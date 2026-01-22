@@ -1,0 +1,62 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+*.pyo
+*.pyd
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+venv/
+env/
+
+# Backend runtime files
+backend/data/*.db
+backend/data/*.sqlite
+backend/data/*.sqlite3
+backend/data/admin_credentials.txt
+backend/downloads/*
+!backend/downloads/.gitkeep
+backend/static/*
+!backend/static/.gitkeep
+backend/aria2/aria2.log
+backend/aria2/aria2.session
+backend/aria2/aria2.session.lock
+backend/aria2/*.aria2
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+frontend/.env*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kiro
+.kiro/
+.serena/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Reference projects
+goods/

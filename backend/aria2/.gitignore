@@ -1,0 +1,5 @@
+# aria2 运行时生成的文件
+aria2.log
+aria2.session
+aria2.session.lock
+*.aria2
