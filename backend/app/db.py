@@ -135,11 +135,44 @@ def init_db() -> None:
             """
             INSERT OR IGNORE INTO config (key, value) VALUES
             ('max_task_size', '10737418240'),
-            ('min_free_disk', '1073741824')
+            ('min_free_disk', '1073741824'),
+            ('pack_format', 'zip'),
+            ('pack_compression_level', '5'),
+            ('pack_extra_args', '')
             """
         )
         conn.commit()
-        
+
+        # 打包任务表
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pack_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER NOT NULL,
+                folder_path TEXT NOT NULL,
+                folder_size INTEGER NOT NULL,
+                reserved_space INTEGER NOT NULL,
+                output_path TEXT,
+                output_name TEXT,
+                output_size INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                progress INTEGER DEFAULT 0,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(owner_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.commit()
+
+        # 添加 output_name 列（兼容旧数据库）
+        try:
+            cur.execute("ALTER TABLE pack_tasks ADD COLUMN output_name TEXT")
+            conn.commit()
+        except Exception:
+            pass  # 列已存在
+
     finally:
         cur.close()
         conn.close()

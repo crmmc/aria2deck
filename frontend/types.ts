@@ -61,6 +61,9 @@ export type SystemConfig = {
   aria2_rpc_url: string;
   aria2_rpc_secret: string;
   hidden_file_extensions: string[];
+  pack_format: "zip" | "7z";
+  pack_compression_level: number;
+  pack_extra_args: string;
 };
 
 export type FileInfo = {
@@ -87,4 +90,25 @@ export type MachineStats = {
   disk_total: number;
   disk_used: number;
   disk_free: number;
+};
+
+export type PackTask = {
+  id: number;
+  owner_id: number;
+  folder_path: string;
+  folder_size: number;
+  reserved_space: number;
+  output_path: string | null;
+  output_size: number | null;
+  status: "pending" | "packing" | "done" | "failed" | "cancelled";
+  progress: number;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PackAvailableSpace = {
+  user_available: number;
+  server_available: number;
+  folder_size?: number;
 };
