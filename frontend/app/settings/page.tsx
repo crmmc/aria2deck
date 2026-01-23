@@ -3,6 +3,12 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import {
+  getNotificationSettings,
+  saveNotificationSettings,
+  requestNotificationPermission,
+  type NotificationSettings,
+} from "@/lib/notification";
 import { SystemConfig, MachineStats } from "@/types";
 import AuthLayout from "@/components/AuthLayout";
 import { formatBytes, bytesToGB, gbToBytes } from "@/lib/utils";
@@ -19,6 +25,9 @@ export default function SettingsPage() {
   const [aria2RpcSecret, setAria2RpcSecret] = useState("");
   const [hiddenExtensions, setHiddenExtensions] = useState<string[]>([]);
   const [extensionInput, setExtensionInput] = useState("");
+  const [packFormat, setPackFormat] = useState<"zip" | "7z">("zip");
+  const [packCompressionLevel, setPackCompressionLevel] = useState(5);
+  const [packExtraArgs, setPackExtraArgs] = useState("");
   const [aria2Status, setAria2Status] = useState<{
     connected: boolean;
     version?: string;
@@ -30,8 +39,18 @@ export default function SettingsPage() {
     error?: string;
   } | null>(null);
   const [testingConnection, setTestingConnection] = useState(false);
+  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>({
+    enabled: false,
+    onComplete: true,
+    onError: true,
+  });
+  const [notificationSupported, setNotificationSupported] = useState(false);
 
   useEffect(() => {
+    // 初始化通知设置
+    setNotificationSettings(getNotificationSettings());
+    setNotificationSupported(typeof window !== "undefined" && "Notification" in window);
+
     api
       .me()
       .then((user) => {
@@ -65,6 +84,9 @@ export default function SettingsPage() {
       setAria2RpcUrl(cfg.aria2_rpc_url || "");
       setAria2RpcSecret(cfg.aria2_rpc_secret || "");
       setHiddenExtensions(cfg.hidden_file_extensions || []);
+      setPackFormat(cfg.pack_format || "zip");
+      setPackCompressionLevel(cfg.pack_compression_level || 5);
+      setPackExtraArgs(cfg.pack_extra_args || "");
       setMachineStats(stats);
       setAria2Status(aria2Ver);
       setTestResult(null); // 清空测试结果
@@ -89,6 +111,9 @@ export default function SettingsPage() {
           ? undefined
           : aria2RpcSecret,
         hidden_file_extensions: hiddenExtensions,
+        pack_format: packFormat,
+        pack_compression_level: packCompressionLevel,
+        pack_extra_args: packExtraArgs,
       });
 
       // 保存后重新加载配置
@@ -158,6 +183,25 @@ export default function SettingsPage() {
     if (!hiddenExtensions.includes(withDot)) {
       setHiddenExtensions([...hiddenExtensions, withDot]);
     }
+  }
+
+  async function handleNotificationToggle(enabled: boolean) {
+    if (enabled) {
+      const granted = await requestNotificationPermission();
+      if (!granted) {
+        alert("浏览器通知权限被拒绝，请在浏览器设置中允许通知");
+        return;
+      }
+    }
+    const newSettings = { ...notificationSettings, enabled };
+    setNotificationSettings(newSettings);
+    saveNotificationSettings(newSettings);
+  }
+
+  function handleNotificationOptionChange(key: "onComplete" | "onError", value: boolean) {
+    const newSettings = { ...notificationSettings, [key]: value };
+    setNotificationSettings(newSettings);
+    saveNotificationSettings(newSettings);
   }
 
   if (loading) return null;
@@ -511,6 +555,78 @@ export default function SettingsPage() {
               )}
             </div>
 
+            <h2 style={{ marginBottom: 24, marginTop: 32 }}>打包设置</h2>
+
+            <div style={{ marginBottom: 24 }}>
+              <label
+                style={{ display: "block", marginBottom: 8, fontWeight: 600 }}
+              >
+                打包格式
+              </label>
+              <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+                选择文件夹打包的压缩格式。
+              </p>
+              <div style={{ display: "flex", gap: 16 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    name="packFormat"
+                    value="zip"
+                    checked={packFormat === "zip"}
+                    onChange={() => setPackFormat("zip")}
+                  />
+                  <span>ZIP</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    name="packFormat"
+                    value="7z"
+                    checked={packFormat === "7z"}
+                    onChange={() => setPackFormat("7z")}
+                  />
+                  <span>7Z</span>
+                </label>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 32 }}>
+              <label
+                style={{ display: "block", marginBottom: 8, fontWeight: 600 }}
+              >
+                压缩等级: {packCompressionLevel}
+              </label>
+              <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+                1 = 最快/最大体积, 9 = 最慢/最小体积
+              </p>
+              <input
+                type="range"
+                min="1"
+                max="9"
+                value={packCompressionLevel}
+                onChange={(e) => setPackCompressionLevel(parseInt(e.target.value))}
+                style={{ width: "100%", maxWidth: 300 }}
+              />
+            </div>
+
+            <div style={{ marginBottom: 32 }}>
+              <label
+                style={{ display: "block", marginBottom: 8, fontWeight: 600 }}
+              >
+                7za 附加参数
+              </label>
+              <p className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+                自定义 7za 命令参数，如 -mmt=2 限制 CPU 核心数
+              </p>
+              <input
+                className="input"
+                type="text"
+                value={packExtraArgs}
+                onChange={(e) => setPackExtraArgs(e.target.value)}
+                placeholder="-mmt=2"
+              />
+            </div>
+
             <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
               <button className="button" type="submit" disabled={saving}>
                 {saving ? "保存中..." : "保存配置"}
@@ -522,6 +638,166 @@ export default function SettingsPage() {
               )}
             </div>
           </form>
+        </div>
+
+        {/* 浏览器通知设置 */}
+        <div className="card" style={{ marginTop: 24 }}>
+          <h2 style={{ marginBottom: 24 }}>浏览器通知</h2>
+
+          {!notificationSupported ? (
+            <div
+              style={{
+                padding: 16,
+                background: "rgba(255, 149, 0, 0.1)",
+                border: "1px solid rgba(255, 149, 0, 0.3)",
+                borderRadius: 8,
+              }}
+            >
+              <p style={{ margin: 0, color: "#ff9500" }}>
+                您的浏览器不支持通知功能
+              </p>
+            </div>
+          ) : (
+            <div style={{ maxWidth: 600 }}>
+              <div style={{ marginBottom: 24 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    marginBottom: 8,
+                  }}
+                >
+                  <label style={{ fontWeight: 600 }}>启用通知</label>
+                  <button
+                    type="button"
+                    onClick={() => handleNotificationToggle(!notificationSettings.enabled)}
+                    style={{
+                      width: 50,
+                      height: 28,
+                      borderRadius: 14,
+                      border: "none",
+                      cursor: "pointer",
+                      background: notificationSettings.enabled ? "#34c759" : "rgba(0,0,0,0.1)",
+                      position: "relative",
+                      transition: "background 0.2s ease",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 24,
+                        height: 24,
+                        borderRadius: 12,
+                        background: "white",
+                        position: "absolute",
+                        top: 2,
+                        left: notificationSettings.enabled ? 24 : 2,
+                        transition: "left 0.2s ease",
+                        boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                      }}
+                    />
+                  </button>
+                </div>
+                <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                  当下载任务状态变化时，发送浏览器桌面通知
+                </p>
+              </div>
+
+              {notificationSettings.enabled && (
+                <div
+                  style={{
+                    padding: 16,
+                    background: "rgba(0,0,0,0.02)",
+                    borderRadius: 8,
+                  }}
+                >
+                  <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>
+                    选择何时发送通知：
+                  </p>
+
+                  <div style={{ marginBottom: 16 }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <label style={{ fontSize: 14 }}>下载完成时</label>
+                      <button
+                        type="button"
+                        onClick={() => handleNotificationOptionChange("onComplete", !notificationSettings.onComplete)}
+                        style={{
+                          width: 44,
+                          height: 24,
+                          borderRadius: 12,
+                          border: "none",
+                          cursor: "pointer",
+                          background: notificationSettings.onComplete ? "#34c759" : "rgba(0,0,0,0.1)",
+                          position: "relative",
+                          transition: "background 0.2s ease",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 20,
+                            height: 20,
+                            borderRadius: 10,
+                            background: "white",
+                            position: "absolute",
+                            top: 2,
+                            left: notificationSettings.onComplete ? 22 : 2,
+                            transition: "left 0.2s ease",
+                            boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                          }}
+                        />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <label style={{ fontSize: 14 }}>下载失败时</label>
+                      <button
+                        type="button"
+                        onClick={() => handleNotificationOptionChange("onError", !notificationSettings.onError)}
+                        style={{
+                          width: 44,
+                          height: 24,
+                          borderRadius: 12,
+                          border: "none",
+                          cursor: "pointer",
+                          background: notificationSettings.onError ? "#34c759" : "rgba(0,0,0,0.1)",
+                          position: "relative",
+                          transition: "background 0.2s ease",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 20,
+                            height: 20,
+                            borderRadius: 10,
+                            background: "white",
+                            position: "absolute",
+                            top: 2,
+                            left: notificationSettings.onError ? 22 : 2,
+                            transition: "left 0.2s ease",
+                            boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                          }}
+                        />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </AuthLayout>

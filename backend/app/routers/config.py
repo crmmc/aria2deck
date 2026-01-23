@@ -23,6 +23,9 @@ class ConfigUpdate(BaseModel):
     aria2_rpc_url: str | None = None  # aria2 RPC URL
     aria2_rpc_secret: str | None = None  # aria2 RPC Secret
     hidden_file_extensions: list[str] | None = None  # 隐藏的文件后缀名列表
+    pack_format: str | None = None  # 打包格式 (zip 或 7z)
+    pack_compression_level: int | None = None  # 压缩等级 (1-9)
+    pack_extra_args: str | None = None  # 7za 附加参数
 
 
 class Aria2TestRequest(BaseModel):
@@ -77,6 +80,28 @@ def get_hidden_file_extensions() -> list[str]:
     return []
 
 
+def get_pack_format() -> str:
+    """获取打包格式 (zip 或 7z)，默认 zip"""
+    val = get_config_value("pack_format")
+    return val if val in ("zip", "7z") else "zip"
+
+
+def get_pack_compression_level() -> int:
+    """获取压缩等级 (1-9)，默认 5"""
+    val = get_config_value("pack_compression_level")
+    try:
+        level = int(val) if val else 5
+        return max(1, min(9, level))
+    except ValueError:
+        return 5
+
+
+def get_pack_extra_args() -> str:
+    """获取 7za 附加参数，默认空字符串"""
+    val = get_config_value("pack_extra_args")
+    return val if val else ""
+
+
 @router.get("")
 def get_config(admin: dict = Depends(require_admin)) -> dict:
     """获取系统配置（管理员）
@@ -102,6 +127,9 @@ def get_config(admin: dict = Depends(require_admin)) -> dict:
         "aria2_rpc_url": aria2_rpc_url,
         "aria2_rpc_secret": masked_secret,
         "hidden_file_extensions": get_hidden_file_extensions(),
+        "pack_format": get_pack_format(),
+        "pack_compression_level": get_pack_compression_level(),
+        "pack_extra_args": get_pack_extra_args(),
     }
 
 
@@ -138,7 +166,15 @@ def update_config(payload: ConfigUpdate, admin: dict = Depends(require_admin)) -
             if ext and ext not in normalized:
                 normalized.append(ext)
         set_config_value("hidden_file_extensions", json.dumps(normalized))
-    
+    if payload.pack_format is not None:
+        if payload.pack_format in ("zip", "7z"):
+            set_config_value("pack_format", payload.pack_format)
+    if payload.pack_compression_level is not None:
+        level = max(1, min(9, payload.pack_compression_level))
+        set_config_value("pack_compression_level", str(level))
+    if payload.pack_extra_args is not None:
+        set_config_value("pack_extra_args", payload.pack_extra_args)
+
     # 返回更新后的配置（secret 脱敏）
     aria2_rpc_url = get_config_value("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
     aria2_rpc_secret = get_config_value("aria2_rpc_secret") or ""
@@ -152,6 +188,9 @@ def update_config(payload: ConfigUpdate, admin: dict = Depends(require_admin)) -
         "aria2_rpc_url": aria2_rpc_url,
         "aria2_rpc_secret": masked_secret,
         "hidden_file_extensions": get_hidden_file_extensions(),
+        "pack_format": get_pack_format(),
+        "pack_compression_level": get_pack_compression_level(),
+        "pack_extra_args": get_pack_extra_args(),
     }
 
 

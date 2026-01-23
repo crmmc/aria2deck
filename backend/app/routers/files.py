@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 from pathlib import Path
@@ -56,6 +57,29 @@ class QuotaResponse(BaseModel):
     used: int  # 已使用空间（字节）
     total: int  # 总配额（字节）
     percentage: float  # 使用百分比
+
+
+class PackRequest(BaseModel):
+    """创建打包任务请求"""
+    folder_path: str | None = None  # 单文件夹路径（向后兼容）
+    paths: list[str] | None = None  # 多文件/文件夹路径
+    output_name: str | None = None  # 自定义输出文件名（不含扩展名）
+
+
+class PackTaskResponse(BaseModel):
+    """打包任务响应"""
+    id: int
+    owner_id: int
+    folder_path: str
+    folder_size: int
+    reserved_space: int
+    output_path: str | None
+    output_size: int | None
+    status: str
+    progress: int
+    error_message: str | None
+    created_at: str
+    updated_at: str
 
 
 # ========== Helpers ==========
@@ -146,12 +170,19 @@ def _get_user_quota(user_id: int) -> int:
 @router.get("", response_model=FileListResponse)
 def list_files(path: str = "", user: dict = Depends(require_user)) -> FileListResponse:
     """列出用户目录下的文件和文件夹
-    
+
     Args:
         path: 相对路径（可选），默认为根目录
     """
     from app.routers.config import get_hidden_file_extensions
-    
+
+    # 禁止访问 .incomplete 目录
+    if path == ".incomplete" or path.startswith(".incomplete/"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权访问此目录"
+        )
+
     user_dir = _get_user_dir(user["id"])
     target_dir = _validate_path(user_dir, path)
     
@@ -175,6 +206,10 @@ def list_files(path: str = "", user: dict = Depends(require_user)) -> FileListRe
     try:
         for entry in sorted(target_dir.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
             try:
+                # 隐藏 .incomplete 目录（下载中的文件存放位置）
+                if entry.name == ".incomplete":
+                    continue
+
                 # 检查是否应该隐藏该文件
                 if entry.is_file() and hidden_extensions:
                     file_ext = entry.suffix.lower()
@@ -214,7 +249,7 @@ def list_files(path: str = "", user: dict = Depends(require_user)) -> FileListRe
 @router.get("/download")
 def download_file(path: str, user: dict = Depends(require_user)) -> FileResponse:
     """下载文件
-    
+
     Args:
         path: 文件的相对路径
     """
@@ -223,7 +258,14 @@ def download_file(path: str, user: dict = Depends(require_user)) -> FileResponse
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="缺少文件路径"
         )
-    
+
+    # 禁止访问 .incomplete 目录
+    if path == ".incomplete" or path.startswith(".incomplete/"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权访问此文件"
+        )
+
     user_dir = _get_user_dir(user["id"])
     target_file = _validate_path(user_dir, path)
     
@@ -249,7 +291,7 @@ def download_file(path: str, user: dict = Depends(require_user)) -> FileResponse
 @router.delete("")
 def delete_file(path: str, user: dict = Depends(require_user)) -> dict:
     """删除文件或文件夹
-    
+
     Args:
         path: 文件/文件夹的相对路径
     """
@@ -258,7 +300,42 @@ def delete_file(path: str, user: dict = Depends(require_user)) -> dict:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="缺少路径"
         )
-    
+
+    # 禁止访问 .incomplete 目录
+    if path == ".incomplete" or path.startswith(".incomplete/"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权删除此文件"
+        )
+
+    # 检查文件是否正在被打包
+    from app.db import fetch_all
+    import json
+    active_pack_tasks = fetch_all(
+        "SELECT folder_path FROM pack_tasks WHERE owner_id = ? AND status IN ('pending', 'packing')",
+        [user["id"]]
+    )
+    for task in active_pack_tasks:
+        folder_path = task["folder_path"]
+        # 检查单文件或多文件打包
+        if folder_path.startswith("["):
+            try:
+                paths = json.loads(folder_path)
+                for p in paths:
+                    if path == p or path.startswith(p + "/") or p.startswith(path + "/"):
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail="文件正在被打包，无法删除"
+                        )
+            except json.JSONDecodeError:
+                pass
+        else:
+            if path == folder_path or path.startswith(folder_path + "/") or folder_path.startswith(path + "/"):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="文件正在被打包，无法删除"
+                )
+
     user_dir = _get_user_dir(user["id"])
     target = _validate_path(user_dir, path)
     
@@ -300,7 +377,7 @@ def delete_file(path: str, user: dict = Depends(require_user)) -> dict:
 @router.put("/rename")
 def rename_file(payload: RenameRequest, user: dict = Depends(require_user)) -> dict:
     """重命名文件或文件夹
-    
+
     Args:
         payload: 包含旧路径和新名称
     """
@@ -309,7 +386,14 @@ def rename_file(payload: RenameRequest, user: dict = Depends(require_user)) -> d
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="缺少必要参数"
         )
-    
+
+    # 禁止访问 .incomplete 目录
+    if payload.old_path == ".incomplete" or payload.old_path.startswith(".incomplete/"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权操作此文件"
+        )
+
     # 验证新名称不包含路径分隔符
     if "/" in payload.new_name or "\\" in payload.new_name:
         raise HTTPException(
@@ -391,4 +475,313 @@ def get_quota(user: dict = Depends(require_user)) -> QuotaResponse:
         used=used,
         total=display_total,
         percentage=round(percentage, 2)
+    )
+
+
+# ========== Pack Endpoints ==========
+
+class CalculateSizeRequest(BaseModel):
+    """计算多文件大小请求"""
+    paths: list[str]
+
+
+@router.post("/pack/calculate-size")
+def calculate_paths_size(
+    payload: CalculateSizeRequest,
+    user: dict = Depends(require_user)
+) -> dict:
+    """计算多个文件/文件夹的总大小"""
+    from app.services.pack import calculate_folder_size, get_user_available_space_for_pack
+
+    if not payload.paths:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="路径列表不能为空"
+        )
+
+    user_dir = _get_user_dir(user["id"])
+    total_size = 0
+
+    for path in payload.paths:
+        # 禁止访问 .incomplete 目录
+        if path == ".incomplete" or path.startswith(".incomplete/"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="无权访问此文件"
+            )
+
+        target = _validate_path(user_dir, path)
+        if not target.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"路径不存在: {path}"
+            )
+        if target.is_dir():
+            total_size += calculate_folder_size(target)
+        else:
+            total_size += target.stat().st_size
+
+    available = get_user_available_space_for_pack(user["id"])
+
+    return {
+        "total_size": total_size,
+        "user_available": available,
+    }
+
+
+@router.get("/pack/available-space")
+def get_pack_available_space(
+    folder_path: str | None = None,
+    user: dict = Depends(require_user)
+) -> dict:
+    """获取用户可用于打包的空间
+
+    如果提供 folder_path，同时返回文件夹大小
+    """
+    from app.services.pack import get_user_available_space_for_pack, get_server_available_space, calculate_folder_size
+
+    available = get_user_available_space_for_pack(user["id"])
+    server_available = get_server_available_space()
+
+    result = {
+        "user_available": available,
+        "server_available": server_available,
+    }
+
+    # Calculate folder size if path provided
+    if folder_path:
+        user_dir = _get_user_dir(user["id"])
+        target = _validate_path(user_dir, folder_path)
+        if target.exists() and target.is_dir():
+            result["folder_size"] = calculate_folder_size(target)
+        else:
+            result["folder_size"] = 0
+
+    return result
+
+
+@router.get("/pack")
+def list_pack_tasks(user: dict = Depends(require_user)) -> list[dict]:
+    """列出用户的打包任务（按创建时间倒序）"""
+    from app.db import fetch_all
+    return fetch_all(
+        """SELECT * FROM pack_tasks
+           WHERE owner_id = ?
+           ORDER BY created_at DESC""",
+        [user["id"]]
+    )
+
+
+@router.post("/pack", status_code=status.HTTP_201_CREATED)
+async def create_pack_task(
+    payload: PackRequest,
+    user: dict = Depends(require_user)
+) -> dict:
+    """创建打包任务
+
+    支持两种模式：
+    1. 单文件夹打包：提供 folder_path
+    2. 多文件打包：提供 paths 列表
+
+    可选提供 output_name 自定义输出文件名。
+
+    验证：
+    - 所有路径存在且属于该用户
+    - 用户有足够的空间（配额 + 服务器）
+
+    预留空间并在后台启动异步打包。
+    """
+    import json
+    from app.db import execute, fetch_one
+    from app.db import utc_now
+    from app.services.pack import (
+        PackTaskManager, calculate_folder_size,
+        get_user_available_space_for_pack
+    )
+
+    user_dir = _get_user_dir(user["id"])
+
+    # 确定打包路径列表
+    if payload.paths and len(payload.paths) > 0:
+        # 多文件打包模式
+        paths = payload.paths
+        is_multi = True
+    elif payload.folder_path:
+        # 单文件夹打包模式（向后兼容）
+        paths = [payload.folder_path]
+        is_multi = False
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请提供 folder_path 或 paths"
+        )
+
+    # 验证所有路径并计算总大小
+    total_size = 0
+    validated_paths = []
+    for path in paths:
+        # 禁止访问 .incomplete 目录
+        if path == ".incomplete" or path.startswith(".incomplete/"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="无权访问此文件"
+            )
+
+        target = _validate_path(user_dir, path)
+        if not target.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"路径不存在: {path}"
+            )
+        validated_paths.append(path)
+        if target.is_dir():
+            total_size += calculate_folder_size(target)
+        else:
+            total_size += target.stat().st_size
+
+    if total_size == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="选中的文件/文件夹为空"
+        )
+
+    # 存储路径：多文件用 JSON，单文件用原始路径
+    folder_path_value = json.dumps(paths) if is_multi else paths[0]
+
+    # Check for existing pack task on same paths
+    existing = fetch_one(
+        "SELECT id FROM pack_tasks WHERE owner_id = ? AND folder_path = ? AND status IN ('pending', 'packing')",
+        [user["id"], folder_path_value]
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="相同路径已有进行中的打包任务"
+        )
+
+    # Reserve space = total size
+    reserved_space = total_size
+
+    # Check available space
+    available = get_user_available_space_for_pack(user["id"])
+    if reserved_space > available:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"空间不足。需要: {reserved_space / 1024 / 1024 / 1024:.2f} GB, 可用: {available / 1024 / 1024 / 1024:.2f} GB"
+        )
+
+    # 验证输出文件名
+    output_name = payload.output_name
+    if output_name:
+        # 不允许路径分隔符
+        if "/" in output_name or "\\" in output_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="输出文件名不能包含路径分隔符"
+            )
+
+    # Create task record
+    task_id = execute(
+        """
+        INSERT INTO pack_tasks
+        (owner_id, folder_path, folder_size, reserved_space, output_name, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [user["id"], folder_path_value, total_size, reserved_space, output_name, "pending", utc_now(), utc_now()]
+    )
+
+    # Start async packing
+    asyncio.create_task(PackTaskManager.start_pack(task_id, user["id"], folder_path_value, output_name))
+
+    return fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+
+
+@router.get("/pack/{task_id}")
+def get_pack_task(task_id: int, user: dict = Depends(require_user)) -> dict:
+    """获取打包任务详情"""
+    from app.db import fetch_one
+    task = fetch_one(
+        "SELECT * FROM pack_tasks WHERE id = ? AND owner_id = ?",
+        [task_id, user["id"]]
+    )
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+    return task
+
+
+@router.delete("/pack/{task_id}")
+async def cancel_or_delete_pack_task(
+    task_id: int,
+    user: dict = Depends(require_user)
+) -> dict:
+    """取消或删除打包任务
+
+    - pending/packing 状态: 取消运行中的进程
+    - done/failed/cancelled 状态: 仅删除任务记录（不删除压缩包文件）
+    """
+    from app.db import fetch_one, execute
+    from app.db import utc_now
+    from app.services.pack import PackTaskManager
+
+    task = fetch_one(
+        "SELECT * FROM pack_tasks WHERE id = ? AND owner_id = ?",
+        [task_id, user["id"]]
+    )
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+
+    task_status = task["status"]
+
+    # 进行中的任务：取消
+    if task_status in ("pending", "packing"):
+        await PackTaskManager.cancel_pack(task_id)
+        execute(
+            "UPDATE pack_tasks SET status = ?, reserved_space = 0, updated_at = ? WHERE id = ?",
+            ["cancelled", utc_now(), task_id]
+        )
+        return {"ok": True, "message": "任务已取消"}
+
+    # 已完成/失败/已取消的任务：仅删除记录（保留文件）
+    if task_status in ("done", "failed", "cancelled"):
+        execute("DELETE FROM pack_tasks WHERE id = ?", [task_id])
+        return {"ok": True, "message": "任务已删除"}
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="无法处理该任务状态"
+    )
+
+
+@router.get("/pack/{task_id}/download")
+def download_pack_result(task_id: int, user: dict = Depends(require_user)) -> FileResponse:
+    """下载已完成的打包文件"""
+    from app.db import fetch_one
+
+    task = fetch_one(
+        "SELECT * FROM pack_tasks WHERE id = ? AND owner_id = ?",
+        [task_id, user["id"]]
+    )
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+
+    if task["status"] != "done":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="打包任务未完成"
+        )
+
+    output_path = task.get("output_path")
+    if not output_path or not Path(output_path).exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="打包文件不存在")
+
+    # Validate output path is within user's directory
+    user_dir = _get_user_dir(user["id"])
+    output_resolved = Path(output_path).resolve()
+    if not str(output_resolved).startswith(str(user_dir)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该文件")
+
+    return FileResponse(
+        path=output_path,
+        filename=Path(output_path).name,
+        media_type="application/octet-stream"
     )

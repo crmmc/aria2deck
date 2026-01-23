@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 from uuid import uuid4
 
@@ -61,6 +62,63 @@ def _first_artifact_path(status: dict) -> str | None:
     return files[0].get("path")
 
 
+def _move_completed_files(status: dict, user_id: int) -> str | None:
+    """将完成的文件从 .incomplete 移动到用户根目录
+
+    返回: 移动后的新路径，如果移动失败则返回原路径
+    """
+    files = status.get("files") or []
+    if not files:
+        return None
+
+    first_file_path = files[0].get("path")
+    if not first_file_path:
+        return None
+
+    src_path = Path(first_file_path)
+    user_dir = Path(settings.download_dir) / str(user_id)
+    incomplete_dir = user_dir / ".incomplete"
+
+    # 检查文件是否在 .incomplete 目录中
+    try:
+        if not src_path.exists():
+            return first_file_path
+        if not src_path.is_relative_to(incomplete_dir):
+            return first_file_path
+    except Exception:
+        return first_file_path
+
+    # 确定要移动的是文件还是目录（BT任务通常是目录）
+    # 获取相对于 .incomplete 的路径
+    try:
+        rel_path = src_path.relative_to(incomplete_dir)
+        # 获取顶级目录或文件
+        top_level = rel_path.parts[0] if rel_path.parts else None
+        if not top_level:
+            return first_file_path
+
+        src_item = incomplete_dir / top_level
+        dst_item = user_dir / top_level
+
+        # 如果目标已存在，添加后缀
+        if dst_item.exists():
+            counter = 1
+            stem = dst_item.stem
+            suffix = dst_item.suffix
+            while dst_item.exists():
+                dst_item = user_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+        # 移动文件/目录
+        shutil.move(str(src_item), str(dst_item))
+
+        # 返回新路径
+        new_first_file = dst_item / rel_path.relative_to(top_level) if len(rel_path.parts) > 1 else dst_item
+        return str(new_first_file)
+    except Exception:
+        return first_file_path
+
+
 def _update_task(task_id: int, values: dict) -> None:
     fields = []
     params = []
@@ -115,7 +173,8 @@ async def sync_tasks(
             artifact_path = task["artifact_path"]
             artifact_token = task["artifact_token"]
             if mapped["status"] == "complete" and not artifact_token:
-                artifact_path = _first_artifact_path(status)
+                # 移动文件从 .incomplete 到用户根目录
+                artifact_path = _move_completed_files(status, task["owner_id"])
                 artifact_token = uuid4().hex
 
             current_speed = mapped["download_speed"]

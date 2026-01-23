@@ -1,21 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { api } from "@/lib/api";
+import { formatBytes } from "@/lib/utils";
 import AuthLayout from "@/components/AuthLayout";
+import PackConfirmModal from "@/components/PackConfirmModal";
+import PackTaskCard from "@/components/PackTaskCard";
 import type { FileInfo, QuotaResponse } from "@/types";
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let idx = 0;
-  let val = bytes;
-  while (val >= 1024 && idx < units.length - 1) {
-    val /= 1024;
-    idx += 1;
-  }
-  return `${val.toFixed(1)} ${units[idx]}`;
-}
 
 function formatDate(timestamp: number): string {
   const date = new Date(timestamp * 1000);
@@ -32,9 +23,25 @@ export default function FilesPage() {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
 
-  const loadFiles = async (path?: string) => {
+  // Selection state
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+
+  // Pack states
+  const [packingFolder, setPackingFolder] = useState<FileInfo | null>(null);
+  const [packAvailableSpace, setPackAvailableSpace] = useState<number>(0);
+  const [packLoading, setPackLoading] = useState(false);
+  const [packTasksKey, setPackTasksKey] = useState(0);
+  const [calculatingSize, setCalculatingSize] = useState(false);
+
+  // Multi-file pack states
+  const [packingMulti, setPackingMulti] = useState(false);
+  const [multiPackSize, setMultiPackSize] = useState(0);
+  const [multiPackPaths, setMultiPackPaths] = useState<string[]>([]);
+
+  const loadFiles = useCallback(async (path?: string) => {
     setLoading(true);
     setError(null);
+    setSelectedFiles(new Set()); // Clear selection when navigating
     try {
       const response = await api.listFiles(path);
       setFiles(response.files);
@@ -45,7 +52,7 @@ export default function FilesPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   const loadQuota = async () => {
     try {
@@ -113,6 +120,112 @@ export default function FilesPage() {
     return "#34c759";
   };
 
+  // Selection handlers
+  const toggleSelectFile = (path: string) => {
+    setSelectedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedFiles.size === files.length) {
+      setSelectedFiles(new Set());
+    } else {
+      setSelectedFiles(new Set(files.map((f) => f.path)));
+    }
+  };
+
+  const clearSelection = () => {
+    setSelectedFiles(new Set());
+  };
+
+  // Pack handlers
+  const handleStartPack = async (file: FileInfo) => {
+    setCalculatingSize(true);
+    try {
+      // Get folder size and available space from server in single request
+      const space = await api.getPackAvailableSpace(file.path);
+
+      if (!space.folder_size) {
+        alert("无法计算文件夹大小或文件夹为空");
+        return;
+      }
+
+      setPackAvailableSpace(space.user_available);
+      setPackingFolder({ ...file, size: space.folder_size });
+    } catch (err) {
+      alert(`检查文件夹失败: ${(err as Error).message}`);
+    } finally {
+      setCalculatingSize(false);
+    }
+  };
+
+  // Multi-file pack handler
+  const handleStartMultiPack = async () => {
+    if (selectedFiles.size === 0) return;
+
+    setCalculatingSize(true);
+    try {
+      const paths = Array.from(selectedFiles);
+      const result = await api.calculateFilesSize(paths);
+
+      if (result.total_size === 0) {
+        alert("选中的文件为空");
+        return;
+      }
+
+      setMultiPackPaths(paths);
+      setMultiPackSize(result.total_size);
+      setPackAvailableSpace(result.user_available);
+      setPackingMulti(true);
+    } catch (err) {
+      alert(`计算大小失败: ${(err as Error).message}`);
+    } finally {
+      setCalculatingSize(false);
+    }
+  };
+
+  const handleConfirmPack = async (outputName: string) => {
+    if (!packingFolder) return;
+
+    setPackLoading(true);
+    try {
+      await api.createPackTask(packingFolder.path, outputName);
+      setPackingFolder(null);
+      setPackTasksKey((k) => k + 1);
+    } catch (err) {
+      alert(`创建打包任务失败: ${(err as Error).message}`);
+    } finally {
+      setPackLoading(false);
+    }
+  };
+
+  const handleConfirmMultiPack = async (outputName: string) => {
+    setPackLoading(true);
+    try {
+      await api.createPackTaskMulti(multiPackPaths, outputName);
+      setPackingMulti(false);
+      setMultiPackPaths([]);
+      setSelectedFiles(new Set());
+      setPackTasksKey((k) => k + 1);
+    } catch (err) {
+      alert(`创建打包任务失败: ${(err as Error).message}`);
+    } finally {
+      setPackLoading(false);
+    }
+  };
+
+  const handlePackTaskComplete = useCallback(() => {
+    loadFiles(currentPath);
+    loadQuota();
+  }, [currentPath, loadFiles]);
+
   return (
     <AuthLayout>
       <div className="glass-frame full-height animate-in">
@@ -121,6 +234,7 @@ export default function FilesPage() {
             <h1 style={{ fontSize: "28px" }}>文件</h1>
             <p className="muted">管理您下载的文件</p>
           </div>
+          <PackTaskCard key={packTasksKey} onTaskComplete={handlePackTaskComplete} />
         </div>
 
         {/* Quota Widget */}
@@ -201,6 +315,41 @@ export default function FilesPage() {
           </div>
         </div>
 
+        {/* Selection Action Bar */}
+        {selectedFiles.size > 0 && (
+          <div
+            className="card"
+            style={{
+              marginBottom: 16,
+              padding: "12px 16px",
+              display: "flex",
+              alignItems: "center",
+              gap: 16,
+              background: "rgba(0, 122, 255, 0.05)",
+              border: "1px solid rgba(0, 122, 255, 0.2)",
+            }}
+          >
+            <span style={{ fontWeight: 500 }}>
+              已选中 {selectedFiles.size} 项
+            </span>
+            <button
+              className="button"
+              style={{ padding: "6px 16px", fontSize: "13px" }}
+              onClick={handleStartMultiPack}
+              disabled={calculatingSize}
+            >
+              {calculatingSize ? "计算中..." : "打包下载"}
+            </button>
+            <button
+              className="button secondary"
+              style={{ padding: "6px 12px", fontSize: "13px" }}
+              onClick={clearSelection}
+            >
+              取消选择
+            </button>
+          </div>
+        )}
+
         {/* File List */}
         {loading ? (
           <div className="card" style={{ textAlign: "center", padding: 48 }}>
@@ -224,6 +373,20 @@ export default function FilesPage() {
                     borderBottom: "1px solid rgba(0,0,0,0.1)",
                   }}
                 >
+                  <th
+                    style={{
+                      padding: "12px 16px",
+                      textAlign: "center",
+                      width: 40,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedFiles.size === files.length && files.length > 0}
+                      onChange={toggleSelectAll}
+                      style={{ cursor: "pointer" }}
+                    />
+                  </th>
                   <th
                     style={{
                       padding: "12px 16px",
@@ -277,14 +440,27 @@ export default function FilesPage() {
                     style={{
                       borderBottom: "1px solid rgba(0,0,0,0.05)",
                       transition: "background 0.2s",
+                      background: selectedFiles.has(file.path) ? "rgba(0, 122, 255, 0.05)" : "transparent",
                     }}
-                    onMouseEnter={(e) =>
-                      (e.currentTarget.style.background = "rgba(0,0,0,0.02)")
-                    }
-                    onMouseLeave={(e) =>
-                      (e.currentTarget.style.background = "transparent")
-                    }
+                    onMouseEnter={(e) => {
+                      if (!selectedFiles.has(file.path)) {
+                        e.currentTarget.style.background = "rgba(0,0,0,0.02)";
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      if (!selectedFiles.has(file.path)) {
+                        e.currentTarget.style.background = "transparent";
+                      }
+                    }}
                   >
+                    <td style={{ padding: "12px 16px", textAlign: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedFiles.has(file.path)}
+                        onChange={() => toggleSelectFile(file.path)}
+                        style={{ cursor: "pointer" }}
+                      />
+                    </td>
                     <td style={{ padding: "12px 16px" }}>
                       {renaming === file.path ? (
                         <div style={{ display: "flex", gap: 8 }}>
@@ -376,7 +552,16 @@ export default function FilesPage() {
                           justifyContent: "flex-end",
                         }}
                       >
-                        {!file.is_dir && (
+                        {file.is_dir ? (
+                          <button
+                            className="button secondary"
+                            style={{ padding: "6px 12px", fontSize: "13px" }}
+                            onClick={() => handleStartPack(file)}
+                            disabled={calculatingSize}
+                          >
+                            {calculatingSize ? "计算中..." : "打包下载"}
+                          </button>
+                        ) : (
                           <a
                             className="button secondary"
                             style={{ padding: "6px 12px", fontSize: "13px" }}
@@ -407,6 +592,35 @@ export default function FilesPage() {
               </tbody>
             </table>
           </div>
+        )}
+
+        {/* Pack Confirm Modal - Single Folder */}
+        {packingFolder && (
+          <PackConfirmModal
+            folderName={packingFolder.name}
+            folderSize={packingFolder.size || 0}
+            availableSpace={packAvailableSpace}
+            onConfirm={handleConfirmPack}
+            onCancel={() => setPackingFolder(null)}
+            loading={packLoading}
+          />
+        )}
+
+        {/* Pack Confirm Modal - Multi Files */}
+        {packingMulti && (
+          <PackConfirmModal
+            folderName="多文件打包"
+            folderSize={multiPackSize}
+            availableSpace={packAvailableSpace}
+            onConfirm={handleConfirmMultiPack}
+            onCancel={() => {
+              setPackingMulti(false);
+              setMultiPackPaths([]);
+            }}
+            loading={packLoading}
+            isMultiFile
+            fileCount={multiPackPaths.length}
+          />
         )}
       </div>
     </AuthLayout>

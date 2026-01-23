@@ -9,6 +9,8 @@ import type {
   FileListResponse,
   QuotaResponse,
   MachineStats,
+  PackTask,
+  PackAvailableSpace,
 } from "@/types";
 
 function getApiBase(): string {
@@ -50,20 +52,25 @@ export const api = {
 
   // Tasks
   listTasks: () => request<Task[]>("/api/tasks"),
-  getTask: (id: number) => request<Task>(`/api/tasks/${id}`),
+  getTask: (idOrGid: number | string) => request<Task>(`/api/tasks/${idOrGid}`),
   createTask: (uri: string) =>
     request<Task>("/api/tasks", {
       method: "POST",
       body: JSON.stringify({ uri }),
     }),
+  uploadTorrent: (torrent: string, options?: Record<string, unknown>) =>
+    request<Task>("/api/tasks/torrent", {
+      method: "POST",
+      body: JSON.stringify({ torrent, options }),
+    }),
   // Replaces actionTask with more specific status update
-  updateTaskStatus: (id: number, status: string) =>
-    request<{ ok: boolean }>(`/api/tasks/${id}/status`, {
+  updateTaskStatus: (idOrGid: number | string, status: string) =>
+    request<{ ok: boolean }>(`/api/tasks/${idOrGid}/status`, {
       method: "PUT",
       body: JSON.stringify({ status }),
     }),
-  deleteTask: (id: number, deleteFiles: boolean = false) =>
-    request<{ ok: boolean }>(`/api/tasks/${id}?delete_files=${deleteFiles}`, {
+  deleteTask: (idOrGid: number | string, deleteFiles: boolean = false) =>
+    request<{ ok: boolean }>(`/api/tasks/${idOrGid}?delete_files=${deleteFiles}`, {
       method: "DELETE",
     }),
   clearHistory: (deleteFiles: boolean = false) =>
@@ -73,8 +80,17 @@ export const api = {
         method: "DELETE",
       },
     ),
-  getTaskFiles: (id: number) => request<TaskFile[]>(`/api/tasks/${id}/files`),
-  getTaskDetail: (id: number) => request<any>(`/api/tasks/${id}/detail`),
+  getTaskFiles: (idOrGid: number | string) => request<TaskFile[]>(`/api/tasks/${idOrGid}/files`),
+  getTaskDetail: (idOrGid: number | string) => request<any>(`/api/tasks/${idOrGid}/detail`),
+  changeTaskPosition: (idOrGid: number | string, position: number, how: string = "POS_SET") =>
+    request<{ ok: boolean; new_position: number }>(`/api/tasks/${idOrGid}/position`, {
+      method: "PUT",
+      body: JSON.stringify({ position, how }),
+    }),
+  retryTask: (idOrGid: number | string) =>
+    request<Task>(`/api/tasks/${idOrGid}/retry`, {
+      method: "POST",
+    }),
 
   // Stats & Config
   getStats: () => request<SystemStats>("/api/stats"),
@@ -144,6 +160,46 @@ export const api = {
       },
     ),
   getQuota: () => request<QuotaResponse>("/api/files/quota"),
+
+  // Pack Tasks
+  createPackTask: (folderPath: string, outputName?: string) =>
+    request<PackTask>("/api/files/pack", {
+      method: "POST",
+      body: JSON.stringify({ folder_path: folderPath, output_name: outputName }),
+    }),
+
+  createPackTaskMulti: (paths: string[], outputName: string) =>
+    request<PackTask>("/api/files/pack", {
+      method: "POST",
+      body: JSON.stringify({ paths, output_name: outputName }),
+    }),
+
+  calculateFilesSize: (paths: string[]) =>
+    request<{ total_size: number; user_available: number }>("/api/files/pack/calculate-size", {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
+
+  listPackTasks: () => request<PackTask[]>("/api/files/pack"),
+
+  getPackTask: (id: number) => request<PackTask>(`/api/files/pack/${id}`),
+
+  cancelPackTask: (id: number) =>
+    request<{ ok: boolean; message: string }>(`/api/files/pack/${id}`, {
+      method: "DELETE",
+    }),
+
+  downloadPackResult: (id: number) => {
+    const base = getApiBase();
+    return `${base}/api/files/pack/${id}/download`;
+  },
+
+  getPackAvailableSpace: (folderPath?: string) =>
+    request<PackAvailableSpace>(
+      folderPath
+        ? `/api/files/pack/available-space?folder_path=${encodeURIComponent(folderPath)}`
+        : "/api/files/pack/available-space"
+    ),
 };
 
 export function taskWsUrl(): string {
