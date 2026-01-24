@@ -73,8 +73,8 @@ export default function SettingsPage() {
       setPackExtraArgs(cfg.pack_extra_args || "");
       setMachineStats(stats);
       setAria2Status(aria2Ver);
-      setTestResult(null); // 清空测试结果
-    } catch (err) {
+      setTestResult(null);
+    } catch {
       setError("加载配置失败");
     }
   }
@@ -100,12 +100,10 @@ export default function SettingsPage() {
         pack_extra_args: packExtraArgs,
       });
 
-      // 保存后重新加载配置
       await loadConfig();
       setSaveSuccess(true);
-      // 3秒后隐藏成功提示
       setTimeout(() => setSaveSuccess(false), 3000);
-    } catch (err) {
+    } catch {
       setError("保存配置失败");
     } finally {
       setSaving(false);
@@ -119,7 +117,7 @@ export default function SettingsPage() {
     }
 
     setTestingConnection(true);
-    setTestResult(null); // 清空之前的测试结果
+    setTestResult(null);
     try {
       const result = await api.testAria2Connection(
         aria2RpcUrl,
@@ -137,10 +135,8 @@ export default function SettingsPage() {
     const ext = extensionInput.trim().toLowerCase();
     if (!ext) return;
 
-    // 规范化：移除开头的点（后端会自动添加）
     const normalized = ext.startsWith(".") ? ext.substring(1) : ext;
 
-    // 检查是否已存在
     const withDot = "." + normalized;
     if (hiddenExtensions.includes(withDot)) {
       setExtensionInput("");
@@ -169,77 +165,53 @@ export default function SettingsPage() {
     }
   }
 
+  const getDiskColor = (percent: number) => {
+    if (percent >= 80) return "var(--danger)";
+    if (percent >= 50) return "var(--warning)";
+    return "var(--success)";
+  };
+
   if (loading) return null;
 
   return (
     <AuthLayout>
       <div className="glass-frame full-height animate-in">
-        <h1 style={{ marginBottom: 8 }}>系统设置</h1>
-        <p className="muted" style={{ marginBottom: 32 }}>
-          系统配置（仅管理员）
-        </p>
+        <div className="page-header">
+          <h1 className="page-title">系统设置</h1>
+          <p className="muted">系统配置（仅管理员）</p>
+        </div>
 
         {error && (
-          <div className="card" style={{ color: "var(--danger)" }}>
-            {error}
-          </div>
+          <div className="card text-danger">{error}</div>
         )}
 
         {machineStats && (
-              <div className="card" style={{ marginBottom: 24 }}>
-                <h2 style={{ marginBottom: 16 }}>机器磁盘空间</h2>
-                <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                  <span style={{ fontSize: 24, fontWeight: 600 }}>
-                    {formatBytes(machineStats.disk_free)}
-                  </span>
-                  <span className="muted" style={{ fontSize: 16 }}>
-                    / {formatBytes(machineStats.disk_total)}
-                  </span>
-                  <span className="muted">可用</span>
-                </div>
-                <div
-                  style={{
-                    height: 6,
-                    background: "rgba(0,0,0,0.05)",
-                    borderRadius: 3,
-                    marginTop: 8,
-                    overflow: "hidden",
-                    maxWidth: 600,
-                  }}
-                >
-                  <div
-                    style={{
-                      height: "100%",
-                      width: `${(machineStats.disk_used / machineStats.disk_total) * 100}%`,
-                      background:
-                        (machineStats.disk_used / machineStats.disk_total) * 100 >=
-                        80
-                          ? "#ff3b30"
-                          : (machineStats.disk_used / machineStats.disk_total) *
-                                100 >=
-                              50
-                            ? "#ff9500"
-                            : "#34c759",
-                      transition: "width 0.5s ease, background 0.3s ease",
-                    }}
-                  />
-                </div>
-              </div>
-            )}
+          <div className="card mb-6">
+            <h2 className="mb-4">机器磁盘空间</h2>
+            <div className="flex items-baseline gap-2">
+              <span className="stats-value">{formatBytes(machineStats.disk_free)}</span>
+              <span className="stats-unit">/ {formatBytes(machineStats.disk_total)}</span>
+              <span className="muted">可用</span>
+            </div>
+            <div className="progress-container mt-2 max-w-600">
+              <div
+                className="progress-bar"
+                style={{
+                  width: `${(machineStats.disk_used / machineStats.disk_total) * 100}%`,
+                  background: getDiskColor((machineStats.disk_used / machineStats.disk_total) * 100),
+                }}
+              />
+            </div>
+          </div>
+        )}
 
-            <div className="card">
-              <form onSubmit={saveConfig} style={{ maxWidth: 600 }}>
-                <h2 style={{ marginBottom: 24 }}>系统配置</h2>
+        <div className="card">
+          <form onSubmit={saveConfig} className="max-w-600">
+            <h2 className="section-title">系统配置</h2>
 
-            <div style={{ marginBottom: 24 }}>
-              <label
-                style={{ display: "block", marginBottom: 8, fontWeight: 600 }}
-              >
-                最大任务大小 (GB)
-              </label>
-              <p className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
-                超过此大小的任务将被拒绝。
-              </p>
+            <div className="mb-6">
+              <label className="form-label-lg">最大任务大小 (GB)</label>
+              <p className="muted text-sm mb-2">超过此大小的任务将被拒绝。</p>
               <input
                 className="input"
                 type="number"
@@ -251,15 +223,9 @@ export default function SettingsPage() {
               />
             </div>
 
-            <div style={{ marginBottom: 32 }}>
-              <label
-                style={{ display: "block", marginBottom: 8, fontWeight: 600 }}
-              >
-                最小剩余磁盘空间 (GB)
-              </label>
-              <p className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
-                如果剩余空间低于此值，将停止接受新任务。
-              </p>
+            <div className="mb-7">
+              <label className="form-label-lg">最小剩余磁盘空间 (GB)</label>
+              <p className="muted text-sm mb-2">如果剩余空间低于此值，将停止接受新任务。</p>
               <input
                 className="input"
                 type="number"
@@ -271,71 +237,26 @@ export default function SettingsPage() {
               />
             </div>
 
-            <h2 style={{ marginBottom: 24 }}>aria2 后端配置</h2>
+            <h2 className="section-title">aria2 后端配置</h2>
 
-            {/* aria2 连接状态 */}
-            <div
-              style={{
-                marginBottom: 24,
-                padding: 16,
-                background: aria2Status?.connected
-                  ? "rgba(52, 199, 89, 0.1)"
-                  : "rgba(255, 59, 48, 0.1)",
-                border: `1px solid ${aria2Status?.connected ? "rgba(52, 199, 89, 0.3)" : "rgba(255, 59, 48, 0.3)"}`,
-                borderRadius: 8,
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  marginBottom: 8,
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div
-                    style={{
-                      width: 10,
-                      height: 10,
-                      borderRadius: "50%",
-                      background: aria2Status?.connected
-                        ? "#34c759"
-                        : "#ff3b30",
-                    }}
-                  />
-                  <span style={{ fontWeight: 600 }}>
-                    {aria2Status?.connected ? "已连接" : "未连接"}
-                  </span>
+            <div className={`mb-6 p-4 rounded-lg ${aria2Status?.connected ? "alert-success" : "alert-danger"}`}>
+              <div className="flex-between mb-2">
+                <div className="flex items-center gap-2">
+                  <div className={`status-dot ${aria2Status?.connected ? "status-dot-success" : "status-dot-danger"}`} />
+                  <span className="font-semibold">{aria2Status?.connected ? "已连接" : "未连接"}</span>
                 </div>
                 {aria2Status?.connected && aria2Status.version && (
-                  <span
-                    className="muted"
-                    style={{ fontSize: 13, fontFamily: "monospace" }}
-                  >
-                    aria2 {aria2Status.version}
-                  </span>
+                  <span className="muted text-sm font-mono">aria2 {aria2Status.version}</span>
                 )}
               </div>
               {aria2Status?.error && (
-                <p
-                  className="muted"
-                  style={{ fontSize: 13, margin: 0, color: "#ff3b30" }}
-                >
-                  错误：{aria2Status.error}
-                </p>
+                <p className="muted text-sm text-danger">错误：{aria2Status.error}</p>
               )}
             </div>
 
-            <div style={{ marginBottom: 24 }}>
-              <label
-                style={{ display: "block", marginBottom: 8, fontWeight: 600 }}
-              >
-                aria2 RPC URL
-              </label>
-              <p className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
-                aria2 JSON-RPC 接口地址，例如：http://localhost:6800/jsonrpc
-              </p>
+            <div className="mb-6">
+              <label className="form-label-lg">aria2 RPC URL</label>
+              <p className="muted text-sm mb-2">aria2 JSON-RPC 接口地址，例如：http://localhost:6800/jsonrpc</p>
               <input
                 className="input"
                 type="text"
@@ -345,15 +266,9 @@ export default function SettingsPage() {
               />
             </div>
 
-            <div style={{ marginBottom: 16 }}>
-              <label
-                style={{ display: "block", marginBottom: 8, fontWeight: 600 }}
-              >
-                aria2 RPC Secret
-              </label>
-              <p className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
-                aria2 RPC 认证密钥（可选）。留空表示不使用认证。
-              </p>
+            <div className="mb-4">
+              <label className="form-label-lg">aria2 RPC Secret</label>
+              <p className="muted text-sm mb-2">aria2 RPC 认证密钥（可选）。留空表示不使用认证。</p>
               <input
                 className="input"
                 type="password"
@@ -363,154 +278,81 @@ export default function SettingsPage() {
               />
             </div>
 
-            <div style={{ marginBottom: 32 }}>
+            <div className="mb-7">
               <button
                 type="button"
-                className="button secondary"
+                className="button secondary mb-4"
                 onClick={testConnection}
                 disabled={testingConnection}
-                style={{ padding: "8px 16px", marginBottom: 16 }}
               >
                 {testingConnection ? "测试中..." : "测试连接"}
               </button>
 
-              {/* 测试结果显示 */}
               {testResult && (
-                <div
-                  style={{
-                    padding: 12,
-                    background: testResult.connected
-                      ? "rgba(52, 199, 89, 0.1)"
-                      : "rgba(255, 59, 48, 0.1)",
-                    border: `1px solid ${testResult.connected ? "rgba(52, 199, 89, 0.3)" : "rgba(255, 59, 48, 0.3)"}`,
-                    borderRadius: 8,
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <div
-                      style={{
-                        width: 8,
-                        height: 8,
-                        borderRadius: "50%",
-                        background: testResult.connected ? "#34c759" : "#ff3b30",
-                      }}
-                    />
-                    <span style={{ fontSize: 14, fontWeight: 600 }}>
+                <div className={`p-3 rounded-lg ${testResult.connected ? "alert-success" : "alert-danger"}`}>
+                  <div className="flex items-center gap-2">
+                    <div className={`status-dot-sm ${testResult.connected ? "status-dot-success" : "status-dot-danger"}`} />
+                    <span className="text-base font-semibold">
                       测试结果：{testResult.connected ? "连接成功" : "连接失败"}
                     </span>
                   </div>
                   {testResult.connected && testResult.version && (
-                    <p className="muted" style={{ fontSize: 13, margin: "4px 0 0 16px" }}>
-                      aria2 版本: {testResult.version}
-                    </p>
+                    <p className="muted text-sm ml-4 mt-1">aria2 版本: {testResult.version}</p>
                   )}
                   {testResult.error && (
-                    <p style={{ fontSize: 13, margin: "4px 0 0 16px", color: "#ff3b30" }}>
-                      {testResult.error}
-                    </p>
+                    <p className="text-sm ml-4 mt-1 text-danger">{testResult.error}</p>
                   )}
                 </div>
               )}
             </div>
 
-            <h2 style={{ marginBottom: 24 }}>文件管理配置</h2>
+            <h2 className="section-title">文件管理配置</h2>
 
-            <div style={{ marginBottom: 32 }}>
-              <label
-                style={{ display: "block", marginBottom: 8, fontWeight: 600 }}
-              >
-                隐藏文件后缀名
-              </label>
-              <p className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
-                在文件管理页面隐藏指定后缀名的文件。输入后缀名（如 aria2 或
-                .aria2）并按回车添加。
+            <div className="mb-7">
+              <label className="form-label-lg">隐藏文件后缀名</label>
+              <p className="muted text-sm mb-2">
+                在文件管理页面隐藏指定后缀名的文件。输入后缀名（如 aria2 或 .aria2）并按回车添加。
               </p>
 
-              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <div className="flex gap-2 mb-3">
                 <input
-                  className="input"
+                  className="input flex-1"
                   type="text"
                   value={extensionInput}
                   onChange={(e) => setExtensionInput(e.target.value)}
                   onKeyDown={handleExtensionKeyDown}
                   placeholder="输入后缀名，按回车添加"
-                  style={{ flex: 1 }}
                 />
-                <button
-                  type="button"
-                  className="button"
-                  onClick={addExtension}
-                  style={{ padding: "0 20px" }}
-                >
+                <button type="button" className="button px-4" onClick={addExtension}>
                   添加
                 </button>
               </div>
 
-              <div style={{ marginBottom: 12 }}>
-                <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
-                  常用后缀名：
-                </p>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  {[".aria2", ".tmp", ".part", ".download", ".crdownload"].map(
-                    (ext) => (
-                      <button
-                        key={ext}
-                        type="button"
-                        onClick={() => addCommonExtension(ext)}
-                        style={{
-                          padding: "4px 12px",
-                          fontSize: 12,
-                          border: "1px solid rgba(0,0,0,0.1)",
-                          borderRadius: 4,
-                          background: "white",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {ext}
-                      </button>
-                    ),
-                  )}
+              <div className="mb-3">
+                <p className="muted text-xs mb-2">常用后缀名：</p>
+                <div className="flex gap-2 flex-wrap">
+                  {[".aria2", ".tmp", ".part", ".download", ".crdownload"].map((ext) => (
+                    <button
+                      key={ext}
+                      type="button"
+                      onClick={() => addCommonExtension(ext)}
+                      className="ext-btn"
+                    >
+                      {ext}
+                    </button>
+                  ))}
                 </div>
               </div>
 
               {hiddenExtensions.length > 0 && (
-                <div
-                  style={{
-                    display: "flex",
-                    gap: 8,
-                    flexWrap: "wrap",
-                    padding: 12,
-                    background: "rgba(0,0,0,0.02)",
-                    borderRadius: 6,
-                  }}
-                >
+                <div className="flex gap-2 flex-wrap p-3 bg-black-02 rounded">
                   {hiddenExtensions.map((ext) => (
-                    <div
-                      key={ext}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                        padding: "6px 12px",
-                        background: "#0071e3",
-                        color: "white",
-                        borderRadius: 16,
-                        fontSize: 14,
-                      }}
-                    >
+                    <div key={ext} className="chip">
                       <span>{ext}</span>
                       <button
                         type="button"
                         onClick={() => removeExtension(ext)}
-                        style={{
-                          background: "none",
-                          border: "none",
-                          color: "white",
-                          cursor: "pointer",
-                          padding: 0,
-                          fontSize: 16,
-                          lineHeight: 1,
-                        }}
+                        className="chip-close"
                       >
                         ×
                       </button>
@@ -520,19 +362,13 @@ export default function SettingsPage() {
               )}
             </div>
 
-            <h2 style={{ marginBottom: 24, marginTop: 32 }}>打包设置</h2>
+            <h2 className="section-title mt-7">打包设置</h2>
 
-            <div style={{ marginBottom: 24 }}>
-              <label
-                style={{ display: "block", marginBottom: 8, fontWeight: 600 }}
-              >
-                打包格式
-              </label>
-              <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
-                选择文件夹打包的压缩格式。
-              </p>
-              <div style={{ display: "flex", gap: 16 }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <div className="mb-6">
+              <label className="form-label-lg">打包格式</label>
+              <p className="muted text-sm mb-3">选择文件夹打包的压缩格式。</p>
+              <div className="flex gap-4">
+                <label className="checkbox-label">
                   <input
                     type="radio"
                     name="packFormat"
@@ -542,7 +378,7 @@ export default function SettingsPage() {
                   />
                   <span>ZIP</span>
                 </label>
-                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <label className="checkbox-label">
                   <input
                     type="radio"
                     name="packFormat"
@@ -555,34 +391,23 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            <div style={{ marginBottom: 32 }}>
-              <label
-                style={{ display: "block", marginBottom: 8, fontWeight: 600 }}
-              >
-                压缩等级: {packCompressionLevel}
-              </label>
-              <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
-                1 = 最快/最大体积, 9 = 最慢/最小体积
-              </p>
+            <div className="mb-7">
+              <label className="form-label-lg">压缩等级: {packCompressionLevel}</label>
+              <p className="muted text-sm mb-3">1 = 最快/最大体积, 9 = 最慢/最小体积</p>
               <input
                 type="range"
                 min="1"
                 max="9"
                 value={packCompressionLevel}
                 onChange={(e) => setPackCompressionLevel(parseInt(e.target.value))}
-                style={{ width: "100%", maxWidth: 300 }}
+                className="w-full"
+                style={{ maxWidth: 300 }}
               />
             </div>
 
-            <div style={{ marginBottom: 32 }}>
-              <label
-                style={{ display: "block", marginBottom: 8, fontWeight: 600 }}
-              >
-                7za 附加参数
-              </label>
-              <p className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
-                自定义 7za 命令参数，如 -mmt=2 限制 CPU 核心数
-              </p>
+            <div className="mb-7">
+              <label className="form-label-lg">7za 附加参数</label>
+              <p className="muted text-sm mb-2">自定义 7za 命令参数，如 -mmt=2 限制 CPU 核心数</p>
               <input
                 className="input"
                 type="text"
@@ -592,14 +417,12 @@ export default function SettingsPage() {
               />
             </div>
 
-            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            <div className="flex items-center gap-4">
               <button className="button" type="submit" disabled={saving}>
                 {saving ? "保存中..." : "保存配置"}
               </button>
               {saveSuccess && (
-                <span style={{ color: "#34c759", fontSize: 14, fontWeight: 500 }}>
-                  ✓ 配置已保存
-                </span>
+                <span className="text-success text-base font-medium">✓ 配置已保存</span>
               )}
             </div>
           </form>

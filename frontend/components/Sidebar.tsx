@@ -195,14 +195,7 @@ function SidebarContent({ user }: SidebarProps) {
       <div className="sidebar-footer">
         <button
           onClick={logout}
-          className="nav-item"
-          style={{
-            width: "100%",
-            border: "none",
-            background: "transparent",
-            cursor: "pointer",
-            textAlign: "left",
-          }}
+          className="nav-item logout-btn"
         >
           <span className="nav-icon">
             <svg

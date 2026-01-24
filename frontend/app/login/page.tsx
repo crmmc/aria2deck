@@ -11,7 +11,6 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Check if already logged in
     api
       .me()
       .then(() => router.push("/tasks"))
@@ -23,7 +22,6 @@ export default function LoginPage() {
     setError(null);
     try {
       await api.login(username, password);
-      // Force a page reload to ensure AuthContext picks up the new session
       window.location.href = "/tasks";
     } catch (err) {
       setError("用户名或密码无效");
@@ -31,26 +29,15 @@ export default function LoginPage() {
   }
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "16px",
-      }}
-    >
-      <div
-        className="glass-frame animate-in"
-        style={{ maxWidth: "400px", width: "100%" }}
-      >
-        <div style={{ textAlign: "center", marginBottom: 32 }}>
-          <h1 style={{ fontSize: "24px" }}>登录</h1>
+    <div className="fixed inset-0 flex-center p-4">
+      <div className="glass-frame animate-in max-w-400 w-full">
+        <div className="text-center mb-7">
+          <h1 className="text-xl">登录</h1>
           <p className="muted">输入您的凭据以继续</p>
         </div>
 
         <form onSubmit={onSubmit}>
-          <div style={{ marginBottom: 16 }}>
+          <div className="mb-4">
             <input
               className="input"
               placeholder="用户名"
@@ -60,7 +47,7 @@ export default function LoginPage() {
               autoFocus
             />
           </div>
-          <div style={{ marginBottom: 24 }}>
+          <div className="mb-6">
             <input
               className="input"
               type="password"
@@ -72,26 +59,12 @@ export default function LoginPage() {
           </div>
 
           {error ? (
-            <div
-              style={{
-                padding: "12px",
-                borderRadius: "12px",
-                background: "rgba(255, 59, 48, 0.1)",
-                color: "var(--danger)",
-                marginBottom: 24,
-                fontSize: "14px",
-                textAlign: "center",
-              }}
-            >
+            <div className="alert alert-danger text-center mb-6">
               {error}
             </div>
           ) : null}
 
-          <button
-            className="button"
-            type="submit"
-            style={{ width: "100%", fontSize: "16px", padding: "12px" }}
-          >
+          <button className="button w-full text-md p-3" type="submit">
             登录
           </button>
         </form>

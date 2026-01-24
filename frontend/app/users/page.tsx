@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { useToast } from "@/components/Toast";
 import AuthLayout from "@/components/AuthLayout";
 import type { User, UserUpdate } from "@/types";
 
@@ -18,11 +19,11 @@ type EditingUser = {
 
 export default function UsersPage() {
   const router = useRouter();
+  const { showToast, showConfirm } = useToast();
   const [users, setUsers] = useState<User[]>([]);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Create form state
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
@@ -30,7 +31,6 @@ export default function UsersPage() {
   const [quotaUnit, setQuotaUnit] = useState("GB");
   const [error, setError] = useState<string | null>(null);
 
-  // Edit modal state
   const [editingUser, setEditingUser] = useState<EditingUser | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
 
@@ -60,7 +60,6 @@ export default function UsersPage() {
     e.preventDefault();
     setError(null);
     try {
-      // 转换配额为字节
       const unitMultiplier: Record<string, number> = {
         KB: 1024,
         MB: 1024 * 1024,
@@ -86,17 +85,22 @@ export default function UsersPage() {
   }
 
   async function handleDeleteUser(id: number) {
-    if (!confirm("确定要删除此用户吗？")) return;
+    const confirmed = await showConfirm({
+      title: "删除用户",
+      message: "确定要删除此用户吗？",
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
     try {
       await api.deleteUser(id);
       setUsers(users.filter((u) => u.id !== id));
-    } catch (err) {
-      alert("删除用户失败");
+    } catch {
+      showToast("删除用户失败", "error");
     }
   }
 
   function openEditModal(user: User) {
-    // 将字节转换为合适的单位
     let value = user.quota;
     let unit = "KB";
 
@@ -141,7 +145,6 @@ export default function UsersPage() {
       updates.is_admin = editingUser.is_admin;
     }
 
-    // 计算新的配额（字节）
     const unitMultiplier: Record<string, number> = {
       KB: 1024,
       MB: 1024 * 1024,
@@ -174,33 +177,16 @@ export default function UsersPage() {
   return (
     <AuthLayout>
       <div className="glass-frame full-height animate-in">
-        <h1 style={{ marginBottom: 8 }}>用户</h1>
-        <p className="muted" style={{ marginBottom: 32 }}>
-          管理系统用户
-        </p>
+        <div className="page-header">
+          <h1 className="page-title">用户</h1>
+          <p className="muted">管理系统用户</p>
+        </div>
 
-        <div className="card" style={{ marginBottom: 32 }}>
-          <h3 style={{ marginBottom: 16 }}>创建新用户</h3>
-          <form
-            onSubmit={handleCreateUser}
-            style={{
-              display: "flex",
-              gap: 12,
-              alignItems: "flex-end",
-              flexWrap: "wrap",
-            }}
-          >
-            <div style={{ flex: 1, minWidth: 200 }}>
-              <label
-                style={{
-                  display: "block",
-                  fontSize: 13,
-                  marginBottom: 4,
-                  fontWeight: 500,
-                }}
-              >
-                用户名
-              </label>
+        <div className="card mb-7">
+          <h3 className="mb-4">创建新用户</h3>
+          <form onSubmit={handleCreateUser} className="flex gap-3 items-end flex-wrap">
+            <div className="flex-1" style={{ minWidth: 200 }}>
+              <label className="form-label">用户名</label>
               <input
                 className="input"
                 value={username}
@@ -208,17 +194,8 @@ export default function UsersPage() {
                 required
               />
             </div>
-            <div style={{ flex: 1, minWidth: 200 }}>
-              <label
-                style={{
-                  display: "block",
-                  fontSize: 13,
-                  marginBottom: 4,
-                  fontWeight: 500,
-                }}
-              >
-                密码
-              </label>
+            <div className="flex-1" style={{ minWidth: 200 }}>
+              <label className="form-label">密码</label>
               <input
                 className="input"
                 type="password"
@@ -228,33 +205,23 @@ export default function UsersPage() {
                 autoComplete="new-password"
               />
             </div>
-            <div style={{ flex: 1, minWidth: 200 }}>
-              <label
-                style={{
-                  display: "block",
-                  fontSize: 13,
-                  marginBottom: 4,
-                  fontWeight: 500,
-                }}
-              >
-                存储配额
-              </label>
-              <div style={{ display: "flex", gap: 8 }}>
+            <div className="flex-1" style={{ minWidth: 200 }}>
+              <label className="form-label">存储配额</label>
+              <div className="flex gap-2">
                 <input
-                  className="input"
+                  className="input flex-1"
                   type="number"
                   step="0.01"
                   min="0.01"
                   value={quotaValue}
                   onChange={(e) => setQuotaValue(e.target.value)}
                   required
-                  style={{ flex: 1 }}
                 />
                 <select
                   className="input"
                   value={quotaUnit}
                   onChange={(e) => setQuotaUnit(e.target.value)}
-                  style={{ width: "80px" }}
+                  style={{ width: 80 }}
                 >
                   <option value="KB">KB</option>
                   <option value="MB">MB</option>
@@ -263,20 +230,13 @@ export default function UsersPage() {
               </div>
             </div>
             <div style={{ paddingBottom: 12 }}>
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  cursor: "pointer",
-                }}
-              >
+              <label className="checkbox-label">
                 <input
                   type="checkbox"
                   checked={isAdmin}
                   onChange={(e) => setIsAdmin(e.target.checked)}
                 />
-                <span style={{ fontSize: 14 }}>管理员用户</span>
+                <span className="text-base">管理员用户</span>
               </label>
             </div>
             <button className="button" type="submit">
@@ -284,115 +244,44 @@ export default function UsersPage() {
             </button>
           </form>
           {error && (
-            <p style={{ color: "var(--danger)", marginTop: 12, fontSize: 14 }}>
-              {error}
-            </p>
+            <p className="text-danger mt-3 text-base">{error}</p>
           )}
         </div>
 
-        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-          <table
-            style={{
-              width: "100%",
-              borderCollapse: "collapse",
-              textAlign: "left",
-            }}
-          >
-            <thead
-              style={{
-                background: "rgba(0,0,0,0.02)",
-                borderBottom: "1px solid rgba(0,0,0,0.05)",
-              }}
-            >
+        <div className="card p-0 overflow-hidden">
+          <table className="table text-left">
+            <thead className="table-header">
               <tr>
-                <th
-                  style={{
-                    padding: "12px 16px",
-                    fontWeight: 600,
-                    color: "var(--muted)",
-                    fontSize: 13,
-                  }}
-                >
-                  ID
-                </th>
-                <th
-                  style={{
-                    padding: "12px 16px",
-                    fontWeight: 600,
-                    color: "var(--muted)",
-                    fontSize: 13,
-                  }}
-                >
-                  用户名
-                </th>
-                <th
-                  style={{
-                    padding: "12px 16px",
-                    fontWeight: 600,
-                    color: "var(--muted)",
-                    fontSize: 13,
-                  }}
-                >
-                  角色
-                </th>
-                <th
-                  style={{
-                    padding: "12px 16px",
-                    fontWeight: 600,
-                    color: "var(--muted)",
-                    fontSize: 13,
-                    textAlign: "right",
-                  }}
-                >
-                  操作
-                </th>
+                <th className="table-cell">ID</th>
+                <th className="table-cell">用户名</th>
+                <th className="table-cell">角色</th>
+                <th className="table-cell text-right">操作</th>
               </tr>
             </thead>
             <tbody>
               {users.map((u) => (
-                <tr
-                  key={u.id}
-                  style={{ borderBottom: "1px solid rgba(0,0,0,0.05)" }}
-                >
-                  <td style={{ padding: "12px 16px" }}>{u.id}</td>
-                  <td style={{ padding: "12px 16px", fontWeight: 500 }}>
-                    {u.username}
-                  </td>
-                  <td style={{ padding: "12px 16px" }}>
+                <tr key={u.id} className="table-row">
+                  <td className="table-cell">{u.id}</td>
+                  <td className="table-cell font-medium">{u.username}</td>
+                  <td className="table-cell">
                     {u.is_admin ? (
                       <span className="badge active">管理员</span>
                     ) : (
                       <span className="badge">用户</span>
                     )}
                   </td>
-                  <td style={{ padding: "12px 16px", textAlign: "right" }}>
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: 8,
-                        justifyContent: "flex-end",
-                      }}
-                    >
+                  <td className="table-cell text-right">
+                    <div className="flex gap-2 flex-end">
                       <button
                         onClick={() => openEditModal(u)}
-                        className="button secondary"
-                        style={{
-                          padding: "4px 12px",
-                          fontSize: 12,
-                          height: 28,
-                        }}
+                        className="button secondary btn-sm"
                       >
                         编辑
                       </button>
                       {u.id !== currentUser?.id && (
                         <button
                           onClick={() => handleDeleteUser(u.id)}
-                          className="button secondary danger"
-                          style={{
-                            padding: "4px 12px",
-                            fontSize: 12,
-                            height: 28,
-                          }}
+                          className="button secondary danger btn-sm"
                         >
                           删除
                         </button>
@@ -406,47 +295,19 @@ export default function UsersPage() {
         </div>
       </div>
 
-      {/* Edit Modal */}
       {editingUser && (
         <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: "rgba(0,0,0,0.5)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-          }}
+          className="modal-overlay"
           onClick={() => setEditingUser(null)}
         >
           <div
-            className="card"
-            style={{
-              width: "100%",
-              maxWidth: 400,
-              margin: 16,
-              animation: "fadeIn 0.2s ease",
-              background: "#fff",
-            }}
+            className="card max-w-400 m-4 animate-in bg-white"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 style={{ marginBottom: 20 }}>编辑用户</h3>
+            <h3 className="mb-5">编辑用户</h3>
             <form onSubmit={handleUpdateUser}>
-              <div style={{ marginBottom: 16 }}>
-                <label
-                  style={{
-                    display: "block",
-                    fontSize: 13,
-                    marginBottom: 4,
-                    fontWeight: 500,
-                  }}
-                >
-                  用户名
-                </label>
+              <div className="form-group">
+                <label className="form-label">用户名</label>
                 <input
                   className="input"
                   value={editingUser.username}
@@ -456,19 +317,9 @@ export default function UsersPage() {
                   required
                 />
               </div>
-              <div style={{ marginBottom: 16 }}>
-                <label
-                  style={{
-                    display: "block",
-                    fontSize: 13,
-                    marginBottom: 4,
-                    fontWeight: 500,
-                  }}
-                >
-                  新密码{" "}
-                  <span style={{ color: "var(--muted)", fontWeight: 400 }}>
-                    (留空保持不变)
-                  </span>
+              <div className="form-group">
+                <label className="form-label">
+                  新密码 <span className="muted font-normal">(留空保持不变)</span>
                 </label>
                 <input
                   className="input"
@@ -481,20 +332,11 @@ export default function UsersPage() {
                   autoComplete="new-password"
                 />
               </div>
-              <div style={{ marginBottom: 16 }}>
-                <label
-                  style={{
-                    display: "block",
-                    fontSize: 13,
-                    marginBottom: 4,
-                    fontWeight: 500,
-                  }}
-                >
-                  存储配额
-                </label>
-                <div style={{ display: "flex", gap: 8 }}>
+              <div className="form-group">
+                <label className="form-label">存储配额</label>
+                <div className="flex gap-2">
                   <input
-                    className="input"
+                    className="input flex-1"
                     type="number"
                     step="0.01"
                     min="0.01"
@@ -506,7 +348,6 @@ export default function UsersPage() {
                       })
                     }
                     required
-                    style={{ flex: 1 }}
                   />
                   <select
                     className="input"
@@ -517,7 +358,7 @@ export default function UsersPage() {
                         quotaUnit: e.target.value,
                       })
                     }
-                    style={{ width: "80px" }}
+                    style={{ width: 80 }}
                   >
                     <option value="KB">KB</option>
                     <option value="MB">MB</option>
@@ -525,15 +366,8 @@ export default function UsersPage() {
                   </select>
                 </div>
               </div>
-              <div style={{ marginBottom: 20 }}>
-                <label
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    cursor: "pointer",
-                  }}
-                >
+              <div className="mb-5">
+                <label className="checkbox-label">
                   <input
                     type="checkbox"
                     checked={editingUser.is_admin}
@@ -545,28 +379,16 @@ export default function UsersPage() {
                     }
                     disabled={editingUser.id === currentUser?.id}
                   />
-                  <span style={{ fontSize: 14 }}>管理员用户</span>
+                  <span className="text-base">管理员用户</span>
                   {editingUser.id === currentUser?.id && (
-                    <span style={{ fontSize: 12, color: "var(--muted)" }}>
-                      (不能修改自己的角色)
-                    </span>
+                    <span className="text-xs muted">(不能修改自己的角色)</span>
                   )}
                 </label>
               </div>
               {editError && (
-                <p
-                  style={{
-                    color: "var(--danger)",
-                    marginBottom: 16,
-                    fontSize: 14,
-                  }}
-                >
-                  {editError}
-                </p>
+                <p className="text-danger mb-4 text-base">{editError}</p>
               )}
-              <div
-                style={{ display: "flex", gap: 12, justifyContent: "flex-end" }}
-              >
+              <div className="flex gap-3 flex-end">
                 <button
                   type="button"
                   className="button secondary"

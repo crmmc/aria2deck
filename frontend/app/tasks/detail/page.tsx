@@ -5,6 +5,7 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { api, taskWsUrl } from "@/lib/api";
+import { useToast } from "@/components/Toast";
 import SpeedChart from "@/components/SpeedChart";
 import FileList from "@/components/FileList";
 import type { Task, TaskFile } from "@/types";
@@ -23,6 +24,7 @@ function formatBytes(value: number) {
 
 function TaskDetailContent() {
   const router = useRouter();
+  const { showToast } = useToast();
   const searchParams = useSearchParams();
   const taskId = useMemo(() => Number(searchParams.get("id")), [searchParams]);
   const [task, setTask] = useState<Task | null>(null);
@@ -47,10 +49,10 @@ function TaskDetailContent() {
     navigator.clipboard
       .writeText(magnetLink)
       .then(() => {
-        alert("磁力链接已复制到剪贴板");
+        showToast("磁力链接已复制到剪贴板", "success");
       })
       .catch(() => {
-        alert("复制失败，请手动复制");
+        showToast("复制失败，请手动复制", "error");
       });
   }
 
@@ -125,106 +127,83 @@ function TaskDetailContent() {
     <div className="glass-frame animate-in">
       <Link
         href="/tasks"
-        className="muted"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          marginBottom: 24,
-        }}
+        className="muted back-link"
       >
         ← 返回任务列表
       </Link>
 
       <div className="card">
-        <div className="space-between" style={{ alignItems: "flex-start" }}>
-          <div>
-            <h1 style={{ fontSize: "32px", marginBottom: "8px" }}>
+        <div className="space-between flex-start">
+          <div className="detail-header">
+            <h1
+              className="detail-title"
+              title={task.name || task.uri}
+            >
               {task.name || "未命名任务"}
             </h1>
-            <p className="muted" style={{ wordBreak: "break-all" }}>
+            <p
+              className="muted truncate"
+              title={task.uri}
+            >
               {task.uri}
             </p>
           </div>
           <span
-            className={`badge ${task.status === "active" ? "active" : task.status === "complete" ? "complete" : ""}`}
-            style={{ fontSize: "14px", padding: "6px 12px" }}
+            className={`badge badge-lg ${task.status === "active" ? "active" : task.status === "complete" ? "complete" : ""}`}
           >
             {task.status}
           </span>
         </div>
 
-        <div
-          style={{
-            marginTop: 32,
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-            gap: "24px",
-          }}
-        >
+        <div className="detail-stats-grid">
           <div>
-            <p className="muted" style={{ marginBottom: "4px" }}>
+            <p className="muted detail-stat-label">
               进度
             </p>
-            <div style={{ fontSize: "24px", fontWeight: 600 }}>
+            <div className="detail-stat-value">
               {formatBytes(task.completed_length)}
-              <span
-                className="muted"
-                style={{ fontSize: "16px", fontWeight: 400 }}
-              >
+              <span className="muted font-normal text-md">
                 {" "}
                 / {formatBytes(task.total_length)}
               </span>
             </div>
-            <div
-              className="muted"
-              style={{ fontSize: "13px", marginTop: "4px" }}
-            >
+            <div className="muted detail-stat-sub">
               {task.total_length > 0
                 ? `${((task.completed_length / task.total_length) * 100).toFixed(2)}%`
                 : "0%"}
             </div>
           </div>
           <div>
-            <p className="muted" style={{ marginBottom: "4px" }}>
+            <p className="muted detail-stat-label">
               当前速度
             </p>
-            <div
-              style={{ fontSize: "24px", fontWeight: 600, color: "#0a84ff" }}
-            >
+            <div className="detail-stat-value text-info">
               {formatBytes(task.download_speed)}/s
             </div>
             {taskDetail?.peak_download_speed > 0 && (
-              <div
-                className="muted"
-                style={{ fontSize: "13px", marginTop: "4px" }}
-              >
+              <div className="muted detail-stat-sub">
                 峰值: {formatBytes(taskDetail.peak_download_speed)}/s
               </div>
             )}
           </div>
           <div>
-            <p className="muted" style={{ marginBottom: "4px" }}>
+            <p className="muted detail-stat-label">
               上传速度
             </p>
-            <div
-              style={{ fontSize: "24px", fontWeight: 600, color: "#34c759" }}
-            >
+            <div className="detail-stat-value text-success">
               {formatBytes(task.upload_speed)}/s
             </div>
           </div>
           {taskDetail?.aria2_detail?.connections !== undefined && (
             <div>
-              <p className="muted" style={{ marginBottom: "4px" }}>
+              <p className="muted detail-stat-label">
                 连接数
               </p>
-              <div style={{ fontSize: "24px", fontWeight: 600 }}>
+              <div className="detail-stat-value">
                 {taskDetail.aria2_detail.connections}
               </div>
               {taskDetail?.peak_connections > 0 && (
-                <div
-                  className="muted"
-                  style={{ fontSize: "13px", marginTop: "4px" }}
-                >
+                <div className="muted detail-stat-sub">
                   峰值: {taskDetail.peak_connections}
                 </div>
               )}
@@ -232,38 +211,27 @@ function TaskDetailContent() {
           )}
           {taskDetail?.aria2_detail?.num_seeders !== undefined && (
             <div>
-              <p className="muted" style={{ marginBottom: "4px" }}>
+              <p className="muted detail-stat-label">
                 做种数
               </p>
-              <div style={{ fontSize: "24px", fontWeight: 600 }}>
+              <div className="detail-stat-value">
                 {taskDetail.aria2_detail.num_seeders}
               </div>
             </div>
           )}
           {taskDetail?.aria2_detail?.info_hash && (
-            <div style={{ gridColumn: "1 / -1" }}>
-              <p className="muted" style={{ marginBottom: "4px" }}>
+            <div className="span-full">
+              <p className="muted detail-stat-label">
                 Info Hash
               </p>
-              <div
-                style={{
-                  fontSize: "13px",
-                  fontFamily: "monospace",
-                  wordBreak: "break-all",
-                }}
-              >
+              <div className="detail-info-hash">
                 {taskDetail.aria2_detail.info_hash}
               </div>
               {magnetLink && (
                 <button
                   type="button"
-                  className="button secondary"
+                  className="button secondary btn-sm mt-2"
                   onClick={copyMagnetLink}
-                  style={{
-                    marginTop: "8px",
-                    padding: "6px 12px",
-                    fontSize: "13px",
-                  }}
                 >
                   复制磁力链接
                 </button>
@@ -271,25 +239,16 @@ function TaskDetailContent() {
             </div>
           )}
           {task.error ? (
-            <div
-              style={{
-                gridColumn: "1 / -1",
-                background: "rgba(255, 69, 58, 0.1)",
-                padding: "12px",
-                borderRadius: "8px",
-                color: "#ff453a",
-              }}
-            >
+            <div className="span-full error-box">
               错误：{task.error}
             </div>
           ) : null}
         </div>
 
         {task.artifact_token ? (
-          <div style={{ marginTop: 32 }}>
+          <div className="mt-7">
             <a
-              className="button"
-              style={{ padding: "12px 24px", fontSize: "16px" }}
+              className="button btn-task text-md"
               href={`${process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000"}/api/tasks/artifacts/${task.artifact_token}`}
             >
               下载文件
@@ -298,13 +257,13 @@ function TaskDetailContent() {
         ) : null}
       </div>
 
-      <div className="card" style={{ marginTop: 24 }}>
-        <h3 style={{ marginBottom: 24 }}>实时速度</h3>
+      <div className="card detail-section">
+        <h3 className="detail-section-title">实时速度</h3>
         <SpeedChart samples={samples} height={200} />
       </div>
 
-      <div className="card" style={{ marginTop: 24 }}>
-        <h3 style={{ marginBottom: 24 }}>文件列表</h3>
+      <div className="card detail-section">
+        <h3 className="detail-section-title">文件列表</h3>
         <FileList files={files} />
       </div>
     </div>
