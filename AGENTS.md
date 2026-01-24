@@ -379,3 +379,4 @@ NEXT_PUBLIC_API_BASE=http://localhost:8000
 - **Don't** create new files when editing existing ones suffices
 - **Don't** add features not explicitly requested
 - **Don't** commit `backend/data/` or `backend/static/` contents
+- **Don't** let user verify frontend changes without running `make build` first - always ensure build passes before user acceptance

@@ -18,10 +18,9 @@ function formatBytes(value: number) {
 }
 
 export default function SpeedChart({ samples, height = 120 }: Props) {
-  const max = Math.max(1, ...samples) * 1.1; // Add 10% headroom
+  const max = Math.max(1, ...samples) * 1.1;
   const width = 600;
 
-  // Create area path (close the loop at the bottom)
   const points = samples
     .map((value, idx) => {
       const x = (idx / Math.max(samples.length - 1, 1)) * width;
@@ -38,7 +37,7 @@ export default function SpeedChart({ samples, height = 120 }: Props) {
         width="100%"
         height={height}
         viewBox={`0 0 ${width} ${height}`}
-        style={{ overflow: "visible" }}
+        className="overflow-visible"
       >
         <defs>
           <linearGradient id="speedGradient" x1="0" y1="0" x2="0" y2="1">
@@ -46,11 +45,7 @@ export default function SpeedChart({ samples, height = 120 }: Props) {
             <stop offset="100%" stopColor="#0a84ff" stopOpacity="0" />
           </linearGradient>
         </defs>
-
-        {/* Fill Area */}
         <polygon points={areaPoints} fill="url(#speedGradient)" />
-
-        {/* Line */}
         <polyline
           fill="none"
           stroke="#0a84ff"
@@ -60,22 +55,12 @@ export default function SpeedChart({ samples, height = 120 }: Props) {
           points={points}
         />
       </svg>
-      <div className="space-between" style={{ marginTop: 8 }}>
-        <p className="muted" style={{ fontSize: "12px" }}>
-          60秒前
-        </p>
-        <p
-          style={{
-            fontWeight: 600,
-            color: "#0a84ff",
-            fontVariantNumeric: "tabular-nums",
-          }}
-        >
+      <div className="space-between speed-chart-footer">
+        <p className="muted speed-chart-label">60秒前</p>
+        <p className="speed-chart-value tabular-nums">
           {formatBytes(samples[samples.length - 1] || 0)}/s
         </p>
-        <p className="muted" style={{ fontSize: "12px" }}>
-          当前
-        </p>
+        <p className="muted speed-chart-label">当前</p>
       </div>
     </div>
   );

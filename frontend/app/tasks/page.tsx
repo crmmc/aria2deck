@@ -25,6 +25,7 @@ import { CSS } from "@dnd-kit/utilities";
 
 import { api, taskWsUrl } from "@/lib/api";
 import type { Task } from "@/types";
+import { useToast } from "@/components/Toast";
 import StatsWidget from "@/components/StatsWidget";
 import AuthLayout from "@/components/AuthLayout";
 import {
@@ -98,64 +99,17 @@ function SortableTaskCard({
       {...attributes}
     >
       <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "space-between",
-          cursor: "pointer",
-          transition: "transform 0.2s ease, box-shadow 0.2s ease",
-          border: isSelected
-            ? "2px solid #0071e3"
-            : "1px solid rgba(0,0,0,0.1)",
-          borderRadius: "12px",
-          padding: "20px",
-        }}
-        onMouseEnter={(e) => {
-          if (!isDragging) {
-            e.currentTarget.style.transform = "translateY(-2px)";
-            e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.1)";
-          }
-        }}
-        onMouseLeave={(e) => {
-          if (!isDragging) {
-            e.currentTarget.style.transform = "translateY(0)";
-            e.currentTarget.style.boxShadow = "none";
-          }
-        }}
+        className={`task-card-inner${isSelected ? " selected" : ""}`}
       >
         <div>
-          <div
-            className="space-between"
-            style={{ alignItems: "flex-start", marginBottom: 12 }}
-          >
             <div
-              style={{
-                display: "flex",
-                gap: "8px",
-                alignItems: "flex-start",
-                overflow: "hidden",
-                flex: 1,
-              }}
+              className="space-between flex-start mb-3"
             >
-              {/* 拖拽手柄 - 仅 waiting 状态显示 */}
+            <div className="task-card-header">
               {canDrag && (
                 <div
                   {...listeners}
-                  style={{
-                    cursor: "grab",
-                    padding: "4px 4px 4px 0",
-                    color: "#999",
-                    fontSize: "14px",
-                    lineHeight: 1,
-                    userSelect: "none",
-                    marginTop: "2px",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.color = "#666";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.color = "#999";
-                  }}
+                  className="drag-handle"
                   title="拖拽排序"
                 >
                   ⋮⋮
@@ -166,33 +120,19 @@ function SortableTaskCard({
                 checked={isSelected}
                 onChange={() => onToggleSelection(task.id)}
                 onClick={(e) => e.stopPropagation()}
-                style={{
-                  marginTop: "4px",
-                  cursor: "pointer",
-                  width: "16px",
-                  height: "16px",
-                }}
+                className="checkbox-sm mt-2 cursor-pointer"
               />
               <div
-                style={{ overflow: "hidden", flex: 1 }}
+                className="overflow-hidden flex-1"
                 onClick={() => onNavigate(task.id)}
               >
                 <h3
-                  style={{
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    fontSize: "16px",
-                    marginBottom: "4px",
-                  }}
+                  className="task-name"
                   title={task.name || task.uri}
                 >
                   {getTaskDisplayName(task)}
                 </h3>
-                <div
-                  className="muted tabular-nums"
-                  style={{ fontSize: "13px" }}
-                >
+                <div className="muted tabular-nums text-sm">
                   {formatBytes(task.completed_length)} /{" "}
                   {formatBytes(task.total_length)}
                 </div>
@@ -205,107 +145,77 @@ function SortableTaskCard({
             )}
           </div>
 
-          {/* Progress Bar */}
-          <div
-            style={{
-              height: "6px",
-              background: "rgba(0,0,0,0.05)",
-              borderRadius: "3px",
-              marginBottom: "12px",
-              overflow: "hidden",
-            }}
-          >
+          <div className="progress-container mb-3">
             <div
-              className={task.status === "active" ? "progress-bar-active" : ""}
-              style={{
-                height: "100%",
-                width: `${task.total_length ? (task.completed_length / task.total_length) * 100 : 0}%`,
-                background:
-                  task.status === "error"
-                    ? "#ff3b30"
+              className={`progress-bar ${
+                task.status === "active"
+                  ? "progress-bar-active progress-bar-primary"
+                  : task.status === "error"
+                    ? "progress-bar-error"
                     : task.status === "complete"
-                      ? "#34c759"
-                      : task.status === "active"
-                        ? undefined // Use class gradient
-                        : "#0071e3",
-                backgroundColor:
-                  task.status === "active" ? "#0071e3" : undefined, // Fallback/Base
-                transition: "width 0.3s ease",
+                      ? "progress-bar-success"
+                      : "progress-bar-primary"
+              }`}
+              style={{
+                width: `${task.total_length ? (task.completed_length / task.total_length) * 100 : 0}%`,
               }}
             />
           </div>
         </div>
 
         <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            marginTop: "auto",
-          }}
+          className="task-card-footer"
           onClick={(e) => e.stopPropagation()}
         >
-          {task.status === "error" && (
-            <div
-              style={{
-                flex: "1 1 auto",
-                minWidth: 0,
-                fontSize: "13px",
-                color: "#ff3b30",
-                background: "rgba(255, 59, 48, 0.1)",
-                padding: "6px 10px",
-                borderRadius: "6px",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                marginRight: "16px",
-              }}
-              title={task.error || "未知错误"}
+          <div className="task-footer-left">
+            <span
+              className={`task-status task-status-${task.status}`}
             >
-              错误：{task.error || "未知错误"}
-            </div>
-          )}
+              {task.status === "active"
+                ? "下载中"
+                : task.status === "waiting"
+                  ? "等待中"
+                  : task.status === "paused"
+                    ? "已暂停"
+                    : task.status === "complete"
+                      ? "已完成"
+                      : task.status === "error"
+                        ? "错误"
+                        : task.status}
+            </span>
+            {task.total_length > 0 && task.status !== "complete" && (
+              <span className="muted tabular-nums text-sm">
+                {((task.completed_length / task.total_length) * 100).toFixed(1)}%
+              </span>
+            )}
+            {task.status === "error" && task.error && (
+              <span
+                className="task-error-text"
+                title={task.error}
+              >
+                {task.error}
+              </span>
+            )}
+          </div>
 
-          <div
-            style={{
-              display: "flex",
-              gap: "8px",
-              marginLeft: "auto",
-              flexShrink: 0,
-            }}
-          >
+          <div className="task-footer-right">
             {task.status === "active" || task.status === "waiting" ? (
               <button
-                className="button secondary"
-                style={{
-                  padding: "8px 16px",
-                  fontSize: "13px",
-                  minWidth: "64px",
-                }}
+                className="button secondary btn-task"
                 onClick={() => onPause(task.id)}
               >
                 暂停
               </button>
             ) : task.status === "paused" ? (
               <button
-                className="button secondary"
-                style={{
-                  padding: "8px 16px",
-                  fontSize: "13px",
-                  minWidth: "64px",
-                }}
+                className="button secondary btn-task"
                 onClick={() => onResume(task.id)}
               >
                 继续
               </button>
             ) : task.status === "error" ? (
               <button
-                className="button secondary"
-                style={{
-                  padding: "8px 16px",
-                  fontSize: "13px",
-                  minWidth: "64px",
-                  opacity: isRetrying ? 0.6 : 1,
-                }}
+                className={`button secondary btn-task${isRetrying ? " opacity-60" : ""}`}
                 onClick={() => onRetry(task)}
                 disabled={isRetrying}
               >
@@ -314,26 +224,14 @@ function SortableTaskCard({
             ) : null}
 
             <button
-              className="button secondary danger"
-              style={{
-                padding: "8px 16px",
-                fontSize: "13px",
-                minWidth: "64px",
-              }}
+              className="button secondary danger btn-task"
               onClick={() => onRemove(task.id)}
             >
               删除
             </button>
 
             <Link
-              className="button secondary"
-              style={{
-                padding: "8px 16px",
-                textAlign: "center",
-                fontSize: "13px",
-                minWidth: "64px",
-                textDecoration: "none",
-              }}
+              className="button secondary btn-task btn-link"
               href={`/tasks/detail?id=${task.id}`}
               onClick={(e) => e.stopPropagation()}
             >
@@ -348,11 +246,13 @@ function SortableTaskCard({
 
 export default function TasksPage() {
   const router = useRouter();
+  const { showToast, showConfirm } = useToast();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [uri, setUri] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [selectedTasks, setSelectedTasks] = useState<Set<number>>(new Set());
   const [filterStatus, setFilterStatus] = useState<string>("all");
+  const [searchKeyword, setSearchKeyword] = useState("");
   const [sortBy, setSortBy] = useState<string>("time");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
@@ -592,7 +492,7 @@ export default function TasksPage() {
       setDeleteFiles(false);
     } catch (err) {
       console.error(err);
-      alert("删除失败：" + (err as Error).message);
+      showToast("删除失败：" + (err as Error).message, "error");
     }
   }
 
@@ -609,7 +509,13 @@ export default function TasksPage() {
       ? `确定要删除选中的 ${selectedTasks.size} 个任务吗？\n\n警告：删除任务会同时删除任务相关联的文件！`
       : `确定要删除选中的 ${selectedTasks.size} 个任务吗？`;
 
-    if (!confirm(message)) return;
+    const confirmed = await showConfirm({
+      title: "批量删除",
+      message,
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
 
     try {
       // 批量删除时，未完成的任务会删除文件
@@ -624,7 +530,7 @@ export default function TasksPage() {
       setSelectedTasks(new Set());
     } catch (err) {
       console.error(err);
-      alert("批量删除失败：" + (err as Error).message);
+      showToast("批量删除失败：" + (err as Error).message, "error");
     }
   }
 
@@ -636,7 +542,7 @@ export default function TasksPage() {
         (t.status === "active" || t.status === "waiting"),
     );
     if (activeTasks.length === 0) {
-      alert("没有可暂停的任务");
+      showToast("没有可暂停的任务", "warning");
       return;
     }
     try {
@@ -654,7 +560,7 @@ export default function TasksPage() {
       (t) => selectedTasks.has(t.id) && t.status === "paused",
     );
     if (pausedTasks.length === 0) {
-      alert("没有可继续的任务");
+      showToast("没有可继续的任务", "warning");
       return;
     }
     try {
@@ -669,7 +575,7 @@ export default function TasksPage() {
   async function retryTask(task: Task) {
     // 种子任务无法重试
     if (task.uri === "[torrent]") {
-      alert("种子任务无法直接重试，请重新上传种子文件");
+      showToast("种子任务无法直接重试，请重新上传种子文件", "warning");
       return;
     }
 
@@ -696,7 +602,7 @@ export default function TasksPage() {
       // 失败时恢复列表（通过刷新）
       const tasks = await api.listTasks();
       setTasks(tasks);
-      alert("重试失败：" + (err as Error).message);
+      showToast("重试失败：" + (err as Error).message, "error");
     } finally {
       setRetryingTaskIds((prev) => {
         const next = new Set(prev);
@@ -718,7 +624,7 @@ export default function TasksPage() {
     );
 
     if (errorTasks.length === 0) {
-      alert("没有可重试的任务（种子任务需重新上传）");
+      showToast("没有可重试的任务（种子任务需重新上传）", "warning");
       return;
     }
 
@@ -752,9 +658,9 @@ export default function TasksPage() {
     deletedTaskIdsRef.current.clear();
 
     if (failCount > 0) {
-      alert(`重试完成：成功 ${successCount} 个，失败 ${failCount} 个`);
+      showToast(`重试完成：成功 ${successCount} 个，失败 ${failCount} 个`, "warning");
     } else if (successCount > 0) {
-      alert(`成功重试 ${successCount} 个任务`);
+      showToast(`成功重试 ${successCount} 个任务`, "success");
     }
   }
 
@@ -765,7 +671,7 @@ export default function TasksPage() {
       .filter((line) => line.length > 0);
 
     if (uris.length === 0) {
-      alert("请输入至少一个链接");
+      showToast("请输入至少一个链接", "warning");
       return;
     }
 
@@ -788,9 +694,9 @@ export default function TasksPage() {
     setShowBatchAddModal(false);
 
     if (failCount > 0) {
-      alert(`添加完成：成功 ${successCount} 个，失败 ${failCount} 个`);
+      showToast(`添加完成：成功 ${successCount} 个，失败 ${failCount} 个`, "warning");
     } else {
-      alert(`成功添加 ${successCount} 个任务`);
+      showToast(`成功添加 ${successCount} 个任务`, "success");
     }
   }
 
@@ -823,15 +729,25 @@ export default function TasksPage() {
   const filteredAndSortedTasks = useMemo(() => {
     let filtered = tasks;
 
+    // 关键词搜索
+    if (searchKeyword.trim()) {
+      const keyword = searchKeyword.toLowerCase();
+      filtered = filtered.filter(
+        (t) =>
+          (t.name && t.name.toLowerCase().includes(keyword)) ||
+          (t.uri && t.uri.toLowerCase().includes(keyword))
+      );
+    }
+
     // 筛选
     if (filterStatus === "active") {
-      filtered = tasks.filter(
+      filtered = filtered.filter(
         (t) => t.status === "active" || t.status === "waiting",
       );
     } else if (filterStatus === "complete") {
-      filtered = tasks.filter((t) => t.status === "complete");
+      filtered = filtered.filter((t) => t.status === "complete");
     } else if (filterStatus === "error") {
-      filtered = tasks.filter((t) => t.status === "error");
+      filtered = filtered.filter((t) => t.status === "error");
     }
 
     // 排序
@@ -857,7 +773,7 @@ export default function TasksPage() {
     });
 
     return sorted;
-  }, [tasks, filterStatus, sortBy, sortOrder]);
+  }, [tasks, searchKeyword, filterStatus, sortBy, sortOrder]);
 
   async function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
@@ -889,31 +805,19 @@ export default function TasksPage() {
   return (
     <AuthLayout>
       <div className="glass-frame full-height animate-in">
-        <div className="space-between" style={{ marginBottom: 32 }}>
+        <div className="space-between mb-7">
           <div>
-            <h1 style={{ fontSize: "28px" }}>任务</h1>
+            <h1 className="text-2xl">任务</h1>
             <p className="muted">管理您的下载</p>
           </div>
         </div>
 
         <StatsWidget />
 
-        <div
-          className="card"
-          style={{
-            marginBottom: 16,
-            padding: "8px",
-            background: "rgba(255,255,255,0.9)",
-          }}
-        >
-          <form onSubmit={createTask} style={{ display: "flex", gap: "8px" }}>
+        <div className="card add-task-card">
+          <form onSubmit={createTask} className="add-task-form">
             <input
-              className="input"
-              style={{
-                border: "none",
-                background: "transparent",
-                padding: "12px 16px",
-              }}
+              className="input add-task-input"
               placeholder="粘贴磁力链接、HTTP 或 FTP URL..."
               value={uri}
               onChange={(event) => setUri(event.target.value)}
@@ -924,73 +828,56 @@ export default function TasksPage() {
               ref={torrentInputRef}
               accept=".torrent"
               onChange={handleTorrentUpload}
-              style={{ display: "none" }}
+              className="hidden"
             />
             <button
-              className="button"
+              className="button flex-shrink-0 shadow-none"
               type="submit"
-              style={{ flexShrink: 0, boxShadow: "none" }}
             >
               + 添加任务
             </button>
             <button
-              className="button secondary"
+              className="button secondary flex-shrink-0 shadow-none"
               type="button"
               onClick={() => setShowBatchAddModal(true)}
-              style={{ flexShrink: 0, boxShadow: "none" }}
             >
               批量添加
             </button>
             <button
-              className="button secondary"
+              className="button secondary flex-shrink-0 shadow-none"
               type="button"
               onClick={() => torrentInputRef.current?.click()}
-              style={{ flexShrink: 0, boxShadow: "none" }}
               title="上传种子文件"
             >
               上传种子
             </button>
           </form>
           {error ? (
-            <div
-              style={{
-                padding: "0 16px 12px",
-                color: "#ff3b30",
-                fontSize: "13px",
-              }}
-            >
+            <div className="form-error">
               {error}
             </div>
           ) : null}
         </div>
 
-        {/* 筛选和排序工具栏 */}
-        <div
-          className="card"
-          style={{
-            marginBottom: 16,
-            padding: "12px 16px",
-            display: "flex",
-            gap: "16px",
-            alignItems: "center",
-            flexWrap: "wrap",
-          }}
-        >
-          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-            <span className="muted" style={{ fontSize: "13px" }}>
+        <div className="card filter-toolbar">
+          <div className="filter-group">
+            <input
+              type="text"
+              placeholder="搜索任务..."
+              value={searchKeyword}
+              onChange={(e) => setSearchKeyword(e.target.value)}
+              className="search-input"
+            />
+          </div>
+
+          <div className="filter-group">
+            <span className="muted text-sm">
               筛选:
             </span>
             <select
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value)}
-              style={{
-                padding: "6px 12px",
-                fontSize: "13px",
-                border: "1px solid rgba(0,0,0,0.1)",
-                borderRadius: "6px",
-                background: "white",
-                cursor: "pointer",
-              }}
+              className="select"
             >
               <option value="all">全部</option>
               <option value="active">进行中</option>
@@ -999,21 +886,14 @@ export default function TasksPage() {
             </select>
           </div>
 
-          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-            <span className="muted" style={{ fontSize: "13px" }}>
+          <div className="filter-group">
+            <span className="muted text-sm">
               排序:
             </span>
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value)}
-              style={{
-                padding: "6px 12px",
-                fontSize: "13px",
-                border: "1px solid rgba(0,0,0,0.1)",
-                borderRadius: "6px",
-                background: "white",
-                cursor: "pointer",
-              }}
+              className="select"
             >
               <option value="time">添加时间</option>
               <option value="speed">下载速度</option>
@@ -1022,54 +902,43 @@ export default function TasksPage() {
             <button
               type="button"
               onClick={() => setSortOrder(sortOrder === "asc" ? "desc" : "asc")}
-              style={{
-                padding: "6px 12px",
-                fontSize: "13px",
-                border: "1px solid rgba(0,0,0,0.1)",
-                borderRadius: "6px",
-                background: "white",
-                cursor: "pointer",
-              }}
+              className="sort-btn"
             >
               {sortOrder === "asc" ? "↑" : "↓"}
             </button>
           </div>
 
-          <div style={{ marginLeft: "auto", display: "flex", gap: "8px" }}>
+          <div className="filter-group ml-auto">
             {selectedTasks.size > 0 && (
               <>
-                <span className="muted" style={{ fontSize: "13px" }}>
+                <span className="muted text-sm">
                   已选 {selectedTasks.size} 项
                 </span>
                 <button
                   type="button"
-                  className="button secondary"
+                  className="button secondary btn-sm"
                   onClick={batchPauseTasks}
-                  style={{ padding: "6px 12px", fontSize: "13px" }}
                 >
                   暂停
                 </button>
                 <button
                   type="button"
-                  className="button secondary"
+                  className="button secondary btn-sm"
                   onClick={batchResumeTasks}
-                  style={{ padding: "6px 12px", fontSize: "13px" }}
                 >
                   继续
                 </button>
                 <button
                   type="button"
-                  className="button secondary"
+                  className="button secondary btn-sm"
                   onClick={batchRetryTasks}
-                  style={{ padding: "6px 12px", fontSize: "13px" }}
                 >
                   重试
                 </button>
                 <button
                   type="button"
-                  className="button secondary danger"
+                  className="button secondary danger btn-sm"
                   onClick={batchDeleteTasks}
-                  style={{ padding: "6px 12px", fontSize: "13px" }}
                 >
                   删除
                 </button>
@@ -1077,9 +946,8 @@ export default function TasksPage() {
             )}
             <button
               type="button"
-              className="button secondary"
+              className="button secondary btn-sm"
               onClick={toggleSelectAll}
-              style={{ padding: "6px 12px", fontSize: "13px" }}
             >
               {selectedTasks.size === filteredAndSortedTasks.length &&
               filteredAndSortedTasks.length > 0
@@ -1098,7 +966,7 @@ export default function TasksPage() {
             items={filteredAndSortedTasks.map((t) => t.gid || String(t.id))}
             strategy={verticalListSortingStrategy}
           >
-            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+            <div className="task-list">
               {filteredAndSortedTasks.length === 0 && (
                 <div className="empty-state">
                   <div className="empty-state-icon">
@@ -1116,10 +984,10 @@ export default function TasksPage() {
                       <polyline points="13 2 13 9 20 9" />
                     </svg>
                   </div>
-                  <p style={{ fontWeight: 500, marginBottom: "4px" }}>
+                  <p className="font-medium mb-1">
                     暂无任务
                   </p>
-                  <p className="muted" style={{ fontSize: "14px" }}>
+                  <p className="muted text-base">
                     点击上方的 "+" 添加下载任务
                   </p>
                 </div>
@@ -1144,63 +1012,27 @@ export default function TasksPage() {
         </DndContext>
       </div>
 
-      {/* 批量添加任务弹窗 - 使用 Portal 渲染到 body */}
       {mounted && showBatchAddModal && createPortal(
         <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: "rgba(0,0,0,0.5)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-          }}
+          className="modal-overlay"
           onClick={() => setShowBatchAddModal(false)}
         >
           <div
-            className="card"
-            style={{
-              width: "90%",
-              maxWidth: "600px",
-              maxHeight: "80vh",
-              display: "flex",
-              flexDirection: "column",
-              background: "white",
-            }}
+            className="card batch-modal-content"
             onClick={(e) => e.stopPropagation()}
           >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: "16px",
-              }}
-            >
-              <h2 style={{ margin: 0 }}>批量添加任务</h2>
+            <div className="modal-header">
+              <h2 className="m-0">批量添加任务</h2>
               <button
                 type="button"
                 onClick={() => setShowBatchAddModal(false)}
-                style={{
-                  background: "none",
-                  border: "none",
-                  fontSize: "24px",
-                  cursor: "pointer",
-                  color: "#666",
-                }}
+                className="modal-close-btn"
               >
                 ×
               </button>
             </div>
 
-            <p
-              className="muted"
-              style={{ fontSize: "13px", marginBottom: "12px" }}
-            >
+            <p className="muted text-sm mb-3">
               每行输入一个链接，支持磁力链接、HTTP 或 FTP URL
             </p>
 
@@ -1208,42 +1040,24 @@ export default function TasksPage() {
               value={batchUris}
               onChange={(e) => setBatchUris(e.target.value)}
               placeholder="magnet:?xt=urn:btih:...&#10;https://example.com/file1.zip&#10;https://example.com/file2.zip"
-              style={{
-                flex: 1,
-                minHeight: "300px",
-                padding: "12px",
-                border: "1px solid rgba(0,0,0,0.1)",
-                borderRadius: "6px",
-                fontSize: "13px",
-                fontFamily: "monospace",
-                resize: "vertical",
-                marginBottom: "16px",
-              }}
+              className="batch-textarea"
             />
 
-            <div
-              style={{
-                display: "flex",
-                gap: "8px",
-                justifyContent: "flex-end",
-              }}
-            >
+            <div className="modal-footer">
               <button
                 type="button"
-                className="button secondary"
+                className="button secondary btn-task"
                 onClick={() => {
                   setShowBatchAddModal(false);
                   setBatchUris("");
                 }}
-                style={{ padding: "8px 16px" }}
               >
                 取消
               </button>
               <button
                 type="button"
-                className="button"
+                className="button btn-task"
                 onClick={batchAddTasks}
-                style={{ padding: "8px 16px" }}
               >
                 添加任务
               </button>
@@ -1253,117 +1067,62 @@ export default function TasksPage() {
         document.body
       )}
 
-      {/* 删除确认对话框 - 使用 Portal 渲染到 body */}
       {mounted && deleteConfirmModal && createPortal(
         <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: "rgba(0,0,0,0.5)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-          }}
+          className="modal-overlay"
           onClick={() => {
             setDeleteConfirmModal(null);
             setDeleteFiles(false);
           }}
         >
           <div
-            className="card"
-            style={{
-              width: "90%",
-              maxWidth: "500px",
-              background: "white",
-            }}
+            className="card delete-modal-content"
             onClick={(e) => e.stopPropagation()}
           >
-              <div style={{ marginBottom: "16px" }}>
-                <h2 style={{ margin: 0, marginBottom: "8px" }}>确认删除任务</h2>
-                <p className="muted" style={{ fontSize: "14px", margin: 0 }}>
+              <div className="mb-4">
+                <h2 className="m-0 mb-2">确认删除任务</h2>
+                <p className="muted text-base m-0">
                   {deleteConfirmModal.taskName}
                 </p>
               </div>
 
               {deleteConfirmModal.isComplete ? (
-                <div style={{ marginBottom: "16px" }}>
+                <div className="mb-4">
                   <label
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "8px",
-                      cursor: "pointer",
-                      padding: "12px",
-                      border: "1px solid rgba(0,0,0,0.1)",
-                      borderRadius: "6px",
-                      background: deleteFiles
-                        ? "rgba(0,113,227,0.05)"
-                        : "transparent",
-                    }}
+                    className={`delete-checkbox-option${deleteFiles ? " checked" : ""}`}
                   >
                     <input
                       type="checkbox"
                       checked={deleteFiles}
                       onChange={(e) => setDeleteFiles(e.target.checked)}
-                      style={{
-                        width: "18px",
-                        height: "18px",
-                        cursor: "pointer",
-                      }}
+                      className="checkbox cursor-pointer"
                     />
-                    <span style={{ fontSize: "14px" }}>同时删除下载的文件</span>
+                    <span className="text-base">同时删除下载的文件</span>
                   </label>
                 </div>
               ) : (
-                <div
-                  style={{
-                    marginBottom: "16px",
-                    padding: "12px",
-                    background: "rgba(255, 59, 48, 0.1)",
-                    borderRadius: "6px",
-                    border: "1px solid rgba(255, 59, 48, 0.3)",
-                  }}
-                >
-                  <p
-                    style={{
-                      margin: 0,
-                      color: "#ff3b30",
-                      fontSize: "14px",
-                      fontWeight: 500,
-                    }}
-                  >
+                <div className="warning-box">
+                  <p>
                     ⚠️ 此任务未完成，删除任务会同时删除未完成的文件
                   </p>
                 </div>
               )}
 
-              <div
-                style={{
-                  display: "flex",
-                  gap: "8px",
-                  justifyContent: "flex-end",
-                }}
-              >
+              <div className="modal-footer">
                 <button
                   type="button"
-                  className="button secondary"
+                  className="button secondary btn-task"
                   onClick={() => {
                     setDeleteConfirmModal(null);
                     setDeleteFiles(false);
                   }}
-                  style={{ padding: "8px 16px" }}
                 >
                   取消
                 </button>
                 <button
                   type="button"
-                  className="button danger"
+                  className="button btn-danger"
                   onClick={confirmDeleteTask}
-                  style={{ padding: "8px 16px", background: "#ff3b30", color: "white" }}
                 >
                   确认删除
                 </button>

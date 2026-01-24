@@ -207,7 +207,7 @@ def set_rpc_access(
     """开启或关闭 RPC 访问"""
     if payload.enabled:
         # 开启：生成新 secret
-        new_secret = secrets.token_urlsafe(32)
+        new_secret = "aria2_" + secrets.token_urlsafe(32)
         created_at = utc_now()
         execute(
             "UPDATE users SET rpc_secret = ?, rpc_secret_created_at = ? WHERE id = ?",
@@ -252,7 +252,7 @@ def refresh_rpc_secret(user: dict = Depends(require_user)) -> RpcAccessStatus:
         )
 
     # 生成新 secret
-    new_secret = secrets.token_urlsafe(32)
+    new_secret = "aria2_" + secrets.token_urlsafe(32)
     created_at = utc_now()
     execute(
         "UPDATE users SET rpc_secret = ?, rpc_secret_created_at = ? WHERE id = ?",

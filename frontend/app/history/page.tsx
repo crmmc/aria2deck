@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { useToast } from "@/components/Toast";
 import AuthLayout from "@/components/AuthLayout";
 import type { Task } from "@/types";
 
@@ -31,9 +32,11 @@ function formatDate(dateStr: string) {
 
 export default function HistoryPage() {
   const router = useRouter();
+  const { showToast, showConfirm } = useToast();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState<string>("all");
+  const [searchKeyword, setSearchKeyword] = useState("");
   const [sortBy, setSortBy] = useState<string>("time");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
 
@@ -49,81 +52,99 @@ export default function HistoryPage() {
         (t) =>
           t.status === "complete" ||
           t.status === "error" ||
-          t.status === "stopped",
+          t.status === "stopped" ||
+          t.status === "removed",
       );
       setTasks(historyTasks);
       setLoading(false);
-    } catch (err) {
+    } catch {
       router.push("/login");
     }
   }
 
   async function handleDelete(id: number) {
-    if (!confirm("确定要删除此历史记录吗？")) return;
+    const confirmed = await showConfirm({
+      title: "删除历史记录",
+      message: "确定要删除此历史记录吗？",
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
     try {
       await api.deleteTask(id);
       setTasks(tasks.filter((t) => t.id !== id));
-    } catch (err) {
-      alert("删除失败");
+    } catch {
+      showToast("删除失败", "error");
     }
   }
 
   async function handleClearAll() {
-    if (!confirm("确定要清空所有历史记录吗？此操作不可恢复！")) return;
+    const confirmed = await showConfirm({
+      title: "清空历史记录",
+      message: "确定要清空所有历史记录吗？此操作不可恢复！",
+      confirmText: "清空",
+      danger: true,
+    });
+    if (!confirmed) return;
     try {
       const result = await api.clearHistory();
-      alert(`已清空 ${result.count} 条历史记录`);
+      showToast(`已清空 ${result.count} 条历史记录`, "success");
       setTasks([]);
-    } catch (err) {
-      alert("清空失败");
+    } catch {
+      showToast("清空失败", "error");
     }
   }
 
   async function handleRetry(task: Task) {
-    // 种子任务无法重试
     if (task.uri === "[torrent]") {
-      alert("种子任务无法直接重试，请重新上传种子文件");
+      showToast("种子任务无法直接重试，请重新上传种子文件", "warning");
       return;
     }
 
-    // 立即乐观移除旧任务
     setTasks((prev) => prev.filter((t) => t.id !== task.id));
 
     try {
       await api.retryTask(task.id);
-      // 强制刷新列表，确保状态一致
       const allTasks = await api.listTasks();
       const historyTasks = allTasks.filter(
         (t) =>
           t.status === "complete" ||
           t.status === "error" ||
-          t.status === "stopped",
+          t.status === "stopped" ||
+          t.status === "removed",
       );
       setTasks(historyTasks);
-      alert("任务已重新开始，请前往任务页面查看进度");
+      showToast("任务已重新开始，请前往任务页面查看进度", "success");
     } catch (err) {
-      // 失败时恢复列表（通过刷新）
       const allTasks = await api.listTasks();
       const historyTasks = allTasks.filter(
         (t) =>
           t.status === "complete" ||
           t.status === "error" ||
-          t.status === "stopped",
+          t.status === "stopped" ||
+          t.status === "removed",
       );
       setTasks(historyTasks);
-      alert("重试失败：" + (err as Error).message);
+      showToast("重试失败：" + (err as Error).message, "error");
     }
   }
 
   const filteredAndSortedTasks = useMemo(() => {
     let filtered = tasks;
 
-    // 筛选
-    if (filterStatus !== "all") {
-      filtered = tasks.filter((t) => t.status === filterStatus);
+    if (searchKeyword.trim()) {
+      const keyword = searchKeyword.toLowerCase();
+      filtered = filtered.filter(
+        (t) =>
+          (t.name && t.name.toLowerCase().includes(keyword)) ||
+          (t.uri && t.uri.toLowerCase().includes(keyword))
+      );
     }
 
-    // 排序
+    if (filterStatus !== "all") {
+      filtered = filtered.filter((t) => t.status === filterStatus);
+    }
+
     const sorted = [...filtered].sort((a, b) => {
       let comparison = 0;
 
@@ -143,80 +164,61 @@ export default function HistoryPage() {
     });
 
     return sorted;
-  }, [tasks, filterStatus, sortBy, sortOrder]);
+  }, [tasks, searchKeyword, filterStatus, sortBy, sortOrder]);
 
   if (loading) return null;
 
   return (
     <AuthLayout>
       <div className="glass-frame full-height animate-in">
-        <div className="space-between" style={{ marginBottom: 32 }}>
+        <div className="flex-between mb-7">
           <div>
-            <h1 style={{ marginBottom: 8 }}>任务历史</h1>
+            <h1 className="mb-2">任务历史</h1>
             <p className="muted">查看已完成、错误或已停止的任务。</p>
           </div>
           {tasks.length > 0 && (
             <button
               className="button secondary danger"
               onClick={handleClearAll}
-              style={{ height: "fit-content" }}
             >
               清空历史
             </button>
           )}
         </div>
 
-        {/* 筛选和排序工具栏 */}
         {tasks.length > 0 && (
-          <div
-            className="card"
-            style={{
-              marginBottom: 16,
-              padding: "12px 16px",
-              display: "flex",
-              gap: "16px",
-              alignItems: "center",
-              flexWrap: "wrap",
-            }}
-          >
-            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-              <span className="muted" style={{ fontSize: "13px" }}>
-                筛选:
-              </span>
+          <div className="card toolbar mb-4">
+            <div className="flex gap-2 items-center">
+              <input
+                type="text"
+                placeholder="搜索任务..."
+                value={searchKeyword}
+                onChange={(e) => setSearchKeyword(e.target.value)}
+                className="search-input"
+              />
+            </div>
+
+            <div className="flex gap-2 items-center">
+              <span className="muted text-sm">筛选:</span>
               <select
                 value={filterStatus}
                 onChange={(e) => setFilterStatus(e.target.value)}
-                style={{
-                  padding: "6px 12px",
-                  fontSize: "13px",
-                  border: "1px solid rgba(0,0,0,0.1)",
-                  borderRadius: "6px",
-                  background: "white",
-                  cursor: "pointer",
-                }}
+                className="select"
               >
                 <option value="all">全部</option>
                 <option value="complete">已完成</option>
                 <option value="error">错误</option>
                 <option value="stopped">已停止</option>
+                <option value="removed">已删除</option>
               </select>
             </div>
 
-            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-              <span className="muted" style={{ fontSize: "13px" }}>
-                排序:
-              </span>
+            <div className="flex gap-2 items-center">
+              <span className="muted text-sm">排序:</span>
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value)}
-                style={{
-                  padding: "6px 12px",
-                  fontSize: "13px",
-                  border: "1px solid rgba(0,0,0,0.1)",
-                  borderRadius: "6px",
-                  background: "white",
-                  cursor: "pointer",
-                }}
+                className="select"
               >
                 <option value="time">完成时间</option>
                 <option value="size">文件大小</option>
@@ -224,186 +226,104 @@ export default function HistoryPage() {
               <button
                 type="button"
                 onClick={() => setSortOrder(sortOrder === "asc" ? "desc" : "asc")}
-                style={{
-                  padding: "6px 12px",
-                  fontSize: "13px",
-                  border: "1px solid rgba(0,0,0,0.1)",
-                  borderRadius: "6px",
-                  background: "white",
-                  cursor: "pointer",
-                }}
+                className="sort-btn"
               >
                 {sortOrder === "asc" ? "↑" : "↓"}
               </button>
             </div>
 
-            <div className="muted" style={{ marginLeft: "auto", fontSize: "13px" }}>
+            <div className="muted ml-auto text-sm">
               共 {filteredAndSortedTasks.length} 条记录
             </div>
           </div>
         )}
 
         {filteredAndSortedTasks.length === 0 ? (
-          <div
-            className="card"
-            style={{ textAlign: "center", padding: "48px 0" }}
-          >
+          <div className="card text-center py-8">
             <p className="muted">暂无历史记录。</p>
           </div>
         ) : (
-          <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-            <table
-              style={{
-                width: "100%",
-                borderCollapse: "collapse",
-                fontSize: 14,
-              }}
-            >
-              <thead
-                style={{
-                  background: "rgba(0,0,0,0.03)",
-                  borderBottom: "1px solid rgba(0,0,0,0.05)",
-                }}
-              >
+          <div className="card p-0 overflow-hidden">
+            <table className="table">
+              <thead className="table-header">
                 <tr>
-                  <th
-                    style={{
-                      padding: "12px 16px",
-                      textAlign: "left",
-                      fontWeight: 600,
-                      color: "var(--muted)",
-                    }}
-                  >
-                    任务名称
-                  </th>
-                  <th
-                    style={{
-                      padding: "12px 16px",
-                      textAlign: "left",
-                      fontWeight: 600,
-                      color: "var(--muted)",
-                      width: 100,
-                    }}
-                  >
-                    状态
-                  </th>
-                  <th
-                    style={{
-                      padding: "12px 16px",
-                      textAlign: "right",
-                      fontWeight: 600,
-                      color: "var(--muted)",
-                      width: 120,
-                    }}
-                  >
-                    大小
-                  </th>
-                  <th
-                    style={{
-                      padding: "12px 16px",
-                      textAlign: "right",
-                      fontWeight: 600,
-                      color: "var(--muted)",
-                      width: 160,
-                    }}
-                  >
-                    完成时间
-                  </th>
-                  <th
-                    style={{
-                      padding: "12px 16px",
-                      textAlign: "right",
-                      fontWeight: 600,
-                      color: "var(--muted)",
-                      width: 130,
-                    }}
-                  >
-                    操作
-                  </th>
+                  <th className="table-cell text-left">任务名称</th>
+                  <th className="table-cell text-left" style={{ width: 100 }}>状态</th>
+                  <th className="table-cell text-right" style={{ width: 120 }}>大小</th>
+                  <th className="table-cell text-right" style={{ width: 160 }}>完成时间</th>
+                  <th className="table-cell text-right" style={{ width: 130 }}>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredAndSortedTasks.map((task) => (
-                  <tr
-                    key={task.id}
-                    style={{ borderBottom: "1px solid rgba(0,0,0,0.05)" }}
-                  >
-                    <td style={{ padding: "12px 16px" }}>
-                      <div style={{ fontWeight: 500, marginBottom: 4 }}>
+                  <tr key={task.id} className="table-row">
+                    <td className="table-cell">
+                      <div
+                        className="font-medium mb-1 truncate"
+                        style={{ maxWidth: 400 }}
+                        title={task.name || task.uri}
+                      >
                         {task.name || "未命名任务"}
                       </div>
                       <div
-                        className="muted"
-                        style={{
-                          fontSize: 12,
-                          wordBreak: "break-all",
-                          maxWidth: 400,
-                        }}
+                        className="muted text-xs truncate"
+                        style={{ maxWidth: 400 }}
+                        title={task.uri}
                       >
                         {task.uri}
                       </div>
                     </td>
-                    <td style={{ padding: "12px 16px" }}>
+                    <td className="table-cell">
                       <span
                         className={`badge ${
                           task.status === "complete"
                             ? "complete"
                             : task.status === "error"
                               ? "error"
-                              : ""
+                              : task.status === "removed"
+                                ? "removed"
+                                : ""
                         }`}
                       >
                         {task.status === "complete"
                           ? "已完成"
                           : task.status === "error"
                             ? "错误"
-                            : "已停止"}
+                            : task.status === "removed"
+                              ? "已删除"
+                              : "已停止"}
                       </span>
                     </td>
-                    <td
-                      style={{
-                        padding: "12px 16px",
-                        textAlign: "right",
-                        fontVariantNumeric: "tabular-nums",
-                      }}
-                    >
+                    <td className="table-cell text-right tabular-nums">
                       {formatBytes(task.total_length)}
                     </td>
-                    <td
-                      style={{
-                        padding: "12px 16px",
-                        textAlign: "right",
-                        fontSize: 13,
-                        color: "var(--muted)",
-                      }}
-                    >
+                    <td className="table-cell text-right text-sm muted">
                       {formatDate(task.updated_at)}
                     </td>
-                    <td style={{ padding: "12px 16px", textAlign: "right" }}>
-                      <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end", flexShrink: 0 }}>
+                    <td className="table-cell text-right">
+                      <div className="flex gap-2 flex-end flex-shrink-0">
+                        {task.uri !== "[torrent]" && (
+                          <button
+                            className="button secondary btn-sm"
+                            onClick={() => {
+                              navigator.clipboard.writeText(task.uri);
+                            }}
+                            title="复制下载链接"
+                          >
+                            复制
+                          </button>
+                        )}
                         {task.status === "error" && (
                           <button
-                            className="button secondary"
+                            className="button secondary btn-sm"
                             onClick={() => handleRetry(task)}
-                            style={{
-                              padding: "4px 12px",
-                              fontSize: 12,
-                              height: 28,
-                              whiteSpace: "nowrap",
-                            }}
                           >
                             重试
                           </button>
                         )}
                         <button
-                          className="button secondary danger"
+                          className="button secondary danger btn-sm"
                           onClick={() => handleDelete(task.id)}
-                          style={{
-                            padding: "4px 12px",
-                            fontSize: 12,
-                            height: 28,
-                            whiteSpace: "nowrap",
-                          }}
                         >
                           删除
                         </button>

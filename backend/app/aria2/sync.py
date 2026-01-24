@@ -201,7 +201,41 @@ async def sync_tasks(
 
         # 并发执行所有任务更新
         await asyncio.gather(*[fetch_and_update(task) for task in tasks])
+
+        # 检测已完成任务的文件是否存在，若不存在则删除任务
+        await _cleanup_orphaned_tasks()
+
         await asyncio.sleep(interval)
+
+
+async def _cleanup_orphaned_tasks() -> None:
+    """检测已完成任务的文件是否存在，若不存在则删除任务"""
+    from app.core.state import get_aria2_client
+
+    completed_tasks = fetch_all(
+        """
+        SELECT id, owner_id, name, gid
+        FROM tasks
+        WHERE status = 'complete' AND name IS NOT NULL
+        """
+    )
+
+    for task in completed_tasks:
+        user_dir = Path(settings.download_dir) / str(task["owner_id"])
+        file_path = user_dir / task["name"]
+
+        # 检查文件是否存在
+        if not file_path.exists():
+            # 从 aria2 中移除记录
+            if task.get("gid"):
+                client = get_aria2_client()
+                try:
+                    await client.remove_download_result(task["gid"])
+                except Exception:
+                    pass
+
+            # 标记任务为 removed，保留历史记录
+            _update_task(task["id"], {"status": "removed"})
 
 
 async def broadcast_update(state: AppState, user_id: int, task_id: int) -> None:

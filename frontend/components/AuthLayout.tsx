@@ -11,7 +11,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
   return (
     <>
       <Sidebar user={user} />
-      <div className="main-content" style={{ marginLeft: sidebarExpanded ? 292 : 100 }}>
+      <div className={`main-content ${sidebarExpanded ? "sidebar-expanded" : ""}`}>
         <div className="auth-container">
           {children}
         </div>

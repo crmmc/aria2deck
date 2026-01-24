@@ -19,49 +19,13 @@ export default function FileList({ files }: { files: TaskFile[] }) {
     return <p className="muted">暂无文件列表。</p>;
 
   return (
-    <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-      <table
-        style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}
-      >
-        <thead
-          style={{
-            background: "rgba(0,0,0,0.03)",
-            borderBottom: "1px solid rgba(0,0,0,0.05)",
-          }}
-        >
+    <div className="card p-0 overflow-hidden">
+      <table className="file-table">
+        <thead className="file-table-header">
           <tr>
-            <th
-              style={{
-                padding: "12px 16px",
-                textAlign: "left",
-                fontWeight: 600,
-                color: "var(--muted)",
-              }}
-            >
-              文件名
-            </th>
-            <th
-              style={{
-                padding: "12px 16px",
-                textAlign: "right",
-                fontWeight: 600,
-                color: "var(--muted)",
-                width: 120,
-              }}
-            >
-              大小
-            </th>
-            <th
-              style={{
-                padding: "12px 16px",
-                textAlign: "right",
-                fontWeight: 600,
-                color: "var(--muted)",
-                width: 100,
-              }}
-            >
-              进度
-            </th>
+            <th className="file-table-th text-left">文件名</th>
+            <th className="file-table-th text-right" style={{ width: 120 }}>大小</th>
+            <th className="file-table-th text-right" style={{ width: 100 }}>进度</th>
           </tr>
         </thead>
         <tbody>
@@ -69,28 +33,15 @@ export default function FileList({ files }: { files: TaskFile[] }) {
             const progress =
               file.length > 0 ? (file.completed_length / file.length) * 100 : 0;
             return (
-              <tr
-                key={i}
-                style={{ borderBottom: "1px solid rgba(0,0,0,0.05)" }}
-              >
-                <td style={{ padding: "12px 16px" }}>
-                  <div style={{ wordBreak: "break-all" }}>
-                    {file.path.split("/").pop()}
-                  </div>
-                  <div className="muted" style={{ fontSize: 12 }}>
-                    {file.path}
-                  </div>
+              <tr key={i} className="file-table-row">
+                <td className="file-table-cell">
+                  <div className="break-all">{file.path.split("/").pop()}</div>
+                  <div className="muted text-xs">{file.path}</div>
                 </td>
-                <td
-                  style={{
-                    padding: "12px 16px",
-                    textAlign: "right",
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
+                <td className="file-table-cell text-right tabular-nums">
                   {formatBytes(file.length)}
                 </td>
-                <td style={{ padding: "12px 16px", textAlign: "right" }}>
+                <td className="file-table-cell text-right">
                   {progress.toFixed(1)}%
                 </td>
               </tr>
