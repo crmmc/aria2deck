@@ -6,15 +6,23 @@ import json
 import re
 import shutil
 import shlex
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from sqlmodel import select, func
+
 from app.core.config import settings
-from app.db import execute, fetch_one, fetch_all, utc_now
+from app.database import get_session
+from app.models import PackTask, User
 
 
 # 全局打包队列锁
 _pack_queue_lock = asyncio.Lock()
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # 允许的 7za 参数前缀白名单（防止命令注入）
@@ -111,18 +119,18 @@ class PackTaskManager:
             try:
                 paths = json.loads(folder_path)
             except json.JSONDecodeError:
-                cls._update_task_error(task_id, "Invalid paths format")
+                await cls._update_task_error(task_id, "Invalid paths format")
                 return
             sources = [user_dir / p for p in paths]
             # 验证所有路径存在
             for source in sources:
                 if not source.exists():
-                    cls._update_task_error(task_id, f"Path does not exist: {source.name}")
+                    await cls._update_task_error(task_id, f"Path does not exist: {source.name}")
                     return
         else:
             source = user_dir / folder_path
             if not source.exists():
-                cls._update_task_error(task_id, "Source folder does not exist")
+                await cls._update_task_error(task_id, "Source folder does not exist")
                 return
             sources = [source]
 
@@ -150,10 +158,14 @@ class PackTaskManager:
             counter += 1
 
         # Update status to packing
-        execute(
-            "UPDATE pack_tasks SET status = ?, output_path = ?, updated_at = ? WHERE id = ?",
-            ["packing", str(output_path), utc_now(), task_id]
-        )
+        async with get_session() as db:
+            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+            task = result.first()
+            if task:
+                task.status = "packing"
+                task.output_path = str(output_path)
+                task.updated_at = utc_now()
+                db.add(task)
 
         # Build 7za command
         # -tzip or -t7z for format
@@ -196,10 +208,13 @@ class PackTaskManager:
                     new_progress = int(match.group(1))
                     if new_progress != progress:
                         progress = new_progress
-                        execute(
-                            "UPDATE pack_tasks SET progress = ?, updated_at = ? WHERE id = ?",
-                            [progress, utc_now(), task_id]
-                        )
+                        async with get_session() as db:
+                            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+                            task = result.first()
+                            if task:
+                                task.progress = progress
+                                task.updated_at = utc_now()
+                                db.add(task)
                         if on_progress:
                             on_progress(task_id, progress)
 
@@ -224,33 +239,40 @@ class PackTaskManager:
                         if aria2_file.exists():
                             aria2_file.unlink()
 
-                execute(
-                    """UPDATE pack_tasks SET
-                       status = ?, progress = 100, output_size = ?,
-                       reserved_space = 0, updated_at = ?
-                       WHERE id = ?""",
-                    ["done", output_size, utc_now(), task_id]
-                )
+                async with get_session() as db:
+                    result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+                    task = result.first()
+                    if task:
+                        task.status = "done"
+                        task.progress = 100
+                        task.output_size = output_size
+                        task.reserved_space = 0
+                        task.updated_at = utc_now()
+                        db.add(task)
             else:
                 # Failed: cleanup partial output
                 if output_path.exists():
                     output_path.unlink()
-                cls._update_task_error(task_id, f"7za exited with code {process.returncode}")
+                await cls._update_task_error(task_id, f"7za exited with code {process.returncode}")
 
         except FileNotFoundError:
-            cls._update_task_error(task_id, "7za command not found. Please install p7zip.")
+            await cls._update_task_error(task_id, "7za command not found. Please install p7zip.")
         except asyncio.CancelledError:
             # Task was cancelled
             if output_path.exists():
                 output_path.unlink()
-            execute(
-                "UPDATE pack_tasks SET status = ?, reserved_space = 0, updated_at = ? WHERE id = ?",
-                ["cancelled", utc_now(), task_id]
-            )
+            async with get_session() as db:
+                result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+                task = result.first()
+                if task:
+                    task.status = "cancelled"
+                    task.reserved_space = 0
+                    task.updated_at = utc_now()
+                    db.add(task)
         except Exception as exc:
             if output_path.exists():
                 output_path.unlink()
-            cls._update_task_error(task_id, str(exc))
+            await cls._update_task_error(task_id, str(exc))
         finally:
             cls._running_tasks.pop(task_id, None)
 
@@ -271,13 +293,16 @@ class PackTaskManager:
         return False
 
     @classmethod
-    def _update_task_error(cls, task_id: int, error: str) -> None:
-        execute(
-            """UPDATE pack_tasks SET
-               status = ?, error_message = ?, reserved_space = 0, updated_at = ?
-               WHERE id = ?""",
-            ["failed", error, utc_now(), task_id]
-        )
+    async def _update_task_error(cls, task_id: int, error: str) -> None:
+        async with get_session() as db:
+            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+            task = result.first()
+            if task:
+                task.status = "failed"
+                task.error_message = error
+                task.reserved_space = 0
+                task.updated_at = utc_now()
+                db.add(task)
 
 
 def calculate_folder_size(path: Path) -> int:
@@ -292,26 +317,27 @@ def calculate_folder_size(path: Path) -> int:
     return total
 
 
-def get_reserved_space() -> int:
+async def get_reserved_space() -> int:
     """Get total reserved space from pending/packing tasks"""
-    result = fetch_one(
-        """SELECT COALESCE(SUM(reserved_space), 0) as total
-           FROM pack_tasks
-           WHERE status IN ('pending', 'packing')"""
-    )
-    return result["total"] if result else 0
+    async with get_session() as db:
+        result = await db.exec(
+            select(func.coalesce(func.sum(PackTask.reserved_space), 0))
+            .where(PackTask.status.in_(["pending", "packing"]))
+        )
+        total = result.first()
+        return total if total else 0
 
 
-def get_server_available_space() -> int:
+async def get_server_available_space() -> int:
     """Get server available space minus reserved space"""
     download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
-    reserved = get_reserved_space()
+    reserved = await get_reserved_space()
     return max(0, disk.free - reserved)
 
 
-def get_user_available_space_for_pack(user_id: int) -> int:
+async def get_user_available_space_for_pack(user_id: int) -> int:
     """Get user available space for pack (considers quota, disk, and reserved)
 
     Returns minimum of:
@@ -319,8 +345,10 @@ def get_user_available_space_for_pack(user_id: int) -> int:
     - Server available space (minus reserved)
     """
     # Get user quota
-    user = fetch_one("SELECT quota FROM users WHERE id = ?", [user_id])
-    user_quota = user["quota"] if user and user.get("quota") else 100 * 1024 * 1024 * 1024
+    async with get_session() as db:
+        result = await db.exec(select(User).where(User.id == user_id))
+        user = result.first()
+        user_quota = user.quota if user and user.quota else 100 * 1024 * 1024 * 1024
 
     # Calculate user's current usage
     user_dir = Path(settings.download_dir) / str(user_id)
@@ -334,6 +362,6 @@ def get_user_available_space_for_pack(user_id: int) -> int:
                     pass
 
     user_remaining = max(0, user_quota - used_space)
-    server_available = get_server_available_space()
+    server_available = await get_server_available_space()
 
     return min(user_remaining, server_available)

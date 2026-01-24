@@ -4,52 +4,60 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from fastapi import Depends, HTTPException, Request, Response, status
+from sqlmodel import select
 
 from app.core.config import settings
-from app.db import execute, fetch_one
+from app.database import get_session
+from app.models import Session, User
 
 
-def create_session(user_id: int) -> str:
+async def create_session(user_id: int) -> str:
     session_id = uuid4().hex
     expires_at = (datetime.now(timezone.utc) + timedelta(seconds=settings.session_ttl_seconds)).isoformat()
-    execute(
-        "INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)",
-        [session_id, user_id, expires_at],
-    )
+    async with get_session() as db:
+        session = Session(id=session_id, user_id=user_id, expires_at=expires_at)
+        db.add(session)
     return session_id
 
 
-def clear_session(session_id: str) -> None:
-    execute("DELETE FROM sessions WHERE id = ?", [session_id])
+async def clear_session(session_id: str) -> None:
+    async with get_session() as db:
+        result = await db.exec(select(Session).where(Session.id == session_id))
+        session = result.first()
+        if session:
+            await db.delete(session)
 
 
-def get_user_by_session(session_id: str | None) -> dict | None:
+async def get_user_by_session(session_id: str | None) -> User | None:
     if not session_id:
         return None
-    session = fetch_one("SELECT * FROM sessions WHERE id = ?", [session_id])
-    if not session:
-        return None
-    expires_at = datetime.fromisoformat(session["expires_at"])
-    # 确保有时区信息，避免 naive datetime 与 aware datetime 比较
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at < datetime.now(timezone.utc):
-        clear_session(session_id)
-        return None
-    user = fetch_one("SELECT * FROM users WHERE id = ?", [session["user_id"]])
-    return user
+    async with get_session() as db:
+        result = await db.exec(select(Session).where(Session.id == session_id))
+        session = result.first()
+        if not session:
+            return None
+        expires_at = datetime.fromisoformat(session.expires_at)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < datetime.now(timezone.utc):
+            await db.delete(session)
+            await db.commit()
+            return None
+        result = await db.exec(select(User).where(User.id == session.user_id))
+        user = result.first()
+        return user
 
 
-def require_user(request: Request) -> dict:
+async def require_user(request: Request) -> User:
     session_id = request.cookies.get(settings.session_cookie_name)
-    user = get_user_by_session(session_id)
+    user = await get_user_by_session(session_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     return user
 
 
-def require_admin(user: dict = Depends(require_user)) -> dict:
-    if not user.get("is_admin"):
+async def require_admin(user: User = Depends(require_user)) -> User:
+    if not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin required")
     return user
 

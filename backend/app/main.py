@@ -12,6 +12,7 @@ from app.aria2.sync import sync_tasks
 from app.core.config import settings
 from app.core.state import AppState
 from app.db import ensure_default_admin, init_db
+from app.database import init_db as init_sqlmodel_db, get_session, init_default_config
 from app.routers import aria2_rpc, auth, config, files, hooks, stats, tasks, users, ws
 
 
@@ -21,8 +22,20 @@ async def lifespan(app: FastAPI):
     # Startup
     Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
     Path(settings.download_dir).mkdir(parents=True, exist_ok=True)
+
+    # Initialize database schema (using old init_db for backward compatibility)
     init_db()
+
+    # Initialize SQLModel tables (creates tables if they don't exist)
+    await init_sqlmodel_db()
+
+    # Initialize default config values
+    async with get_session() as session:
+        await init_default_config(session)
+
+    # Ensure default admin exists
     ensure_default_admin()
+
     sync_task = asyncio.create_task(
         sync_tasks(app.state.app_state, settings.aria2_poll_interval)
     )

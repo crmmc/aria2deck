@@ -178,8 +178,8 @@ class TestCreatePackTask:
         # Calculate expected folder size
         folder_path = test_folder.relative_to(Path(settings.download_dir) / str(test_user["id"]))
 
-        with patch("app.routers.files.asyncio.create_task") as mock_create_task:
-            with patch("app.services.pack.get_server_available_space", return_value=100 * 1024 * 1024 * 1024):
+        with patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock) as mock_start_pack:
+            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
                 response = authenticated_client.post(
                     "/api/files/pack",
                     json={"folder_path": str(folder_path)}
@@ -193,9 +193,6 @@ class TestCreatePackTask:
         assert data["status"] == "pending"
         assert data["folder_size"] > 0
         assert data["reserved_space"] == data["folder_size"]
-
-        # Verify async task was started
-        mock_create_task.assert_called_once()
 
     def test_create_pack_task_folder_not_found(
         self,
@@ -217,16 +214,20 @@ class TestCreatePackTask:
         test_file: Path,
         test_user: dict,
     ):
-        """Return 400 when path is a file, not a directory."""
+        """Can pack a single file (not just directories)."""
         file_path = test_file.relative_to(Path(settings.download_dir) / str(test_user["id"]))
 
-        response = authenticated_client.post(
-            "/api/files/pack",
-            json={"folder_path": str(file_path)}
-        )
+        with patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
+            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
+                response = authenticated_client.post(
+                    "/api/files/pack",
+                    json={"folder_path": str(file_path)}
+                )
 
-        assert response.status_code == 400
-        assert "detail" in response.json()
+        assert response.status_code == 201
+        data = response.json()
+        assert data["folder_path"] == str(file_path)
+        assert data["folder_size"] > 0
 
     def test_create_pack_task_empty_folder(
         self,
@@ -255,8 +256,8 @@ class TestCreatePackTask:
         folder_path = test_folder.relative_to(Path(settings.download_dir) / str(test_user["id"]))
 
         # Mock very limited available space
-        with patch("app.services.pack.get_server_available_space", return_value=10):
-            with patch("app.services.pack.get_user_available_space_for_pack", return_value=10):
+        with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=10):
+            with patch("app.services.pack.get_user_available_space_for_pack", new_callable=AsyncMock, return_value=10):
                 response = authenticated_client.post(
                     "/api/files/pack",
                     json={"folder_path": str(folder_path)}
@@ -467,36 +468,46 @@ class TestCancelPackTask:
         task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [packing_task["id"]])
         assert task["reserved_space"] == 0
 
-    def test_cancel_done_task_fails(
+    def test_delete_done_task_success(
         self,
         authenticated_client: TestClient,
         done_pack_task: dict,
     ):
-        """Cannot cancel a completed task."""
+        """Can delete a completed task record."""
         response = authenticated_client.delete(f"/api/files/pack/{done_pack_task['id']}")
 
-        assert response.status_code == 400
-        assert "detail" in response.json()
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert "删除" in data["message"]
 
-    def test_cancel_failed_task_fails(
+        # Verify task is deleted
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [done_pack_task["id"]])
+        assert task is None
+
+    def test_delete_failed_task_success(
         self,
         authenticated_client: TestClient,
         failed_pack_task: dict,
     ):
-        """Cannot cancel a failed task."""
+        """Can delete a failed task record."""
         response = authenticated_client.delete(f"/api/files/pack/{failed_pack_task['id']}")
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
 
-    def test_cancel_cancelled_task_fails(
+    def test_delete_cancelled_task_success(
         self,
         authenticated_client: TestClient,
         cancelled_pack_task: dict,
     ):
-        """Cannot cancel an already cancelled task."""
+        """Can delete a cancelled task record."""
         response = authenticated_client.delete(f"/api/files/pack/{cancelled_pack_task['id']}")
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
 
     def test_cancel_task_not_found(
         self,
@@ -612,8 +623,8 @@ class TestGetAvailableSpace:
         authenticated_client: TestClient,
     ):
         """Return user_available and server_available."""
-        with patch("app.services.pack.get_user_available_space_for_pack", return_value=50 * 1024 * 1024 * 1024):
-            with patch("app.services.pack.get_server_available_space", return_value=100 * 1024 * 1024 * 1024):
+        with patch("app.services.pack.get_user_available_space_for_pack", new_callable=AsyncMock, return_value=50 * 1024 * 1024 * 1024):
+            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
                 response = authenticated_client.get("/api/files/pack/available-space")
 
         assert response.status_code == 200
@@ -631,8 +642,8 @@ class TestGetAvailableSpace:
         """Return folder_size when folder_path is provided."""
         folder_path = test_folder.relative_to(Path(settings.download_dir) / str(test_user["id"]))
 
-        with patch("app.services.pack.get_user_available_space_for_pack", return_value=50 * 1024 * 1024 * 1024):
-            with patch("app.services.pack.get_server_available_space", return_value=100 * 1024 * 1024 * 1024):
+        with patch("app.services.pack.get_user_available_space_for_pack", new_callable=AsyncMock, return_value=50 * 1024 * 1024 * 1024):
+            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
                 response = authenticated_client.get(
                     f"/api/files/pack/available-space?folder_path={folder_path}"
                 )
@@ -648,8 +659,8 @@ class TestGetAvailableSpace:
         authenticated_client: TestClient,
     ):
         """Return folder_size=0 for non-existent folder."""
-        with patch("app.services.pack.get_user_available_space_for_pack", return_value=50 * 1024 * 1024 * 1024):
-            with patch("app.services.pack.get_server_available_space", return_value=100 * 1024 * 1024 * 1024):
+        with patch("app.services.pack.get_user_available_space_for_pack", new_callable=AsyncMock, return_value=50 * 1024 * 1024 * 1024):
+            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
                 response = authenticated_client.get(
                     "/api/files/pack/available-space?folder_path=nonexistent"
                 )
@@ -665,7 +676,8 @@ class TestGetAvailableSpace:
 class TestSpaceCalculation:
     """Tests for space calculation functions in pack.py."""
 
-    def test_get_server_available_space(
+    @pytest.mark.asyncio
+    async def test_get_server_available_space(
         self,
         temp_db: str,
     ):
@@ -677,13 +689,14 @@ class TestSpaceCalculation:
         mock_disk.free = 100 * 1024 * 1024 * 1024  # 100GB
 
         with patch("shutil.disk_usage", return_value=mock_disk):
-            available = get_server_available_space()
+            available = await get_server_available_space()
 
-        reserved = get_reserved_space()
+        reserved = await get_reserved_space()
         expected = 100 * 1024 * 1024 * 1024 - reserved
         assert available == expected
 
-    def test_get_server_available_space_with_reserved(
+    @pytest.mark.asyncio
+    async def test_get_server_available_space_with_reserved(
         self,
         test_user: dict,
         temp_db: str,
@@ -717,13 +730,14 @@ class TestSpaceCalculation:
         mock_disk.free = 100 * 1024 * 1024 * 1024  # 100GB
 
         with patch("shutil.disk_usage", return_value=mock_disk):
-            available = get_server_available_space()
+            available = await get_server_available_space()
 
         # Should subtract 3MB (1MB + 2MB) from pending/packing tasks
         expected = 100 * 1024 * 1024 * 1024 - 3000000
         assert available == expected
 
-    def test_get_user_available_space_for_pack(
+    @pytest.mark.asyncio
+    async def test_get_user_available_space_for_pack(
         self,
         test_user: dict,
         user_download_dir: Path,
@@ -740,14 +754,15 @@ class TestSpaceCalculation:
         mock_disk.free = 50 * 1024 * 1024 * 1024  # 50GB server space
 
         with patch("shutil.disk_usage", return_value=mock_disk):
-            available = get_user_available_space_for_pack(test_user["id"])
+            available = await get_user_available_space_for_pack(test_user["id"])
 
         # User quota is 100GB, used is ~10KB
         # Server available is 50GB
         # Should return min of (100GB - 10KB, 50GB) = 50GB
         assert available <= 50 * 1024 * 1024 * 1024
 
-    def test_get_user_available_space_with_other_tasks_reserved(
+    @pytest.mark.asyncio
+    async def test_get_user_available_space_with_other_tasks_reserved(
         self,
         test_user: dict,
         test_admin: dict,
@@ -771,7 +786,7 @@ class TestSpaceCalculation:
         mock_disk.free = 50 * 1024 * 1024 * 1024  # 50GB server space
 
         with patch("shutil.disk_usage", return_value=mock_disk):
-            available = get_user_available_space_for_pack(test_user["id"])
+            available = await get_user_available_space_for_pack(test_user["id"])
 
         # Server available = 50GB - 10GB reserved = 40GB
         # User quota remaining = ~100GB
@@ -973,8 +988,8 @@ class TestPackIntegration:
         folder_path = test_folder.relative_to(Path(settings.download_dir) / str(test_user["id"]))
 
         # 1. Create pack task
-        with patch("app.routers.files.asyncio.create_task"):
-            with patch("app.services.pack.get_server_available_space", return_value=100 * 1024 * 1024 * 1024):
+        with patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
+            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
                 create_response = authenticated_client.post(
                     "/api/files/pack",
                     json={"folder_path": str(folder_path)}
