@@ -12,7 +12,7 @@ from app.aria2.sync import sync_tasks
 from app.core.config import settings
 from app.core.state import AppState
 from app.db import ensure_default_admin, init_db
-from app.routers import auth, config, files, hooks, stats, tasks, users, ws
+from app.routers import aria2_rpc, auth, config, files, hooks, stats, tasks, users, ws
 
 
 @asynccontextmanager
@@ -56,6 +56,7 @@ def create_app() -> FastAPI:
     app.include_router(config.router)
     app.include_router(hooks.router)
     app.include_router(ws.router)
+    app.include_router(aria2_rpc.router)
 
     # 静态导出时，Next.js 生成的是 /tasks.html 而不是 /tasks/index.html
     # 这里通过中间件统一把无后缀路径映射到对应 HTML，避免直接刷新 404
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
             "/users": "users.html",
             "/settings": "settings.html",
             "/history": "history.html",
+            "/profile": "profile.html",
         }
 
         @app.middleware("http")

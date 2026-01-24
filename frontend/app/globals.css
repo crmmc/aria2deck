@@ -63,6 +63,18 @@
   gap: 4px;
 }
 
+.nav-divider {
+  height: 1px;
+  margin: 12px 8px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(0, 0, 0, 0.08) 20%,
+    rgba(0, 0, 0, 0.08) 80%,
+    transparent 100%
+  );
+}
+
 .nav-item {
   display: flex;
   align-items: center;
@@ -152,6 +164,7 @@
 
 body {
   margin: 0;
+  overflow: hidden; /* 防止 body 滚动，滚动应在 glass-frame 内部 */
   font-family:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
     Helvetica, Arial, sans-serif;
@@ -384,4 +397,74 @@ p {
 
 .animate-in {
   animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Utilities */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+/* Animated Progress Bar */
+@keyframes progress-stripes {
+  from {
+    background-position: 40px 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+.progress-bar-active {
+  background-image: linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.15) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.15) 50%,
+    rgba(255, 255, 255, 0.15) 75%,
+    transparent 75%,
+    transparent
+  );
+  background-size: 40px 40px;
+  animation: progress-stripes 2s linear infinite;
+}
+
+/* Empty State */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  color: var(--muted);
+  text-align: center;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 16px;
+  border: 2px dashed rgba(0, 0, 0, 0.05);
+}
+
+.empty-state-icon {
+  margin-bottom: 16px;
+  opacity: 0.5;
+  color: var(--primary);
 }

@@ -11,6 +11,7 @@ import type {
   MachineStats,
   PackTask,
   PackAvailableSpace,
+  RpcAccessStatus,
 } from "@/types";
 
 function getApiBase(): string {
@@ -117,6 +118,18 @@ export const api = {
     }>("/api/config/aria2/test", {
       method: "POST",
       body: JSON.stringify({ aria2_rpc_url, aria2_rpc_secret }),
+    }),
+
+  // RPC Access
+  getRpcAccess: () => request<RpcAccessStatus>("/api/users/me/rpc-access"),
+  setRpcAccess: (enabled: boolean) =>
+    request<RpcAccessStatus>("/api/users/me/rpc-access", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  refreshRpcSecret: () =>
+    request<RpcAccessStatus>("/api/users/me/rpc-access/refresh", {
+      method: "POST",
     }),
 
   // Users (Admin)

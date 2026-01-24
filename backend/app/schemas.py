@@ -30,3 +30,15 @@ class UserOut(BaseModel):
     username: str
     is_admin: bool
     quota: int
+
+
+class RpcAccessStatus(BaseModel):
+    """RPC 访问状态"""
+    enabled: bool
+    secret: str | None = None
+    created_at: str | None = None
+
+
+class RpcAccessToggle(BaseModel):
+    """RPC 访问开关请求"""
+    enabled: bool

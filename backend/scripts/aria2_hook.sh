@@ -15,12 +15,14 @@
 # $3 - 文件路径
 #
 # 环境变量:
-# ARIA2_HOOK_URL - 后端 hook 接口地址，默认 http://localhost:8000/api/hooks/aria2
+# ARIA2_HOOK_URL    - 后端 hook 接口地址，默认 http://localhost:8000/api/hooks/aria2
+# ARIA2_HOOK_SECRET - Hook 认证密钥（必须与后端 ARIA2C_HOOK_SECRET 一致）
 
 set -e
 
 GID="$1"
 HOOK_URL="${ARIA2_HOOK_URL:-http://localhost:8000/api/hooks/aria2}"
+HOOK_SECRET="${ARIA2_HOOK_SECRET:-}"
 
 # 从脚本调用方式推断事件类型
 # Aria2 会根据不同事件调用脚本，但脚本路径相同
@@ -56,9 +58,16 @@ case "$SCRIPT_NAME" in
         ;;
 esac
 
+# 构建 curl 命令
+CURL_ARGS=(-s -X POST "${HOOK_URL}" -H "Content-Type: application/json")
+
+# 添加 Hook Secret header（如果配置了）
+if [ -n "$HOOK_SECRET" ]; then
+    CURL_ARGS+=(-H "X-Hook-Secret: ${HOOK_SECRET}")
+fi
+
 # 发送请求到后端
-curl -s -X POST "${HOOK_URL}" \
-    -H "Content-Type: application/json" \
+curl "${CURL_ARGS[@]}" \
     -d "{\"gid\": \"${GID}\", \"event\": \"${EVENT}\"}" \
     > /dev/null 2>&1 || true
 

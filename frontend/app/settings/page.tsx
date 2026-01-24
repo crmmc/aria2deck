@@ -3,13 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
-import {
-  getNotificationSettings,
-  saveNotificationSettings,
-  requestNotificationPermission,
-  type NotificationSettings,
-} from "@/lib/notification";
-import { SystemConfig, MachineStats } from "@/types";
+import { MachineStats } from "@/types";
 import AuthLayout from "@/components/AuthLayout";
 import { formatBytes, bytesToGB, gbToBytes } from "@/lib/utils";
 
@@ -39,18 +33,8 @@ export default function SettingsPage() {
     error?: string;
   } | null>(null);
   const [testingConnection, setTestingConnection] = useState(false);
-  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>({
-    enabled: false,
-    onComplete: true,
-    onError: true,
-  });
-  const [notificationSupported, setNotificationSupported] = useState(false);
 
   useEffect(() => {
-    // 初始化通知设置
-    setNotificationSettings(getNotificationSettings());
-    setNotificationSupported(typeof window !== "undefined" && "Notification" in window);
-
     api
       .me()
       .then((user) => {
@@ -63,7 +47,7 @@ export default function SettingsPage() {
       .then(() => {
         setLoading(false);
       })
-      .catch((err) => {
+      .catch(() => {
         setError("加载配置失败");
         setLoading(false);
       });
@@ -185,33 +169,14 @@ export default function SettingsPage() {
     }
   }
 
-  async function handleNotificationToggle(enabled: boolean) {
-    if (enabled) {
-      const granted = await requestNotificationPermission();
-      if (!granted) {
-        alert("浏览器通知权限被拒绝，请在浏览器设置中允许通知");
-        return;
-      }
-    }
-    const newSettings = { ...notificationSettings, enabled };
-    setNotificationSettings(newSettings);
-    saveNotificationSettings(newSettings);
-  }
-
-  function handleNotificationOptionChange(key: "onComplete" | "onError", value: boolean) {
-    const newSettings = { ...notificationSettings, [key]: value };
-    setNotificationSettings(newSettings);
-    saveNotificationSettings(newSettings);
-  }
-
   if (loading) return null;
 
   return (
     <AuthLayout>
       <div className="glass-frame full-height animate-in">
-        <h1 style={{ marginBottom: 8 }}>设置</h1>
+        <h1 style={{ marginBottom: 8 }}>系统设置</h1>
         <p className="muted" style={{ marginBottom: 32 }}>
-          系统配置
+          系统配置（仅管理员）
         </p>
 
         {error && (
@@ -221,50 +186,50 @@ export default function SettingsPage() {
         )}
 
         {machineStats && (
-          <div className="card" style={{ marginBottom: 24 }}>
-            <h2 style={{ marginBottom: 16 }}>机器磁盘空间</h2>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-              <span style={{ fontSize: 24, fontWeight: 600 }}>
-                {formatBytes(machineStats.disk_free)}
-              </span>
-              <span className="muted" style={{ fontSize: 16 }}>
-                / {formatBytes(machineStats.disk_total)}
-              </span>
-              <span className="muted">可用</span>
-            </div>
-            <div
-              style={{
-                height: 6,
-                background: "rgba(0,0,0,0.05)",
-                borderRadius: 3,
-                marginTop: 8,
-                overflow: "hidden",
-                maxWidth: 600,
-              }}
-            >
-              <div
-                style={{
-                  height: "100%",
-                  width: `${(machineStats.disk_used / machineStats.disk_total) * 100}%`,
-                  background:
-                    (machineStats.disk_used / machineStats.disk_total) * 100 >=
-                    80
-                      ? "#ff3b30"
-                      : (machineStats.disk_used / machineStats.disk_total) *
-                            100 >=
-                          50
-                        ? "#ff9500"
-                        : "#34c759",
-                  transition: "width 0.5s ease, background 0.3s ease",
-                }}
-              />
-            </div>
-          </div>
-        )}
+              <div className="card" style={{ marginBottom: 24 }}>
+                <h2 style={{ marginBottom: 16 }}>机器磁盘空间</h2>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                  <span style={{ fontSize: 24, fontWeight: 600 }}>
+                    {formatBytes(machineStats.disk_free)}
+                  </span>
+                  <span className="muted" style={{ fontSize: 16 }}>
+                    / {formatBytes(machineStats.disk_total)}
+                  </span>
+                  <span className="muted">可用</span>
+                </div>
+                <div
+                  style={{
+                    height: 6,
+                    background: "rgba(0,0,0,0.05)",
+                    borderRadius: 3,
+                    marginTop: 8,
+                    overflow: "hidden",
+                    maxWidth: 600,
+                  }}
+                >
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${(machineStats.disk_used / machineStats.disk_total) * 100}%`,
+                      background:
+                        (machineStats.disk_used / machineStats.disk_total) * 100 >=
+                        80
+                          ? "#ff3b30"
+                          : (machineStats.disk_used / machineStats.disk_total) *
+                                100 >=
+                              50
+                            ? "#ff9500"
+                            : "#34c759",
+                      transition: "width 0.5s ease, background 0.3s ease",
+                    }}
+                  />
+                </div>
+              </div>
+            )}
 
-        <div className="card">
-          <form onSubmit={saveConfig} style={{ maxWidth: 600 }}>
-            <h2 style={{ marginBottom: 24 }}>系统配置</h2>
+            <div className="card">
+              <form onSubmit={saveConfig} style={{ maxWidth: 600 }}>
+                <h2 style={{ marginBottom: 24 }}>系统配置</h2>
 
             <div style={{ marginBottom: 24 }}>
               <label
@@ -638,166 +603,6 @@ export default function SettingsPage() {
               )}
             </div>
           </form>
-        </div>
-
-        {/* 浏览器通知设置 */}
-        <div className="card" style={{ marginTop: 24 }}>
-          <h2 style={{ marginBottom: 24 }}>浏览器通知</h2>
-
-          {!notificationSupported ? (
-            <div
-              style={{
-                padding: 16,
-                background: "rgba(255, 149, 0, 0.1)",
-                border: "1px solid rgba(255, 149, 0, 0.3)",
-                borderRadius: 8,
-              }}
-            >
-              <p style={{ margin: 0, color: "#ff9500" }}>
-                您的浏览器不支持通知功能
-              </p>
-            </div>
-          ) : (
-            <div style={{ maxWidth: 600 }}>
-              <div style={{ marginBottom: 24 }}>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    marginBottom: 8,
-                  }}
-                >
-                  <label style={{ fontWeight: 600 }}>启用通知</label>
-                  <button
-                    type="button"
-                    onClick={() => handleNotificationToggle(!notificationSettings.enabled)}
-                    style={{
-                      width: 50,
-                      height: 28,
-                      borderRadius: 14,
-                      border: "none",
-                      cursor: "pointer",
-                      background: notificationSettings.enabled ? "#34c759" : "rgba(0,0,0,0.1)",
-                      position: "relative",
-                      transition: "background 0.2s ease",
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: 24,
-                        height: 24,
-                        borderRadius: 12,
-                        background: "white",
-                        position: "absolute",
-                        top: 2,
-                        left: notificationSettings.enabled ? 24 : 2,
-                        transition: "left 0.2s ease",
-                        boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-                      }}
-                    />
-                  </button>
-                </div>
-                <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-                  当下载任务状态变化时，发送浏览器桌面通知
-                </p>
-              </div>
-
-              {notificationSettings.enabled && (
-                <div
-                  style={{
-                    padding: 16,
-                    background: "rgba(0,0,0,0.02)",
-                    borderRadius: 8,
-                  }}
-                >
-                  <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>
-                    选择何时发送通知：
-                  </p>
-
-                  <div style={{ marginBottom: 16 }}>
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                      }}
-                    >
-                      <label style={{ fontSize: 14 }}>下载完成时</label>
-                      <button
-                        type="button"
-                        onClick={() => handleNotificationOptionChange("onComplete", !notificationSettings.onComplete)}
-                        style={{
-                          width: 44,
-                          height: 24,
-                          borderRadius: 12,
-                          border: "none",
-                          cursor: "pointer",
-                          background: notificationSettings.onComplete ? "#34c759" : "rgba(0,0,0,0.1)",
-                          position: "relative",
-                          transition: "background 0.2s ease",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: 20,
-                            height: 20,
-                            borderRadius: 10,
-                            background: "white",
-                            position: "absolute",
-                            top: 2,
-                            left: notificationSettings.onComplete ? 22 : 2,
-                            transition: "left 0.2s ease",
-                            boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-                          }}
-                        />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div>
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                      }}
-                    >
-                      <label style={{ fontSize: 14 }}>下载失败时</label>
-                      <button
-                        type="button"
-                        onClick={() => handleNotificationOptionChange("onError", !notificationSettings.onError)}
-                        style={{
-                          width: 44,
-                          height: 24,
-                          borderRadius: 12,
-                          border: "none",
-                          cursor: "pointer",
-                          background: notificationSettings.onError ? "#34c759" : "rgba(0,0,0,0.1)",
-                          position: "relative",
-                          transition: "background 0.2s ease",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: 20,
-                            height: 20,
-                            borderRadius: 10,
-                            background: "white",
-                            position: "absolute",
-                            top: 2,
-                            left: notificationSettings.onError ? 22 : 2,
-                            transition: "left 0.2s ease",
-                            boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-                          }}
-                        />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
     </AuthLayout>

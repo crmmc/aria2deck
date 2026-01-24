@@ -1,13 +1,15 @@
-"""后台配置接口模块（管理员专用）"""
+"""后台配置接口模块（管理员专用）及 Token 管理"""
 from __future__ import annotations
 
+import secrets
+import string
 from time import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from app.auth import require_admin
-from app.db import execute, fetch_all, fetch_one
+from app.auth import require_admin, require_user
+from app.db import execute, fetch_all, fetch_one, utc_now
 
 _config_cache: dict[str, tuple[str | None, float]] = {}
 _CACHE_TTL = 60.0  # 缓存有效期（秒）
@@ -261,7 +263,7 @@ async def test_aria2_connection(
         secret = get_config_value("aria2_rpc_secret") or ""
     
     client = Aria2Client(payload.aria2_rpc_url, secret)
-    
+
     try:
         version_info = await client.get_version()
         return {
@@ -274,3 +276,104 @@ async def test_aria2_connection(
             "connected": False,
             "error": str(exc),
         }
+
+
+# ============================================================
+# Token 管理 API（登录用户）
+# ============================================================
+
+class TokenCreateRequest(BaseModel):
+    """Token 创建请求体"""
+    name: str | None = None  # Token 名称（可选）
+
+
+def generate_api_token() -> str:
+    """生成 API Token，格式: aria2_{24位随机字符}"""
+    chars = string.ascii_letters + string.digits
+    random_part = ''.join(secrets.choice(chars) for _ in range(24))
+    return f"aria2_{random_part}"
+
+
+@router.get("/tokens")
+def list_tokens(user: dict = Depends(require_user)) -> list[dict]:
+    """获取当前用户的 Token 列表
+
+    返回:
+    - id: Token ID
+    - name: Token 名称
+    - token: Token 值
+    - created_at: 创建时间
+    - last_used_at: 最后使用时间
+    """
+    rows = fetch_all(
+        "SELECT id, name, token, created_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC",
+        [user["id"]]
+    )
+    return [dict(row) for row in rows]
+
+
+@router.post("/tokens")
+def create_token(
+    payload: TokenCreateRequest = None,
+    user: dict = Depends(require_user)
+) -> dict:
+    """生成新的 API Token
+
+    请求体（可选）:
+    - name: Token 名称
+
+    返回:
+    - id: Token ID
+    - name: Token 名称
+    - token: Token 值
+    - created_at: 创建时间
+    """
+    token = generate_api_token()
+    name = payload.name if payload else None
+    created_at = utc_now()
+
+    execute(
+        "INSERT INTO api_tokens (user_id, token, name, created_at) VALUES (?, ?, ?, ?)",
+        [user["id"], token, name, created_at]
+    )
+
+    # 获取刚插入的记录
+    row = fetch_one(
+        "SELECT id, name, token, created_at FROM api_tokens WHERE token = ?",
+        [token]
+    )
+
+    return dict(row)
+
+
+@router.delete("/tokens/{token_id}")
+def delete_token(token_id: int, user: dict = Depends(require_user)) -> dict:
+    """删除 API Token
+
+    路径参数:
+    - token_id: Token ID
+
+    返回:
+    - ok: 是否删除成功
+    """
+    # 检查 Token 是否存在且属于当前用户
+    row = fetch_one(
+        "SELECT id, user_id FROM api_tokens WHERE id = ?",
+        [token_id]
+    )
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Token 不存在"
+        )
+
+    if row["user_id"] != user["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权删除此 Token"
+        )
+
+    execute("DELETE FROM api_tokens WHERE id = ?", [token_id])
+
+    return {"ok": True}

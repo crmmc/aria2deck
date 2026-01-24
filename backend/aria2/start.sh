@@ -16,7 +16,11 @@ cd "$PROJECT_ROOT"
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+
+# 本地开发用的 Hook Secret（与 make run 保持一致）
+DEV_HOOK_SECRET="dev_hook_secret_local_12345"
 
 echo -e "${GREEN}=== aria2 本地测试服务 ===${NC}"
 echo ""
@@ -52,6 +56,9 @@ echo "  日志文件: backend/aria2/aria2.log"
 echo "  会话文件: backend/aria2/aria2.session"
 echo "  RPC 端口: 6800"
 echo "  RPC 地址: http://localhost:6800/jsonrpc"
+echo ""
+echo -e "${CYAN}Hook Secret: ${DEV_HOOK_SECRET}${NC}"
+echo -e "${CYAN}提示: 启动后端时请使用 'make run' 以自动配置 Hook Secret${NC}"
 echo ""
 
 echo -e "${GREEN}启动 aria2 服务...${NC}"

@@ -1,10 +1,12 @@
-"""用户管理接口模块（管理员专用）"""
+"""用户管理接口模块"""
+import secrets
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.auth import require_admin, require_user
 from app.core.security import hash_password
 from app.db import execute, fetch_all, fetch_one, utc_now
-from app.schemas import UserCreate, UserOut, UserUpdate
+from app.schemas import RpcAccessStatus, RpcAccessToggle, UserCreate, UserOut, UserUpdate
 
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -172,3 +174,93 @@ def update_user(user_id: int, payload: UserUpdate, admin: dict = Depends(require
         "is_admin": bool(updated["is_admin"]),
         "quota": updated["quota"]
     }
+
+
+# ============ RPC 访问管理接口 ============
+
+
+@router.get("/me/rpc-access", response_model=RpcAccessStatus)
+def get_rpc_access(user: dict = Depends(require_user)) -> RpcAccessStatus:
+    """获取当前用户的 RPC 访问状态"""
+    row = fetch_one(
+        "SELECT rpc_secret, rpc_secret_created_at FROM users WHERE id = ?",
+        [user["id"]]
+    )
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
+
+    return RpcAccessStatus(
+        enabled=row["rpc_secret"] is not None,
+        secret=row["rpc_secret"],
+        created_at=row["rpc_secret_created_at"]
+    )
+
+
+@router.put("/me/rpc-access", response_model=RpcAccessStatus)
+def set_rpc_access(
+    payload: RpcAccessToggle,
+    user: dict = Depends(require_user)
+) -> RpcAccessStatus:
+    """开启或关闭 RPC 访问"""
+    if payload.enabled:
+        # 开启：生成新 secret
+        new_secret = secrets.token_urlsafe(32)
+        created_at = utc_now()
+        execute(
+            "UPDATE users SET rpc_secret = ?, rpc_secret_created_at = ? WHERE id = ?",
+            [new_secret, created_at, user["id"]]
+        )
+        return RpcAccessStatus(
+            enabled=True,
+            secret=new_secret,
+            created_at=created_at
+        )
+    else:
+        # 关闭：清除 secret
+        execute(
+            "UPDATE users SET rpc_secret = NULL, rpc_secret_created_at = NULL WHERE id = ?",
+            [user["id"]]
+        )
+        return RpcAccessStatus(
+            enabled=False,
+            secret=None,
+            created_at=None
+        )
+
+
+@router.post("/me/rpc-access/refresh", response_model=RpcAccessStatus)
+def refresh_rpc_secret(user: dict = Depends(require_user)) -> RpcAccessStatus:
+    """刷新 RPC Secret（旧的立即失效）"""
+    # 检查是否已开启 RPC 访问
+    row = fetch_one(
+        "SELECT rpc_secret FROM users WHERE id = ?",
+        [user["id"]]
+    )
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
+
+    if row["rpc_secret"] is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="RPC 访问未开启，请先开启后再刷新"
+        )
+
+    # 生成新 secret
+    new_secret = secrets.token_urlsafe(32)
+    created_at = utc_now()
+    execute(
+        "UPDATE users SET rpc_secret = ?, rpc_secret_created_at = ? WHERE id = ?",
+        [new_secret, created_at, user["id"]]
+    )
+
+    return RpcAccessStatus(
+        enabled=True,
+        secret=new_secret,
+        created_at=created_at
+    )
