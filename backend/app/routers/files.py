@@ -6,20 +6,28 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from time import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlmodel import select
 
 from app.auth import require_user
 from app.core.config import settings
+from app.database import get_session
+from app.models import User, PackTask
 
 
 router = APIRouter(prefix="/api/files", tags=["files"])
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ========== Cache ==========
@@ -162,20 +170,40 @@ def _invalidate_dir_size_cache(user_dir: Path) -> None:
         del _dir_size_cache[key]
 
 
-def _get_user_quota(user_id: int) -> int:
+async def _get_user_quota(user_id: int) -> int:
     """从数据库获取用户配额（字节）"""
-    from app.db import fetch_one
-    user = fetch_one("SELECT quota FROM users WHERE id = ?", [user_id])
-    if user and user.get("quota"):
-        return user["quota"]
+    async with get_session() as db:
+        result = await db.exec(select(User).where(User.id == user_id))
+        user = result.first()
+        if user and user.quota:
+            return user.quota
     # 默认 100GB
     return 100 * 1024 * 1024 * 1024
+
+
+def _pack_task_to_dict(task: PackTask) -> dict:
+    """Convert PackTask model to dict"""
+    return {
+        "id": task.id,
+        "owner_id": task.owner_id,
+        "folder_path": task.folder_path,
+        "folder_size": task.folder_size,
+        "reserved_space": task.reserved_space,
+        "output_path": task.output_path,
+        "output_name": task.output_name,
+        "output_size": task.output_size,
+        "status": task.status,
+        "progress": task.progress,
+        "error_message": task.error_message,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
 
 
 # ========== API Endpoints ==========
 
 @router.get("", response_model=FileListResponse)
-def list_files(path: str = "", user: dict = Depends(require_user)) -> FileListResponse:
+async def list_files(path: str = "", user: User = Depends(require_user)) -> FileListResponse:
     """列出用户目录下的文件和文件夹
 
     Args:
@@ -190,24 +218,24 @@ def list_files(path: str = "", user: dict = Depends(require_user)) -> FileListRe
             detail="无权访问此目录"
         )
 
-    user_dir = _get_user_dir(user["id"])
+    user_dir = _get_user_dir(user.id)
     target_dir = _validate_path(user_dir, path)
-    
+
     if not target_dir.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="目录不存在"
         )
-    
+
     if not target_dir.is_dir():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="路径不是目录"
         )
-    
+
     # 获取隐藏的文件后缀名列表
     hidden_extensions = get_hidden_file_extensions()
-    
+
     # 获取文件列表
     files: list[FileInfo] = []
     try:
@@ -222,7 +250,7 @@ def list_files(path: str = "", user: dict = Depends(require_user)) -> FileListRe
                     file_ext = entry.suffix.lower()
                     if file_ext in hidden_extensions:
                         continue  # 跳过黑名单中的文件
-                
+
                 stat = entry.stat()
                 relative = entry.relative_to(user_dir)
                 files.append(FileInfo(
@@ -239,13 +267,13 @@ def list_files(path: str = "", user: dict = Depends(require_user)) -> FileListRe
             status_code=status.HTTP_403_FORBIDDEN,
             detail="无权访问此目录"
         )
-    
+
     # 计算父目录路径
     parent_path = None
     if target_dir != user_dir:
         parent = target_dir.parent.relative_to(user_dir)
         parent_path = str(parent) if str(parent) != "." else ""
-    
+
     return FileListResponse(
         current_path=path,
         parent_path=parent_path,
@@ -254,7 +282,7 @@ def list_files(path: str = "", user: dict = Depends(require_user)) -> FileListRe
 
 
 @router.get("/download")
-def download_file(path: str, user: dict = Depends(require_user)) -> FileResponse:
+async def download_file(path: str, user: User = Depends(require_user)) -> FileResponse:
     """下载文件
 
     Args:
@@ -273,21 +301,21 @@ def download_file(path: str, user: dict = Depends(require_user)) -> FileResponse
             detail="无权访问此文件"
         )
 
-    user_dir = _get_user_dir(user["id"])
+    user_dir = _get_user_dir(user.id)
     target_file = _validate_path(user_dir, path)
-    
+
     if not target_file.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
         )
-    
+
     if not target_file.is_file():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="路径不是文件"
         )
-    
+
     return FileResponse(
         path=str(target_file),
         filename=target_file.name,
@@ -296,7 +324,7 @@ def download_file(path: str, user: dict = Depends(require_user)) -> FileResponse
 
 
 @router.delete("")
-def delete_file(path: str, user: dict = Depends(require_user)) -> dict:
+async def delete_file(path: str, user: User = Depends(require_user)) -> dict:
     """删除文件或文件夹
 
     Args:
@@ -316,14 +344,17 @@ def delete_file(path: str, user: dict = Depends(require_user)) -> dict:
         )
 
     # 检查文件是否正在被打包
-    from app.db import fetch_all
-    import json
-    active_pack_tasks = fetch_all(
-        "SELECT folder_path FROM pack_tasks WHERE owner_id = ? AND status IN ('pending', 'packing')",
-        [user["id"]]
-    )
+    async with get_session() as db:
+        result = await db.exec(
+            select(PackTask).where(
+                PackTask.owner_id == user.id,
+                PackTask.status.in_(["pending", "packing"])
+            )
+        )
+        active_pack_tasks = result.all()
+
     for task in active_pack_tasks:
-        folder_path = task["folder_path"]
+        folder_path = task.folder_path
         # 检查单文件或多文件打包
         if folder_path.startswith("["):
             try:
@@ -343,22 +374,22 @@ def delete_file(path: str, user: dict = Depends(require_user)) -> dict:
                     detail="文件正在被打包，无法删除"
                 )
 
-    user_dir = _get_user_dir(user["id"])
+    user_dir = _get_user_dir(user.id)
     target = _validate_path(user_dir, path)
-    
+
     if not target.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件或目录不存在"
         )
-    
+
     # 不允许删除用户根目录
     if target == user_dir:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="不能删除根目录"
         )
-    
+
     try:
         # 再次检查符号链接（防止 TOCTOU 攻击）
         if target.is_symlink():
@@ -397,12 +428,12 @@ def delete_file(path: str, user: dict = Depends(require_user)) -> dict:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"删除失败: {exc}"
         )
-    
+
     return {"ok": True, "message": "删除成功"}
 
 
 @router.put("/rename")
-def rename_file(payload: RenameRequest, user: dict = Depends(require_user)) -> dict:
+async def rename_file(payload: RenameRequest, user: User = Depends(require_user)) -> dict:
     """重命名文件或文件夹
 
     Args:
@@ -427,35 +458,35 @@ def rename_file(payload: RenameRequest, user: dict = Depends(require_user)) -> d
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="新名称不能包含路径分隔符"
         )
-    
-    user_dir = _get_user_dir(user["id"])
+
+    user_dir = _get_user_dir(user.id)
     old_path = _validate_path(user_dir, payload.old_path)
-    
+
     if not old_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件或目录不存在"
         )
-    
+
     # 不允许重命名用户根目录
     if old_path == user_dir:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="不能重命名根目录"
         )
-    
+
     # 计算新路径
     new_path = old_path.parent / payload.new_name
-    
+
     # 验证新路径也在用户目录内
     _validate_path(user_dir, str(new_path.relative_to(user_dir)))
-    
+
     if new_path.exists():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="目标名称已存在"
         )
-    
+
     try:
         old_path.rename(new_path)
     except Exception as exc:
@@ -463,41 +494,41 @@ def rename_file(payload: RenameRequest, user: dict = Depends(require_user)) -> d
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"重命名失败: {exc}"
         )
-    
+
     return {"ok": True, "message": "重命名成功", "new_path": str(new_path.relative_to(user_dir))}
 
 
 @router.get("/quota", response_model=QuotaResponse)
-def get_quota(user: dict = Depends(require_user)) -> QuotaResponse:
+async def get_quota(user: User = Depends(require_user)) -> QuotaResponse:
     """获取用户空间配额信息（考虑机器空间限制）"""
-    user_dir = _get_user_dir(user["id"])
-    
+    user_dir = _get_user_dir(user.id)
+
     # 计算已使用空间
     used = _calculate_dir_size(user_dir)
-    
+
     # 从数据库获取用户配额
-    user_quota = _get_user_quota(user["id"])
-    
+    user_quota = await _get_user_quota(user.id)
+
     # 获取机器实际剩余空间
     download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
     machine_free = disk.free
-    
+
     # 用户理论可用空间（基于配额）
     user_free_by_quota = max(0, user_quota - used)
-    
+
     # 判断是否受机器空间限制
     is_limited = machine_free < user_free_by_quota
-    
+
     # 动态调整显示的总空间：
     # - 如果受限：总空间 = 已使用 + 机器剩余空间
     # - 如果不受限：总空间 = 用户配额
     display_total = used + machine_free if is_limited else user_quota
-    
+
     # 计算百分比
     percentage = (used / display_total * 100) if display_total > 0 else 0
-    
+
     return QuotaResponse(
         used=used,
         total=display_total,
@@ -513,9 +544,9 @@ class CalculateSizeRequest(BaseModel):
 
 
 @router.post("/pack/calculate-size")
-def calculate_paths_size(
+async def calculate_paths_size(
     payload: CalculateSizeRequest,
-    user: dict = Depends(require_user)
+    user: User = Depends(require_user)
 ) -> dict:
     """计算多个文件/文件夹的总大小"""
     from app.services.pack import calculate_folder_size, get_user_available_space_for_pack
@@ -526,7 +557,7 @@ def calculate_paths_size(
             detail="路径列表不能为空"
         )
 
-    user_dir = _get_user_dir(user["id"])
+    user_dir = _get_user_dir(user.id)
     total_size = 0
 
     for path in payload.paths:
@@ -548,7 +579,7 @@ def calculate_paths_size(
         else:
             total_size += target.stat().st_size
 
-    available = get_user_available_space_for_pack(user["id"])
+    available = await get_user_available_space_for_pack(user.id)
 
     return {
         "total_size": total_size,
@@ -557,9 +588,9 @@ def calculate_paths_size(
 
 
 @router.get("/pack/available-space")
-def get_pack_available_space(
+async def get_pack_available_space(
     folder_path: str | None = None,
-    user: dict = Depends(require_user)
+    user: User = Depends(require_user)
 ) -> dict:
     """获取用户可用于打包的空间
 
@@ -567,8 +598,8 @@ def get_pack_available_space(
     """
     from app.services.pack import get_user_available_space_for_pack, get_server_available_space, calculate_folder_size
 
-    available = get_user_available_space_for_pack(user["id"])
-    server_available = get_server_available_space()
+    available = await get_user_available_space_for_pack(user.id)
+    server_available = await get_server_available_space()
 
     result = {
         "user_available": available,
@@ -577,7 +608,7 @@ def get_pack_available_space(
 
     # Calculate folder size if path provided
     if folder_path:
-        user_dir = _get_user_dir(user["id"])
+        user_dir = _get_user_dir(user.id)
         target = _validate_path(user_dir, folder_path)
         if target.exists() and target.is_dir():
             result["folder_size"] = calculate_folder_size(target)
@@ -588,21 +619,22 @@ def get_pack_available_space(
 
 
 @router.get("/pack")
-def list_pack_tasks(user: dict = Depends(require_user)) -> list[dict]:
+async def list_pack_tasks(user: User = Depends(require_user)) -> list[dict]:
     """列出用户的打包任务（按创建时间倒序）"""
-    from app.db import fetch_all
-    return fetch_all(
-        """SELECT * FROM pack_tasks
-           WHERE owner_id = ?
-           ORDER BY created_at DESC""",
-        [user["id"]]
-    )
+    async with get_session() as db:
+        result = await db.exec(
+            select(PackTask)
+            .where(PackTask.owner_id == user.id)
+            .order_by(PackTask.created_at.desc())
+        )
+        tasks = result.all()
+        return [_pack_task_to_dict(t) for t in tasks]
 
 
 @router.post("/pack", status_code=status.HTTP_201_CREATED)
 async def create_pack_task(
     payload: PackRequest,
-    user: dict = Depends(require_user)
+    user: User = Depends(require_user)
 ) -> dict:
     """创建打包任务
 
@@ -618,15 +650,12 @@ async def create_pack_task(
 
     预留空间并在后台启动异步打包。
     """
-    import json
-    from app.db import execute, fetch_one
-    from app.db import utc_now
     from app.services.pack import (
         PackTaskManager, calculate_folder_size,
         get_user_available_space_for_pack
     )
 
-    user_dir = _get_user_dir(user["id"])
+    user_dir = _get_user_dir(user.id)
 
     # 确定打包路径列表
     if payload.paths and len(payload.paths) > 0:
@@ -676,10 +705,16 @@ async def create_pack_task(
     folder_path_value = json.dumps(paths) if is_multi else paths[0]
 
     # Check for existing pack task on same paths
-    existing = fetch_one(
-        "SELECT id FROM pack_tasks WHERE owner_id = ? AND folder_path = ? AND status IN ('pending', 'packing')",
-        [user["id"], folder_path_value]
-    )
+    async with get_session() as db:
+        result = await db.exec(
+            select(PackTask).where(
+                PackTask.owner_id == user.id,
+                PackTask.folder_path == folder_path_value,
+                PackTask.status.in_(["pending", "packing"])
+            )
+        )
+        existing = result.first()
+
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -690,7 +725,7 @@ async def create_pack_task(
     reserved_space = total_size
 
     # Check available space
-    available = get_user_available_space_for_pack(user["id"])
+    available = await get_user_available_space_for_pack(user.id)
     if reserved_space > available:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -708,69 +743,88 @@ async def create_pack_task(
             )
 
     # Create task record
-    task_id = execute(
-        """
-        INSERT INTO pack_tasks
-        (owner_id, folder_path, folder_size, reserved_space, output_name, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [user["id"], folder_path_value, total_size, reserved_space, output_name, "pending", utc_now(), utc_now()]
-    )
+    async with get_session() as db:
+        pack_task = PackTask(
+            owner_id=user.id,
+            folder_path=folder_path_value,
+            folder_size=total_size,
+            reserved_space=reserved_space,
+            output_name=output_name,
+            status="pending",
+            created_at=utc_now(),
+            updated_at=utc_now()
+        )
+        db.add(pack_task)
+        await db.commit()
+        await db.refresh(pack_task)
+        task_id = pack_task.id
 
     # Start async packing
-    asyncio.create_task(PackTaskManager.start_pack(task_id, user["id"], folder_path_value, output_name))
+    asyncio.create_task(PackTaskManager.start_pack(task_id, user.id, folder_path_value, output_name))
 
-    return fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+    async with get_session() as db:
+        result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+        task = result.first()
+        return _pack_task_to_dict(task)
 
 
 @router.get("/pack/{task_id}")
-def get_pack_task(task_id: int, user: dict = Depends(require_user)) -> dict:
+async def get_pack_task(task_id: int, user: User = Depends(require_user)) -> dict:
     """获取打包任务详情"""
-    from app.db import fetch_one
-    task = fetch_one(
-        "SELECT * FROM pack_tasks WHERE id = ? AND owner_id = ?",
-        [task_id, user["id"]]
-    )
+    async with get_session() as db:
+        result = await db.exec(
+            select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
+        )
+        task = result.first()
+
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
-    return task
+    return _pack_task_to_dict(task)
 
 
 @router.delete("/pack/{task_id}")
 async def cancel_or_delete_pack_task(
     task_id: int,
-    user: dict = Depends(require_user)
+    user: User = Depends(require_user)
 ) -> dict:
     """取消或删除打包任务
 
     - pending/packing 状态: 取消运行中的进程
     - done/failed/cancelled 状态: 仅删除任务记录（不删除压缩包文件）
     """
-    from app.db import fetch_one, execute
-    from app.db import utc_now
     from app.services.pack import PackTaskManager
 
-    task = fetch_one(
-        "SELECT * FROM pack_tasks WHERE id = ? AND owner_id = ?",
-        [task_id, user["id"]]
-    )
+    async with get_session() as db:
+        result = await db.exec(
+            select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
+        )
+        task = result.first()
+
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
 
-    task_status = task["status"]
+    task_status = task.status
 
     # 进行中的任务：取消
     if task_status in ("pending", "packing"):
         await PackTaskManager.cancel_pack(task_id)
-        execute(
-            "UPDATE pack_tasks SET status = ?, reserved_space = 0, updated_at = ? WHERE id = ?",
-            ["cancelled", utc_now(), task_id]
-        )
+        async with get_session() as db:
+            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+            db_task = result.first()
+            if db_task:
+                db_task.status = "cancelled"
+                db_task.reserved_space = 0
+                db_task.updated_at = utc_now()
+                db.add(db_task)
         return {"ok": True, "message": "任务已取消"}
 
     # 已完成/失败/已取消的任务：仅删除记录（保留文件）
     if task_status in ("done", "failed", "cancelled"):
-        execute("DELETE FROM pack_tasks WHERE id = ?", [task_id])
+        async with get_session() as db:
+            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+            db_task = result.first()
+            if db_task:
+                await db.delete(db_task)
         return {"ok": True, "message": "任务已删除"}
 
     raise HTTPException(
@@ -780,29 +834,29 @@ async def cancel_or_delete_pack_task(
 
 
 @router.get("/pack/{task_id}/download")
-def download_pack_result(task_id: int, user: dict = Depends(require_user)) -> FileResponse:
+async def download_pack_result(task_id: int, user: User = Depends(require_user)) -> FileResponse:
     """下载已完成的打包文件"""
-    from app.db import fetch_one
+    async with get_session() as db:
+        result = await db.exec(
+            select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
+        )
+        task = result.first()
 
-    task = fetch_one(
-        "SELECT * FROM pack_tasks WHERE id = ? AND owner_id = ?",
-        [task_id, user["id"]]
-    )
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
 
-    if task["status"] != "done":
+    if task.status != "done":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="打包任务未完成"
         )
 
-    output_path = task.get("output_path")
+    output_path = task.output_path
     if not output_path or not Path(output_path).exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="打包文件不存在")
 
     # Validate output path is within user's directory
-    user_dir = _get_user_dir(user["id"])
+    user_dir = _get_user_dir(user.id)
     output_resolved = Path(output_path).resolve()
     try:
         output_resolved.relative_to(user_dir)

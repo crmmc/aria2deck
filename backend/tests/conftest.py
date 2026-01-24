@@ -22,6 +22,7 @@ os.environ["ARIA2C_DOWNLOAD_DIR"] = _test_download_dir
 from app.core.config import settings
 from app.core.security import hash_password
 from app.db import init_db, execute, fetch_one
+from app.database import reset_engine, init_db as init_sqlmodel_db
 from app.main import app
 from app.aria2.client import Aria2Client
 
@@ -41,14 +42,22 @@ def temp_db() -> Generator[str, None, None]:
     settings.database_path = db_path
     settings.download_dir = download_dir
 
-    # Initialize database
+    # Reset the async engine so it uses the new path
+    reset_engine()
+
+    # Initialize database (both sync and async)
     init_db()
+
+    # Initialize SQLModel tables
+    import asyncio
+    asyncio.run(init_sqlmodel_db())
 
     yield db_path
 
-    # Restore settings
+    # Restore settings and reset engine
     settings.database_path = original_db_path
     settings.download_dir = original_download_dir
+    reset_engine()
 
 
 @pytest.fixture

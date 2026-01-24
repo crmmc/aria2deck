@@ -4,19 +4,26 @@ Aria2 通过 --on-download-* 参数调用外部脚本，脚本再调用此接口
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel
+from sqlmodel import select
 
 from app.aria2.client import Aria2Client
 from app.aria2.sync import broadcast_update
 from app.core.config import settings
 from app.core.state import AppState, get_aria2_client
-from app.db import execute, fetch_one, utc_now
+from app.database import get_session
+from app.models import Task
 
 
 router = APIRouter(prefix="/api/hooks", tags=["hooks"])
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class Aria2HookPayload(BaseModel):
@@ -71,30 +78,33 @@ async def aria2_hook(
 
     gid = payload.gid
     event = payload.event
-    
+
     # 查找对应任务
-    task = fetch_one("SELECT * FROM tasks WHERE gid = ?", [gid])
+    async with get_session() as db:
+        result = await db.exec(select(Task).where(Task.gid == gid))
+        task = result.first()
+
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"未找到 GID 为 {gid} 的任务"
         )
-    
+
     client = _get_client(request)
     state = _get_state(request)
-    
+
     # 获取 aria2 中的最新状态
     try:
         aria2_status = await client.tell_status(gid)
     except Exception:
         aria2_status = {}
-    
+
     # 根据事件类型更新状态
-    new_status = task["status"]
+    new_status = task.status
     error_msg = None
-    artifact_path = task.get("artifact_path")
-    artifact_token = task.get("artifact_token")
-    
+    artifact_path = task.artifact_path
+    artifact_token = task.artifact_token
+
     if event == "start":
         new_status = "active"
     elif event == "pause":
@@ -110,37 +120,37 @@ async def aria2_hook(
     elif event == "error":
         new_status = "error"
         error_msg = aria2_status.get("errorMessage", "未知错误")
-    
+
     # 更新数据库
-    update_fields = {
-        "status": new_status,
-        "updated_at": utc_now(),
-    }
-    if error_msg:
-        update_fields["error"] = error_msg
-    if artifact_path:
-        update_fields["artifact_path"] = artifact_path
-    if artifact_token:
-        update_fields["artifact_token"] = artifact_token
-    
-    # 更新其他字段
-    if aria2_status:
-        update_fields["name"] = (
-            aria2_status.get("bittorrent", {}).get("info", {}).get("name")
-            or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
-            or task.get("name")
-        )
-        update_fields["total_length"] = int(aria2_status.get("totalLength", 0))
-        update_fields["completed_length"] = int(aria2_status.get("completedLength", 0))
-        update_fields["download_speed"] = int(aria2_status.get("downloadSpeed", 0))
-        update_fields["upload_speed"] = int(aria2_status.get("uploadSpeed", 0))
-    
-    # 构建 SQL
-    set_clause = ", ".join(f"{k} = ?" for k in update_fields.keys())
-    params = list(update_fields.values()) + [task["id"]]
-    execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", params)
-    
+    async with get_session() as db:
+        result = await db.exec(select(Task).where(Task.id == task.id))
+        db_task = result.first()
+        if db_task:
+            db_task.status = new_status
+            db_task.updated_at = utc_now()
+
+            if error_msg:
+                db_task.error = error_msg
+            if artifact_path:
+                db_task.artifact_path = artifact_path
+            if artifact_token:
+                db_task.artifact_token = artifact_token
+
+            # 更新其他字段
+            if aria2_status:
+                db_task.name = (
+                    aria2_status.get("bittorrent", {}).get("info", {}).get("name")
+                    or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
+                    or db_task.name
+                )
+                db_task.total_length = int(aria2_status.get("totalLength", 0))
+                db_task.completed_length = int(aria2_status.get("completedLength", 0))
+                db_task.download_speed = int(aria2_status.get("downloadSpeed", 0))
+                db_task.upload_speed = int(aria2_status.get("uploadSpeed", 0))
+
+            db.add(db_task)
+
     # 广播更新到 WebSocket
-    await broadcast_update(state, task["owner_id"], task["id"])
-    
-    return {"ok": True, "task_id": task["id"], "status": new_status}
+    await broadcast_update(state, task.owner_id, task.id)
+
+    return {"ok": True, "task_id": task.id, "status": new_status}

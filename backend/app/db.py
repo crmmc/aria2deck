@@ -1,3 +1,13 @@
+"""Legacy database module for schema migration and admin credential management.
+
+This module is retained for backward compatibility during the SQLModel migration.
+New code should use `app.database` and `app.models` instead.
+
+Kept functions:
+- init_db(): Schema migration for existing databases (adds new columns)
+- ensure_default_admin(): Admin user/credential management
+"""
+
 import os
 import random
 import sqlite3
@@ -12,11 +22,12 @@ from app.core.config import settings
 from app.core.security import hash_password, verify_password
 
 
-def utc_now() -> str:
+def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def get_connection() -> sqlite3.Connection:
+def _get_connection() -> sqlite3.Connection:
+    """Internal: Get a raw SQLite connection for legacy operations."""
     conn = sqlite3.connect(settings.database_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
@@ -26,9 +37,10 @@ _db_lock = threading.Lock()
 
 
 @contextmanager
-def db_cursor():
+def _db_cursor():
+    """Internal: Context manager for legacy database operations."""
     with _db_lock:
-        conn = get_connection()
+        conn = _get_connection()
         cur = conn.cursor()
         try:
             yield cur
@@ -38,10 +50,51 @@ def db_cursor():
             conn.close()
 
 
+def _execute(query: str, params: Iterable | None = None) -> int:
+    """Internal: Execute a query and return lastrowid."""
+    with _db_cursor() as cur:
+        cur.execute(query, params or [])
+        return cur.lastrowid
+
+
+def _fetch_one(query: str, params: Iterable | None = None) -> dict | None:
+    """Internal: Fetch a single row as dict."""
+    with _db_cursor() as cur:
+        cur.execute(query, params or [])
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def _fetch_all(query: str, params: Iterable | None = None) -> list[dict]:
+    """Internal: Fetch all rows as list of dicts."""
+    with _db_cursor() as cur:
+        cur.execute(query, params or [])
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+
+# Public aliases for backward compatibility
+# These are kept for code that still uses synchronous database access
+execute = _execute
+fetch_one = _fetch_one
+fetch_all = _fetch_all
+utc_now = _utc_now
+
+
 def init_db() -> None:
-    conn = get_connection()
+    """Initialize database schema and perform migrations for existing databases.
+
+    This function handles:
+    - Creating tables if they don't exist
+    - Adding new columns to existing tables (schema migration)
+    - Initializing default config values
+
+    Note: For new tables and columns, prefer using Alembic migrations.
+    This function is kept for backward compatibility with existing deployments.
+    """
+    conn = _get_connection()
     cur = conn.cursor()
-    
+
     try:
         cur.execute(
             """
@@ -56,19 +109,16 @@ def init_db() -> None:
             """
         )
         conn.commit()
-        
+
         # 为已存在的表添加 quota 字段（如果不存在）
-        # 检查 quota 列是否存在
         cur.execute("PRAGMA table_info(users)")
         columns = [row[1] for row in cur.fetchall()]
-        
+
         if "quota" not in columns:
-            # quota 字段不存在，添加它（默认 100GB）
             cur.execute("ALTER TABLE users ADD COLUMN quota INTEGER DEFAULT 107374182400")
-            # 更新所有现有用户的配额
             cur.execute("UPDATE users SET quota = 107374182400 WHERE quota IS NULL")
             conn.commit()
-        
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS sessions (
@@ -80,7 +130,7 @@ def init_db() -> None:
             """
         )
         conn.commit()
-        
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS tasks (
@@ -106,19 +156,19 @@ def init_db() -> None:
             """
         )
         conn.commit()
-        
+
         # 为已存在的 tasks 表添加峰值字段（如果不存在）
         cur.execute("PRAGMA table_info(tasks)")
         task_columns = [row[1] for row in cur.fetchall()]
-        
+
         if "peak_download_speed" not in task_columns:
             cur.execute("ALTER TABLE tasks ADD COLUMN peak_download_speed INTEGER DEFAULT 0")
             conn.commit()
-        
+
         if "peak_connections" not in task_columns:
             cur.execute("ALTER TABLE tasks ADD COLUMN peak_connections INTEGER DEFAULT 0")
             conn.commit()
-        
+
         # 系统配置表
         cur.execute(
             """
@@ -129,7 +179,7 @@ def init_db() -> None:
             """
         )
         conn.commit()
-        
+
         # 初始化默认配置
         cur.execute(
             """
@@ -191,14 +241,24 @@ def init_db() -> None:
 
 
 def ensure_default_admin() -> str | None:
-    existing = fetch_one("SELECT id FROM users LIMIT 1")
+    """Ensure a default admin user exists, creating one if necessary.
+
+    This function:
+    - Creates an admin user with a random password if no users exist
+    - Syncs the admin password with the credentials file
+    - Writes credentials to data/admin_credentials.txt
+
+    Returns:
+        The generated password if a new admin was created, None otherwise.
+    """
+    existing = _fetch_one("SELECT id FROM users LIMIT 1")
     data_dir = Path(settings.database_path).parent
     data_dir.mkdir(parents=True, exist_ok=True)
     credential_path = data_dir / "admin_credentials.txt"
 
     if existing:
         # Keep the admin credential file in sync with the stored password.
-        admin = fetch_one("SELECT id, password_hash FROM users WHERE username = ?", ["admin"])
+        admin = _fetch_one("SELECT id, password_hash FROM users WHERE username = ?", ["admin"])
         if not admin:
             return None
         if credential_path.exists():
@@ -207,7 +267,7 @@ def ensure_default_admin() -> str | None:
                 if line.startswith("password:"):
                     password = line.split("password:", 1)[1].strip()
                     if password and not verify_password(password, admin["password_hash"]):
-                        execute(
+                        _execute(
                             "UPDATE users SET password_hash = ? WHERE id = ?",
                             [hash_password(password), admin["id"]],
                         )
@@ -224,7 +284,7 @@ def ensure_default_admin() -> str | None:
         )
         random.SystemRandom().shuffle(password_chars)
         password = "".join(password_chars)
-        execute(
+        _execute(
             "UPDATE users SET password_hash = ? WHERE id = ?",
             [hash_password(password), admin["id"]],
         )
@@ -236,6 +296,8 @@ def ensure_default_admin() -> str | None:
         except OSError:
             pass
         return password
+
+    # No users exist: create the first admin user
     password_chars = [
         random.SystemRandom().choice(string.ascii_lowercase),
         random.SystemRandom().choice(string.ascii_uppercase),
@@ -247,16 +309,13 @@ def ensure_default_admin() -> str | None:
     )
     random.SystemRandom().shuffle(password_chars)
     password = "".join(password_chars)
-    execute(
+    _execute(
         """
         INSERT INTO users (username, password_hash, is_admin, created_at)
         VALUES (?, ?, ?, ?)
         """,
-        ["admin", hash_password(password), 1, utc_now()],
+        ["admin", hash_password(password), 1, _utc_now()],
     )
-    data_dir = Path(settings.database_path).parent
-    data_dir.mkdir(parents=True, exist_ok=True)
-    credential_path = data_dir / "admin_credentials.txt"
     credential_path.write_text(
         f"username: admin\npassword: {password}\n", encoding="utf-8")
     try:
@@ -264,23 +323,3 @@ def ensure_default_admin() -> str | None:
     except OSError:
         pass
     return password
-
-
-def execute(query: str, params: Iterable | None = None) -> int:
-    with db_cursor() as cur:
-        cur.execute(query, params or [])
-        return cur.lastrowid
-
-
-def fetch_one(query: str, params: Iterable | None = None) -> dict | None:
-    with db_cursor() as cur:
-        cur.execute(query, params or [])
-        row = cur.fetchone()
-        return dict(row) if row else None
-
-
-def fetch_all(query: str, params: Iterable | None = None) -> list[dict]:
-    with db_cursor() as cur:
-        cur.execute(query, params or [])
-        rows = cur.fetchall()
-        return [dict(row) for row in rows]

@@ -2,28 +2,36 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
+
+from sqlmodel import select
 
 from app.aria2.client import Aria2Client
 from app.core.config import settings
 from app.core.state import AppState
-from app.db import execute, fetch_all, fetch_one, utc_now
+from app.database import get_session
+from app.models import Task
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _sanitize_path(file_path: str | None, user_id: int) -> str | None:
     """将绝对路径转换为相对于用户目录的路径，避免暴露服务器路径"""
     if not file_path:
         return None
-    
+
     try:
         abs_path = Path(file_path)
         user_dir = Path(settings.download_dir) / str(user_id)
-        
+
         # 如果是绝对路径且在用户目录内，转换为相对路径
         if abs_path.is_absolute() and abs_path.is_relative_to(user_dir):
             return str(abs_path.relative_to(user_dir))
-        
+
         # 如果已经是相对路径或无法转换，返回文件名
         return abs_path.name if abs_path.name else file_path
     except Exception:
@@ -40,10 +48,10 @@ def _map_status(status: dict, user_id: int) -> dict:
         status.get("bittorrent", {}).get("info", {}).get("name")
         or status.get("files", [{}])[0].get("path")
     )
-    
+
     # 清理路径，避免暴露服务器绝对路径
     sanitized_name = _sanitize_path(raw_name, user_id)
-    
+
     return {
         "status": status.get("status", "unknown"),
         "name": sanitized_name,
@@ -119,20 +127,15 @@ def _move_completed_files(status: dict, user_id: int) -> str | None:
         return first_file_path
 
 
-def _update_task(task_id: int, values: dict) -> None:
-    fields = []
-    params = []
-    for key, value in values.items():
-        fields.append(f"{key} = ?")
-        params.append(value)
-    params.extend([utc_now(), task_id])
-    execute(
-        f"""
-        UPDATE tasks SET {", ".join(fields)}, updated_at = ?
-        WHERE id = ?
-        """,
-        params,
-    )
+async def _update_task(task_id: int, values: dict) -> None:
+    async with get_session() as db:
+        result = await db.exec(select(Task).where(Task.id == task_id))
+        task = result.first()
+        if task:
+            for key, value in values.items():
+                setattr(task, key, value)
+            task.updated_at = utc_now()
+            db.add(task)
 
 
 async def sync_tasks(
@@ -149,46 +152,46 @@ async def sync_tasks(
         # 动态获取 aria2 客户端（支持配置热更新）
         client = get_aria2_client()
 
-        tasks = fetch_all(
-            """
-            SELECT id, gid, owner_id, status, artifact_token, artifact_path,
-                   peak_download_speed, peak_connections
-            FROM tasks
-            WHERE gid IS NOT NULL AND status NOT IN ('removed')
-            """
-        )
+        async with get_session() as db:
+            result = await db.exec(
+                select(Task).where(
+                    Task.gid.isnot(None),
+                    Task.status != "removed"
+                )
+            )
+            tasks = result.all()
 
         # 并发查询所有任务状态
-        async def fetch_and_update(task: dict) -> None:
-            gid = task["gid"]
+        async def fetch_and_update(task: Task) -> None:
+            gid = task.gid
             if not gid:
                 return
             try:
                 status = await client.tell_status(gid)
             except Exception as exc:  # noqa: BLE001
-                _update_task(task["id"], {"status": "error", "error": str(exc)})
+                await _update_task(task.id, {"status": "error", "error": str(exc)})
                 return
 
-            mapped = _map_status(status, task["owner_id"])
-            artifact_path = task["artifact_path"]
-            artifact_token = task["artifact_token"]
+            mapped = _map_status(status, task.owner_id)
+            artifact_path = task.artifact_path
+            artifact_token = task.artifact_token
             if mapped["status"] == "complete" and not artifact_token:
                 # 移动文件从 .incomplete 到用户根目录
-                artifact_path = _move_completed_files(status, task["owner_id"])
+                artifact_path = _move_completed_files(status, task.owner_id)
                 artifact_token = uuid4().hex
 
             current_speed = mapped["download_speed"]
             current_connections = int(status.get("connections", 0))
-            peak_speed = task.get("peak_download_speed", 0) or 0
-            peak_connections = task.get("peak_connections", 0) or 0
+            peak_speed = task.peak_download_speed or 0
+            peak_connections = task.peak_connections or 0
 
             if current_speed > peak_speed:
                 peak_speed = current_speed
             if current_connections > peak_connections:
                 peak_connections = current_connections
 
-            _update_task(
-                task["id"],
+            await _update_task(
+                task.id,
                 {
                     **mapped,
                     "artifact_path": artifact_path,
@@ -197,7 +200,7 @@ async def sync_tasks(
                     "peak_connections": peak_connections,
                 },
             )
-            await broadcast_update(state, task["owner_id"], task["id"])
+            await broadcast_update(state, task.owner_id, task.id)
 
         # 并发执行所有任务更新
         await asyncio.gather(*[fetch_and_update(task) for task in tasks])
@@ -212,36 +215,60 @@ async def _cleanup_orphaned_tasks() -> None:
     """检测已完成任务的文件是否存在，若不存在则删除任务"""
     from app.core.state import get_aria2_client
 
-    completed_tasks = fetch_all(
-        """
-        SELECT id, owner_id, name, gid
-        FROM tasks
-        WHERE status = 'complete' AND name IS NOT NULL
-        """
-    )
+    async with get_session() as db:
+        result = await db.exec(
+            select(Task).where(
+                Task.status == "complete",
+                Task.name.isnot(None)
+            )
+        )
+        completed_tasks = result.all()
 
     for task in completed_tasks:
-        user_dir = Path(settings.download_dir) / str(task["owner_id"])
-        file_path = user_dir / task["name"]
+        user_dir = Path(settings.download_dir) / str(task.owner_id)
+        file_path = user_dir / task.name
 
         # 检查文件是否存在
         if not file_path.exists():
             # 从 aria2 中移除记录
-            if task.get("gid"):
+            if task.gid:
                 client = get_aria2_client()
                 try:
-                    await client.remove_download_result(task["gid"])
+                    await client.remove_download_result(task.gid)
                 except Exception:
                     pass
 
             # 标记任务为 removed，保留历史记录
-            _update_task(task["id"], {"status": "removed"})
+            await _update_task(task.id, {"status": "removed"})
 
 
 async def broadcast_update(state: AppState, user_id: int, task_id: int) -> None:
-    payload = fetch_one("SELECT * FROM tasks WHERE id = ?", [task_id])
-    if not payload:
-        return
+    async with get_session() as db:
+        result = await db.exec(select(Task).where(Task.id == task_id))
+        task = result.first()
+        if not task:
+            return
+        # Convert to dict for JSON serialization
+        payload = {
+            "id": task.id,
+            "owner_id": task.owner_id,
+            "gid": task.gid,
+            "uri": task.uri,
+            "status": task.status,
+            "name": task.name,
+            "total_length": task.total_length,
+            "completed_length": task.completed_length,
+            "download_speed": task.download_speed,
+            "upload_speed": task.upload_speed,
+            "error": task.error,
+            "created_at": task.created_at,
+            "updated_at": task.updated_at,
+            "artifact_path": task.artifact_path,
+            "artifact_token": task.artifact_token,
+            "peak_download_speed": task.peak_download_speed,
+            "peak_connections": task.peak_connections,
+        }
+
     async with state.lock:
         sockets = list(state.ws_connections.get(user_id, set()))
     for ws in sockets:

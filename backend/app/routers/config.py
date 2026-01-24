@@ -3,19 +3,26 @@ from __future__ import annotations
 
 import secrets
 import string
+from datetime import datetime, timezone
 from time import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from sqlmodel import select
 
 from app.auth import require_admin, require_user
-from app.db import execute, fetch_all, fetch_one, utc_now
+from app.database import get_session
+from app.models import Config, User
 
 _config_cache: dict[str, tuple[str | None, float]] = {}
 _CACHE_TTL = 60.0  # 缓存有效期（秒）
 
 
 router = APIRouter(prefix="/api/config", tags=["config"])
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class ConfigUpdate(BaseModel):
@@ -37,24 +44,73 @@ class Aria2TestRequest(BaseModel):
 
 
 def get_config_value(key: str) -> str | None:
-    """获取单个配置值（带缓存）"""
+    """获取单个配置值（带缓存）- 同步版本用于非异步上下文"""
     now = time()
     if key in _config_cache:
         value, ts = _config_cache[key]
         if now - ts < _CACHE_TTL:
             return value
-    row = fetch_one("SELECT value FROM config WHERE key = ?", [key])
-    value = row["value"] if row else None
-    _config_cache[key] = (value, now)
-    return value
+
+    # 使用同步方式读取（用于向后兼容）
+    import sqlite3
+    from app.core.config import settings
+    try:
+        conn = sqlite3.connect(settings.database_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM config WHERE key = ?", [key])
+        row = cur.fetchone()
+        value = row["value"] if row else None
+        cur.close()
+        conn.close()
+        _config_cache[key] = (value, now)
+        return value
+    except Exception:
+        return None
+
+
+async def get_config_value_async(key: str) -> str | None:
+    """获取单个配置值（带缓存）- 异步版本"""
+    now = time()
+    if key in _config_cache:
+        value, ts = _config_cache[key]
+        if now - ts < _CACHE_TTL:
+            return value
+
+    async with get_session() as db:
+        result = await db.exec(select(Config).where(Config.key == key))
+        config = result.first()
+        value = config.value if config else None
+        _config_cache[key] = (value, now)
+        return value
+
+
+async def set_config_value_async(key: str, value: str) -> None:
+    """设置单个配置值 - 异步版本"""
+    async with get_session() as db:
+        result = await db.exec(select(Config).where(Config.key == key))
+        config = result.first()
+        if config:
+            config.value = value
+            db.add(config)
+        else:
+            db.add(Config(key=key, value=value))
+    _config_cache[key] = (value, time())  # 更新缓存
 
 
 def set_config_value(key: str, value: str) -> None:
-    """设置单个配置值"""
-    execute(
+    """设置单个配置值 - 同步版本（用于向后兼容）"""
+    import sqlite3
+    from app.core.config import settings
+    conn = sqlite3.connect(settings.database_path)
+    cur = conn.cursor()
+    cur.execute(
         "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
         [key, value]
     )
+    conn.commit()
+    cur.close()
+    conn.close()
     _config_cache[key] = (value, time())  # 更新缓存
 
 
@@ -105,9 +161,9 @@ def get_pack_extra_args() -> str:
 
 
 @router.get("")
-def get_config(admin: dict = Depends(require_admin)) -> dict:
+async def get_config(admin: User = Depends(require_admin)) -> dict:
     """获取系统配置（管理员）
-    
+
     返回:
     - max_task_size: 单任务最大允许大小（字节）
     - min_free_disk: 磁盘最小剩余空间阈值（字节）
@@ -115,14 +171,14 @@ def get_config(admin: dict = Depends(require_admin)) -> dict:
     - aria2_rpc_secret: aria2 RPC Secret（脱敏显示）
     - hidden_file_extensions: 隐藏的文件后缀名列表
     """
-    aria2_rpc_url = get_config_value("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
-    aria2_rpc_secret = get_config_value("aria2_rpc_secret") or ""
-    
+    aria2_rpc_url = await get_config_value_async("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
+    aria2_rpc_secret = await get_config_value_async("aria2_rpc_secret") or ""
+
     # 脱敏处理 secret
     masked_secret = ""
     if aria2_rpc_secret:
         masked_secret = "*" * min(len(aria2_rpc_secret), 8)
-    
+
     return {
         "max_task_size": get_max_task_size(),
         "min_free_disk": get_min_free_disk(),
@@ -136,9 +192,9 @@ def get_config(admin: dict = Depends(require_admin)) -> dict:
 
 
 @router.put("")
-def update_config(payload: ConfigUpdate, admin: dict = Depends(require_admin)) -> dict:
+async def update_config(payload: ConfigUpdate, admin: User = Depends(require_admin)) -> dict:
     """更新系统配置（管理员）
-    
+
     可更新字段:
     - max_task_size: 单任务最大允许大小（字节）
     - min_free_disk: 磁盘最小剩余空间阈值（字节）
@@ -147,17 +203,17 @@ def update_config(payload: ConfigUpdate, admin: dict = Depends(require_admin)) -
     - hidden_file_extensions: 隐藏的文件后缀名列表
     """
     import json
-    
+
     if payload.max_task_size is not None:
-        set_config_value("max_task_size", str(payload.max_task_size))
+        await set_config_value_async("max_task_size", str(payload.max_task_size))
     if payload.min_free_disk is not None:
-        set_config_value("min_free_disk", str(payload.min_free_disk))
+        await set_config_value_async("min_free_disk", str(payload.min_free_disk))
     if payload.aria2_rpc_url is not None:
-        set_config_value("aria2_rpc_url", payload.aria2_rpc_url)
+        await set_config_value_async("aria2_rpc_url", payload.aria2_rpc_url)
     if payload.aria2_rpc_secret is not None:
         # 如果是掩码，不更新
         if not payload.aria2_rpc_secret.startswith("*"):
-            set_config_value("aria2_rpc_secret", payload.aria2_rpc_secret)
+            await set_config_value_async("aria2_rpc_secret", payload.aria2_rpc_secret)
     if payload.hidden_file_extensions is not None:
         # 规范化后缀名：统一小写，确保以点开头
         normalized = []
@@ -167,23 +223,23 @@ def update_config(payload: ConfigUpdate, admin: dict = Depends(require_admin)) -
                 ext = "." + ext
             if ext and ext not in normalized:
                 normalized.append(ext)
-        set_config_value("hidden_file_extensions", json.dumps(normalized))
+        await set_config_value_async("hidden_file_extensions", json.dumps(normalized))
     if payload.pack_format is not None:
         if payload.pack_format in ("zip", "7z"):
-            set_config_value("pack_format", payload.pack_format)
+            await set_config_value_async("pack_format", payload.pack_format)
     if payload.pack_compression_level is not None:
         level = max(1, min(9, payload.pack_compression_level))
-        set_config_value("pack_compression_level", str(level))
+        await set_config_value_async("pack_compression_level", str(level))
     if payload.pack_extra_args is not None:
-        set_config_value("pack_extra_args", payload.pack_extra_args)
+        await set_config_value_async("pack_extra_args", payload.pack_extra_args)
 
     # 返回更新后的配置（secret 脱敏）
-    aria2_rpc_url = get_config_value("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
-    aria2_rpc_secret = get_config_value("aria2_rpc_secret") or ""
+    aria2_rpc_url = await get_config_value_async("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
+    aria2_rpc_secret = await get_config_value_async("aria2_rpc_secret") or ""
     masked_secret = ""
     if aria2_rpc_secret:
         masked_secret = "*" * min(len(aria2_rpc_secret), 8)
-    
+
     return {
         "max_task_size": get_max_task_size(),
         "min_free_disk": get_min_free_disk(),
@@ -196,11 +252,10 @@ def update_config(payload: ConfigUpdate, admin: dict = Depends(require_admin)) -
     }
 
 
-
 @router.get("/aria2/version")
-async def get_aria2_version(admin: dict = Depends(require_admin)) -> dict:
+async def get_aria2_version(admin: User = Depends(require_admin)) -> dict:
     """获取当前连接的 aria2 版本信息（管理员）
-    
+
     返回:
     - version: aria2 版本号
     - enabled_features: 启用的功能列表
@@ -208,12 +263,12 @@ async def get_aria2_version(admin: dict = Depends(require_admin)) -> dict:
     - error: 错误信息（如果连接失败）
     """
     from app.aria2.client import Aria2Client
-    
-    aria2_rpc_url = get_config_value("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
-    aria2_rpc_secret = get_config_value("aria2_rpc_secret") or ""
-    
+
+    aria2_rpc_url = await get_config_value_async("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
+    aria2_rpc_secret = await get_config_value_async("aria2_rpc_secret") or ""
+
     client = Aria2Client(aria2_rpc_url, aria2_rpc_secret)
-    
+
     try:
         version_info = await client.get_version()
         return {
@@ -231,14 +286,14 @@ async def get_aria2_version(admin: dict = Depends(require_admin)) -> dict:
 @router.post("/aria2/test")
 async def test_aria2_connection(
     payload: Aria2TestRequest,
-    admin: dict = Depends(require_admin)
+    admin: User = Depends(require_admin)
 ) -> dict:
     """测试 aria2 连接（管理员）
-    
+
     参数:
     - aria2_rpc_url: aria2 RPC URL
     - aria2_rpc_secret: aria2 RPC Secret（可选）
-    
+
     返回:
     - connected: 是否成功连接
     - version: aria2 版本号（如果连接成功）
@@ -246,13 +301,13 @@ async def test_aria2_connection(
     - error: 错误信息（如果连接失败）
     """
     from app.aria2.client import Aria2Client
-    
+
     if not payload.aria2_rpc_url:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="aria2 RPC URL 不能为空"
         )
-    
+
     # secret 处理逻辑：
     # - None: 前端发送 undefined，表示用户未修改（显示掩码），使用数据库密码
     # - 以 * 开头: 掩码（兜底），使用数据库密码
@@ -260,8 +315,8 @@ async def test_aria2_connection(
     # - 其他: 用户输入的新密码
     secret = payload.aria2_rpc_secret
     if secret is None or (isinstance(secret, str) and secret.startswith("*")):
-        secret = get_config_value("aria2_rpc_secret") or ""
-    
+        secret = await get_config_value_async("aria2_rpc_secret") or ""
+
     client = Aria2Client(payload.aria2_rpc_url, secret)
 
     try:
@@ -279,7 +334,7 @@ async def test_aria2_connection(
 
 
 # ============================================================
-# Token 管理 API（登录用户）
+# Token 管理 API（登录用户）- 注意：api_tokens 表暂未迁移到 SQLModel
 # ============================================================
 
 class TokenCreateRequest(BaseModel):
@@ -295,7 +350,7 @@ def generate_api_token() -> str:
 
 
 @router.get("/tokens")
-def list_tokens(user: dict = Depends(require_user)) -> list[dict]:
+async def list_tokens(user: User = Depends(require_user)) -> list[dict]:
     """获取当前用户的 Token 列表
 
     返回:
@@ -305,17 +360,27 @@ def list_tokens(user: dict = Depends(require_user)) -> list[dict]:
     - created_at: 创建时间
     - last_used_at: 最后使用时间
     """
-    rows = fetch_all(
+    # api_tokens 表暂未迁移，使用原生 SQL
+    import sqlite3
+    from app.core.config import settings
+
+    conn = sqlite3.connect(settings.database_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute(
         "SELECT id, name, token, created_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC",
-        [user["id"]]
+        [user.id]
     )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
     return [dict(row) for row in rows]
 
 
 @router.post("/tokens")
-def create_token(
+async def create_token(
     payload: TokenCreateRequest = None,
-    user: dict = Depends(require_user)
+    user: User = Depends(require_user)
 ) -> dict:
     """生成新的 API Token
 
@@ -328,26 +393,36 @@ def create_token(
     - token: Token 值
     - created_at: 创建时间
     """
+    import sqlite3
+    from app.core.config import settings
+
     token = generate_api_token()
     name = payload.name if payload else None
     created_at = utc_now()
 
-    execute(
+    conn = sqlite3.connect(settings.database_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute(
         "INSERT INTO api_tokens (user_id, token, name, created_at) VALUES (?, ?, ?, ?)",
-        [user["id"], token, name, created_at]
+        [user.id, token, name, created_at]
     )
+    conn.commit()
 
     # 获取刚插入的记录
-    row = fetch_one(
+    cur.execute(
         "SELECT id, name, token, created_at FROM api_tokens WHERE token = ?",
         [token]
     )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
 
     return dict(row)
 
 
 @router.delete("/tokens/{token_id}")
-def delete_token(token_id: int, user: dict = Depends(require_user)) -> dict:
+async def delete_token(token_id: int, user: User = Depends(require_user)) -> dict:
     """删除 API Token
 
     路径参数:
@@ -356,24 +431,39 @@ def delete_token(token_id: int, user: dict = Depends(require_user)) -> dict:
     返回:
     - ok: 是否删除成功
     """
+    import sqlite3
+    from app.core.config import settings
+
+    conn = sqlite3.connect(settings.database_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
     # 检查 Token 是否存在且属于当前用户
-    row = fetch_one(
+    cur.execute(
         "SELECT id, user_id FROM api_tokens WHERE id = ?",
         [token_id]
     )
+    row = cur.fetchone()
 
     if not row:
+        cur.close()
+        conn.close()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Token 不存在"
         )
 
-    if row["user_id"] != user["id"]:
+    if row["user_id"] != user.id:
+        cur.close()
+        conn.close()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="无权删除此 Token"
         )
 
-    execute("DELETE FROM api_tokens WHERE id = ?", [token_id])
+    cur.execute("DELETE FROM api_tokens WHERE id = ?", [token_id])
+    conn.commit()
+    cur.close()
+    conn.close()
 
     return {"ok": True}
