@@ -32,10 +32,11 @@ build:
 	cp -r $(FRONTEND_DIR)/out/* $(STATIC_DIR)/
 	@echo "Build complete."
 
-# Run backend
+# Run backend (with dev hook secret for local testing)
 run:
 	@echo "Starting server..."
-	PYTHONPATH=$(BACKEND_DIR) uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+	@echo "Hook Secret: dev_hook_secret_local_12345"
+	PYTHONPATH=$(BACKEND_DIR) ARIA2C_HOOK_SECRET=dev_hook_secret_local_12345 ARIA2C_RPC_SECRET=1 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Clean
 clean:

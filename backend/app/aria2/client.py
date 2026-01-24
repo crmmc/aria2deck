@@ -32,6 +32,28 @@ class Aria2Client:
             params.append(options)
         return await self._call("aria2.addUri", params)
 
+    async def add_torrent(
+        self,
+        torrent: str,
+        uris: list[str] | None = None,
+        options: dict | None = None,
+    ) -> str:
+        """添加种子任务
+
+        Args:
+            torrent: Base64 编码的种子文件内容
+            uris: 可选的 Web Seeding URI 列表
+            options: 可选的下载选项
+
+        Returns:
+            任务 GID
+        """
+        params: list = [torrent]
+        params.append(uris or [])
+        if options:
+            params.append(options)
+        return await self._call("aria2.addTorrent", params)
+
     async def tell_status(self, gid: str) -> dict:
         return await self._call("aria2.tellStatus", [gid])
 
@@ -68,3 +90,16 @@ class Aria2Client:
     async def get_version(self) -> dict:
         """获取 aria2 版本信息"""
         return await self._call("aria2.getVersion", [])
+
+    async def change_position(self, gid: str, pos: int, how: str) -> int:
+        """调整任务在队列中的位置
+
+        Args:
+            gid: 任务 GID
+            pos: 位置参数
+            how: 定位方式 (POS_SET, POS_CUR, POS_END)
+
+        Returns:
+            新位置
+        """
+        return await self._call("aria2.changePosition", [gid, pos, how])

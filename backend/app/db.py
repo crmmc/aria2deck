@@ -173,6 +173,18 @@ def init_db() -> None:
         except Exception:
             pass  # 列已存在
 
+        # 为 users 表添加 RPC 访问字段（兼容旧数据库）
+        cur.execute("PRAGMA table_info(users)")
+        user_columns = [row[1] for row in cur.fetchall()]
+
+        if "rpc_secret" not in user_columns:
+            cur.execute("ALTER TABLE users ADD COLUMN rpc_secret VARCHAR(64) NULL")
+            conn.commit()
+
+        if "rpc_secret_created_at" not in user_columns:
+            cur.execute("ALTER TABLE users ADD COLUMN rpc_secret_created_at TEXT NULL")
+            conn.commit()
+
     finally:
         cur.close()
         conn.close()

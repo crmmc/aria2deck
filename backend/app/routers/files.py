@@ -155,6 +155,13 @@ def _calculate_dir_size(path: Path) -> int:
     return total
 
 
+def _invalidate_dir_size_cache(user_dir: Path) -> None:
+    """清除用户目录的大小缓存"""
+    key = str(user_dir)
+    if key in _dir_size_cache:
+        del _dir_size_cache[key]
+
+
 def _get_user_quota(user_id: int) -> int:
     """从数据库获取用户配额（字节）"""
     from app.db import fetch_one
@@ -353,11 +360,26 @@ def delete_file(path: str, user: dict = Depends(require_user)) -> dict:
         )
     
     try:
-        if target.is_dir():
+        # 再次检查符号链接（防止 TOCTOU 攻击）
+        if target.is_symlink():
+            # 只删除符号链接本身，不跟随
+            target.unlink()
+        elif target.is_dir():
+            # 删除目录前检查是否包含指向外部的符号链接
+            for item in target.rglob("*"):
+                if item.is_symlink():
+                    real_path = item.resolve()
+                    try:
+                        real_path.relative_to(user_dir)
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="目录包含指向外部的符号链接，无法删除"
+                        )
             shutil.rmtree(target)
         else:
             target.unlink()
-            
+
             # 检查并删除对应的 .aria2 控制文件（静默）
             aria2_file = target.parent / f"{target.name}.aria2"
             if aria2_file.exists() and aria2_file.is_file():
@@ -365,6 +387,11 @@ def delete_file(path: str, user: dict = Depends(require_user)) -> dict:
                     aria2_file.unlink()
                 except Exception:
                     pass  # 静默失败，不影响主文件删除
+
+        # 清除目录大小缓存，确保 quota 立即更新
+        _invalidate_dir_size_cache(user_dir)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -777,7 +804,9 @@ def download_pack_result(task_id: int, user: dict = Depends(require_user)) -> Fi
     # Validate output path is within user's directory
     user_dir = _get_user_dir(user["id"])
     output_resolved = Path(output_path).resolve()
-    if not str(output_resolved).startswith(str(user_dir)):
+    try:
+        output_resolved.relative_to(user_dir)
+    except ValueError:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该文件")
 
     return FileResponse(

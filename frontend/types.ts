@@ -112,3 +112,9 @@ export type PackAvailableSpace = {
   server_available: number;
   folder_size?: number;
 };
+
+export interface RpcAccessStatus {
+  enabled: boolean;
+  secret: string | null;
+  created_at: string | null;
+}

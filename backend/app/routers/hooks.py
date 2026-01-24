@@ -57,8 +57,13 @@ async def aria2_hook(
     - error: 下载出错
     - bt_complete: BT 下载完成
     """
-    # 验证 hook secret
-    if settings.hook_secret and x_hook_secret != settings.hook_secret:
+    # 验证 hook secret（必须配置）
+    if not settings.hook_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Hook secret not configured. Set ARIA2C_HOOK_SECRET environment variable."
+        )
+    if x_hook_secret != settings.hook_secret:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid hook secret"

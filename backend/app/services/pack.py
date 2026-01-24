@@ -17,6 +17,19 @@ from app.db import execute, fetch_one, fetch_all, utc_now
 _pack_queue_lock = asyncio.Lock()
 
 
+# 允许的 7za 参数前缀白名单（防止命令注入）
+_ALLOWED_7ZA_ARG_PREFIXES = (
+    "-mmt",   # 多线程
+    "-mx",    # 压缩级别
+    "-m0=",   # 压缩方法
+    "-ms",    # 固实压缩
+    "-mf",    # 过滤器
+    "-mhc",   # 头压缩
+    "-mhe",   # 头加密
+    "-p",     # 密码（允许用户加密）
+)
+
+
 class PackTaskManager:
     """Manages async pack task execution"""
 
@@ -42,13 +55,19 @@ class PackTaskManager:
 
     @classmethod
     def get_extra_args(cls) -> list[str]:
-        """Get extra 7za arguments from config"""
+        """Get extra 7za arguments from config (with whitelist validation)"""
         from app.routers.config import get_config_value
         val = get_config_value("pack_extra_args")
         if not val or not val.strip():
             return []
         try:
-            return shlex.split(val)
+            args = shlex.split(val)
+            # 只允许白名单中的参数前缀（防止命令注入）
+            safe_args = []
+            for arg in args:
+                if any(arg.startswith(prefix) for prefix in _ALLOWED_7ZA_ARG_PREFIXES):
+                    safe_args.append(arg)
+            return safe_args
         except ValueError:
             return []
 
