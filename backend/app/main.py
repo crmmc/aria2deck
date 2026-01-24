@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -14,8 +15,28 @@ from app.db import ensure_default_admin, init_db
 from app.routers import auth, config, files, hooks, stats, tasks, users, ws
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理器"""
+    # Startup
+    Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(settings.download_dir).mkdir(parents=True, exist_ok=True)
+    init_db()
+    ensure_default_admin()
+    sync_task = asyncio.create_task(
+        sync_tasks(app.state.app_state, settings.aria2_poll_interval)
+    )
+    yield
+    # Shutdown
+    sync_task.cancel()
+    try:
+        await sync_task
+    except asyncio.CancelledError:
+        pass
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title=settings.app_name, debug=settings.debug)
+    app = FastAPI(title=settings.app_name, debug=settings.debug, lifespan=lifespan)
     app.state.app_state = AppState()
     app.state.aria2_client = Aria2Client(settings.aria2_rpc_url, settings.aria2_rpc_secret)
 
@@ -65,14 +86,6 @@ def create_app() -> FastAPI:
     # 挂载静态文件用于服务前端
     if static_dir.exists():
         app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
-
-    @app.on_event("startup")
-    async def startup() -> None:
-        Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(settings.download_dir).mkdir(parents=True, exist_ok=True)
-        init_db()
-        ensure_default_admin()
-        asyncio.create_task(sync_tasks(app.state.app_state, settings.aria2_poll_interval))
 
     return app
 
