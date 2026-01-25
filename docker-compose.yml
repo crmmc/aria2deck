@@ -1,0 +1,44 @@
+services:
+  aria2:
+    image: p3terx/aria2-pro:latest
+    container_name: aria2
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - RPC_SECRET=${ARIA2_RPC_SECRET:-changeme}
+      - RPC_PORT=6800
+      - LISTEN_PORT=6888
+    volumes:
+      - ./data/aria2-config:/config
+      - ./data/downloads:/downloads
+    ports:
+      - "6800:6800"
+      - "6888:6888"
+      - "6888:6888/udp"
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+
+  app:
+    build: .
+    container_name: aria2-controler
+    restart: unless-stopped
+    depends_on:
+      - aria2
+    environment:
+      - ARIA2C_ARIA2_RPC_URL=http://aria2:6800/jsonrpc
+      - ARIA2C_ARIA2_RPC_SECRET=${ARIA2_RPC_SECRET:-changeme}
+      - ARIA2C_DOWNLOAD_DIR=/app/backend/downloads
+      - ARIA2C_DATABASE_PATH=/app/backend/data/app.db
+      - ARIA2C_DEBUG=false
+    volumes:
+      - ./data/app:/app/backend/data
+      - ./data/downloads:/app/backend/downloads
+    ports:
+      - "8000:8000"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m

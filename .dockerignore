@@ -1,0 +1,40 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.venv
+venv
+
+# Node
+node_modules
+.next
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Build artifacts
+backend/static
+frontend/out
+
+# Data (mounted as volumes)
+backend/data
+backend/downloads
+
+# Docs
+*.md
+!README.md
+PRD_Tracking
+
+# Tests
+backend/tests
+
+# Misc
+.DS_Store
+*.log

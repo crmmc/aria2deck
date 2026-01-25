@@ -34,11 +34,18 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
     login_limiter.clear(client_ip)
     session_id = await create_session(user["id"])
     set_session_cookie(response, session_id)
+
+    # 检测是否使用默认密码
+    password_warning = None
+    if payload.password == "123456":
+        password_warning = "您正在使用默认密码，请尽快修改密码以确保账户安全"
+
     return {
         "id": user["id"],
         "username": user["username"],
         "is_admin": bool(user["is_admin"]),
-        "quota": user["quota"]
+        "quota": user["quota"],
+        "password_warning": password_warning
     }
 
 

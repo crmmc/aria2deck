@@ -1,4 +1,4 @@
-.PHONY: install build run clean
+.PHONY: install build run clean docker-build docker-up docker-down docker-logs
 
 # Variables
 PYTHON = python3
@@ -36,7 +36,7 @@ build:
 run:
 	@echo "Starting server..."
 	@echo "Hook Secret: dev_hook_secret_local_12345"
-	PYTHONPATH=$(BACKEND_DIR) ARIA2C_HOOK_SECRET=dev_hook_secret_local_12345 ARIA2C_RPC_SECRET=1 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+	PYTHONPATH=$(BACKEND_DIR) ARIA2C_HOOK_SECRET=dev_hook_secret_local_12345 ARIA2C_ARIA2_RPC_SECRET=1 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Clean
 clean:
@@ -44,3 +44,16 @@ clean:
 	rm -rf $(FRONTEND_DIR)/out
 	rm -rf $(FRONTEND_DIR)/.next
 	find . -type d -name "__pycache__" -exec rm -rf {} +
+
+# Docker commands
+docker-build:
+	docker build -t aria2-controler .
+
+docker-up:
+	docker compose up -d
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f

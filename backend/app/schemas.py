@@ -30,6 +30,7 @@ class UserOut(BaseModel):
     username: str
     is_admin: bool
     quota: int
+    password_warning: str | None = None  # 密码安全警告
 
 
 class RpcAccessStatus(BaseModel):
