@@ -8,8 +8,11 @@ from __future__ import annotations
 import os
 import asyncio
 import shutil
+import ipaddress
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -21,6 +24,8 @@ from app.aria2.client import Aria2Client
 from app.aria2.sync import broadcast_update
 from app.auth import require_user
 from app.core.config import settings
+from app.core.rate_limit import api_limiter
+from app.core.security import mask_url_credentials
 from app.core.state import AppState, get_aria2_client
 from app.database import get_session
 from app.models import Task, User
@@ -32,6 +37,101 @@ router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ========== SSRF 防护 ==========
+
+def _is_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """检查 IP 是否为私有/内网地址"""
+    return (
+        ip.is_private or        # 私有网络（192.168.x.x, 10.x.x.x, 172.16-31.x.x）
+        ip.is_loopback or       # 回环地址（127.0.0.1, ::1）
+        ip.is_link_local or     # 链路本地地址（169.254.x.x，AWS 元数据接口）
+        ip.is_reserved or       # 保留地址
+        ip.is_multicast         # 组播地址
+    )
+
+
+def _check_url_safety(url: str) -> None:
+    """检查 URL 是否安全（SSRF 防护）
+
+    只允许 http/https/ftp 协议的公网地址下载
+
+    Args:
+        url: 待检查的 URL
+
+    Raises:
+        HTTPException: URL 不安全时抛出 400 异常
+    """
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+
+        # 只检查 http/https/ftp 协议
+        if scheme not in ('http', 'https', 'ftp'):
+            # magnet、ed2k 等协议不经过 HTTP，不检查
+            return
+
+        if not hostname:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="无效的下载链接"
+            )
+
+        # 明确禁止的主机名
+        blocked_hosts = {
+            'localhost', 'localhost.localdomain',
+            '127.0.0.1', '::1', '0.0.0.0', '::'
+        }
+        if hostname.lower() in blocked_hosts:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="不允许下载本机地址"
+            )
+
+        # 检查是否为 IP 地址
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if _is_private_ip(ip):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="不允许下载内网地址"
+                )
+            # 是公网 IP，放行
+            return
+        except ValueError:
+            # 不是 IP，是域名，继续 DNS 解析检查
+            pass
+
+        # DNS 解析并检查所有解析结果
+        try:
+            # getaddrinfo 返回所有解析结果（IPv4 + IPv6）
+            addr_infos = socket.getaddrinfo(hostname, None)
+
+            for addr_info in addr_infos:
+                ip_str = addr_info[4][0]
+                try:
+                    ip = ipaddress.ip_address(ip_str)
+                    if _is_private_ip(ip):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"域名 {hostname} 解析到内网地址，禁止下载"
+                        )
+                except ValueError:
+                    # 解析结果不是有效 IP，跳过
+                    continue
+
+        except socket.gaierror:
+            # DNS 解析失败，让 aria2 去处理，可能是临时网络问题
+            pass
+
+    except HTTPException:
+        # 重新抛出我们的异常
+        raise
+    except Exception:
+        # 其他异常不阻止下载，让 aria2 去处理
+        pass
 
 
 # ========== Schemas ==========
@@ -199,11 +299,23 @@ async def create_task(payload: TaskCreate, request: Request, user: User = Depend
     """创建新下载任务
 
     会进行以下检查:
-    1. 磁盘剩余空间是否足够
-    2. 用户可用空间是否足够（考虑配额和机器空间限制）
-    3. HTTP/HTTPS 任务会检查文件大小是否超过限制
-    4. 强制设置下载目录到用户专属目录（隔离）
+    1. 频率限制：每用户每分钟最多 30 次
+    2. SSRF 防护：禁止下载内网地址
+    3. 磁盘剩余空间是否足够
+    4. 用户可用空间是否足够（考虑配额和机器空间限制）
+    5. HTTP/HTTPS 任务会检查文件大小是否超过限制
+    6. 强制设置下载目录到用户专属目录（隔离）
     """
+    # 频率限制：每用户每分钟最多 30 次
+    if not api_limiter.is_allowed(user.id, "create_task", limit=30, window_seconds=60):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="操作过于频繁，请稍后再试"
+        )
+
+    # SSRF 防护：检查 URL 安全性
+    _check_url_safety(payload.uri)
+
     # 检查磁盘空间
     disk_ok, disk_free = _check_disk_space()
     if not disk_ok:
@@ -234,11 +346,14 @@ async def create_task(payload: TaskCreate, request: Request, user: User = Depend
     options = dict(payload.options) if payload.options else {}
     options["dir"] = user_incomplete_dir  # 下载中的文件放在 .incomplete 目录
 
+    # 存储到数据库时脱敏 URL 凭证
+    masked_uri = mask_url_credentials(payload.uri)
+
     # 创建任务记录
     async with get_session() as db:
         task = Task(
             owner_id=user.id,
-            uri=payload.uri,
+            uri=masked_uri,  # 存储脱敏后的 URI
             status="queued",
             created_at=utc_now(),
             updated_at=utc_now()
@@ -250,11 +365,12 @@ async def create_task(payload: TaskCreate, request: Request, user: User = Depend
 
     state = _get_state(request)
     async with state.lock:
-        state.pending_tasks[task_id] = {"uri": payload.uri}
+        state.pending_tasks[task_id] = {"uri": masked_uri}
 
     async def _do_add():
         client = _get_client(request)
         try:
+            # 发送给 aria2 时使用原始 URI（包含凭证）
             gid = await client.add_uri([payload.uri], options)
             async with get_session() as db:
                 result = await db.exec(select(Task).where(Task.id == task_id))
@@ -276,7 +392,7 @@ async def create_task(payload: TaskCreate, request: Request, user: User = Depend
         finally:
             async with state.lock:
                 state.pending_tasks.pop(task_id, None)
-            await broadcast_update(state, user.id, task_id)
+            await broadcast_update(state, user.id, task_id, force=True)
 
     asyncio.create_task(_do_add())
 
@@ -295,11 +411,19 @@ async def create_torrent_task(
     """通过种子文件创建下载任务
 
     会进行以下检查:
-    1. Base64 大小限制（约 10MB，即 base64 长度约 14MB）
-    2. 磁盘剩余空间是否足够
-    3. 用户可用空间是否足够（考虑配额和机器空间限制）
-    4. 强制设置下载目录到用户专属目录（隔离）
+    1. 频率限制：每用户每分钟最多 10 次
+    2. Base64 大小限制（约 10MB，即 base64 长度约 14MB）
+    3. 磁盘剩余空间是否足够
+    4. 用户可用空间是否足够（考虑配额和机器空间限制）
+    5. 强制设置下载目录到用户专属目录（隔离）
     """
+    # 频率限制：每用户每分钟最多 10 次
+    if not api_limiter.is_allowed(user.id, "create_torrent", limit=10, window_seconds=60):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="操作过于频繁，请稍后再试"
+        )
+
     # 校验 Base64 大小（约 10MB 限制，base64 编码后约 14MB）
     max_base64_length = 14 * 1024 * 1024  # 14MB in characters
     if len(payload.torrent) > max_base64_length:
@@ -371,7 +495,7 @@ async def create_torrent_task(
         finally:
             async with state.lock:
                 state.pending_tasks.pop(task_id, None)
-            await broadcast_update(state, user.id, task_id)
+            await broadcast_update(state, user.id, task_id, force=True)
 
     asyncio.create_task(_do_add())
 
@@ -644,7 +768,7 @@ async def update_task_status(
         )
 
     state = _get_state(request)
-    await broadcast_update(state, user.id, task.id)
+    await broadcast_update(state, user.id, task.id, force=True)
 
     return {"ok": True, "status": action}
 
@@ -786,7 +910,7 @@ async def retry_task(
     async with get_session() as db:
         result = await db.exec(select(Task).where(Task.id == new_task_id))
         new_task = result.first()
-        await broadcast_update(state, user.id, new_task_id)
+        await broadcast_update(state, user.id, new_task_id, force=True)
         return _task_to_dict(new_task)
 
 

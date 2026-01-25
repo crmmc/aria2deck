@@ -12,7 +12,13 @@ from app.aria2.sync import sync_tasks
 from app.core.config import settings
 from app.core.state import AppState
 from app.db import ensure_default_admin, init_db
-from app.database import init_db as init_sqlmodel_db, get_session, init_default_config
+from app.database import (
+    init_db as init_sqlmodel_db,
+    get_session,
+    init_default_config,
+    check_database_integrity,
+    check_wal_integrity,
+)
 from app.routers import aria2_rpc, auth, config, files, hooks, stats, tasks, users, ws
 
 
@@ -28,6 +34,17 @@ async def lifespan(app: FastAPI):
 
     # Initialize SQLModel tables (creates tables if they don't exist)
     await init_sqlmodel_db()
+
+    # 数据库完整性检查
+    db_ok = await check_database_integrity()
+    if not db_ok:
+        raise RuntimeError("数据库完整性检查失败，请检查日志。可能需要从备份恢复数据库。")
+
+    # WAL 完整性检查
+    wal_ok = await check_wal_integrity()
+    if not wal_ok:
+        import logging
+        logging.warning("WAL 文件检查发现问题，但不影响启动。建议检查磁盘空间和文件系统。")
 
     # Initialize default config values
     async with get_session() as session:

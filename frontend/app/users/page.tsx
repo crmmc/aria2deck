@@ -19,7 +19,7 @@ type EditingUser = {
 
 export default function UsersPage() {
   const router = useRouter();
-  const { showToast, showConfirm } = useToast();
+  const { showToast } = useToast();
   const [users, setUsers] = useState<User[]>([]);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -33,6 +33,10 @@ export default function UsersPage() {
 
   const [editingUser, setEditingUser] = useState<EditingUser | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+
+  // 删除用户弹窗状态
+  const [deletingUser, setDeletingUser] = useState<User | null>(null);
+  const [deleteFiles, setDeleteFiles] = useState(false);
 
   useEffect(() => {
     api
@@ -84,17 +88,18 @@ export default function UsersPage() {
     }
   }
 
-  async function handleDeleteUser(id: number) {
-    const confirmed = await showConfirm({
-      title: "删除用户",
-      message: "确定要删除此用户吗？",
-      confirmText: "删除",
-      danger: true,
-    });
-    if (!confirmed) return;
+  function openDeleteModal(user: User) {
+    setDeletingUser(user);
+    setDeleteFiles(false);
+  }
+
+  async function handleDeleteUser() {
+    if (!deletingUser) return;
     try {
-      await api.deleteUser(id);
-      setUsers(users.filter((u) => u.id !== id));
+      await api.deleteUser(deletingUser.id, deleteFiles);
+      setUsers(users.filter((u) => u.id !== deletingUser.id));
+      setDeletingUser(null);
+      showToast("用户已删除", "success");
     } catch {
       showToast("删除用户失败", "error");
     }
@@ -229,19 +234,22 @@ export default function UsersPage() {
                 </select>
               </div>
             </div>
-            <div style={{ paddingBottom: 12 }}>
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={isAdmin}
-                  onChange={(e) => setIsAdmin(e.target.checked)}
-                />
-                <span className="text-base">管理员用户</span>
-              </label>
+            <div className="flex-shrink-0">
+              <label className="form-label">&nbsp;</label>
+              <div className="flex gap-3 items-center">
+                <label className="checkbox-label" style={{ height: 46, display: "flex", alignItems: "center" }}>
+                  <input
+                    type="checkbox"
+                    checked={isAdmin}
+                    onChange={(e) => setIsAdmin(e.target.checked)}
+                  />
+                  <span className="text-base">管理员</span>
+                </label>
+                <button className="button" type="submit" style={{ height: 46 }}>
+                  创建用户
+                </button>
+              </div>
             </div>
-            <button className="button" type="submit">
-              创建用户
-            </button>
           </form>
           {error && (
             <p className="text-danger mt-3 text-base">{error}</p>
@@ -280,7 +288,7 @@ export default function UsersPage() {
                       </button>
                       {u.id !== currentUser?.id && (
                         <button
-                          onClick={() => handleDeleteUser(u.id)}
+                          onClick={() => openDeleteModal(u)}
                           className="button secondary danger btn-sm"
                         >
                           删除
@@ -401,6 +409,58 @@ export default function UsersPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {deletingUser && (
+        <div
+          className="modal-overlay"
+          onClick={() => setDeletingUser(null)}
+        >
+          <div
+            className="card max-w-400 m-4 animate-in bg-white"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="mb-4">删除用户</h3>
+            <p className="mb-4">
+              确定要删除用户 <strong>{deletingUser.username}</strong> 吗？
+            </p>
+            <p className="text-sm muted mb-4">
+              将删除该用户的所有下载任务记录和打包任务记录。
+            </p>
+            <div className="mb-5">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={deleteFiles}
+                  onChange={(e) => setDeleteFiles(e.target.checked)}
+                />
+                <span className="text-base">同时删除用户下载目录</span>
+              </label>
+              {deleteFiles && (
+                <p className="text-sm text-danger mt-2">
+                  警告：此操作不可恢复，用户的所有下载文件将被永久删除。
+                </p>
+              )}
+            </div>
+            <div className="flex gap-3 flex-end">
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => setDeletingUser(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="button"
+                style={{ background: "var(--danger)" }}
+                onClick={handleDeleteUser}
+              >
+                删除
+              </button>
+            </div>
           </div>
         </div>
       )}

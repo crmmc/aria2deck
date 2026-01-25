@@ -8,7 +8,7 @@ import {
   useCallback,
 } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { api } from "./api";
+import { api, authEvents } from "./api";
 import type { User } from "@/types";
 
 type AuthContextType = {
@@ -60,6 +60,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       router.push("/login");
     }
   }, [loading, user, pathname, router]);
+
+  // 监听 401 错误，自动跳转登录页
+  useEffect(() => {
+    return authEvents.onUnauthorized(() => {
+      setUser(null);
+      if (pathname !== "/login") {
+        router.push("/login");
+      }
+    });
+  }, [pathname, router]);
 
   const logout = useCallback(async () => {
     await api.logout();

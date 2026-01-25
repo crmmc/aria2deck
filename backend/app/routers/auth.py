@@ -32,6 +32,12 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
 
     # 登录成功，清除失败记录
     login_limiter.clear(client_ip)
+
+    # 会话固定防护：清除请求中可能存在的旧 session
+    old_session_id = request.cookies.get(settings.session_cookie_name)
+    if old_session_id:
+        await clear_session(old_session_id)
+
     session_id = await create_session(user["id"])
     set_session_cookie(response, session_id)
 

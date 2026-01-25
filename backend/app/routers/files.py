@@ -19,6 +19,7 @@ from sqlmodel import select
 
 from app.auth import require_user
 from app.core.config import settings
+from app.core.rate_limit import api_limiter
 from app.database import get_session
 from app.models import User, PackTask
 
@@ -645,11 +646,19 @@ async def create_pack_task(
     可选提供 output_name 自定义输出文件名。
 
     验证：
+    - 频率限制：每用户每分钟最多 5 次
     - 所有路径存在且属于该用户
     - 用户有足够的空间（配额 + 服务器）
 
     预留空间并在后台启动异步打包。
     """
+    # 频率限制：每用户每分钟最多 5 次
+    if not api_limiter.is_allowed(user.id, "create_pack", limit=5, window_seconds=60):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="操作过于频繁，请稍后再试"
+        )
+
     from app.services.pack import (
         PackTaskManager, calculate_folder_size,
         get_user_available_space_for_pack

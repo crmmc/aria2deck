@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -9,8 +10,10 @@ from uuid import uuid4
 from sqlmodel import select
 
 from app.aria2.client import Aria2Client
+from app.aria2.errors import parse_error_message
 from app.core.config import settings
-from app.core.state import AppState
+from app.core.security import sanitize_string
+from app.core.state import AppState, WS_THROTTLE_INTERVAL
 from app.database import get_session
 from app.models import Task
 
@@ -51,6 +54,13 @@ def _map_status(status: dict, user_id: int) -> dict:
 
     # 清理路径，避免暴露服务器绝对路径
     sanitized_name = _sanitize_path(raw_name, user_id)
+    # 清理控制字符，防止日志注入
+    sanitized_name = sanitize_string(sanitized_name)
+
+    # 错误信息：先翻译，再清理控制字符
+    raw_error = status.get("errorMessage")
+    error_msg = parse_error_message(raw_error) if raw_error else None
+    error_msg = sanitize_string(error_msg)
 
     return {
         "status": status.get("status", "unknown"),
@@ -59,7 +69,7 @@ def _map_status(status: dict, user_id: int) -> dict:
         "completed_length": int(status.get("completedLength", 0)),
         "download_speed": int(status.get("downloadSpeed", 0)),
         "upload_speed": int(status.get("uploadSpeed", 0)),
-        "error": status.get("errorMessage"),
+        "error": error_msg,
     }
 
 
@@ -242,7 +252,24 @@ async def _cleanup_orphaned_tasks() -> None:
             await _update_task(task.id, {"status": "removed"})
 
 
-async def broadcast_update(state: AppState, user_id: int, task_id: int) -> None:
+async def broadcast_update(state: AppState, user_id: int, task_id: int, force: bool = False) -> None:
+    """广播任务更新到 WebSocket 客户端
+
+    Args:
+        state: 应用状态
+        user_id: 用户 ID
+        task_id: 任务 ID
+        force: 是否强制发送（忽略节流）
+    """
+    # 节流检查：同一任务在短时间内只发送一次
+    now = time.time()
+    if not force:
+        async with state.lock:
+            last_time = state.last_broadcast.get(task_id, 0)
+            if now - last_time < WS_THROTTLE_INTERVAL:
+                return  # 跳过本次推送
+            state.last_broadcast[task_id] = now
+
     async with get_session() as db:
         result = await db.exec(select(Task).where(Task.id == task_id))
         task = result.first()
