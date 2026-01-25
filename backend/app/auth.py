@@ -28,6 +28,24 @@ async def clear_session(session_id: str) -> None:
             await db.delete(session)
 
 
+async def clear_user_sessions(user_id: int) -> int:
+    """清除指定用户的所有 session
+
+    Args:
+        user_id: 用户 ID
+
+    Returns:
+        被删除的 session 数量
+    """
+    async with get_session() as db:
+        result = await db.exec(select(Session).where(Session.user_id == user_id))
+        sessions = result.all()
+        count = len(sessions)
+        for session in sessions:
+            await db.delete(session)
+        return count
+
+
 async def get_user_by_session(session_id: str | None) -> User | None:
     if not session_id:
         return None

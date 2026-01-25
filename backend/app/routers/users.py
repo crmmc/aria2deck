@@ -1,14 +1,17 @@
 """用户管理接口模块"""
 import secrets
+import shutil
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlmodel import select
 
-from app.auth import require_admin, require_user
+from app.auth import clear_user_sessions, require_admin, require_user
+from app.core.config import settings
 from app.core.security import hash_password
 from app.database import get_session
-from app.models import User, Session as SessionModel
+from app.models import User, Session as SessionModel, Task, PackTask
 from app.schemas import RpcAccessStatus, RpcAccessToggle, UserCreate, UserOut, UserUpdate
 
 
@@ -80,8 +83,18 @@ async def list_users(admin: User = Depends(require_admin)) -> list[dict]:
 
 
 @router.delete("/{user_id}")
-async def delete_user(user_id: int, admin: User = Depends(require_admin)) -> dict:
+async def delete_user(
+    user_id: int,
+    delete_files: bool = Query(False, description="是否删除用户下载目录"),
+    admin: User = Depends(require_admin)
+) -> dict:
     """删除用户（管理员）
+
+    删除用户时会同时删除：
+    - 用户的所有会话
+    - 用户的所有下载任务记录
+    - 用户的所有打包任务记录
+    - 可选：用户的下载目录
 
     注意: 不能删除自己
     """
@@ -105,8 +118,24 @@ async def delete_user(user_id: int, admin: User = Depends(require_admin)) -> dic
         for session in sessions_result.all():
             await db.delete(session)
 
+        # 删除用户的所有下载任务记录
+        tasks_result = await db.exec(select(Task).where(Task.owner_id == user_id))
+        for task in tasks_result.all():
+            await db.delete(task)
+
+        # 删除用户的所有打包任务记录
+        pack_tasks_result = await db.exec(select(PackTask).where(PackTask.owner_id == user_id))
+        for pack_task in pack_tasks_result.all():
+            await db.delete(pack_task)
+
         # 删除用户
         await db.delete(user)
+
+    # 可选：删除用户下载目录
+    if delete_files:
+        user_download_dir = Path(settings.download_dir) / str(user_id)
+        if user_download_dir.exists():
+            shutil.rmtree(user_download_dir, ignore_errors=True)
 
     return {"ok": True}
 
@@ -156,6 +185,8 @@ async def update_user(user_id: int, payload: UserUpdate, admin: User = Depends(r
 
         if payload.password is not None:
             user.password_hash = hash_password(payload.password)
+            # 密码修改后使该用户的所有 session 失效
+            await clear_user_sessions(user_id)
 
         if payload.is_admin is not None:
             # 不能取消自己的管理员权限

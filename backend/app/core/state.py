@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Dict, Set
 
@@ -10,11 +11,17 @@ from app.aria2.client import Aria2Client
 from app.core.config import settings
 
 
+# WebSocket 消息节流间隔（秒）
+WS_THROTTLE_INTERVAL = 0.5
+
+
 @dataclass
 class AppState:
     pending_tasks: Dict[int, dict] = field(default_factory=dict)
     ws_connections: Dict[int, Set[WebSocket]] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # 消息节流：记录每个任务的最后推送时间 {task_id: timestamp}
+    last_broadcast: Dict[int, float] = field(default_factory=dict)
 
 
 def get_aria2_client(request: Request | None = None) -> Aria2Client:

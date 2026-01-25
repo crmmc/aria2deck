@@ -4,6 +4,7 @@ Aria2 通过 --on-download-* 参数调用外部脚本，脚本再调用此接口
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from app.aria2.client import Aria2Client
+from app.aria2.errors import parse_error_message
 from app.aria2.sync import broadcast_update
 from app.core.config import settings
 from app.core.state import AppState, get_aria2_client
@@ -19,6 +21,7 @@ from app.database import get_session
 from app.models import Task
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/hooks", tags=["hooks"])
 
 
@@ -66,11 +69,21 @@ async def aria2_hook(
     """
     # 验证 hook secret（必须配置）
     if not settings.hook_secret:
+        logger.error(
+            "Hook secret 未配置，拒绝回调请求。"
+            "请设置 ARIA2C_HOOK_SECRET 环境变量并重启服务。"
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Hook secret not configured. Set ARIA2C_HOOK_SECRET environment variable."
         )
+
     if x_hook_secret != settings.hook_secret:
+        # 记录认证失败，便于排查 aria2 配置问题
+        logger.warning(
+            f"Hook 认证失败：收到的 secret 不匹配 (GID: {payload.gid}, Event: {payload.event})。"
+            f"请检查 aria2 的 hook 脚本中传递的 secret 是否正确。"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid hook secret"
@@ -119,7 +132,8 @@ async def aria2_hook(
             artifact_token = uuid4().hex
     elif event == "error":
         new_status = "error"
-        error_msg = aria2_status.get("errorMessage", "未知错误")
+        raw_error = aria2_status.get("errorMessage", "未知错误")
+        error_msg = parse_error_message(raw_error)
 
     # 更新数据库
     async with get_session() as db:
@@ -150,7 +164,7 @@ async def aria2_hook(
 
             db.add(db_task)
 
-    # 广播更新到 WebSocket
-    await broadcast_update(state, task.owner_id, task.id)
+    # 广播更新到 WebSocket（状态变更强制推送）
+    await broadcast_update(state, task.owner_id, task.id, force=True)
 
     return {"ok": True, "task_id": task.id, "status": new_status}

@@ -24,6 +24,20 @@ function getApiBase(): string {
   return "http://localhost:8000";
 }
 
+// 401 错误事件，用于通知 AuthContext 会话过期
+export const authEvents = {
+  listeners: new Set<() => void>(),
+  onUnauthorized(callback: () => void): () => void {
+    this.listeners.add(callback);
+    return () => {
+      this.listeners.delete(callback);
+    };
+  },
+  emit() {
+    this.listeners.forEach((cb) => cb());
+  },
+};
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const base = getApiBase();
   const res = await fetch(`${base}${path}`, {
@@ -35,6 +49,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     ...options,
   });
   if (!res.ok) {
+    // 401 错误：会话过期，触发重新登录
+    if (res.status === 401) {
+      authEvents.emit();
+      throw new Error("会话已过期，请重新登录");
+    }
     const text = await res.text();
     throw new Error(text || `请求失败: ${res.status}`);
   }
@@ -145,8 +164,8 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
-  deleteUser: (id: number) =>
-    request<{ ok: boolean }>(`/api/users/${id}`, { method: "DELETE" }),
+  deleteUser: (id: number, deleteFiles: boolean = false) =>
+    request<{ ok: boolean }>(`/api/users/${id}?delete_files=${deleteFiles}`, { method: "DELETE" }),
 
   // Files
   listFiles: (path?: string) =>

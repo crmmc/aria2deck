@@ -53,6 +53,7 @@ interface SortableTaskCardProps {
   task: Task;
   isSelected: boolean;
   isRetrying: boolean;
+  isOperating: boolean;
   onToggleSelection: (id: number) => void;
   onPause: (id: number) => void;
   onResume: (id: number) => void;
@@ -65,6 +66,7 @@ function SortableTaskCard({
   task,
   isSelected,
   isRetrying,
+  isOperating,
   onToggleSelection,
   onPause,
   onResume,
@@ -201,17 +203,19 @@ function SortableTaskCard({
           <div className="task-footer-right">
             {task.status === "active" || task.status === "waiting" ? (
               <button
-                className="button secondary btn-task"
+                className={`button secondary btn-task${isOperating ? " opacity-60" : ""}`}
                 onClick={() => onPause(task.id)}
+                disabled={isOperating}
               >
-                暂停
+                {isOperating ? "处理中..." : "暂停"}
               </button>
             ) : task.status === "paused" ? (
               <button
-                className="button secondary btn-task"
+                className={`button secondary btn-task${isOperating ? " opacity-60" : ""}`}
                 onClick={() => onResume(task.id)}
+                disabled={isOperating}
               >
-                继续
+                {isOperating ? "处理中..." : "继续"}
               </button>
             ) : task.status === "error" ? (
               <button
@@ -251,10 +255,27 @@ export default function TasksPage() {
   const [uri, setUri] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [selectedTasks, setSelectedTasks] = useState<Set<number>>(new Set());
-  const [filterStatus, setFilterStatus] = useState<string>("all");
+  // 从 localStorage 恢复筛选/排序状态
+  const [filterStatus, setFilterStatus] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("tasks_filterStatus") || "all";
+    }
+    return "all";
+  });
   const [searchKeyword, setSearchKeyword] = useState("");
-  const [sortBy, setSortBy] = useState<string>("time");
-  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [sortBy, setSortBy] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("tasks_sortBy") || "time";
+    }
+    return "time";
+  });
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("tasks_sortOrder");
+      return saved === "asc" ? "asc" : "desc";
+    }
+    return "desc";
+  });
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [batchUris, setBatchUris] = useState("");
   const [deleteConfirmModal, setDeleteConfirmModal] = useState<{
@@ -266,6 +287,10 @@ export default function TasksPage() {
   const [retryingTaskIds, setRetryingTaskIds] = useState<Set<number>>(new Set());
   const [mounted, setMounted] = useState(false);
   const torrentInputRef = useRef<HTMLInputElement>(null);
+  // 加载状态
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isBatchOperating, setIsBatchOperating] = useState(false);
+  const [operatingTaskIds, setOperatingTaskIds] = useState<Set<number>>(new Set());
 
   // 已删除任务 ID 集合，用于过滤 WebSocket 推送的旧任务更新
   const deletedTaskIdsRef = useRef<Set<number>>(new Set());
@@ -274,6 +299,25 @@ export default function TasksPage() {
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  // 持久化筛选/排序状态到 localStorage
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("tasks_filterStatus", filterStatus);
+    }
+  }, [filterStatus]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("tasks_sortBy", sortBy);
+    }
+  }, [sortBy]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("tasks_sortOrder", sortOrder);
+    }
+  }, [sortOrder]);
 
   // DnD sensors
   const sensors = useSensors(
@@ -395,13 +439,17 @@ export default function TasksPage() {
 
   async function createTask(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isSubmitting) return;
     setError(null);
+    setIsSubmitting(true);
     try {
       const task = await api.createTask(uri);
       setTasks((prev) => [task, ...prev]);
       setUri("");
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setIsSubmitting(false);
     }
   }
 
@@ -447,18 +495,34 @@ export default function TasksPage() {
   }
 
   async function pauseTask(id: number) {
+    if (operatingTaskIds.has(id)) return;
+    setOperatingTaskIds((prev) => new Set(prev).add(id));
     try {
       await api.updateTaskStatus(id, "pause");
     } catch (err) {
-      console.error(err);
+      showToast("暂停失败：" + (err as Error).message, "error");
+    } finally {
+      setOperatingTaskIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
   }
 
   async function resumeTask(id: number) {
+    if (operatingTaskIds.has(id)) return;
+    setOperatingTaskIds((prev) => new Set(prev).add(id));
     try {
       await api.updateTaskStatus(id, "resume");
     } catch (err) {
-      console.error(err);
+      showToast("继续失败：" + (err as Error).message, "error");
+    } finally {
+      setOperatingTaskIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
   }
 
@@ -535,7 +599,7 @@ export default function TasksPage() {
   }
 
   async function batchPauseTasks() {
-    if (selectedTasks.size === 0) return;
+    if (selectedTasks.size === 0 || isBatchOperating) return;
     const activeTasks = tasks.filter(
       (t) =>
         selectedTasks.has(t.id) &&
@@ -545,17 +609,29 @@ export default function TasksPage() {
       showToast("没有可暂停的任务", "warning");
       return;
     }
+
+    const confirmed = await showConfirm({
+      title: "批量暂停",
+      message: `确定要暂停选中的 ${activeTasks.length} 个任务吗？`,
+      confirmText: "暂停",
+    });
+    if (!confirmed) return;
+
+    setIsBatchOperating(true);
     try {
       await Promise.all(
         activeTasks.map((t) => api.updateTaskStatus(t.id, "pause")),
       );
+      showToast(`已暂停 ${activeTasks.length} 个任务`, "success");
     } catch (err) {
-      console.error(err);
+      showToast("批量暂停失败：" + (err as Error).message, "error");
+    } finally {
+      setIsBatchOperating(false);
     }
   }
 
   async function batchResumeTasks() {
-    if (selectedTasks.size === 0) return;
+    if (selectedTasks.size === 0 || isBatchOperating) return;
     const pausedTasks = tasks.filter(
       (t) => selectedTasks.has(t.id) && t.status === "paused",
     );
@@ -563,12 +639,24 @@ export default function TasksPage() {
       showToast("没有可继续的任务", "warning");
       return;
     }
+
+    const confirmed = await showConfirm({
+      title: "批量继续",
+      message: `确定要继续选中的 ${pausedTasks.length} 个任务吗？`,
+      confirmText: "继续",
+    });
+    if (!confirmed) return;
+
+    setIsBatchOperating(true);
     try {
       await Promise.all(
         pausedTasks.map((t) => api.updateTaskStatus(t.id, "resume")),
       );
+      showToast(`已继续 ${pausedTasks.length} 个任务`, "success");
     } catch (err) {
-      console.error(err);
+      showToast("批量继续失败：" + (err as Error).message, "error");
+    } finally {
+      setIsBatchOperating(false);
     }
   }
 
@@ -751,22 +839,31 @@ export default function TasksPage() {
     }
 
     // 排序
+    // 排序（处理 null/undefined 值，确保稳定性）
     const sorted = [...filtered].sort((a, b) => {
       let comparison = 0;
 
       switch (sortBy) {
         case "speed":
-          comparison = a.download_speed - b.download_speed;
+          // null/undefined 视为 0
+          comparison = (a.download_speed ?? 0) - (b.download_speed ?? 0);
           break;
         case "time":
-          comparison =
-            new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+          // 处理无效日期
+          const timeA = a.created_at ? new Date(a.created_at).getTime() : 0;
+          const timeB = b.created_at ? new Date(b.created_at).getTime() : 0;
+          comparison = timeA - timeB;
           break;
         case "remaining":
           comparison = getRemainingTime(a) - getRemainingTime(b);
           break;
         default:
           comparison = 0;
+      }
+
+      // 主排序相同时，按 id 排序保证稳定性
+      if (comparison === 0) {
+        comparison = a.id - b.id;
       }
 
       return sortOrder === "asc" ? comparison : -comparison;
@@ -831,10 +928,11 @@ export default function TasksPage() {
               className="hidden"
             />
             <button
-              className="button flex-shrink-0 shadow-none"
+              className={`button flex-shrink-0 shadow-none${isSubmitting ? " opacity-60" : ""}`}
               type="submit"
+              disabled={isSubmitting}
             >
-              + 添加任务
+              {isSubmitting ? "添加中..." : "+ 添加任务"}
             </button>
             <button
               className="button secondary flex-shrink-0 shadow-none"
@@ -916,29 +1014,33 @@ export default function TasksPage() {
                 </span>
                 <button
                   type="button"
-                  className="button secondary btn-sm"
+                  className={`button secondary btn-sm${isBatchOperating ? " opacity-60" : ""}`}
                   onClick={batchPauseTasks}
+                  disabled={isBatchOperating}
                 >
                   暂停
                 </button>
                 <button
                   type="button"
-                  className="button secondary btn-sm"
+                  className={`button secondary btn-sm${isBatchOperating ? " opacity-60" : ""}`}
                   onClick={batchResumeTasks}
+                  disabled={isBatchOperating}
                 >
                   继续
                 </button>
                 <button
                   type="button"
-                  className="button secondary btn-sm"
+                  className={`button secondary btn-sm${isBatchOperating ? " opacity-60" : ""}`}
                   onClick={batchRetryTasks}
+                  disabled={isBatchOperating}
                 >
                   重试
                 </button>
                 <button
                   type="button"
-                  className="button secondary danger btn-sm"
+                  className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
                   onClick={batchDeleteTasks}
+                  disabled={isBatchOperating}
                 >
                   删除
                 </button>
@@ -999,6 +1101,7 @@ export default function TasksPage() {
                   task={task}
                   isSelected={selectedTasks.has(task.id)}
                   isRetrying={retryingTaskIds.has(task.id)}
+                  isOperating={operatingTaskIds.has(task.id)}
                   onToggleSelection={toggleTaskSelection}
                   onPause={pauseTask}
                   onResume={resumeTask}
