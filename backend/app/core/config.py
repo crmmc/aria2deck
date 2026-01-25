@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     aria2_poll_interval: float = 2.0
     download_dir: str = str(BASE_DIR / "downloads")
     hook_secret: str = ""  # aria2 回调认证密钥（必须配置，否则 Hook 接口返回 503）
+    admin_password: str = "123456"  # 初始管理员密码
 
     class Config:
         env_prefix = "ARIA2C_"

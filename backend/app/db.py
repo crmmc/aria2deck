@@ -5,13 +5,10 @@ New code should use `app.database` and `app.models` instead.
 
 Kept functions:
 - init_db(): Schema migration for existing databases (adds new columns)
-- ensure_default_admin(): Admin user/credential management
+- ensure_default_admin(): Admin user creation
 """
 
-import os
-import random
 import sqlite3
-import string
 import threading
 from pathlib import Path
 from contextlib import contextmanager
@@ -19,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from app.core.config import settings
-from app.core.security import hash_password, verify_password
+from app.core.security import hash_password
 
 
 def _utc_now() -> str:
@@ -240,86 +237,21 @@ def init_db() -> None:
         conn.close()
 
 
-def ensure_default_admin() -> str | None:
+def ensure_default_admin() -> None:
     """Ensure a default admin user exists, creating one if necessary.
 
-    This function:
-    - Creates an admin user with a random password if no users exist
-    - Syncs the admin password with the credentials file
-    - Writes credentials to data/admin_credentials.txt
-
-    Returns:
-        The generated password if a new admin was created, None otherwise.
+    Uses password from settings.admin_password (env: ARIA2C_ADMIN_PASSWORD).
+    Default password is '123456'.
     """
     existing = _fetch_one("SELECT id FROM users LIMIT 1")
-    data_dir = Path(settings.database_path).parent
-    data_dir.mkdir(parents=True, exist_ok=True)
-    credential_path = data_dir / "admin_credentials.txt"
-
     if existing:
-        # Keep the admin credential file in sync with the stored password.
-        admin = _fetch_one("SELECT id, password_hash FROM users WHERE username = ?", ["admin"])
-        if not admin:
-            return None
-        if credential_path.exists():
-            content = credential_path.read_text(encoding="utf-8")
-            for line in content.splitlines():
-                if line.startswith("password:"):
-                    password = line.split("password:", 1)[1].strip()
-                    if password and not verify_password(password, admin["password_hash"]):
-                        _execute(
-                            "UPDATE users SET password_hash = ? WHERE id = ?",
-                            [hash_password(password), admin["id"]],
-                        )
-                    return None
-        # Credentials file missing: generate a new admin password and persist it.
-        password_chars = [
-            random.SystemRandom().choice(string.ascii_lowercase),
-            random.SystemRandom().choice(string.ascii_uppercase),
-            random.SystemRandom().choice(string.digits),
-        ]
-        password_chars.extend(
-            random.SystemRandom().choice(string.ascii_letters + string.digits)
-            for _ in range(18 - len(password_chars))
-        )
-        random.SystemRandom().shuffle(password_chars)
-        password = "".join(password_chars)
-        _execute(
-            "UPDATE users SET password_hash = ? WHERE id = ?",
-            [hash_password(password), admin["id"]],
-        )
-        credential_path.write_text(
-            f"username: admin\npassword: {password}\n", encoding="utf-8"
-        )
-        try:
-            os.chmod(credential_path, 0o600)
-        except OSError:
-            pass
-        return password
+        return
 
     # No users exist: create the first admin user
-    password_chars = [
-        random.SystemRandom().choice(string.ascii_lowercase),
-        random.SystemRandom().choice(string.ascii_uppercase),
-        random.SystemRandom().choice(string.digits),
-    ]
-    password_chars.extend(
-        random.SystemRandom().choice(string.ascii_letters + string.digits)
-        for _ in range(18 - len(password_chars))
-    )
-    random.SystemRandom().shuffle(password_chars)
-    password = "".join(password_chars)
     _execute(
         """
         INSERT INTO users (username, password_hash, is_admin, created_at)
         VALUES (?, ?, ?, ?)
         """,
-        ["admin", hash_password(password), 1, _utc_now()],
+        ["admin", hash_password(settings.admin_password), 1, _utc_now()],
     )
-    credential_path.write_text(
-        f"username: admin\npassword: {password}\n", encoding="utf-8")
-    try:
-        os.chmod(credential_path, 0o600)
-    except OSError:
-        pass
-    return password
