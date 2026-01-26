@@ -49,9 +49,11 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Kiro
+# AI context
 .kiro/
 .serena/
+.claude/
+AGENTS.md
 
 # Temporary files
 *.tmp
