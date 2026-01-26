@@ -169,9 +169,9 @@ function SidebarContent({ user }: SidebarProps) {
       onMouseLeave={() => sidebarExpanded && setSidebarExpanded(false)}
     >
       <div className="sidebar-header">
-        <div className="sidebar-logo">AC</div>
+        <div className="sidebar-logo">AD</div>
         {sidebarExpanded && (
-          <span className="sidebar-title">Aria2 Controller</span>
+          <span className="sidebar-title">Aria2Deck</span>
         )}
       </div>
 
