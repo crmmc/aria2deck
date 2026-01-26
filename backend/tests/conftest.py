@@ -23,7 +23,7 @@ from app.core.config import settings
 from app.core.rate_limit import api_limiter
 from app.core.security import hash_password
 from app.db import init_db, execute, fetch_one
-from app.database import reset_engine, init_db as init_sqlmodel_db
+from app.database import reset_engine, init_db as init_sqlmodel_db, dispose_engine
 from app.main import app
 from app.aria2.client import Aria2Client
 
@@ -62,6 +62,10 @@ def temp_db() -> Generator[str, None, None]:
     asyncio.run(init_sqlmodel_db())
 
     yield db_path
+
+    # Dispose engine before resetting (close connections properly)
+    import asyncio
+    asyncio.run(dispose_engine())
 
     # Restore settings and reset engine
     settings.database_path = original_db_path

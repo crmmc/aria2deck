@@ -51,6 +51,13 @@ def _get_session_maker() -> async_sessionmaker[AsyncSession]:
     return _async_session_maker
 
 
+async def dispose_engine() -> None:
+    """Dispose the engine properly (close all connections)."""
+    global _async_engine
+    if _async_engine is not None:
+        await _async_engine.dispose()
+
+
 def reset_engine() -> None:
     """Reset the engine (for testing purposes)."""
     global _async_engine, _async_session_maker
