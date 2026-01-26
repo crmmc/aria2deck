@@ -20,11 +20,20 @@ os.environ["ARIA2C_DATABASE_PATH"] = _test_db
 os.environ["ARIA2C_DOWNLOAD_DIR"] = _test_download_dir
 
 from app.core.config import settings
+from app.core.rate_limit import api_limiter
 from app.core.security import hash_password
 from app.db import init_db, execute, fetch_one
 from app.database import reset_engine, init_db as init_sqlmodel_db
 from app.main import app
 from app.aria2.client import Aria2Client
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    """在每个测试前后清理限流器状态"""
+    api_limiter.clear_all()
+    yield
+    api_limiter.clear_all()
 
 
 @pytest.fixture(scope="function")
