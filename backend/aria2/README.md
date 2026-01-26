@@ -50,7 +50,7 @@ sudo yum install aria2
 
 - **RPC 地址**: `http://localhost:6800/jsonrpc`
 - **RPC 端口**: `6800`
-- **RPC 密钥**: 默认为空（无密钥）
+- **RPC 密钥**: 默认 `1`（见 `aria2.conf`，可修改或置空）
 
 ### 下载设置
 
@@ -94,7 +94,8 @@ dir=/path/to/your/download/directory
 ### 1. 检查服务状态
 
 ```bash
-curl http://localhost:6800/jsonrpc -d '{"jsonrpc":"2.0","method":"aria2.getVersion","id":"1"}'
+# 默认配置包含 rpc-secret=1，需要使用 token:1
+curl http://localhost:6800/jsonrpc -d '{"jsonrpc":"2.0","method":"aria2.getVersion","params":["token:1"],"id":"1"}'
 ```
 
 应该返回类似：
@@ -110,7 +111,7 @@ curl http://localhost:6800/jsonrpc -d '{
   "jsonrpc":"2.0",
   "method":"aria2.addUri",
   "id":"1",
-  "params":[["http://example.com/file.zip"]]
+  "params":["token:1", ["http://example.com/file.zip"]]
 }'
 ```
 
@@ -120,6 +121,7 @@ curl http://localhost:6800/jsonrpc -d '{
 curl http://localhost:6800/jsonrpc -d '{
   "jsonrpc":"2.0",
   "method":"aria2.tellActive",
+  "params":["token:1"],
   "id":"1"
 }'
 ```
@@ -131,8 +133,10 @@ curl http://localhost:6800/jsonrpc -d '{
 ```bash
 # backend/env.example 或环境变量
 ARIA2C_ARIA2_RPC_URL=http://localhost:6800/jsonrpc
-ARIA2C_ARIA2_RPC_SECRET=
+ARIA2C_ARIA2_RPC_SECRET=1
 ```
+
+> 如果你把 `rpc-secret` 置空，调用和环境变量中的 `ARIA2C_ARIA2_RPC_SECRET` 也需要同步置空。
 
 ## 常见问题
 
