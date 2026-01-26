@@ -1,382 +1,169 @@
-# AGENTS.md - aria2 Controller
+# AGENTS.md - Aria2Deck
 
-> For AI coding agents operating in this repository.
+> 给在本仓库工作的 AI 编码代理的指引。
 
-## Project Overview
+## 项目概述
 
-aria2 download controller with multi-user support:
+Aria2Deck - aria2 多用户下载管理平台。
 
-- **Backend**: FastAPI (Python 3.12+) with SQLite
-- **Frontend**: Next.js 14 (TypeScript) with static export
-- **Package managers**: `uv` (backend), `bun` (frontend)
-- **Key Features**: User isolation, quota management, task sorting/filtering, batch operations, file management, dynamic configuration, peak metrics tracking, Chinese UI
-
----
-
-## Quick Reference
-
-| Task | Command |
-|------|---------|
-| Install all deps | `make install` |
-| Build frontend → static | `make build` |
-| Run dev server | `make run` |
-| Clean | `make clean` |
+- **后端**：FastAPI + SQLModel (SQLite) + aiohttp
+- **前端**：Next.js 14 静态导出
+- **包管理**：`uv`（后端）、`bun`（前端）
+- **关键能力**：用户隔离、配额与磁盘空间校验、任务排序/筛选/批量操作、文件管理与打包、动态配置、WebSocket 实时推送、中文 UI
+- **aria2 RPC 兼容**：`POST /aria2/jsonrpc`（供 AriaNg/Motrix 等）
 
 ---
 
-## Build Commands
-
-### Full Stack
+## 常用命令
 
 ```bash
-# Install dependencies (both backend & frontend)
+# 安装依赖
 make install
 
-# Build frontend and copy to backend/static
+# 构建前端并拷贝到后端 static
 make build
 
-# Start server (port 8000, serves API + static frontend)
+# 启动开发服务器 (端口 8000)
 make run
+
+# 清理
+make clean
+
+# 后端测试
+cd backend && uv run pytest
+
+# 前端开发
+cd frontend && bun run dev
 ```
 
-### Backend Only
+## 测试要求
+
+> ⚠️ **修改 `backend/` 必须运行测试**
 
 ```bash
-# Install Python dependencies
-uv sync
-
-# Run with hot-reload
-PYTHONPATH=backend uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+cd backend && uv run pytest
 ```
 
-### Frontend Only
-
-```bash
-cd frontend
-
-# Install dependencies
-bun install
-
-# Dev server (port 3000)
-bun run dev
-
-# Production build (static export to ./out)
-bun run build
-```
-
----
-
-## Testing
-
-> No test framework is currently configured. Tests should be added using `pytest` for backend and appropriate tools for frontend.
-
-When tests are added:
-
-```bash
-# Backend (future)
-uv run pytest backend/tests/
-uv run pytest backend/tests/test_foo.py -v           # single file
-uv run pytest backend/tests/test_foo.py::test_bar -v # single test
-```
-
----
-
-## Project Structure
+## 项目结构
 
 ```
 aria2_controler/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py           # FastAPI app, middleware, routers
-│   │   ├── auth.py           # Session auth (cookie-based)
-│   │   ├── db.py             # SQLite helpers (raw SQL, no ORM)
-│   │   ├── schemas.py        # Pydantic request/response models
+│   │   ├── main.py           # FastAPI 入口 + 静态导出路由映射
+│   │   ├── auth.py           # 会话认证依赖
+│   │   ├── models.py         # SQLModel 模型
+│   │   ├── database.py       # 异步引擎与 get_session
+│   │   ├── db.py             # 旧版 SQLite 迁移/兼容逻辑
+│   │   ├── schemas.py        # Pydantic 请求/响应模型
 │   │   ├── core/
-│   │   │   ├── config.py     # pydantic-settings configuration
-│   │   │   ├── security.py   # Password hashing
-│   │   │   └── state.py      # App state management
-│   │   ├── routers/          # API endpoints by domain
-│   │   │   ├── auth.py       # Login/logout/me
-│   │   │   ├── users.py      # User CRUD (admin)
-│   │   │   ├── tasks.py      # Task management
-│   │   │   ├── files.py      # File browser
-│   │   │   ├── stats.py      # System stats
-│   │   │   ├── config.py     # System config (admin)
-│   │   │   ├── hooks.py      # aria2 callbacks
-│   │   │   └── ws.py         # WebSocket endpoint
-│   │   └── aria2/            # aria2 RPC client
-│   │       ├── client.py     # JSON-RPC client
-│   │       └── sync.py       # Background sync task
-│   ├── aria2/                # aria2 configuration files
-│   │   ├── aria2.conf        # aria2 config
-│   │   └── start.sh          # aria2 startup script
-│   ├── data/                 # SQLite DB, credentials (gitignored)
-│   ├── static/               # Built frontend (gitignored)
-│   ├── scripts/              # aria2 hook scripts
-│   └── downloads/            # User download directories
+│   │   │   ├── config.py     # pydantic-settings 配置
+│   │   │   ├── security.py   # 密码哈希
+│   │   │   └── state.py      # App 状态管理
+│   │   ├── routers/
+│   │   │   ├── auth.py       # 登录/退出/当前用户
+│   │   │   ├── users.py      # 用户管理（管理员）
+│   │   │   ├── tasks.py      # 任务管理
+│   │   │   ├── files.py      # 文件管理 + 打包任务
+│   │   │   ├── stats.py      # 系统统计
+│   │   │   ├── config.py     # 系统配置（管理员）
+│   │   │   ├── hooks.py      # aria2 回调
+│   │   │   ├── ws.py         # WebSocket
+│   │   │   └── aria2_rpc.py  # aria2 RPC 兼容接口
+│   │   ├── services/
+│   │   │   ├── pack.py       # 打包任务
+│   │   │   └── aria2_rpc_handler.py
+│   │   └── aria2/
+│   │       ├── client.py     # JSON-RPC 客户端
+│   │       └── sync.py       # 后台任务同步
+│   ├── aria2/                # aria2 配置文件
+│   ├── scripts/              # aria2 hook 脚本
+│   ├── data/                 # SQLite DB（gitignored）
+│   ├── static/               # 前端构建产物（gitignored）
+│   └── downloads/            # 用户下载目录
 ├── frontend/
-│   ├── app/                  # Next.js App Router pages
-│   ├── components/           # React components
-│   ├── lib/                  # API client, utilities
-│   └── types.ts              # TypeScript type definitions
+│   ├── app/                  # Next.js App Router
+│   ├── components/           # React 组件
+│   ├── lib/
+│   │   ├── api.ts            # API 客户端
+│   │   └── AuthContext.tsx
+│   └── types.ts              # TypeScript 类型定义
 ├── Makefile
 ├── pyproject.toml
 └── uv.lock
 ```
 
----
+## 架构要点
 
-## Code Style Guidelines
+- **认证**：Cookie Session（`aria2_session`），依赖 `require_user` / `require_admin`，当前用户 `GET /api/auth/me`
+- **任务同步**：`sync_tasks` 默认每 2 秒轮询 aria2 RPC，更新数据库并通过 `WebSocket /ws/tasks` 推送
+- **用户隔离**：下载目录默认 `backend/downloads/{user_id}/`（由 `ARIA2C_DOWNLOAD_DIR` 控制），配额与磁盘剩余双重校验
+- **动态配置**：配置存储在 `config` 表，包含 RPC 地址/密钥、隐藏后缀、打包参数等
+- **文件与打包**：文件浏览/删除/重命名，打包任务在 `files` 路由下
+- **aria2 RPC 兼容**：`/aria2/jsonrpc` 支持外部客户端，逻辑在 `services/aria2_rpc_handler.py`
 
-### Python (Backend)
+## 数据库
 
-**Imports** - Group in order: stdlib → third-party → local
-
-```python
-from __future__ import annotations  # Always first if used
-
-import asyncio
-from pathlib import Path
-
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-
-from app.auth import require_user
-from app.db import execute, fetch_one
-```
-
-**Type Hints** - Always use, prefer `|` over `Union`
+- 使用 **SQLModel + AsyncSession**（`app.database.get_session`）
+- 表：`users`、`sessions`、`tasks`、`config`、`pack_tasks`
+- `app.db` 为历史兼容模块（迁移 + 默认管理员），仅在必要时用，必须参数化 SQL
 
 ```python
-def get_user(user_id: int) -> dict | None:
-    ...
+from sqlmodel import select
+from app.database import get_session
+from app.models import Task
 
-async def create_task(uri: str, options: dict | None = None) -> dict:
-    ...
+async with get_session() as db:
+    result = await db.exec(select(Task).where(Task.owner_id == user.id))
+    tasks = result.all()
 ```
-
-**Docstrings** - Chinese allowed, keep concise
 
 ```python
-def _check_disk_space() -> tuple[bool, int]:
-    """检查磁盘空间是否足够
-    
-    返回: (是否足够, 剩余空间字节)
-    """
+# legacy: 参数化 SQL
+execute("SELECT * FROM tasks WHERE id = ?", [task_id])
 ```
 
-**Pydantic Models** - For request/response schemas
+## 代码规范
 
-```python
-class TaskCreate(BaseModel):
-    """创建任务请求体"""
-    uri: str
-    options: dict | None = None
-```
+### Python（后端）
 
-**Naming**
+- 导入顺序：stdlib → third-party → local
+- 必须类型注解，错误信息用中文
+- 新代码优先 SQLModel；历史模块才用 `app.db`/`sqlite3`（禁止拼接 SQL）
 
-- Functions/variables: `snake_case`
-- Classes: `PascalCase`
-- Private helpers: `_prefix`
-- Constants: `UPPER_SNAKE_CASE`
+### TypeScript（前端）
 
-**Error Handling**
+- 使用路径别名 `@/`
+- 类型集中在 `frontend/types.ts`
+- API 调用统一走 `@/lib/api`
+- 客户端组件加 `"use client"`
+- 禁止 `as any` / `@ts-ignore` / `@ts-expect-error`
 
-```python
-# Raise HTTPException with Chinese detail messages
-raise HTTPException(
-    status_code=status.HTTP_404_NOT_FOUND,
-    detail="任务不存在"
-)
+## 环境变量
 
-# Catch specific exceptions, log or handle appropriately
-try:
-    await client.pause(gid)
-except Exception:
-    pass  # Only acceptable for cleanup operations
-```
+- 后端：以 `backend/env.example` 为准（前缀 `ARIA2C_`）
+- `ARIA2C_HOOK_SECRET` 用于 `/api/hooks/aria2` 回调鉴权（未配置会返回 503）
+- 前端：`frontend/env.local.example`（`NEXT_PUBLIC_API_BASE`）
 
-**Database** - Use raw SQL with parameterized queries
+## 常见操作
 
-```python
-# CORRECT: Parameterized
-execute("UPDATE tasks SET status = ? WHERE id = ?", [status, task_id])
-fetch_one("SELECT * FROM tasks WHERE id = ?", [task_id])
+### 添加 API 端点
 
-# WRONG: String interpolation (SQL injection risk)
-execute(f"UPDATE tasks SET status = '{status}' WHERE id = {task_id}")
-```
+1. 在 `backend/app/routers/` 创建或修改路由
+2. 使用 `Depends(require_user)` / `Depends(require_admin)`
+3. 在 `main.py` 注册 router
 
-### TypeScript (Frontend)
+### 添加前端页面
 
-**Imports** - Use path aliases
+1. 在 `frontend/app/{route}/page.tsx` 新建页面
+2. 在 `backend/app/main.py` 的 `alias_map` 添加静态导出映射
+3. 运行 `make build`
 
-```typescript
-import type { Task, User } from "@/types";
-import { api } from "@/lib/api";
-import { Sidebar } from "@/components/Sidebar";
-```
+## 不要做
 
-**Types** - Define in `types.ts`, export with `type` keyword
-
-```typescript
-export type User = {
-  id: number;
-  username: string;
-  is_admin: boolean;
-};
-```
-
-**Components** - Functional with TypeScript props
-
-```typescript
-type SidebarProps = {
-  expanded: boolean;
-  onToggle: () => void;
-  user: User | null;
-};
-
-export default function Sidebar({ expanded, onToggle, user }: SidebarProps) {
-  // ...
-}
-```
-
-**Client Components** - Mark with `"use client"` directive
-
-```typescript
-"use client";
-
-import { useState, useEffect } from "react";
-```
-
-**API Calls** - Use the centralized `api` object from `@/lib/api`
-
-```typescript
-// CORRECT
-const tasks = await api.listTasks();
-
-// WRONG: Direct fetch
-const res = await fetch("/api/tasks");
-```
-
----
-
-## Environment Variables
-
-### Backend (via `pydantic-settings`, prefix: `ARIA2C_`)
-
-```bash
-# backend/env.example
-ARIA2C_APP_NAME=aria2-controler
-ARIA2C_DEBUG=true
-ARIA2C_DATABASE_PATH=./data/app.db
-ARIA2C_SESSION_TTL_SECONDS=43200
-ARIA2C_ARIA2_RPC_URL=http://localhost:6800/jsonrpc
-ARIA2C_ARIA2_RPC_SECRET=
-ARIA2C_ARIA2_POLL_INTERVAL=2.0
-ARIA2C_DOWNLOAD_DIR=./downloads
-```
-
-### Frontend
-
-```bash
-# frontend/env.local.example
-NEXT_PUBLIC_API_BASE=http://localhost:8000
-```
-
----
-
-## Architecture Notes
-
-### Authentication
-
-- Cookie-based session authentication (`aria2_session` cookie)
-- Sessions stored in SQLite `sessions` table
-- Dependencies: `require_user`, `require_admin` in `app/auth.py`
-- Current user info via `GET /api/auth/me`
-
-### Database
-
-- SQLite with raw SQL (no ORM)
-- Auto-init on startup via `init_db()`
-- Default admin created on first run (credentials in `backend/data/admin_credentials.txt`)
-- Tables: users (with quota), sessions, tasks (with peak metrics), config
-
-### Frontend Build
-
-- Static export (`output: 'export'` in next.config.mjs)
-- Built files copied to `backend/static/`
-- Served by FastAPI with custom middleware for SPA routing
-- Fully localized Chinese interface
-
-### aria2 Integration
-
-- JSON-RPC client in `app/aria2/client.py`
-- Background sync task polls aria2 every 2 seconds
-- Tracks peak download speed and peak connections
-- WebSocket endpoint for real-time updates
-- Automatic .aria2 control file cleanup on task/file deletion
-- Dynamic configuration: aria2 RPC settings can be changed via UI without restart
-
-### Key Features Implementation
-
-**User Space Management**
-
-- Each user has isolated download directory: `downloads/{user_id}/`
-- User quota stored in database, enforced on task creation
-- Dynamic space calculation considers both quota and machine free space
-- Space widget shows: used/available (dynamically adjusted)
-
-**Task Management**
-
-- Task sorting: by time, speed, remaining time (asc/desc)
-- Task filtering: all, active, complete, error
-- Batch operations: select multiple, pause/resume/delete
-- Smart deletion: completed tasks can optionally delete files, incomplete tasks always delete files
-- Peak metrics: tracks peak_download_speed and peak_connections
-- Task caching: prevents aria2 interface blocking during large task creation
-
-**File Management**
-
-- File browser with path validation (prevents directory traversal)
-- File extension blacklist (configurable, e.g., .aria2, .tmp, .part)
-- Automatic .aria2 cleanup when deleting files
-- File operations: list, download, delete, rename
-
-**Dynamic Configuration**
-
-- aria2 RPC URL and secret configurable via UI
-- System limits: max_task_size, min_free_disk
-- File extension blacklist
-- All configs stored in database, hot-reloadable
-
----
-
-## Common Patterns
-
-### Adding a New API Endpoint
-
-1. Create/modify router in `backend/app/routers/`
-2. Define Pydantic schemas if needed
-3. Use `require_user` or `require_admin` dependency
-4. Register router in `main.py`
-
-### Adding a New Frontend Page
-
-1. Create page in `frontend/app/{route}/page.tsx`
-2. Add to sidebar if needed in `frontend/components/Sidebar.tsx`
-3. Add URL alias in `main.py` for static export routing
-4. Run `make build` to update static files
-
----
-
-## Don'ts
-
-- **Don't** use `as any`, `@ts-ignore`, or `@ts-expect-error`
-- **Don't** modify tests to match broken code
-- **Don't** use string interpolation in SQL queries
-- **Don't** create new files when editing existing ones suffices
-- **Don't** add features not explicitly requested
-- **Don't** commit `backend/data/` or `backend/static/` contents
-- **Don't** let user verify frontend changes without running `make build` first - always ensure build passes before user acceptance
+- 不要用 `as any`、`@ts-ignore`、`@ts-expect-error`
+- 不要手动编辑 `pyproject.toml` 或 `requirements.txt`，用 `uv add`
+- 不要在 SQL 中拼字符串，必须参数化
+- 不要提交 `backend/data/` 或 `backend/static/`
+- 不要跳过后端测试
+- 不要让用户在前端改动未 `make build` 前验收
