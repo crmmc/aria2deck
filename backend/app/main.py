@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.aria2.client import Aria2Client
+from app.aria2.listener import listen_aria2_events
 from app.aria2.sync import sync_tasks
 from app.core.config import settings
 from app.core.state import AppState
@@ -56,11 +57,19 @@ async def lifespan(app: FastAPI):
     sync_task = asyncio.create_task(
         sync_tasks(app.state.app_state, settings.aria2_poll_interval)
     )
+    listener_task = asyncio.create_task(
+        listen_aria2_events(app.state.app_state)
+    )
     yield
     # Shutdown
     sync_task.cancel()
+    listener_task.cancel()
     try:
         await sync_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await listener_task
     except asyncio.CancelledError:
         pass
 

@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -29,7 +28,7 @@ from app.core.security import mask_url_credentials
 from app.core.state import AppState, get_aria2_client
 from app.database import get_session
 from app.models import Task, User
-from app.routers.config import get_max_task_size, get_min_free_disk
+from app.routers.config import get_min_free_disk
 
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -207,24 +206,6 @@ def _get_user_incomplete_dir(user_id: int) -> str:
     return str(incomplete_dir)
 
 
-async def _check_url_size(uri: str) -> int | None:
-    """通过 HEAD 请求获取文件大小（仅 HTTP/HTTPS）
-
-    返回: 文件大小（字节），无法获取时返回 None
-    """
-    if not uri.lower().startswith(("http://", "https://")):
-        return None
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.head(uri, allow_redirects=True, timeout=10) as resp:
-                content_length = resp.headers.get("Content-Length")
-                if content_length:
-                    return int(content_length)
-    except Exception:
-        pass
-    return None
-
-
 def _check_disk_space() -> tuple[bool, int]:
     """检查磁盘空间是否足够
 
@@ -235,38 +216,6 @@ def _check_disk_space() -> tuple[bool, int]:
     disk = shutil.disk_usage(download_path)
     min_free = get_min_free_disk()
     return disk.free > min_free, disk.free
-
-
-def _get_user_available_space(user: User) -> int:
-    """获取用户实际可用空间（考虑配额和机器空间限制）
-
-    返回: 用户可用空间（字节）
-    """
-    # 计算用户已使用的空间
-    user_dir = Path(settings.download_dir) / str(user.id)
-    used_space = 0
-    if user_dir.exists():
-        for file_path in user_dir.rglob("*"):
-            if file_path.is_file():
-                try:
-                    used_space += file_path.stat().st_size
-                except Exception:
-                    pass
-
-    # 用户配额
-    user_quota = user.quota if user.quota else 100 * 1024 * 1024 * 1024  # 默认 100GB
-
-    # 获取机器实际剩余空间
-    download_path = Path(settings.download_dir)
-    download_path.mkdir(parents=True, exist_ok=True)
-    disk = shutil.disk_usage(download_path)
-    machine_free = disk.free
-
-    # 用户理论可用空间（基于配额）
-    user_free_by_quota = max(0, user_quota - used_space)
-
-    # 实际可用空间 = min(用户配额剩余, 机器剩余空间)
-    return min(user_free_by_quota, machine_free)
 
 
 def _task_to_dict(task: Task) -> dict:
@@ -301,10 +250,10 @@ async def create_task(payload: TaskCreate, request: Request, user: User = Depend
     会进行以下检查:
     1. 频率限制：每用户每分钟最多 30 次
     2. SSRF 防护：禁止下载内网地址
-    3. 磁盘剩余空间是否足够
-    4. 用户可用空间是否足够（考虑配额和机器空间限制）
-    5. HTTP/HTTPS 任务会检查文件大小是否超过限制
-    6. 强制设置下载目录到用户专属目录（隔离）
+    3. 磁盘剩余空间是否低于最小阈值
+    4. 强制设置下载目录到用户专属目录（隔离）
+
+    注：任务大小和用户配额检查在 aria2 hook 中统一处理
     """
     # 频率限制：每用户每分钟最多 30 次
     if not api_limiter.is_allowed(user.id, "create_task", limit=30, window_seconds=60):
@@ -316,29 +265,12 @@ async def create_task(payload: TaskCreate, request: Request, user: User = Depend
     # SSRF 防护：检查 URL 安全性
     _check_url_safety(payload.uri)
 
-    # 检查磁盘空间
+    # 检查磁盘空间（最小阈值）
     disk_ok, disk_free = _check_disk_space()
     if not disk_ok:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"磁盘空间不足，剩余 {disk_free / 1024 / 1024 / 1024:.2f} GB"
-        )
-
-    # 检查文件大小（HTTP/HTTPS）
-    max_size = get_max_task_size()
-    file_size = await _check_url_size(payload.uri)
-    if file_size is not None and file_size > max_size:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"文件大小 {file_size / 1024 / 1024 / 1024:.2f} GB 超过系统限制 {max_size / 1024 / 1024 / 1024:.2f} GB"
-        )
-
-    # 检查用户可用空间（考虑配额和机器空间限制）
-    user_available = _get_user_available_space(user)
-    if file_size is not None and file_size > user_available:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"文件大小 {file_size / 1024 / 1024 / 1024:.2f} GB 超过您的可用空间 {user_available / 1024 / 1024 / 1024:.2f} GB"
         )
 
     # 强制设置用户专属下载目录（隔离）- 下载到 .incomplete 目录
@@ -413,9 +345,10 @@ async def create_torrent_task(
     会进行以下检查:
     1. 频率限制：每用户每分钟最多 10 次
     2. Base64 大小限制（约 10MB，即 base64 长度约 14MB）
-    3. 磁盘剩余空间是否足够
-    4. 用户可用空间是否足够（考虑配额和机器空间限制）
-    5. 强制设置下载目录到用户专属目录（隔离）
+    3. 磁盘剩余空间是否低于最小阈值
+    4. 强制设置下载目录到用户专属目录（隔离）
+
+    注：任务大小和用户配额检查在 aria2 hook 中统一处理
     """
     # 频率限制：每用户每分钟最多 10 次
     if not api_limiter.is_allowed(user.id, "create_torrent", limit=10, window_seconds=60):
@@ -432,20 +365,12 @@ async def create_torrent_task(
             detail="种子文件过大，最大支持 10MB"
         )
 
-    # 检查磁盘空间
+    # 检查磁盘空间（最小阈值）
     disk_ok, disk_free = _check_disk_space()
     if not disk_ok:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"磁盘空间不足，剩余 {disk_free / 1024 / 1024 / 1024:.2f} GB"
-        )
-
-    # 检查用户可用空间
-    user_available = _get_user_available_space(user)
-    if user_available <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="您的可用空间已用尽"
         )
 
     # 强制设置用户专属下载目录（隔离）- 下载到 .incomplete 目录
@@ -795,6 +720,8 @@ async def retry_task(
     On failure:
     - Old task remains unchanged
     - Returns error details
+
+    注：任务大小和用户配额检查在 aria2 hook 中统一处理
     """
     # 1. Fetch and validate task
     task = await _resolve_task(task_id, user.id)
@@ -811,29 +738,12 @@ async def retry_task(
     # 3. Reuse create_task logic for validation and task creation
     original_uri = task.uri
 
-    # Check disk space
+    # Check disk space (minimum threshold)
     disk_ok, disk_free = _check_disk_space()
     if not disk_ok:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"磁盘空间不足，剩余 {disk_free / 1024 / 1024 / 1024:.2f} GB"
-        )
-
-    # Check file size (HTTP/HTTPS)
-    max_size = get_max_task_size()
-    file_size = await _check_url_size(original_uri)
-    if file_size is not None and file_size > max_size:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"文件大小 {file_size / 1024 / 1024 / 1024:.2f} GB 超过系统限制 {max_size / 1024 / 1024 / 1024:.2f} GB"
-        )
-
-    # Check user quota
-    user_available = _get_user_available_space(user)
-    if file_size is not None and file_size > user_available:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"文件大小 {file_size / 1024 / 1024 / 1024:.2f} GB 超过您的可用空间 {user_available / 1024 / 1024 / 1024:.2f} GB"
         )
 
     # 4. Create new task record

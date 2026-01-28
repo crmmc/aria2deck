@@ -66,6 +66,9 @@ export type SystemConfig = {
   pack_format: "zip" | "7z";
   pack_compression_level: number;
   pack_extra_args: string;
+  ws_reconnect_max_delay: number;
+  ws_reconnect_jitter: number;
+  ws_reconnect_factor: number;
 };
 
 export type FileInfo = {
