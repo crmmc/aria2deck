@@ -309,7 +309,7 @@ export default function UsersPage() {
           onClick={() => setEditingUser(null)}
         >
           <div
-            className="card max-w-400 m-4 animate-in bg-white"
+            className="modal-content max-w-400 animate-in"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="mb-5">编辑用户</h3>
@@ -419,7 +419,7 @@ export default function UsersPage() {
           onClick={() => setDeletingUser(null)}
         >
           <div
-            className="card max-w-400 m-4 animate-in bg-white"
+            className="modal-content max-w-400 animate-in"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="mb-4">删除用户</h3>
