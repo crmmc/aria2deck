@@ -221,10 +221,23 @@ jobs:
       contents: write
 
     steps:
-      - name: Download all artifacts
+      - name: Download docker-image-amd64
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          name: docker-image-amd64
+          path: artifacts/docker-image-amd64
+
+      - name: Download docker-image-arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-arm64
+          path: artifacts/docker-image-arm64
+
+      - name: Download standalone-package
+        uses: actions/download-artifact@v4
+        with:
+          name: standalone-package
+          path: artifacts/standalone-package
 
       - name: Prepare release files
         run: |
