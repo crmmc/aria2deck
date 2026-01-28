@@ -117,12 +117,12 @@ async def handle_aria2_event(
         _cancel_and_delete_task,
         _move_completed_files,
         broadcast_update,
+        get_user_available_space,
     )
     from app.core.state import get_aria2_client
     from app.database import get_session
     from app.models import Task, User
     from app.routers.config import get_max_task_size
-    from app.routers.hooks import _get_user_available_space
 
     def utc_now() -> str:
         from datetime import datetime, timezone
@@ -191,7 +191,7 @@ async def handle_aria2_event(
                 return
 
             # 4.2 检查用户可用空间
-            user_available = _get_user_available_space(user)
+            user_available = get_user_available_space(user)
             if total_length > user_available:
                 logger.warning(
                     f"[WS] 任务 {task.id} 大小 {total_length / 1024**3:.2f} GB "

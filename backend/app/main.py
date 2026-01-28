@@ -20,7 +20,7 @@ from app.database import (
     check_database_integrity,
     check_wal_integrity,
 )
-from app.routers import aria2_rpc, auth, config, files, hooks, stats, tasks, users, ws
+from app.routers import aria2_rpc, auth, config, files, stats, tasks, users, ws
 
 
 @asynccontextmanager
@@ -93,7 +93,6 @@ def create_app() -> FastAPI:
     app.include_router(files.router)
     app.include_router(stats.router)
     app.include_router(config.router)
-    app.include_router(hooks.router)
     app.include_router(ws.router)
     app.include_router(aria2_rpc.router)
 
