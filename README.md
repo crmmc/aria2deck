@@ -245,25 +245,7 @@ bash backend/aria2/start.sh
 
 ### 事件通知机制
 
-本项目通过 **WebSocket 监听 aria2 事件**实现毫秒级响应，无需配置 hook 脚本。
-
-如需使用 hook 脚本（可选，用于特殊场景或兼容老版本 aria2）：
-
-```bash
-aria2c --enable-rpc --rpc-listen-all --rpc-allow-origin-all \
-       --rpc-secret=YOUR_SECRET \
-       --on-download-start=backend/scripts/aria2_hook.sh \
-       --on-download-pause=backend/scripts/aria2_hook.sh \
-       --on-download-stop=backend/scripts/aria2_hook.sh \
-       --on-download-complete=backend/scripts/aria2_hook.sh \
-       --on-download-error=backend/scripts/aria2_hook.sh \
-       --on-bt-download-complete=backend/scripts/aria2_hook.sh
-```
-
-回调脚本环境变量：
-
-- `ARIA2_HOOK_URL`：后端回调接口地址，默认 `http://localhost:8000/api/hooks/aria2`
-- `ARIA2_HOOK_SECRET`：Hook 认证密钥（需与后端 `ARIA2C_HOOK_SECRET` 一致）
+本项目通过 **WebSocket 监听 aria2 事件**实现毫秒级响应，无需额外配置。
 
 ## 初始用户创建
 
@@ -294,7 +276,6 @@ aria2c --enable-rpc --rpc-listen-all --rpc-allow-origin-all \
 | `ARIA2C_ARIA2_RPC_URL` | `http://localhost:6800/jsonrpc` | aria2 RPC 地址 |
 | `ARIA2C_ARIA2_RPC_SECRET` | - | aria2 RPC 密钥 |
 | `ARIA2C_ARIA2_POLL_INTERVAL` | `2.0` | aria2 状态轮询间隔（秒） |
-| `ARIA2C_HOOK_SECRET` | - | Hook 回调认证密钥 |
 | `ARIA2C_ADMIN_PASSWORD` | `123456` | 初始管理员密码 |
 
 ---
@@ -370,9 +351,3 @@ aria2c --enable-rpc --rpc-listen-all --rpc-allow-origin-all \
 | PUT | `/api/config` | 修改配置（aria2 RPC、任务限制、隐藏后缀列表等） |
 | GET | `/api/config/aria2/version` | 获取当前连接的 aria2 版本信息 |
 | POST | `/api/config/aria2/test` | 测试 aria2 连接 |
-
-### Aria2 回调
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/hooks/aria2` | Aria2 回调入口（内部调用） |

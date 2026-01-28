@@ -15,11 +15,47 @@ from app.core.config import settings
 from app.core.security import sanitize_string
 from app.core.state import AppState, WS_THROTTLE_INTERVAL
 from app.database import get_session
-from app.models import Task
+from app.models import Task, User
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def get_user_available_space(user: User) -> int:
+    """获取用户实际可用空间（考虑配额和机器空间限制）
+
+    Args:
+        user: 用户对象
+
+    Returns:
+        用户可用空间（字节）
+    """
+    # 计算用户已使用的空间
+    user_dir = Path(settings.download_dir) / str(user.id)
+    used_space = 0
+    if user_dir.exists():
+        for file_path in user_dir.rglob("*"):
+            if file_path.is_file():
+                try:
+                    used_space += file_path.stat().st_size
+                except Exception:
+                    pass
+
+    # 用户配额
+    user_quota = user.quota if user.quota else 100 * 1024 * 1024 * 1024  # 默认 100GB
+
+    # 获取机器实际剩余空间
+    download_path = Path(settings.download_dir)
+    download_path.mkdir(parents=True, exist_ok=True)
+    disk = shutil.disk_usage(download_path)
+    machine_free = disk.free
+
+    # 用户理论可用空间（基于配额）
+    user_free_by_quota = max(0, user_quota - used_space)
+
+    # 实际可用空间 = min(用户配额剩余, 机器剩余空间)
+    return min(user_free_by_quota, machine_free)
 
 
 def delete_path_with_aria2(target: Path) -> bool:
@@ -284,9 +320,7 @@ async def sync_tasks(
     """
     import logging
     from app.core.state import get_aria2_client
-    from app.models import User
     from app.routers.config import get_max_task_size
-    from app.routers.hooks import _get_user_available_space
 
     logger = logging.getLogger(__name__)
 
@@ -346,7 +380,7 @@ async def sync_tasks(
                     user = result.first()
 
                 if user:
-                    user_available = _get_user_available_space(user)
+                    user_available = get_user_available_space(user)
                     if total_length > user_available:
                         logger.warning(
                             f"[Sync] 任务 {task.id} 大小 {total_length / 1024**3:.2f} GB "
