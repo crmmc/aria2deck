@@ -53,6 +53,7 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
             username=payload.username,
             password_hash=hash_password(payload.password),
             is_admin=payload.is_admin,
+            is_initial_password=True,  # 新用户需要自行修改密码
             quota=quota,
             created_at=utc_now()
         )
@@ -185,6 +186,7 @@ async def update_user(user_id: int, payload: UserUpdate, admin: User = Depends(r
 
         if payload.password is not None:
             user.password_hash = hash_password(payload.password)
+            user.is_initial_password = True  # 管理员重置密码后，用户需要自行修改
             # 密码修改后使该用户的所有 session 失效
             await clear_user_sessions(user_id)
 

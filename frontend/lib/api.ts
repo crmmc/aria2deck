@@ -13,6 +13,7 @@ import type {
   PackAvailableSpace,
   RpcAccessStatus,
 } from "@/types";
+import { hashPassword } from "./crypto";
 
 function getApiBase(): string {
   if (process.env.NEXT_PUBLIC_API_BASE) {
@@ -61,19 +62,31 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  login: (username: string, password: string) =>
-    request<User>("/api/auth/login", {
+  login: async (username: string, password: string) => {
+    const clientHash = await hashPassword(password, username);
+    return request<User>("/api/auth/login", {
       method: "POST",
-      body: JSON.stringify({ username, password }),
-    }),
+      body: JSON.stringify({ username, password: clientHash }),
+    });
+  },
   logout: () =>
     request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   me: () => request<User>("/api/auth/me"),
-  changePassword: (oldPassword: string, newPassword: string) =>
-    request<{ ok: boolean; message: string }>("/api/auth/change-password", {
+  changePassword: async (oldPassword: string, newPassword: string, username: string) => {
+    const oldHash = await hashPassword(oldPassword, username);
+    const newHash = await hashPassword(newPassword, username);
+    return request<{ ok: boolean; message: string }>("/api/auth/change-password", {
       method: "POST",
-      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
-    }),
+      body: JSON.stringify({ old_password: oldHash, new_password: newHash }),
+    });
+  },
+  resetPassword: async (username: string, newPassword: string) => {
+    const newHash = await hashPassword(newPassword, username);
+    return request<{ ok: boolean; message: string }>("/api/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ username, new_password: newHash }),
+    });
+  },
 
   // Tasks
   listTasks: () => request<Task[]>("/api/tasks"),
@@ -159,16 +172,25 @@ export const api = {
   // Users (Admin)
   listUsers: () => request<User[]>("/api/users"),
   getUser: (id: number) => request<User>(`/api/users/${id}`),
-  createUser: (data: UserCreate) =>
-    request<User>("/api/users", {
+  createUser: async (data: UserCreate) => {
+    const clientHash = await hashPassword(data.password, data.username);
+    return request<User>("/api/users", {
       method: "POST",
-      body: JSON.stringify(data),
-    }),
-  updateUser: (id: number, data: UserUpdate) =>
-    request<User>(`/api/users/${id}`, {
+      body: JSON.stringify({ ...data, password: clientHash }),
+    });
+  },
+  updateUser: async (id: number, data: UserUpdate, username: string) => {
+    const payload = { ...data };
+    if (data.password) {
+      // 使用目标用户的用户名（可能已修改）
+      const targetUsername = data.username || username;
+      payload.password = await hashPassword(data.password, targetUsername);
+    }
+    return request<User>(`/api/users/${id}`, {
       method: "PUT",
-      body: JSON.stringify(data),
-    }),
+      body: JSON.stringify(payload),
+    });
+  },
   deleteUser: (id: number, deleteFiles: boolean = false) =>
     request<{ ok: boolean }>(`/api/users/${id}?delete_files=${deleteFiles}`, { method: "DELETE" }),
 
