@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.core.rate_limit import api_limiter
 from app.database import get_session
 from app.models import User, PackTask
+from app.aria2.sync import delete_path_with_aria2
 
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -408,17 +409,11 @@ async def delete_file(path: str, user: User = Depends(require_user)) -> dict:
                             status_code=status.HTTP_403_FORBIDDEN,
                             detail="目录包含指向外部的符号链接，无法删除"
                         )
-            shutil.rmtree(target)
+            # 使用共享函数删除目录和 .aria2 文件
+            delete_path_with_aria2(target)
         else:
-            target.unlink()
-
-            # 检查并删除对应的 .aria2 控制文件（静默）
-            aria2_file = target.parent / f"{target.name}.aria2"
-            if aria2_file.exists() and aria2_file.is_file():
-                try:
-                    aria2_file.unlink()
-                except Exception:
-                    pass  # 静默失败，不影响主文件删除
+            # 使用共享函数删除文件和 .aria2 文件
+            delete_path_with_aria2(target)
 
         # 清除目录大小缓存，确保 quota 立即更新
         _invalidate_dir_size_cache(user_dir)

@@ -29,8 +29,7 @@ class TestRetryTaskSuccess:
     ):
         """Retry a failed HTTP task should create new task and delete old one."""
         with patch("app.routers.tasks.get_aria2_client", return_value=mock_aria2_client):
-            with patch("app.routers.tasks._check_url_size", return_value=None):
-                response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
+            response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
 
         assert response.status_code == 200
         data = response.json()
@@ -58,8 +57,7 @@ class TestRetryTaskSuccess:
         original_uri = failed_task["uri"]
 
         with patch("app.routers.tasks.get_aria2_client", return_value=mock_aria2_client):
-            with patch("app.routers.tasks._check_url_size", return_value=None):
-                response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
+            response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
 
         assert response.status_code == 200
         data = response.json()
@@ -73,8 +71,7 @@ class TestRetryTaskSuccess:
     ):
         """Retry should attempt to clean up the old task from aria2."""
         with patch("app.routers.tasks.get_aria2_client", return_value=mock_aria2_client):
-            with patch("app.routers.tasks._check_url_size", return_value=None):
-                response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
+            response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
 
         assert response.status_code == 200
 
@@ -196,8 +193,7 @@ class TestRetryTaskAria2Failure:
         mock_aria2_client.add_uri.side_effect = Exception("aria2 connection failed")
 
         with patch("app.routers.tasks.get_aria2_client", return_value=mock_aria2_client):
-            with patch("app.routers.tasks._check_url_size", return_value=None):
-                response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
+            response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
 
         assert response.status_code == 500
         data = response.json()
@@ -223,8 +219,7 @@ class TestRetryTaskAria2Failure:
         count_before = len(tasks_before)
 
         with patch("app.routers.tasks.get_aria2_client", return_value=mock_aria2_client):
-            with patch("app.routers.tasks._check_url_size", return_value=None):
-                response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
+            response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
 
         assert response.status_code == 500
 
@@ -235,7 +230,7 @@ class TestRetryTaskAria2Failure:
 
 
 class TestRetryTaskDiskSpaceCheck:
-    """Test disk space and quota validation during retry."""
+    """Test disk space validation during retry."""
 
     def test_retry_fails_when_disk_full(
         self,
@@ -251,40 +246,8 @@ class TestRetryTaskDiskSpaceCheck:
         assert "detail" in data
         assert "磁盘" in data["detail"] or "disk" in data["detail"].lower()
 
-    def test_retry_fails_when_file_exceeds_max_size(
-        self,
-        authenticated_client: TestClient,
-        failed_task: dict,
-        mock_aria2_client: AsyncMock,
-    ):
-        """Retry should fail if file exceeds max task size."""
-        # File size is 20GB, but max is typically 10GB
-        with patch("app.routers.tasks._check_disk_space", return_value=(True, 100 * 1024 * 1024 * 1024)):
-            with patch("app.routers.tasks._check_url_size", return_value=20 * 1024 * 1024 * 1024):
-                with patch("app.routers.tasks.get_max_task_size", return_value=10 * 1024 * 1024 * 1024):
-                    response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
-
-        assert response.status_code == 403
-        data = response.json()
-        assert "detail" in data
-
-    def test_retry_fails_when_user_quota_exceeded(
-        self,
-        authenticated_client: TestClient,
-        failed_task: dict,
-        mock_aria2_client: AsyncMock,
-    ):
-        """Retry should fail if file exceeds user's available quota."""
-        # File is larger than user's available space
-        with patch("app.routers.tasks._check_disk_space", return_value=(True, 100 * 1024 * 1024 * 1024)):
-            with patch("app.routers.tasks._check_url_size", return_value=50 * 1024 * 1024 * 1024):
-                with patch("app.routers.tasks.get_max_task_size", return_value=100 * 1024 * 1024 * 1024):
-                    with patch("app.routers.tasks._get_user_available_space", return_value=10 * 1024 * 1024 * 1024):
-                        response = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
-
-        assert response.status_code == 403
-        data = response.json()
-        assert "detail" in data
+    # Note: File size and user quota checks are now handled in aria2 hook,
+    # not during task creation. See test_hook_space_check.py for those tests.
 
 
 class TestRetryTaskIdempotency:
@@ -299,15 +262,13 @@ class TestRetryTaskIdempotency:
         """After successful retry, old task ID should no longer exist."""
         # First retry
         with patch("app.routers.tasks.get_aria2_client", return_value=mock_aria2_client):
-            with patch("app.routers.tasks._check_url_size", return_value=None):
-                response1 = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
+            response1 = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
 
         assert response1.status_code == 200
 
         # Second retry with same ID should fail (task no longer exists)
         with patch("app.routers.tasks.get_aria2_client", return_value=mock_aria2_client):
-            with patch("app.routers.tasks._check_url_size", return_value=None):
-                response2 = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
+            response2 = authenticated_client.post(f"/api/tasks/{failed_task['id']}/retry")
 
         assert response2.status_code == 404
 
@@ -330,8 +291,7 @@ class TestRetryTaskIdempotency:
         )
 
         with patch("app.routers.tasks.get_aria2_client", return_value=mock_aria2_client):
-            with patch("app.routers.tasks._check_url_size", return_value=None):
-                response = authenticated_client.post(f"/api/tasks/{task_id}/retry")
+            response = authenticated_client.post(f"/api/tasks/{task_id}/retry")
 
         assert response.status_code == 200
 

@@ -22,6 +22,10 @@ export default function SettingsPage() {
   const [packFormat, setPackFormat] = useState<"zip" | "7z">("zip");
   const [packCompressionLevel, setPackCompressionLevel] = useState(5);
   const [packExtraArgs, setPackExtraArgs] = useState("");
+  // WebSocket 重连配置
+  const [wsReconnectMaxDelay, setWsReconnectMaxDelay] = useState(60);
+  const [wsReconnectJitter, setWsReconnectJitter] = useState(0.2);
+  const [wsReconnectFactor, setWsReconnectFactor] = useState(2);
   const [aria2Status, setAria2Status] = useState<{
     connected: boolean;
     version?: string;
@@ -71,6 +75,9 @@ export default function SettingsPage() {
       setPackFormat(cfg.pack_format || "zip");
       setPackCompressionLevel(cfg.pack_compression_level || 5);
       setPackExtraArgs(cfg.pack_extra_args || "");
+      setWsReconnectMaxDelay(cfg.ws_reconnect_max_delay || 60);
+      setWsReconnectJitter(cfg.ws_reconnect_jitter || 0.2);
+      setWsReconnectFactor(cfg.ws_reconnect_factor || 2);
       setMachineStats(stats);
       setAria2Status(aria2Ver);
       setTestResult(null);
@@ -98,6 +105,9 @@ export default function SettingsPage() {
         pack_format: packFormat,
         pack_compression_level: packCompressionLevel,
         pack_extra_args: packExtraArgs,
+        ws_reconnect_max_delay: wsReconnectMaxDelay,
+        ws_reconnect_jitter: wsReconnectJitter,
+        ws_reconnect_factor: wsReconnectFactor,
       });
 
       await loadConfig();
@@ -414,6 +424,51 @@ export default function SettingsPage() {
                 value={packExtraArgs}
                 onChange={(e) => setPackExtraArgs(e.target.value)}
                 placeholder="-mmt=2"
+              />
+            </div>
+
+            <h2 className="section-title mt-7">WebSocket 重连设置</h2>
+            <p className="muted text-sm mb-4">配置后端与 aria2 WebSocket 连接断开后的重连策略。</p>
+
+            <div className="mb-6">
+              <label className="form-label-lg">最大重连延迟: {wsReconnectMaxDelay} 秒</label>
+              <p className="muted text-sm mb-3">指数退避的最大等待时间（1-300 秒）</p>
+              <input
+                type="range"
+                min="1"
+                max="300"
+                value={wsReconnectMaxDelay}
+                onChange={(e) => setWsReconnectMaxDelay(parseInt(e.target.value))}
+                className="w-full"
+                style={{ maxWidth: 300 }}
+              />
+            </div>
+
+            <div className="mb-6">
+              <label className="form-label-lg">抖动系数: {(wsReconnectJitter * 100).toFixed(0)}%</label>
+              <p className="muted text-sm mb-3">重连延迟的随机波动范围（0-100%）</p>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={wsReconnectJitter * 100}
+                onChange={(e) => setWsReconnectJitter(parseInt(e.target.value) / 100)}
+                className="w-full"
+                style={{ maxWidth: 300 }}
+              />
+            </div>
+
+            <div className="mb-7">
+              <label className="form-label-lg">指数因子: {wsReconnectFactor.toFixed(1)}</label>
+              <p className="muted text-sm mb-3">每次重连延迟的倍增系数（1.1-10）</p>
+              <input
+                type="range"
+                min="11"
+                max="100"
+                value={wsReconnectFactor * 10}
+                onChange={(e) => setWsReconnectFactor(parseInt(e.target.value) / 10)}
+                className="w-full"
+                style={{ maxWidth: 300 }}
               />
             </div>
 

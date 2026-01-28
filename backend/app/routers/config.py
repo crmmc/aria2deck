@@ -35,6 +35,10 @@ class ConfigUpdate(BaseModel):
     pack_format: str | None = None  # 打包格式 (zip 或 7z)
     pack_compression_level: int | None = None  # 压缩等级 (1-9)
     pack_extra_args: str | None = None  # 7za 附加参数
+    # WebSocket 重连参数
+    ws_reconnect_max_delay: float | None = None  # 最大重连延迟（秒）
+    ws_reconnect_jitter: float | None = None  # 抖动系数 (0-1)
+    ws_reconnect_factor: float | None = None  # 指数因子
 
 
 class Aria2TestRequest(BaseModel):
@@ -160,6 +164,35 @@ def get_pack_extra_args() -> str:
     return val if val else ""
 
 
+def get_ws_reconnect_max_delay() -> float:
+    """获取 WebSocket 最大重连延迟（秒），默认 60"""
+    val = get_config_value("ws_reconnect_max_delay")
+    try:
+        return float(val) if val else 60.0
+    except ValueError:
+        return 60.0
+
+
+def get_ws_reconnect_jitter() -> float:
+    """获取 WebSocket 重连抖动系数 (0-1)，默认 0.2"""
+    val = get_config_value("ws_reconnect_jitter")
+    try:
+        jitter = float(val) if val else 0.2
+        return max(0.0, min(1.0, jitter))
+    except ValueError:
+        return 0.2
+
+
+def get_ws_reconnect_factor() -> float:
+    """获取 WebSocket 重连指数因子，默认 2.0"""
+    val = get_config_value("ws_reconnect_factor")
+    try:
+        factor = float(val) if val else 2.0
+        return max(1.1, min(10.0, factor))  # 限制范围 1.1-10
+    except ValueError:
+        return 2.0
+
+
 @router.get("")
 async def get_config(admin: User = Depends(require_admin)) -> dict:
     """获取系统配置（管理员）
@@ -188,6 +221,9 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
         "pack_format": get_pack_format(),
         "pack_compression_level": get_pack_compression_level(),
         "pack_extra_args": get_pack_extra_args(),
+        "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
+        "ws_reconnect_jitter": get_ws_reconnect_jitter(),
+        "ws_reconnect_factor": get_ws_reconnect_factor(),
     }
 
 
@@ -232,6 +268,16 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         await set_config_value_async("pack_compression_level", str(level))
     if payload.pack_extra_args is not None:
         await set_config_value_async("pack_extra_args", payload.pack_extra_args)
+    # WebSocket 重连参数
+    if payload.ws_reconnect_max_delay is not None:
+        delay = max(1.0, min(300.0, payload.ws_reconnect_max_delay))  # 1-300秒
+        await set_config_value_async("ws_reconnect_max_delay", str(delay))
+    if payload.ws_reconnect_jitter is not None:
+        jitter = max(0.0, min(1.0, payload.ws_reconnect_jitter))  # 0-1
+        await set_config_value_async("ws_reconnect_jitter", str(jitter))
+    if payload.ws_reconnect_factor is not None:
+        factor = max(1.1, min(10.0, payload.ws_reconnect_factor))  # 1.1-10
+        await set_config_value_async("ws_reconnect_factor", str(factor))
 
     # 返回更新后的配置（secret 脱敏）
     aria2_rpc_url = await get_config_value_async("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
@@ -249,6 +295,9 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         "pack_format": get_pack_format(),
         "pack_compression_level": get_pack_compression_level(),
         "pack_extra_args": get_pack_extra_args(),
+        "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
+        "ws_reconnect_jitter": get_ws_reconnect_jitter(),
+        "ws_reconnect_factor": get_ws_reconnect_factor(),
     }
 
 

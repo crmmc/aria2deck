@@ -415,6 +415,12 @@ export default function TasksPage() {
             next[idx] = newTask;
             return next;
           });
+        } else if (payload.type === "notification") {
+          // 服务端推送的通知（如任务因空间不足被取消）
+          const level = payload.level === "error" ? "error"
+                      : payload.level === "warning" ? "warning"
+                      : "info";
+          showToast(payload.message, level);
         }
       };
 
@@ -1121,7 +1127,7 @@ export default function TasksPage() {
           onClick={() => setShowBatchAddModal(false)}
         >
           <div
-            className="card batch-modal-content"
+            className="batch-modal-content"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="modal-header">
@@ -1179,7 +1185,7 @@ export default function TasksPage() {
           }}
         >
           <div
-            className="card delete-modal-content"
+            className="delete-modal-content"
             onClick={(e) => e.stopPropagation()}
           >
               <div className="mb-4">
