@@ -6,3 +6,4 @@ sqlmodel>=0.0.31
 aiosqlite>=0.22.0
 alembic>=1.15.0
 greenlet>=3.0.0
+itsdangerous>=2.1.0

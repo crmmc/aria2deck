@@ -36,6 +36,7 @@ export default function FilesPage() {
   const [packingMulti, setPackingMulti] = useState(false);
   const [multiPackSize, setMultiPackSize] = useState(0);
   const [multiPackPaths, setMultiPackPaths] = useState<string[]>([]);
+  const [downloadingFile, setDownloadingFile] = useState<string | null>(null);
 
   const loadFiles = useCallback(async (path?: string) => {
     setLoading(true);
@@ -227,6 +228,25 @@ export default function FilesPage() {
     loadQuota();
   }, [currentPath, loadFiles]);
 
+  const handleDownload = async (file: FileInfo) => {
+    setDownloadingFile(file.path);
+    try {
+      const { token } = await api.getDownloadToken(file.path);
+      const url = api.downloadFileUrl(token);
+      // 创建临时链接并触发下载
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (err) {
+      showToast(`获取下载链接失败: ${(err as Error).message}`, "error");
+    } finally {
+      setDownloadingFile(null);
+    }
+  };
+
   return (
     <AuthLayout>
       <div className="glass-frame full-height animate-in">
@@ -414,13 +434,13 @@ export default function FilesPage() {
                             {calculatingSize ? "计算中..." : "打包下载"}
                           </button>
                         ) : (
-                          <a
+                          <button
                             className="button secondary btn-sm"
-                            href={api.downloadFile(file.path)}
-                            download
+                            onClick={() => handleDownload(file)}
+                            disabled={downloadingFile === file.path}
                           >
-                            下载
-                          </a>
+                            {downloadingFile === file.path ? "获取中..." : "下载"}
+                          </button>
                         )}
                         <button
                           className="button secondary btn-sm"

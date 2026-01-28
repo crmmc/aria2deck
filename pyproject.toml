@@ -12,6 +12,7 @@ dependencies = [
     "sqlmodel>=0.0.31",
     "aiosqlite>=0.22.1",
     "greenlet>=3.3.1",
+    "itsdangerous>=2.2.0",
 ]
 
 [dependency-groups]

@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     aria2_rpc_secret: str = ""
     aria2_poll_interval: float = 2.0
     download_dir: str = str(BASE_DIR / "downloads")
+    secret_key: str = "aria2deck-default-secret-key-change-in-production"
 
     class Config:
         env_prefix = "ARIA2C_"

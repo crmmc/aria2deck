@@ -26,6 +26,8 @@ export default function SettingsPage() {
   const [wsReconnectMaxDelay, setWsReconnectMaxDelay] = useState(60);
   const [wsReconnectJitter, setWsReconnectJitter] = useState(0.2);
   const [wsReconnectFactor, setWsReconnectFactor] = useState(2);
+  // 下载链接 Token 有效期
+  const [downloadTokenExpiry, setDownloadTokenExpiry] = useState(7200);
   const [aria2Status, setAria2Status] = useState<{
     connected: boolean;
     version?: string;
@@ -79,6 +81,7 @@ export default function SettingsPage() {
       setWsReconnectMaxDelay(cfg.ws_reconnect_max_delay || 60);
       setWsReconnectJitter(cfg.ws_reconnect_jitter || 0.2);
       setWsReconnectFactor(cfg.ws_reconnect_factor || 2);
+      setDownloadTokenExpiry(cfg.download_token_expiry || 7200);
       setMachineStats(stats);
       setAria2Status(aria2Ver);
       setTestResult(null);
@@ -110,6 +113,7 @@ export default function SettingsPage() {
         ws_reconnect_max_delay: wsReconnectMaxDelay,
         ws_reconnect_jitter: wsReconnectJitter,
         ws_reconnect_factor: wsReconnectFactor,
+        download_token_expiry: downloadTokenExpiry,
       });
 
       await loadConfig();
@@ -471,6 +475,40 @@ export default function SettingsPage() {
                 className="w-full"
                 style={{ maxWidth: 300 }}
               />
+            </div>
+
+            <h2 className="section-title mt-7">下载链接设置</h2>
+
+            <div className="mb-7">
+              <label className="form-label-lg">下载链接有效期: {downloadTokenExpiry >= 3600 ? `${(downloadTokenExpiry / 3600).toFixed(1)} 小时` : `${Math.round(downloadTokenExpiry / 60)} 分钟`}</label>
+              <p className="muted text-sm mb-3">文件下载链接的有效时间（1 分钟 - 7 天），过期后需重新获取</p>
+              <input
+                type="range"
+                min="60"
+                max="604800"
+                step="60"
+                value={downloadTokenExpiry}
+                onChange={(e) => setDownloadTokenExpiry(parseInt(e.target.value))}
+                className="w-full"
+                style={{ maxWidth: 300 }}
+              />
+              <div className="flex gap-2 mt-2">
+                {[
+                  { label: "1小时", value: 3600 },
+                  { label: "2小时", value: 7200 },
+                  { label: "6小时", value: 21600 },
+                  { label: "24小时", value: 86400 },
+                ].map((preset) => (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    onClick={() => setDownloadTokenExpiry(preset.value)}
+                    className={`ext-btn ${downloadTokenExpiry === preset.value ? "ext-btn-active" : ""}`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="flex items-center gap-4">
