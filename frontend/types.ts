@@ -69,6 +69,7 @@ export type SystemConfig = {
   ws_reconnect_max_delay: number;
   ws_reconnect_jitter: number;
   ws_reconnect_factor: number;
+  download_token_expiry: number;
 };
 
 export type FileInfo = {

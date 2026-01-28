@@ -12,12 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import time
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
-from app.auth import require_user
+from app.auth import require_user, optional_user
 from app.core.config import settings
 from app.core.rate_limit import api_limiter
 from app.database import get_session
@@ -284,12 +284,84 @@ async def list_files(path: str = "", user: User = Depends(require_user)) -> File
 
 
 @router.get("/download")
-async def download_file(path: str, user: User = Depends(require_user)) -> FileResponse:
+async def download_file(
+    path: str = Query(default=None),
+    token: str = Query(default=None),
+    user: User | None = Depends(optional_user)
+) -> FileResponse:
     """下载文件
+
+    支持两种鉴权方式：
+    1. 用户登录态（Cookie）+ path 参数
+    2. 临时 Token（无需登录）
+
+    Args:
+        path: 文件的相对路径（使用登录态时必填）
+        token: 临时下载 Token（无需登录）
+    """
+    from app.routers.config import verify_download_token
+
+    # 优先使用 token 鉴权
+    if token:
+        data = verify_download_token(token)
+        if not data:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="下载链接已过期或无效"
+            )
+        user_id = data["user_id"]
+        file_path = data["path"]
+    elif user and path:
+        user_id = user.id
+        file_path = path
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="缺少文件路径或下载 Token"
+        )
+
+    # 禁止访问 .incomplete 目录
+    if file_path == ".incomplete" or file_path.startswith(".incomplete/"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权访问此文件"
+        )
+
+    user_dir = _get_user_dir(user_id)
+    target_file = _validate_path(user_dir, file_path)
+
+    if not target_file.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文件不存在"
+        )
+
+    if not target_file.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="路径不是文件"
+        )
+
+    return FileResponse(
+        path=str(target_file),
+        filename=target_file.name,
+        media_type="application/octet-stream"
+    )
+
+
+@router.post("/download-token")
+async def create_download_token(path: str, user: User = Depends(require_user)) -> dict:
+    """生成文件下载临时 Token
 
     Args:
         path: 文件的相对路径
+
+    Returns:
+        token: 临时下载 Token
+        expires_in: Token 有效期（秒）
     """
+    from app.routers.config import generate_download_token, get_download_token_expiry
+
     if not path:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -318,11 +390,11 @@ async def download_file(path: str, user: User = Depends(require_user)) -> FileRe
             detail="路径不是文件"
         )
 
-    return FileResponse(
-        path=str(target_file),
-        filename=target_file.name,
-        media_type="application/octet-stream"
-    )
+    token = generate_download_token(user.id, path)
+    return {
+        "token": token,
+        "expires_in": get_download_token_expiry()
+    }
 
 
 @router.delete("")

@@ -39,6 +39,8 @@ class ConfigUpdate(BaseModel):
     ws_reconnect_max_delay: float | None = None  # 最大重连延迟（秒）
     ws_reconnect_jitter: float | None = None  # 抖动系数 (0-1)
     ws_reconnect_factor: float | None = None  # 指数因子
+    # 下载链接 Token 有效期
+    download_token_expiry: int | None = None  # 下载链接 Token 有效期（秒）
 
 
 class Aria2TestRequest(BaseModel):
@@ -193,6 +195,36 @@ def get_ws_reconnect_factor() -> float:
         return 2.0
 
 
+def get_download_token_expiry() -> int:
+    """获取下载链接 Token 有效期（秒），默认 7200（2小时）"""
+    val = get_config_value("download_token_expiry")
+    try:
+        expiry = int(val) if val else 7200
+        return max(60, min(86400 * 7, expiry))  # 限制范围 1分钟-7天
+    except ValueError:
+        return 7200
+
+
+def generate_download_token(user_id: int, file_path: str) -> str:
+    """生成下载链接临时 Token"""
+    from itsdangerous import URLSafeTimedSerializer
+    from app.core.config import settings
+    serializer = URLSafeTimedSerializer(settings.secret_key)
+    return serializer.dumps({"user_id": user_id, "path": file_path})
+
+
+def verify_download_token(token: str) -> dict | None:
+    """验证下载链接 Token，返回 {user_id, path} 或 None"""
+    from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
+    from app.core.config import settings
+    serializer = URLSafeTimedSerializer(settings.secret_key)
+    try:
+        data = serializer.loads(token, max_age=get_download_token_expiry())
+        return data
+    except (SignatureExpired, BadSignature):
+        return None
+
+
 @router.get("")
 async def get_config(admin: User = Depends(require_admin)) -> dict:
     """获取系统配置（管理员）
@@ -224,6 +256,7 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
         "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),
         "ws_reconnect_factor": get_ws_reconnect_factor(),
+        "download_token_expiry": get_download_token_expiry(),
     }
 
 
@@ -278,6 +311,9 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
     if payload.ws_reconnect_factor is not None:
         factor = max(1.1, min(10.0, payload.ws_reconnect_factor))  # 1.1-10
         await set_config_value_async("ws_reconnect_factor", str(factor))
+    if payload.download_token_expiry is not None:
+        expiry = max(60, min(86400 * 7, payload.download_token_expiry))  # 1分钟-7天
+        await set_config_value_async("download_token_expiry", str(expiry))
 
     # 返回更新后的配置（secret 脱敏）
     aria2_rpc_url = await get_config_value_async("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
@@ -298,6 +334,7 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),
         "ws_reconnect_factor": get_ws_reconnect_factor(),
+        "download_token_expiry": get_download_token_expiry(),
     }
 
 

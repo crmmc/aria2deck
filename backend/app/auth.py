@@ -74,6 +74,12 @@ async def require_user(request: Request) -> User:
     return user
 
 
+async def optional_user(request: Request) -> User | None:
+    """可选的用户认证，不抛出异常"""
+    session_id = request.cookies.get(settings.session_cookie_name)
+    return await get_user_by_session(session_id)
+
+
 async def require_admin(user: User = Depends(require_user)) -> User:
     if not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin required")

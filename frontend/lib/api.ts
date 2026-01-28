@@ -199,6 +199,16 @@ export const api = {
     request<FileListResponse>(
       `/api/files${path ? `?path=${encodeURIComponent(path)}` : ""}`,
     ),
+  getDownloadToken: (path: string) =>
+    request<{ token: string; expires_in: number }>(
+      `/api/files/download-token?path=${encodeURIComponent(path)}`,
+      { method: "POST" }
+    ),
+  downloadFileUrl: (token: string) => {
+    const base = getApiBase();
+    return `${base}/api/files/download?token=${encodeURIComponent(token)}`;
+  },
+  // 保留旧方法用于向后兼容（需要登录态）
   downloadFile: (path: string) => {
     const base = getApiBase();
     return `${base}/api/files/download?path=${encodeURIComponent(path)}`;
