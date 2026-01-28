@@ -52,26 +52,22 @@ function getTaskDisplayName(task: Task): string {
 interface SortableTaskCardProps {
   task: Task;
   isSelected: boolean;
-  isRetrying: boolean;
   isOperating: boolean;
   onToggleSelection: (id: number) => void;
   onPause: (id: number) => void;
   onResume: (id: number) => void;
   onRemove: (id: number) => void;
-  onRetry: (task: Task) => void;
   onNavigate: (id: number) => void;
 }
 
 function SortableTaskCard({
   task,
   isSelected,
-  isRetrying,
   isOperating,
   onToggleSelection,
   onPause,
   onResume,
   onRemove,
-  onRetry,
   onNavigate,
 }: SortableTaskCardProps) {
   const {
@@ -152,11 +148,7 @@ function SortableTaskCard({
               className={`progress-bar ${
                 task.status === "active"
                   ? "progress-bar-active progress-bar-primary"
-                  : task.status === "error"
-                    ? "progress-bar-error"
-                    : task.status === "complete"
-                      ? "progress-bar-success"
-                      : "progress-bar-primary"
+                  : "progress-bar-primary"
               }`}
               style={{
                 width: `${task.total_length ? (task.completed_length / task.total_length) * 100 : 0}%`,
@@ -179,23 +171,11 @@ function SortableTaskCard({
                   ? "等待中"
                   : task.status === "paused"
                     ? "已暂停"
-                    : task.status === "complete"
-                      ? "已完成"
-                      : task.status === "error"
-                        ? "错误"
-                        : task.status}
+                    : task.status}
             </span>
-            {task.total_length > 0 && task.status !== "complete" && (
+            {task.total_length > 0 && (
               <span className="muted tabular-nums text-sm">
                 {((task.completed_length / task.total_length) * 100).toFixed(1)}%
-              </span>
-            )}
-            {task.status === "error" && task.error && (
-              <span
-                className="task-error-text"
-                title={task.error}
-              >
-                {task.error}
               </span>
             )}
           </div>
@@ -216,14 +196,6 @@ function SortableTaskCard({
                 disabled={isOperating}
               >
                 {isOperating ? "处理中..." : "继续"}
-              </button>
-            ) : task.status === "error" ? (
-              <button
-                className={`button secondary btn-task${isRetrying ? " opacity-60" : ""}`}
-                onClick={() => onRetry(task)}
-                disabled={isRetrying}
-              >
-                {isRetrying ? "重试中..." : "重试"}
               </button>
             ) : null}
 
@@ -284,7 +256,6 @@ export default function TasksPage() {
     isComplete: boolean;
   } | null>(null);
   const [deleteFiles, setDeleteFiles] = useState(false);
-  const [retryingTaskIds, setRetryingTaskIds] = useState<Set<number>>(new Set());
   const [mounted, setMounted] = useState(false);
   const torrentInputRef = useRef<HTMLInputElement>(null);
   // 加载状态
@@ -351,7 +322,13 @@ export default function TasksPage() {
   useEffect(() => {
     api
       .listTasks()
-      .then(setTasks)
+      .then((allTasks) => {
+        // 只显示活动任务（进行中、等待中、暂停）
+        const activeTasks = allTasks.filter(
+          (t) => t.status === "active" || t.status === "waiting" || t.status === "paused"
+        );
+        setTasks(activeTasks);
+      })
       .catch(() => null);
   }, []);
 
@@ -360,8 +337,12 @@ export default function TasksPage() {
     const pollInterval = setInterval(() => {
       api
         .listTasks()
-        .then((fetched) => {
-          setTasks((prev) => mergeTasks(prev, fetched));
+        .then((allTasks) => {
+          // 只显示活动任务
+          const activeTasks = allTasks.filter(
+            (t) => t.status === "active" || t.status === "waiting" || t.status === "paused"
+          );
+          setTasks((prev) => mergeTasks(prev, activeTasks));
           // 轮询成功后清理已删除集合，因为状态已同步
           deletedTaskIdsRef.current.clear();
         })
@@ -395,10 +376,12 @@ export default function TasksPage() {
             return;
           }
 
+          const newTask = payload.task;
+          const isActiveStatus = newTask.status === "active" || newTask.status === "waiting" || newTask.status === "paused";
+
           setTasks((prev) => {
             const idx = prev.findIndex((task) => task.id === taskId);
             const oldTask = idx !== -1 ? prev[idx] : null;
-            const newTask = payload.task;
 
             // 检测状态变化并发送通知
             if (oldTask) {
@@ -410,6 +393,17 @@ export default function TasksPage() {
               }
             }
 
+            // 如果任务变为终态（完成/错误/停止等），从列表移除
+            if (!isActiveStatus) {
+              if (idx !== -1) {
+                const next = [...prev];
+                next.splice(idx, 1);
+                return next;
+              }
+              return prev;
+            }
+
+            // 活动状态的任务，正常更新或添加
             if (idx === -1) return [newTask, ...prev];
             const next = [...prev];
             next[idx] = newTask;
@@ -666,98 +660,6 @@ export default function TasksPage() {
     }
   }
 
-  async function retryTask(task: Task) {
-    // 种子任务无法重试
-    if (task.uri === "[torrent]") {
-      showToast("种子任务无法直接重试，请重新上传种子文件", "warning");
-      return;
-    }
-
-    // 防止重复点击
-    if (retryingTaskIds.has(task.id)) {
-      return;
-    }
-
-    // 在调用 API 前就标记旧任务为已删除，防止 WebSocket 推送旧任务更新
-    deletedTaskIdsRef.current.add(task.id);
-    // 立即乐观移除旧任务
-    setTasks((prev) => prev.filter((t) => t.id !== task.id));
-    setRetryingTaskIds((prev) => new Set(prev).add(task.id));
-
-    try {
-      await api.retryTask(task.id);
-      // 强制刷新列表，确保状态一致
-      const tasks = await api.listTasks();
-      setTasks(tasks);
-      deletedTaskIdsRef.current.clear();
-    } catch (err) {
-      // 失败时从已删除集合中移除，允许后续重试
-      deletedTaskIdsRef.current.delete(task.id);
-      // 失败时恢复列表（通过刷新）
-      const tasks = await api.listTasks();
-      setTasks(tasks);
-      showToast("重试失败：" + (err as Error).message, "error");
-    } finally {
-      setRetryingTaskIds((prev) => {
-        const next = new Set(prev);
-        next.delete(task.id);
-        return next;
-      });
-    }
-  }
-
-  async function batchRetryTasks() {
-    if (selectedTasks.size === 0) return;
-
-    // 筛选出可重试的 error 任务（排除种子任务）
-    const errorTasks = tasks.filter(
-      (t) =>
-        selectedTasks.has(t.id) &&
-        t.status === "error" &&
-        t.uri !== "[torrent]",
-    );
-
-    if (errorTasks.length === 0) {
-      showToast("没有可重试的任务（种子任务需重新上传）", "warning");
-      return;
-    }
-
-    // 在调用 API 前就标记所有待重试任务为已删除，防止 WebSocket 推送旧任务更新
-    errorTasks.forEach((t) => deletedTaskIdsRef.current.add(t.id));
-    // 乐观移除旧任务
-    const retriedIds = errorTasks.map((t) => t.id);
-    setTasks((prev) => prev.filter((t) => !retriedIds.includes(t.id)));
-
-    let successCount = 0;
-    let failCount = 0;
-    const failedIds: number[] = [];
-
-    for (const task of errorTasks) {
-      try {
-        await api.retryTask(task.id);
-        successCount++;
-      } catch (err) {
-        failCount++;
-        failedIds.push(task.id);
-        console.error(`Failed to retry task ${task.id}:`, err);
-      }
-    }
-
-    // 失败的任务从已删除集合中移除
-    failedIds.forEach((id) => deletedTaskIdsRef.current.delete(id));
-
-    // 强制刷新列表，确保状态一致
-    const refreshedTasks = await api.listTasks();
-    setTasks(refreshedTasks);
-    deletedTaskIdsRef.current.clear();
-
-    if (failCount > 0) {
-      showToast(`重试完成：成功 ${successCount} 个，失败 ${failCount} 个`, "warning");
-    } else if (successCount > 0) {
-      showToast(`成功重试 ${successCount} 个任务`, "success");
-    }
-  }
-
   async function batchAddTasks() {
     const uris = batchUris
       .split("\n")
@@ -838,10 +740,8 @@ export default function TasksPage() {
       filtered = filtered.filter(
         (t) => t.status === "active" || t.status === "waiting",
       );
-    } else if (filterStatus === "complete") {
-      filtered = filtered.filter((t) => t.status === "complete");
-    } else if (filterStatus === "error") {
-      filtered = filtered.filter((t) => t.status === "error");
+    } else if (filterStatus === "paused") {
+      filtered = filtered.filter((t) => t.status === "paused");
     }
 
     // 排序
@@ -985,8 +885,7 @@ export default function TasksPage() {
             >
               <option value="all">全部</option>
               <option value="active">进行中</option>
-              <option value="complete">已完成</option>
-              <option value="error">错误</option>
+              <option value="paused">已暂停</option>
             </select>
           </div>
 
@@ -1033,14 +932,6 @@ export default function TasksPage() {
                   disabled={isBatchOperating}
                 >
                   继续
-                </button>
-                <button
-                  type="button"
-                  className={`button secondary btn-sm${isBatchOperating ? " opacity-60" : ""}`}
-                  onClick={batchRetryTasks}
-                  disabled={isBatchOperating}
-                >
-                  重试
                 </button>
                 <button
                   type="button"
@@ -1093,10 +984,10 @@ export default function TasksPage() {
                     </svg>
                   </div>
                   <p className="font-medium mb-1">
-                    暂无任务
+                    暂无活动任务
                   </p>
                   <p className="muted text-base">
-                    点击上方的 "+" 添加下载任务
+                    添加新任务开始下载，已完成的任务请前往历史页面查看
                   </p>
                 </div>
               )}
@@ -1106,13 +997,11 @@ export default function TasksPage() {
                   key={task.gid || task.id}
                   task={task}
                   isSelected={selectedTasks.has(task.id)}
-                  isRetrying={retryingTaskIds.has(task.id)}
                   isOperating={operatingTaskIds.has(task.id)}
                   onToggleSelection={toggleTaskSelection}
                   onPause={pauseTask}
                   onResume={resumeTask}
                   onRemove={removeTask}
-                  onRetry={retryTask}
                   onNavigate={(id) => router.push(`/tasks/detail?id=${id}`)}
                 />
               ))}
