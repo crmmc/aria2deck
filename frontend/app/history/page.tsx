@@ -174,7 +174,7 @@ export default function HistoryPage() {
         <div className="flex-between mb-7">
           <div>
             <h1 className="mb-2">任务历史</h1>
-            <p className="muted">查看已完成、错误或已停止的任务。</p>
+            <p className="muted">已完成、失败或已取消的任务归档</p>
           </div>
           {tasks.length > 0 && (
             <button

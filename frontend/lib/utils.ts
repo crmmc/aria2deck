@@ -6,10 +6,10 @@ export function bytesToGB(bytes: number): string {
 }
 
 /**
- * GB 转字节
+ * GB 转字节（返回整数）
  */
 export function gbToBytes(gb: number): number {
-  return gb * 1024 * 1024 * 1024;
+  return Math.round(gb * 1024 * 1024 * 1024);
 }
 
 /**

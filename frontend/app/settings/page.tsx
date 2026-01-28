@@ -59,6 +59,7 @@ export default function SettingsPage() {
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   async function loadConfig() {
     try {
@@ -90,6 +91,7 @@ export default function SettingsPage() {
     e.preventDefault();
     setSaving(true);
     setSaveSuccess(false);
+    setSaveError(null);
     try {
       const newMax = gbToBytes(parseFloat(maxTaskSize));
       const newMin = gbToBytes(parseFloat(minFreeDisk));
@@ -113,8 +115,9 @@ export default function SettingsPage() {
       await loadConfig();
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
-    } catch {
-      setError("保存配置失败");
+    } catch (err) {
+      const message = (err as Error).message || "保存配置失败";
+      setSaveError(message);
     } finally {
       setSaving(false);
     }
@@ -225,9 +228,8 @@ export default function SettingsPage() {
               <input
                 className="input"
                 type="number"
-                step="0.1"
-                min="0"
-                max="10240"
+                step="any"
+                min="0.1"
                 value={maxTaskSize}
                 onChange={(e) => setMaxTaskSize(e.target.value)}
               />
@@ -239,9 +241,8 @@ export default function SettingsPage() {
               <input
                 className="input"
                 type="number"
-                step="0.1"
-                min="0"
-                max="10240"
+                step="any"
+                min="0.1"
                 value={minFreeDisk}
                 onChange={(e) => setMinFreeDisk(e.target.value)}
               />
@@ -478,6 +479,9 @@ export default function SettingsPage() {
               </button>
               {saveSuccess && (
                 <span className="text-success text-base font-medium">✓ 配置已保存</span>
+              )}
+              {saveError && (
+                <span className="save-error-inline">{saveError}</span>
               )}
             </div>
           </form>
