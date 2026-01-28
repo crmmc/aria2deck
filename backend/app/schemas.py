@@ -31,6 +31,13 @@ class UserOut(BaseModel):
     is_admin: bool
     quota: int
     password_warning: str | None = None  # 密码安全警告
+    is_default_password: bool = False  # 是否使用默认密码
+
+
+class ChangePasswordRequest(BaseModel):
+    """修改密码请求"""
+    old_password: str = Field(min_length=1, max_length=100)
+    new_password: str = Field(min_length=6, max_length=100)
 
 
 class RpcAccessStatus(BaseModel):

@@ -9,13 +9,21 @@ import {
   type NotificationSettings,
 } from "@/lib/notification";
 import { useToast } from "@/components/Toast";
+import { useAuth } from "@/lib/AuthContext";
 import { RpcAccessStatus } from "@/types";
 import AuthLayout from "@/components/AuthLayout";
 
 export default function ProfilePage() {
   const { showToast, showConfirm } = useToast();
+  const { user, refreshUser } = useAuth();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // 修改密码表单
+  const [oldPassword, setOldPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordChanging, setPasswordChanging] = useState(false);
 
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>({
     enabled: false,
@@ -101,6 +109,42 @@ export default function ProfilePage() {
     return `${window.location.origin}/aria2/jsonrpc`;
   }
 
+  async function handleChangePassword(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+
+    if (newPassword !== confirmPassword) {
+      setError("两次输入的新密码不一致");
+      return;
+    }
+
+    if (newPassword.length < 6) {
+      setError("新密码长度至少为 6 位");
+      return;
+    }
+
+    setPasswordChanging(true);
+    try {
+      await api.changePassword(oldPassword, newPassword);
+      showToast("密码修改成功", "success");
+      setOldPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      // 刷新用户信息以更新 is_default_password 状态
+      await refreshUser();
+    } catch (err) {
+      const message = (err as Error).message;
+      try {
+        const parsed = JSON.parse(message);
+        setError(parsed.detail || "密码修改失败");
+      } catch {
+        setError(message || "密码修改失败");
+      }
+    } finally {
+      setPasswordChanging(false);
+    }
+  }
+
   async function handleNotificationToggle(enabled: boolean) {
     if (enabled) {
       const granted = await requestNotificationPermission();
@@ -133,6 +177,58 @@ export default function ProfilePage() {
         {error && (
           <div className="card text-danger mb-6">{error}</div>
         )}
+
+        <div className="card mb-6">
+          <h2 className="section-title">修改密码</h2>
+          {user?.is_default_password && (
+            <div className="alert alert-warning mb-4">
+              <span className="mr-2">⚠</span>
+              您正在使用默认密码，请尽快修改以确保账户安全
+            </div>
+          )}
+          <form onSubmit={handleChangePassword} className="max-w-400">
+            <div className="mb-4">
+              <label className="form-label">当前密码</label>
+              <input
+                type="password"
+                className="input"
+                value={oldPassword}
+                onChange={(e) => setOldPassword(e.target.value)}
+                required
+              />
+            </div>
+            <div className="mb-4">
+              <label className="form-label">新密码</label>
+              <input
+                type="password"
+                className="input"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                minLength={6}
+                required
+              />
+              <p className="muted text-sm mt-1">至少 6 位字符</p>
+            </div>
+            <div className="mb-6">
+              <label className="form-label">确认新密码</label>
+              <input
+                type="password"
+                className="input"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                minLength={6}
+                required
+              />
+            </div>
+            <button
+              type="submit"
+              className="button"
+              disabled={passwordChanging}
+            >
+              {passwordChanging ? "修改中..." : "修改密码"}
+            </button>
+          </form>
+        </div>
 
         <div className="card mb-6">
           <h2 className="section-title">浏览器通知</h2>

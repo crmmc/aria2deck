@@ -69,6 +69,11 @@ export const api = {
   logout: () =>
     request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   me: () => request<User>("/api/auth/me"),
+  changePassword: (oldPassword: string, newPassword: string) =>
+    request<{ ok: boolean; message: string }>("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    }),
 
   // Tasks
   listTasks: () => request<Task[]>("/api/tasks"),

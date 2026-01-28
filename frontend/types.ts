@@ -3,6 +3,7 @@ export type User = {
   username: string;
   is_admin: boolean;
   quota: number;
+  is_default_password?: boolean;
 };
 
 export type UserCreate = {
