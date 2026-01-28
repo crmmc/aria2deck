@@ -3,7 +3,8 @@ export type User = {
   username: string;
   is_admin: boolean;
   quota: number;
-  is_default_password?: boolean;
+  is_default_password?: boolean;  // deprecated
+  is_initial_password?: boolean;  // whether user needs to reset password
 };
 
 export type UserCreate = {

@@ -13,6 +13,7 @@ class User(SQLModel, table=True):
     created_at: str
     rpc_secret: Optional[str] = Field(default=None, max_length=64)
     rpc_secret_created_at: Optional[str] = None
+    is_initial_password: bool = Field(default=False, sa_column_kwargs={"server_default": "0"})
 
     # Relationships
     sessions: list["Session"] = Relationship(back_populates="user", cascade_delete=True)

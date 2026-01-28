@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from app.core.config import settings
-from app.core.security import hash_password
 
 
 def _utc_now() -> str:
@@ -232,6 +231,14 @@ def init_db() -> None:
             cur.execute("ALTER TABLE users ADD COLUMN rpc_secret_created_at TEXT NULL")
             conn.commit()
 
+        # 为 users 表添加 is_initial_password 字段
+        cur.execute("PRAGMA table_info(users)")
+        user_columns_updated = [row[1] for row in cur.fetchall()]
+
+        if "is_initial_password" not in user_columns_updated:
+            cur.execute("ALTER TABLE users ADD COLUMN is_initial_password INTEGER DEFAULT 0")
+            conn.commit()
+
     finally:
         cur.close()
         conn.close()
@@ -240,18 +247,18 @@ def init_db() -> None:
 def ensure_default_admin() -> None:
     """Ensure a default admin user exists, creating one if necessary.
 
-    Uses password from settings.admin_password (env: ARIA2C_ADMIN_PASSWORD).
-    Default password is '123456'.
+    Creates admin with initial password state (empty password, is_initial_password=1).
+    User must reset password on first login.
     """
     existing = _fetch_one("SELECT id FROM users LIMIT 1")
     if existing:
         return
 
-    # No users exist: create the first admin user
+    # No users exist: create the first admin user with initial password state
     _execute(
         """
-        INSERT INTO users (username, password_hash, is_admin, created_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO users (username, password_hash, is_admin, created_at, is_initial_password)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        ["admin", hash_password(settings.admin_password), 1, _utc_now()],
+        ["admin", "", 1, _utc_now(), 1],
     )

@@ -14,6 +14,7 @@
 - 管理员和普通用户角色分离
 - 用户空间完全隔离（独立下载目录）
 - 用户配额管理（默认 100GB，可调整）
+- 密码安全：客户端 PBKDF2 哈希后传输，服务端无法获取明文密码
 
 ### 任务管理
 - 支持 BT、HTTP、FTP 多协议下载
@@ -212,15 +213,14 @@ services:
 ### 部署示例
 
 ```bash
-# 1. 设置 RPC 密钥和管理员密码（可选）
+# 1. 设置 RPC 密钥
 export ARIA2_RPC_SECRET=your_secure_secret
-export ARIA2C_ADMIN_PASSWORD=your_admin_password  # 不设置则为 123456
 
 # 2. 启动
 docker compose up -d
 
 # 3. 访问 http://localhost:8000
-# 默认账号：admin / 123456（或自定义密码）
+# 首次启动会创建 admin 账户，登录时需设置密码
 ```
 
 ## aria2 配置

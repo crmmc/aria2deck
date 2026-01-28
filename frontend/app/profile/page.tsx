@@ -125,12 +125,12 @@ export default function ProfilePage() {
 
     setPasswordChanging(true);
     try {
-      await api.changePassword(oldPassword, newPassword);
+      // 需要传入当前用户名
+      await api.changePassword(oldPassword, newPassword, user!.username);
       showToast("密码修改成功", "success");
       setOldPassword("");
       setNewPassword("");
       setConfirmPassword("");
-      // 刷新用户信息以更新 is_default_password 状态
       await refreshUser();
     } catch (err) {
       const message = (err as Error).message;
@@ -180,12 +180,6 @@ export default function ProfilePage() {
 
         <div className="card mb-6">
           <h2 className="section-title">修改密码</h2>
-          {user?.is_default_password && (
-            <div className="alert alert-warning mb-4">
-              <span className="mr-2">⚠</span>
-              您正在使用默认密码，请尽快修改以确保账户安全
-            </div>
-          )}
           <form onSubmit={handleChangePassword} className="max-w-400">
             <div className="mb-4">
               <label className="form-label">当前密码</label>

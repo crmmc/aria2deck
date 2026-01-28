@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlmodel import select
 
 from app.auth import clear_session, create_session, require_user, set_session_cookie
 from app.core.config import settings
@@ -7,9 +8,7 @@ from app.core.security import hash_password, verify_password
 from app.database import get_session
 from app.db import fetch_one
 from app.models import User
-from app.schemas import ChangePasswordRequest, LoginRequest, UserOut
-
-DEFAULT_PASSWORD = "123456"
+from app.schemas import ChangePasswordRequest, LoginRequest, ResetPasswordRequest, UserOut
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -27,10 +26,18 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
         )
 
     user = fetch_one("SELECT * FROM users WHERE username = ?", [payload.username])
+
+    # 检查是否为初始密码状态（密码为空）
+    if user and user["is_initial_password"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="请先重置密码"
+        )
+
     if not user or not verify_password(payload.password, user["password_hash"]):
         # 记录失败尝试
         login_limiter.record_failure(client_ip)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
 
     # 登录成功，清除失败记录
     login_limiter.clear(client_ip)
@@ -43,19 +50,12 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
     session_id = await create_session(user["id"])
     set_session_cookie(response, session_id)
 
-    # 检测是否使用默认密码
-    is_default_password = payload.password == DEFAULT_PASSWORD
-    password_warning = None
-    if is_default_password:
-        password_warning = "您正在使用默认密码，请尽快修改密码以确保账户安全"
-
     return {
         "id": user["id"],
         "username": user["username"],
         "is_admin": bool(user["is_admin"]),
         "quota": user["quota"],
-        "password_warning": password_warning,
-        "is_default_password": is_default_password
+        "is_initial_password": bool(user["is_initial_password"])
     }
 
 
@@ -70,15 +70,12 @@ async def logout(request: Request, response: Response, user: User = Depends(requ
 
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(require_user)) -> dict:
-    # 检测是否使用默认密码
-    is_default_password = verify_password(DEFAULT_PASSWORD, user.password_hash)
-
     return {
         "id": user.id,
         "username": user.username,
         "is_admin": bool(user.is_admin),
         "quota": user.quota,
-        "is_default_password": is_default_password
+        "is_initial_password": bool(user.is_initial_password)
     }
 
 
@@ -89,23 +86,26 @@ async def change_password(
     response: Response,
     user: User = Depends(require_user)
 ) -> dict:
-    # 验证旧密码
-    if not verify_password(payload.old_password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="旧密码错误"
-        )
+    # 如果是初始密码状态，跳过旧密码验证
+    if not user.is_initial_password:
+        # 验证旧密码
+        if not verify_password(payload.old_password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="旧密码错误"
+            )
 
-    # 新密码不能与旧密码相同
-    if payload.old_password == payload.new_password:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="新密码不能与旧密码相同"
-        )
+        # 新密码不能与旧密码相同
+        if payload.old_password == payload.new_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="新密码不能与旧密码相同"
+            )
 
     # 更新密码
     async with get_session() as db:
         user.password_hash = hash_password(payload.new_password)
+        user.is_initial_password = False  # 清除初始密码标记
         db.add(user)
         await db.commit()
 
@@ -120,3 +120,46 @@ async def change_password(
     set_session_cookie(response, session_id)
 
     return {"ok": True, "message": "密码修改成功"}
+
+
+@router.post("/reset-password")
+async def reset_password(payload: ResetPasswordRequest, request: Request, response: Response) -> dict:
+    """初始密码状态的用户重置密码（无需登录）"""
+    client_ip = request.client.host if request.client else "unknown"
+
+    if login_limiter.is_blocked(client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="尝试次数过多，请稍后再试"
+        )
+
+    user_row = fetch_one("SELECT * FROM users WHERE username = ?", [payload.username])
+    # 统一错误消息，防止用户名枚举攻击
+    if not user_row or not user_row["is_initial_password"]:
+        login_limiter.record_failure(client_ip)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="用户不存在或不需要重置密码"
+        )
+
+    login_limiter.clear(client_ip)
+
+    async with get_session() as db:
+        result = await db.exec(select(User).where(User.username == payload.username))
+        user = result.first()
+        user.password_hash = hash_password(payload.new_password)
+        user.is_initial_password = False
+        db.add(user)
+        await db.commit()
+
+        # 清除该用户的所有旧会话
+        from sqlmodel import delete
+        from app.models import Session
+        await db.exec(delete(Session).where(Session.user_id == user.id))
+        await db.commit()
+
+    # 创建新会话
+    session_id = await create_session(user.id)
+    set_session_cookie(response, session_id)
+
+    return {"ok": True, "message": "密码重置成功"}

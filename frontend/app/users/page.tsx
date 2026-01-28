@@ -169,7 +169,8 @@ export default function UsersPage() {
     }
 
     try {
-      const updated = await api.updateUser(editingUser.id, updates);
+      // 传入原始用户名用于密码哈希
+      const updated = await api.updateUser(editingUser.id, updates, originalUser!.username);
       setUsers(users.map((u) => (u.id === updated.id ? updated : u)));
       setEditingUser(null);
     } catch (err) {
