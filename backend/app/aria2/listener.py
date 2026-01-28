@@ -215,7 +215,29 @@ async def handle_aria2_event(
         new_status = "paused"
     elif event == "stop":
         new_status = "stopped"
-    elif event in ("complete", "bt_complete"):
+    elif event == "complete":
+        # 检查是否是磁力链接元数据下载完成（会有 followedBy 指向真正的 BT 任务）
+        followed_by = aria2_status.get("followedBy", [])
+        if followed_by:
+            # 元数据下载完成，更新 GID 为真正的 BT 任务 GID
+            new_gid = followed_by[0]
+            logger.info(f"[WS] 磁力链接元数据下载完成，更新 GID: {gid} -> {new_gid}")
+            async with get_session() as db:
+                result = await db.exec(select(Task).where(Task.id == task.id))
+                db_task = result.first()
+                if db_task:
+                    db_task.gid = new_gid
+                    db_task.updated_at = utc_now()
+                    db.add(db_task)
+            # 不更新状态，等待真正的 BT 下载事件
+            return
+        else:
+            # 真正的下载完成
+            new_status = "complete"
+            if not artifact_token:
+                artifact_path = _move_completed_files(aria2_status, task.owner_id)
+                artifact_token = uuid4().hex
+    elif event == "bt_complete":
         new_status = "complete"
         if not artifact_token:
             # 移动文件从 .incomplete 到用户根目录

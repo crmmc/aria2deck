@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import time
 from datetime import datetime, timezone
@@ -16,6 +17,8 @@ from app.core.security import sanitize_string
 from app.core.state import AppState, WS_THROTTLE_INTERVAL
 from app.database import get_session
 from app.models import Task, User
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> str:
@@ -318,11 +321,8 @@ async def sync_tasks(
     每次循环都会动态获取最新的 aria2 配置
     同时检查活动任务的大小是否超过限制（HTTP 下载启动时 totalLength 可能为 0）
     """
-    import logging
     from app.core.state import get_aria2_client
     from app.routers.config import get_max_task_size
-
-    logger = logging.getLogger(__name__)
 
     while True:
         # 动态获取 aria2 客户端（支持配置热更新）
@@ -395,10 +395,21 @@ async def sync_tasks(
             mapped = _map_status(status, task.owner_id)
             artifact_path = task.artifact_path
             artifact_token = task.artifact_token
-            if mapped["status"] == "complete" and not artifact_token:
-                # 移动文件从 .incomplete 到用户根目录
-                artifact_path = _move_completed_files(status, task.owner_id)
-                artifact_token = uuid4().hex
+
+            # 检查是否是磁力链接元数据下载完成（会有 followedBy 指向真正的 BT 任务）
+            if mapped["status"] == "complete":
+                followed_by = status.get("followedBy", [])
+                if followed_by:
+                    # 元数据下载完成，更新 GID 为真正的 BT 任务 GID
+                    new_gid = followed_by[0]
+                    logger.info(f"[Sync] 磁力链接元数据下载完成，更新 GID: {task.gid} -> {new_gid}")
+                    await _update_task(task.id, {"gid": new_gid})
+                    # 不更新状态为 complete，等待真正的 BT 下载完成
+                    return
+                elif not artifact_token:
+                    # 真正的下载完成，移动文件
+                    artifact_path = _move_completed_files(status, task.owner_id)
+                    artifact_token = uuid4().hex
 
             current_speed = mapped["download_speed"]
             current_connections = int(status.get("connections", 0))
