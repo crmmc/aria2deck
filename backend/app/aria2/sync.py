@@ -14,6 +14,7 @@ import shutil
 import time
 from pathlib import Path
 
+from sqlalchemy import case, update
 from sqlmodel import select
 
 from app.aria2.client import Aria2Client
@@ -177,31 +178,41 @@ async def sync_tasks(
                     subscriptions = result.all()
 
                 valid_subscribers = []
+                cumulative_frozen = 0  # Track frozen space within this transaction
+
                 for sub, user in subscriptions:
                     space_info = await get_user_space_info(user.id, user.quota)
-                    if total_length <= space_info["available"]:
-                        valid_subscribers.append((sub, user))
-                        # Update frozen space
+                    # Subtract cumulative frozen space from available (for same-user multiple subscriptions)
+                    effective_available = space_info["available"] - cumulative_frozen
+
+                    if total_length <= effective_available:
+                        # Use optimistic locking: only update if frozen_space is still 0
                         async with get_session() as db:
-                            result = await db.exec(
-                                select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                            result = await db.execute(
+                                update(UserTaskSubscription)
+                                .where(
+                                    UserTaskSubscription.id == sub.id,
+                                    UserTaskSubscription.frozen_space == 0  # Optimistic lock
+                                )
+                                .values(frozen_space=total_length)
                             )
-                            db_sub = result.first()
-                            if db_sub:
-                                db_sub.frozen_space = total_length
-                                db.add(db_sub)
+
+                            if result.rowcount > 0:
+                                valid_subscribers.append((sub, user))
+                                cumulative_frozen += total_length
+                            # If rowcount == 0, already frozen by another process, skip
                     else:
-                        # Mark subscription as failed
+                        # Mark subscription as failed atomically
                         async with get_session() as db:
-                            result = await db.exec(
-                                select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                            await db.execute(
+                                update(UserTaskSubscription)
+                                .where(UserTaskSubscription.id == sub.id)
+                                .values(
+                                    status="failed",
+                                    error_display="用户配额空间不足",
+                                    frozen_space=0
+                                )
                             )
-                            db_sub = result.first()
-                            if db_sub:
-                                db_sub.status = "failed"
-                                db_sub.error_display = "用户配额空间不足"
-                                db_sub.frozen_space = 0
-                                db.add(db_sub)
 
                 if not valid_subscribers:
                     logger.warning(f"[Sync] 任务 {task.id} 没有有效订阅者，取消任务")
@@ -211,7 +222,7 @@ async def sync_tasks(
                     )
                     return
 
-            # Update task status
+            # Update task status with atomic peak value updates
             mapped = _map_status(status, task.id)
 
             # Handle magnet link metadata completion
@@ -223,25 +234,34 @@ async def sync_tasks(
                     await _update_task(task.id, {"gid": new_gid})
                     return
 
-            # Track peak values
+            # Track peak values using SQL CASE for atomic conditional update
             current_speed = mapped["download_speed"]
             current_connections = int(status.get("connections", 0))
-            peak_speed = task.peak_download_speed or 0
-            peak_connections = task.peak_connections or 0
 
-            if current_speed > peak_speed:
-                peak_speed = current_speed
-            if current_connections > peak_connections:
-                peak_connections = current_connections
-
-            await _update_task(
-                task.id,
-                {
-                    **mapped,
-                    "peak_download_speed": peak_speed,
-                    "peak_connections": peak_connections,
-                },
-            )
+            async with get_session() as db:
+                await db.execute(
+                    update(DownloadTask)
+                    .where(DownloadTask.id == task.id)
+                    .values(
+                        status=mapped["status"],
+                        name=mapped["name"],
+                        total_length=mapped["total_length"],
+                        completed_length=mapped["completed_length"],
+                        download_speed=mapped["download_speed"],
+                        upload_speed=mapped["upload_speed"],
+                        error=mapped.get("error"),
+                        updated_at=utc_now_str(),
+                        # Atomic peak value update: only update if new value is greater
+                        peak_download_speed=case(
+                            (DownloadTask.peak_download_speed < current_speed, current_speed),
+                            else_=DownloadTask.peak_download_speed
+                        ),
+                        peak_connections=case(
+                            (DownloadTask.peak_connections < current_connections, current_connections),
+                            else_=DownloadTask.peak_connections
+                        ),
+                    )
+                )
 
             # Broadcast update
             await broadcast_task_update_to_subscribers(state, task.id)
@@ -335,9 +355,14 @@ async def broadcast_notification(
     message: str,
     level: str = "error"
 ) -> None:
-    """广播通知消息到 WebSocket 客户端"""
+    """广播通知消息到 WebSocket 客户端
+
+    Handles connection failures gracefully with automatic cleanup.
+    """
     async with state.lock:
         sockets = list(state.ws_connections.get(user_id, set()))
+
+    failed_sockets = []
     for ws in sockets:
         try:
             await ws.send_json({
@@ -345,8 +370,16 @@ async def broadcast_notification(
                 "level": level,
                 "message": message,
             })
-        except Exception:
+        except Exception as e:
+            logger.debug(f"WebSocket send failed for user {user_id}: {e}")
+            failed_sockets.append(ws)
+
+    # Clean up failed connections outside the iteration
+    for ws in failed_sockets:
+        try:
             await unregister_ws(state, user_id, ws)
+        except Exception:
+            pass
 
 
 async def register_ws(state: AppState, user_id: int, ws) -> None:

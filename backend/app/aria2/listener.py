@@ -87,6 +87,7 @@ async def handle_aria2_event(
     5. 处理完成事件（创建 StoredFile 和 UserFile）
     6. 广播到所有订阅者
     """
+    from sqlalchemy import update
     from sqlmodel import select
 
     from app.aria2.errors import parse_error_message
@@ -179,34 +180,44 @@ async def handle_aria2_event(
                 subscriptions = result.all()
 
             valid_subscribers = []
+            cumulative_frozen = 0  # Track frozen space within this batch
+
             for sub, user in subscriptions:
                 space_info = await get_user_space_info(user.id, user.quota)
-                if total_length <= space_info["available"]:
-                    valid_subscribers.append((sub, user))
-                    # Update frozen space
+                # Subtract cumulative frozen space from available (for same-user multiple subscriptions)
+                effective_available = space_info["available"] - cumulative_frozen
+
+                if total_length <= effective_available:
+                    # Use optimistic locking: only update if frozen_space is still 0
                     async with get_session() as db:
-                        result = await db.exec(
-                            select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                        result = await db.execute(
+                            update(UserTaskSubscription)
+                            .where(
+                                UserTaskSubscription.id == sub.id,
+                                UserTaskSubscription.frozen_space == 0  # Optimistic lock
+                            )
+                            .values(frozen_space=total_length)
                         )
-                        db_sub = result.first()
-                        if db_sub:
-                            db_sub.frozen_space = total_length
-                            db.add(db_sub)
+
+                        if result.rowcount > 0:
+                            valid_subscribers.append((sub, user))
+                            cumulative_frozen += total_length
+                        # If rowcount == 0, already frozen by another process, skip
                 else:
-                    # Mark subscription as failed
+                    # Mark subscription as failed atomically
                     logger.warning(
                         f"[WS] 用户 {user.id} 空间不足，标记订阅 {sub.id} 失败"
                     )
                     async with get_session() as db:
-                        result = await db.exec(
-                            select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                        await db.execute(
+                            update(UserTaskSubscription)
+                            .where(UserTaskSubscription.id == sub.id)
+                            .values(
+                                status="failed",
+                                error_display="用户配额空间不足",
+                                frozen_space=0
+                            )
                         )
-                        db_sub = result.first()
-                        if db_sub:
-                            db_sub.status = "failed"
-                            db_sub.error_display = "用户配额空间不足"
-                            db_sub.frozen_space = 0
-                            db.add(db_sub)
 
             # If no valid subscribers, cancel the task
             if not valid_subscribers:
@@ -302,10 +313,11 @@ async def _handle_task_complete(
     3. 为所有成功的订阅者创建 UserFile 引用
     4. 释放冻结空间
     """
+    from sqlalchemy import update
     from sqlmodel import select
 
     from app.database import get_session
-    from app.models import DownloadTask, UserTaskSubscription, utc_now_str
+    from app.models import DownloadTask, UserTaskSubscription, UserFile, StoredFile, utc_now_str
     from app.services.storage import (
         cleanup_task_download_dir,
         create_user_file_reference,
@@ -313,12 +325,22 @@ async def _handle_task_complete(
         move_to_store,
     )
 
-    # Get task
+    # Get task with idempotency check
     async with get_session() as db:
         result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
         task = result.first()
 
     if not task:
+        return
+
+    # Idempotency check: skip if already processed
+    if task.stored_file_id is not None:
+        logger.debug(f"[WS] Task {task_id} already processed (stored_file_id={task.stored_file_id}), skipping")
+        return
+
+    # Additional check: verify task status is complete
+    if task.status != "complete":
+        logger.warning(f"[WS] Task {task_id} status is {task.status}, not complete, skipping")
         return
 
     # Get source file path
@@ -356,14 +378,25 @@ async def _handle_task_complete(
         # Move to store and create StoredFile
         stored_file = await move_to_store(source_path, original_name)
 
-        # Update task with stored_file_id
+        # Update task with stored_file_id atomically using compare-and-swap pattern
         async with get_session() as db:
-            result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-            db_task = result.first()
-            if db_task:
-                db_task.stored_file_id = stored_file.id
-                db_task.completed_at = utc_now_str()
-                db.add(db_task)
+            result = await db.execute(
+                update(DownloadTask)
+                .where(
+                    DownloadTask.id == task_id,
+                    DownloadTask.stored_file_id.is_(None)  # Only update if not already set
+                )
+                .values(
+                    stored_file_id=stored_file.id,
+                    completed_at=utc_now_str()
+                )
+            )
+
+            if result.rowcount == 0:
+                # Another process already set stored_file_id
+                logger.info(f"[WS] Task {task_id} already processed by another handler")
+                await cleanup_task_download_dir(task_id)
+                return
 
         # Create UserFile references for all pending subscribers
         async with get_session() as db:
@@ -376,23 +409,40 @@ async def _handle_task_complete(
             subscriptions = result.all()
 
         for sub in subscriptions:
-            # Create file reference
-            await create_user_file_reference(
-                user_id=sub.owner_id,
-                stored_file_id=stored_file.id,
-                display_name=original_name,
-            )
-
-            # Update subscription status
+            # Create file reference and update status in single transaction
             async with get_session() as db:
+                # Check if reference already exists
                 result = await db.exec(
-                    select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                    select(UserFile).where(
+                        UserFile.owner_id == sub.owner_id,
+                        UserFile.stored_file_id == stored_file.id,
+                    )
                 )
-                db_sub = result.first()
-                if db_sub:
-                    db_sub.status = "success"
-                    db_sub.frozen_space = 0
-                    db.add(db_sub)
+                existing_ref = result.first()
+
+                if not existing_ref:
+                    # Create file reference
+                    user_file = UserFile(
+                        owner_id=sub.owner_id,
+                        stored_file_id=stored_file.id,
+                        display_name=original_name,
+                        created_at=utc_now_str(),
+                    )
+                    db.add(user_file)
+
+                    # Increment reference count
+                    await db.execute(
+                        update(StoredFile)
+                        .where(StoredFile.id == stored_file.id)
+                        .values(ref_count=StoredFile.ref_count + 1)
+                    )
+
+                # Update subscription status in the same transaction
+                await db.execute(
+                    update(UserTaskSubscription)
+                    .where(UserTaskSubscription.id == sub.id)
+                    .values(status="success", frozen_space=0)
+                )
 
         logger.info(f"[WS] 任务 {task_id} 完成，创建了 {len(subscriptions)} 个用户文件引用")
 

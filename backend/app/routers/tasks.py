@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from app.aria2.client import Aria2Client
@@ -225,7 +227,10 @@ async def _create_subscription(
     task: DownloadTask,
     frozen_space: int,
 ) -> UserTaskSubscription:
-    """Create a subscription for a user to a task"""
+    """Create a subscription for a user to a task
+
+    Handles concurrent creation by catching IntegrityError.
+    """
     async with get_session() as db:
         subscription = UserTaskSubscription(
             owner_id=user.id,
@@ -235,9 +240,24 @@ async def _create_subscription(
             created_at=utc_now_str(),
         )
         db.add(subscription)
-        await db.commit()
-        await db.refresh(subscription)
-        return subscription
+
+        try:
+            await db.commit()
+            await db.refresh(subscription)
+            return subscription
+        except IntegrityError:
+            await db.rollback()
+            # Concurrent creation, re-query existing subscription
+            result = await db.exec(
+                select(UserTaskSubscription).where(
+                    UserTaskSubscription.owner_id == user.id,
+                    UserTaskSubscription.task_id == task.id,
+                )
+            )
+            existing = result.first()
+            if existing:
+                return existing
+            raise  # Should not happen, but re-raise for safety
 
 
 async def _find_or_create_task(
@@ -247,6 +267,8 @@ async def _find_or_create_task(
     total_length: int = 0,
 ) -> tuple[DownloadTask, bool]:
     """Find existing task or create new one.
+
+    Handles race condition by catching IntegrityError on duplicate uri_hash.
 
     Returns:
         Tuple of (task, is_new)
@@ -272,9 +294,26 @@ async def _find_or_create_task(
             updated_at=utc_now_str(),
         )
         db.add(task)
-        await db.commit()
-        await db.refresh(task)
-        return task, True
+
+        try:
+            await db.commit()
+            await db.refresh(task)
+            return task, True
+        except IntegrityError:
+            # Race condition: another process created the task
+            await db.rollback()
+            logger.info(f"Race condition on task creation: {uri_hash}, fetching existing")
+
+            # Re-fetch the existing task
+            result = await db.exec(
+                select(DownloadTask).where(DownloadTask.uri_hash == uri_hash)
+            )
+            existing = result.first()
+            if existing:
+                return existing, False
+
+            # Should not happen, but handle gracefully
+            raise RuntimeError(f"Failed to create or find task: {uri_hash}")
 
 
 # ========== API Endpoints ==========
@@ -403,11 +442,10 @@ async def create_task(
         )
         existing_sub = result.first()
 
-    if existing_sub:
-        # Already subscribed
-        if existing_sub.status == "success":
-            # Already completed, check if user has the file
-            async with get_session() as db:
+        if existing_sub:
+            # Already subscribed - convert to dict inside session
+            if existing_sub.status == "success":
+                # Already completed, check if user has the file
                 result = await db.exec(
                     select(UserFile).where(
                         UserFile.owner_id == user.id,
@@ -416,13 +454,13 @@ async def create_task(
                 )
                 user_file = result.first()
 
-            if user_file:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="您已拥有此文件"
-                )
+                if user_file:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="您已拥有此文件"
+                    )
 
-        return _subscription_to_dict(existing_sub, task)
+            return _subscription_to_dict(existing_sub, task)
 
     # Handle based on task status
     if task.status == "complete" and task.stored_file_id:
@@ -728,20 +766,9 @@ async def cancel_task(
 
     subscription, task = row
 
-    # Check if this is the only pending subscriber
+    # Atomic operation: delete subscription and count remaining pending subscribers
     async with get_session() as db:
-        result = await db.exec(
-            select(UserTaskSubscription).where(
-                UserTaskSubscription.task_id == task.id,
-                UserTaskSubscription.status == "pending",
-            )
-        )
-        pending_subs = result.all()
-
-    is_only_subscriber = len(pending_subs) == 1 and pending_subs[0].id == subscription.id
-
-    # Delete subscription
-    async with get_session() as db:
+        # Step 1: Delete current subscription
         result = await db.exec(
             select(UserTaskSubscription).where(UserTaskSubscription.id == subscription_id)
         )
@@ -749,8 +776,18 @@ async def cancel_task(
         if db_sub:
             await db.delete(db_sub)
 
-    # If only subscriber and task is active, cancel aria2 task
-    if is_only_subscriber and task.gid and task.status in ("queued", "active"):
+        # Step 2: Count remaining pending subscribers in the SAME transaction
+        result = await db.exec(
+            select(func.count(UserTaskSubscription.id)).where(
+                UserTaskSubscription.task_id == task.id,
+                UserTaskSubscription.status == "pending",
+            )
+        )
+        remaining_count = result.one()
+        # Transaction commits here
+
+    # Step 3: Only cancel aria2 task if no remaining subscribers
+    if remaining_count == 0 and task.gid and task.status in ("queued", "active"):
         client = _get_client(request)
         try:
             await client.force_remove(task.gid)
@@ -802,7 +839,12 @@ async def clear_history(user: User = Depends(require_user)) -> dict:
 # ========== Broadcast Helpers ==========
 
 async def _broadcast_task_update(state: AppState, task_id: int) -> None:
-    """Broadcast task update to all subscribers"""
+    """Broadcast task update to all subscribers
+
+    Handles connection failures gracefully.
+    """
+    from app.aria2.sync import unregister_ws
+
     async with get_session() as db:
         # Get task
         result = await db.exec(
@@ -827,9 +869,18 @@ async def _broadcast_task_update(state: AppState, task_id: int) -> None:
         async with state.lock:
             sockets = list(state.ws_connections.get(sub.owner_id, set()))
 
+        failed_sockets = []
         for ws in sockets:
             try:
                 await ws.send_json({"type": "task_update", "task": payload})
+            except Exception as e:
+                logger.debug(f"WebSocket send failed for user {sub.owner_id}: {e}")
+                failed_sockets.append(ws)
+
+        # Clean up failed connections outside the iteration
+        for ws in failed_sockets:
+            try:
+                await unregister_ws(state, sub.owner_id, ws)
             except Exception:
                 pass
 

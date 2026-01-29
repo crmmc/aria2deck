@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import shutil
 import shlex
@@ -10,6 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+logger = logging.getLogger(__name__)
+
+from sqlalchemy import update
 from sqlmodel import select, func
 
 from app.core.config import settings
@@ -157,15 +161,25 @@ class PackTaskManager:
             output_path = user_dir / output_filename
             counter += 1
 
-        # Update status to packing
+        # Update status to packing using CAS pattern
         async with get_session() as db:
-            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
-            task = result.first()
-            if task:
-                task.status = "packing"
-                task.output_path = str(output_path)
-                task.updated_at = utc_now()
-                db.add(task)
+            result = await db.execute(
+                update(PackTask)
+                .where(
+                    PackTask.id == task_id,
+                    PackTask.status == "pending"  # CAS: only pending can become packing
+                )
+                .values(
+                    status="packing",
+                    output_path=str(output_path),
+                    updated_at=utc_now()
+                )
+            )
+
+            if result.rowcount == 0:
+                # Task was cancelled or status already changed
+                logger.info(f"Pack task {task_id} status changed, skipping")
+                return
 
         # Build 7za command
         # -tzip or -t7z for format
@@ -239,16 +253,25 @@ class PackTaskManager:
                         if aria2_file.exists():
                             aria2_file.unlink()
 
+                # Update status using CAS pattern
                 async with get_session() as db:
-                    result = await db.exec(select(PackTask).where(PackTask.id == task_id))
-                    task = result.first()
-                    if task:
-                        task.status = "done"
-                        task.progress = 100
-                        task.output_size = output_size
-                        task.reserved_space = 0
-                        task.updated_at = utc_now()
-                        db.add(task)
+                    result = await db.execute(
+                        update(PackTask)
+                        .where(
+                            PackTask.id == task_id,
+                            PackTask.status == "packing"  # CAS: only packing can become done
+                        )
+                        .values(
+                            status="done",
+                            progress=100,
+                            output_size=output_size,
+                            reserved_space=0,
+                            updated_at=utc_now()
+                        )
+                    )
+
+                    if result.rowcount == 0:
+                        logger.warning(f"Pack task {task_id} was cancelled during packing")
             else:
                 # Failed: cleanup partial output
                 if output_path.exists():
@@ -295,14 +318,20 @@ class PackTaskManager:
     @classmethod
     async def _update_task_error(cls, task_id: int, error: str) -> None:
         async with get_session() as db:
-            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
-            task = result.first()
-            if task:
-                task.status = "failed"
-                task.error_message = error
-                task.reserved_space = 0
-                task.updated_at = utc_now()
-                db.add(task)
+            # Use CAS pattern: only pending or packing can become failed
+            await db.execute(
+                update(PackTask)
+                .where(
+                    PackTask.id == task_id,
+                    PackTask.status.in_(["pending", "packing"])
+                )
+                .values(
+                    status="failed",
+                    error_message=error,
+                    reserved_space=0,
+                    updated_at=utc_now()
+                )
+            )
 
 
 def calculate_folder_size(path: Path) -> int:

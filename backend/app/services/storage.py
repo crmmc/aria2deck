@@ -12,6 +12,7 @@ import logging
 import shutil
 from pathlib import Path
 
+from sqlalchemy import update
 from sqlmodel import select
 
 from app.core.config import settings
@@ -120,17 +121,37 @@ async def move_to_store(
     store_path = get_store_path_for_hash(content_hash)
     store_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Move to store
-    if store_path.exists():
-        # Race condition: another process created it
-        logger.warning(f"Store path already exists: {store_path}")
-        if source_path.is_dir():
-            shutil.rmtree(source_path)
+    # Move to store with race condition handling
+    try:
+        if store_path.exists():
+            # Race condition: another process created it
+            logger.warning(f"Store path already exists: {store_path}")
+            if source_path.is_dir():
+                shutil.rmtree(source_path)
+            else:
+                source_path.unlink()
         else:
-            source_path.unlink()
-    else:
-        shutil.move(str(source_path), str(store_path))
-        logger.info(f"Moved {source_path} to {store_path}")
+            shutil.move(str(source_path), str(store_path))
+            logger.info(f"Moved {source_path} to {store_path}")
+    except shutil.Error as e:
+        # Handle race condition where path was created between check and move
+        if "already exists" in str(e).lower() or store_path.exists():
+            logger.warning(f"Race condition during move: {e}")
+            if source_path.exists():
+                if source_path.is_dir():
+                    shutil.rmtree(source_path)
+                else:
+                    source_path.unlink()
+        else:
+            raise
+    except FileExistsError:
+        # Another process created the destination
+        logger.warning(f"FileExistsError during move to {store_path}")
+        if source_path.exists():
+            if source_path.is_dir():
+                shutil.rmtree(source_path)
+            else:
+                source_path.unlink()
 
     # Create StoredFile record with race condition handling
     async with get_session() as db:
@@ -224,9 +245,12 @@ async def create_user_file_reference(
         )
         db.add(user_file)
 
-        # Increment reference count
-        stored_file.ref_count += 1
-        db.add(stored_file)
+        # Increment reference count atomically
+        await db.execute(
+            update(StoredFile)
+            .where(StoredFile.id == stored_file_id)
+            .values(ref_count=StoredFile.ref_count + 1)
+        )
 
         try:
             await db.commit()
@@ -234,7 +258,7 @@ async def create_user_file_reference(
 
             logger.info(
                 f"Created user file reference: user={user_id}, "
-                f"stored_file={stored_file_id}, ref_count={stored_file.ref_count}"
+                f"stored_file={stored_file_id}"
             )
             return user_file
         except Exception:
@@ -258,6 +282,9 @@ async def delete_user_file_reference(user_file_id: int) -> bool:
     Returns:
         True if deleted successfully
     """
+    store_path_to_delete: str | None = None
+    stored_file_id_to_delete: int | None = None
+
     async with get_session() as db:
         result = await db.exec(select(UserFile).where(UserFile.id == user_file_id))
         user_file = result.first()
@@ -266,32 +293,55 @@ async def delete_user_file_reference(user_file_id: int) -> bool:
 
         stored_file_id = user_file.stored_file_id
 
-        # Delete the reference
+        # Delete the user reference
         await db.delete(user_file)
 
-        # Decrement reference count
+        # Decrement reference count atomically
+        await db.execute(
+            update(StoredFile)
+            .where(StoredFile.id == stored_file_id)
+            .values(ref_count=StoredFile.ref_count - 1)
+        )
+
+        # Re-fetch to check current ref_count in the SAME transaction
         result = await db.exec(
             select(StoredFile).where(StoredFile.id == stored_file_id)
         )
         stored_file = result.first()
-        if stored_file:
-            stored_file.ref_count -= 1
-            db.add(stored_file)
 
-            # If no more references, delete the physical file
-            if stored_file.ref_count <= 0:
-                await db.commit()
-                await _delete_stored_file(stored_file)
+        if stored_file and stored_file.ref_count <= 0:
+            # Record info for deletion after commit
+            store_path_to_delete = stored_file.real_path
+            stored_file_id_to_delete = stored_file.id
+            # Delete database record
+            await db.delete(stored_file)
+        elif stored_file:
+            logger.info(
+                f"Deleted user file reference {user_file_id}, "
+                f"ref_count now {stored_file.ref_count}"
+            )
+        # Transaction commits here
+
+    # Delete physical file AFTER transaction commit (avoid I/O in transaction)
+    if store_path_to_delete:
+        await _delete_stored_file_by_path(store_path_to_delete)
+        logger.info(f"Deleted StoredFile {stored_file_id_to_delete} and physical file")
+
+    return True
+
+
+async def _delete_stored_file_by_path(real_path: str) -> None:
+    """Delete physical file by path."""
+    path = Path(real_path)
+    if path.exists():
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
             else:
-                await db.commit()
-                logger.info(
-                    f"Deleted user file reference {user_file_id}, "
-                    f"ref_count now {stored_file.ref_count}"
-                )
-        else:
-            await db.commit()
-
-        return True
+                path.unlink()
+            logger.info(f"Deleted physical file: {path}")
+        except Exception as e:
+            logger.error(f"Failed to delete physical file {path}: {e}")
 
 
 async def _delete_stored_file(stored_file: StoredFile) -> None:
