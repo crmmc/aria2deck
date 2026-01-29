@@ -159,6 +159,21 @@ def _check_disk_space() -> tuple[bool, int]:
     return disk.free > min_free, disk.free
 
 
+def _get_display_name(task: DownloadTask) -> str:
+    """获取任务显示名称"""
+    # 如果有有效的 name 且不是 [METADATA]，直接使用
+    if task.name and not task.name.startswith("[METADATA]"):
+        return task.name
+    # 如果是磁力链接，提取 info_hash 并返回完整格式
+    if task.uri and task.uri.startswith("magnet:"):
+        import re
+        match = re.search(r'xt=urn:btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})', task.uri)
+        if match:
+            return f"magnet:?xt=urn:btih:{match.group(1)}"
+    # 其他情况返回 name 或默认值
+    return task.name or "未知文件"
+
+
 def _subscription_to_dict(
     subscription: UserTaskSubscription,
     task: DownloadTask,
@@ -177,7 +192,8 @@ def _subscription_to_dict(
 
     return {
         "id": subscription.id,
-        "name": task.name,
+        "name": _get_display_name(task),
+        "uri": task.uri,
         "status": effective_status,
         "total_length": task.total_length,
         "completed_length": task.completed_length,
@@ -567,9 +583,11 @@ async def create_torrent_task(
         )
 
     # Find or create task
+    # 构造磁力链接供前端复制
+    magnet_uri = f"magnet:?xt=urn:btih:{uri_hash}"
     task, is_new = await _find_or_create_task(
         uri_hash=uri_hash,
-        uri="[torrent]",
+        uri=magnet_uri,
     )
 
     # Check if user already subscribed

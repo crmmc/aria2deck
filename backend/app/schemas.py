@@ -41,12 +41,6 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=1, max_length=200)  # client_hash
 
 
-class ResetPasswordRequest(BaseModel):
-    """重置密码请求（初始密码状态用户）"""
-    username: str = Field(min_length=1, max_length=50)
-    new_password: str = Field(min_length=1, max_length=200)  # client_hash
-
-
 class RpcAccessStatus(BaseModel):
     """RPC 访问状态"""
     enabled: bool

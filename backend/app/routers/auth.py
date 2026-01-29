@@ -8,7 +8,7 @@ from app.core.security import hash_password, verify_password
 from app.database import get_session
 from app.db import fetch_one
 from app.models import User
-from app.schemas import ChangePasswordRequest, LoginRequest, ResetPasswordRequest, UserOut
+from app.schemas import ChangePasswordRequest, LoginRequest, UserOut
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -26,13 +26,6 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
         )
 
     user = fetch_one("SELECT * FROM users WHERE username = ?", [payload.username])
-
-    # 检查是否为初始密码状态（密码为空）
-    if user and user["is_initial_password"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="请先重置密码"
-        )
 
     if not user or not verify_password(payload.password, user["password_hash"]):
         # 记录失败尝试
@@ -120,46 +113,3 @@ async def change_password(
     set_session_cookie(response, session_id)
 
     return {"ok": True, "message": "密码修改成功"}
-
-
-@router.post("/reset-password")
-async def reset_password(payload: ResetPasswordRequest, request: Request, response: Response) -> dict:
-    """初始密码状态的用户重置密码（无需登录）"""
-    client_ip = request.client.host if request.client else "unknown"
-
-    if login_limiter.is_blocked(client_ip):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="尝试次数过多，请稍后再试"
-        )
-
-    user_row = fetch_one("SELECT * FROM users WHERE username = ?", [payload.username])
-    # 统一错误消息，防止用户名枚举攻击
-    if not user_row or not user_row["is_initial_password"]:
-        login_limiter.record_failure(client_ip)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="用户不存在或不需要重置密码"
-        )
-
-    login_limiter.clear(client_ip)
-
-    async with get_session() as db:
-        result = await db.exec(select(User).where(User.username == payload.username))
-        user = result.first()
-        user.password_hash = hash_password(payload.new_password)
-        user.is_initial_password = False
-        db.add(user)
-        await db.commit()
-
-        # 清除该用户的所有旧会话
-        from sqlmodel import delete
-        from app.models import Session
-        await db.exec(delete(Session).where(Session.user_id == user.id))
-        await db.commit()
-
-    # 创建新会话
-    session_id = await create_session(user.id)
-    set_session_cookie(response, session_id)
-
-    return {"ok": True, "message": "密码重置成功"}
