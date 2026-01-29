@@ -35,6 +35,7 @@ interface TaskCardProps {
   isOperating: boolean;
   onToggleSelection: (id: number) => void;
   onCancel: (id: number) => void;
+  onCopyUri: (uri: string) => void;
 }
 
 function TaskCard({
@@ -43,9 +44,16 @@ function TaskCard({
   isOperating,
   onToggleSelection,
   onCancel,
+  onCopyUri,
 }: TaskCardProps) {
+  const handleCardClick = () => {
+    if (task.uri) {
+      onCopyUri(task.uri);
+    }
+  };
+
   return (
-    <div className="card" key={task.id}>
+    <div className="card" key={task.id} onClick={handleCardClick} style={{ cursor: task.uri ? 'pointer' : 'default' }}>
       <div className={`task-card-inner${isSelected ? " selected" : ""}`}>
         <div>
           <div className="space-between flex-start mb-3">
@@ -117,6 +125,15 @@ function TaskCard({
           </div>
 
           <div className="task-footer-right">
+            {task.uri && (
+              <button
+                className="button secondary btn-task"
+                onClick={() => onCopyUri(task.uri!)}
+                title="复制链接"
+              >
+                复制
+              </button>
+            )}
             {(task.status === "active" || task.status === "queued") && (
               <button
                 className={`button secondary danger btn-task${isOperating ? " opacity-60" : ""}`}
@@ -183,27 +200,54 @@ export default function TasksPage() {
   }, []);
 
   useEffect(() => {
+    // 获取全部任务（包括历史）
     api
-      .listTasks("active")
-      .then((activeTasks) => {
-        setTasks(activeTasks);
+      .listTasks()
+      .then((allTasks) => {
+        setTasks(allTasks);
       })
       .catch(() => null);
   }, []);
 
   useEffect(() => {
+    // 轮询只更新活动任务，历史任务保持不变
     const pollInterval = setInterval(() => {
       api
         .listTasks("active")
         .then((activeTasks) => {
-          setTasks((prev) => mergeTasks(prev, activeTasks));
-          deletedTaskIdsRef.current.clear();
+          setTasks((prev) => {
+            // 保留历史任务，更新活动任务
+            const historyTasks = prev.filter(
+              (t) => t.status === "complete" || t.status === "error"
+            );
+            const activeMap = new Map(activeTasks.map((t) => [t.id, t]));
+
+            // 更新现有活动任务或添加新任务
+            const updatedActive = activeTasks.filter(
+              (t) => !deletedTaskIdsRef.current.has(t.id)
+            );
+
+            // 检查之前的活动任务是否变成历史任务
+            const prevActive = prev.filter(
+              (t) => t.status === "active" || t.status === "queued"
+            );
+            for (const t of prevActive) {
+              if (!activeMap.has(t.id) && !deletedTaskIdsRef.current.has(t.id)) {
+                // 任务不再活动，可能已完成或失败，重新获取
+                api.listTasks().then((all) => setTasks(all)).catch(() => null);
+                break;
+              }
+            }
+
+            deletedTaskIdsRef.current.clear();
+            return [...updatedActive, ...historyTasks];
+          });
         })
         .catch(() => null);
     }, 5000);
 
     return () => clearInterval(pollInterval);
-  }, [mergeTasks]);
+  }, []);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -416,6 +460,82 @@ export default function TasksPage() {
     }
   }
 
+  async function batchDeleteHistory() {
+    // 删除选中的历史任务
+    const historyTasks = tasks.filter(
+      (t) =>
+        selectedTasks.has(t.id) &&
+        (t.status === "complete" || t.status === "error")
+    );
+    if (historyTasks.length === 0) {
+      showToast("没有可删除的历史任务", "warning");
+      return;
+    }
+
+    const confirmed = await showConfirm({
+      title: "删除历史",
+      message: `确定要删除选中的 ${historyTasks.length} 条历史记录吗？`,
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    setIsBatchOperating(true);
+    try {
+      await Promise.all(historyTasks.map((t) => api.cancelTask(t.id)));
+      const deletedIds = new Set(historyTasks.map((t) => t.id));
+      deletedIds.forEach((id) => deletedTaskIdsRef.current.add(id));
+      setTasks((prev) => prev.filter((t) => !deletedIds.has(t.id)));
+      setSelectedTasks(new Set());
+      showToast(`已删除 ${historyTasks.length} 条历史记录`, "success");
+    } catch (err) {
+      showToast("删除失败：" + (err as Error).message, "error");
+    } finally {
+      setIsBatchOperating(false);
+    }
+  }
+
+  async function clearAllHistory() {
+    const historyCount = tasks.filter(
+      (t) => t.status === "complete" || t.status === "error"
+    ).length;
+
+    if (historyCount === 0) {
+      showToast("没有历史记录", "warning");
+      return;
+    }
+
+    const confirmed = await showConfirm({
+      title: "清空历史",
+      message: `确定要清空全部 ${historyCount} 条历史记录吗？`,
+      confirmText: "清空",
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    setIsBatchOperating(true);
+    try {
+      await api.clearHistory();
+      setTasks((prev) =>
+        prev.filter((t) => t.status !== "complete" && t.status !== "error")
+      );
+      setSelectedTasks(new Set());
+      showToast(`已清空 ${historyCount} 条历史记录`, "success");
+    } catch (err) {
+      showToast("清空失败：" + (err as Error).message, "error");
+    } finally {
+      setIsBatchOperating(false);
+    }
+  }
+
+  function copyUri(uri: string) {
+    navigator.clipboard.writeText(uri).then(() => {
+      showToast("链接已复制", "success");
+    }).catch(() => {
+      showToast("复制失败", "error");
+    });
+  }
+
   async function batchAddTasks() {
     const uris = batchUris
       .split("\n")
@@ -491,6 +611,12 @@ export default function TasksPage() {
       filtered = filtered.filter((t) => t.status === "active");
     } else if (filterStatus === "queued") {
       filtered = filtered.filter((t) => t.status === "queued");
+    } else if (filterStatus === "complete") {
+      filtered = filtered.filter((t) => t.status === "complete");
+    } else if (filterStatus === "error") {
+      filtered = filtered.filter((t) => t.status === "error");
+    } else if (filterStatus === "history") {
+      filtered = filtered.filter((t) => t.status === "complete" || t.status === "error");
     }
 
     return filtered;
@@ -571,6 +697,9 @@ export default function TasksPage() {
               <option value="all">全部</option>
               <option value="active">下载中</option>
               <option value="queued">排队中</option>
+              <option value="complete">已完成</option>
+              <option value="error">失败</option>
+              <option value="history">历史记录</option>
             </select>
           </div>
 
@@ -580,15 +709,48 @@ export default function TasksPage() {
                 <span className="muted text-sm">
                   已选 {selectedTasks.size} 项
                 </span>
-                <button
-                  type="button"
-                  className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
-                  onClick={batchCancelTasks}
-                  disabled={isBatchOperating}
-                >
-                  取消
-                </button>
+                {/* 根据选中任务类型显示不同按钮 */}
+                {tasks.some(
+                  (t) =>
+                    selectedTasks.has(t.id) &&
+                    (t.status === "active" || t.status === "queued")
+                ) && (
+                  <button
+                    type="button"
+                    className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
+                    onClick={batchCancelTasks}
+                    disabled={isBatchOperating}
+                  >
+                    取消下载
+                  </button>
+                )}
+                {tasks.some(
+                  (t) =>
+                    selectedTasks.has(t.id) &&
+                    (t.status === "complete" || t.status === "error")
+                ) && (
+                  <button
+                    type="button"
+                    className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
+                    onClick={batchDeleteHistory}
+                    disabled={isBatchOperating}
+                  >
+                    删除记录
+                  </button>
+                )}
               </>
+            )}
+            {tasks.some(
+              (t) => t.status === "complete" || t.status === "error"
+            ) && (
+              <button
+                type="button"
+                className={`button secondary btn-sm${isBatchOperating ? " opacity-60" : ""}`}
+                onClick={clearAllHistory}
+                disabled={isBatchOperating}
+              >
+                清空历史
+              </button>
             )}
             <button
               type="button"
@@ -636,6 +798,7 @@ export default function TasksPage() {
               isOperating={operatingTaskIds.has(task.id)}
               onToggleSelection={toggleTaskSelection}
               onCancel={cancelTask}
+              onCopyUri={copyUri}
             />
           ))}
         </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import {
   getNotificationSettings,
@@ -18,6 +19,10 @@ export default function ProfilePage() {
   const { user, refreshUser } = useAuth();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [mounted, setMounted] = useState(false);
+
+  // 初始密码提醒弹窗
+  const [showInitialPasswordAlert, setShowInitialPasswordAlert] = useState(false);
 
   // 修改密码表单
   const [oldPassword, setOldPassword] = useState("");
@@ -38,9 +43,18 @@ export default function ProfilePage() {
   const [copiedUrl, setCopiedUrl] = useState(false);
 
   useEffect(() => {
+    setMounted(true);
     setNotificationSettings(getNotificationSettings());
     setNotificationSupported(typeof window !== "undefined" && "Notification" in window);
     loadRpcAccess().then(() => setLoading(false));
+
+    // 检查是否需要显示初始密码提醒
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("initial_password") === "1") {
+        setShowInitialPasswordAlert(true);
+      }
+    }
   }, []);
 
   const loadRpcAccess = async () => {
@@ -168,6 +182,26 @@ export default function ProfilePage() {
 
   return (
     <AuthLayout>
+      {/* 初始密码提醒弹窗 - 使用 Portal 渲染到 body */}
+      {mounted && showInitialPasswordAlert && createPortal(
+        <div className="modal-overlay z-10000">
+          <div className="modal-content max-w-400 animate-in">
+            <div className="alert alert-danger mb-4">
+              <p className="text-center m-0" style={{ fontSize: '15px' }}>
+                您当前使用的是管理员设置的初始密码，为了账户安全，请尽快修改为您自己的密码。
+              </p>
+            </div>
+            <button
+              className="button w-full"
+              onClick={() => setShowInitialPasswordAlert(false)}
+            >
+              我知道了
+            </button>
+          </div>
+        </div>,
+        document.body
+      )}
+
       <div className="glass-frame full-height animate-in">
         <div className="page-header">
           <h1 className="page-title">用户设置</h1>
@@ -181,16 +215,18 @@ export default function ProfilePage() {
         <div className="card mb-6">
           <h2 className="section-title">修改密码</h2>
           <form onSubmit={handleChangePassword} className="max-w-400">
-            <div className="mb-4">
-              <label className="form-label">当前密码</label>
-              <input
-                type="password"
-                className="input"
-                value={oldPassword}
-                onChange={(e) => setOldPassword(e.target.value)}
-                required
-              />
-            </div>
+            {!user?.is_initial_password && (
+              <div className="mb-4">
+                <label className="form-label">当前密码</label>
+                <input
+                  type="password"
+                  className="input"
+                  value={oldPassword}
+                  onChange={(e) => setOldPassword(e.target.value)}
+                  required
+                />
+              </div>
+            )}
             <div className="mb-4">
               <label className="form-label">新密码</label>
               <input

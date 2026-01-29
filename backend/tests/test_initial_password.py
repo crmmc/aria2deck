@@ -13,24 +13,44 @@ from app.db import execute, fetch_one
 class TestInitialPasswordLogin:
     """Test login behavior for users with initial password state."""
 
-    def test_initial_password_user_cannot_login(self, client: TestClient, temp_db: str):
-        """Initial password users should get 403 and be told to reset."""
-        # Create user with is_initial_password=1
+    def test_initial_password_user_can_login_with_correct_password(self, client: TestClient, temp_db: str):
+        """Initial password users can login with correct password, returns is_initial_password=True."""
+        client_hash = "a" * 64
         execute(
             """
             INSERT INTO users (username, password_hash, is_admin, is_initial_password, created_at, quota)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            ["newuser", "", 0, 1, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
+            ["newuser", hash_password(client_hash), 0, 1, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
         )
 
         response = client.post("/api/auth/login", json={
             "username": "newuser",
-            "password": "anyhash"
+            "password": client_hash
         })
 
-        assert response.status_code == 403
-        assert "请先重置密码" in response.json()["detail"]
+        assert response.status_code == 200
+        assert response.json()["username"] == "newuser"
+        assert response.json()["is_initial_password"] is True
+
+    def test_initial_password_user_cannot_login_with_wrong_password(self, client: TestClient, temp_db: str):
+        """Initial password users cannot login with wrong password."""
+        client_hash = "a" * 64
+        execute(
+            """
+            INSERT INTO users (username, password_hash, is_admin, is_initial_password, created_at, quota)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ["newuser", hash_password(client_hash), 0, 1, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
+        )
+
+        response = client.post("/api/auth/login", json={
+            "username": "newuser",
+            "password": "wrongpassword"
+        })
+
+        assert response.status_code == 401
+        assert "用户名或密码错误" in response.json()["detail"]
 
     def test_normal_user_can_login(self, client: TestClient, temp_db: str):
         """Normal users (is_initial_password=0) should be able to login."""
@@ -52,92 +72,6 @@ class TestInitialPasswordLogin:
         assert response.status_code == 200
         assert response.json()["username"] == "normaluser"
         assert response.json()["is_initial_password"] is False
-
-
-class TestResetPassword:
-    """Test the reset-password endpoint for initial password users."""
-
-    def test_reset_password_success(self, client: TestClient, temp_db: str):
-        """Initial password users can reset their password."""
-        execute(
-            """
-            INSERT INTO users (username, password_hash, is_admin, is_initial_password, created_at, quota)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            ["resetuser", "", 0, 1, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-        )
-
-        new_password_hash = "b" * 64  # Simulated client hash
-        response = client.post("/api/auth/reset-password", json={
-            "username": "resetuser",
-            "new_password": new_password_hash
-        })
-
-        assert response.status_code == 200
-        assert response.json()["ok"] is True
-
-        # Verify is_initial_password is now 0
-        user = fetch_one("SELECT * FROM users WHERE username = ?", ["resetuser"])
-        assert user["is_initial_password"] == 0
-
-        # Verify session cookie is set
-        assert settings.session_cookie_name in response.cookies
-
-    def test_reset_password_user_not_found_or_not_initial(self, client: TestClient, temp_db: str):
-        """Reset password should return unified error for non-existent or non-initial users."""
-        # Test non-existent user
-        response = client.post("/api/auth/reset-password", json={
-            "username": "nonexistent",
-            "new_password": "c" * 64
-        })
-        assert response.status_code == 400
-        assert "用户不存在或不需要重置密码" in response.json()["detail"]
-
-        # Create normal user (not initial password)
-        execute(
-            """
-            INSERT INTO users (username, password_hash, is_admin, is_initial_password, created_at, quota)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            ["existinguser", hash_password("d" * 64), 0, 0, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-        )
-
-        # Test user that doesn't need reset
-        response = client.post("/api/auth/reset-password", json={
-            "username": "existinguser",
-            "new_password": "e" * 64
-        })
-        assert response.status_code == 400
-        assert "用户不存在或不需要重置密码" in response.json()["detail"]
-
-    def test_reset_password_after_reset_can_login(self, client: TestClient, temp_db: str):
-        """After resetting password, user should be able to login."""
-        execute(
-            """
-            INSERT INTO users (username, password_hash, is_admin, is_initial_password, created_at, quota)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            ["loginafter", "", 0, 1, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-        )
-
-        # Reset password
-        new_password_hash = "f" * 64
-        reset_response = client.post("/api/auth/reset-password", json={
-            "username": "loginafter",
-            "new_password": new_password_hash
-        })
-        assert reset_response.status_code == 200
-
-        # Clear cookie to simulate new login
-        client.cookies.clear()
-
-        # Login with new password
-        login_response = client.post("/api/auth/login", json={
-            "username": "loginafter",
-            "password": new_password_hash
-        })
-        assert login_response.status_code == 200
-        assert login_response.json()["is_initial_password"] is False
 
 
 class TestAdminResetUserPassword:

@@ -25,6 +25,7 @@ export type UserUpdate = {
 export type Task = {
   id: number;  // subscription ID
   name?: string | null;
+  uri?: string | null;  // 原始 URI，用于复制
   status: string;  // effective status: queued, active, complete, error
   total_length: number;
   completed_length: number;

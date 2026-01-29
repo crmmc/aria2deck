@@ -81,13 +81,6 @@ export const api = {
       body: JSON.stringify({ old_password: oldHash, new_password: newHash }),
     });
   },
-  resetPassword: async (username: string, newPassword: string) => {
-    const newHash = await hashPassword(newPassword, username);
-    return request<{ ok: boolean; message: string }>("/api/auth/reset-password", {
-      method: "POST",
-      body: JSON.stringify({ username, new_password: newHash }),
-    });
-  },
 
   // Tasks (subscription-based)
   listTasks: (statusFilter?: string) =>

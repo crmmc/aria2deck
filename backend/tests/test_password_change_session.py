@@ -79,7 +79,7 @@ class TestPasswordChangeSessionInvalidation:
         )
         assert response.status_code == 200
 
-        # 修改密码
+        # 管理员修改密码
         client.cookies.set(settings.session_cookie_name, admin_session)
         response = client.put(
             f"/api/users/{user_id}",
@@ -87,27 +87,21 @@ class TestPasswordChangeSessionInvalidation:
         )
         assert response.status_code == 200
 
-        # 管理员重置后用户需要先重置密码，所以旧密码登录会返回 403
+        # 旧密码登录会返回 401（密码错误）
         client.cookies.clear()
         response = client.post(
             "/api/auth/login",
             json={"username": "testuser_relogin", "password": "oldpassword123"}
         )
-        assert response.status_code == 403  # 需要重置密码
+        assert response.status_code == 401
 
-        # 新密码登录也会返回 403（因为 is_initial_password=True）
+        # 新密码登录成功，但 is_initial_password=True
         response = client.post(
             "/api/auth/login",
             json={"username": "testuser_relogin", "password": "newpassword123"}
         )
-        assert response.status_code == 403  # 需要先重置密码
-
-        # 用户通过 reset-password 重置密码后可以登录
-        response = client.post(
-            "/api/auth/reset-password",
-            json={"username": "testuser_relogin", "new_password": "finalpassword123"}
-        )
         assert response.status_code == 200
+        assert response.json()["is_initial_password"] is True
 
     def test_other_updates_keep_session_valid(
         self, client: TestClient, test_admin: dict, admin_session: str, temp_db: str
