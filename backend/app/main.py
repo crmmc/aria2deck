@@ -1,8 +1,55 @@
 import asyncio
+import logging
+import os
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+
+
+def setup_logging():
+    """配置日志：同时输出到控制台和文件"""
+    # 从环境变量获取日志级别，默认 INFO
+    log_level_str = os.environ.get("ARIA2C_LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+
+    # 日志格式
+    log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+    formatter = logging.Formatter(log_format, datefmt=date_format)
+
+    # 根 logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    # 控制台 handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    # 文件 handler（日志目录：data/logs）
+    from app.core.config import settings
+    log_dir = Path(settings.database_path).parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "app.log"
+
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+
+    logging.info(f"日志已配置: 级别={log_level_str}, 文件={log_file}")
+
+
+# 初始化日志
+setup_logging()
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles

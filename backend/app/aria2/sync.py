@@ -443,21 +443,40 @@ async def sync_tasks(
 
 
 async def _cleanup_orphaned_tasks() -> None:
-    """检测已完成任务的文件是否存在，若不存在则删除任务"""
+    """检测已完成任务的文件是否存在，若不存在则标记任务为 removed
+
+    注意：此函数仅检查 artifact_path 是否存在，不会删除任何文件。
+    artifact_path 是文件移动后的实际绝对路径，比 task.name 更准确。
+    """
     from app.core.state import get_aria2_client
 
     async with get_session() as db:
         result = await db.exec(
             select(Task).where(
                 Task.status == "complete",
-                Task.name.isnot(None)
+                Task.artifact_path.isnot(None)  # 使用 artifact_path 而非 name
             )
         )
         completed_tasks = result.all()
 
     for task in completed_tasks:
-        user_dir = Path(settings.download_dir) / str(task.owner_id)
-        file_path = user_dir / task.name
+        # 使用 artifact_path（实际文件路径）而非 user_dir / task.name
+        # task.name 可能只是文件名，对于 BT 下载的子目录文件会导致路径错误
+        artifact_path = task.artifact_path
+
+        # 空字符串检查：SQLModel 查询条件 isnot(None) 不排除空字符串
+        if not artifact_path:
+            continue
+
+        # Path() 可能因无效字符抛出异常，需要捕获以避免中断整个清理循环
+        try:
+            file_path = Path(artifact_path)
+        except Exception as e:
+            logger.warning(
+                f"[Cleanup] 任务 {task.id} 的 artifact_path 无效: "
+                f"{artifact_path!r}, 错误: {e}"
+            )
+            continue
 
         # 检查文件是否存在
         if not file_path.exists():
@@ -470,6 +489,9 @@ async def _cleanup_orphaned_tasks() -> None:
                     pass
 
             # 标记任务为 removed，保留历史记录
+            logger.info(
+                f"[Cleanup] 任务 {task.id} 文件已不存在，标记为 removed: {file_path}"
+            )
             await _update_task(task.id, {"status": "removed"})
 
 
