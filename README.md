@@ -12,49 +12,49 @@
 ### 多用户系统
 - 基于 Session Cookie 的认证机制
 - 管理员和普通用户角色分离
-- 用户空间完全隔离（独立下载目录）
 - 用户配额管理（默认 100GB，可调整）
 - 密码安全：客户端 PBKDF2 哈希后传输，服务端无法获取明文密码
+
+### 共享下载架构
+- **下载去重**：相同资源只下载一次，多用户共享
+  - 磁力链接/种子：使用 info_hash 去重
+  - HTTP(S) URL：使用最终 URL 的 SHA256 去重
+- **空间冻结**：下载中的任务冻结用户配额空间
+- **引用计数**：文件使用引用计数管理，无引用时自动清理
+- **用户文件引用**：用户拥有文件引用而非物理文件，支持自定义显示名称
 
 ### 任务管理
 - 支持 BT、HTTP、FTP 多协议下载
 - 实时状态同步：WebSocket 事件监听（毫秒级）+ 轮询兜底（可配置间隔）
-- 任务排序：按时间、速度、剩余时间（升序/降序）
-- 任务筛选：全部、活动中、已完成、错误
-- 关键词搜索：支持任务名称模糊搜索
-- 批量操作：暂停、继续、删除
+- 任务订阅模式：用户订阅下载任务，完成后自动创建文件引用
 - 峰值指标追踪：峰值下载速度、峰值连接数
 - 任务异步创建：避免 aria2 RPC 调用阻塞接口
-- 空间超限保护：自动终止超限任务，保留历史记录支持重试
-- 孤立任务清理：文件删除后自动标记任务为 removed 状态
+- 空间超限保护：自动终止超限任务
 
 ### 文件管理
-- 文件浏览器：支持目录导航、路径验证
+- 扁平文件列表：用户文件引用列表
+- BT 文件夹浏览：支持浏览 BT 下载的目录结构
 - 文件操作：下载、删除、重命名
 - 打包下载：多文件打包为 ZIP/7z（可配置）
-- 隐藏文件后缀列表（可配置，如 .aria2、.tmp、.part）
-- 智能清理：删除任务/文件时自动清理 .aria2 控制文件
+- 智能清理：删除文件引用时自动检查引用计数
 
 ### 动态配置
 - aria2 RPC 连接配置（URL、Secret）
 - 系统限制：最大任务大小、最小剩余磁盘空间
 - WebSocket 重连参数：最大延迟、抖动系数、指数因子
-- 隐藏文件后缀列表
 - 配置热更新：无需重启服务
 
 ### 实时监控
 - aria2 WebSocket 事件监听（自动重连、指数退避）
 - WebSocket 推送任务状态更新
-- 下载速度实时图表
-- 用户空间使用统计
+- 用户空间使用统计（已用/冻结/可用）
 - 机器磁盘空间监控（管理员）
 
 ### 前端特性
 - 统一的 CSS 设计系统（变量、工具类）
 - 自定义 Toast/Confirm 组件（替代浏览器原生弹窗）
 - 响应式设计
-- 文件名截断悬浮提示
-- 任务历史记录查看
+- 空间使用三段式进度条（已用/冻结/可用）
 
 ## 技术栈
 
@@ -210,8 +210,11 @@ services:
 | 目录 | 说明 |
 |------|------|
 | `data/app/` | SQLite 数据库 |
-| `data/downloads/` | 下载文件（两个容器共享） |
+| `data/downloads/downloading/` | 下载中的文件（按任务 ID 分目录） |
+| `data/downloads/store/` | 已完成文件存储（按内容哈希分目录） |
 | `data/aria2-config/` | aria2 配置 |
+
+> **注意**：新架构使用共享下载模式，文件按内容哈希存储而非按用户目录。
 
 ### 部署示例
 
@@ -302,22 +305,13 @@ bash backend/aria2/start.sh
 
 ### 任务管理
 
-说明：多数任务接口的 `{id}` 支持任务 ID 或 GID。
-
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/tasks` | 当前用户任务列表（支持状态筛选） |
-| POST | `/api/tasks` | 新建任务（带容量检测与隔离） |
+| GET | `/api/tasks` | 当前用户任务订阅列表（支持状态筛选） |
+| POST | `/api/tasks` | 新建任务订阅（自动去重、空间检测） |
 | POST | `/api/tasks/torrent` | 上传种子创建任务 |
-| GET | `/api/tasks/{id}` | 任务详情 |
-| GET | `/api/tasks/{id}/detail` | 任务详细信息（含 aria2 实时状态、峰值数据） |
-| DELETE | `/api/tasks/{id}?delete_files=bool` | 删除任务（可选删除文件） |
-| DELETE | `/api/tasks?delete_files=bool` | 清空历史记录（可选删除文件） |
-| PUT | `/api/tasks/{id}/status` | 暂停/恢复任务 |
-| POST | `/api/tasks/{id}/retry` | 重试失败任务（非种子任务） |
-| PUT | `/api/tasks/{id}/position` | 调整任务队列位置 |
-| GET | `/api/tasks/{id}/files` | 任务文件列表 |
-| GET | `/api/tasks/artifacts/{token}` | 下载制品 |
+| DELETE | `/api/tasks/{subscription_id}` | 取消任务订阅 |
+| DELETE | `/api/tasks` | 清空已完成/失败的订阅记录 |
 
 ### 系统状态
 
@@ -330,11 +324,13 @@ bash backend/aria2/start.sh
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/files?path=xxx` | 列出文件和文件夹 |
-| GET | `/api/files/download?path=xxx` | 下载文件 |
-| DELETE | `/api/files?path=xxx` | 删除文件/文件夹（自动清理 .aria2） |
-| PUT | `/api/files/rename` | 重命名文件/文件夹 |
-| GET | `/api/files/quota` | 获取用户配额信息 |
+| GET | `/api/files` | 用户文件引用列表（含空间信息） |
+| GET | `/api/files/{file_id}/browse?path=xxx` | 浏览 BT 文件夹内容 |
+| GET | `/api/files/{file_id}/download?path=xxx` | 下载文件（支持子路径） |
+| DELETE | `/api/files/{file_id}` | 删除文件引用 |
+| PUT | `/api/files/{file_id}/rename` | 重命名文件显示名称 |
+| GET | `/api/files/space` | 获取用户空间信息 |
+| GET | `/api/files/quota` | 获取用户配额信息（兼容） |
 | POST | `/api/files/pack/calculate-size` | 计算打包体积 |
 | GET | `/api/files/pack/available-space` | 获取可用打包空间 |
 | GET | `/api/files/pack` | 获取打包任务列表 |
