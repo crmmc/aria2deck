@@ -1,12 +1,18 @@
+"""aria2 任务同步模块（共享下载架构）
+
+轮询 aria2 状态，作为 WebSocket 事件监听的补充机制。
+主要功能：
+- 同步任务进度
+- 检测大小变化（HTTP 下载）
+- 清理孤立任务
+"""
 from __future__ import annotations
 
 import asyncio
 import logging
 import shutil
 import time
-from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4
 
 from sqlmodel import select
 
@@ -16,66 +22,18 @@ from app.core.config import settings
 from app.core.security import sanitize_string
 from app.core.state import AppState, WS_THROTTLE_INTERVAL
 from app.database import get_session
-from app.models import Task, User
+from app.models import DownloadTask, User, UserTaskSubscription, utc_now_str
 
 logger = logging.getLogger(__name__)
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def get_user_available_space(user: User) -> int:
-    """获取用户实际可用空间（考虑配额和机器空间限制）
-
-    Args:
-        user: 用户对象
-
-    Returns:
-        用户可用空间（字节）
-    """
-    # 计算用户已使用的空间
-    user_dir = Path(settings.download_dir) / str(user.id)
-    used_space = 0
-    if user_dir.exists():
-        for file_path in user_dir.rglob("*"):
-            if file_path.is_file():
-                try:
-                    used_space += file_path.stat().st_size
-                except Exception:
-                    pass
-
-    # 用户配额
-    user_quota = user.quota if user.quota else 100 * 1024 * 1024 * 1024  # 默认 100GB
-
-    # 获取机器实际剩余空间
-    download_path = Path(settings.download_dir)
-    download_path.mkdir(parents=True, exist_ok=True)
-    disk = shutil.disk_usage(download_path)
-    machine_free = disk.free
-
-    # 用户理论可用空间（基于配额）
-    user_free_by_quota = max(0, user_quota - used_space)
-
-    # 实际可用空间 = min(用户配额剩余, 机器剩余空间)
-    return min(user_free_by_quota, machine_free)
-
-
 def delete_path_with_aria2(target: Path) -> bool:
-    """删除文件/目录，并清理对应的 .aria2 控制文件
-
-    Args:
-        target: 要删除的文件或目录路径
-
-    Returns:
-        是否成功删除主文件/目录
-    """
+    """删除文件/目录，并清理对应的 .aria2 控制文件"""
     if not target.exists():
         return False
 
     try:
         if target.is_symlink():
-            # 只删除符号链接本身
             target.unlink()
         elif target.is_file():
             target.unlink()
@@ -84,63 +42,40 @@ def delete_path_with_aria2(target: Path) -> bool:
         else:
             return False
 
-        # 清理对应的 .aria2 控制文件
         aria2_file = target.parent / f"{target.name}.aria2"
         if aria2_file.exists() and aria2_file.is_file():
             try:
                 aria2_file.unlink()
             except Exception:
-                pass  # 静默失败，不影响主文件删除结果
+                pass
 
         return True
     except Exception:
         return False
 
 
-def _sanitize_path(file_path: str | None, user_id: int) -> str | None:
-    """将绝对路径转换为文件名，避免暴露服务器路径和 .incomplete 目录"""
+def _sanitize_path(file_path: str | None, task_id: int) -> str | None:
+    """将绝对路径转换为文件名"""
     if not file_path:
         return None
 
     try:
         abs_path = Path(file_path)
-        user_dir = Path(settings.download_dir) / str(user_id)
-
-        # 如果是绝对路径且在用户目录内，提取相对路径
-        if abs_path.is_absolute() and abs_path.is_relative_to(user_dir):
-            rel_path = abs_path.relative_to(user_dir)
-            # 去除 .incomplete 前缀，只保留文件名
-            parts = rel_path.parts
-            if parts and parts[0] == ".incomplete":
-                # 跳过 .incomplete，返回后面的路径
-                if len(parts) > 1:
-                    return str(Path(*parts[1:]))
-                return None
-            return str(rel_path)
-
-        # 如果已经是相对路径或无法转换，返回文件名
         return abs_path.name if abs_path.name else file_path
     except Exception:
-        # 转换失败时，尝试返回文件名
-        try:
-            return Path(file_path).name
-        except Exception:
-            return file_path
+        return file_path
 
 
-def _map_status(status: dict, user_id: int) -> dict:
-    """映射 aria2 状态到数据库字段，并清理路径信息"""
+def _map_status(status: dict, task_id: int) -> dict:
+    """映射 aria2 状态到数据库字段"""
     raw_name = (
         status.get("bittorrent", {}).get("info", {}).get("name")
         or status.get("files", [{}])[0].get("path")
     )
 
-    # 清理路径，避免暴露服务器绝对路径
-    sanitized_name = _sanitize_path(raw_name, user_id)
-    # 清理控制字符，防止日志注入
+    sanitized_name = _sanitize_path(raw_name, task_id)
     sanitized_name = sanitize_string(sanitized_name)
 
-    # 错误信息：先翻译，再清理控制字符
     raw_error = status.get("errorMessage")
     error_msg = parse_error_message(raw_error) if raw_error else None
     error_msg = sanitize_string(error_msg)
@@ -156,160 +91,16 @@ def _map_status(status: dict, user_id: int) -> dict:
     }
 
 
-def _first_artifact_path(status: dict) -> str | None:
-    files = status.get("files") or []
-    if not files:
-        return None
-    return files[0].get("path")
-
-
-def _move_completed_files(status: dict, user_id: int) -> str | None:
-    """将完成的文件从 .incomplete 移动到用户根目录
-
-    返回: 移动后的新路径，如果移动失败则返回原路径
-    """
-    files = status.get("files") or []
-    if not files:
-        return None
-
-    first_file_path = files[0].get("path")
-    if not first_file_path:
-        return None
-
-    src_path = Path(first_file_path)
-    user_dir = Path(settings.download_dir) / str(user_id)
-    incomplete_dir = user_dir / ".incomplete"
-
-    # 检查文件是否在 .incomplete 目录中
-    try:
-        if not src_path.exists():
-            return first_file_path
-        if not src_path.is_relative_to(incomplete_dir):
-            return first_file_path
-    except Exception:
-        return first_file_path
-
-    # 确定要移动的是文件还是目录（BT任务通常是目录）
-    # 获取相对于 .incomplete 的路径
-    try:
-        rel_path = src_path.relative_to(incomplete_dir)
-        # 获取顶级目录或文件
-        top_level = rel_path.parts[0] if rel_path.parts else None
-        if not top_level:
-            return first_file_path
-
-        src_item = incomplete_dir / top_level
-        dst_item = user_dir / top_level
-
-        # 如果目标已存在，添加后缀
-        if dst_item.exists():
-            counter = 1
-            stem = dst_item.stem
-            suffix = dst_item.suffix
-            while dst_item.exists():
-                dst_item = user_dir / f"{stem}_{counter}{suffix}"
-                counter += 1
-
-        # 移动文件/目录
-        shutil.move(str(src_item), str(dst_item))
-
-        # 返回新路径
-        new_first_file = dst_item / rel_path.relative_to(top_level) if len(rel_path.parts) > 1 else dst_item
-        return str(new_first_file)
-    except Exception:
-        return first_file_path
-
-
 async def _update_task(task_id: int, values: dict) -> None:
+    """更新任务字段"""
     async with get_session() as db:
-        result = await db.exec(select(Task).where(Task.id == task_id))
+        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
         task = result.first()
         if task:
             for key, value in values.items():
                 setattr(task, key, value)
-            task.updated_at = utc_now()
+            task.updated_at = utc_now_str()
             db.add(task)
-
-
-async def _cancel_and_delete_task(
-    client,
-    state,
-    task: Task,
-    aria2_status: dict,
-    notification_message: str,
-) -> None:
-    """取消超限任务，保留历史记录以便重试
-
-    Args:
-        client: aria2 客户端
-        state: 应用状态
-        task: 任务对象
-        aria2_status: aria2 状态字典
-        notification_message: 通知用户的消息（同时作为错误信息保存）
-    """
-    gid = task.gid
-
-    # 1. 停止 aria2 任务
-    try:
-        await client.force_remove(gid)
-    except Exception:
-        pass
-    try:
-        await client.remove_download_result(gid)
-    except Exception:
-        pass
-
-    # 2. 删除关联文件（包括 .aria2 控制文件）
-    user_dir = Path(settings.download_dir) / str(task.owner_id)
-    incomplete_dir = user_dir / ".incomplete"
-
-    files = aria2_status.get("files", [])
-    for f in files:
-        file_path = f.get("path", "")
-        if file_path:
-            delete_path_with_aria2(Path(file_path))
-
-    # 对于 BT 下载，可能有顶层目录的 .aria2 文件
-    bt_info = aria2_status.get("bittorrent", {}).get("info", {})
-    bt_name = bt_info.get("name")
-    if bt_name:
-        for base_dir in [user_dir, incomplete_dir]:
-            bt_path = base_dir / bt_name
-            delete_path_with_aria2(bt_path)
-
-    # 3. 更新数据库：标记为 error 状态，清除 gid 以便重试
-    # 保留 uri 和 total_length，方便用户查看历史和重试
-    async with get_session() as db:
-        result = await db.exec(select(Task).where(Task.id == task.id))
-        db_task = result.first()
-        if db_task:
-            db_task.status = "error"
-            db_task.gid = None  # 清除 gid，aria2 任务已移除
-            db_task.error = notification_message
-            db_task.download_speed = 0
-            db_task.upload_speed = 0
-            db_task.updated_at = utc_now()
-            # 保留 name 用于显示
-            if not db_task.name and aria2_status:
-                db_task.name = (
-                    aria2_status.get("bittorrent", {}).get("info", {}).get("name")
-                    or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
-                )
-            # 保留 total_length 用于显示大小
-            if aria2_status:
-                db_task.total_length = int(aria2_status.get("totalLength", 0))
-            db.add(db_task)
-
-    # 4. 通知用户
-    await broadcast_notification(
-        state,
-        task.owner_id,
-        notification_message,
-        level="error"
-    )
-
-    # 5. 广播任务状态更新到前端
-    await broadcast_update(state, task.owner_id, task.id, force=True)
 
 
 async def sync_tasks(
@@ -318,42 +109,41 @@ async def sync_tasks(
 ) -> None:
     """同步 aria2 任务状态到数据库
 
-    每次循环都会动态获取最新的 aria2 配置
-    同时检查活动任务的大小是否超过限制（HTTP 下载启动时 totalLength 可能为 0）
+    作为 WebSocket 事件监听的补充机制。
     """
     from app.core.state import get_aria2_client
     from app.routers.config import get_max_task_size
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+    from app.services.storage import get_user_space_info
 
     while True:
-        # 动态获取 aria2 客户端（支持配置热更新）
         client = get_aria2_client()
 
+        # Get all active tasks
         async with get_session() as db:
             result = await db.exec(
-                select(Task).where(
-                    Task.gid.isnot(None),
-                    Task.status != "removed"
+                select(DownloadTask).where(
+                    DownloadTask.gid.isnot(None),
+                    DownloadTask.status.in_(["queued", "active"]),
                 )
             )
             tasks = result.all()
 
-        # 并发查询所有任务状态
-        async def fetch_and_update(task: Task) -> None:
+        async def fetch_and_update(task: DownloadTask) -> None:
             gid = task.gid
             if not gid:
                 return
+
             try:
                 status = await client.tell_status(gid)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 await _update_task(task.id, {"status": "error", "error": str(exc)})
                 return
 
-            # 空间检查：仅对 active 任务且 totalLength 首次变为非零时检查
             aria2_status = status.get("status")
             total_length = int(status.get("totalLength", 0))
 
-            # 只有当 DB 中的 total_length 为 0，而 aria2 返回的 totalLength > 0 时才检查
-            # 这表示大小刚刚变为已知（HTTP 下载收到 Content-Length 响应）
+            # Check size when it becomes known
             if aria2_status == "active" and total_length > 0 and (task.total_length or 0) == 0:
                 task_name = (
                     status.get("bittorrent", {}).get("info", {}).get("name")
@@ -361,56 +151,79 @@ async def sync_tasks(
                     or "未知任务"
                 )
 
-                # 检查系统最大任务限制
+                # Check system limit
                 max_task_size = get_max_task_size()
                 if total_length > max_task_size:
                     logger.warning(
                         f"[Sync] 任务 {task.id} 大小 {total_length / 1024**3:.2f} GB "
-                        f"超过系统限制 {max_task_size / 1024**3:.2f} GB，终止并删除任务"
+                        f"超过系统限制，终止任务"
                     )
-                    await _cancel_and_delete_task(
+                    await _cancel_task_sync(
                         client, state, task, status,
-                        f"已取消：大小 {total_length / 1024**3:.2f} GB 超过系统限制 {max_task_size / 1024**3:.2f} GB"
+                        f"已取消：大小超过系统限制"
                     )
                     return
 
-                # 检查用户可用空间
+                # Check all subscribers' space
                 async with get_session() as db:
-                    result = await db.exec(select(User).where(User.id == task.owner_id))
-                    user = result.first()
-
-                if user:
-                    user_available = get_user_available_space(user)
-                    if total_length > user_available:
-                        logger.warning(
-                            f"[Sync] 任务 {task.id} 大小 {total_length / 1024**3:.2f} GB "
-                            f"超过用户可用空间 {user_available / 1024**3:.2f} GB，终止并删除任务"
+                    result = await db.exec(
+                        select(UserTaskSubscription, User)
+                        .join(User, UserTaskSubscription.owner_id == User.id)
+                        .where(
+                            UserTaskSubscription.task_id == task.id,
+                            UserTaskSubscription.status == "pending",
                         )
-                        await _cancel_and_delete_task(
-                            client, state, task, status,
-                            f"已取消：大小 {total_length / 1024**3:.2f} GB 超过可用空间 {user_available / 1024**3:.2f} GB"
-                        )
-                        return
+                    )
+                    subscriptions = result.all()
 
-            mapped = _map_status(status, task.owner_id)
-            artifact_path = task.artifact_path
-            artifact_token = task.artifact_token
+                valid_subscribers = []
+                for sub, user in subscriptions:
+                    space_info = await get_user_space_info(user.id, user.quota)
+                    if total_length <= space_info["available"]:
+                        valid_subscribers.append((sub, user))
+                        # Update frozen space
+                        async with get_session() as db:
+                            result = await db.exec(
+                                select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                            )
+                            db_sub = result.first()
+                            if db_sub:
+                                db_sub.frozen_space = total_length
+                                db.add(db_sub)
+                    else:
+                        # Mark subscription as failed
+                        async with get_session() as db:
+                            result = await db.exec(
+                                select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                            )
+                            db_sub = result.first()
+                            if db_sub:
+                                db_sub.status = "failed"
+                                db_sub.error_display = "用户配额空间不足"
+                                db_sub.frozen_space = 0
+                                db.add(db_sub)
 
-            # 检查是否是磁力链接元数据下载完成（会有 followedBy 指向真正的 BT 任务）
+                if not valid_subscribers:
+                    logger.warning(f"[Sync] 任务 {task.id} 没有有效订阅者，取消任务")
+                    await _cancel_task_sync(
+                        client, state, task, status,
+                        "所有订阅者空间不足"
+                    )
+                    return
+
+            # Update task status
+            mapped = _map_status(status, task.id)
+
+            # Handle magnet link metadata completion
             if mapped["status"] == "complete":
                 followed_by = status.get("followedBy", [])
                 if followed_by:
-                    # 元数据下载完成，更新 GID 为真正的 BT 任务 GID
                     new_gid = followed_by[0]
-                    logger.info(f"[Sync] 磁力链接元数据下载完成，更新 GID: {task.gid} -> {new_gid}")
+                    logger.info(f"[Sync] 磁力链接元数据完成，更新 GID: {task.gid} -> {new_gid}")
                     await _update_task(task.id, {"gid": new_gid})
-                    # 不更新状态为 complete，等待真正的 BT 下载完成
                     return
-                elif not artifact_token:
-                    # 真正的下载完成，移动文件
-                    artifact_path = _move_completed_files(status, task.owner_id)
-                    artifact_token = uuid4().hex
 
+            # Track peak values
             current_speed = mapped["download_speed"]
             current_connections = int(status.get("connections", 0))
             peak_speed = task.peak_download_speed or 0
@@ -425,127 +238,95 @@ async def sync_tasks(
                 task.id,
                 {
                     **mapped,
-                    "artifact_path": artifact_path,
-                    "artifact_token": artifact_token,
                     "peak_download_speed": peak_speed,
                     "peak_connections": peak_connections,
                 },
             )
-            await broadcast_update(state, task.owner_id, task.id)
 
-        # 并发执行所有任务更新
+            # Broadcast update
+            await broadcast_task_update_to_subscribers(state, task.id)
+
+        # Process all tasks concurrently
         await asyncio.gather(*[fetch_and_update(task) for task in tasks])
-
-        # 检测已完成任务的文件是否存在，若不存在则删除任务
-        await _cleanup_orphaned_tasks()
 
         await asyncio.sleep(interval)
 
 
-async def _cleanup_orphaned_tasks() -> None:
-    """检测已完成任务的文件是否存在，若不存在则标记任务为 removed
+async def _cancel_task_sync(
+    client: Aria2Client,
+    state: AppState,
+    task: DownloadTask,
+    aria2_status: dict,
+    error_message: str,
+) -> None:
+    """取消任务（sync 版本）"""
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+    from app.services.storage import cleanup_task_download_dir
 
-    注意：此函数仅检查 artifact_path 是否存在，不会删除任何文件。
-    artifact_path 是文件移动后的实际绝对路径，比 task.name 更准确。
-    """
-    from app.core.state import get_aria2_client
+    gid = task.gid
 
+    # Stop aria2 task
+    try:
+        await client.force_remove(gid)
+    except Exception:
+        pass
+    try:
+        await client.remove_download_result(gid)
+    except Exception:
+        pass
+
+    # Update task status
+    async with get_session() as db:
+        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task.id))
+        db_task = result.first()
+        if db_task:
+            db_task.status = "error"
+            db_task.gid = None
+            db_task.error_display = error_message
+            db_task.download_speed = 0
+            db_task.upload_speed = 0
+            db_task.updated_at = utc_now_str()
+            if aria2_status:
+                db_task.name = (
+                    aria2_status.get("bittorrent", {}).get("info", {}).get("name")
+                    or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
+                    or db_task.name
+                )
+                db_task.total_length = int(aria2_status.get("totalLength", 0))
+            db.add(db_task)
+
+    # Mark all pending subscriptions as failed
     async with get_session() as db:
         result = await db.exec(
-            select(Task).where(
-                Task.status == "complete",
-                Task.artifact_path.isnot(None)  # 使用 artifact_path 而非 name
+            select(UserTaskSubscription).where(
+                UserTaskSubscription.task_id == task.id,
+                UserTaskSubscription.status == "pending",
             )
         )
-        completed_tasks = result.all()
+        subscriptions = result.all()
 
-    for task in completed_tasks:
-        # 使用 artifact_path（实际文件路径）而非 user_dir / task.name
-        # task.name 可能只是文件名，对于 BT 下载的子目录文件会导致路径错误
-        artifact_path = task.artifact_path
+        for sub in subscriptions:
+            sub.status = "failed"
+            sub.error_display = error_message
+            sub.frozen_space = 0
+            db.add(sub)
 
-        # 空字符串检查：SQLModel 查询条件 isnot(None) 不排除空字符串
-        if not artifact_path:
-            continue
+    # Clean up download directory
+    await cleanup_task_download_dir(task.id)
 
-        # Path() 可能因无效字符抛出异常，需要捕获以避免中断整个清理循环
-        try:
-            file_path = Path(artifact_path)
-        except Exception as e:
-            logger.warning(
-                f"[Cleanup] 任务 {task.id} 的 artifact_path 无效: "
-                f"{artifact_path!r}, 错误: {e}"
-            )
-            continue
+    # Broadcast update
+    await broadcast_task_update_to_subscribers(state, task.id)
 
-        # 检查文件是否存在
-        if not file_path.exists():
-            # 从 aria2 中移除记录
-            if task.gid:
-                client = get_aria2_client()
-                try:
-                    await client.remove_download_result(task.gid)
-                except Exception:
-                    pass
 
-            # 标记任务为 removed，保留历史记录
-            logger.info(
-                f"[Cleanup] 任务 {task.id} 文件已不存在，标记为 removed: {file_path}"
-            )
-            await _update_task(task.id, {"status": "removed"})
-
+# WebSocket helpers
 
 async def broadcast_update(state: AppState, user_id: int, task_id: int, force: bool = False) -> None:
-    """广播任务更新到 WebSocket 客户端
+    """广播任务更新到 WebSocket 客户端（兼容旧代码）
 
-    Args:
-        state: 应用状态
-        user_id: 用户 ID
-        task_id: 任务 ID
-        force: 是否强制发送（忽略节流）
+    新架构使用 broadcast_task_update_to_subscribers
     """
-    # 节流检查：同一任务在短时间内只发送一次
-    now = time.time()
-    if not force:
-        async with state.lock:
-            last_time = state.last_broadcast.get(task_id, 0)
-            if now - last_time < WS_THROTTLE_INTERVAL:
-                return  # 跳过本次推送
-            state.last_broadcast[task_id] = now
-
-    async with get_session() as db:
-        result = await db.exec(select(Task).where(Task.id == task_id))
-        task = result.first()
-        if not task:
-            return
-        # Convert to dict for JSON serialization
-        payload = {
-            "id": task.id,
-            "owner_id": task.owner_id,
-            "gid": task.gid,
-            "uri": task.uri,
-            "status": task.status,
-            "name": task.name,
-            "total_length": task.total_length,
-            "completed_length": task.completed_length,
-            "download_speed": task.download_speed,
-            "upload_speed": task.upload_speed,
-            "error": task.error,
-            "created_at": task.created_at,
-            "updated_at": task.updated_at,
-            "artifact_path": task.artifact_path,
-            "artifact_token": task.artifact_token,
-            "peak_download_speed": task.peak_download_speed,
-            "peak_connections": task.peak_connections,
-        }
-
-    async with state.lock:
-        sockets = list(state.ws_connections.get(user_id, set()))
-    for ws in sockets:
-        try:
-            await ws.send_json({"type": "task_update", "task": payload})
-        except Exception:
-            await unregister_ws(state, user_id, ws)
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+    await broadcast_task_update_to_subscribers(state, task_id)
 
 
 async def broadcast_notification(
@@ -554,14 +335,7 @@ async def broadcast_notification(
     message: str,
     level: str = "error"
 ) -> None:
-    """广播通知消息到 WebSocket 客户端
-
-    Args:
-        state: 应用状态
-        user_id: 用户 ID
-        message: 通知消息
-        level: 消息级别 (info, warning, error)
-    """
+    """广播通知消息到 WebSocket 客户端"""
     async with state.lock:
         sockets = list(state.ws_connections.get(user_id, set()))
     for ws in sockets:
@@ -585,3 +359,59 @@ async def unregister_ws(state: AppState, user_id: int, ws) -> None:
         sockets = state.ws_connections.get(user_id)
         if sockets:
             sockets.discard(ws)
+
+
+# Legacy functions for backward compatibility
+
+def get_user_available_space(user: User) -> int:
+    """获取用户实际可用空间（兼容旧代码）"""
+    user_dir = Path(settings.download_dir) / str(user.id)
+    used_space = 0
+    if user_dir.exists():
+        for file_path in user_dir.rglob("*"):
+            if file_path.is_file():
+                try:
+                    used_space += file_path.stat().st_size
+                except Exception:
+                    pass
+
+    user_quota = user.quota if user.quota else 100 * 1024 * 1024 * 1024
+
+    download_path = Path(settings.download_dir)
+    download_path.mkdir(parents=True, exist_ok=True)
+    disk = shutil.disk_usage(download_path)
+    machine_free = disk.free
+
+    user_free_by_quota = max(0, user_quota - used_space)
+
+    return min(user_free_by_quota, machine_free)
+
+
+def _move_completed_files(status: dict, user_id: int) -> str | None:
+    """将完成的文件从 .incomplete 移动到用户根目录（兼容旧代码）
+
+    新架构使用 storage.move_to_store
+    """
+    files = status.get("files") or []
+    if not files:
+        return None
+
+    first_file_path = files[0].get("path")
+    if not first_file_path:
+        return None
+
+    return first_file_path
+
+
+async def _cancel_and_delete_task(
+    client,
+    state,
+    task,
+    aria2_status: dict,
+    notification_message: str,
+) -> None:
+    """取消超限任务（兼容旧代码）
+
+    新架构使用 _cancel_task_sync
+    """
+    pass

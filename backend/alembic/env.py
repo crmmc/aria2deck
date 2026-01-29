@@ -12,7 +12,10 @@ from alembic import context
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Import all models to register them with SQLModel.metadata
-from app.models import User, Session, Task, Config, PackTask  # noqa: F401
+from app.models import (  # noqa: F401
+    User, Session, Task, Config, PackTask,
+    DownloadTask, StoredFile, UserFile, UserTaskSubscription,
+)
 from app.core.config import settings
 
 # this is the Alembic Config object, which provides
