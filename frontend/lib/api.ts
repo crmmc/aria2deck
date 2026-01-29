@@ -5,8 +5,9 @@ import type {
   UserUpdate,
   SystemStats,
   SystemConfig,
-  TaskFile,
   FileListResponse,
+  BrowseFileInfo,
+  SpaceInfo,
   QuotaResponse,
   MachineStats,
   PackTask,
@@ -88,9 +89,9 @@ export const api = {
     });
   },
 
-  // Tasks
-  listTasks: () => request<Task[]>("/api/tasks"),
-  getTask: (idOrGid: number | string) => request<Task>(`/api/tasks/${idOrGid}`),
+  // Tasks (subscription-based)
+  listTasks: (statusFilter?: string) =>
+    request<Task[]>(`/api/tasks${statusFilter ? `?status_filter=${statusFilter}` : ""}`),
   createTask: (uri: string) =>
     request<Task>("/api/tasks", {
       method: "POST",
@@ -101,33 +102,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ torrent, options }),
     }),
-  // Replaces actionTask with more specific status update
-  updateTaskStatus: (idOrGid: number | string, status: string) =>
-    request<{ ok: boolean }>(`/api/tasks/${idOrGid}/status`, {
-      method: "PUT",
-      body: JSON.stringify({ status }),
-    }),
-  deleteTask: (idOrGid: number | string, deleteFiles: boolean = false) =>
-    request<{ ok: boolean }>(`/api/tasks/${idOrGid}?delete_files=${deleteFiles}`, {
+  cancelTask: (subscriptionId: number) =>
+    request<{ ok: boolean }>(`/api/tasks/${subscriptionId}`, {
       method: "DELETE",
     }),
-  clearHistory: (deleteFiles: boolean = false) =>
-    request<{ ok: boolean; count: number }>(
-      `/api/tasks?delete_files=${deleteFiles}`,
-      {
-        method: "DELETE",
-      },
-    ),
-  getTaskFiles: (idOrGid: number | string) => request<TaskFile[]>(`/api/tasks/${idOrGid}/files`),
-  getTaskDetail: (idOrGid: number | string) => request<any>(`/api/tasks/${idOrGid}/detail`),
-  changeTaskPosition: (idOrGid: number | string, position: number, how: string = "POS_SET") =>
-    request<{ ok: boolean; new_position: number }>(`/api/tasks/${idOrGid}/position`, {
-      method: "PUT",
-      body: JSON.stringify({ position, how }),
-    }),
-  retryTask: (idOrGid: number | string) =>
-    request<Task>(`/api/tasks/${idOrGid}/retry`, {
-      method: "POST",
+  clearHistory: () =>
+    request<{ ok: boolean; count: number }>("/api/tasks", {
+      method: "DELETE",
     }),
 
   // Stats & Config
@@ -194,40 +175,27 @@ export const api = {
   deleteUser: (id: number, deleteFiles: boolean = false) =>
     request<{ ok: boolean }>(`/api/users/${id}?delete_files=${deleteFiles}`, { method: "DELETE" }),
 
-  // Files
-  listFiles: (path?: string) =>
-    request<FileListResponse>(
-      `/api/files${path ? `?path=${encodeURIComponent(path)}` : ""}`,
+  // Files (UserFile-based)
+  listFiles: () => request<FileListResponse>("/api/files"),
+  browseFile: (fileId: number, path?: string) =>
+    request<BrowseFileInfo[]>(
+      `/api/files/${fileId}/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`
     ),
-  getDownloadToken: (path: string) =>
-    request<{ token: string; expires_in: number }>(
-      `/api/files/download-token?path=${encodeURIComponent(path)}`,
-      { method: "POST" }
-    ),
-  downloadFileUrl: (token: string) => {
+  downloadFileUrl: (fileId: number, path?: string) => {
     const base = getApiBase();
-    return `${base}/api/files/download?token=${encodeURIComponent(token)}`;
+    const pathParam = path ? `?path=${encodeURIComponent(path)}` : "";
+    return `${base}/api/files/${fileId}/download${pathParam}`;
   },
-  // 保留旧方法用于向后兼容（需要登录态）
-  downloadFile: (path: string) => {
-    const base = getApiBase();
-    return `${base}/api/files/download?path=${encodeURIComponent(path)}`;
-  },
-  deleteFile: (path: string) =>
-    request<{ ok: boolean; message: string }>(
-      `/api/files?path=${encodeURIComponent(path)}`,
-      {
-        method: "DELETE",
-      },
-    ),
-  renameFile: (oldPath: string, newName: string) =>
-    request<{ ok: boolean; message: string; new_path: string }>(
-      "/api/files/rename",
-      {
-        method: "PUT",
-        body: JSON.stringify({ old_path: oldPath, new_name: newName }),
-      },
-    ),
+  deleteFile: (fileId: number) =>
+    request<{ ok: boolean }>(`/api/files/${fileId}`, {
+      method: "DELETE",
+    }),
+  renameFile: (fileId: number, newName: string) =>
+    request<{ ok: boolean }>(`/api/files/${fileId}/rename`, {
+      method: "PUT",
+      body: JSON.stringify({ name: newName }),
+    }),
+  getSpace: () => request<SpaceInfo>("/api/files/space"),
   getQuota: () => request<QuotaResponse>("/api/files/quota"),
 
   // Pack Tasks

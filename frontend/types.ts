@@ -21,31 +21,18 @@ export type UserUpdate = {
   quota?: number;
 };
 
+// Task subscription (user's view of a shared download task)
 export type Task = {
-  id: number;
-  owner_id: number;
-  gid?: string | null;
-  uri: string;
-  status: string;
+  id: number;  // subscription ID
   name?: string | null;
+  status: string;  // effective status: queued, active, complete, error
   total_length: number;
   completed_length: number;
   download_speed: number;
   upload_speed: number;
+  frozen_space: number;  // space frozen for this download
   error?: string | null;
   created_at: string;
-  updated_at: string;
-  artifact_path?: string | null;
-  artifact_token?: string | null;
-};
-
-export type TaskFile = {
-  index: number;
-  path: string;
-  length: number;
-  completed_length: number;
-  selected: boolean;
-  uris: string[];
 };
 
 export type SystemStats = {
@@ -72,20 +59,34 @@ export type SystemConfig = {
   download_token_expiry: number;
 };
 
+// User file reference (user's view of a stored file)
 export type FileInfo = {
-  name: string;
-  path: string;
-  is_dir: boolean;
+  id: number;  // UserFile ID
+  name: string;  // display_name
   size: number;
-  modified_at: number;
+  is_directory: boolean;
+  created_at: string;
 };
 
 export type FileListResponse = {
-  current_path: string;
-  parent_path: string | null;
   files: FileInfo[];
+  space: SpaceInfo;
 };
 
+export type SpaceInfo = {
+  used: number;
+  frozen: number;
+  available: number;
+};
+
+// Browse file info (for BT directory contents)
+export type BrowseFileInfo = {
+  name: string;
+  size: number;
+  is_directory: boolean;
+};
+
+// Legacy quota response (for backward compatibility)
 export type QuotaResponse = {
   used: number;
   total: number;

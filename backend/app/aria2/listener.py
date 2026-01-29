@@ -1,18 +1,19 @@
-"""aria2 WebSocket 事件监听器
+"""aria2 WebSocket 事件监听器（共享下载架构）
 
 通过 WebSocket 连接 aria2，订阅事件通知，实现毫秒级响应。
 与轮询机制 (sync_tasks) 并行运行，事件驱动为主、轮询为辅。
 
 关键特性：
 - 自动重连：指数退避 + 抖动算法 (1s -> 60s max, +/- 20% jitter)
-- 事件处理：复用 hooks.py 逻辑
-- 优雅关闭：支持 CancelledError
+- 共享下载：处理多用户订阅同一任务的场景
+- 空间检查：磁力链接解析后检查订阅者空间
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import random
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse, urlunparse
 
@@ -33,19 +34,12 @@ EVENT_MAP = {
     "aria2.onBtDownloadComplete": "bt_complete",
 }
 
-# 重连参数默认值（可通过配置覆盖）
-RECONNECT_BASE_DELAY = 1.0      # 初始延迟（秒）
+# 重连参数默认值
+RECONNECT_BASE_DELAY = 1.0
 
 
 def _http_to_ws_url(http_url: str) -> str:
-    """将 HTTP RPC URL 转换为 WebSocket URL
-
-    Args:
-        http_url: HTTP URL, e.g., "http://localhost:6800/jsonrpc"
-
-    Returns:
-        WebSocket URL, e.g., "ws://localhost:6800/jsonrpc"
-    """
+    """将 HTTP RPC URL 转换为 WebSocket URL"""
     parsed = urlparse(http_url)
     if parsed.scheme == "https":
         ws_scheme = "wss"
@@ -60,17 +54,7 @@ def _calculate_backoff(
     jitter: float | None = None,
     factor: float | None = None,
 ) -> float:
-    """计算指数退避延迟，带抖动
-
-    Args:
-        attempt: 重连尝试次数（从 0 开始）
-        max_delay: 最大延迟（秒），None 时从配置读取
-        jitter: 抖动系数 (0-1)，None 时从配置读取
-        factor: 指数因子，None 时从配置读取
-
-    Returns:
-        延迟时间（秒），包含随机抖动
-    """
+    """计算指数退避延迟，带抖动"""
     from app.routers.config import (
         get_ws_reconnect_factor,
         get_ws_reconnect_jitter,
@@ -96,37 +80,33 @@ async def handle_aria2_event(
 ) -> None:
     """处理 aria2 事件
 
-    复用 hooks.py 的核心逻辑：
     1. 获取 aria2 状态
     2. 查找任务（支持 followingGid）
-    3. 空间检查（start 事件）
+    3. 空间检查（start 事件，检查所有订阅者）
     4. 更新数据库
-    5. 广播到前端
-
-    Args:
-        state: 应用状态
-        gid: 任务 GID
-        event: 事件类型 (start, pause, stop, complete, error, bt_complete)
+    5. 处理完成事件（创建 StoredFile 和 UserFile）
+    6. 广播到所有订阅者
     """
-    from uuid import uuid4
-
     from sqlmodel import select
 
     from app.aria2.errors import parse_error_message
-    from app.aria2.sync import (
-        _cancel_and_delete_task,
-        _move_completed_files,
-        broadcast_update,
-        get_user_available_space,
-    )
     from app.core.state import get_aria2_client
     from app.database import get_session
-    from app.models import Task, User
+    from app.models import (
+        DownloadTask,
+        User,
+        UserTaskSubscription,
+        utc_now_str,
+    )
     from app.routers.config import get_max_task_size
-
-    def utc_now() -> str:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).isoformat()
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+    from app.services.storage import (
+        cleanup_task_download_dir,
+        create_user_file_reference,
+        get_task_download_dir,
+        get_user_space_info,
+        move_to_store,
+    )
 
     client = get_aria2_client()
 
@@ -139,7 +119,7 @@ async def handle_aria2_event(
 
     # 2. 查找任务
     async with get_session() as db:
-        result = await db.exec(select(Task).where(Task.gid == gid))
+        result = await db.exec(select(DownloadTask).where(DownloadTask.gid == gid))
         task = result.first()
 
     # 2.1 通过 followingGid 查找（磁力链接转换场景）
@@ -149,7 +129,7 @@ async def handle_aria2_event(
         if following_gid:
             logger.info(f"[WS] GID {gid} 未找到，尝试通过 followingGid {following_gid} 查找")
             async with get_session() as db:
-                result = await db.exec(select(Task).where(Task.gid == following_gid))
+                result = await db.exec(select(DownloadTask).where(DownloadTask.gid == following_gid))
                 task = result.first()
                 if task:
                     logger.info(f"[WS] 找到原任务 {task.id}，更新 GID: {following_gid} -> {gid}")
@@ -161,14 +141,10 @@ async def handle_aria2_event(
         logger.debug(f"[WS] 未找到 GID {gid} 对应的任务，忽略事件")
         return
 
-    # 3. 获取用户信息
-    user: User | None = None
-    async with get_session() as db:
-        result = await db.exec(select(User).where(User.id == task.owner_id))
-        user = result.first()
+    task_id = task.id
 
-    # 4. 空间检查（仅 start 事件）
-    if event == "start" and aria2_status and user:
+    # 3. 空间检查（仅 start 事件，检查所有订阅者）
+    if event == "start" and aria2_status:
         total_length = int(aria2_status.get("totalLength", 0))
         if total_length > 0:
             task_name = (
@@ -177,100 +153,120 @@ async def handle_aria2_event(
                 or "未知任务"
             )
 
-            # 4.1 检查系统最大任务限制
+            # 3.1 检查系统最大任务限制
             max_task_size = get_max_task_size()
             if total_length > max_task_size:
                 logger.warning(
-                    f"[WS] 任务 {task.id} 大小 {total_length / 1024**3:.2f} GB "
-                    f"超过系统限制 {max_task_size / 1024**3:.2f} GB，终止并删除任务"
+                    f"[WS] 任务 {task_id} 大小 {total_length / 1024**3:.2f} GB "
+                    f"超过系统限制 {max_task_size / 1024**3:.2f} GB，终止任务"
                 )
-                await _cancel_and_delete_task(
+                await _cancel_task(
                     client, state, task, aria2_status,
-                    f"已取消：大小 {total_length / 1024**3:.2f} GB 超过系统限制 {max_task_size / 1024**3:.2f} GB"
+                    f"已取消：大小 {total_length / 1024**3:.2f} GB 超过系统限制"
                 )
                 return
 
-            # 4.2 检查用户可用空间
-            user_available = get_user_available_space(user)
-            logger.info(
-                f"[WS] 空间检查: 任务 {task.id} ({task_name}), "
-                f"大小={total_length / 1024**3:.2f} GB, "
-                f"用户可用={user_available / 1024**3:.2f} GB, "
-                f"用户配额={user.quota / 1024**3:.2f} GB"
-            )
-            if total_length > user_available:
-                logger.warning(
-                    f"[WS] 任务 {task.id} 大小 {total_length / 1024**3:.2f} GB "
-                    f"超过用户可用空间 {user_available / 1024**3:.2f} GB，终止并删除任务"
+            # 3.2 检查所有订阅者的空间
+            async with get_session() as db:
+                result = await db.exec(
+                    select(UserTaskSubscription, User)
+                    .join(User, UserTaskSubscription.owner_id == User.id)
+                    .where(
+                        UserTaskSubscription.task_id == task_id,
+                        UserTaskSubscription.status == "pending",
+                    )
                 )
-                await _cancel_and_delete_task(
+                subscriptions = result.all()
+
+            valid_subscribers = []
+            for sub, user in subscriptions:
+                space_info = await get_user_space_info(user.id, user.quota)
+                if total_length <= space_info["available"]:
+                    valid_subscribers.append((sub, user))
+                    # Update frozen space
+                    async with get_session() as db:
+                        result = await db.exec(
+                            select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                        )
+                        db_sub = result.first()
+                        if db_sub:
+                            db_sub.frozen_space = total_length
+                            db.add(db_sub)
+                else:
+                    # Mark subscription as failed
+                    logger.warning(
+                        f"[WS] 用户 {user.id} 空间不足，标记订阅 {sub.id} 失败"
+                    )
+                    async with get_session() as db:
+                        result = await db.exec(
+                            select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                        )
+                        db_sub = result.first()
+                        if db_sub:
+                            db_sub.status = "failed"
+                            db_sub.error_display = "用户配额空间不足"
+                            db_sub.frozen_space = 0
+                            db.add(db_sub)
+
+            # If no valid subscribers, cancel the task
+            if not valid_subscribers:
+                logger.warning(f"[WS] 任务 {task_id} 没有有效订阅者，取消任务")
+                await _cancel_task(
                     client, state, task, aria2_status,
-                    f"已取消：大小 {total_length / 1024**3:.2f} GB 超过可用空间 {user_available / 1024**3:.2f} GB"
+                    "所有订阅者空间不足"
                 )
                 return
 
-    # 5. 更新数据库状态
+    # 4. 更新数据库状态
     new_status = task.status
     error_msg = None
-    artifact_path = task.artifact_path
-    artifact_token = task.artifact_token
+    error_display = None
 
     if event == "start":
         new_status = "active"
     elif event == "pause":
         new_status = "paused"
     elif event == "stop":
-        new_status = "stopped"
+        new_status = "error"
+        error_display = "已停止"
     elif event == "complete":
-        # 检查是否是磁力链接元数据下载完成（会有 followedBy 指向真正的 BT 任务）
+        # 检查是否是磁力链接元数据下载完成
         followed_by = aria2_status.get("followedBy", [])
         if followed_by:
-            # 元数据下载完成，更新 GID 为真正的 BT 任务 GID
             new_gid = followed_by[0]
             logger.info(f"[WS] 磁力链接元数据下载完成，更新 GID: {gid} -> {new_gid}")
             async with get_session() as db:
-                result = await db.exec(select(Task).where(Task.id == task.id))
+                result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
                 db_task = result.first()
                 if db_task:
                     db_task.gid = new_gid
-                    db_task.updated_at = utc_now()
+                    db_task.updated_at = utc_now_str()
                     db.add(db_task)
-            # 不更新状态，等待真正的 BT 下载事件
             return
         else:
-            # 真正的下载完成
             new_status = "complete"
-            if not artifact_token:
-                artifact_path = _move_completed_files(aria2_status, task.owner_id)
-                artifact_token = uuid4().hex
-            logger.info(f"[WS] 任务 {task.id} 下载完成，artifact_path={artifact_path}")
     elif event == "bt_complete":
         new_status = "complete"
-        if not artifact_token:
-            # 移动文件从 .incomplete 到用户根目录
-            artifact_path = _move_completed_files(aria2_status, task.owner_id)
-            artifact_token = uuid4().hex
-        logger.info(f"[WS] 任务 {task.id} BT下载完成，artifact_path={artifact_path}")
     elif event == "error":
         new_status = "error"
         raw_error = aria2_status.get("errorMessage", "未知错误")
-        error_msg = parse_error_message(raw_error)
+        error_msg = raw_error
+        error_display = parse_error_message(raw_error)
 
+    # Update task in database
     async with get_session() as db:
-        result = await db.exec(select(Task).where(Task.id == task.id))
+        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
         db_task = result.first()
         if db_task:
             db_task.status = new_status
-            db_task.updated_at = utc_now()
+            db_task.updated_at = utc_now_str()
 
             if gid_updated:
                 db_task.gid = gid
             if error_msg:
                 db_task.error = error_msg
-            if artifact_path:
-                db_task.artifact_path = artifact_path
-            if artifact_token:
-                db_task.artifact_token = artifact_token
+            if error_display:
+                db_task.error_display = error_display
 
             if aria2_status:
                 db_task.name = (
@@ -285,28 +281,206 @@ async def handle_aria2_event(
 
             db.add(db_task)
 
-    # 6. 广播到前端（状态变更强制推送）
-    await broadcast_update(state, task.owner_id, task.id, force=True)
+    # 5. 处理完成事件
+    if new_status == "complete":
+        await _handle_task_complete(state, task_id, aria2_status)
+
+    # 6. 广播到所有订阅者
+    await broadcast_task_update_to_subscribers(state, task_id)
     logger.debug(f"[WS] 事件处理完成: GID={gid}, event={event}, status={new_status}")
 
 
-async def listen_aria2_events(state: AppState) -> None:
-    """aria2 WebSocket 事件监听器主循环
+async def _handle_task_complete(
+    state: AppState,
+    task_id: int,
+    aria2_status: dict,
+) -> None:
+    """处理任务完成事件
 
-    - 连接 aria2 WebSocket 端点
-    - 接收并处理事件通知
-    - 断开后自动重连（指数退避 + 抖动）
-
-    Args:
-        state: 应用状态，用于广播更新
+    1. 移动文件到 store
+    2. 创建 StoredFile 记录
+    3. 为所有成功的订阅者创建 UserFile 引用
+    4. 释放冻结空间
     """
+    from sqlmodel import select
+
+    from app.database import get_session
+    from app.models import DownloadTask, UserTaskSubscription, utc_now_str
+    from app.services.storage import (
+        cleanup_task_download_dir,
+        create_user_file_reference,
+        get_task_download_dir,
+        move_to_store,
+    )
+
+    # Get task
+    async with get_session() as db:
+        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+        task = result.first()
+
+    if not task:
+        return
+
+    # Get source file path
+    files = aria2_status.get("files", [])
+    if not files:
+        logger.error(f"[WS] 任务 {task_id} 完成但没有文件信息")
+        return
+
+    first_file_path = files[0].get("path")
+    if not first_file_path:
+        logger.error(f"[WS] 任务 {task_id} 完成但文件路径为空")
+        return
+
+    source_path = Path(first_file_path)
+
+    # Determine the actual item to move (file or top-level directory)
+    task_dir = get_task_download_dir(task_id)
+    try:
+        if source_path.is_relative_to(task_dir):
+            rel_path = source_path.relative_to(task_dir)
+            top_level = rel_path.parts[0] if rel_path.parts else None
+            if top_level:
+                source_path = task_dir / top_level
+    except Exception:
+        pass
+
+    if not source_path.exists():
+        logger.error(f"[WS] 任务 {task_id} 完成但源文件不存在: {source_path}")
+        return
+
+    # Get original name
+    original_name = task.name or source_path.name
+
+    try:
+        # Move to store and create StoredFile
+        stored_file = await move_to_store(source_path, original_name)
+
+        # Update task with stored_file_id
+        async with get_session() as db:
+            result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+            db_task = result.first()
+            if db_task:
+                db_task.stored_file_id = stored_file.id
+                db_task.completed_at = utc_now_str()
+                db.add(db_task)
+
+        # Create UserFile references for all pending subscribers
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserTaskSubscription).where(
+                    UserTaskSubscription.task_id == task_id,
+                    UserTaskSubscription.status == "pending",
+                )
+            )
+            subscriptions = result.all()
+
+        for sub in subscriptions:
+            # Create file reference
+            await create_user_file_reference(
+                user_id=sub.owner_id,
+                stored_file_id=stored_file.id,
+                display_name=original_name,
+            )
+
+            # Update subscription status
+            async with get_session() as db:
+                result = await db.exec(
+                    select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                )
+                db_sub = result.first()
+                if db_sub:
+                    db_sub.status = "success"
+                    db_sub.frozen_space = 0
+                    db.add(db_sub)
+
+        logger.info(f"[WS] 任务 {task_id} 完成，创建了 {len(subscriptions)} 个用户文件引用")
+
+    except Exception as e:
+        logger.error(f"[WS] 处理任务 {task_id} 完成事件失败: {e}")
+
+    # Clean up task download directory
+    await cleanup_task_download_dir(task_id)
+
+
+async def _cancel_task(
+    client,
+    state: AppState,
+    task,
+    aria2_status: dict,
+    error_message: str,
+) -> None:
+    """取消任务并通知所有订阅者"""
+    from sqlmodel import select
+
+    from app.database import get_session
+    from app.models import DownloadTask, UserTaskSubscription, utc_now_str
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+    from app.services.storage import cleanup_task_download_dir
+
+    gid = task.gid
+
+    # Stop aria2 task
+    try:
+        await client.force_remove(gid)
+    except Exception:
+        pass
+    try:
+        await client.remove_download_result(gid)
+    except Exception:
+        pass
+
+    # Update task status
+    async with get_session() as db:
+        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task.id))
+        db_task = result.first()
+        if db_task:
+            db_task.status = "error"
+            db_task.gid = None
+            db_task.error_display = error_message
+            db_task.download_speed = 0
+            db_task.upload_speed = 0
+            db_task.updated_at = utc_now_str()
+            if aria2_status:
+                db_task.name = (
+                    aria2_status.get("bittorrent", {}).get("info", {}).get("name")
+                    or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
+                    or db_task.name
+                )
+                db_task.total_length = int(aria2_status.get("totalLength", 0))
+            db.add(db_task)
+
+    # Mark all pending subscriptions as failed
+    async with get_session() as db:
+        result = await db.exec(
+            select(UserTaskSubscription).where(
+                UserTaskSubscription.task_id == task.id,
+                UserTaskSubscription.status == "pending",
+            )
+        )
+        subscriptions = result.all()
+
+        for sub in subscriptions:
+            sub.status = "failed"
+            sub.error_display = error_message
+            sub.frozen_space = 0
+            db.add(sub)
+
+    # Clean up download directory
+    await cleanup_task_download_dir(task.id)
+
+    # Broadcast update
+    await broadcast_task_update_to_subscribers(state, task.id)
+
+
+async def listen_aria2_events(state: AppState) -> None:
+    """aria2 WebSocket 事件监听器主循环"""
     from app.core.config import settings
     from app.routers.config import get_config_value
 
     reconnect_attempt = 0
 
     while True:
-        # 动态获取 aria2 配置
         rpc_url = get_config_value("aria2_rpc_url")
         if not rpc_url:
             rpc_url = settings.aria2_rpc_url
@@ -320,7 +494,7 @@ async def listen_aria2_events(state: AppState) -> None:
 
                 async with session.ws_connect(ws_url) as ws:
                     logger.info("[WS] 已连接 aria2 WebSocket")
-                    reconnect_attempt = 0  # 连接成功，重置重连计数
+                    reconnect_attempt = 0
 
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
@@ -335,7 +509,6 @@ async def listen_aria2_events(state: AppState) -> None:
                                         if gid:
                                             event = EVENT_MAP[method]
                                             logger.debug(f"[WS] 收到事件: {method}, GID={gid}")
-                                            # 异步处理事件，不阻塞消息接收
                                             asyncio.create_task(
                                                 handle_aria2_event(state, gid, event),
                                                 name=f"aria2_event_{gid}_{event}"
@@ -358,7 +531,6 @@ async def listen_aria2_events(state: AppState) -> None:
         except Exception as exc:
             logger.warning(f"[WS] 连接失败: {exc}")
 
-        # 计算重连延迟
         delay = _calculate_backoff(reconnect_attempt)
         reconnect_attempt += 1
         logger.info(f"[WS] {delay:.1f} 秒后重连 (尝试 #{reconnect_attempt})")
