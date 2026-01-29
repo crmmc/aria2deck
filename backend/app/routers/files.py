@@ -20,6 +20,7 @@ from sqlmodel import select
 
 from app.auth import require_user, optional_user
 from app.core.config import settings
+from app.core.rate_limit import api_limiter
 from app.database import get_session
 from app.models import User, PackTask, UserFile, StoredFile
 from app.services.storage import (
@@ -63,6 +64,18 @@ class BrowseFileInfo(BaseModel):
 class RenameRequest(BaseModel):
     """重命名请求"""
     name: str
+
+
+class PackRequest(BaseModel):
+    """打包请求"""
+    folder_path: str | None = None
+    paths: list[str] | None = None
+    output_name: str | None = None
+
+
+class CalculateSizeRequest(BaseModel):
+    """计算大小请求"""
+    paths: list[str]
 
 
 class SpaceInfo(BaseModel):
@@ -452,6 +465,208 @@ def _pack_task_to_dict(task: PackTask) -> dict:
 # Pack endpoints remain largely unchanged as they work with physical files
 # These will be updated in a future iteration to work with StoredFile
 
+@router.post("/pack/calculate-size")
+async def calculate_paths_size(
+    payload: CalculateSizeRequest,
+    user: User = Depends(require_user)
+) -> dict:
+    """计算多个文件/文件夹的总大小"""
+    from app.services.pack import calculate_folder_size, get_user_available_space_for_pack
+
+    if not payload.paths:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="路径列表不能为空"
+        )
+
+    user_dir = _get_user_dir(user.id)
+    total_size = 0
+
+    for path in payload.paths:
+        # 禁止访问 .incomplete 目录
+        if path == ".incomplete" or path.startswith(".incomplete/"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="无权访问此文件"
+            )
+
+        target = _validate_path(user_dir, path)
+        if not target.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"路径不存在: {path}"
+            )
+        if target.is_dir():
+            total_size += calculate_folder_size(target)
+        else:
+            total_size += target.stat().st_size
+
+    available = await get_user_available_space_for_pack(user.id)
+
+    return {
+        "total_size": total_size,
+        "user_available": available,
+    }
+
+
+@router.get("/pack/available-space")
+async def get_pack_available_space(
+    folder_path: str | None = None,
+    user: User = Depends(require_user)
+) -> dict:
+    """获取用户可用于打包的空间"""
+    from app.services.pack import (
+        calculate_folder_size,
+        get_server_available_space,
+        get_user_available_space_for_pack,
+    )
+
+    user_available = await get_user_available_space_for_pack(user.id)
+    server_available = await get_server_available_space()
+
+    result = {
+        "user_available": user_available,
+        "server_available": server_available,
+    }
+
+    if folder_path:
+        user_dir = _get_user_dir(user.id)
+        target = _validate_path(user_dir, folder_path)
+        if target.exists() and target.is_dir():
+            result["folder_size"] = calculate_folder_size(target)
+        else:
+            result["folder_size"] = 0
+
+    return result
+
+
+@router.post("/pack", status_code=status.HTTP_201_CREATED)
+async def create_pack_task(
+    payload: PackRequest,
+    user: User = Depends(require_user)
+) -> dict:
+    """创建打包任务
+
+    支持两种模式：
+    1. 单文件夹打包：提供 folder_path
+    2. 多文件打包：提供 paths 列表
+    """
+    # 频率限制
+    if not api_limiter.is_allowed(user.id, "create_pack", limit=5, window_seconds=60):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="操作过于频繁，请稍后再试"
+        )
+
+    from app.services.pack import (
+        PackTaskManager, calculate_folder_size,
+        get_user_available_space_for_pack
+    )
+
+    user_dir = _get_user_dir(user.id)
+
+    # 确定打包路径列表
+    if payload.paths and len(payload.paths) > 0:
+        paths = payload.paths
+        is_multi = True
+    elif payload.folder_path:
+        paths = [payload.folder_path]
+        is_multi = False
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请提供 folder_path 或 paths"
+        )
+
+    # 验证所有路径并计算总大小
+    total_size = 0
+    for path in paths:
+        if path == ".incomplete" or path.startswith(".incomplete/"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="无权访问此文件"
+            )
+
+        target = _validate_path(user_dir, path)
+        if not target.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"路径不存在: {path}"
+            )
+        if target.is_dir():
+            total_size += calculate_folder_size(target)
+        else:
+            total_size += target.stat().st_size
+
+    if total_size == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="选中的文件/文件夹为空"
+        )
+
+    folder_path_value = json.dumps(paths) if is_multi else paths[0]
+
+    # Check for existing pack task
+    async with get_session() as db:
+        result = await db.exec(
+            select(PackTask).where(
+                PackTask.owner_id == user.id,
+                PackTask.folder_path == folder_path_value,
+                PackTask.status.in_(["pending", "packing"])
+            )
+        )
+        existing = result.first()
+
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="相同路径已有进行中的打包任务"
+        )
+
+    reserved_space = total_size
+
+    # Check available space
+    available = await get_user_available_space_for_pack(user.id)
+    if reserved_space > available:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"空间不足。需要: {reserved_space / 1024**3:.2f} GB, 可用: {available / 1024**3:.2f} GB"
+        )
+
+    # 验证输出文件名
+    output_name = payload.output_name
+    if output_name and ("/" in output_name or "\\" in output_name):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="输出文件名不能包含路径分隔符"
+        )
+
+    # Create task record
+    async with get_session() as db:
+        pack_task = PackTask(
+            owner_id=user.id,
+            folder_path=folder_path_value,
+            folder_size=total_size,
+            reserved_space=reserved_space,
+            output_name=output_name,
+            status="pending",
+            created_at=utc_now(),
+            updated_at=utc_now()
+        )
+        db.add(pack_task)
+        await db.commit()
+        await db.refresh(pack_task)
+        task_id = pack_task.id
+
+    # Start async packing
+    asyncio.create_task(PackTaskManager.start_pack(task_id, user.id, folder_path_value, output_name))
+
+    async with get_session() as db:
+        result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+        task = result.first()
+        return _pack_task_to_dict(task)
+
+
 @router.get("/pack")
 async def list_pack_tasks(user: User = Depends(require_user)) -> list[dict]:
     """列出用户的打包任务"""
@@ -545,6 +760,17 @@ async def download_pack_result(task_id: int, user: User = Depends(require_user))
     output_path = task.output_path
     if not output_path or not Path(output_path).exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="打包文件不存在")
+
+    # Path traversal protection: ensure output_path is within user directory
+    user_dir = _get_user_dir(user.id)
+    output_path_resolved = Path(output_path).resolve()
+    try:
+        output_path_resolved.relative_to(user_dir)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权访问此文件"
+        )
 
     return FileResponse(
         path=output_path,
