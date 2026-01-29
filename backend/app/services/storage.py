@@ -132,7 +132,7 @@ async def move_to_store(
         shutil.move(str(source_path), str(store_path))
         logger.info(f"Moved {source_path} to {store_path}")
 
-    # Create StoredFile record
+    # Create StoredFile record with race condition handling
     async with get_session() as db:
         # Double-check for race condition
         result = await db.exec(
@@ -152,9 +152,26 @@ async def move_to_store(
             created_at=utc_now_str(),
         )
         db.add(stored_file)
-        await db.commit()
-        await db.refresh(stored_file)
-        return stored_file
+
+        try:
+            await db.commit()
+            await db.refresh(stored_file)
+            return stored_file
+        except Exception as e:
+            # UNIQUE constraint violation - another process created it
+            await db.rollback()
+            logger.info(f"Race condition on StoredFile creation: {content_hash}, fetching existing")
+
+            # Fetch the record created by the other process
+            result = await db.exec(
+                select(StoredFile).where(StoredFile.content_hash == content_hash)
+            )
+            existing = result.first()
+            if existing:
+                return existing
+
+            # If still not found, re-raise the original error
+            raise RuntimeError(f"Failed to create or find StoredFile: {content_hash}") from e
 
 
 async def create_user_file_reference(
@@ -211,14 +228,22 @@ async def create_user_file_reference(
         stored_file.ref_count += 1
         db.add(stored_file)
 
-        await db.commit()
-        await db.refresh(user_file)
+        try:
+            await db.commit()
+            await db.refresh(user_file)
 
-        logger.info(
-            f"Created user file reference: user={user_id}, "
-            f"stored_file={stored_file_id}, ref_count={stored_file.ref_count}"
-        )
-        return user_file
+            logger.info(
+                f"Created user file reference: user={user_id}, "
+                f"stored_file={stored_file_id}, ref_count={stored_file.ref_count}"
+            )
+            return user_file
+        except Exception:
+            # UNIQUE constraint violation - reference already exists
+            await db.rollback()
+            logger.debug(
+                f"Race condition: user {user_id} already has reference to stored file {stored_file_id}"
+            )
+            return None
 
 
 async def delete_user_file_reference(user_file_id: int) -> bool:
