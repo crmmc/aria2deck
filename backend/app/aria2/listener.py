@@ -192,6 +192,12 @@ async def handle_aria2_event(
 
             # 4.2 检查用户可用空间
             user_available = get_user_available_space(user)
+            logger.info(
+                f"[WS] 空间检查: 任务 {task.id} ({task_name}), "
+                f"大小={total_length / 1024**3:.2f} GB, "
+                f"用户可用={user_available / 1024**3:.2f} GB, "
+                f"用户配额={user.quota / 1024**3:.2f} GB"
+            )
             if total_length > user_available:
                 logger.warning(
                     f"[WS] 任务 {task.id} 大小 {total_length / 1024**3:.2f} GB "
@@ -237,12 +243,14 @@ async def handle_aria2_event(
             if not artifact_token:
                 artifact_path = _move_completed_files(aria2_status, task.owner_id)
                 artifact_token = uuid4().hex
+            logger.info(f"[WS] 任务 {task.id} 下载完成，artifact_path={artifact_path}")
     elif event == "bt_complete":
         new_status = "complete"
         if not artifact_token:
             # 移动文件从 .incomplete 到用户根目录
             artifact_path = _move_completed_files(aria2_status, task.owner_id)
             artifact_token = uuid4().hex
+        logger.info(f"[WS] 任务 {task.id} BT下载完成，artifact_path={artifact_path}")
     elif event == "error":
         new_status = "error"
         raw_error = aria2_status.get("errorMessage", "未知错误")
