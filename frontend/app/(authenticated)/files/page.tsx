@@ -274,27 +274,25 @@ export default function FilesPage() {
               )}
             </div>
           </div>
-          <div className="progress-container">
+          <div className="progress-container" style={{ position: "relative" }}>
             {/* Used space */}
             <div
               className="progress-bar"
               style={{
-                width: `${getSpacePercentage(space).used}%`,
+                width: `${getSpacePercentage(space).used + getSpacePercentage(space).frozen}%`,
                 background: getSpaceColor(getSpacePercentage(space).used + getSpacePercentage(space).frozen),
               }}
             />
-            {/* Frozen space */}
+            {/* Frozen space overlay - show as striped pattern on top of used+frozen bar */}
             {space.frozen > 0 && (
               <div
-                className="progress-bar"
                 style={{
-                  width: `${getSpacePercentage(space).frozen}%`,
-                  background: "var(--warning)",
-                  opacity: 0.6,
-                  marginLeft: `${getSpacePercentage(space).used}%`,
                   position: "absolute",
+                  left: `${getSpacePercentage(space).used}%`,
                   top: 0,
+                  width: `${getSpacePercentage(space).frozen}%`,
                   height: "100%",
+                  background: "repeating-linear-gradient(45deg, transparent, transparent 2px, rgba(255,255,255,0.3) 2px, rgba(255,255,255,0.3) 4px)",
                 }}
               />
             )}
