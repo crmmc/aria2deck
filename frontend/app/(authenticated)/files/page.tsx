@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
@@ -12,6 +12,9 @@ function formatDate(dateStr: string): string {
   return date.toLocaleString();
 }
 
+type SortField = "name" | "size" | "created_at";
+type SortOrder = "asc" | "desc";
+
 export default function FilesPage() {
   const { showToast, showConfirm } = useToast();
   const [files, setFiles] = useState<FileInfo[]>([]);
@@ -20,6 +23,16 @@ export default function FilesPage() {
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<number | null>(null);
   const [newName, setNewName] = useState("");
+
+  // Sort state
+  const [sortField, setSortField] = useState<SortField>("created_at");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
+
+  // Search state
+  const [toolbarSearchKeyword, setToolbarSearchKeyword] = useState("");
+  const [showSearchModal, setShowSearchModal] = useState(false);
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const searchModalInputRef = useRef<HTMLInputElement>(null);
 
   // Batch selection state
   const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
@@ -41,7 +54,6 @@ export default function FilesPage() {
       const response = await api.listFiles();
       setFiles(response.files);
       setSpace(response.space);
-      // Clear selection when files reload
       setSelectedFiles(new Set());
     } catch (err) {
       setError((err as Error).message);
@@ -53,6 +65,106 @@ export default function FilesPage() {
   useEffect(() => {
     loadFiles();
   }, [loadFiles]);
+
+  // Focus search modal input when opened
+  useEffect(() => {
+    if (showSearchModal && searchModalInputRef.current) {
+      searchModalInputRef.current.focus();
+    }
+  }, [showSearchModal]);
+
+  // Keyboard shortcut for search (Cmd/Ctrl + F)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+        e.preventDefault();
+        openSearchModal();
+      }
+      if (e.key === "Escape" && showSearchModal) {
+        closeSearchModal();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showSearchModal, toolbarSearchKeyword]);
+
+  // Sorted files (folders first, then by sort field)
+  const sortedFiles = useMemo(() => {
+    const sorted = [...files].sort((a, b) => {
+      // Folders always come first
+      if (a.is_directory && !b.is_directory) return -1;
+      if (!a.is_directory && b.is_directory) return 1;
+
+      // Then sort by field
+      let cmp = 0;
+      if (sortField === "name") {
+        cmp = a.name.localeCompare(b.name);
+      } else if (sortField === "size") {
+        cmp = a.size - b.size;
+      } else if (sortField === "created_at") {
+        cmp = new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      }
+      return sortOrder === "asc" ? cmp : -cmp;
+    });
+    return sorted;
+  }, [files, sortField, sortOrder]);
+
+  // Search results for modal
+  const searchResults = useMemo(() => {
+    if (!searchKeyword.trim()) return [];
+    const keyword = searchKeyword.toLowerCase();
+    return files.filter((f) => f.name.toLowerCase().includes(keyword));
+  }, [files, searchKeyword]);
+
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortOrder(sortOrder === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortOrder(field === "name" ? "asc" : "desc");
+    }
+  };
+
+  const getSortIcon = (field: SortField) => {
+    if (sortField !== field) return "↕";
+    return sortOrder === "asc" ? "↑" : "↓";
+  };
+
+  // Search modal handlers
+  const openSearchModal = () => {
+    setSearchKeyword(toolbarSearchKeyword);
+    setShowSearchModal(true);
+  };
+
+  const closeSearchModal = () => {
+    setShowSearchModal(false);
+  };
+
+  const handleToolbarSearchKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      openSearchModal();
+    }
+  };
+
+  const handleSearchModalKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      // Search is already active via searchResults memo
+    }
+  };
+
+  // Sync modal input back to toolbar when closing
+  const handleSearchModalInputChange = (value: string) => {
+    setSearchKeyword(value);
+    setToolbarSearchKeyword(value);
+  };
+
+  // Handle search result click
+  const handleSearchResultClick = (file: FileInfo) => {
+    closeSearchModal();
+    if (file.is_directory) {
+      openBrowse(file);
+    }
+  };
 
   const handleDelete = async (file: FileInfo) => {
     const confirmMsg = file.is_directory
@@ -115,12 +227,12 @@ export default function FilesPage() {
   }, []);
 
   const toggleSelectAll = useCallback(() => {
-    if (selectedFiles.size === files.length) {
+    if (selectedFiles.size === sortedFiles.length) {
       setSelectedFiles(new Set());
     } else {
-      setSelectedFiles(new Set(files.map((f) => f.id)));
+      setSelectedFiles(new Set(sortedFiles.map((f) => f.id)));
     }
-  }, [selectedFiles.size, files]);
+  }, [selectedFiles.size, sortedFiles]);
 
   const selectedSize = useMemo(() => {
     return files
@@ -202,9 +314,10 @@ export default function FilesPage() {
     }
   };
 
-  const navigateBrowseUp = async () => {
-    if (!browsingFile || browsePath.length === 0) return;
-    const newPath = browsePath.slice(0, -1);
+  const navigateToPathIndex = async (index: number) => {
+    if (!browsingFile) return;
+    // index -1 means root
+    const newPath = index < 0 ? [] : browsePath.slice(0, index + 1);
     setBrowseLoading(true);
     try {
       const contents = await api.browseFile(
@@ -214,7 +327,7 @@ export default function FilesPage() {
       setBrowseContents(contents);
       setBrowsePath(newPath);
     } catch (err) {
-      showToast(`返回上级失败: ${(err as Error).message}`, "error");
+      showToast(`导航失败: ${(err as Error).message}`, "error");
     } finally {
       setBrowseLoading(false);
     }
@@ -275,7 +388,6 @@ export default function FilesPage() {
             </div>
           </div>
           <div className="progress-container" style={{ position: "relative" }}>
-            {/* Used space */}
             <div
               className="progress-bar"
               style={{
@@ -283,7 +395,6 @@ export default function FilesPage() {
                 background: getSpaceColor(getSpacePercentage(space).used + getSpacePercentage(space).frozen),
               }}
             />
-            {/* Frozen space overlay - show as striped pattern on top of used+frozen bar */}
             {space.frozen > 0 && (
               <div
                 style={{
@@ -300,37 +411,100 @@ export default function FilesPage() {
         </div>
       )}
 
-      {/* Batch operation toolbar */}
-      {files.length > 0 && (
-        <div className="card filter-toolbar mb-4">
-          <div className="filter-group ml-auto">
-            {selectedFiles.size > 0 && (
-              <>
-                <span className="muted text-sm">
-                  已选 {selectedFiles.size} 项 ({formatBytes(selectedSize)})
-                </span>
-                <button
-                  type="button"
-                  className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
-                  onClick={handleBatchDelete}
-                  disabled={isBatchOperating}
-                >
-                  {isBatchOperating ? "删除中..." : "批量删除"}
-                </button>
-              </>
-            )}
+      {/* Toolbar - Always visible */}
+      <div className="card filter-toolbar mb-4">
+        {/* Path breadcrumb */}
+        <div className="filter-group path-breadcrumb">
+          <span className="file-icon">📁</span>
+          <span className="text-sm font-medium">根目录</span>
+          <span className="muted text-sm">({files.length} 项)</span>
+        </div>
+
+        {/* Sort select */}
+        <div className="filter-group">
+          <select
+            className="select"
+            value={`${sortField}-${sortOrder}`}
+            onChange={(e) => {
+              const [field, order] = e.target.value.split("-") as [SortField, SortOrder];
+              setSortField(field);
+              setSortOrder(order);
+            }}
+          >
+            <option value="created_at-desc">时间 (最新)</option>
+            <option value="created_at-asc">时间 (最早)</option>
+            <option value="name-asc">名称 (A-Z)</option>
+            <option value="name-desc">名称 (Z-A)</option>
+            <option value="size-desc">大小 (最大)</option>
+            <option value="size-asc">大小 (最小)</option>
+          </select>
+        </div>
+
+        {/* Search input */}
+        <div className="filter-group search-input-group">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="search-input-icon"
+          >
+            <circle cx="11" cy="11" r="8" />
+            <path d="m21 21-4.35-4.35" />
+          </svg>
+          <input
+            type="text"
+            className="toolbar-search-input"
+            placeholder="搜索文件名... (回车搜索)"
+            value={toolbarSearchKeyword}
+            onChange={(e) => setToolbarSearchKeyword(e.target.value)}
+            onKeyDown={handleToolbarSearchKeyDown}
+          />
+          {toolbarSearchKeyword && (
+            <button
+              type="button"
+              className="search-clear-btn"
+              onClick={() => setToolbarSearchKeyword("")}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
+        {/* Batch operations */}
+        <div className="filter-group ml-auto">
+          {selectedFiles.size > 0 && (
+            <>
+              <span className="muted text-sm">
+                已选 {selectedFiles.size} 项 ({formatBytes(selectedSize)})
+              </span>
+              <button
+                type="button"
+                className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
+                onClick={handleBatchDelete}
+                disabled={isBatchOperating}
+              >
+                {isBatchOperating ? "删除中..." : "批量删除"}
+              </button>
+            </>
+          )}
+          {sortedFiles.length > 0 && (
             <button
               type="button"
               className="button secondary btn-sm"
               onClick={toggleSelectAll}
             >
-              {selectedFiles.size === files.length && files.length > 0
+              {selectedFiles.size === sortedFiles.length && sortedFiles.length > 0
                 ? "取消全选"
                 : "全选"}
             </button>
-          </div>
+          )}
         </div>
-      )}
+      </div>
 
       {loading ? (
         <div className="card text-center py-8">
@@ -340,7 +514,7 @@ export default function FilesPage() {
         <div className="card text-center py-8">
           <p className="text-danger">{error}</p>
         </div>
-      ) : files.length === 0 ? (
+      ) : sortedFiles.length === 0 ? (
         <div className="card text-center py-8">
           <p className="muted">暂无文件</p>
         </div>
@@ -352,19 +526,34 @@ export default function FilesPage() {
                 <th className="table-cell text-left" style={{ width: "40px" }}>
                   <input
                     type="checkbox"
-                    checked={selectedFiles.size === files.length && files.length > 0}
+                    checked={selectedFiles.size === sortedFiles.length && sortedFiles.length > 0}
                     onChange={toggleSelectAll}
                     className="checkbox-sm cursor-pointer"
                   />
                 </th>
-                <th className="table-cell text-left">名称</th>
-                <th className="table-cell text-right">大小</th>
-                <th className="table-cell text-right">添加时间</th>
+                <th
+                  className="table-cell text-left sortable-header"
+                  onClick={() => handleSort("name")}
+                >
+                  名称 <span className="sort-icon">{getSortIcon("name")}</span>
+                </th>
+                <th
+                  className="table-cell text-right sortable-header"
+                  onClick={() => handleSort("size")}
+                >
+                  大小 <span className="sort-icon">{getSortIcon("size")}</span>
+                </th>
+                <th
+                  className="table-cell text-right sortable-header"
+                  onClick={() => handleSort("created_at")}
+                >
+                  添加时间 <span className="sort-icon">{getSortIcon("created_at")}</span>
+                </th>
                 <th className="table-cell text-right">操作</th>
               </tr>
             </thead>
             <tbody>
-              {files.map((file) => (
+              {sortedFiles.map((file) => (
                 <tr key={file.id} className="table-row transition-bg">
                   <td className="table-cell">
                     <input
@@ -463,6 +652,94 @@ export default function FilesPage() {
         </div>
       )}
 
+      {/* Search Modal */}
+      {showSearchModal && (
+        <div
+          className="modal-overlay"
+          onClick={closeSearchModal}
+        >
+          <div
+            className="search-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="search-modal-header">
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="search-modal-icon"
+              >
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <input
+                ref={searchModalInputRef}
+                type="text"
+                className="search-modal-input"
+                placeholder="搜索文件名..."
+                value={searchKeyword}
+                onChange={(e) => handleSearchModalInputChange(e.target.value)}
+                onKeyDown={handleSearchModalKeyDown}
+              />
+              {searchKeyword && (
+                <button
+                  className="search-modal-clear"
+                  onClick={() => handleSearchModalInputChange("")}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            <div className="search-modal-results">
+              {searchKeyword.trim() === "" ? (
+                <div className="search-modal-hint">
+                  <p className="muted">输入关键词搜索文件</p>
+                  <p className="muted text-sm">按 ESC 关闭</p>
+                </div>
+              ) : searchResults.length === 0 ? (
+                <div className="search-modal-hint">
+                  <p className="muted">未找到匹配的文件</p>
+                </div>
+              ) : (
+                <div className="search-results-list">
+                  {searchResults.map((file) => (
+                    <div
+                      key={file.id}
+                      className="search-result-item"
+                      onClick={() => handleSearchResultClick(file)}
+                    >
+                      <span className="file-icon">
+                        {file.is_directory ? "📁" : "📄"}
+                      </span>
+                      <div className="search-result-info">
+                        <span className="search-result-name">{file.name}</span>
+                        <span className="search-result-meta">
+                          {formatBytes(file.size)} · {formatDate(file.created_at)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="search-modal-footer">
+              <span className="muted text-sm">
+                {searchResults.length > 0
+                  ? `找到 ${searchResults.length} 个文件`
+                  : "⌘F 打开搜索"}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* BT Folder Browser Modal */}
       {browsingFile && (
         <div className="modal-overlay" onClick={closeBrowse}>
@@ -482,27 +759,28 @@ export default function FilesPage() {
               </button>
             </div>
 
+            {/* Clickable path breadcrumb */}
             <div className="card mb-4 py-3 px-4">
-              <div className="flex items-center gap-2">
+              <div className="path-breadcrumb-nav">
                 <button
-                  className="button secondary btn-sm"
-                  onClick={closeBrowse}
+                  type="button"
+                  className="path-segment"
+                  onClick={() => navigateToPathIndex(-1)}
                 >
-                  🏠 根目录
+                  📁 {browsingFile.name}
                 </button>
-                {browsePath.length > 0 && (
-                  <>
-                    <span className="muted">/</span>
-                    <span className="text-base">{browsePath.join("/")}</span>
-                    <span className="ml-auto" />
+                {browsePath.map((segment, index) => (
+                  <span key={index} className="path-segment-wrapper">
+                    <span className="path-separator">/</span>
                     <button
-                      className="button secondary btn-sm"
-                      onClick={navigateBrowseUp}
+                      type="button"
+                      className="path-segment"
+                      onClick={() => navigateToPathIndex(index)}
                     >
-                      ← 返回
+                      {segment}
                     </button>
-                  </>
-                )}
+                  </span>
+                ))}
               </div>
             </div>
 
