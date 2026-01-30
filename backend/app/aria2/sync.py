@@ -112,7 +112,7 @@ async def sync_tasks(
 
     作为 WebSocket 事件监听的补充机制。
     """
-    from app.core.state import get_aria2_client
+    from app.core.state import get_aria2_client, get_user_space_lock
     from app.routers.config import get_max_task_size
     from app.routers.tasks import broadcast_task_update_to_subscribers
     from app.services.storage import get_user_space_info
@@ -181,38 +181,51 @@ async def sync_tasks(
                 cumulative_frozen = 0  # Track frozen space within this transaction
 
                 for sub, user in subscriptions:
-                    space_info = await get_user_space_info(user.id, user.quota)
-                    # Subtract cumulative frozen space from available (for same-user multiple subscriptions)
-                    effective_available = space_info["available"] - cumulative_frozen
+                    user_lock = await get_user_space_lock(state, user.id)
+                    async with user_lock:
+                        space_info = await get_user_space_info(user.id, user.quota)
+                        # Subtract cumulative frozen space from available (for same-user multiple subscriptions)
+                        effective_available = space_info["available"] - cumulative_frozen
 
-                    if total_length <= effective_available:
-                        # Use optimistic locking: only update if frozen_space is still 0
-                        async with get_session() as db:
-                            result = await db.execute(
-                                update(UserTaskSubscription)
-                                .where(
-                                    UserTaskSubscription.id == sub.id,
-                                    UserTaskSubscription.frozen_space == 0  # Optimistic lock
+                        if total_length <= effective_available:
+                            # Use optimistic locking: only update if frozen_space is still 0
+                            async with get_session() as db:
+                                result = await db.execute(
+                                    update(UserTaskSubscription)
+                                    .where(
+                                        UserTaskSubscription.id == sub.id,
+                                        UserTaskSubscription.frozen_space == 0  # Optimistic lock
+                                    )
+                                    .values(frozen_space=total_length)
                                 )
-                                .values(frozen_space=total_length)
-                            )
 
-                            if result.rowcount > 0:
-                                valid_subscribers.append((sub, user))
-                                cumulative_frozen += total_length
-                            # If rowcount == 0, already frozen by another process, skip
-                    else:
-                        # Mark subscription as failed atomically
-                        async with get_session() as db:
-                            await db.execute(
-                                update(UserTaskSubscription)
-                                .where(UserTaskSubscription.id == sub.id)
-                                .values(
-                                    status="failed",
-                                    error_display="用户配额空间不足",
-                                    frozen_space=0
+                                if result.rowcount > 0:
+                                    valid_subscribers.append((sub, user))
+                                    cumulative_frozen += total_length
+                                else:
+                                    # Already frozen by another process, re-check current state
+                                    async with get_session() as db:
+                                        refreshed = await db.exec(
+                                            select(UserTaskSubscription).where(
+                                                UserTaskSubscription.id == sub.id
+                                            )
+                                        )
+                                        current = refreshed.first()
+                                        if current and current.status == "pending" and current.frozen_space > 0:
+                                            valid_subscribers.append((sub, user))
+                                            cumulative_frozen += current.frozen_space
+                        else:
+                            # Mark subscription as failed atomically
+                            async with get_session() as db:
+                                await db.execute(
+                                    update(UserTaskSubscription)
+                                    .where(UserTaskSubscription.id == sub.id)
+                                    .values(
+                                        status="failed",
+                                        error_display="用户配额空间不足",
+                                        frozen_space=0
+                                    )
                                 )
-                            )
 
                 if not valid_subscribers:
                     logger.warning(f"[Sync] 任务 {task.id} 没有有效订阅者，取消任务")
@@ -315,7 +328,7 @@ async def _cancel_task_sync(
                 db_task.total_length = int(aria2_status.get("totalLength", 0))
             db.add(db_task)
 
-    # Mark all pending subscriptions as failed
+    # Mark all pending subscriptions as failed and record history
     async with get_session() as db:
         result = await db.exec(
             select(UserTaskSubscription).where(
@@ -330,6 +343,26 @@ async def _cancel_task_sync(
             sub.error_display = error_message
             sub.frozen_space = 0
             db.add(sub)
+
+    # Record history for each failed subscription
+    from app.services.history import add_task_history
+    task_name = (
+        aria2_status.get("bittorrent", {}).get("info", {}).get("name")
+        or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
+        or task.name
+        or "未知任务"
+    ) if aria2_status else (task.name or "未知任务")
+
+    for sub in subscriptions:
+        await add_task_history(
+            owner_id=sub.owner_id,
+            task_name=task_name,
+            result="failed",
+            reason=error_message,
+            uri=task.uri,
+            total_length=int(aria2_status.get("totalLength", 0)) if aria2_status else task.total_length,
+            created_at=sub.created_at,
+        )
 
     # Clean up download directory
     await cleanup_task_download_dir(task.id)

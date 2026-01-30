@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
@@ -24,7 +24,7 @@ from app.auth import require_user
 from app.core.config import settings
 from app.core.rate_limit import api_limiter
 from app.core.security import mask_url_credentials
-from app.core.state import AppState, get_aria2_client
+from app.core.state import AppState, get_aria2_client, get_user_space_lock
 from app.database import get_session
 from app.models import (
     DownloadTask,
@@ -150,6 +150,16 @@ def _get_state(request: Request) -> AppState:
 
 def _get_client(request: Request) -> Aria2Client:
     return get_aria2_client(request)
+
+
+async def _get_task_submit_lock(state: AppState, task_id: int) -> asyncio.Lock:
+    """获取任务提交锁，避免并发提交同一任务"""
+    async with state.lock:
+        lock = state.task_submit_locks.get(task_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            state.task_submit_locks[task_id] = lock
+        return lock
 
 
 def _check_disk_space() -> tuple[bool, int]:
@@ -472,7 +482,8 @@ async def create_task(
             stored_file_id=task.stored_file_id,
         )
 
-        # Create subscription marked as success
+        # Create subscription marked as success (use _create_subscription to handle race)
+        # First try to create, if race condition occurs, _create_subscription handles it
         async with get_session() as db:
             subscription = UserTaskSubscription(
                 owner_id=user.id,
@@ -482,8 +493,22 @@ async def create_task(
                 created_at=utc_now_str(),
             )
             db.add(subscription)
-            await db.commit()
-            await db.refresh(subscription)
+
+            try:
+                await db.commit()
+                await db.refresh(subscription)
+            except IntegrityError:
+                # Race condition: subscription already exists
+                await db.rollback()
+                result = await db.exec(
+                    select(UserTaskSubscription).where(
+                        UserTaskSubscription.owner_id == user.id,
+                        UserTaskSubscription.task_id == task.id,
+                    )
+                )
+                subscription = result.first()
+                if not subscription:
+                    raise  # Should not happen
 
         return _subscription_to_dict(subscription, task)
 
@@ -523,8 +548,23 @@ async def create_task(
 
             is_new = True  # Treat as new for aria2 submission
 
-    # Create subscription
-    subscription = await _create_subscription(user, task, frozen_space)
+    # Create subscription (protect space check for known-size downloads)
+    if frozen_space > 0:
+        state = _get_state(request)
+        user_lock = await get_user_space_lock(state, user.id)
+        async with user_lock:
+            space_info = await get_user_space_info(user.id, user.quota)
+            if frozen_space > space_info["available"]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        f"文件大小 {total_length / 1024**3:.2f} GB 超过可用空间 "
+                        f"{space_info['available'] / 1024**3:.2f} GB"
+                    )
+                )
+            subscription = await _create_subscription(user, task, frozen_space)
+    else:
+        subscription = await _create_subscription(user, task, frozen_space)
 
     # If new task, submit to aria2
     if is_new:
@@ -537,31 +577,65 @@ async def create_task(
         options["dir"] = str(task_dir)
 
         async def _do_add():
-            try:
-                gid = await client.add_uri([uri], options)
+            lock = await _get_task_submit_lock(state, task.id)
+            async with lock:
+                # Re-check task and subscriptions before submitting to aria2
                 async with get_session() as db:
+                    result = await db.exec(
+                        select(func.count(UserTaskSubscription.id)).where(
+                            UserTaskSubscription.task_id == task.id,
+                            UserTaskSubscription.status == "pending",
+                        )
+                    )
+                    pending_count = result.one()
+                    if isinstance(pending_count, tuple):
+                        pending_count = pending_count[0]
+
                     result = await db.exec(
                         select(DownloadTask).where(DownloadTask.id == task.id)
                     )
                     db_task = result.first()
-                    if db_task:
-                        db_task.gid = gid
-                        db_task.status = "active"
-                        db_task.updated_at = utc_now_str()
-                        db.add(db_task)
-            except Exception as exc:
-                logger.error(f"Failed to add task to aria2: {exc}")
-                async with get_session() as db:
-                    result = await db.exec(
-                        select(DownloadTask).where(DownloadTask.id == task.id)
-                    )
-                    db_task = result.first()
-                    if db_task:
-                        db_task.status = "error"
-                        db_task.error = str(exc)
-                        db_task.error_display = "添加下载任务失败"
-                        db_task.updated_at = utc_now_str()
-                        db.add(db_task)
+                    if not db_task:
+                        return
+
+                    if pending_count == 0:
+                        # No subscribers, mark as cancelled if still queued
+                        if db_task.status in ("queued", "active") and db_task.gid is None:
+                            db_task.status = "error"
+                            db_task.error_display = "已取消"
+                            db_task.updated_at = utc_now_str()
+                            db.add(db_task)
+                        return
+
+                    # Already submitted or not in queued state
+                    if db_task.gid or db_task.status != "queued":
+                        return
+
+                try:
+                    gid = await client.add_uri([uri], options)
+                    async with get_session() as db:
+                        result = await db.exec(
+                            select(DownloadTask).where(DownloadTask.id == task.id)
+                        )
+                        db_task = result.first()
+                        if db_task:
+                            db_task.gid = gid
+                            db_task.status = "active"
+                            db_task.updated_at = utc_now_str()
+                            db.add(db_task)
+                except Exception as exc:
+                    logger.error(f"Failed to add task to aria2: {exc}")
+                    async with get_session() as db:
+                        result = await db.exec(
+                            select(DownloadTask).where(DownloadTask.id == task.id)
+                        )
+                        db_task = result.first()
+                        if db_task:
+                            db_task.status = "error"
+                            db_task.error = str(exc)
+                            db_task.error_display = "添加下载任务失败"
+                            db_task.updated_at = utc_now_str()
+                            db.add(db_task)
 
             # Broadcast update to all subscribers
             await _broadcast_task_update(state, task.id)
@@ -650,6 +724,7 @@ async def create_torrent_task(
             stored_file_id=task.stored_file_id,
         )
 
+        # Create subscription marked as success (handle race condition)
         async with get_session() as db:
             subscription = UserTaskSubscription(
                 owner_id=user.id,
@@ -659,8 +734,22 @@ async def create_torrent_task(
                 created_at=utc_now_str(),
             )
             db.add(subscription)
-            await db.commit()
-            await db.refresh(subscription)
+
+            try:
+                await db.commit()
+                await db.refresh(subscription)
+            except IntegrityError:
+                # Race condition: subscription already exists
+                await db.rollback()
+                result = await db.exec(
+                    select(UserTaskSubscription).where(
+                        UserTaskSubscription.owner_id == user.id,
+                        UserTaskSubscription.task_id == task.id,
+                    )
+                )
+                subscription = result.first()
+                if not subscription:
+                    raise  # Should not happen
 
         return _subscription_to_dict(subscription, task)
 
@@ -677,31 +766,63 @@ async def create_torrent_task(
         options["dir"] = str(task_dir)
 
         async def _do_add():
-            try:
-                gid = await client.add_torrent(payload.torrent, [], options)
+            lock = await _get_task_submit_lock(state, task.id)
+            async with lock:
+                # Re-check task and subscriptions before submitting to aria2
                 async with get_session() as db:
+                    result = await db.exec(
+                        select(func.count(UserTaskSubscription.id)).where(
+                            UserTaskSubscription.task_id == task.id,
+                            UserTaskSubscription.status == "pending",
+                        )
+                    )
+                    pending_count = result.one()
+                    if isinstance(pending_count, tuple):
+                        pending_count = pending_count[0]
+
                     result = await db.exec(
                         select(DownloadTask).where(DownloadTask.id == task.id)
                     )
                     db_task = result.first()
-                    if db_task:
-                        db_task.gid = gid
-                        db_task.status = "active"
-                        db_task.updated_at = utc_now_str()
-                        db.add(db_task)
-            except Exception as exc:
-                logger.error(f"Failed to add torrent to aria2: {exc}")
-                async with get_session() as db:
-                    result = await db.exec(
-                        select(DownloadTask).where(DownloadTask.id == task.id)
-                    )
-                    db_task = result.first()
-                    if db_task:
-                        db_task.status = "error"
-                        db_task.error = str(exc)
-                        db_task.error_display = "添加种子任务失败"
-                        db_task.updated_at = utc_now_str()
-                        db.add(db_task)
+                    if not db_task:
+                        return
+
+                    if pending_count == 0:
+                        if db_task.status in ("queued", "active") and db_task.gid is None:
+                            db_task.status = "error"
+                            db_task.error_display = "已取消"
+                            db_task.updated_at = utc_now_str()
+                            db.add(db_task)
+                        return
+
+                    if db_task.gid or db_task.status != "queued":
+                        return
+
+                try:
+                    gid = await client.add_torrent(payload.torrent, [], options)
+                    async with get_session() as db:
+                        result = await db.exec(
+                            select(DownloadTask).where(DownloadTask.id == task.id)
+                        )
+                        db_task = result.first()
+                        if db_task:
+                            db_task.gid = gid
+                            db_task.status = "active"
+                            db_task.updated_at = utc_now_str()
+                            db.add(db_task)
+                except Exception as exc:
+                    logger.error(f"Failed to add torrent to aria2: {exc}")
+                    async with get_session() as db:
+                        result = await db.exec(
+                            select(DownloadTask).where(DownloadTask.id == task.id)
+                        )
+                        db_task = result.first()
+                        if db_task:
+                            db_task.status = "error"
+                            db_task.error = str(exc)
+                            db_task.error_display = "添加种子任务失败"
+                            db_task.updated_at = utc_now_str()
+                            db.add(db_task)
 
             await _broadcast_task_update(state, task.id)
 
@@ -728,6 +849,19 @@ async def list_tasks(
                 query = query.where(
                     UserTaskSubscription.status == "pending",
                     DownloadTask.status.in_(["queued", "active"]),
+                )
+            elif status_filter == "current":
+                # 当前任务：活跃 + 失败（不包括已完成）
+                query = query.where(
+                    (
+                        (UserTaskSubscription.status == "pending") &
+                        (DownloadTask.status.in_(["queued", "active"]))
+                    ) |
+                    (UserTaskSubscription.status == "failed") |
+                    (
+                        (UserTaskSubscription.status == "pending") &
+                        (DownloadTask.status == "error")
+                    )
                 )
             elif status_filter == "complete":
                 query = query.where(UserTaskSubscription.status == "success")
@@ -766,6 +900,9 @@ async def cancel_task(
 
     subscription, task = row
 
+    # Check if this is an active task cancellation (needs history)
+    is_active_cancel = subscription.status == "pending" and task.status in ("queued", "active")
+
     # Atomic operation: delete subscription and count remaining pending subscribers
     async with get_session() as db:
         # Step 1: Delete current subscription
@@ -784,35 +921,86 @@ async def cancel_task(
             )
         )
         remaining_count = result.one()
+        if isinstance(remaining_count, tuple):
+            remaining_count = remaining_count[0]
+
+        # Step 2.1: If no remaining subscribers, mark task as cancelled (even if gid not set)
+        if remaining_count == 0:
+            await db.execute(
+                update(DownloadTask)
+                .where(
+                    DownloadTask.id == task.id,
+                    DownloadTask.status.in_(["queued", "active"])
+                )
+                .values(
+                    status="error",
+                    error_display="已取消",
+                    updated_at=utc_now_str()
+                )
+            )
         # Transaction commits here
 
-    # Step 3: Only cancel aria2 task if no remaining subscribers
-    if remaining_count == 0 and task.gid and task.status in ("queued", "active"):
-        client = _get_client(request)
-        try:
-            await client.force_remove(task.gid)
-        except Exception:
-            pass
-        try:
-            await client.remove_download_result(task.gid)
-        except Exception:
-            pass
+    # Write to history if this was an active task cancellation
+    if is_active_cancel:
+        from app.services.history import add_task_history
+        await add_task_history(
+            owner_id=user.id,
+            task_name=_get_display_name(task),
+            result="cancelled",
+            reason="用户取消",
+            uri=task.uri,
+            total_length=task.total_length,
+            created_at=subscription.created_at,
+        )
 
-        # Mark task as cancelled
+    # Step 3: Only cancel aria2 task if no remaining subscribers
+    if remaining_count == 0:
+        # Re-check pending subscribers to avoid cancelling a newly subscribed task
         async with get_session() as db:
+            result = await db.exec(
+                select(func.count(UserTaskSubscription.id)).where(
+                    UserTaskSubscription.task_id == task.id,
+                    UserTaskSubscription.status == "pending",
+                )
+            )
+            still_pending = result.one()
+            if isinstance(still_pending, tuple):
+                still_pending = still_pending[0]
+
+            if still_pending != 0:
+                return {"ok": True}
+
             result = await db.exec(
                 select(DownloadTask).where(DownloadTask.id == task.id)
             )
             db_task = result.first()
-            if db_task:
-                db_task.status = "error"
-                db_task.error_display = "已取消"
-                db_task.updated_at = utc_now_str()
-                db.add(db_task)
 
-        # Clean up download directory
-        from app.services.storage import cleanup_task_download_dir
-        await cleanup_task_download_dir(task.id)
+        if db_task and db_task.gid and db_task.status in ("queued", "active", "error"):
+            client = _get_client(request)
+            try:
+                await client.force_remove(db_task.gid)
+            except Exception:
+                pass
+            try:
+                await client.remove_download_result(db_task.gid)
+            except Exception:
+                pass
+
+            # Mark task as cancelled
+            async with get_session() as db:
+                result = await db.exec(
+                    select(DownloadTask).where(DownloadTask.id == task.id)
+                )
+                db_task = result.first()
+                if db_task:
+                    db_task.status = "error"
+                    db_task.error_display = "已取消"
+                    db_task.updated_at = utc_now_str()
+                    db.add(db_task)
+
+            # Clean up download directory
+            from app.services.storage import cleanup_task_download_dir
+            await cleanup_task_download_dir(task.id)
 
     return {"ok": True}
 
