@@ -34,6 +34,7 @@ class User(SQLModel, table=True):
         back_populates="owner", cascade_delete=True
     )
     files: list["UserFile"] = Relationship(back_populates="owner", cascade_delete=True)
+    task_history: list["TaskHistory"] = Relationship(back_populates="owner", cascade_delete=True)
 
 
 class Session(SQLModel, table=True):
@@ -233,3 +234,34 @@ class UserTaskSubscription(SQLModel, table=True):
     # Relationships
     owner: Optional[User] = Relationship(back_populates="task_subscriptions")
     task: Optional[DownloadTask] = Relationship(back_populates="subscriptions")
+
+
+class TaskHistory(SQLModel, table=True):
+    """任务历史记录
+
+    独立存储用户的任务历史，与活动任务分离。
+    记录：下载完成、用户取消、下载失败。
+    """
+    __tablename__ = "task_history"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    owner_id: int = Field(foreign_key="users.id", index=True)
+
+    # 任务信息快照
+    task_name: str
+    uri: Optional[str] = None
+    total_length: int = Field(default=0)
+
+    # 结果状态: completed, cancelled, failed
+    result: str
+
+    # 原因说明
+    reason: Optional[str] = None  # "下载完成", "用户取消", 具体错误信息
+
+    # 时间戳
+    created_at: str = Field(default_factory=utc_now_str)  # 任务创建时间
+    finished_at: str = Field(default_factory=utc_now_str)  # 完成/取消/失败时间
+
+    # Relationships
+    owner: Optional[User] = Relationship(back_populates="task_history")

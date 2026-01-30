@@ -13,6 +13,7 @@ import type {
   PackTask,
   PackAvailableSpace,
   RpcAccessStatus,
+  TaskHistory,
 } from "@/types";
 import { hashPassword } from "./crypto";
 
@@ -40,24 +41,49 @@ export const authEvents = {
   },
 };
 
+// 自定义错误类，用于区分错误类型
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+    public isUnauthorized: boolean = false,
+    public isNetworkError: boolean = false
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const base = getApiBase();
-  const res = await fetch(`${base}${path}`, {
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(options?.headers || {}),
-    },
-    ...options,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${base}${path}`, {
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(options?.headers || {}),
+      },
+      ...options,
+    });
+  } catch (err) {
+    // 网络错误（无法连接服务器）
+    throw new ApiError(
+      "网络连接失败，请检查网络",
+      0,
+      false,
+      true
+    );
+  }
+
   if (!res.ok) {
     // 401 错误：会话过期，触发重新登录
     if (res.status === 401) {
       authEvents.emit();
-      throw new Error("会话已过期，请重新登录");
+      throw new ApiError("会话已过期，请重新登录", 401, true);
     }
     const text = await res.text();
-    throw new Error(text || `请求失败: ${res.status}`);
+    throw new ApiError(text || `请求失败: ${res.status}`, res.status);
   }
   return (await res.json()) as T;
 }
@@ -99,8 +125,19 @@ export const api = {
     request<{ ok: boolean }>(`/api/tasks/${subscriptionId}`, {
       method: "DELETE",
     }),
-  clearHistory: () =>
+  clearTaskHistory: () =>
     request<{ ok: boolean; count: number }>("/api/tasks", {
+      method: "DELETE",
+    }),
+
+  // Task History (independent storage)
+  listHistory: () => request<TaskHistory[]>("/api/history"),
+  deleteHistory: (historyId: number) =>
+    request<{ ok: boolean }>(`/api/history/${historyId}`, {
+      method: "DELETE",
+    }),
+  clearHistory: () =>
+    request<{ ok: boolean; count: number }>("/api/history", {
       method: "DELETE",
     }),
 

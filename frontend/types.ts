@@ -126,3 +126,15 @@ export interface RpcAccessStatus {
   secret: string | null;
   created_at: string | null;
 }
+
+// Task history record (independent storage)
+export type TaskHistory = {
+  id: number;
+  task_name: string;
+  uri?: string | null;
+  total_length: number;
+  result: "completed" | "cancelled" | "failed";
+  reason?: string | null;
+  created_at: string;
+  finished_at: string;
+};
