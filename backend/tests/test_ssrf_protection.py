@@ -9,6 +9,7 @@
 6. 允许非 HTTP 协议 (magnet, ed2k)
 """
 import pytest
+from unittest.mock import AsyncMock, patch
 
 
 class TestSSRFProtection:
@@ -105,11 +106,22 @@ class TestSSRFProtection:
 
         注意：此测试会真实创建任务（如果磁盘空间足够），但任务可能会失败
         """
-        # 8.8.8.8 是 Google DNS，是公网地址
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://8.8.8.8/file.zip"}
-        )
+        # 8.8.8.8 是公网地址，mock HTTP 探测避免真实网络请求导致测试过慢
+        with patch(
+            "app.routers.tasks.probe_url_with_get_fallback",
+            new_callable=AsyncMock,
+        ) as mock_probe:
+            mock_probe.return_value = type("ProbeResult", (), {
+                "success": True,
+                "final_url": "http://8.8.8.8/file.zip",
+                "content_length": 0,
+                "filename": "file.zip",
+                "error": None,
+            })()
+            response = authenticated_client.post(
+                "/api/tasks",
+                json={"uri": "http://8.8.8.8/file.zip"}
+            )
         # 应该通过 SSRF 检查（不返回 400），但可能因为其他原因失败
         # 只要不是 400 且不包含 "内网" 或 "本机" 就说明通过了 SSRF 检查
         if response.status_code == 400:
@@ -121,10 +133,25 @@ class TestSSRFProtection:
 
         注意：此测试会真实创建任务（如果磁盘空间足够），但任务可能会失败
         """
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://example.com/file.zip"}
-        )
+        # mock HTTP 探测避免真实网络请求导致测试波动
+        with patch(
+            "app.routers.tasks.probe_url_with_get_fallback",
+            new_callable=AsyncMock,
+        ) as mock_probe, patch(
+            "app.routers.tasks.socket.getaddrinfo"
+        ) as mock_getaddrinfo:
+            mock_probe.return_value = type("ProbeResult", (), {
+                "success": True,
+                "final_url": "http://example.com/file.zip",
+                "content_length": 0,
+                "filename": "file.zip",
+                "error": None,
+            })()
+            mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
+            response = authenticated_client.post(
+                "/api/tasks",
+                json={"uri": "http://example.com/file.zip"}
+            )
         # 应该通过 SSRF 检查（不返回 400），但可能因为其他原因失败
         if response.status_code == 400:
             detail = response.json().get("detail", "")
@@ -154,10 +181,12 @@ class TestSSRFProtection:
 
     def test_allow_ftp_public(self, authenticated_client):
         """测试 FTP 公网地址允许"""
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "ftp://ftp.example.com/file.zip"}
-        )
+        with patch("app.routers.tasks.socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
+            response = authenticated_client.post(
+                "/api/tasks",
+                json={"uri": "ftp://ftp.example.com/file.zip"}
+            )
         # 应该通过 SSRF 检查
         if response.status_code == 400:
             detail = response.json().get("detail", "")

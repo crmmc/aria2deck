@@ -1,6 +1,7 @@
 """后台配置接口模块（管理员专用）及 Token 管理"""
 from __future__ import annotations
 
+import asyncio
 import secrets
 import string
 from datetime import datetime, timezone
@@ -11,10 +12,12 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from app.auth import require_admin, require_user
+from app.core.rate_limit import api_limiter
 from app.database import get_session
 from app.models import Config, User
 
 _config_cache: dict[str, tuple[str | None, float]] = {}
+_config_cache_lock = asyncio.Lock()  # 保护异步缓存访问
 _CACHE_TTL = 60.0  # 缓存有效期（秒）
 
 
@@ -78,16 +81,18 @@ def get_config_value(key: str) -> str | None:
 async def get_config_value_async(key: str) -> str | None:
     """获取单个配置值（带缓存）- 异步版本"""
     now = time()
-    if key in _config_cache:
-        value, ts = _config_cache[key]
-        if now - ts < _CACHE_TTL:
-            return value
+    async with _config_cache_lock:
+        if key in _config_cache:
+            value, ts = _config_cache[key]
+            if now - ts < _CACHE_TTL:
+                return value
 
     async with get_session() as db:
         result = await db.exec(select(Config).where(Config.key == key))
         config = result.first()
         value = config.value if config else None
-        _config_cache[key] = (value, now)
+        async with _config_cache_lock:
+            _config_cache[key] = (value, now)
         return value
 
 
@@ -101,23 +106,8 @@ async def set_config_value_async(key: str, value: str) -> None:
             db.add(config)
         else:
             db.add(Config(key=key, value=value))
-    _config_cache[key] = (value, time())  # 更新缓存
-
-
-def set_config_value(key: str, value: str) -> None:
-    """设置单个配置值 - 同步版本（用于向后兼容）"""
-    import sqlite3
-    from app.core.config import settings
-    conn = sqlite3.connect(settings.database_path)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
-        [key, value]
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-    _config_cache[key] = (value, time())  # 更新缓存
+    async with _config_cache_lock:
+        _config_cache[key] = (value, time())
 
 
 def get_max_task_size() -> int:
@@ -203,26 +193,6 @@ def get_download_token_expiry() -> int:
         return max(60, min(86400 * 7, expiry))  # 限制范围 1分钟-7天
     except ValueError:
         return 7200
-
-
-def generate_download_token(user_id: int, file_path: str) -> str:
-    """生成下载链接临时 Token"""
-    from itsdangerous import URLSafeTimedSerializer
-    from app.core.config import settings
-    serializer = URLSafeTimedSerializer(settings.secret_key)
-    return serializer.dumps({"user_id": user_id, "path": file_path})
-
-
-def verify_download_token(token: str) -> dict | None:
-    """验证下载链接 Token，返回 {user_id, path} 或 None"""
-    from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-    from app.core.config import settings
-    serializer = URLSafeTimedSerializer(settings.secret_key)
-    try:
-        data = serializer.loads(token, max_age=get_download_token_expiry())
-        return data
-    except (SignatureExpired, BadSignature):
-        return None
 
 
 @router.get("")
@@ -362,10 +332,10 @@ async def get_aria2_version(admin: User = Depends(require_admin)) -> dict:
             "version": version_info.get("version"),
             "enabled_features": version_info.get("enabledFeatures", []),
         }
-    except Exception as exc:
+    except Exception:
         return {
             "connected": False,
-            "error": str(exc),
+            "error": "无法连接到 aria2 服务",
         }
 
 
@@ -386,6 +356,12 @@ async def test_aria2_connection(
     - enabled_features: 启用的功能列表（如果连接成功）
     - error: 错误信息（如果连接失败）
     """
+    if not await api_limiter.is_allowed(admin.id, "aria2_test", limit=10, window_seconds=60):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="操作过于频繁，请稍后再试"
+        )
+
     from app.aria2.client import Aria2Client
 
     if not payload.aria2_rpc_url:
@@ -412,10 +388,10 @@ async def test_aria2_connection(
             "version": version_info.get("version"),
             "enabled_features": version_info.get("enabledFeatures", []),
         }
-    except Exception as exc:
+    except Exception:
         return {
             "connected": False,
-            "error": str(exc),
+            "error": "无法连接到 aria2 服务",
         }
 
 
@@ -465,7 +441,7 @@ async def list_tokens(user: User = Depends(require_user)) -> list[dict]:
 
 @router.post("/tokens")
 async def create_token(
-    payload: TokenCreateRequest = None,
+    payload: TokenCreateRequest | None = None,
     user: User = Depends(require_user)
 ) -> dict:
     """生成新的 API Token

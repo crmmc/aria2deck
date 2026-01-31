@@ -39,13 +39,13 @@ export async function requestNotificationPermission(): Promise<boolean> {
   return result === "granted";
 }
 
-export function canSendNotification(): boolean {
+function canSendNotification(): boolean {
   if (typeof window === "undefined") return false;
   if (!("Notification" in window)) return false;
   return Notification.permission === "granted";
 }
 
-export function sendNotification(
+function sendNotification(
   title: string,
   body: string,
   onClick?: () => void,

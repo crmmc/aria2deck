@@ -63,20 +63,13 @@ class TestParseErrorMessage:
 
     def test_empty_message(self):
         """测试空消息"""
-        assert parse_error_message("") == "未知错误"
-        assert parse_error_message(None) == "未知错误"
+        assert parse_error_message("") == "后端错误"
+        assert parse_error_message(None) == "后端错误"
 
     def test_unrecognized_message(self):
         """测试无法识别的消息"""
         msg = "Some random error message"
-        assert parse_error_message(msg) == msg
-
-    def test_long_message_truncation(self):
-        """测试长消息截断"""
-        long_msg = "A" * 150
-        result = parse_error_message(long_msg)
-        assert len(result) == 100
-        assert result.endswith("...")
+        assert parse_error_message(msg) == "后端错误"
 
 
 class TestErrorCodeMapCoverage:

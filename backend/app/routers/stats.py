@@ -4,26 +4,20 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from sqlmodel import select, func
 
-from app.aria2.client import Aria2Client
 from app.auth import require_admin, require_user
 from app.core.config import settings
-from app.core.state import get_aria2_client
 from app.database import get_session
-from app.models import Task, User
+from app.models import DownloadTask, User, UserTaskSubscription
 
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
 
-def _get_client(request: Request) -> Aria2Client:
-    return get_aria2_client(request)
-
-
 @router.get("")
-async def get_stats(request: Request, user: User = Depends(require_user)) -> dict:
+async def get_stats(user: User = Depends(require_user)) -> dict:
     """获取系统状态
 
     所有用户返回:
@@ -67,20 +61,30 @@ async def get_stats(request: Request, user: User = Depends(require_user)) -> dic
 
     # 当前用户活跃任务统计和速度总和
     async with get_session() as db:
-        # 活跃任务数
+        # 活跃任务数：用户订阅中 pending 状态且任务为 active 的数量
         count_result = await db.exec(
-            select(func.count()).select_from(Task).where(
-                Task.owner_id == user.id, Task.status == "active"
+            select(func.count(UserTaskSubscription.id))
+            .join(DownloadTask, UserTaskSubscription.task_id == DownloadTask.id)
+            .where(
+                UserTaskSubscription.owner_id == user.id,
+                UserTaskSubscription.status == "pending",
+                DownloadTask.status == "active"
             )
         )
         active_count = count_result.first() or 0
 
-        # 速度总和
+        # 速度总和：用户订阅的活跃任务的速度总和
         speed_result = await db.exec(
             select(
-                func.coalesce(func.sum(Task.download_speed), 0),
-                func.coalesce(func.sum(Task.upload_speed), 0)
-            ).where(Task.owner_id == user.id, Task.status == "active")
+                func.coalesce(func.sum(DownloadTask.download_speed), 0),
+                func.coalesce(func.sum(DownloadTask.upload_speed), 0)
+            )
+            .join(UserTaskSubscription, UserTaskSubscription.task_id == DownloadTask.id)
+            .where(
+                UserTaskSubscription.owner_id == user.id,
+                UserTaskSubscription.status == "pending",
+                DownloadTask.status == "active"
+            )
         )
         speed_row = speed_result.first()
         total_download = speed_row[0] if speed_row else 0

@@ -7,11 +7,8 @@ import type {
   SystemConfig,
   FileListResponse,
   BrowseFileInfo,
-  SpaceInfo,
-  QuotaResponse,
   MachineStats,
   PackTask,
-  PackAvailableSpace,
   RpcAccessStatus,
   TaskHistory,
 } from "@/types";
@@ -125,10 +122,6 @@ export const api = {
     request<{ ok: boolean }>(`/api/tasks/${subscriptionId}`, {
       method: "DELETE",
     }),
-  clearTaskHistory: () =>
-    request<{ ok: boolean; count: number }>("/api/tasks", {
-      method: "DELETE",
-    }),
 
   // Task History (independent storage)
   listHistory: () => request<TaskHistory[]>("/api/history"),
@@ -182,7 +175,6 @@ export const api = {
 
   // Users (Admin)
   listUsers: () => request<User[]>("/api/users"),
-  getUser: (id: number) => request<User>(`/api/users/${id}`),
   createUser: async (data: UserCreate) => {
     const clientHash = await hashPassword(data.password, data.username);
     return request<User>("/api/users", {
@@ -225,31 +217,9 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ name: newName }),
     }),
-  getSpace: () => request<SpaceInfo>("/api/files/space"),
-  getQuota: () => request<QuotaResponse>("/api/files/quota"),
 
   // Pack Tasks
-  createPackTask: (folderPath: string, outputName?: string) =>
-    request<PackTask>("/api/files/pack", {
-      method: "POST",
-      body: JSON.stringify({ folder_path: folderPath, output_name: outputName }),
-    }),
-
-  createPackTaskMulti: (paths: string[], outputName: string) =>
-    request<PackTask>("/api/files/pack", {
-      method: "POST",
-      body: JSON.stringify({ paths, output_name: outputName }),
-    }),
-
-  calculateFilesSize: (paths: string[]) =>
-    request<{ total_size: number; user_available: number }>("/api/files/pack/calculate-size", {
-      method: "POST",
-      body: JSON.stringify({ paths }),
-    }),
-
   listPackTasks: () => request<PackTask[]>("/api/files/pack"),
-
-  getPackTask: (id: number) => request<PackTask>(`/api/files/pack/${id}`),
 
   cancelPackTask: (id: number) =>
     request<{ ok: boolean; message: string }>(`/api/files/pack/${id}`, {
@@ -260,13 +230,6 @@ export const api = {
     const base = getApiBase();
     return `${base}/api/files/pack/${id}/download`;
   },
-
-  getPackAvailableSpace: (folderPath?: string) =>
-    request<PackAvailableSpace>(
-      folderPath
-        ? `/api/files/pack/available-space?folder_path=${encodeURIComponent(folderPath)}`
-        : "/api/files/pack/available-space"
-    ),
 };
 
 export function taskWsUrl(): string {

@@ -4,13 +4,13 @@
 实现用户隔离、数据脱敏、配额检查等安全机制。
 """
 from __future__ import annotations
-
 import shutil
 from pathlib import Path
 from typing import Any
 
 from app.aria2.client import Aria2Client
 from app.core.config import settings
+from app.core.state import AppState
 from app.db import execute, fetch_all, fetch_one, utc_now
 
 
@@ -85,9 +85,13 @@ class Aria2RpcHandler:
         "system.multicall",
     ]
 
-    def __init__(self, user_id: int, aria2_client: Aria2Client):
+    def __init__(self, user_id: int, aria2_client: Aria2Client, app_state: AppState):
         self.user_id = user_id
         self.client = aria2_client
+        if app_state is None:
+            # Fail fast: app_state is required for quota lock consistency
+            raise RuntimeError("AppState is required for Aria2RpcHandler")
+        self.app_state: AppState = app_state  # AppState for shared locks
         self._user_dir: str | None = None
         self._user_incomplete_dir: str | None = None
 
@@ -276,36 +280,41 @@ class Aria2RpcHandler:
         options = params[1] if len(params) > 1 and isinstance(params[1], dict) else {}
         position = params[2] if len(params) > 2 else None
 
-        # 检查磁盘空间
-        disk_ok, disk_free = self._check_disk_space()
-        if not disk_ok:
-            raise RpcError(
-                RpcErrorCode.QUOTA_EXCEEDED,
-                f"Disk space not enough, free: {disk_free / 1024 / 1024 / 1024:.2f} GB"
+        # 获取用户空间锁，防止并发配额检查竞态（与 REST API 共享同一把锁）
+        from app.core.state import get_user_space_lock
+        user_lock = await get_user_space_lock(self.app_state, self.user_id)
+
+        async with user_lock:
+            # 检查磁盘空间
+            disk_ok, disk_free = self._check_disk_space()
+            if not disk_ok:
+                raise RpcError(
+                    RpcErrorCode.QUOTA_EXCEEDED,
+                    f"Disk space not enough, free: {disk_free / 1024 / 1024 / 1024:.2f} GB"
+                )
+
+            # 检查用户配额
+            user_available = self._get_user_available_space()
+            if user_available <= 0:
+                raise RpcError(
+                    RpcErrorCode.QUOTA_EXCEEDED,
+                    "Your quota has been exceeded"
+                )
+
+            # 强制设置下载目录为用户的 .incomplete 目录，忽略客户端传入的 dir
+            options["dir"] = self._get_user_incomplete_dir()
+
+            # 创建数据库任务记录
+            uri = uris[0] if uris else ""
+            task_id = execute(
+                """
+                INSERT INTO tasks (owner_id, uri, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [self.user_id, uri, "queued", utc_now(), utc_now()],
             )
 
-        # 检查用户配额
-        user_available = self._get_user_available_space()
-        if user_available <= 0:
-            raise RpcError(
-                RpcErrorCode.QUOTA_EXCEEDED,
-                "Your quota has been exceeded"
-            )
-
-        # 强制设置下载目录为用户的 .incomplete 目录，忽略客户端传入的 dir
-        options["dir"] = self._get_user_incomplete_dir()
-
-        # 创建数据库任务记录
-        uri = uris[0] if uris else ""
-        task_id = execute(
-            """
-            INSERT INTO tasks (owner_id, uri, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [self.user_id, uri, "queued", utc_now(), utc_now()],
-        )
-
-        # 调用 aria2 添加任务
+        # 调用 aria2 添加任务（在锁外执行，避免长时间持锁）
         try:
             call_params = [uris, options]
             if position is not None:
@@ -344,7 +353,6 @@ class Aria2RpcHandler:
         torrent = params[0]
         uris = params[1] if len(params) > 1 and isinstance(params[1], list) else []
         options = params[2] if len(params) > 2 and isinstance(params[2], dict) else {}
-        position = params[3] if len(params) > 3 else None
 
         # 校验 Base64 大小（约 10MB 限制）
         max_base64_length = 14 * 1024 * 1024
@@ -354,35 +362,40 @@ class Aria2RpcHandler:
                 "Torrent file too large, max 10MB"
             )
 
-        # 检查磁盘空间
-        disk_ok, disk_free = self._check_disk_space()
-        if not disk_ok:
-            raise RpcError(
-                RpcErrorCode.QUOTA_EXCEEDED,
-                f"Disk space not enough, free: {disk_free / 1024 / 1024 / 1024:.2f} GB"
+        # 获取用户空间锁，防止并发配额检查竞态（与 REST API 共享同一把锁）
+        from app.core.state import get_user_space_lock
+        user_lock = await get_user_space_lock(self.app_state, self.user_id)
+
+        async with user_lock:
+            # 检查磁盘空间
+            disk_ok, disk_free = self._check_disk_space()
+            if not disk_ok:
+                raise RpcError(
+                    RpcErrorCode.QUOTA_EXCEEDED,
+                    f"Disk space not enough, free: {disk_free / 1024 / 1024 / 1024:.2f} GB"
+                )
+
+            # 检查用户配额
+            user_available = self._get_user_available_space()
+            if user_available <= 0:
+                raise RpcError(
+                    RpcErrorCode.QUOTA_EXCEEDED,
+                    "Your quota has been exceeded"
+                )
+
+            # 强制设置下载目录
+            options["dir"] = self._get_user_incomplete_dir()
+
+            # 创建数据库任务记录
+            task_id = execute(
+                """
+                INSERT INTO tasks (owner_id, uri, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [self.user_id, "[torrent]", "queued", utc_now(), utc_now()],
             )
 
-        # 检查用户配额
-        user_available = self._get_user_available_space()
-        if user_available <= 0:
-            raise RpcError(
-                RpcErrorCode.QUOTA_EXCEEDED,
-                "Your quota has been exceeded"
-            )
-
-        # 强制设置下载目录
-        options["dir"] = self._get_user_incomplete_dir()
-
-        # 创建数据库任务记录
-        task_id = execute(
-            """
-            INSERT INTO tasks (owner_id, uri, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [self.user_id, "[torrent]", "queued", utc_now(), utc_now()],
-        )
-
-        # 调用 aria2 添加任务
+        # 调用 aria2 添加任务（在锁外执行，避免长时间持锁）
         try:
             gid = await self.client.add_torrent(torrent, uris, options)
 

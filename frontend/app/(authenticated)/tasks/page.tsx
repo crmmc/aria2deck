@@ -204,6 +204,17 @@ export default function TasksPage() {
   );
   const [wsConnected, setWsConnected] = useState(false);
 
+  useEffect(() => {
+    if (showBatchAddModal) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [showBatchAddModal]);
+
   const deletedTaskIdsRef = useRef<Set<number>>(new Set());
   const tasksRef = useRef<Task[]>([]);
   tasksRef.current = tasks;

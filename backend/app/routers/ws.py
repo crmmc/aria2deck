@@ -47,8 +47,10 @@ async def task_ws(websocket: WebSocket) -> None:
     try:
         while True:
             data = await websocket.receive_text()
-            # 客户端可以发送 pong 响应或其他消息
-            if data == "pong":
+            # 客户端发送 ping，服务端回复 pong
+            if data == "ping":
+                await websocket.send_text("pong")
+            elif data == "pong":
                 logger.debug(f"收到用户 {user_id} 的心跳响应")
     except WebSocketDisconnect:
         pass

@@ -12,7 +12,6 @@ import {
 import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/AuthContext";
 import { RpcAccessStatus } from "@/types";
-import AuthLayout from "@/components/AuthLayout";
 
 export default function ProfilePage() {
   const { showToast, showConfirm } = useToast();
@@ -181,7 +180,7 @@ export default function ProfilePage() {
   if (loading) return null;
 
   return (
-    <AuthLayout>
+    <>
       {/* 初始密码提醒弹窗 - 使用 Portal 渲染到 body */}
       {mounted && showInitialPasswordAlert && createPortal(
         <div className="modal-overlay z-10000">
@@ -394,6 +393,6 @@ export default function ProfilePage() {
           </div>
         </div>
       </div>
-    </AuthLayout>
+    </>
   );
 }

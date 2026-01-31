@@ -62,7 +62,7 @@ export default function AuthenticatedLayout({ children }: { children: React.Reac
     <>
       <Sidebar user={user} />
       <PasswordWarningBanner user={user} />
-      <div className={`main-content ${sidebarExpanded ? "sidebar-expanded" : ""}`}>
+      <div className={`main-content${sidebarExpanded ? " sidebar-expanded" : ""}`}>
         <div className="auth-container">
           {children}
         </div>

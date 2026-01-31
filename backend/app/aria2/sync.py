@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
-import time
 from pathlib import Path
 
 from sqlalchemy import case, update
@@ -19,40 +17,12 @@ from sqlmodel import select
 
 from app.aria2.client import Aria2Client
 from app.aria2.errors import parse_error_message
-from app.core.config import settings
 from app.core.security import sanitize_string
-from app.core.state import AppState, WS_THROTTLE_INTERVAL
+from app.core.state import AppState
 from app.database import get_session
 from app.models import DownloadTask, User, UserTaskSubscription, utc_now_str
 
 logger = logging.getLogger(__name__)
-
-
-def delete_path_with_aria2(target: Path) -> bool:
-    """删除文件/目录，并清理对应的 .aria2 控制文件"""
-    if not target.exists():
-        return False
-
-    try:
-        if target.is_symlink():
-            target.unlink()
-        elif target.is_file():
-            target.unlink()
-        elif target.is_dir():
-            shutil.rmtree(target)
-        else:
-            return False
-
-        aria2_file = target.parent / f"{target.name}.aria2"
-        if aria2_file.exists() and aria2_file.is_file():
-            try:
-                aria2_file.unlink()
-            except Exception:
-                pass
-
-        return True
-    except Exception:
-        return False
 
 
 def _sanitize_path(file_path: str | None, task_id: int) -> str | None:
@@ -78,8 +48,8 @@ def _map_status(status: dict, task_id: int) -> dict:
     sanitized_name = sanitize_string(sanitized_name)
 
     raw_error = status.get("errorMessage")
-    error_msg = parse_error_message(raw_error) if raw_error else None
-    error_msg = sanitize_string(error_msg)
+    error_display = parse_error_message(raw_error) if raw_error else None
+    error_display = sanitize_string(error_display) if error_display else None
 
     return {
         "status": status.get("status", "unknown"),
@@ -88,7 +58,8 @@ def _map_status(status: dict, task_id: int) -> dict:
         "completed_length": int(status.get("completedLength", 0)),
         "download_speed": int(status.get("downloadSpeed", 0)),
         "upload_speed": int(status.get("uploadSpeed", 0)),
-        "error": error_msg,
+        "error": raw_error,
+        "error_display": error_display,
     }
 
 
@@ -138,7 +109,15 @@ async def sync_tasks(
             try:
                 status = await client.tell_status(gid)
             except Exception as exc:
-                await _update_task(task.id, {"status": "error", "error": str(exc)})
+                logger.error(f"[Sync] 获取 GID {gid} 状态失败: {exc}")
+                await _update_task(
+                    task.id,
+                    {
+                        "status": "error",
+                        "error": str(exc),
+                        "error_display": "后端错误",
+                    }
+                )
                 return
 
             aria2_status = status.get("status")
@@ -146,12 +125,6 @@ async def sync_tasks(
 
             # Check size when it becomes known
             if aria2_status == "active" and total_length > 0 and (task.total_length or 0) == 0:
-                task_name = (
-                    status.get("bittorrent", {}).get("info", {}).get("name")
-                    or status.get("files", [{}])[0].get("path", "").split("/")[-1]
-                    or "未知任务"
-                )
-
                 # Check system limit
                 max_task_size = get_max_task_size()
                 if total_length > max_task_size:
@@ -178,14 +151,13 @@ async def sync_tasks(
                     subscriptions = result.all()
 
                 valid_subscribers = []
-                cumulative_frozen = 0  # Track frozen space within this transaction
 
                 for sub, user in subscriptions:
                     user_lock = await get_user_space_lock(state, user.id)
                     async with user_lock:
                         space_info = await get_user_space_info(user.id, user.quota)
-                        # Subtract cumulative frozen space from available (for same-user multiple subscriptions)
-                        effective_available = space_info["available"] - cumulative_frozen
+                        # Each user's space is independent, use available directly
+                        effective_available = space_info["available"]
 
                         if total_length <= effective_available:
                             # Use optimistic locking: only update if frozen_space is still 0
@@ -201,7 +173,6 @@ async def sync_tasks(
 
                                 if result.rowcount > 0:
                                     valid_subscribers.append((sub, user))
-                                    cumulative_frozen += total_length
                                 else:
                                     # Already frozen by another process, re-check current state
                                     async with get_session() as db:
@@ -213,7 +184,6 @@ async def sync_tasks(
                                         current = refreshed.first()
                                         if current and current.status == "pending" and current.frozen_space > 0:
                                             valid_subscribers.append((sub, user))
-                                            cumulative_frozen += current.frozen_space
                         else:
                             # Mark subscription as failed atomically
                             async with get_session() as db:
@@ -237,9 +207,34 @@ async def sync_tasks(
 
             # Update task status with atomic peak value updates
             mapped = _map_status(status, task.id)
+            mapped_status = mapped["status"]
+            raw_error = mapped.get("error")
+            error_display = mapped.get("error_display")
+
+            # Handle removed tasks as external cancellations
+            if mapped_status == "removed":
+                mapped_status = "error"
+                error_display = "外部取消（管理员/外部客户端）"
+                if raw_error is None:
+                    raw_error = "removed"
+
+            # Log and normalize error display
+            if mapped_status == "error":
+                if raw_error:
+                    logger.error(f"[Sync] 任务 {task.id} 错误: {raw_error}")
+                if not error_display:
+                    error_display = "后端错误"
+
+                # Avoid overriding user-initiated cancellation
+                if task.error_display == "已取消":
+                    error_display = "已取消"
+                    if raw_error is None:
+                        raw_error = task.error
+
+                await _handle_task_stop_or_error_sync(task.id, error_display)
 
             # Handle magnet link metadata completion
-            if mapped["status"] == "complete":
+            if mapped_status == "complete":
                 followed_by = status.get("followedBy", [])
                 if followed_by:
                     new_gid = followed_by[0]
@@ -252,28 +247,33 @@ async def sync_tasks(
             current_connections = int(status.get("connections", 0))
 
             async with get_session() as db:
+                update_values = dict(
+                    status=mapped_status,
+                    name=mapped["name"],
+                    total_length=mapped["total_length"],
+                    completed_length=mapped["completed_length"],
+                    download_speed=mapped["download_speed"],
+                    upload_speed=mapped["upload_speed"],
+                    updated_at=utc_now_str(),
+                    # Atomic peak value update: only update if new value is greater
+                    peak_download_speed=case(
+                        (DownloadTask.peak_download_speed < current_speed, current_speed),
+                        else_=DownloadTask.peak_download_speed
+                    ),
+                    peak_connections=case(
+                        (DownloadTask.peak_connections < current_connections, current_connections),
+                        else_=DownloadTask.peak_connections
+                    ),
+                )
+
+                if mapped_status == "error":
+                    update_values["error"] = raw_error
+                    update_values["error_display"] = error_display or "后端错误"
+
                 await db.execute(
                     update(DownloadTask)
                     .where(DownloadTask.id == task.id)
-                    .values(
-                        status=mapped["status"],
-                        name=mapped["name"],
-                        total_length=mapped["total_length"],
-                        completed_length=mapped["completed_length"],
-                        download_speed=mapped["download_speed"],
-                        upload_speed=mapped["upload_speed"],
-                        error=mapped.get("error"),
-                        updated_at=utc_now_str(),
-                        # Atomic peak value update: only update if new value is greater
-                        peak_download_speed=case(
-                            (DownloadTask.peak_download_speed < current_speed, current_speed),
-                            else_=DownloadTask.peak_download_speed
-                        ),
-                        peak_connections=case(
-                            (DownloadTask.peak_connections < current_connections, current_connections),
-                            else_=DownloadTask.peak_connections
-                        ),
-                    )
+                    .values(**update_values)
                 )
 
             # Broadcast update
@@ -371,49 +371,41 @@ async def _cancel_task_sync(
     await broadcast_task_update_to_subscribers(state, task.id)
 
 
-# WebSocket helpers
-
-async def broadcast_update(state: AppState, user_id: int, task_id: int, force: bool = False) -> None:
-    """广播任务更新到 WebSocket 客户端（兼容旧代码）
-
-    新架构使用 broadcast_task_update_to_subscribers
-    """
-    from app.routers.tasks import broadcast_task_update_to_subscribers
-    await broadcast_task_update_to_subscribers(state, task_id)
-
-
-async def broadcast_notification(
-    state: AppState,
-    user_id: int,
-    message: str,
-    level: str = "error"
+async def _handle_task_stop_or_error_sync(
+    task_id: int,
+    error_display: str | None,
 ) -> None:
-    """广播通知消息到 WebSocket 客户端
+    """同步路径处理任务停止/错误：释放冻结空间并标记订阅失败。"""
+    message = error_display or "后端错误"
 
-    Handles connection failures gracefully with automatic cleanup.
-    """
-    async with state.lock:
-        sockets = list(state.ws_connections.get(user_id, set()))
+    async with get_session() as db:
+        result = await db.exec(
+            select(UserTaskSubscription).where(
+                UserTaskSubscription.task_id == task_id,
+                UserTaskSubscription.status == "pending",
+            )
+        )
+        subscriptions = result.all()
 
-    failed_sockets = []
-    for ws in sockets:
-        try:
-            await ws.send_json({
-                "type": "notification",
-                "level": level,
-                "message": message,
-            })
-        except Exception as e:
-            logger.debug(f"WebSocket send failed for user {user_id}: {e}")
-            failed_sockets.append(ws)
+        for sub in subscriptions:
+            await db.execute(
+                update(UserTaskSubscription)
+                .where(
+                    UserTaskSubscription.id == sub.id,
+                    UserTaskSubscription.status == "pending",
+                )
+                .values(
+                    status="failed",
+                    error_display=message,
+                    frozen_space=0,
+                )
+            )
 
-    # Clean up failed connections outside the iteration
-    for ws in failed_sockets:
-        try:
-            await unregister_ws(state, user_id, ws)
-        except Exception:
-            pass
+    if subscriptions:
+        logger.info(f"[Sync] 任务 {task_id} 错误/停止，释放了 {len(subscriptions)} 个订阅的冻结空间")
 
+
+# WebSocket helpers
 
 async def register_ws(state: AppState, user_id: int, ws) -> None:
     async with state.lock:
@@ -425,3 +417,24 @@ async def unregister_ws(state: AppState, user_id: int, ws) -> None:
         sockets = state.ws_connections.get(user_id)
         if sockets:
             sockets.discard(ws)
+
+
+async def broadcast_notification(state: AppState, user_id: int, message: str, level: str = "info"):
+    async with state.lock:
+        sockets = list(state.ws_connections.get(user_id, set()))
+    
+    notification = {"type": "notification", "message": message, "level": level}
+    failed_sockets = []
+    
+    for ws in sockets:
+        try:
+            await ws.send_json(notification)
+        except Exception:
+            failed_sockets.append(ws)
+    
+    if failed_sockets:
+        async with state.lock:
+            user_sockets = state.ws_connections.get(user_id)
+            if user_sockets:
+                for ws in failed_sockets:
+                    user_sockets.discard(ws)

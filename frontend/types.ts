@@ -87,13 +87,6 @@ export type BrowseFileInfo = {
   is_directory: boolean;
 };
 
-// Legacy quota response (for backward compatibility)
-export type QuotaResponse = {
-  used: number;
-  total: number;
-  percentage: number;
-};
-
 export type MachineStats = {
   disk_total: number;
   disk_used: number;
@@ -113,12 +106,6 @@ export type PackTask = {
   error_message: string | null;
   created_at: string;
   updated_at: string;
-};
-
-export type PackAvailableSpace = {
-  user_available: number;
-  server_available: number;
-  folder_size?: number;
 };
 
 export interface RpcAccessStatus {

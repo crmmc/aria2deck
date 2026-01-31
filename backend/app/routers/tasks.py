@@ -40,7 +40,6 @@ from app.services.hash import (
     get_uri_hash,
     is_http_url,
     is_magnet_link,
-    is_torrent_task,
 )
 from app.services.http_probe import probe_url_with_get_fallback
 from app.services.storage import (
@@ -194,13 +193,16 @@ def _subscription_to_dict(
     # Determine effective status for user
     if subscription.status == "failed":
         effective_status = "error"
-        error = subscription.error_display
+        error = subscription.error_display or "后端错误"
     elif subscription.status == "success":
         effective_status = "complete"
         error = None
     else:
         effective_status = task.status
-        error = task.error_display or task.error
+        if effective_status == "error":
+            error = task.error_display or "后端错误"
+        else:
+            error = None
 
     return {
         "id": subscription.id,
@@ -343,7 +345,7 @@ async def create_task(
     返回用户的订阅信息。
     """
     # Rate limit
-    if not api_limiter.is_allowed(user.id, "create_task", limit=30, window_seconds=60):
+    if not await api_limiter.is_allowed(user.id, "create_task", limit=30, window_seconds=60):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="操作过于频繁，请稍后再试"
@@ -513,8 +515,6 @@ async def create_task(
         return _subscription_to_dict(subscription, task)
 
     elif task.status == "error":
-        # Task failed, allow retry by creating new subscription
-        # Reset task status if this is the only subscriber
         async with get_session() as db:
             result = await db.exec(
                 select(UserTaskSubscription).where(
@@ -524,9 +524,7 @@ async def create_task(
             )
             pending_subs = result.all()
 
-        if not pending_subs:
-            # No pending subscribers, reset task for retry
-            async with get_session() as db:
+            if not pending_subs:
                 result = await db.exec(
                     select(DownloadTask).where(DownloadTask.id == task.id)
                 )
@@ -538,15 +536,25 @@ async def create_task(
                     db_task.gid = None
                     db_task.updated_at = utc_now_str()
                     db.add(db_task)
+                    await db.commit()
+                    await db.refresh(db_task)
+                    task = db_task
+                    is_new = True
 
-            # Refresh task
-            async with get_session() as db:
-                result = await db.exec(
-                    select(DownloadTask).where(DownloadTask.id == task.id)
+    # For existing tasks with known size, freeze space for new subscriber
+    # This handles the case where a magnet link's size became known after initial creation
+    if not is_new and frozen_space == 0 and task.total_length > 0:
+        frozen_space = task.total_length
+        # Re-check available space
+        space_info = await get_user_space_info(user.id, user.quota)
+        if frozen_space > space_info["available"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"文件大小 {task.total_length / 1024**3:.2f} GB 超过可用空间 "
+                    f"{space_info['available'] / 1024**3:.2f} GB"
                 )
-                task = result.first()
-
-            is_new = True  # Treat as new for aria2 submission
+            )
 
     # Create subscription (protect space check for known-size downloads)
     if frozen_space > 0:
@@ -653,7 +661,7 @@ async def create_torrent_task(
 ) -> dict:
     """通过种子文件创建下载任务"""
     # Rate limit
-    if not api_limiter.is_allowed(user.id, "create_torrent", limit=10, window_seconds=60):
+    if not await api_limiter.is_allowed(user.id, "create_torrent", limit=10, window_seconds=60):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="操作过于频繁，请稍后再试"
@@ -753,8 +761,29 @@ async def create_torrent_task(
 
         return _subscription_to_dict(subscription, task)
 
-    # Create subscription (no frozen space until size known)
-    subscription = await _create_subscription(user, task, frozen_space=0)
+    # For existing tasks with known size, freeze space for new subscriber
+    # This handles the case where a torrent's size became known after initial creation
+    frozen_space = 0
+    if not is_new and task.total_length > 0:
+        frozen_space = task.total_length
+
+    # Create subscription (protect space check for known-size downloads)
+    if frozen_space > 0:
+        state = _get_state(request)
+        user_lock = await get_user_space_lock(state, user.id)
+        async with user_lock:
+            space_info = await get_user_space_info(user.id, user.quota)
+            if frozen_space > space_info["available"]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        f"文件大小 {task.total_length / 1024**3:.2f} GB 超过可用空间 "
+                        f"{space_info['available'] / 1024**3:.2f} GB"
+                    )
+                )
+            subscription = await _create_subscription(user, task, frozen_space=frozen_space)
+    else:
+        subscription = await _create_subscription(user, task, frozen_space=frozen_space)
 
     # If new task, submit to aria2
     if is_new:
@@ -955,52 +984,56 @@ async def cancel_task(
 
     # Step 3: Only cancel aria2 task if no remaining subscribers
     if remaining_count == 0:
-        # Re-check pending subscribers to avoid cancelling a newly subscribed task
-        async with get_session() as db:
-            result = await db.exec(
-                select(func.count(UserTaskSubscription.id)).where(
-                    UserTaskSubscription.task_id == task.id,
-                    UserTaskSubscription.status == "pending",
-                )
-            )
-            still_pending = result.one()
-            if isinstance(still_pending, tuple):
-                still_pending = still_pending[0]
-
-            if still_pending != 0:
-                return {"ok": True}
-
-            result = await db.exec(
-                select(DownloadTask).where(DownloadTask.id == task.id)
-            )
-            db_task = result.first()
-
-        if db_task and db_task.gid and db_task.status in ("queued", "active", "error"):
-            client = _get_client(request)
-            try:
-                await client.force_remove(db_task.gid)
-            except Exception:
-                pass
-            try:
-                await client.remove_download_result(db_task.gid)
-            except Exception:
-                pass
-
-            # Mark task as cancelled
+        # Acquire task submit lock to prevent race with concurrent task submission
+        state = _get_state(request)
+        lock = await _get_task_submit_lock(state, task.id)
+        async with lock:
+            # Re-check pending subscribers to avoid cancelling a newly subscribed task
             async with get_session() as db:
+                result = await db.exec(
+                    select(func.count(UserTaskSubscription.id)).where(
+                        UserTaskSubscription.task_id == task.id,
+                        UserTaskSubscription.status == "pending",
+                    )
+                )
+                still_pending = result.one()
+                if isinstance(still_pending, tuple):
+                    still_pending = still_pending[0]
+
+                if still_pending != 0:
+                    return {"ok": True}
+
                 result = await db.exec(
                     select(DownloadTask).where(DownloadTask.id == task.id)
                 )
                 db_task = result.first()
-                if db_task:
-                    db_task.status = "error"
-                    db_task.error_display = "已取消"
-                    db_task.updated_at = utc_now_str()
-                    db.add(db_task)
 
-            # Clean up download directory
-            from app.services.storage import cleanup_task_download_dir
-            await cleanup_task_download_dir(task.id)
+            if db_task and db_task.gid and db_task.status in ("queued", "active", "error"):
+                client = _get_client(request)
+                try:
+                    await client.force_remove(db_task.gid)
+                except Exception:
+                    pass
+                try:
+                    await client.remove_download_result(db_task.gid)
+                except Exception:
+                    pass
+
+                # Mark task as cancelled
+                async with get_session() as db:
+                    result = await db.exec(
+                        select(DownloadTask).where(DownloadTask.id == task.id)
+                    )
+                    db_task = result.first()
+                    if db_task:
+                        db_task.status = "error"
+                        db_task.error_display = "已取消"
+                        db_task.updated_at = utc_now_str()
+                        db.add(db_task)
+
+                # Clean up download directory
+                from app.services.storage import cleanup_task_download_dir
+                await cleanup_task_download_dir(task.id)
 
     return {"ok": True}
 

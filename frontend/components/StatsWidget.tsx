@@ -3,18 +3,7 @@
 import { useEffect, useState } from "react";
 import { SystemStats } from "@/types";
 import { api } from "@/lib/api";
-
-function formatBytes(value?: number | null) {
-  if (value === 0 || value == null || Number.isNaN(value)) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let idx = 0;
-  let val = value;
-  while (val >= 1024 && idx < units.length - 1) {
-    val /= 1024;
-    idx += 1;
-  }
-  return `${val.toFixed(1)} ${units[idx]}`;
-}
+import { formatBytes } from "@/lib/utils";
 
 export default function StatsWidget() {
   const [stats, setStats] = useState<SystemStats | null>(null);

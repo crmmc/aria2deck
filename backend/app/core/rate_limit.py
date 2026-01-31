@@ -1,4 +1,5 @@
 """速率限制器"""
+import asyncio
 from collections import defaultdict
 from time import time
 
@@ -13,20 +14,21 @@ class LoginRateLimiter:
         self.max_attempts = max_attempts
         self.window = window_seconds
         self._attempts: dict[str, list[float]] = defaultdict(list)
+        self._lock = asyncio.Lock()
 
-    def is_blocked(self, key: str) -> bool:
-        """检查是否被限制"""
-        now = time()
-        self._attempts[key] = [t for t in self._attempts[key] if now - t < self.window]
-        return len(self._attempts[key]) >= self.max_attempts
+    async def is_blocked(self, key: str) -> bool:
+        async with self._lock:
+            now = time()
+            self._attempts[key] = [t for t in self._attempts[key] if now - t < self.window]
+            return len(self._attempts[key]) >= self.max_attempts
 
-    def record_failure(self, key: str) -> None:
-        """记录失败尝试"""
-        self._attempts[key].append(time())
+    async def record_failure(self, key: str) -> None:
+        async with self._lock:
+            self._attempts[key].append(time())
 
-    def clear(self, key: str) -> None:
-        """清除记录（登录成功时调用）"""
-        self._attempts.pop(key, None)
+    async def clear(self, key: str) -> None:
+        async with self._lock:
+            self._attempts.pop(key, None)
 
 
 class ApiRateLimiter:
@@ -36,47 +38,30 @@ class ApiRateLimiter:
     """
 
     def __init__(self):
-        # key: "{user_id}:{endpoint}" -> list of timestamps
         self._requests: dict[str, list[float]] = defaultdict(list)
+        self._lock = asyncio.Lock()
 
     def _make_key(self, user_id: int, endpoint: str) -> str:
         return f"{user_id}:{endpoint}"
 
-    def is_allowed(self, user_id: int, endpoint: str, limit: int, window_seconds: int = 60) -> bool:
-        """检查请求是否允许
-
-        Args:
-            user_id: 用户 ID
-            endpoint: 接口标识（如 "create_task"）
-            limit: 时间窗口内最大请求数
-            window_seconds: 时间窗口（秒），默认 60 秒
-
-        Returns:
-            True 如果允许请求，False 如果超限
-        """
+    async def is_allowed(self, user_id: int, endpoint: str, limit: int, window_seconds: int = 60) -> bool:
         key = self._make_key(user_id, endpoint)
-        now = time()
+        async with self._lock:
+            now = time()
+            self._requests[key] = [t for t in self._requests[key] if now - t < window_seconds]
+            if len(self._requests[key]) >= limit:
+                return False
+            self._requests[key].append(now)
+            return True
 
-        # 清理过期记录
-        self._requests[key] = [t for t in self._requests[key] if now - t < window_seconds]
-
-        # 检查是否超限
-        if len(self._requests[key]) >= limit:
-            return False
-
-        # 记录本次请求
-        self._requests[key].append(now)
-        return True
-
-    def get_remaining(self, user_id: int, endpoint: str, limit: int, window_seconds: int = 60) -> int:
-        """获取剩余可用次数"""
+    async def get_remaining(self, user_id: int, endpoint: str, limit: int, window_seconds: int = 60) -> int:
         key = self._make_key(user_id, endpoint)
-        now = time()
-        self._requests[key] = [t for t in self._requests[key] if now - t < window_seconds]
-        return max(0, limit - len(self._requests[key]))
+        async with self._lock:
+            now = time()
+            self._requests[key] = [t for t in self._requests[key] if now - t < window_seconds]
+            return max(0, limit - len(self._requests[key]))
 
     def clear_all(self) -> None:
-        """清除所有记录（用于测试）"""
         self._requests.clear()
 
 

@@ -19,6 +19,7 @@ from app.database import get_session, reset_engine, init_db as init_sqlmodel_db,
 from app.db import init_db, execute
 from app.core.config import settings
 from app.core.security import hash_password
+from app.core.state import AppState
 from app.models import DownloadTask, UserTaskSubscription, utc_now_str
 
 
@@ -168,6 +169,146 @@ class TestConcurrentTaskCancellation:
             assert len(remaining) == 1
             assert remaining[0].owner_id == test_users_cancel[2]["id"]
 
+
+class TestCancelDuringSubmit:
+    """Test cancel while aria2 submission is in-flight."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_submit_does_not_leave_active_task(
+        self,
+        temp_db_cancel,
+        test_users_cancel,
+    ):
+        """Cancel while add_uri is blocked should not leave active task without subscribers."""
+        from starlette.requests import Request
+
+        from app.main import app
+        from app.models import User
+        from app.routers.tasks import TaskCreate, cancel_task, create_task
+
+        # Ensure isolated AppState for consistent locks
+        app.state.app_state = AppState()
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/tasks",
+                "headers": [],
+                "client": ("test", 1234),
+                "app": app,
+            }
+        )
+
+        payload = TaskCreate(uri="https://example.com/file.zip")
+
+        add_entered = asyncio.Event()
+        add_release = asyncio.Event()
+
+        async def add_uri_blocking(uris, options=None):
+            add_entered.set()
+            await add_release.wait()
+            return "gid_submit_race_123"
+
+        mock_client = AsyncMock()
+        mock_client.add_uri.side_effect = add_uri_blocking
+        mock_client.force_remove.return_value = "OK"
+        mock_client.remove_download_result.return_value = "OK"
+
+        # Capture background submit task so we can await it
+        created_tasks: list[asyncio.Task] = []
+        real_create_task = asyncio.create_task
+
+        def capture_task(coro, *args, **kwargs):
+            task = real_create_task(coro, *args, **kwargs)
+            created_tasks.append(task)
+            return task
+
+        probe_result = type(
+            "ProbeResult",
+            (),
+            {
+                "success": True,
+                "final_url": "https://example.com/file.zip",
+                "content_length": 1024,
+                "filename": "file.zip",
+                "error": None,
+            },
+        )()
+
+        async def fake_space_info(user_id: int, quota: int):
+            return {
+                "available": 10 * 1024 * 1024 * 1024,
+                "used": 0,
+                "frozen": 0,
+                "quota": quota,
+            }
+
+        with patch("app.routers.tasks.api_limiter") as mock_limiter, \
+             patch("app.routers.tasks.probe_url_with_get_fallback", new_callable=AsyncMock, return_value=probe_result), \
+             patch("app.routers.tasks.socket.getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 0))]), \
+             patch("app.routers.tasks.get_aria2_client", return_value=mock_client), \
+             patch("app.routers.tasks._broadcast_task_update", new_callable=AsyncMock), \
+             patch("app.services.storage.get_user_space_info", new_callable=AsyncMock, side_effect=fake_space_info), \
+             patch("app.routers.tasks.asyncio.create_task", side_effect=capture_task):
+            mock_limiter.is_allowed = AsyncMock(return_value=True)
+
+            # Load user model
+            async with get_session() as db:
+                result = await db.exec(select(User).where(User.id == test_users_cancel[0]["id"]))
+                user = result.first()
+
+            # Create task (schedules background submit)
+            subscription = await create_task(payload, request, user=user)
+            sub_id = subscription["id"]
+
+            # Capture task_id before cancellation
+            async with get_session() as db:
+                result = await db.exec(
+                    select(UserTaskSubscription).where(UserTaskSubscription.id == sub_id)
+                )
+                sub = result.first()
+                task_id = sub.task_id if sub else None
+
+            # Wait until add_uri is entered (submit in-flight)
+            await asyncio.wait_for(add_entered.wait(), timeout=1.0)
+
+            # Cancel subscription while submit is blocked
+            cancel_request = Request(
+                {
+                    "type": "http",
+                    "method": "DELETE",
+                    "path": f"/api/tasks/{sub_id}",
+                    "headers": [],
+                    "client": ("test", 1234),
+                    "app": app,
+                }
+            )
+            # Start cancellation while submit is blocked (avoid deadlock on shared lock)
+            cancel_future = asyncio.create_task(cancel_task(sub_id, cancel_request, user=user))
+
+            # Release submit and wait for background tasks
+            add_release.set()
+            if created_tasks:
+                await asyncio.gather(*created_tasks)
+
+            cancel_result = await cancel_future
+            assert cancel_result == {"ok": True}
+
+        # Verify no pending subscriptions remain and task is not active
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.id == sub_id)
+            )
+            assert result.first() is None
+
+            result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+            task = result.first()
+
+        # Task should be marked as cancelled (error) after race resolution
+        assert task is not None
+        assert task.status == "error"
+        assert task.error_display == "已取消"
 
 class TestCancelOnlySubscriberRemovesAria2Task:
     """Test that aria2 task is cancelled when last subscriber cancels."""

@@ -286,11 +286,6 @@ def is_magnet_link(uri: str) -> bool:
     return uri.lower().startswith("magnet:")
 
 
-def is_torrent_task(uri: str) -> bool:
-    """Check if a URI represents a torrent file upload."""
-    return uri == "[torrent]"
-
-
 def is_http_url(uri: str) -> bool:
     """Check if a URI is an HTTP(S) URL."""
     lower = uri.lower()

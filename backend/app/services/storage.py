@@ -12,7 +12,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from sqlalchemy import update
+from sqlalchemy import delete, update
 from sqlmodel import select
 
 from app.core.config import settings
@@ -203,6 +203,7 @@ async def create_user_file_reference(
     """Create a user file reference to a stored file.
 
     Increments the reference count on the StoredFile.
+    Uses atomic ref_count increment to prevent race with deletion.
 
     Args:
         user_id: The user ID
@@ -210,7 +211,7 @@ async def create_user_file_reference(
         display_name: Optional custom display name
 
     Returns:
-        UserFile record or None if already exists
+        UserFile record or None if already exists or StoredFile was deleted
     """
     async with get_session() as db:
         # Check if reference already exists
@@ -227,13 +228,33 @@ async def create_user_file_reference(
             )
             return None
 
-        # Get stored file for default display name
+        # CRITICAL: Atomically increment ref_count FIRST, with condition ref_count > 0
+        # This prevents race with delete_user_file_reference which sets ref_count to 0
+        # before deleting the StoredFile record.
+        increment_result = await db.execute(
+            update(StoredFile)
+            .where(
+                StoredFile.id == stored_file_id,
+                StoredFile.ref_count >= 0,  # Allow 0 -> 1 for first reference
+            )
+            .values(ref_count=StoredFile.ref_count + 1)
+        )
+
+        if increment_result.rowcount == 0:
+            # StoredFile was deleted or doesn't exist
+            logger.warning(
+                f"StoredFile {stored_file_id} not found or deleted during reference creation"
+            )
+            return None
+
+        # Get stored file for default display name (now safe, ref_count > 0)
         result = await db.exec(
             select(StoredFile).where(StoredFile.id == stored_file_id)
         )
         stored_file = result.first()
         if not stored_file:
-            logger.error(f"StoredFile {stored_file_id} not found")
+            # Should not happen after successful increment, but handle gracefully
+            logger.error(f"StoredFile {stored_file_id} disappeared after ref_count increment")
             return None
 
         # Create reference
@@ -244,13 +265,6 @@ async def create_user_file_reference(
             created_at=utc_now_str(),
         )
         db.add(user_file)
-
-        # Increment reference count atomically
-        await db.execute(
-            update(StoredFile)
-            .where(StoredFile.id == stored_file_id)
-            .values(ref_count=StoredFile.ref_count + 1)
-        )
 
         try:
             await db.commit()
@@ -263,7 +277,9 @@ async def create_user_file_reference(
             return user_file
         except Exception:
             # UNIQUE constraint violation - reference already exists
+            # db.rollback() will automatically undo the ref_count +1 we did in this transaction
             await db.rollback()
+
             logger.debug(
                 f"Race condition: user {user_id} already has reference to stored file {stored_file_id}"
             )
@@ -275,6 +291,9 @@ async def delete_user_file_reference(user_file_id: int) -> bool:
 
     Decrements the reference count and deletes the physical file
     if no more references exist.
+
+    Uses conditional delete to prevent race with create_user_file_reference:
+    only deletes StoredFile if ref_count is still <= 0 at delete time.
 
     Args:
         user_file_id: The UserFile ID to delete
@@ -293,8 +312,12 @@ async def delete_user_file_reference(user_file_id: int) -> bool:
 
         stored_file_id = user_file.stored_file_id
 
-        # Delete the user reference
-        await db.delete(user_file)
+        # Delete the user reference atomically, avoid double-decrement on races
+        delete_result = await db.execute(
+            delete(UserFile).where(UserFile.id == user_file_id)
+        )
+        if delete_result.rowcount == 0:
+            return False
 
         # Decrement reference count atomically
         await db.execute(
@@ -303,23 +326,39 @@ async def delete_user_file_reference(user_file_id: int) -> bool:
             .values(ref_count=StoredFile.ref_count - 1)
         )
 
-        # Re-fetch to check current ref_count in the SAME transaction
+        # CRITICAL: Use conditional delete to prevent race with create_user_file_reference
+        # Only delete if ref_count is still <= 0 (no concurrent create incremented it)
+        # First, get the real_path before potential deletion
         result = await db.exec(
             select(StoredFile).where(StoredFile.id == stored_file_id)
         )
         stored_file = result.first()
 
-        if stored_file and stored_file.ref_count <= 0:
-            # Record info for deletion after commit
-            store_path_to_delete = stored_file.real_path
-            stored_file_id_to_delete = stored_file.id
-            # Delete database record
-            await db.delete(stored_file)
-        elif stored_file:
-            logger.info(
-                f"Deleted user file reference {user_file_id}, "
-                f"ref_count now {stored_file.ref_count}"
-            )
+        if stored_file:
+            if stored_file.ref_count <= 0:
+                # Attempt conditional delete - only succeeds if ref_count still <= 0
+                conditional_delete = await db.execute(
+                    delete(StoredFile)
+                    .where(
+                        StoredFile.id == stored_file_id,
+                        StoredFile.ref_count <= 0,  # CAS condition
+                    )
+                )
+                if conditional_delete.rowcount > 0:
+                    # Successfully deleted, record path for physical deletion
+                    store_path_to_delete = stored_file.real_path
+                    stored_file_id_to_delete = stored_file.id
+                else:
+                    # Concurrent create incremented ref_count, don't delete
+                    logger.info(
+                        f"StoredFile {stored_file_id} ref_count was incremented concurrently, "
+                        f"skipping deletion"
+                    )
+            else:
+                logger.info(
+                    f"Deleted user file reference {user_file_id}, "
+                    f"ref_count now {stored_file.ref_count}"
+                )
         # Transaction commits here
 
     # Delete physical file AFTER transaction commit (avoid I/O in transaction)
@@ -344,59 +383,6 @@ async def _delete_stored_file_by_path(real_path: str) -> None:
             logger.error(f"Failed to delete physical file {path}: {e}")
 
 
-async def _delete_stored_file(stored_file: StoredFile) -> None:
-    """Delete a stored file and its record.
-
-    Args:
-        stored_file: The StoredFile to delete
-    """
-    real_path = Path(stored_file.real_path)
-
-    # Delete physical file
-    if real_path.exists():
-        try:
-            if real_path.is_dir():
-                shutil.rmtree(real_path)
-            else:
-                real_path.unlink()
-            logger.info(f"Deleted physical file: {real_path}")
-        except Exception as e:
-            logger.error(f"Failed to delete physical file {real_path}: {e}")
-
-    # Delete database record
-    async with get_session() as db:
-        result = await db.exec(
-            select(StoredFile).where(StoredFile.id == stored_file.id)
-        )
-        db_stored_file = result.first()
-        if db_stored_file:
-            await db.delete(db_stored_file)
-            await db.commit()
-            logger.info(f"Deleted StoredFile record: {stored_file.id}")
-
-
-async def cleanup_orphaned_stored_files() -> int:
-    """Clean up stored files with zero references.
-
-    Returns:
-        Number of files cleaned up
-    """
-    count = 0
-    async with get_session() as db:
-        result = await db.exec(
-            select(StoredFile).where(StoredFile.ref_count <= 0)
-        )
-        orphaned = result.all()
-
-        for stored_file in orphaned:
-            await _delete_stored_file(stored_file)
-            count += 1
-
-    if count > 0:
-        logger.info(f"Cleaned up {count} orphaned stored files")
-    return count
-
-
 async def cleanup_task_download_dir(task_id: int) -> None:
     """Clean up the download directory for a task.
 
@@ -412,43 +398,6 @@ async def cleanup_task_download_dir(task_id: int) -> None:
             logger.info(f"Cleaned up task download directory: {task_dir}")
         except Exception as e:
             logger.error(f"Failed to clean up task directory {task_dir}: {e}")
-
-
-def get_user_used_space(user_id: int) -> int:
-    """Calculate user's used space from UserFile references.
-
-    This is a synchronous function for use in space calculations.
-
-    Args:
-        user_id: The user ID
-
-    Returns:
-        Total bytes used by user's files
-    """
-    import asyncio
-
-    async def _get_used():
-        async with get_session() as db:
-            result = await db.exec(
-                select(UserFile, StoredFile)
-                .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
-                .where(UserFile.owner_id == user_id)
-            )
-            rows = result.all()
-            return sum(stored_file.size for _, stored_file in rows)
-
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # We're in an async context, create a new task
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, _get_used())
-                return future.result()
-        else:
-            return loop.run_until_complete(_get_used())
-    except RuntimeError:
-        return asyncio.run(_get_used())
 
 
 async def get_user_used_space_async(user_id: int) -> int:

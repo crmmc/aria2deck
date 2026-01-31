@@ -73,7 +73,7 @@ def parse_error_message(aria2_error: str | None) -> str:
         用户友好的中文错误描述
     """
     if not aria2_error:
-        return "未知错误"
+        return "后端错误"
 
     # aria2 错误消息格式通常是 "errorCode=X errorMessage=..."
     # 或直接是错误描述
@@ -110,7 +110,5 @@ def parse_error_message(aria2_error: str | None) -> str:
         if re.search(pattern, aria2_error_lower):
             return message
 
-    # 无法识别，返回原始消息（截断过长的消息）
-    if len(aria2_error) > 100:
-        return aria2_error[:97] + "..."
-    return aria2_error
+    # 无法识别，返回通用后端错误提示（避免暴露敏感信息）
+    return "后端错误"
