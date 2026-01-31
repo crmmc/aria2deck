@@ -23,6 +23,8 @@ from app.models import PackTask, User
 
 # 全局打包队列锁
 _pack_queue_lock = asyncio.Lock()
+# 保护 _running_tasks 字典的锁
+_running_tasks_lock = asyncio.Lock()
 
 
 def utc_now() -> str:
@@ -85,7 +87,6 @@ class PackTaskManager:
 
     @classmethod
     def is_any_task_running(cls) -> bool:
-        """Check if any pack task is currently running"""
         return len(cls._running_tasks) > 0
 
     @classmethod
@@ -210,7 +211,28 @@ class PackTaskManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT
             )
-            cls._running_tasks[task_id] = process
+            async with _running_tasks_lock:
+                cls._running_tasks[task_id] = process
+
+            # CRITICAL: Check if task was cancelled during subprocess creation window
+            # This prevents race where cancel_pack() couldn't find the process
+            # but the API already marked the task as cancelled
+            async with get_session() as db:
+                result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+                task_check = result.first()
+                if task_check and task_check.status != "packing":
+                    # Task was cancelled during the window, terminate and exit
+                    logger.info(f"Pack task {task_id} was cancelled during startup, terminating")
+                    process.terminate()
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        process.kill()
+                    if output_path.exists():
+                        output_path.unlink()
+                    async with _running_tasks_lock:
+                        cls._running_tasks.pop(task_id, None)
+                    return
 
             # Parse progress from 7za output
             progress = 0
@@ -297,15 +319,13 @@ class PackTaskManager:
                 output_path.unlink()
             await cls._update_task_error(task_id, str(exc))
         finally:
-            cls._running_tasks.pop(task_id, None)
+            async with _running_tasks_lock:
+                cls._running_tasks.pop(task_id, None)
 
     @classmethod
     async def cancel_pack(cls, task_id: int) -> bool:
-        """Cancel a running pack task
-
-        Returns True if cancelled, False if not running
-        """
-        process = cls._running_tasks.get(task_id)
+        async with _running_tasks_lock:
+            process = cls._running_tasks.get(task_id)
         if process:
             process.terminate()
             try:

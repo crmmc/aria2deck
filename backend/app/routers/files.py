@@ -8,17 +8,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from time import time
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlalchemy import text, update
 from sqlmodel import select
 
-from app.auth import require_user, optional_user
+from app.auth import require_user
 from app.core.config import settings
 from app.core.rate_limit import api_limiter
 from app.database import get_session
@@ -31,6 +30,18 @@ from app.services.storage import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/files", tags=["files"])
+# 打包任务创建锁，防止并发校验导致空间超卖（按事件循环隔离）
+_pack_create_lock: asyncio.Lock | None = None
+_pack_create_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_pack_create_lock() -> asyncio.Lock:
+    global _pack_create_lock, _pack_create_lock_loop
+    loop = asyncio.get_running_loop()
+    if _pack_create_lock is None or _pack_create_lock_loop is not loop:
+        _pack_create_lock = asyncio.Lock()
+        _pack_create_lock_loop = loop
+    return _pack_create_lock
 
 
 def utc_now() -> str:
@@ -54,13 +65,6 @@ class FileListResponse(BaseModel):
     space: dict  # {used, frozen, available}
 
 
-class BrowseFileInfo(BaseModel):
-    """浏览文件夹内的文件信息"""
-    name: str
-    size: int
-    is_directory: bool
-
-
 class RenameRequest(BaseModel):
     """重命名请求"""
     name: str
@@ -76,13 +80,6 @@ class PackRequest(BaseModel):
 class CalculateSizeRequest(BaseModel):
     """计算大小请求"""
     paths: list[str]
-
-
-class SpaceInfo(BaseModel):
-    """空间信息"""
-    used: int
-    frozen: int
-    available: int
 
 
 # ========== Helpers ==========
@@ -257,6 +254,11 @@ async def download_file(
         file_id: UserFile ID
         path: BT 文件夹内的相对路径（可选）
     """
+    if not await api_limiter.is_allowed(user.id, "download_file", limit=60, window_seconds=60):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="下载请求过于频繁，请稍后再试"
+        )
     # Get user file and stored file
     async with get_session() as db:
         result = await db.exec(
@@ -345,8 +347,8 @@ async def delete_file(
 
     if not success:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="删除失败"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文件不存在"
         )
 
     return {"ok": True}
@@ -552,7 +554,7 @@ async def create_pack_task(
     2. 多文件打包：提供 paths 列表
     """
     # 频率限制
-    if not api_limiter.is_allowed(user.id, "create_pack", limit=5, window_seconds=60):
+    if not await api_limiter.is_allowed(user.id, "create_pack", limit=5, window_seconds=60):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="操作过于频繁，请稍后再试"
@@ -606,32 +608,7 @@ async def create_pack_task(
 
     folder_path_value = json.dumps(paths) if is_multi else paths[0]
 
-    # Check for existing pack task
-    async with get_session() as db:
-        result = await db.exec(
-            select(PackTask).where(
-                PackTask.owner_id == user.id,
-                PackTask.folder_path == folder_path_value,
-                PackTask.status.in_(["pending", "packing"])
-            )
-        )
-        existing = result.first()
-
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="相同路径已有进行中的打包任务"
-        )
-
     reserved_space = total_size
-
-    # Check available space
-    available = await get_user_available_space_for_pack(user.id)
-    if reserved_space > available:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"空间不足。需要: {reserved_space / 1024**3:.2f} GB, 可用: {available / 1024**3:.2f} GB"
-        )
 
     # 验证输出文件名
     output_name = payload.output_name
@@ -641,22 +618,70 @@ async def create_pack_task(
             detail="输出文件名不能包含路径分隔符"
         )
 
-    # Create task record
-    async with get_session() as db:
-        pack_task = PackTask(
-            owner_id=user.id,
-            folder_path=folder_path_value,
-            folder_size=total_size,
-            reserved_space=reserved_space,
-            output_name=output_name,
-            status="pending",
-            created_at=utc_now(),
-            updated_at=utc_now()
-        )
-        db.add(pack_task)
-        await db.commit()
-        await db.refresh(pack_task)
-        task_id = pack_task.id
+    # Check available space + create task record atomically (avoid concurrent oversell)
+    async with _get_pack_create_lock():
+        available = await get_user_available_space_for_pack(user.id)
+        if reserved_space > available:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"空间不足。需要: {reserved_space / 1024**3:.2f} GB, 可用: {available / 1024**3:.2f} GB"
+            )
+
+        # Create task record atomically (avoid concurrent duplicates)
+        async with get_session() as db:
+            now = utc_now()
+            result = await db.execute(
+                text(
+                    """
+                    INSERT INTO pack_tasks (
+                        owner_id, folder_path, folder_size, reserved_space,
+                        output_name, status, created_at, updated_at
+                    )
+                    SELECT
+                        :owner_id, :folder_path, :folder_size, :reserved_space,
+                        :output_name, 'pending', :created_at, :updated_at
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM pack_tasks
+                        WHERE owner_id = :owner_id
+                          AND folder_path = :folder_path
+                          AND status IN ('pending', 'packing')
+                    )
+                    """
+                ),
+                {
+                    "owner_id": user.id,
+                    "folder_path": folder_path_value,
+                    "folder_size": total_size,
+                    "reserved_space": reserved_space,
+                    "output_name": output_name,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+
+            if result.rowcount == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="相同路径已有进行中的打包任务"
+                )
+
+            # Fetch newly created task
+            result = await db.exec(
+                select(PackTask)
+                .where(
+                    PackTask.owner_id == user.id,
+                    PackTask.folder_path == folder_path_value,
+                    PackTask.status == "pending",
+                )
+                .order_by(PackTask.id.desc())
+            )
+            pack_task = result.first()
+            if not pack_task:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="创建打包任务失败"
+                )
+            task_id = pack_task.id
 
     # Start async packing
     asyncio.create_task(PackTaskManager.start_pack(task_id, user.id, folder_path_value, output_name))
@@ -716,14 +741,32 @@ async def cancel_or_delete_pack_task(
     if task_status in ("pending", "packing"):
         await PackTaskManager.cancel_pack(task_id)
         async with get_session() as db:
-            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
-            db_task = result.first()
-            if db_task:
-                db_task.status = "cancelled"
-                db_task.reserved_space = 0
-                db_task.updated_at = utc_now()
-                db.add(db_task)
-        return {"ok": True, "message": "任务已取消"}
+            result = await db.execute(
+                update(PackTask)
+                .where(
+                    PackTask.id == task_id,
+                    PackTask.status.in_(["pending", "packing"]),
+                )
+                .values(
+                    status="cancelled",
+                    reserved_space=0,
+                    updated_at=utc_now()
+                )
+            )
+            cancelled = result.rowcount > 0
+
+        if cancelled:
+            return {"ok": True, "message": "任务已取消"}
+
+        # 状态已变化，重新读取并按实际状态处理
+        async with get_session() as db:
+            result = await db.exec(
+                select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
+            )
+            task = result.first()
+        if not task:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+        task_status = task.status
 
     if task_status in ("done", "failed", "cancelled"):
         async with get_session() as db:

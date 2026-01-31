@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/Toast";
-import AuthLayout from "@/components/AuthLayout";
 import type { User, UserUpdate } from "@/types";
 
 type EditingUser = {
@@ -181,7 +180,7 @@ export default function UsersPage() {
   if (loading) return null;
 
   return (
-    <AuthLayout>
+    <>
       <div className="glass-frame full-height animate-in">
         <div className="page-header">
           <h1 className="page-title">用户</h1>
@@ -190,66 +189,65 @@ export default function UsersPage() {
 
         <div className="card mb-7">
           <h3 className="mb-4">创建新用户</h3>
-          <form onSubmit={handleCreateUser} className="flex gap-3 items-end flex-wrap">
-            <div className="flex-1" style={{ minWidth: 200 }}>
-              <label className="form-label">用户名</label>
-              <input
-                className="input"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                required
-              />
-            </div>
-            <div className="flex-1" style={{ minWidth: 200 }}>
-              <label className="form-label">密码</label>
-              <input
-                className="input"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                autoComplete="new-password"
-              />
-            </div>
-            <div className="flex-1" style={{ minWidth: 200 }}>
-              <label className="form-label">存储配额</label>
-              <div className="flex gap-2">
+          <form onSubmit={handleCreateUser} className="create-user-form">
+            <div className="create-user-fields">
+              <div className="create-user-field">
+                <label className="form-label">用户名</label>
                 <input
-                  className="input flex-1"
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  value={quotaValue}
-                  onChange={(e) => setQuotaValue(e.target.value)}
+                  className="input"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
                   required
                 />
-                <select
+              </div>
+              <div className="create-user-field">
+                <label className="form-label">密码</label>
+                <input
                   className="input"
-                  value={quotaUnit}
-                  onChange={(e) => setQuotaUnit(e.target.value)}
-                  style={{ width: 80 }}
-                >
-                  <option value="KB">KB</option>
-                  <option value="MB">MB</option>
-                  <option value="GB">GB</option>
-                </select>
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  autoComplete="new-password"
+                />
+              </div>
+              <div className="create-user-field">
+                <label className="form-label">存储配额</label>
+                <div className="flex gap-2">
+                  <input
+                    className="input flex-1"
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={quotaValue}
+                    onChange={(e) => setQuotaValue(e.target.value)}
+                    required
+                  />
+                  <select
+                    className="input"
+                    value={quotaUnit}
+                    onChange={(e) => setQuotaUnit(e.target.value)}
+                    style={{ width: 80 }}
+                  >
+                    <option value="KB">KB</option>
+                    <option value="MB">MB</option>
+                    <option value="GB">GB</option>
+                  </select>
+                </div>
               </div>
             </div>
-            <div className="flex-shrink-0">
-              <label className="form-label">&nbsp;</label>
-              <div className="flex gap-3 items-center">
-                <label className="checkbox-label" style={{ height: 46, display: "flex", alignItems: "center" }}>
-                  <input
-                    type="checkbox"
-                    checked={isAdmin}
-                    onChange={(e) => setIsAdmin(e.target.checked)}
-                  />
-                  <span className="text-base">管理员</span>
-                </label>
-                <button className="button" type="submit" style={{ height: 46 }}>
-                  创建用户
-                </button>
-              </div>
+            <div className="create-user-actions">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={isAdmin}
+                  onChange={(e) => setIsAdmin(e.target.checked)}
+                />
+                <span className="text-base">管理员</span>
+              </label>
+              <button className="button" type="submit">
+                创建用户
+              </button>
             </div>
           </form>
           {error && (
@@ -257,7 +255,7 @@ export default function UsersPage() {
           )}
         </div>
 
-        <div className="card p-0 overflow-hidden">
+        <div className="card p-0 overflow-hidden users-table-wrapper">
           <table className="table text-left">
             <thead className="table-header">
               <tr>
@@ -270,9 +268,9 @@ export default function UsersPage() {
             <tbody>
               {users.map((u) => (
                 <tr key={u.id} className="table-row">
-                  <td className="table-cell">{u.id}</td>
-                  <td className="table-cell font-medium">{u.username}</td>
-                  <td className="table-cell">
+                  <td className="table-cell" data-label="ID">{u.id}</td>
+                  <td className="table-cell font-medium" data-label="用户名">{u.username}</td>
+                  <td className="table-cell" data-label="角色">
                     {u.is_admin ? (
                       <span className="badge active">管理员</span>
                     ) : (
@@ -465,6 +463,6 @@ export default function UsersPage() {
           </div>
         </div>
       )}
-    </AuthLayout>
+    </>
   );
 }

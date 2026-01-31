@@ -1,9 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlmodel import select
 
 from app.auth import clear_session, create_session, require_user, set_session_cookie
 from app.core.config import settings
-from app.core.rate_limit import login_limiter
+from app.core.rate_limit import api_limiter, login_limiter
 from app.core.security import hash_password, verify_password
 from app.database import get_session
 from app.db import fetch_one
@@ -19,7 +18,7 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
     client_ip = request.client.host if request.client else "unknown"
 
     # 检查是否被限制
-    if login_limiter.is_blocked(client_ip):
+    if await login_limiter.is_blocked(client_ip):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="登录尝试次数过多，请稍后再试"
@@ -29,11 +28,11 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
 
     if not user or not verify_password(payload.password, user["password_hash"]):
         # 记录失败尝试
-        login_limiter.record_failure(client_ip)
+        await login_limiter.record_failure(client_ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
 
     # 登录成功，清除失败记录
-    login_limiter.clear(client_ip)
+    await login_limiter.clear(client_ip)
 
     # 会话固定防护：清除请求中可能存在的旧 session
     old_session_id = request.cookies.get(settings.session_cookie_name)
@@ -79,7 +78,12 @@ async def change_password(
     response: Response,
     user: User = Depends(require_user)
 ) -> dict:
-    # 如果是初始密码状态，跳过旧密码验证
+    if not await api_limiter.is_allowed(user.id, "change_password", limit=5, window_seconds=300):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="操作过于频繁，请稍后再试"
+        )
+
     if not user.is_initial_password:
         # 验证旧密码
         if not verify_password(payload.old_password, user.password_hash):

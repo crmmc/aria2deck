@@ -10,7 +10,6 @@ Kept functions:
 
 import sqlite3
 import threading
-from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterable

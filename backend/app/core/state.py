@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass, field
 from typing import Dict, Set
 
@@ -11,10 +10,6 @@ from app.aria2.client import Aria2Client
 from app.core.config import settings
 
 
-# WebSocket 消息节流间隔（秒）
-WS_THROTTLE_INTERVAL = 0.5
-
-
 @dataclass
 class AppState:
     pending_tasks: Dict[int, dict] = field(default_factory=dict)
@@ -22,6 +17,20 @@ class AppState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # 消息节流：记录每个任务的最后推送时间 {task_id: timestamp}
     last_broadcast: Dict[int, float] = field(default_factory=dict)
+    # 任务提交锁，避免并发提交同一任务
+    task_submit_locks: Dict[int, asyncio.Lock] = field(default_factory=dict)
+    # 用户空间锁，避免并发冻结/校验导致超额
+    user_space_locks: Dict[int, asyncio.Lock] = field(default_factory=dict)
+
+
+async def get_user_space_lock(state: AppState, user_id: int) -> asyncio.Lock:
+    """获取用户空间锁，避免并发冻结/校验竞态"""
+    async with state.lock:
+        lock = state.user_space_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            state.user_space_locks[user_id] = lock
+        return lock
 
 
 def get_aria2_client(request: Request | None = None) -> Aria2Client:

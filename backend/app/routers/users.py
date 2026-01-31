@@ -5,13 +5,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from app.auth import clear_user_sessions, require_admin, require_user
 from app.core.config import settings
+from app.core.rate_limit import login_limiter
 from app.core.security import hash_password
 from app.database import get_session
-from app.models import User, Session as SessionModel, Task, PackTask
+from app.models import User, Session as SessionModel, Task, PackTask, UserFile
 from app.schemas import RpcAccessStatus, RpcAccessToggle, UserCreate, UserOut, UserUpdate
 
 
@@ -34,32 +37,97 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
 
     首次调用（无用户时）无需认证，之后需要管理员权限。
     """
+    # 获取客户端 IP 用于限流
+    client_ip = request.client.host if request.client else "unknown"
+
+    # 首次创建用户时的 IP 限流（防止滥用）
+    if not await _has_any_user():
+        if await login_limiter.is_blocked(client_ip):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="请求过于频繁，请稍后再试"
+            )
+
     if await _has_any_user():
         await require_admin(await require_user(request))
 
+        async with get_session() as db:
+            # 检查用户名是否已存在
+            result = await db.exec(select(User).where(User.username == payload.username))
+            if result.first():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="用户名已存在"
+                )
+
+            # 默认配额 100GB
+            quota = payload.quota if payload.quota is not None else 107374182400
+
+            user = User(
+                username=payload.username,
+                password_hash=hash_password(payload.password),
+                is_admin=payload.is_admin,
+                is_initial_password=True,  # 新用户需要自行修改密码
+                quota=quota,
+                created_at=utc_now()
+            )
+            db.add(user)
+            try:
+                await db.commit()
+                await db.refresh(user)
+            except IntegrityError:
+                await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="用户名已存在"
+                )
+
+            return {
+                "id": user.id,
+                "username": user.username,
+                "is_admin": user.is_admin,
+                "quota": user.quota
+            }
+
+    # 首次创建用户：仅允许第一个请求插入
     async with get_session() as db:
-        # 检查用户名是否已存在
-        result = await db.exec(select(User).where(User.username == payload.username))
-        if result.first():
+        quota = payload.quota if payload.quota is not None else 107374182400
+        now = utc_now()
+        result = await db.execute(
+            text(
+                """
+                INSERT INTO users (
+                    username, password_hash, is_admin,
+                    quota, created_at, is_initial_password
+                )
+                SELECT
+                    :username, :password_hash, :is_admin,
+                    :quota, :created_at, 1
+                WHERE NOT EXISTS (SELECT 1 FROM users)
+                """
+            ),
+            {
+                "username": payload.username,
+                "password_hash": hash_password(payload.password),
+                "is_admin": payload.is_admin,
+                "quota": quota,
+                "created_at": now,
+            },
+        )
+
+        if result.rowcount == 0:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="用户名已存在"
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="需要管理员权限"
             )
 
-        # 默认配额 100GB
-        quota = payload.quota if payload.quota is not None else 107374182400
-
-        user = User(
-            username=payload.username,
-            password_hash=hash_password(payload.password),
-            is_admin=payload.is_admin,
-            is_initial_password=True,  # 新用户需要自行修改密码
-            quota=quota,
-            created_at=utc_now()
-        )
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
+        result = await db.exec(select(User).where(User.username == payload.username))
+        user = result.first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="创建用户失败"
+            )
 
         return {
             "id": user.id,
@@ -129,8 +197,17 @@ async def delete_user(
         for pack_task in pack_tasks_result.all():
             await db.delete(pack_task)
 
+        # 获取用户的所有文件引用 ID（在事务外删除以正确处理 ref_count）
+        user_files_result = await db.exec(select(UserFile).where(UserFile.owner_id == user_id))
+        user_file_ids = [uf.id for uf in user_files_result.all()]
+
         # 删除用户
         await db.delete(user)
+
+    # 删除用户文件引用（正确递减 ref_count 并清理物理文件）
+    from app.services.storage import delete_user_file_reference
+    for user_file_id in user_file_ids:
+        await delete_user_file_reference(user_file_id)
 
     # 可选：删除用户下载目录
     if delete_files:
@@ -203,8 +280,15 @@ async def update_user(user_id: int, payload: UserUpdate, admin: User = Depends(r
             user.quota = payload.quota
 
         db.add(user)
-        await db.commit()
-        await db.refresh(user)
+        try:
+            await db.commit()
+            await db.refresh(user)
+        except IntegrityError:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="用户名已被占用"
+            )
 
         return {
             "id": user.id,

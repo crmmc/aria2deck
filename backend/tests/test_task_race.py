@@ -11,13 +11,16 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
+from starlette.requests import Request
 
 from app.database import get_session, reset_engine, init_db as init_sqlmodel_db, dispose_engine
 from app.db import init_db, execute
 from app.core.config import settings
 from app.core.security import hash_password
+from app.core.state import AppState
 from app.models import DownloadTask, UserTaskSubscription, utc_now_str
 
 
@@ -356,3 +359,161 @@ class TestConcurrentSubscriptionCreation:
             )
             subscriptions = result.all()
             assert len(subscriptions) == 3
+
+
+class TestTorrentTaskSpaceCheck:
+    """Test space checks for torrent task creation."""
+
+    @pytest.mark.asyncio
+    async def test_create_torrent_task_rechecks_space_under_lock(self, temp_db_task, test_user_task):
+        """Space should be rechecked inside user lock for known-size torrents."""
+        from app.main import app
+        from app.models import User
+        from app.routers.tasks import TorrentCreate, create_torrent_task
+
+        app.state.app_state = AppState()
+
+        # Existing task with known size
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="torrent_hash_known_1",
+                uri="magnet:?xt=urn:btih:torrent_hash_known_1",
+                gid="gid_torrent_known_1",
+                status="active",
+                name="known.torrent",
+                total_length=5 * 1024 * 1024,
+                completed_length=0,
+                created_at=utc_now_str(),
+                updated_at=utc_now_str(),
+            )
+            db.add(task)
+            await db.commit()
+            await db.refresh(task)
+
+        async with get_session() as db:
+            result = await db.exec(select(User).where(User.id == test_user_task["id"]))
+            user = result.first()
+
+        space_calls = 0
+
+        async def fake_space_info(user_id: int, quota: int):
+            nonlocal space_calls
+            space_calls += 1
+            if space_calls == 1:
+                return {
+                    "available": 10 * 1024 * 1024,
+                    "used": 0,
+                    "frozen": 0,
+                    "quota": quota,
+                }
+            return {
+                "available": 0,
+                "used": 0,
+                "frozen": 0,
+                "quota": quota,
+            }
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/tasks/torrent",
+                "headers": [],
+                "client": ("test", 1234),
+                "app": app,
+            }
+        )
+
+        payload = TorrentCreate(torrent="dummy_base64_payload")
+
+        with patch("app.routers.tasks.api_limiter") as mock_limiter, \
+             patch("app.routers.tasks.extract_info_hash_from_torrent_base64", return_value=task.uri_hash), \
+             patch("app.routers.tasks.get_user_space_info", new_callable=AsyncMock, side_effect=fake_space_info), \
+             patch("app.routers.tasks._check_disk_space", return_value=(True, 10**12)):
+            mock_limiter.is_allowed = AsyncMock(return_value=True)
+
+            with pytest.raises(HTTPException) as exc_info:
+                await create_torrent_task(payload, request, user=user)
+
+            assert exc_info.value.status_code == 403
+            assert "超过可用空间" in exc_info.value.detail
+
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserTaskSubscription).where(
+                    UserTaskSubscription.owner_id == user.id,
+                    UserTaskSubscription.task_id == task.id,
+                )
+            )
+            assert result.first() is None
+
+    @pytest.mark.asyncio
+    async def test_create_torrent_task_freezes_space_when_available(self, temp_db_task, test_user_task):
+        """Known-size torrent should freeze space when user has enough quota."""
+        from app.main import app
+        from app.models import User
+        from app.routers.tasks import TorrentCreate, create_torrent_task
+
+        app.state.app_state = AppState()
+
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="torrent_hash_known_2",
+                uri="magnet:?xt=urn:btih:torrent_hash_known_2",
+                gid="gid_torrent_known_2",
+                status="active",
+                name="known2.torrent",
+                total_length=6 * 1024 * 1024,
+                completed_length=0,
+                created_at=utc_now_str(),
+                updated_at=utc_now_str(),
+            )
+            db.add(task)
+            await db.commit()
+            await db.refresh(task)
+
+        async with get_session() as db:
+            result = await db.exec(select(User).where(User.id == test_user_task["id"]))
+            user = result.first()
+
+        async def fake_space_info(user_id: int, quota: int):
+            return {
+                "available": 10 * 1024 * 1024,
+                "used": 0,
+                "frozen": 0,
+                "quota": quota,
+            }
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/tasks/torrent",
+                "headers": [],
+                "client": ("test", 1234),
+                "app": app,
+            }
+        )
+
+        payload = TorrentCreate(torrent="dummy_base64_payload")
+
+        with patch("app.routers.tasks.api_limiter") as mock_limiter, \
+             patch("app.routers.tasks.extract_info_hash_from_torrent_base64", return_value=task.uri_hash), \
+             patch("app.routers.tasks.get_user_space_info", new_callable=AsyncMock, side_effect=fake_space_info), \
+             patch("app.routers.tasks._check_disk_space", return_value=(True, 10**12)):
+            mock_limiter.is_allowed = AsyncMock(return_value=True)
+
+            response = await create_torrent_task(payload, request, user=user)
+            assert response["frozen_space"] == task.total_length
+
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserTaskSubscription).where(
+                    UserTaskSubscription.owner_id == user.id,
+                    UserTaskSubscription.task_id == task.id,
+                )
+            )
+            subscription = result.first()
+            assert subscription is not None
+            assert subscription.frozen_space == task.total_length
+            assert subscription.status == "pending"

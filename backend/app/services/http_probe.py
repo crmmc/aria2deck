@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from email.utils import decode_rfc2231
 from urllib.parse import unquote, urlparse
 
 import aiohttp

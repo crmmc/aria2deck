@@ -8,9 +8,11 @@ import asyncio
 import os
 import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import update
 from sqlmodel import select
 
@@ -339,13 +341,117 @@ class TestPackStatusTransitionValidation:
 
         assert success, "Pending to packing transition should succeed"
 
-        # Verify status
+
+class TestConcurrentPackCreation:
+    """Test concurrent pack task creation for same folder."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_pack_create_same_path(self, temp_db_pack_race, test_user_pack_race):
+        """Only one pack task should be created for the same folder."""
+        from app.routers.files import create_pack_task, PackRequest
+        from app.models import User
+
+        # Create user folder and test data
+        user_dir = Path(settings.download_dir) / str(test_user_pack_race["id"])
+        user_dir.mkdir(parents=True, exist_ok=True)
+        folder = user_dir / "race_folder"
+        folder.mkdir(exist_ok=True)
+        (folder / "file.txt").write_text("race content")
+
         async with get_session() as db:
-            result = await db.exec(
-                select(PackTask).where(PackTask.id == task_id)
+            result = await db.exec(select(User).where(User.id == test_user_pack_race["id"]))
+            user = result.first()
+
+        payload = PackRequest(folder_path="race_folder")
+
+        async def create_pack():
+            return await create_pack_task(payload, user)
+
+        with patch(
+            "app.services.pack.get_user_available_space_for_pack",
+            new_callable=AsyncMock,
+            return_value=10**12,
+        ), patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
+            results = await asyncio.gather(
+                create_pack(),
+                create_pack(),
+                return_exceptions=True,
             )
-            task = result.first()
-            assert task.status == "packing"
+
+        successes = [r for r in results if isinstance(r, dict)]
+        errors = [r for r in results if isinstance(r, HTTPException)]
+
+        assert len(successes) == 1
+        assert len(errors) == 1
+        assert errors[0].status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_concurrent_pack_respects_available_space(self, temp_db_pack_race, test_user_pack_race):
+        """Concurrent pack creation should not oversell reserved space."""
+        from app.routers.files import create_pack_task, PackRequest
+        from app.models import User
+
+        # Create user folder and test data
+        user_dir = Path(settings.download_dir) / str(test_user_pack_race["id"])
+        user_dir.mkdir(parents=True, exist_ok=True)
+
+        folder_a = user_dir / "folder_a"
+        folder_b = user_dir / "folder_b"
+        folder_a.mkdir(exist_ok=True)
+        folder_b.mkdir(exist_ok=True)
+        (folder_a / "a.txt").write_bytes(b"a" * 80)
+        (folder_b / "b.txt").write_bytes(b"b" * 80)
+
+        async with get_session() as db:
+            result = await db.exec(select(User).where(User.id == test_user_pack_race["id"]))
+            user = result.first()
+
+        payload_a = PackRequest(folder_path="folder_a")
+        payload_b = PackRequest(folder_path="folder_b")
+
+        active_calls = 0
+        concurrent = False
+        calls = 0
+
+        async def fake_get_user_available_space_for_pack(_user_id: int) -> int:
+            nonlocal active_calls, concurrent, calls
+            active_calls += 1
+            if active_calls > 1:
+                concurrent = True
+            await asyncio.sleep(0.01)
+            active_calls -= 1
+            calls += 1
+            return 80 if calls == 1 else 40
+
+        with patch(
+            "app.services.pack.get_user_available_space_for_pack",
+            new=fake_get_user_available_space_for_pack,
+        ), patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
+            results = await asyncio.gather(
+                create_pack_task(payload_a, user),
+                create_pack_task(payload_b, user),
+                return_exceptions=True,
+            )
+
+        successes = [r for r in results if isinstance(r, dict)]
+        errors = [r for r in results if isinstance(r, HTTPException)]
+        unexpected = [
+            r for r in results
+            if isinstance(r, Exception) and not isinstance(r, HTTPException)
+        ]
+
+        assert not unexpected, f"Unexpected exceptions: {unexpected}"
+
+        if errors:
+            assert len(errors) == 1
+            assert len(successes) == 1
+            assert errors[0].status_code == 403
+            assert "空间不足" in errors[0].detail
+        else:
+            assert len(successes) == 2
+
+        assert calls == 2
+        assert concurrent is False
 
     @pytest.mark.asyncio
     async def test_done_cannot_transition(self, temp_db_pack_race, test_user_pack_race):

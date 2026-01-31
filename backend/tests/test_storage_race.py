@@ -237,6 +237,43 @@ class TestRefCountConcurrentDecrement:
             stored_file = result.first()
             assert stored_file.ref_count == 2, f"Expected ref_count=2, got {stored_file.ref_count}"
 
+    @pytest.mark.asyncio
+    async def test_concurrent_delete_same_reference(self, temp_db_storage, test_user_storage, test_stored_file):
+        """Deleting the same UserFile concurrently should only decrement once."""
+        from app.services.storage import create_user_file_reference, delete_user_file_reference
+
+        stored_file_id = test_stored_file.id
+        user_id = test_user_storage["id"]
+
+        # Create a single user file reference
+        user_file = await create_user_file_reference(
+            user_id=user_id,
+            stored_file_id=stored_file_id,
+            display_name="test.txt",
+        )
+        assert user_file is not None
+
+        # Delete the same reference concurrently
+        results = await asyncio.gather(
+            delete_user_file_reference(user_file.id),
+            delete_user_file_reference(user_file.id),
+            return_exceptions=True,
+        )
+
+        # One should succeed, one should fail (already deleted)
+        success_count = sum(1 for r in results if r is True)
+        fail_count = sum(1 for r in results if r is False)
+        assert success_count == 1
+        assert fail_count == 1
+
+        # StoredFile should be deleted (ref_count <= 0)
+        async with get_session() as db:
+            result = await db.exec(
+                select(StoredFile).where(StoredFile.id == stored_file_id)
+            )
+            stored_file = result.first()
+            assert stored_file is None
+
 
 class TestRefCountMixedOperations:
     """Test concurrent increment and decrement operations."""
@@ -665,3 +702,127 @@ class TestRefCountDecrementDeletesFile:
 
         # Verify physical file still exists
         assert file_dir.exists(), "Physical file should still exist"
+
+
+class TestSameUserConcurrentReferenceCreation:
+    """Test same user creating references concurrently (IntegrityError path)."""
+
+    @pytest.mark.asyncio
+    async def test_same_user_concurrent_reference_creation(self, temp_db_storage, test_user_storage, test_stored_file):
+        """Same user creating reference concurrently should not corrupt ref_count.
+
+        This tests the IntegrityError path in create_user_file_reference.
+        When two concurrent requests from the same user try to create a reference,
+        one succeeds and one gets IntegrityError. The rollback should correctly
+        undo the ref_count increment without double-decrementing.
+        """
+        from app.services.storage import create_user_file_reference
+
+        stored_file_id = test_stored_file.id
+        user_id = test_user_storage["id"]
+
+        # Run concurrent create_user_file_reference calls for the SAME user
+        results = await asyncio.gather(
+            create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id),
+            create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id),
+            create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id),
+            return_exceptions=True,
+        )
+
+        # Only one should succeed, others should return None (not raise exception)
+        successful = [r for r in results if r is not None and not isinstance(r, Exception)]
+        none_results = [r for r in results if r is None]
+        exceptions = [r for r in results if isinstance(r, Exception)]
+
+        assert len(successful) == 1, f"Expected exactly 1 successful reference, got {len(successful)}"
+        assert len(none_results) == 2, f"Expected 2 None results, got {len(none_results)}"
+        assert len(exceptions) == 0, f"Unexpected exceptions: {exceptions}"
+
+        # CRITICAL: Verify ref_count is exactly 1 (not 0, not negative, not > 1)
+        async with get_session() as db:
+            result = await db.exec(
+                select(StoredFile).where(StoredFile.id == stored_file_id)
+            )
+            stored_file = result.first()
+            assert stored_file is not None, "StoredFile should still exist"
+            assert stored_file.ref_count == 1, (
+                f"Expected ref_count=1, got {stored_file.ref_count}. "
+                "This indicates a bug in IntegrityError handling."
+            )
+
+        # Verify only one UserFile exists
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserFile).where(
+                    UserFile.owner_id == user_id,
+                    UserFile.stored_file_id == stored_file_id,
+                )
+            )
+            user_files = result.all()
+            assert len(user_files) == 1, f"Expected 1 UserFile, got {len(user_files)}"
+
+    @pytest.mark.asyncio
+    async def test_same_user_concurrent_then_delete(self, temp_db_storage, test_user_storage):
+        """After concurrent creation race, deletion should work correctly."""
+        from app.services.storage import create_user_file_reference, delete_user_file_reference
+
+        # Create physical file in store
+        store_dir = Path(temp_db_storage["store_dir"])
+        content_hash = "same_user_race_hash_999"
+        file_dir = store_dir / content_hash[:2] / content_hash
+        file_dir.mkdir(parents=True, exist_ok=True)
+        test_file = file_dir / "test.txt"
+        test_file.write_text("race test content")
+
+        # Create StoredFile record
+        async with get_session() as db:
+            stored_file = StoredFile(
+                content_hash=content_hash,
+                real_path=str(file_dir),
+                size=1024,
+                is_directory=True,
+                original_name="test.txt",
+                ref_count=0,
+                created_at=utc_now_str(),
+            )
+            db.add(stored_file)
+            await db.commit()
+            await db.refresh(stored_file)
+            stored_file_id = stored_file.id
+
+        user_id = test_user_storage["id"]
+
+        # Concurrent creation (same user)
+        results = await asyncio.gather(
+            create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id),
+            create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id),
+            return_exceptions=True,
+        )
+
+        successful = [r for r in results if r is not None and not isinstance(r, Exception)]
+        assert len(successful) == 1
+
+        user_file = successful[0]
+
+        # Verify ref_count is 1
+        async with get_session() as db:
+            result = await db.exec(
+                select(StoredFile).where(StoredFile.id == stored_file_id)
+            )
+            sf = result.first()
+            assert sf.ref_count == 1
+
+        # Delete the reference
+        delete_result = await delete_user_file_reference(user_file.id)
+        assert delete_result is True
+
+        # Verify StoredFile is deleted (ref_count reached 0)
+        async with get_session() as db:
+            result = await db.exec(
+                select(StoredFile).where(StoredFile.id == stored_file_id)
+            )
+            sf = result.first()
+            assert sf is None, "StoredFile should be deleted when ref_count reaches 0"
+
+        # Verify physical file is deleted
+        assert not file_dir.exists(), "Physical file should be deleted"

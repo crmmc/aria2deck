@@ -101,13 +101,7 @@ async def handle_aria2_event(
     )
     from app.routers.config import get_max_task_size
     from app.routers.tasks import broadcast_task_update_to_subscribers
-    from app.services.storage import (
-        cleanup_task_download_dir,
-        create_user_file_reference,
-        get_task_download_dir,
-        get_user_space_info,
-        move_to_store,
-    )
+    from app.services.storage import get_user_space_info
 
     client = get_aria2_client()
 
@@ -148,12 +142,6 @@ async def handle_aria2_event(
     if event == "start" and aria2_status:
         total_length = int(aria2_status.get("totalLength", 0))
         if total_length > 0:
-            task_name = (
-                aria2_status.get("bittorrent", {}).get("info", {}).get("name")
-                or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
-                or "未知任务"
-            )
-
             # 3.1 检查系统最大任务限制
             max_task_size = get_max_task_size()
             if total_length > max_task_size:
@@ -180,14 +168,13 @@ async def handle_aria2_event(
                 subscriptions = result.all()
 
             valid_subscribers = []
-            cumulative_frozen = 0  # Track frozen space within this batch
 
             for sub, user in subscriptions:
                 user_lock = await get_user_space_lock(state, user.id)
                 async with user_lock:
                     space_info = await get_user_space_info(user.id, user.quota)
-                    # Subtract cumulative frozen space from available (for same-user multiple subscriptions)
-                    effective_available = space_info["available"] - cumulative_frozen
+                    # Each user's space is independent, use available directly
+                    effective_available = space_info["available"]
 
                     if total_length <= effective_available:
                         # Use optimistic locking: only update if frozen_space is still 0
@@ -203,7 +190,6 @@ async def handle_aria2_event(
 
                             if result.rowcount > 0:
                                 valid_subscribers.append((sub, user))
-                                cumulative_frozen += total_length
                             else:
                                 # Already frozen by another process, re-check current state
                                 async with get_session() as db:
@@ -215,7 +201,6 @@ async def handle_aria2_event(
                                     current = refreshed.first()
                                     if current and current.status == "pending" and current.frozen_space > 0:
                                         valid_subscribers.append((sub, user))
-                                        cumulative_frozen += current.frozen_space
                     else:
                         # Mark subscription as failed atomically
                         logger.warning(
@@ -252,7 +237,8 @@ async def handle_aria2_event(
         new_status = "paused"
     elif event == "stop":
         new_status = "error"
-        error_display = "已停止"
+        error_display = "外部取消（管理员/外部客户端）"
+        logger.info(f"[WS] 任务 {task_id} 外部取消")
     elif event == "complete":
         # 检查是否是磁力链接元数据下载完成
         followed_by = aria2_status.get("followedBy", [])
@@ -273,9 +259,10 @@ async def handle_aria2_event(
         new_status = "complete"
     elif event == "error":
         new_status = "error"
-        raw_error = aria2_status.get("errorMessage", "未知错误")
+        raw_error = aria2_status.get("errorMessage", "后端错误")
         error_msg = raw_error
         error_display = parse_error_message(raw_error)
+        logger.error(f"[WS] 任务 {task_id} 错误: {raw_error}")
 
     # Update task in database
     async with get_session() as db:
@@ -290,7 +277,11 @@ async def handle_aria2_event(
             if error_msg:
                 db_task.error = error_msg
             if error_display:
-                db_task.error_display = error_display
+                # 避免 stop 事件覆盖用户主动取消的状态
+                if event == "stop" and db_task.error_display == "已取消":
+                    pass
+                else:
+                    db_task.error_display = error_display
 
             if aria2_status:
                 db_task.name = (
@@ -308,6 +299,10 @@ async def handle_aria2_event(
     # 5. 处理完成事件
     if new_status == "complete":
         await _handle_task_complete(state, task_id, aria2_status)
+
+    # 5.1 处理 stop/error 事件 - 释放冻结空间并标记订阅失败
+    if event in ("stop", "error"):
+        await _handle_task_stop_or_error(task_id, error_display)
 
     # 6. 广播到所有订阅者
     await broadcast_task_update_to_subscribers(state, task_id)
@@ -333,7 +328,6 @@ async def _handle_task_complete(
     from app.models import DownloadTask, UserTaskSubscription, UserFile, StoredFile, utc_now_str
     from app.services.storage import (
         cleanup_task_download_dir,
-        create_user_file_reference,
         get_task_download_dir,
         move_to_store,
     )
@@ -423,43 +417,66 @@ async def _handle_task_complete(
 
         for sub in subscriptions:
             # Create file reference and update status in single transaction
-            async with get_session() as db:
-                # Update subscription status first; skip if no longer pending
-                result = await db.execute(
-                    update(UserTaskSubscription)
-                    .where(
-                        UserTaskSubscription.id == sub.id,
-                        UserTaskSubscription.status == "pending",
+            # Use retry logic to handle UNIQUE constraint race condition
+            try:
+                async with get_session() as db:
+                    # Update subscription status first; skip if no longer pending
+                    result = await db.execute(
+                        update(UserTaskSubscription)
+                        .where(
+                            UserTaskSubscription.id == sub.id,
+                            UserTaskSubscription.status == "pending",
+                        )
+                        .values(status="success", frozen_space=0)
                     )
-                    .values(status="success", frozen_space=0)
+                    if result.rowcount == 0:
+                        continue
+
+                    # Check if reference already exists
+                    result = await db.exec(
+                        select(UserFile).where(
+                            UserFile.owner_id == sub.owner_id,
+                            UserFile.stored_file_id == stored_file.id,
+                        )
+                    )
+                    existing_ref = result.first()
+
+                    if not existing_ref:
+                        # Create file reference
+                        user_file = UserFile(
+                            owner_id=sub.owner_id,
+                            stored_file_id=stored_file.id,
+                            display_name=original_name,
+                            created_at=utc_now_str(),
+                        )
+                        db.add(user_file)
+
+                        # Increment reference count
+                        await db.execute(
+                            update(StoredFile)
+                            .where(StoredFile.id == stored_file.id)
+                            .values(ref_count=StoredFile.ref_count + 1)
+                        )
+            except Exception as e:
+                # Race condition: another process created the UserFile between our check and insert
+                # The transaction rolled back, so subscription status is still "pending"
+                # Retry: just update subscription status (UserFile already exists)
+                logger.debug(
+                    f"[WS] UserFile creation race for sub {sub.id}, retrying status update: {e}"
                 )
-                if result.rowcount == 0:
-                    continue
-
-                # Check if reference already exists
-                result = await db.exec(
-                    select(UserFile).where(
-                        UserFile.owner_id == sub.owner_id,
-                        UserFile.stored_file_id == stored_file.id,
-                    )
-                )
-                existing_ref = result.first()
-
-                if not existing_ref:
-                    # Create file reference
-                    user_file = UserFile(
-                        owner_id=sub.owner_id,
-                        stored_file_id=stored_file.id,
-                        display_name=original_name,
-                        created_at=utc_now_str(),
-                    )
-                    db.add(user_file)
-
-                    # Increment reference count
-                    await db.execute(
-                        update(StoredFile)
-                        .where(StoredFile.id == stored_file.id)
-                        .values(ref_count=StoredFile.ref_count + 1)
+                try:
+                    async with get_session() as db:
+                        await db.execute(
+                            update(UserTaskSubscription)
+                            .where(
+                                UserTaskSubscription.id == sub.id,
+                                UserTaskSubscription.status == "pending",
+                            )
+                            .values(status="success", frozen_space=0)
+                        )
+                except Exception as retry_err:
+                    logger.warning(
+                        f"[WS] Failed to update subscription {sub.id} status after race: {retry_err}"
                     )
 
             # Write to history
@@ -481,6 +498,49 @@ async def _handle_task_complete(
 
     # Clean up task download directory
     await cleanup_task_download_dir(task_id)
+
+
+async def _handle_task_stop_or_error(
+    task_id: int,
+    error_display: str | None,
+) -> None:
+    """处理任务停止或错误事件
+
+    释放所有订阅者的冻结空间并标记订阅为失败。
+    """
+    from sqlalchemy import update
+    from sqlmodel import select
+
+    from app.database import get_session
+    from app.models import UserTaskSubscription
+
+    async with get_session() as db:
+        # 获取所有 pending 状态的订阅
+        result = await db.exec(
+            select(UserTaskSubscription).where(
+                UserTaskSubscription.task_id == task_id,
+                UserTaskSubscription.status == "pending",
+            )
+        )
+        subscriptions = result.all()
+
+        # 更新所有订阅：释放冻结空间，标记为失败
+        message = error_display or "后端错误"
+        for sub in subscriptions:
+            await db.execute(
+                update(UserTaskSubscription)
+                .where(
+                    UserTaskSubscription.id == sub.id,
+                    UserTaskSubscription.status == "pending",
+                )
+                .values(
+                    status="failed",
+                    frozen_space=0,
+                    error_display=message,
+                )
+            )
+
+    logger.info(f"[WS] 任务 {task_id} 停止/错误，释放了 {len(subscriptions)} 个订阅的冻结空间")
 
 
 async def _cancel_task(

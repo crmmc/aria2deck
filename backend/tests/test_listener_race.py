@@ -8,6 +8,7 @@ Tests for:
 import asyncio
 import os
 import tempfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -280,6 +281,71 @@ class TestTaskCompletionIdempotency:
             )
             task = result.first()
             assert task.stored_file_id is None
+
+
+class TestStartEventWithFrozenSubscription:
+    """Test start event handling when subscription already frozen."""
+
+    @pytest.mark.asyncio
+    async def test_start_event_with_frozen_subscription_not_cancelled(
+        self,
+        temp_db_listener,
+        test_user_listener,
+        mock_app_state,
+    ):
+        """Already frozen subscription should be treated as valid, not cancelled."""
+        from app.aria2.listener import handle_aria2_event
+
+        # Create queued task with frozen subscription
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="start_frozen_hash_001",
+                uri="https://example.com/start_frozen.zip",
+                gid="gid_start_frozen_001",
+                status="queued",
+                name="start_frozen.zip",
+                total_length=0,
+                completed_length=0,
+                created_at=utc_now_str(),
+                updated_at=utc_now_str(),
+            )
+            db.add(task)
+            await db.commit()
+            await db.refresh(task)
+
+            subscription = UserTaskSubscription(
+                owner_id=test_user_listener["id"],
+                task_id=task.id,
+                frozen_space=1024,  # already frozen
+                status="pending",
+                created_at=utc_now_str(),
+            )
+            db.add(subscription)
+            await db.commit()
+
+        mock_client = AsyncMock()
+        mock_client.tell_status.return_value = {
+            "gid": "gid_start_frozen_001",
+            "status": "active",
+            "totalLength": "1024",
+            "completedLength": "0",
+            "downloadSpeed": "0",
+            "uploadSpeed": "0",
+            "files": [{"path": "dummy"}],
+        }
+
+        with patch("app.core.state.get_aria2_client", return_value=mock_client), \
+             patch("app.services.storage.get_user_space_info", new_callable=AsyncMock, return_value={"available": 10 * 1024}), \
+             patch("app.aria2.listener._cancel_task", new_callable=AsyncMock) as cancel_mock, \
+             patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock):
+            await handle_aria2_event(mock_app_state, "gid_start_frozen_001", "start")
+
+        cancel_mock.assert_not_called()
+
+        async with get_session() as db:
+            result = await db.exec(select(DownloadTask).where(DownloadTask.id == task.id))
+            db_task = result.first()
+            assert db_task.status != "error"
 
 
 class TestDuplicateEventHandling:
@@ -557,3 +623,104 @@ class TestTaskCompletionWithStoredFile:
             for sub in subscriptions:
                 assert sub.status == "success"
                 assert sub.frozen_space == 0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_subscription_not_create_user_file(
+        self, temp_db_listener, test_user_listener, mock_app_state
+    ):
+        """Cancelled subscription should not receive a UserFile."""
+        from app.aria2.listener import _handle_task_complete
+        import app.database as database_module
+
+        # Create task and subscription
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="cancelled_sub_hash",
+                uri="https://example.com/cancelled.zip",
+                gid="gid_cancelled_sub",
+                status="complete",
+                name="cancelled.zip",
+                total_length=1024,
+                completed_length=1024,
+                created_at=utc_now_str(),
+                updated_at=utc_now_str(),
+            )
+            db.add(task)
+            await db.commit()
+            await db.refresh(task)
+            task_id = task.id
+
+            subscription = UserTaskSubscription(
+                owner_id=test_user_listener["id"],
+                task_id=task_id,
+                frozen_space=1024,
+                status="pending",
+                created_at=utc_now_str(),
+            )
+            db.add(subscription)
+            await db.commit()
+            await db.refresh(subscription)
+
+        # Create source file
+        task_dir = Path(temp_db_listener["downloading_dir"]) / str(task_id)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        source_file = task_dir / "cancelled.zip"
+        source_file.write_text("cancelled subscriber content")
+
+        aria2_status = {
+            "files": [{"path": str(source_file)}],
+            "totalLength": "1024",
+            "completedLength": "1024",
+        }
+
+        subscriptions_fetched = asyncio.Event()
+        allow_continue = asyncio.Event()
+
+        original_get_session = database_module.get_session
+
+        class SessionWrapper:
+            def __init__(self, session):
+                self._session = session
+
+            def __getattr__(self, name):
+                return getattr(self._session, name)
+
+            async def exec(self, statement, *args, **kwargs):
+                text = str(statement)
+                if "user_task_subscriptions" in text and "status" in text:
+                    result = await self._session.exec(statement, *args, **kwargs)
+                    subscriptions_fetched.set()
+                    await allow_continue.wait()
+                    return result
+                return await self._session.exec(statement, *args, **kwargs)
+
+        @asynccontextmanager
+        async def hooked_get_session():
+            async with original_get_session() as session:
+                yield SessionWrapper(session)
+
+        with patch("app.database.get_session", new=hooked_get_session), \
+             patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock):
+            task = asyncio.create_task(
+                _handle_task_complete(mock_app_state, task_id, aria2_status)
+            )
+
+            await subscriptions_fetched.wait()
+
+            # Delete subscription after it has been read, before processing
+            async with original_get_session() as db:
+                result = await db.exec(
+                    select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+                )
+                sub = result.first()
+                if sub:
+                    await db.delete(sub)
+
+            allow_continue.set()
+            await task
+
+        # Verify no UserFile was created for the cancelled subscription
+        async with original_get_session() as db:
+            result = await db.exec(select(UserFile))
+            user_files = result.all()
+            assert len(user_files) == 0

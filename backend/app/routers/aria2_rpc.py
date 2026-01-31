@@ -183,10 +183,10 @@ async def process_single_request(
         return build_jsonrpc_response(result, request_id)
     except RpcError as exc:
         return build_jsonrpc_error(exc.code, exc.message, request_id, exc.data)
-    except Exception as exc:
+    except Exception:
         return build_jsonrpc_error(
             RpcErrorCode.INTERNAL_ERROR,
-            str(exc),
+            "Internal server error",
             request_id
         )
 
@@ -308,7 +308,8 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
 
     # 3. 创建处理器
     aria2_client = request.app.state.aria2_client
-    handler = Aria2RpcHandler(user["id"], aria2_client)
+    app_state = request.app.state.app_state
+    handler = Aria2RpcHandler(user["id"], aria2_client, app_state)
 
     # 4. 处理请求（支持单个和批量）
     if isinstance(body, list):

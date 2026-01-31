@@ -6,6 +6,8 @@ import { formatBytes } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
 import PackTaskCard from "@/components/PackTaskCard";
 import type { FileInfo, BrowseFileInfo, SpaceInfo } from "@/types";
+import { List } from "react-window";
+import { AutoSizer } from "react-virtualized-auto-sizer";
 
 function formatDate(dateStr: string): string {
   const date = new Date(dateStr);
@@ -46,6 +48,17 @@ export default function FilesPage() {
 
   const [packTasksKey, setPackTasksKey] = useState(0);
   const [downloadingFile, setDownloadingFile] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (showSearchModal || browsingFile) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [showSearchModal, browsingFile]);
 
   const loadFiles = useCallback(async () => {
     setLoading(true);
@@ -519,136 +532,156 @@ export default function FilesPage() {
           <p className="muted">暂无文件</p>
         </div>
       ) : (
-        <div className="card p-0 overflow-hidden">
-          <table className="table">
-            <thead className="table-header">
-              <tr>
-                <th className="table-cell text-left" style={{ width: "40px" }}>
+        <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+          <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(200px, 1fr) 120px 180px 200px', paddingRight: '16px' }}>
+             <div className="table-cell text-left">
                   <input
                     type="checkbox"
                     checked={selectedFiles.size === sortedFiles.length && sortedFiles.length > 0}
                     onChange={toggleSelectAll}
                     className="checkbox-sm cursor-pointer"
                   />
-                </th>
-                <th
+                </div>
+                <div
                   className="table-cell text-left sortable-header"
                   onClick={() => handleSort("name")}
                 >
                   名称 <span className="sort-icon">{getSortIcon("name")}</span>
-                </th>
-                <th
+                </div>
+                <div
                   className="table-cell text-right sortable-header"
                   onClick={() => handleSort("size")}
                 >
                   大小 <span className="sort-icon">{getSortIcon("size")}</span>
-                </th>
-                <th
+                </div>
+                <div
                   className="table-cell text-right sortable-header"
                   onClick={() => handleSort("created_at")}
                 >
                   添加时间 <span className="sort-icon">{getSortIcon("created_at")}</span>
-                </th>
-                <th className="table-cell text-right">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sortedFiles.map((file) => (
-                <tr key={file.id} className="table-row transition-bg">
-                  <td className="table-cell">
-                    <input
-                      type="checkbox"
-                      checked={selectedFiles.has(file.id)}
-                      onChange={() => toggleFileSelection(file.id)}
-                      className="checkbox-sm cursor-pointer"
-                    />
-                  </td>
-                  <td className="table-cell">
-                    {renaming === file.id ? (
-                      <div className="flex gap-2">
-                        <input
-                          className="input py-1 px-3 text-base"
-                          value={newName}
-                          onChange={(e) => setNewName(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") handleRename(file);
-                            if (e.key === "Escape") cancelRename();
+                </div>
+                <div className="table-cell text-right">操作</div>
+          </div>
+          
+          <div style={{ flex: 1 }}>
+            <AutoSizer renderProp={({ height, width }) => (
+                <List
+                  style={{ height: height ?? 0, width: width ?? 0 }}
+                  rowCount={sortedFiles.length}
+                  rowHeight={60}
+                  rowProps={{}}
+                  rowComponent={({ index, style }) => {
+                    const file = sortedFiles[index];
+                    return (
+                      <div style={style} key={file.id}>
+                        <div 
+                          className="table-row transition-bg" 
+                          style={{ 
+                            display: 'grid', 
+                            gridTemplateColumns: '40px minmax(200px, 1fr) 120px 180px 200px',
+                            height: '100%',
+                            alignItems: 'center'
                           }}
-                          autoFocus
-                        />
-                        <button
-                          className="button secondary btn-sm"
-                          onClick={() => handleRename(file)}
                         >
-                          ✓
-                        </button>
-                        <button
-                          className="button secondary btn-sm"
-                          onClick={cancelRename}
-                        >
-                          ✕
-                        </button>
+                          <div className="table-cell">
+                            <input
+                              type="checkbox"
+                              checked={selectedFiles.has(file.id)}
+                              onChange={() => toggleFileSelection(file.id)}
+                              className="checkbox-sm cursor-pointer"
+                            />
+                          </div>
+                          <div className="table-cell" data-label="名称" style={{ overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+                            {renaming === file.id ? (
+                              <div className="flex gap-2">
+                                <input
+                                  className="input py-1 px-3 text-base"
+                                  value={newName}
+                                  onChange={(e) => setNewName(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") handleRename(file);
+                                    if (e.key === "Escape") cancelRename();
+                                  }}
+                                  autoFocus
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                                <button
+                                  className="button secondary btn-sm"
+                                  onClick={(e) => { e.stopPropagation(); handleRename(file); }}
+                                >
+                                  ✓
+                                </button>
+                                <button
+                                  className="button secondary btn-sm"
+                                  onClick={(e) => { e.stopPropagation(); cancelRename(); }}
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2">
+                                <span className="file-icon">
+                                  {file.is_directory ? "📁" : "📄"}
+                                </span>
+                                {file.is_directory ? (
+                                  <button
+                                    className="file-name-btn"
+                                    onClick={() => openBrowse(file)}
+                                  >
+                                    {file.name}
+                                  </button>
+                                ) : (
+                                  <span className="text-base truncate" title={file.name}>{file.name}</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          <div className="table-cell text-right muted text-base" data-label="大小">
+                            {formatBytes(file.size)}
+                          </div>
+                          <div className="table-cell text-right muted text-sm" data-label="添加时间">
+                            {formatDate(file.created_at)}
+                          </div>
+                          <div className="table-cell text-right">
+                            <div className="flex gap-2 flex-end">
+                              {file.is_directory ? (
+                                <button
+                                  className="button secondary btn-sm"
+                                  onClick={() => openBrowse(file)}
+                                >
+                                  浏览
+                                </button>
+                              ) : (
+                                <button
+                                  className="button secondary btn-sm"
+                                  onClick={() => handleDownload(file)}
+                                  disabled={downloadingFile === file.id}
+                                >
+                                  {downloadingFile === file.id ? "下载中..." : "下载"}
+                                </button>
+                              )}
+                              <button
+                                className="button secondary btn-sm"
+                                onClick={() => startRename(file)}
+                              >
+                                重命名
+                              </button>
+                              <button
+                                className="button secondary danger btn-sm"
+                                onClick={() => handleDelete(file)}
+                              >
+                                删除
+                              </button>
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <span className="file-icon">
-                          {file.is_directory ? "📁" : "📄"}
-                        </span>
-                        {file.is_directory ? (
-                          <button
-                            className="file-name-btn"
-                            onClick={() => openBrowse(file)}
-                          >
-                            {file.name}
-                          </button>
-                        ) : (
-                          <span className="text-base">{file.name}</span>
-                        )}
-                      </div>
-                    )}
-                  </td>
-                  <td className="table-cell text-right muted text-base">
-                    {formatBytes(file.size)}
-                  </td>
-                  <td className="table-cell text-right muted text-sm">
-                    {formatDate(file.created_at)}
-                  </td>
-                  <td className="table-cell text-right">
-                    <div className="flex gap-2 flex-end">
-                      {file.is_directory ? (
-                        <button
-                          className="button secondary btn-sm"
-                          onClick={() => openBrowse(file)}
-                        >
-                          浏览
-                        </button>
-                      ) : (
-                        <button
-                          className="button secondary btn-sm"
-                          onClick={() => handleDownload(file)}
-                          disabled={downloadingFile === file.id}
-                        >
-                          {downloadingFile === file.id ? "下载中..." : "下载"}
-                        </button>
-                      )}
-                      <button
-                        className="button secondary btn-sm"
-                        onClick={() => startRename(file)}
-                      >
-                        重命名
-                      </button>
-                      <button
-                        className="button secondary danger btn-sm"
-                        onClick={() => handleDelete(file)}
-                      >
-                        删除
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    );
+                  }}
+                />
+              )}
+            />
+          </div>
         </div>
       )}
 
