@@ -3614,7 +3614,7 @@ class TestCreateTaskErrorRetry:
                 content_length=10240,
             )
 
-            with patch("app.core.state.get_aria2_client", return_value=mock_client):
+            with patch("app.routers.tasks.get_aria2_client", return_value=mock_client):
                 # Call create_task
                 result = await create_task(payload, mock_request, mock_user)
 
@@ -3718,7 +3718,7 @@ class TestCreateTaskErrorRetry:
                 content_length=20480,
             )
 
-            with patch("app.core.state.get_aria2_client", return_value=mock_client):
+            with patch("app.routers.tasks.get_aria2_client", return_value=mock_client):
                 # Call create_task
                 result = await create_task(payload, mock_request, mock_user)
 
