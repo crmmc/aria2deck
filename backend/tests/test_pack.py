@@ -839,6 +839,93 @@ class TestSpaceCalculation:
 class TestPackTaskManager:
     """Tests for PackTaskManager class."""
 
+    def test_utc_now_returns_iso_format(self, temp_db: str):
+        """utc_now returns ISO format timestamp."""
+        from app.services.pack import utc_now
+
+        result = utc_now()
+        # Should be parseable as ISO format
+        parsed = datetime.fromisoformat(result)
+        assert parsed.tzinfo is not None
+
+    def test_is_any_task_running_false(self, temp_db: str):
+        """is_any_task_running returns False when no tasks running."""
+        from app.services.pack import PackTaskManager
+
+        # Clear any existing tasks
+        PackTaskManager._running_tasks.clear()
+        assert PackTaskManager.is_any_task_running() is False
+
+    def test_is_any_task_running_true(self, temp_db: str):
+        """is_any_task_running returns True when tasks are running."""
+        from app.services.pack import PackTaskManager
+
+        mock_process = MagicMock()
+        PackTaskManager._running_tasks[123] = mock_process
+        try:
+            assert PackTaskManager.is_any_task_running() is True
+        finally:
+            PackTaskManager._running_tasks.clear()
+
+    def test_get_extra_args_empty(self, temp_db: str):
+        """get_extra_args returns empty list when not configured."""
+        from app.services.pack import PackTaskManager
+
+        with patch("app.routers.config.get_config_value", return_value=None):
+            args = PackTaskManager.get_extra_args()
+        assert args == []
+
+    def test_get_extra_args_whitespace_only(self, temp_db: str):
+        """get_extra_args returns empty list for whitespace-only config."""
+        from app.services.pack import PackTaskManager
+
+        with patch("app.routers.config.get_config_value", return_value="   "):
+            args = PackTaskManager.get_extra_args()
+        assert args == []
+
+    def test_get_extra_args_valid_args(self, temp_db: str):
+        """get_extra_args returns whitelisted arguments."""
+        from app.services.pack import PackTaskManager
+
+        with patch("app.routers.config.get_config_value", return_value="-mmt4 -mx=9"):
+            args = PackTaskManager.get_extra_args()
+        assert "-mmt4" in args
+        assert "-mx=9" in args
+
+    def test_get_extra_args_filters_invalid(self, temp_db: str):
+        """get_extra_args filters out non-whitelisted arguments."""
+        from app.services.pack import PackTaskManager
+
+        with patch("app.routers.config.get_config_value", return_value="-mmt4 --dangerous -mx=9"):
+            args = PackTaskManager.get_extra_args()
+        assert "-mmt4" in args
+        assert "-mx=9" in args
+        assert "--dangerous" not in args
+
+    def test_get_extra_args_password_allowed(self, temp_db: str):
+        """get_extra_args allows password argument."""
+        from app.services.pack import PackTaskManager
+
+        with patch("app.routers.config.get_config_value", return_value="-psecret123"):
+            args = PackTaskManager.get_extra_args()
+        assert "-psecret123" in args
+
+    def test_get_extra_args_invalid_shlex(self, temp_db: str):
+        """get_extra_args returns empty list for invalid shell syntax."""
+        from app.services.pack import PackTaskManager
+
+        with patch("app.routers.config.get_config_value", return_value="'unclosed quote"):
+            args = PackTaskManager.get_extra_args()
+        assert args == []
+
+    def test_get_compression_level_invalid_string(self, temp_db: str):
+        """get_compression_level returns 5 for non-numeric string."""
+        from app.services.pack import PackTaskManager
+
+        with patch("app.routers.config.get_config_value", return_value="invalid"):
+            level = PackTaskManager.get_compression_level()
+        assert level == 5
+
     def test_get_pack_format_default(
         self,
         temp_db: str,
@@ -971,6 +1058,360 @@ class TestPackTaskManager:
         finally:
             # Cleanup
             PackTaskManager._running_tasks.pop(task_id, None)
+
+
+# ========== _do_pack Method Tests ==========
+
+class TestDoPackMethod:
+
+    @pytest.mark.asyncio
+    async def test_do_pack_invalid_json_paths(self, test_user: dict, temp_db: str):
+        from app.services.pack import PackTaskManager
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "[invalid json", 1000, 1000, "pending", now, now]
+        )
+
+        await PackTaskManager._do_pack(task_id, test_user["id"], "[invalid json")
+
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+        assert task["status"] == "failed"
+        assert "Invalid paths format" in task["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_do_pack_multi_file_path_not_exists(
+        self, test_user: dict, user_download_dir: Path, temp_db: str
+    ):
+        from app.services.pack import PackTaskManager
+        import json
+
+        paths = json.dumps(["file1.txt", "nonexistent.txt"])
+        (user_download_dir / "file1.txt").write_text("content")
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], paths, 1000, 1000, "pending", now, now]
+        )
+
+        await PackTaskManager._do_pack(task_id, test_user["id"], paths)
+
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+        assert task["status"] == "failed"
+        assert "does not exist" in task["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_do_pack_single_folder_not_exists(
+        self, test_user: dict, user_download_dir: Path, temp_db: str
+    ):
+        from app.services.pack import PackTaskManager
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "nonexistent_folder", 1000, 1000, "pending", now, now]
+        )
+
+        await PackTaskManager._do_pack(task_id, test_user["id"], "nonexistent_folder")
+
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+        assert task["status"] == "failed"
+        assert "does not exist" in task["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_do_pack_task_already_cancelled(
+        self, test_user: dict, user_download_dir: Path, temp_db: str
+    ):
+        from app.services.pack import PackTaskManager
+
+        folder = user_download_dir / "test_folder"
+        folder.mkdir(exist_ok=True)
+        (folder / "file.txt").write_text("content")
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "test_folder", 1000, 1000, "cancelled", now, now]
+        )
+
+        await PackTaskManager._do_pack(task_id, test_user["id"], "test_folder")
+
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+        assert task["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_do_pack_7za_not_found(
+        self, test_user: dict, user_download_dir: Path, temp_db: str
+    ):
+        from app.services.pack import PackTaskManager
+
+        folder = user_download_dir / "test_folder"
+        folder.mkdir(exist_ok=True)
+        (folder / "file.txt").write_text("content")
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "test_folder", 1000, 1000, "pending", now, now]
+        )
+
+        with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError()):
+            await PackTaskManager._do_pack(task_id, test_user["id"], "test_folder")
+
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+        assert task["status"] == "failed"
+        assert "7za command not found" in task["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_update_task_error(self, test_user: dict, temp_db: str):
+        from app.services.pack import PackTaskManager
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder", 1000, 1000, "pending", now, now]
+        )
+
+        await PackTaskManager._update_task_error(task_id, "Test error message")
+
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+        assert task["status"] == "failed"
+        assert task["error_message"] == "Test error message"
+        assert task["reserved_space"] == 0
+
+    @pytest.mark.asyncio
+    async def test_update_task_error_already_done(self, test_user: dict, temp_db: str):
+        from app.services.pack import PackTaskManager
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder", 1000, 0, "done", now, now]
+        )
+
+        await PackTaskManager._update_task_error(task_id, "Should not update")
+
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+        assert task["status"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_do_pack_subprocess_success(
+        self, test_user: dict, user_download_dir: Path, temp_db: str
+    ):
+        from app.services.pack import PackTaskManager
+        import asyncio
+
+        folder = user_download_dir / "pack_test_folder"
+        folder.mkdir(exist_ok=True)
+        (folder / "file.txt").write_text("content")
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "pack_test_folder", 1000, 1000, "pending", now, now]
+        )
+
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.wait = AsyncMock()
+
+        async def mock_stdout_iter():
+            yield b"  10%\n"
+            yield b"  50%\n"
+            yield b" 100%\n"
+
+        mock_process.stdout = mock_stdout_iter()
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+            output_path = user_download_dir / "pack_test_folder.zip"
+            output_path.write_bytes(b"fake zip content")
+
+            await PackTaskManager._do_pack(task_id, test_user["id"], "pack_test_folder")
+
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+        assert task["status"] == "done"
+        assert task["progress"] == 100
+
+    @pytest.mark.asyncio
+    async def test_do_pack_subprocess_failure(
+        self, test_user: dict, user_download_dir: Path, temp_db: str
+    ):
+        from app.services.pack import PackTaskManager
+
+        folder = user_download_dir / "fail_folder"
+        folder.mkdir(exist_ok=True)
+        (folder / "file.txt").write_text("content")
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "fail_folder", 1000, 1000, "pending", now, now]
+        )
+
+        mock_process = MagicMock()
+        mock_process.returncode = 1
+        mock_process.wait = AsyncMock()
+
+        async def mock_stdout_iter():
+            yield b"Error: something went wrong\n"
+
+        mock_process.stdout = mock_stdout_iter()
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+            await PackTaskManager._do_pack(task_id, test_user["id"], "fail_folder")
+
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+        assert task["status"] == "failed"
+        assert "exited with code 1" in task["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_do_pack_cancelled_during_startup(
+        self, test_user: dict, user_download_dir: Path, temp_db: str
+    ):
+        from app.services.pack import PackTaskManager
+        import asyncio as aio
+
+        folder = user_download_dir / "cancel_folder"
+        folder.mkdir(exist_ok=True)
+        (folder / "file.txt").write_text("content")
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "cancel_folder", 1000, 1000, "pending", now, now]
+        )
+
+        mock_process = MagicMock()
+        mock_process.terminate = MagicMock()
+        mock_process.kill = MagicMock()
+        mock_process.wait = AsyncMock()
+
+        async def mock_create_subprocess(*args, **kwargs):
+            execute(
+                "UPDATE pack_tasks SET status = 'cancelled' WHERE id = ?",
+                [task_id]
+            )
+            return mock_process
+
+        with patch("asyncio.create_subprocess_exec", side_effect=mock_create_subprocess):
+            await PackTaskManager._do_pack(task_id, test_user["id"], "cancel_folder")
+
+        mock_process.terminate.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_do_pack_general_exception(
+        self, test_user: dict, user_download_dir: Path, temp_db: str
+    ):
+        from app.services.pack import PackTaskManager
+
+        folder = user_download_dir / "exception_folder"
+        folder.mkdir(exist_ok=True)
+        (folder / "file.txt").write_text("content")
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "exception_folder", 1000, 1000, "pending", now, now]
+        )
+
+        with patch("asyncio.create_subprocess_exec", side_effect=RuntimeError("Unexpected error")):
+            await PackTaskManager._do_pack(task_id, test_user["id"], "exception_folder")
+
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+        assert task["status"] == "failed"
+        assert "Unexpected error" in task["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_do_pack_multi_file_success(
+        self, test_user: dict, user_download_dir: Path, temp_db: str
+    ):
+        from app.services.pack import PackTaskManager
+        import json
+
+        file1 = user_download_dir / "multi_file1.txt"
+        file2 = user_download_dir / "multi_file2.txt"
+        file1.write_text("content1")
+        file2.write_text("content2")
+
+        paths = json.dumps(["multi_file1.txt", "multi_file2.txt"])
+
+        now = utc_now()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], paths, 1000, 1000, "pending", now, now]
+        )
+
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.wait = AsyncMock()
+
+        async def mock_stdout_iter():
+            yield b" 100%\n"
+
+        mock_process.stdout = mock_stdout_iter()
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+            output_path = user_download_dir / "archive.zip"
+            output_path.write_bytes(b"fake zip")
+
+            await PackTaskManager._do_pack(task_id, test_user["id"], paths, output_name="archive")
+
+        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+        assert task["status"] == "done"
+
+
+# ========== Multi-file Pack Tests ==========
+
+class TestMultiFilePack:
+
+    def test_create_multi_file_pack_task(
+        self,
+        authenticated_client: TestClient,
+        user_download_dir: Path,
+        test_user: dict,
+    ):
+        file1 = user_download_dir / "file1.txt"
+        file2 = user_download_dir / "file2.txt"
+        file1.write_text("content1")
+        file2.write_text("content2")
+
+        with patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
+            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
+                response = authenticated_client.post(
+                    "/api/files/pack",
+                    json={"paths": ["file1.txt", "file2.txt"], "output_name": "my_archive"}
+                )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert "file1.txt" in data["folder_path"]
+        assert "file2.txt" in data["folder_path"]
 
 
 # ========== Integration Tests ==========
