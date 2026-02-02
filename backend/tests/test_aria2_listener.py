@@ -146,3 +146,14 @@ class TestConstants:
 
     def test_reconnect_base_delay(self):
         assert RECONNECT_BASE_DELAY == 1.0
+
+
+class TestListenerHelpers:
+
+    def test_calculate_backoff_negative_attempt(self):
+        delay = _calculate_backoff(-1, max_delay=60, jitter=0, factor=2.0)
+        assert delay >= 0
+
+    def test_calculate_backoff_large_attempt(self):
+        delay = _calculate_backoff(1000, max_delay=60, jitter=0.2, factor=2.0)
+        assert delay <= 60 * 1.2

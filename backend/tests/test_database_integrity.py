@@ -81,3 +81,115 @@ async def test_database_integrity_with_corrupted_db():
         settings.database_path = original_path
         reset_engine()
         Path(tmp_path).unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_init_default_config(temp_db: str):
+    from app.database import init_default_config, get_session
+
+    async with get_session() as session:
+        await init_default_config(session)
+
+    async with get_session() as session:
+        from sqlmodel import select
+        from app.models import Config
+
+        result = await session.exec(select(Config).where(Config.key == "max_task_size"))
+        config = result.first()
+        assert config is not None
+        assert config.value == "10737418240"
+
+
+@pytest.mark.asyncio
+async def test_init_default_config_idempotent(temp_db: str):
+    from app.database import init_default_config, get_session
+
+    async with get_session() as session:
+        await init_default_config(session)
+
+    async with get_session() as session:
+        await init_default_config(session)
+
+    async with get_session() as session:
+        from sqlmodel import select
+        from app.models import Config
+
+        result = await session.exec(select(Config).where(Config.key == "pack_format"))
+        config = result.first()
+        assert config is not None
+        assert config.value == "zip"
+
+
+@pytest.mark.asyncio
+async def test_database_integrity_check_with_issues():
+    from unittest.mock import patch, AsyncMock, MagicMock
+    from app.database import check_database_integrity
+
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = [("error1",), ("error2",)]
+
+    mock_conn = AsyncMock()
+    mock_conn.execute.return_value = mock_result
+
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__aenter__.return_value = mock_conn
+    mock_engine.connect.return_value.__aexit__.return_value = None
+
+    with patch("app.database._get_engine", return_value=mock_engine):
+        result = await check_database_integrity()
+        assert result is False
+
+
+@pytest.mark.asyncio
+async def test_wal_integrity_check_with_busy():
+    from unittest.mock import patch, AsyncMock, MagicMock
+    from app.database import check_wal_integrity
+
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (1, 10, 5)
+
+    mock_conn = AsyncMock()
+    mock_conn.execute.return_value = mock_result
+
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__aenter__.return_value = mock_conn
+    mock_engine.connect.return_value.__aexit__.return_value = None
+
+    with patch("app.database._get_engine", return_value=mock_engine):
+        result = await check_wal_integrity()
+        assert result is True
+
+
+@pytest.mark.asyncio
+async def test_wal_integrity_check_exception():
+    from unittest.mock import patch, MagicMock
+    from app.database import check_wal_integrity
+
+    mock_engine = MagicMock()
+    mock_engine.connect.side_effect = Exception("Connection failed")
+
+    with patch("app.database._get_engine", return_value=mock_engine):
+        result = await check_wal_integrity()
+        assert result is False
+
+
+@pytest.mark.asyncio
+async def test_init_default_config_adds_missing(temp_db: str):
+    from app.database import init_default_config, get_session
+    from sqlmodel import select
+    from app.models import Config
+
+    async with get_session() as session:
+        result = await session.exec(select(Config).where(Config.key == "max_task_size"))
+        existing = result.first()
+        if existing:
+            await session.delete(existing)
+            await session.commit()
+
+    async with get_session() as session:
+        await init_default_config(session)
+
+    async with get_session() as session:
+        result = await session.exec(select(Config).where(Config.key == "max_task_size"))
+        config = result.first()
+        assert config is not None
