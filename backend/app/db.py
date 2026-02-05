@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterable
 
+from app.core.security import hash_password
+
 from app.core.config import settings
 
 
@@ -262,18 +264,19 @@ def init_db() -> None:
 def ensure_default_admin() -> None:
     """Ensure a default admin user exists, creating one if necessary.
 
-    Creates admin with initial password state (empty password, is_initial_password=1).
-    User must reset password on first login.
+    Creates admin with default password '123456' and is_initial_password=1.
+    User should reset password on first login.
     """
     existing = _fetch_one("SELECT id FROM users LIMIT 1")
     if existing:
         return
 
-    # No users exist: create the first admin user with initial password state
+    # No users exist: create the first admin user with default password
+    default_password_hash = hash_password("123456")
     _execute(
         """
         INSERT INTO users (username, password_hash, is_admin, created_at, is_initial_password)
         VALUES (?, ?, ?, ?, ?)
         """,
-        ["admin", "", 1, _utc_now(), 1],
+        ["admin", default_password_hash, 1, _utc_now(), 1],
     )
