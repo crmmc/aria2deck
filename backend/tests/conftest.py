@@ -38,36 +38,30 @@ def reset_rate_limiter():
 
 @pytest.fixture(scope="function")
 def temp_db() -> Generator[str, None, None]:
-    """Create a fresh temporary database for each test."""
-    # Create a new temp dir for each test
     temp_dir = tempfile.mkdtemp()
     db_path = os.path.join(temp_dir, "test.db")
     download_dir = os.path.join(temp_dir, "downloads")
     os.makedirs(download_dir, exist_ok=True)
 
-    # Patch settings
     original_db_path = settings.database_path
     original_download_dir = settings.download_dir
     settings.database_path = db_path
     settings.download_dir = download_dir
 
-    # Reset the async engine so it uses the new path
     reset_engine()
-
-    # Initialize database (both sync and async)
     init_db()
 
-    # Initialize SQLModel tables
     import asyncio
     asyncio.run(init_sqlmodel_db())
 
     yield db_path
 
-    # Dispose engine before resetting (close connections properly)
     import asyncio
-    asyncio.run(dispose_engine())
+    import gc
 
-    # Restore settings and reset engine
+    asyncio.run(dispose_engine())
+    gc.collect()
+
     settings.database_path = original_db_path
     settings.download_dir = original_download_dir
     reset_engine()

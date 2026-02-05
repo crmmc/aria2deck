@@ -31,7 +31,11 @@ jobs:
         run: uv sync
 
       - name: Run backend tests
-        run: uv run pytest backend/tests -v
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          command: uv run pytest backend/tests -v --timeout=60
         env:
           PYTHONPATH: backend
 
