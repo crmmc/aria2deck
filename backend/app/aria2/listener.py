@@ -137,6 +137,9 @@ async def handle_aria2_event(
         return
 
     task_id = task.id
+    if task_id is None:
+        logger.warning(f"[WS] 任务缺少 task_id，忽略事件 gid={gid} event={event}")
+        return
 
     # 3. 空间检查（仅 start 事件，检查所有订阅者）
     if event == "start" and aria2_status:
@@ -170,16 +173,20 @@ async def handle_aria2_event(
             valid_subscribers = []
 
             for sub, user in subscriptions:
-                user_lock = await get_user_space_lock(state, user.id)
+                if user.id is None:
+                    logger.warning(f"[WS] 用户缺少 user_id，跳过订阅 sub_id={sub.id}")
+                    continue
+                user_id = user.id
+                user_lock = await get_user_space_lock(state, user_id)
                 async with user_lock:
-                    space_info = await get_user_space_info(user.id, user.quota)
+                    space_info = await get_user_space_info(user_id, user.quota)
                     # Each user's space is independent, use available directly
                     effective_available = space_info["available"]
 
                     if total_length <= effective_available:
                         # Use optimistic locking: only update if frozen_space is still 0
                         async with get_session() as db:
-                            result = await db.execute(
+                            await db.execute(
                                 update(UserTaskSubscription)
                                 .where(
                                     UserTaskSubscription.id == sub.id,
@@ -187,20 +194,15 @@ async def handle_aria2_event(
                                 )
                                 .values(frozen_space=total_length)
                             )
-
-                            if result.rowcount > 0:
+                        async with get_session() as db:
+                            refreshed = await db.exec(
+                                select(UserTaskSubscription).where(
+                                    UserTaskSubscription.id == sub.id
+                                )
+                            )
+                            current = refreshed.first()
+                            if current and current.status == "pending" and current.frozen_space > 0:
                                 valid_subscribers.append((sub, user))
-                            else:
-                                # Already frozen by another process, re-check current state
-                                async with get_session() as db:
-                                    refreshed = await db.exec(
-                                        select(UserTaskSubscription).where(
-                                            UserTaskSubscription.id == sub.id
-                                        )
-                                    )
-                                    current = refreshed.first()
-                                    if current and current.status == "pending" and current.frozen_space > 0:
-                                        valid_subscribers.append((sub, user))
                     else:
                         # Mark subscription as failed atomically
                         logger.warning(
@@ -252,6 +254,11 @@ async def handle_aria2_event(
                     db_task.gid = new_gid
                     db_task.updated_at = utc_now_str()
                     db.add(db_task)
+            if gid != new_gid:
+                try:
+                    await client.remove_download_result(gid)
+                except Exception as exc:
+                    logger.debug(f"[WS] 清理 metadata 任务结果失败 gid={gid} error={exc}")
             return
         else:
             new_status = "complete"
@@ -384,10 +391,13 @@ async def _handle_task_complete(
     try:
         # Move to store and create StoredFile
         stored_file = await move_to_store(source_path, original_name)
+        if stored_file.id is None:
+            logger.error(f"[WS] StoredFile 缺少 id，task_id={task_id}")
+            return
 
         # Update task with stored_file_id atomically using compare-and-swap pattern
         async with get_session() as db:
-            result = await db.execute(
+            await db.execute(
                 update(DownloadTask)
                 .where(
                     DownloadTask.id == task_id,
@@ -399,8 +409,10 @@ async def _handle_task_complete(
                 )
             )
 
-            if result.rowcount == 0:
-                # Another process already set stored_file_id
+        async with get_session() as db:
+            verify_result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+            verify_task = verify_result.first()
+            if not verify_task or verify_task.stored_file_id != stored_file.id:
                 logger.info(f"[WS] Task {task_id} already processed by another handler")
                 await cleanup_task_download_dir(task_id)
                 return
@@ -429,8 +441,6 @@ async def _handle_task_complete(
                         )
                         .values(status="success", frozen_space=0)
                     )
-                    if result.rowcount == 0:
-                        continue
 
                     # Check if reference already exists
                     result = await db.exec(
