@@ -353,7 +353,7 @@ async def update_user(
 
         if payload.password is not None:
             user.password_hash = hash_password(payload.password)
-            user.is_initial_password = True  # 管理员重置密码后，用户需要自行修改
+            user.is_initial_password = user_id != admin.id
             # 密码修改后使该用户的所有 session 失效
             await clear_user_sessions(user_id)
 

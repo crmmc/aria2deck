@@ -9,7 +9,9 @@ Kept functions:
 """
 
 import logging
+import hashlib
 import sqlite3
+import sys
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -28,6 +30,18 @@ DEFAULT_ADMIN_PASSWORD = "123456"
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _derive_client_hash(password: str, username: str) -> str:
+    """Derive client-side hash compatible with frontend hashPassword()."""
+    salt = hashlib.sha256(username.lower().encode("utf-8")).digest()
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        10000,
+    )
+    return digest.hex()
 
 
 def _get_connection() -> sqlite3.Connection:
@@ -279,7 +293,8 @@ def ensure_default_admin() -> None:
         return
 
     # No users exist: create the first admin user with default password
-    default_password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+    default_client_hash = _derive_client_hash(DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME)
+    default_password_hash = hash_password(default_client_hash)
     _execute(
         """
         INSERT INTO users (username, password_hash, is_admin, created_at, is_initial_password)
@@ -312,7 +327,9 @@ def reset_admin_password_for_dev() -> bool:
             admin["id"],
         )
 
-    default_password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+    target_username = str(admin["username"])
+    default_client_hash = _derive_client_hash(DEFAULT_ADMIN_PASSWORD, target_username)
+    default_password_hash = hash_password(default_client_hash)
     _execute(
         "UPDATE users SET password_hash = ?, is_initial_password = 1 WHERE id = ?",
         [default_password_hash, admin["id"]],
@@ -323,3 +340,23 @@ def reset_admin_password_for_dev() -> bool:
         admin["id"],
     )
     return True
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = argv if argv is not None else sys.argv[1:]
+    if not args:
+        print("Usage: python -m app.db reset-admin-password")
+        return 1
+
+    command = args[0]
+    if command == "reset-admin-password":
+        ok = reset_admin_password_for_dev()
+        return 0 if ok else 2
+
+    print(f"Unknown command: {command}")
+    print("Usage: python -m app.db reset-admin-password")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
