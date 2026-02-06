@@ -71,7 +71,7 @@ from app.aria2.listener import listen_aria2_events
 from app.aria2.sync import sync_tasks
 from app.core.config import settings
 from app.core.state import AppState
-from app.db import ensure_default_admin, init_db
+from app.db import ensure_default_admin, init_db, reset_admin_password_for_dev
 from app.database import (
     init_db as init_sqlmodel_db,
     get_session,
@@ -112,6 +112,10 @@ async def lifespan(app: FastAPI):
 
     # Ensure default admin exists
     ensure_default_admin()
+
+    # Development mode helper: reset admin password without clearing DB
+    if settings.dev_reset_admin_password:
+        reset_admin_password_for_dev()
 
     sync_task = asyncio.create_task(
         sync_tasks(app.state.app_state, settings.aria2_poll_interval)

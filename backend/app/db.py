@@ -8,6 +8,7 @@ Kept functions:
 - ensure_default_admin(): Admin user creation
 """
 
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -17,6 +18,12 @@ from typing import Iterable
 from app.core.security import hash_password
 
 from app.core.config import settings
+
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "123456"
 
 
 def _utc_now() -> str:
@@ -272,11 +279,47 @@ def ensure_default_admin() -> None:
         return
 
     # No users exist: create the first admin user with default password
-    default_password_hash = hash_password("123456")
+    default_password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
     _execute(
         """
         INSERT INTO users (username, password_hash, is_admin, created_at, is_initial_password)
         VALUES (?, ?, ?, ?, ?)
         """,
-        ["admin", default_password_hash, 1, _utc_now(), 1],
+        [DEFAULT_ADMIN_USERNAME, default_password_hash, 1, _utc_now(), 1],
     )
+
+
+def reset_admin_password_for_dev() -> bool:
+    """Reset admin password to default for local development.
+
+    This only updates password_hash and is_initial_password,
+    keeping all other user data and system config unchanged.
+    """
+    admin = _fetch_one(
+        "SELECT id, username FROM users WHERE username = ? LIMIT 1",
+        [DEFAULT_ADMIN_USERNAME],
+    )
+    if not admin:
+        admin = _fetch_one(
+            "SELECT id, username FROM users WHERE is_admin = 1 ORDER BY id LIMIT 1"
+        )
+        if not admin:
+            logger.warning("开发模式密码重置失败：未找到管理员账号")
+            return False
+        logger.warning(
+            "开发模式未找到 admin 用户，改为重置首个管理员密码 username=%s user_id=%s",
+            admin["username"],
+            admin["id"],
+        )
+
+    default_password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+    _execute(
+        "UPDATE users SET password_hash = ?, is_initial_password = 1 WHERE id = ?",
+        [default_password_hash, admin["id"]],
+    )
+    logger.info(
+        "开发模式已重置管理员密码 username=%s user_id=%s",
+        admin["username"],
+        admin["id"],
+    )
+    return True

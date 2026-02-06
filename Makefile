@@ -1,4 +1,4 @@
-.PHONY: install build run clean docker-build docker-up docker-down docker-logs
+.PHONY: install build run dev-front dev-back dev-aria2 clean docker-build docker-up docker-down docker-logs
 
 # Variables
 PYTHON = python3
@@ -6,6 +6,8 @@ BUN = bun
 BACKEND_DIR = backend
 FRONTEND_DIR = frontend
 STATIC_DIR = $(BACKEND_DIR)/static
+DEV_HOOK_SECRET = dev_hook_secret_local_12345
+DEV_ARIA2_SECRET = 1
 
 # Default target
 all: build
@@ -32,11 +34,34 @@ build:
 	cp -r $(FRONTEND_DIR)/out/* $(STATIC_DIR)/
 	@echo "Build complete."
 
-# Run backend (with dev hook secret for local testing)
+# Run backend with standard logs (compatibility target)
 run:
-	@echo "Starting server..."
-	@echo "Hook Secret: dev_hook_secret_local_12345"
-	PYTHONPATH=$(BACKEND_DIR) ARIA2C_HOOK_SECRET=dev_hook_secret_local_12345 ARIA2C_ARIA2_RPC_SECRET=1 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+	@echo "Starting backend with standard logs..."
+	@echo "Hook Secret: $(DEV_HOOK_SECRET)"
+	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=false ARIA2C_DEV_RESET_ADMIN_PASSWORD=false ARIA2C_HOOK_SECRET=$(DEV_HOOK_SECRET) ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level info
+
+# Frontend development mode
+# Use this when developing UI pages/components
+
+dev-front:
+	@echo "Starting frontend dev server on http://localhost:3000 ..."
+	cd $(FRONTEND_DIR) && $(BUN) run dev
+
+# Backend development mode (verbose logs)
+# Difference from `run`: ARIA2C_DEBUG=true and uvicorn --log-level debug
+
+dev-back:
+	@echo "Starting backend dev mode with verbose logs..."
+	@echo "Hook Secret: $(DEV_HOOK_SECRET)"
+	@echo "Dev mode will reset admin password to default (123456) on each start."
+	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=true ARIA2C_DEV_RESET_ADMIN_PASSWORD=true ARIA2C_HOOK_SECRET=$(DEV_HOOK_SECRET) ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level debug
+
+# Local aria2 backend for testing (foreground)
+# Keep this running in another terminal while using dev-back/dev-front
+
+dev-aria2:
+	@echo "Starting local aria2 test backend..."
+	bash $(BACKEND_DIR)/aria2/start.sh
 
 # Clean
 clean:

@@ -9,6 +9,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 class Settings(BaseSettings):
     app_name: str = "aria2-controler"
     debug: bool = False
+    dev_reset_admin_password: bool = False
     database_path: str = str(BASE_DIR / "data" / "app.db")
     session_cookie_name: str = "aria2_session"
     session_ttl_seconds: int = 60 * 60 * 12
