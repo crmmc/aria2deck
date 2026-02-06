@@ -33,7 +33,7 @@ from app.models import (
     UserTaskSubscription,
     utc_now_str,
 )
-from app.routers.config import get_download_dir, get_max_task_size, get_min_free_disk
+from app.routers.config import get_max_task_size, get_min_free_disk
 from app.services.hash import (
     extract_info_hash_from_magnet,
     extract_info_hash_from_torrent_base64,
@@ -164,7 +164,7 @@ async def _get_task_submit_lock(state: AppState, task_id: int) -> asyncio.Lock:
 
 def _check_disk_space() -> tuple[bool, int]:
     """检查磁盘空间是否足够"""
-    download_path = Path(get_download_dir())
+    download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
     min_free = get_min_free_disk()

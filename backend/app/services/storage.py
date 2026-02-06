@@ -15,9 +15,9 @@ from pathlib import Path
 from sqlalchemy import delete, update
 from sqlmodel import select
 
+from app.core.config import settings
 from app.database import get_session
 from app.models import StoredFile, UserFile, utc_now_str
-from app.routers.config import get_download_dir
 from app.services.hash import calculate_content_hash
 
 logger = logging.getLogger(__name__)
@@ -25,14 +25,14 @@ logger = logging.getLogger(__name__)
 
 def get_store_dir() -> Path:
     """Get the store directory path."""
-    store_dir = Path(get_download_dir()).resolve() / "store"
+    store_dir = Path(settings.download_dir).resolve() / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
     return store_dir
 
 
 def get_downloading_dir() -> Path:
     """Get the downloading directory path."""
-    downloading_dir = Path(get_download_dir()).resolve() / "downloading"
+    downloading_dir = Path(settings.download_dir).resolve() / "downloading"
     downloading_dir.mkdir(parents=True, exist_ok=True)
     return downloading_dir
 
@@ -455,7 +455,7 @@ async def get_user_space_info(user_id: int, user_quota: int) -> dict:
     frozen = await get_user_frozen_space(user_id)
 
     # Get machine free space
-    download_path = Path(get_download_dir())
+    download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
     machine_free = disk.free

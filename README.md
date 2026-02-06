@@ -37,6 +37,21 @@
 make docker-up
 ```
 
+如需自定义下载根目录（默认 `/app/backend/downloads`），请在启动容器时设置 `ARIA2C_DOWNLOAD_DIR`，并保证该路径在容器内可访问。
+
+示例：
+
+```bash
+docker run -d \
+  --name aria2deck \
+  --network host \
+  -e ARIA2C_DOWNLOAD_DIR=/Downloads/aria2deck \
+  -v /software/aria2deck/data:/app/backend/data \
+  -v /Downloads/aria2deck:/Downloads/aria2deck \
+  --rm \
+  ghcr.io/crmmc/aria2deck:<tag>
+```
+
 ### 3) 打开页面
 
 浏览器访问：
@@ -68,6 +83,12 @@ make install
 ```bash
 cp backend/env.example backend/.env
 cp frontend/env.local.example frontend/.env.local
+```
+
+可选：在 `backend/.env` 中设置下载根目录（未设置时默认 `/app/backend/downloads`）：
+
+```bash
+ARIA2C_DOWNLOAD_DIR=/Downloads/aria2deck
 ```
 
 ### 3) 构建前端
@@ -134,6 +155,8 @@ make docker-logs
 make docker-down
 ```
 
+> `make dev-front` 会先执行一次 `make build`，确保 `backend/static` 为最新前端产物。
+
 ---
 
 ## 常见问题
@@ -154,6 +177,10 @@ make docker-down
 ### 3) 为什么文件列表里看不到刚下载的内容？
 
 先看任务是否已完成；未完成的任务不会出现在最终文件列表。
+
+另外请确认下载路径一致：
+- 后端使用 `ARIA2C_DOWNLOAD_DIR`（默认 `/app/backend/downloads`）
+- aria2 写入路径必须与后端可访问路径一致（容器场景建议同路径挂载）
 
 ---
 
