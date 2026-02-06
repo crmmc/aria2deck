@@ -1,6 +1,7 @@
 """系统状态接口模块"""
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from app.models import DownloadTask, User, UserTaskSubscription
 
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("")
@@ -36,8 +38,8 @@ async def get_stats(user: User = Depends(require_user)) -> dict:
             if file_path.is_file():
                 try:
                     used_space += file_path.stat().st_size
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("统计文件大小失败 user_id=%s path=%s error=%s", user.id, file_path, exc)
 
     # 用户配额
     user_quota = user.quota if user.quota else 100 * 1024 * 1024 * 1024  # 默认 100GB
@@ -90,7 +92,7 @@ async def get_stats(user: User = Depends(require_user)) -> dict:
         total_download = speed_row[0] if speed_row else 0
         total_upload = speed_row[1] if speed_row else 0
 
-    return {
+    result = {
         "disk_total_space": display_total,
         "disk_used_space": used_space,
         "disk_space_limited": is_limited,
@@ -98,6 +100,8 @@ async def get_stats(user: User = Depends(require_user)) -> dict:
         "upload_speed": int(total_upload),
         "active_task_count": active_count,
     }
+    logger.debug("获取用户统计 user_id=%s active=%s", user.id, active_count)
+    return result
 
 
 @router.get("/machine")
@@ -113,8 +117,10 @@ async def get_machine_stats(user: User = Depends(require_admin)) -> dict:
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
 
-    return {
+    result = {
         "disk_total": disk.total,
         "disk_used": disk.used,
         "disk_free": disk.free,
     }
+    logger.debug("获取机器统计 admin_id=%s", user.id)
+    return result

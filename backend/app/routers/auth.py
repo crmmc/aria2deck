@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.auth import clear_session, create_session, require_user, set_session_cookie
@@ -10,15 +12,23 @@ from app.models import User
 from app.schemas import ChangePasswordRequest, LoginRequest, UserOut
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/login", response_model=UserOut)
 async def login(payload: LoginRequest, request: Request, response: Response) -> dict:
     # 获取客户端 IP
     client_ip = request.client.host if request.client else "unknown"
+    request_id = getattr(request.state, "request_id", "-")
 
     # 检查是否被限制
     if await login_limiter.is_blocked(client_ip):
+        logger.warning(
+            "登录限流触发 username=%s ip=%s request_id=%s",
+            payload.username,
+            client_ip,
+            request_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="登录尝试次数过多，请稍后再试"
@@ -29,6 +39,12 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
     if not user or not verify_password(payload.password, user["password_hash"]):
         # 记录失败尝试
         await login_limiter.record_failure(client_ip)
+        logger.warning(
+            "登录失败 username=%s ip=%s request_id=%s",
+            payload.username,
+            client_ip,
+            request_id,
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
 
     # 登录成功，清除失败记录
@@ -41,6 +57,14 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
 
     session_id = await create_session(user["id"])
     set_session_cookie(response, session_id)
+    request.state.auth_user_id = user["id"]
+    logger.info(
+        "登录成功 user_id=%s username=%s ip=%s request_id=%s",
+        user["id"],
+        user["username"],
+        client_ip,
+        request_id,
+    )
 
     return {
         "id": user["id"],
@@ -57,11 +81,18 @@ async def logout(request: Request, response: Response, user: User = Depends(requ
     if session_id:
         await clear_session(session_id)
     response.delete_cookie(settings.session_cookie_name)
+    request_id = getattr(request.state, "request_id", "-")
+    logger.info(
+        "用户登出 user_id=%s request_id=%s",
+        user.id,
+        request_id,
+    )
     return {"ok": True}
 
 
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(require_user)) -> dict:
+    logger.debug("获取当前用户信息 user_id=%s", user.id)
     return {
         "id": user.id,
         "username": user.username,
@@ -78,7 +109,13 @@ async def change_password(
     response: Response,
     user: User = Depends(require_user)
 ) -> dict:
+    request_id = getattr(request.state, "request_id", "-")
     if not await api_limiter.is_allowed(user.id, "change_password", limit=5, window_seconds=300):
+        logger.warning(
+            "修改密码限流触发 user_id=%s request_id=%s",
+            user.id,
+            request_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="操作过于频繁，请稍后再试"
@@ -87,6 +124,11 @@ async def change_password(
     if not user.is_initial_password:
         # 验证旧密码
         if not verify_password(payload.old_password, user.password_hash):
+            logger.warning(
+                "修改密码失败 user_id=%s reason=old_password_mismatch request_id=%s",
+                user.id,
+                request_id,
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="旧密码错误"
@@ -115,5 +157,10 @@ async def change_password(
     # 创建新 session
     session_id = await create_session(user.id)
     set_session_cookie(response, session_id)
+    logger.info(
+        "修改密码成功 user_id=%s request_id=%s",
+        user.id,
+        request_id,
+    )
 
     return {"ok": True, "message": "密码修改成功"}

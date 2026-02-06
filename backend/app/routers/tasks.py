@@ -70,6 +70,7 @@ def _is_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 
 def _check_url_safety(url: str) -> None:
     """检查 URL 是否安全（SSRF 防护）"""
+    safe_url = mask_url_credentials(url)
     try:
         parsed = urlparse(url)
         scheme = parsed.scheme.lower()
@@ -123,8 +124,8 @@ def _check_url_safety(url: str) -> None:
 
     except HTTPException:
         raise
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("SSRF 校验异常 url=%s error=%s", safe_url, exc)
 
 
 # ========== Schemas ==========
@@ -346,6 +347,7 @@ async def create_task(
     """
     # Rate limit
     if not await api_limiter.is_allowed(user.id, "create_task", limit=30, window_seconds=60):
+        logger.warning("创建任务被限流 user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="操作过于频繁，请稍后再试"
@@ -357,6 +359,7 @@ async def create_task(
     # Check disk space
     disk_ok, disk_free = _check_disk_space()
     if not disk_ok:
+        logger.warning("创建任务失败 user_id=%s reason=disk_insufficient free=%s", user.id, disk_free)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"磁盘空间不足，剩余 {disk_free / 1024 / 1024 / 1024:.2f} GB"
@@ -378,6 +381,7 @@ async def create_task(
         # Magnet link: extract info_hash
         uri_hash = extract_info_hash_from_magnet(uri)
         if not uri_hash:
+            logger.warning("创建任务失败 user_id=%s reason=invalid_magnet", user.id)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="无效的磁力链接"
@@ -385,6 +389,7 @@ async def create_task(
 
         # Check minimum space for magnet
         if available_space < MAGNET_MIN_SPACE:
+            logger.warning("创建任务失败 user_id=%s reason=space_low_for_magnet available=%s", user.id, available_space)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="可用空间不足，无法添加磁力链接"
@@ -398,6 +403,7 @@ async def create_task(
         probe_result = await probe_url_with_get_fallback(uri)
 
         if not probe_result.success:
+            logger.warning("创建任务失败 user_id=%s reason=probe_failed error=%s", user.id, probe_result.error)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"无法访问下载链接: {probe_result.error}"
@@ -413,12 +419,24 @@ async def create_task(
         if total_length > 0:
             max_task_size = get_max_task_size()
             if total_length > max_task_size:
+                logger.warning(
+                    "创建任务失败 user_id=%s reason=task_too_large size=%s limit=%s",
+                    user.id,
+                    total_length,
+                    max_task_size,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"文件大小 {total_length / 1024**3:.2f} GB 超过系统限制 {max_task_size / 1024**3:.2f} GB"
                 )
 
             if total_length > available_space:
+                logger.warning(
+                    "创建任务失败 user_id=%s reason=user_space_insufficient size=%s available=%s",
+                    user.id,
+                    total_length,
+                    available_space,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"文件大小 {total_length / 1024**3:.2f} GB 超过可用空间 {available_space / 1024**3:.2f} GB"
@@ -431,6 +449,7 @@ async def create_task(
         uri_hash = get_uri_hash(uri)
 
     if not uri_hash:
+        logger.warning("创建任务失败 user_id=%s reason=unsupported_uri_type", user.id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="无法识别的下载链接类型"
@@ -467,6 +486,7 @@ async def create_task(
                 user_file = result.first()
 
                 if user_file:
+                    logger.info("重复订阅已完成任务 user_id=%s task_id=%s", user.id, task.id)
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail="您已拥有此文件"
@@ -574,6 +594,14 @@ async def create_task(
     else:
         subscription = await _create_subscription(user, task, frozen_space)
 
+    logger.info(
+        "创建任务订阅成功 user_id=%s subscription_id=%s task_id=%s is_new_task=%s",
+        user.id,
+        subscription.id,
+        task.id,
+        is_new,
+    )
+
     # If new task, submit to aria2
     if is_new:
         state = _get_state(request)
@@ -662,6 +690,7 @@ async def create_torrent_task(
     """通过种子文件创建下载任务"""
     # Rate limit
     if not await api_limiter.is_allowed(user.id, "create_torrent", limit=10, window_seconds=60):
+        logger.warning("创建种子任务被限流 user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="操作过于频繁，请稍后再试"
@@ -670,6 +699,7 @@ async def create_torrent_task(
     # Size limit
     max_base64_length = 14 * 1024 * 1024
     if len(payload.torrent) > max_base64_length:
+        logger.warning("创建种子任务失败 user_id=%s reason=torrent_too_large", user.id)
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail="种子文件过大，最大支持 10MB"
@@ -678,6 +708,7 @@ async def create_torrent_task(
     # Check disk space
     disk_ok, disk_free = _check_disk_space()
     if not disk_ok:
+        logger.warning("创建种子任务失败 user_id=%s reason=disk_insufficient free=%s", user.id, disk_free)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"磁盘空间不足，剩余 {disk_free / 1024 / 1024 / 1024:.2f} GB"
@@ -686,6 +717,7 @@ async def create_torrent_task(
     # Extract info_hash from torrent
     uri_hash = extract_info_hash_from_torrent_base64(payload.torrent)
     if not uri_hash:
+        logger.warning("创建种子任务失败 user_id=%s reason=invalid_torrent", user.id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="无效的种子文件"
@@ -697,6 +729,7 @@ async def create_torrent_task(
 
     # Check minimum space
     if available_space < MAGNET_MIN_SPACE:
+        logger.warning("创建种子任务失败 user_id=%s reason=space_low_for_torrent available=%s", user.id, available_space)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="可用空间不足"
@@ -721,6 +754,7 @@ async def create_torrent_task(
         existing_sub = result.first()
 
     if existing_sub:
+        logger.info("重复订阅种子任务 user_id=%s task_id=%s", user.id, task.id)
         return _subscription_to_dict(existing_sub, task)
 
     # Handle completed task
@@ -784,6 +818,14 @@ async def create_torrent_task(
             subscription = await _create_subscription(user, task, frozen_space=frozen_space)
     else:
         subscription = await _create_subscription(user, task, frozen_space=frozen_space)
+
+    logger.info(
+        "创建种子任务订阅成功 user_id=%s subscription_id=%s task_id=%s is_new_task=%s",
+        user.id,
+        subscription.id,
+        task.id,
+        is_new,
+    )
 
     # If new task, submit to aria2
     if is_new:
@@ -907,6 +949,8 @@ async def list_tasks(
         result = await db.exec(query)
         rows = result.all()
 
+    logger.debug("查询任务列表 user_id=%s status_filter=%s count=%s", user.id, status_filter, len(rows))
+
     return [_subscription_to_dict(sub, task) for sub, task in rows]
 
 
@@ -922,6 +966,7 @@ async def cancel_task(
     """
     row = await _get_subscription(subscription_id, user.id)
     if not row:
+        logger.warning("取消任务失败 user_id=%s subscription_id=%s reason=not_found", user.id, subscription_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="任务不存在"
@@ -981,6 +1026,7 @@ async def cancel_task(
             total_length=task.total_length,
             created_at=subscription.created_at,
         )
+        logger.info("记录取消历史 user_id=%s subscription_id=%s task_id=%s", user.id, subscription_id, task.id)
 
     # Step 3: Only cancel aria2 task if no remaining subscribers
     if remaining_count == 0:
@@ -1001,6 +1047,7 @@ async def cancel_task(
                     still_pending = still_pending[0]
 
                 if still_pending != 0:
+                    logger.info("取消任务跳过 aria2 终止 user_id=%s task_id=%s reason=new_subscriber", user.id, task.id)
                     return {"ok": True}
 
                 result = await db.exec(
@@ -1035,6 +1082,8 @@ async def cancel_task(
                 from app.services.storage import cleanup_task_download_dir
                 await cleanup_task_download_dir(task.id)
 
+                logger.info("取消任务成功 user_id=%s subscription_id=%s task_id=%s", user.id, subscription_id, task.id)
+
     return {"ok": True}
 
 
@@ -1053,6 +1102,8 @@ async def clear_history(user: User = Depends(require_user)) -> dict:
         count = len(subscriptions)
         for sub in subscriptions:
             await db.delete(sub)
+
+    logger.info("清空任务记录成功 user_id=%s count=%s", user.id, count)
 
     return {"ok": True, "count": count}
 

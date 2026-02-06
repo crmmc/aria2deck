@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import string
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ _CACHE_TTL = 60.0  # 缓存有效期（秒）
 
 
 router = APIRouter(prefix="/api/config", tags=["config"])
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> str:
@@ -74,7 +76,8 @@ def get_config_value(key: str) -> str | None:
         conn.close()
         _config_cache[key] = (value, now)
         return value
-    except Exception:
+    except Exception as exc:
+        logger.warning("读取配置失败 key=%s error=%s", key, exc)
         return None
 
 
@@ -214,7 +217,7 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
     if aria2_rpc_secret:
         masked_secret = "*" * min(len(aria2_rpc_secret), 8)
 
-    return {
+    result = {
         "max_task_size": get_max_task_size(),
         "min_free_disk": get_min_free_disk(),
         "aria2_rpc_url": aria2_rpc_url,
@@ -228,6 +231,8 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
         "ws_reconnect_factor": get_ws_reconnect_factor(),
         "download_token_expiry": get_download_token_expiry(),
     }
+    logger.debug("获取系统配置 admin_id=%s", admin.id)
+    return result
 
 
 @router.put("")
@@ -243,16 +248,22 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
     """
     import json
 
+    changed_keys: list[str] = []
+
     if payload.max_task_size is not None:
         await set_config_value_async("max_task_size", str(payload.max_task_size))
+        changed_keys.append("max_task_size")
     if payload.min_free_disk is not None:
         await set_config_value_async("min_free_disk", str(payload.min_free_disk))
+        changed_keys.append("min_free_disk")
     if payload.aria2_rpc_url is not None:
         await set_config_value_async("aria2_rpc_url", payload.aria2_rpc_url)
+        changed_keys.append("aria2_rpc_url")
     if payload.aria2_rpc_secret is not None:
         # 如果是掩码，不更新
         if not payload.aria2_rpc_secret.startswith("*"):
             await set_config_value_async("aria2_rpc_secret", payload.aria2_rpc_secret)
+            changed_keys.append("aria2_rpc_secret")
     if payload.hidden_file_extensions is not None:
         # 规范化后缀名：统一小写，确保以点开头
         normalized = []
@@ -263,27 +274,35 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
             if ext and ext not in normalized:
                 normalized.append(ext)
         await set_config_value_async("hidden_file_extensions", json.dumps(normalized))
+        changed_keys.append("hidden_file_extensions")
     if payload.pack_format is not None:
         if payload.pack_format in ("zip", "7z"):
             await set_config_value_async("pack_format", payload.pack_format)
+            changed_keys.append("pack_format")
     if payload.pack_compression_level is not None:
         level = max(1, min(9, payload.pack_compression_level))
         await set_config_value_async("pack_compression_level", str(level))
+        changed_keys.append("pack_compression_level")
     if payload.pack_extra_args is not None:
         await set_config_value_async("pack_extra_args", payload.pack_extra_args)
+        changed_keys.append("pack_extra_args")
     # WebSocket 重连参数
     if payload.ws_reconnect_max_delay is not None:
         delay = max(1.0, min(300.0, payload.ws_reconnect_max_delay))  # 1-300秒
         await set_config_value_async("ws_reconnect_max_delay", str(delay))
+        changed_keys.append("ws_reconnect_max_delay")
     if payload.ws_reconnect_jitter is not None:
         jitter = max(0.0, min(1.0, payload.ws_reconnect_jitter))  # 0-1
         await set_config_value_async("ws_reconnect_jitter", str(jitter))
+        changed_keys.append("ws_reconnect_jitter")
     if payload.ws_reconnect_factor is not None:
         factor = max(1.1, min(10.0, payload.ws_reconnect_factor))  # 1.1-10
         await set_config_value_async("ws_reconnect_factor", str(factor))
+        changed_keys.append("ws_reconnect_factor")
     if payload.download_token_expiry is not None:
         expiry = max(60, min(86400 * 7, payload.download_token_expiry))  # 1分钟-7天
         await set_config_value_async("download_token_expiry", str(expiry))
+        changed_keys.append("download_token_expiry")
 
     # 返回更新后的配置（secret 脱敏）
     aria2_rpc_url = await get_config_value_async("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
@@ -292,6 +311,7 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
     if aria2_rpc_secret:
         masked_secret = "*" * min(len(aria2_rpc_secret), 8)
 
+    logger.info("更新系统配置成功 admin_id=%s changed_keys=%s", admin.id, ",".join(changed_keys) if changed_keys else "none")
     return {
         "max_task_size": get_max_task_size(),
         "min_free_disk": get_min_free_disk(),
@@ -327,12 +347,14 @@ async def get_aria2_version(admin: User = Depends(require_admin)) -> dict:
 
     try:
         version_info = await client.get_version()
+        logger.info("获取aria2版本成功 admin_id=%s", admin.id)
         return {
             "connected": True,
             "version": version_info.get("version"),
             "enabled_features": version_info.get("enabledFeatures", []),
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning("获取aria2版本失败 admin_id=%s error=%s", admin.id, exc)
         return {
             "connected": False,
             "error": "无法连接到 aria2 服务",
@@ -357,6 +379,7 @@ async def test_aria2_connection(
     - error: 错误信息（如果连接失败）
     """
     if not await api_limiter.is_allowed(admin.id, "aria2_test", limit=10, window_seconds=60):
+        logger.warning("测试aria2连接被限流 admin_id=%s", admin.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="操作过于频繁，请稍后再试"
@@ -383,12 +406,14 @@ async def test_aria2_connection(
 
     try:
         version_info = await client.get_version()
+        logger.info("测试aria2连接成功 admin_id=%s url=%s", admin.id, payload.aria2_rpc_url)
         return {
             "connected": True,
             "version": version_info.get("version"),
             "enabled_features": version_info.get("enabledFeatures", []),
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning("测试aria2连接失败 admin_id=%s url=%s error=%s", admin.id, payload.aria2_rpc_url, exc)
         return {
             "connected": False,
             "error": "无法连接到 aria2 服务",
@@ -436,6 +461,7 @@ async def list_tokens(user: User = Depends(require_user)) -> list[dict]:
     rows = cur.fetchall()
     cur.close()
     conn.close()
+    logger.debug("查询Token列表 user_id=%s count=%s", user.id, len(rows))
     return [dict(row) for row in rows]
 
 
@@ -480,6 +506,8 @@ async def create_token(
     cur.close()
     conn.close()
 
+    logger.info("创建API Token user_id=%s token_id=%s token_name=%s", user.id, row["id"] if row else None, name)
+
     return dict(row)
 
 
@@ -510,6 +538,7 @@ async def delete_token(token_id: int, user: User = Depends(require_user)) -> dic
     if not row:
         cur.close()
         conn.close()
+        logger.warning("删除Token失败 user_id=%s token_id=%s reason=not_found", user.id, token_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Token 不存在"
@@ -518,6 +547,7 @@ async def delete_token(token_id: int, user: User = Depends(require_user)) -> dic
     if row["user_id"] != user.id:
         cur.close()
         conn.close()
+        logger.warning("删除Token失败 user_id=%s token_id=%s reason=forbidden", user.id, token_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="无权删除此 Token"
@@ -527,5 +557,7 @@ async def delete_token(token_id: int, user: User = Depends(require_user)) -> dic
     conn.commit()
     cur.close()
     conn.close()
+
+    logger.info("删除Token成功 user_id=%s token_id=%s", user.id, token_id)
 
     return {"ok": True}

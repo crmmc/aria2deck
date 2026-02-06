@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urlparse
 
 import aiohttp
+from app.core.security import mask_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -175,19 +176,22 @@ async def probe_http_url(
                 )
 
     except aiohttp.ClientError as e:
-        logger.warning(f"HTTP probe failed for {url}: {e}")
+        safe_url = mask_url_credentials(url)
+        logger.warning(f"HTTP probe failed for {safe_url}: {e}")
         return ProbeResult(
             success=False,
             error=f"Connection error: {type(e).__name__}",
         )
     except TimeoutError:
-        logger.warning(f"HTTP probe timeout for {url}")
+        safe_url = mask_url_credentials(url)
+        logger.warning(f"HTTP probe timeout for {safe_url}")
         return ProbeResult(
             success=False,
             error="Request timeout",
         )
     except Exception as e:
-        logger.warning(f"HTTP probe unexpected error for {url}: {e}")
+        safe_url = mask_url_credentials(url)
+        logger.warning(f"HTTP probe unexpected error for {safe_url}: {e}")
         return ProbeResult(
             success=False,
             error=f"Unexpected error: {type(e).__name__}",
@@ -267,5 +271,6 @@ async def probe_url_with_get_fallback(
 
     except Exception as e:
         # Return original HEAD error if GET also fails
-        logger.warning(f"GET fallback also failed for {url}: {e}")
+        safe_url = mask_url_credentials(url)
+        logger.warning(f"GET fallback also failed for {safe_url}: {e}")
         return result

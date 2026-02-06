@@ -2,6 +2,8 @@
 
 独立于活动任务，记录用户的下载历史。
 """
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import select
 
@@ -10,6 +12,7 @@ from app.database import get_session
 from app.models import TaskHistory, User
 
 router = APIRouter(prefix="/api/history", tags=["history"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("")
@@ -22,6 +25,8 @@ async def list_history(user: User = Depends(require_user)) -> list[dict]:
             .order_by(TaskHistory.id.desc())
         )
         records = result.all()
+
+    logger.debug("查询历史记录 user_id=%s count=%s", user.id, len(records))
 
     return [
         {
@@ -54,12 +59,15 @@ async def delete_history(
         record = result.first()
 
         if not record:
+            logger.warning("删除历史记录失败 user_id=%s history_id=%s reason=not_found", user.id, history_id)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="历史记录不存在"
             )
 
         await db.delete(record)
+
+    logger.info("删除历史记录成功 user_id=%s history_id=%s", user.id, history_id)
 
     return {"ok": True}
 
@@ -76,5 +84,7 @@ async def clear_history(user: User = Depends(require_user)) -> dict:
         count = len(records)
         for r in records:
             await db.delete(r)
+
+    logger.info("清空历史记录成功 user_id=%s count=%s", user.id, count)
 
     return {"ok": True, "count": count}

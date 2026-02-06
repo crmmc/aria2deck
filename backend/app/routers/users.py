@@ -1,4 +1,5 @@
 """用户管理接口模块"""
+import logging
 import secrets
 import shutil
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from app.schemas import RpcAccessStatus, RpcAccessToggle, UserCreate, UserOut, U
 
 
 router = APIRouter(prefix="/api/users", tags=["users"])
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> str:
@@ -39,10 +41,17 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
     """
     # 获取客户端 IP 用于限流
     client_ip = request.client.host if request.client else "unknown"
+    request_id = getattr(request.state, "request_id", "-")
 
     # 首次创建用户时的 IP 限流（防止滥用）
     if not await _has_any_user():
         if await login_limiter.is_blocked(client_ip):
+            logger.warning(
+                "创建首个用户被限流 username=%s ip=%s request_id=%s",
+                payload.username,
+                client_ip,
+                request_id,
+            )
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="请求过于频繁，请稍后再试"
@@ -55,6 +64,11 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
             # 检查用户名是否已存在
             result = await db.exec(select(User).where(User.username == payload.username))
             if result.first():
+                logger.warning(
+                    "创建用户失败 username=%s reason=duplicate request_id=%s",
+                    payload.username,
+                    request_id,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="用户名已存在"
@@ -77,10 +91,24 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
                 await db.refresh(user)
             except IntegrityError:
                 await db.rollback()
+                logger.warning(
+                    "创建用户冲突 username=%s request_id=%s",
+                    payload.username,
+                    request_id,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="用户名已存在"
                 )
+
+            logger.info(
+                "创建用户成功 actor_id=%s user_id=%s username=%s is_admin=%s request_id=%s",
+                request.state.auth_user_id,
+                user.id,
+                user.username,
+                user.is_admin,
+                request_id,
+            )
 
             return {
                 "id": user.id,
@@ -116,6 +144,11 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
         )
 
         if result.rowcount == 0:
+            logger.warning(
+                "创建首个用户失败 username=%s reason=race_or_permission request_id=%s",
+                payload.username,
+                request_id,
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="需要管理员权限"
@@ -124,10 +157,24 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
         result = await db.exec(select(User).where(User.username == payload.username))
         user = result.first()
         if not user:
+            logger.error(
+                "创建首个用户后查询失败 username=%s request_id=%s",
+                payload.username,
+                request_id,
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="创建用户失败"
             )
+
+        logger.info(
+            "创建首个用户成功 user_id=%s username=%s is_admin=%s ip=%s request_id=%s",
+            user.id,
+            user.username,
+            user.is_admin,
+            client_ip,
+            request_id,
+        )
 
         return {
             "id": user.id,
@@ -143,6 +190,7 @@ async def list_users(admin: User = Depends(require_admin)) -> list[dict]:
     async with get_session() as db:
         result = await db.exec(select(User))
         users = result.all()
+        logger.debug("查询用户列表 admin_id=%s count=%s", admin.id, len(users))
         return [{
             "id": u.id,
             "username": u.username,
@@ -153,6 +201,7 @@ async def list_users(admin: User = Depends(require_admin)) -> list[dict]:
 
 @router.delete("/{user_id}")
 async def delete_user(
+    request: Request,
     user_id: int,
     delete_files: bool = Query(False, description="是否删除用户下载目录"),
     admin: User = Depends(require_admin)
@@ -167,7 +216,15 @@ async def delete_user(
 
     注意: 不能删除自己
     """
+    request_id = getattr(request.state, "request_id", "-")
+
     if user_id == admin.id:
+        logger.warning(
+            "删除用户失败 actor_id=%s target_user_id=%s reason=self_delete request_id=%s",
+            admin.id,
+            user_id,
+            request_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="不能删除自己"
@@ -177,6 +234,12 @@ async def delete_user(
         result = await db.exec(select(User).where(User.id == user_id))
         user = result.first()
         if not user:
+            logger.warning(
+                "删除用户失败 actor_id=%s target_user_id=%s reason=not_found request_id=%s",
+                admin.id,
+                user_id,
+                request_id,
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="用户不存在"
@@ -215,6 +278,14 @@ async def delete_user(
         if user_download_dir.exists():
             shutil.rmtree(user_download_dir, ignore_errors=True)
 
+    logger.info(
+        "删除用户成功 actor_id=%s target_user_id=%s delete_files=%s request_id=%s",
+        admin.id,
+        user_id,
+        delete_files,
+        request_id,
+    )
+
     return {"ok": True}
 
 
@@ -229,6 +300,7 @@ async def get_user(user_id: int, admin: User = Depends(require_admin)) -> dict:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="用户不存在"
             )
+        logger.debug("查询用户详情 admin_id=%s target_user_id=%s", admin.id, user_id)
         return {
             "id": user.id,
             "username": user.username,
@@ -238,12 +310,24 @@ async def get_user(user_id: int, admin: User = Depends(require_admin)) -> dict:
 
 
 @router.put("/{user_id}", response_model=UserOut)
-async def update_user(user_id: int, payload: UserUpdate, admin: User = Depends(require_admin)) -> dict:
+async def update_user(
+    user_id: int,
+    payload: UserUpdate,
+    request: Request,
+    admin: User = Depends(require_admin),
+) -> dict:
     """更新用户信息（管理员）"""
+    request_id = getattr(request.state, "request_id", "-")
     async with get_session() as db:
         result = await db.exec(select(User).where(User.id == user_id))
         user = result.first()
         if not user:
+            logger.warning(
+                "更新用户失败 actor_id=%s target_user_id=%s reason=not_found request_id=%s",
+                admin.id,
+                user_id,
+                request_id,
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="用户不存在"
@@ -255,6 +339,12 @@ async def update_user(user_id: int, payload: UserUpdate, admin: User = Depends(r
                 select(User).where(User.username == payload.username, User.id != user_id)
             )
             if existing_result.first():
+                logger.warning(
+                    "更新用户失败 actor_id=%s target_user_id=%s reason=username_taken request_id=%s",
+                    admin.id,
+                    user_id,
+                    request_id,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="用户名已被占用"
@@ -285,10 +375,27 @@ async def update_user(user_id: int, payload: UserUpdate, admin: User = Depends(r
             await db.refresh(user)
         except IntegrityError:
             await db.rollback()
+            logger.warning(
+                "更新用户冲突 actor_id=%s target_user_id=%s request_id=%s",
+                admin.id,
+                user_id,
+                request_id,
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="用户名已被占用"
             )
+
+        logger.info(
+            "更新用户成功 actor_id=%s target_user_id=%s set_username=%s set_password=%s set_is_admin=%s set_quota=%s request_id=%s",
+            admin.id,
+            user_id,
+            payload.username is not None,
+            payload.password is not None,
+            payload.is_admin is not None,
+            payload.quota is not None,
+            request_id,
+        )
 
         return {
             "id": user.id,
@@ -313,6 +420,8 @@ async def get_rpc_access(user: User = Depends(require_user)) -> RpcAccessStatus:
                 detail="用户不存在"
             )
 
+        logger.debug("查询RPC访问状态 user_id=%s enabled=%s", user.id, db_user.rpc_secret is not None)
+
         return RpcAccessStatus(
             enabled=db_user.rpc_secret is not None,
             secret=db_user.rpc_secret,
@@ -323,9 +432,11 @@ async def get_rpc_access(user: User = Depends(require_user)) -> RpcAccessStatus:
 @router.put("/me/rpc-access", response_model=RpcAccessStatus)
 async def set_rpc_access(
     payload: RpcAccessToggle,
+    request: Request,
     user: User = Depends(require_user)
 ) -> RpcAccessStatus:
     """开启或关闭 RPC 访问"""
+    request_id = getattr(request.state, "request_id", "-")
     async with get_session() as db:
         result = await db.exec(select(User).where(User.id == user.id))
         db_user = result.first()
@@ -343,6 +454,7 @@ async def set_rpc_access(
             db_user.rpc_secret_created_at = created_at
             db.add(db_user)
             await db.commit()
+            logger.info("开启RPC访问 user_id=%s request_id=%s", user.id, request_id)
             return RpcAccessStatus(
                 enabled=True,
                 secret=new_secret,
@@ -354,6 +466,7 @@ async def set_rpc_access(
             db_user.rpc_secret_created_at = None
             db.add(db_user)
             await db.commit()
+            logger.info("关闭RPC访问 user_id=%s request_id=%s", user.id, request_id)
             return RpcAccessStatus(
                 enabled=False,
                 secret=None,
@@ -362,8 +475,9 @@ async def set_rpc_access(
 
 
 @router.post("/me/rpc-access/refresh", response_model=RpcAccessStatus)
-async def refresh_rpc_secret(user: User = Depends(require_user)) -> RpcAccessStatus:
+async def refresh_rpc_secret(request: Request, user: User = Depends(require_user)) -> RpcAccessStatus:
     """刷新 RPC Secret（旧的立即失效）"""
+    request_id = getattr(request.state, "request_id", "-")
     async with get_session() as db:
         result = await db.exec(select(User).where(User.id == user.id))
         db_user = result.first()
@@ -386,6 +500,8 @@ async def refresh_rpc_secret(user: User = Depends(require_user)) -> RpcAccessSta
         db_user.rpc_secret_created_at = created_at
         db.add(db_user)
         await db.commit()
+
+        logger.info("刷新RPC密钥 user_id=%s request_id=%s", user.id, request_id)
 
         return RpcAccessStatus(
             enabled=True,

@@ -144,6 +144,7 @@ async def list_files(user: User = Depends(require_user)) -> FileListResponse:
         rows = result.all()
 
     files = [_user_file_to_dict(uf, sf) for uf, sf in rows]
+    logger.debug("查询文件列表 user_id=%s count=%s", user.id, len(files))
 
     # Get space info
     space_info = await get_user_space_info(user.id, user.quota)
@@ -183,6 +184,7 @@ async def browse_file(
         row = result.first()
 
     if not row:
+        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=not_found", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
@@ -191,6 +193,7 @@ async def browse_file(
     user_file, stored_file = row
 
     if not stored_file.is_directory:
+        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=not_directory", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="此文件不是文件夹"
@@ -199,6 +202,7 @@ async def browse_file(
     # Validate and resolve path
     base_path = Path(stored_file.real_path)
     if not base_path.exists():
+        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=base_missing", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件夹不存在"
@@ -207,12 +211,14 @@ async def browse_file(
     target_path = _validate_subpath(base_path, path)
 
     if not target_path.exists():
+        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=path_missing", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="路径不存在"
         )
 
     if not target_path.is_dir():
+        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=path_not_directory", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="路径不是文件夹"
@@ -232,10 +238,13 @@ async def browse_file(
             except Exception:
                 continue
     except PermissionError:
+        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=permission_denied", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="无权访问此目录"
         )
+
+    logger.debug("浏览文件成功 user_id=%s file_id=%s count=%s", user.id, file_id, len(files))
 
     return files
 
@@ -255,6 +264,7 @@ async def download_file(
         path: BT 文件夹内的相对路径（可选）
     """
     if not await api_limiter.is_allowed(user.id, "download_file", limit=60, window_seconds=60):
+        logger.warning("下载文件被限流 user_id=%s file_id=%s", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="下载请求过于频繁，请稍后再试"
@@ -272,6 +282,7 @@ async def download_file(
         row = result.first()
 
     if not row:
+        logger.warning("下载文件失败 user_id=%s file_id=%s reason=not_found", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
@@ -281,6 +292,7 @@ async def download_file(
     base_path = Path(stored_file.real_path)
 
     if not base_path.exists():
+        logger.warning("下载文件失败 user_id=%s file_id=%s reason=base_missing", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
@@ -289,6 +301,7 @@ async def download_file(
     # Determine target file
     if path:
         if not stored_file.is_directory:
+            logger.warning("下载文件失败 user_id=%s file_id=%s reason=path_on_non_dir", user.id, file_id)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="此文件不是文件夹，不支持路径参数"
@@ -298,16 +311,20 @@ async def download_file(
         target_path = base_path
 
     if not target_path.exists():
+        logger.warning("下载文件失败 user_id=%s file_id=%s reason=target_missing", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
         )
 
     if target_path.is_dir():
+        logger.warning("下载文件失败 user_id=%s file_id=%s reason=target_is_directory", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="不能直接下载文件夹，请选择具体文件"
         )
+
+    logger.info("下载文件成功 user_id=%s file_id=%s file=%s", user.id, file_id, target_path.name)
 
     return FileResponse(
         path=str(target_path),
@@ -337,6 +354,7 @@ async def delete_file(
         user_file = result.first()
 
     if not user_file:
+        logger.warning("删除文件失败 user_id=%s file_id=%s reason=not_found", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
@@ -346,10 +364,13 @@ async def delete_file(
     success = await delete_user_file_reference(file_id)
 
     if not success:
+        logger.warning("删除文件失败 user_id=%s file_id=%s reason=delete_reference_failed", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
         )
+
+    logger.info("删除文件成功 user_id=%s file_id=%s", user.id, file_id)
 
     return {"ok": True}
 
@@ -365,6 +386,7 @@ async def rename_file(
     只修改显示名称，不影响实际存储。
     """
     if not payload.name:
+        logger.warning("重命名文件失败 user_id=%s file_id=%s reason=empty_name", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="名称不能为空"
@@ -372,6 +394,7 @@ async def rename_file(
 
     # Validate name
     if "/" in payload.name or "\\" in payload.name:
+        logger.warning("重命名文件失败 user_id=%s file_id=%s reason=invalid_name", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="名称不能包含路径分隔符"
@@ -387,6 +410,7 @@ async def rename_file(
         user_file = result.first()
 
         if not user_file:
+            logger.warning("重命名文件失败 user_id=%s file_id=%s reason=not_found", user.id, file_id)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="文件不存在"
@@ -395,6 +419,8 @@ async def rename_file(
         user_file.display_name = payload.name
         db.add(user_file)
 
+    logger.info("重命名文件成功 user_id=%s file_id=%s", user.id, file_id)
+
     return {"ok": True}
 
 
@@ -402,6 +428,7 @@ async def rename_file(
 async def get_space(user: User = Depends(require_user)) -> dict:
     """获取用户空间信息"""
     space_info = await get_user_space_info(user.id, user.quota)
+    logger.debug("查询空间信息 user_id=%s", user.id)
     return space_info
 
 
@@ -476,6 +503,7 @@ async def calculate_paths_size(
     from app.services.pack import calculate_folder_size, get_user_available_space_for_pack
 
     if not payload.paths:
+        logger.warning("计算打包大小失败 user_id=%s reason=empty_paths", user.id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="路径列表不能为空"
@@ -539,6 +567,8 @@ async def get_pack_available_space(
         else:
             result["folder_size"] = 0
 
+    logger.debug("查询打包可用空间 user_id=%s", user.id)
+
     return result
 
 
@@ -555,6 +585,7 @@ async def create_pack_task(
     """
     # 频率限制
     if not await api_limiter.is_allowed(user.id, "create_pack", limit=5, window_seconds=60):
+        logger.warning("创建打包任务被限流 user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="操作过于频繁，请稍后再试"
@@ -622,6 +653,12 @@ async def create_pack_task(
     async with _get_pack_create_lock():
         available = await get_user_available_space_for_pack(user.id)
         if reserved_space > available:
+            logger.warning(
+                "创建打包任务失败 user_id=%s reason=insufficient_space required=%s available=%s",
+                user.id,
+                reserved_space,
+                available,
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"空间不足。需要: {reserved_space / 1024**3:.2f} GB, 可用: {available / 1024**3:.2f} GB"
@@ -660,6 +697,11 @@ async def create_pack_task(
             )
 
             if result.rowcount == 0:
+                logger.warning(
+                    "创建打包任务冲突 user_id=%s folder_path=%s",
+                    user.id,
+                    folder_path_value,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="相同路径已有进行中的打包任务"
@@ -677,6 +719,7 @@ async def create_pack_task(
             )
             pack_task = result.first()
             if not pack_task:
+                logger.error("创建打包任务失败 user_id=%s reason=task_not_found_after_insert", user.id)
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="创建打包任务失败"
@@ -685,6 +728,7 @@ async def create_pack_task(
 
     # Start async packing
     asyncio.create_task(PackTaskManager.start_pack(task_id, user.id, folder_path_value, output_name))
+    logger.info("创建打包任务成功 user_id=%s task_id=%s", user.id, task_id)
 
     async with get_session() as db:
         result = await db.exec(select(PackTask).where(PackTask.id == task_id))
@@ -702,6 +746,7 @@ async def list_pack_tasks(user: User = Depends(require_user)) -> list[dict]:
             .order_by(PackTask.created_at.desc())
         )
         tasks = result.all()
+        logger.debug("查询打包任务列表 user_id=%s count=%s", user.id, len(tasks))
         return [_pack_task_to_dict(t) for t in tasks]
 
 
@@ -715,7 +760,9 @@ async def get_pack_task(task_id: int, user: User = Depends(require_user)) -> dic
         task = result.first()
 
     if not task:
+        logger.warning("查询打包任务失败 user_id=%s task_id=%s reason=not_found", user.id, task_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+    logger.debug("查询打包任务详情 user_id=%s task_id=%s", user.id, task_id)
     return _pack_task_to_dict(task)
 
 
@@ -734,6 +781,7 @@ async def cancel_or_delete_pack_task(
         task = result.first()
 
     if not task:
+        logger.warning("取消/删除打包任务失败 user_id=%s task_id=%s reason=not_found", user.id, task_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
 
     task_status = task.status
@@ -756,6 +804,7 @@ async def cancel_or_delete_pack_task(
             cancelled = result.rowcount > 0
 
         if cancelled:
+            logger.info("取消打包任务成功 user_id=%s task_id=%s", user.id, task_id)
             return {"ok": True, "message": "任务已取消"}
 
         # 状态已变化，重新读取并按实际状态处理
@@ -765,6 +814,7 @@ async def cancel_or_delete_pack_task(
             )
             task = result.first()
         if not task:
+            logger.warning("取消/删除打包任务失败 user_id=%s task_id=%s reason=not_found_after_reload", user.id, task_id)
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
         task_status = task.status
 
@@ -774,6 +824,7 @@ async def cancel_or_delete_pack_task(
             db_task = result.first()
             if db_task:
                 await db.delete(db_task)
+        logger.info("删除打包任务记录成功 user_id=%s task_id=%s status=%s", user.id, task_id, task_status)
         return {"ok": True, "message": "任务已删除"}
 
     raise HTTPException(
@@ -792,9 +843,11 @@ async def download_pack_result(task_id: int, user: User = Depends(require_user))
         task = result.first()
 
     if not task:
+        logger.warning("下载打包文件失败 user_id=%s task_id=%s reason=not_found", user.id, task_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
 
     if task.status != "done":
+        logger.warning("下载打包文件失败 user_id=%s task_id=%s reason=not_done", user.id, task_id)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="打包任务未完成"
@@ -802,6 +855,7 @@ async def download_pack_result(task_id: int, user: User = Depends(require_user))
 
     output_path = task.output_path
     if not output_path or not Path(output_path).exists():
+        logger.warning("下载打包文件失败 user_id=%s task_id=%s reason=file_missing", user.id, task_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="打包文件不存在")
 
     # Path traversal protection: ensure output_path is within user directory
@@ -810,10 +864,13 @@ async def download_pack_result(task_id: int, user: User = Depends(require_user))
     try:
         output_path_resolved.relative_to(user_dir)
     except ValueError:
+        logger.warning("下载打包文件失败 user_id=%s task_id=%s reason=path_traversal", user.id, task_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="无权访问此文件"
         )
+
+    logger.info("下载打包文件成功 user_id=%s task_id=%s", user.id, task_id)
 
     return FileResponse(
         path=output_path,
@@ -831,6 +888,8 @@ async def get_quota(user: User = Depends(require_user)) -> dict:
     # Calculate percentage
     total = space_info["used"] + space_info["available"]
     percentage = (space_info["used"] / total * 100) if total > 0 else 0
+
+    logger.debug("查询配额信息 user_id=%s", user.id)
 
     return {
         "used": space_info["used"],
