@@ -563,12 +563,12 @@ async def _cancel_task(
     # Stop aria2 task
     try:
         await client.force_remove(gid)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"[WS] force_remove 失败 task_id={task.id} gid={gid} error={exc}")
     try:
         await client.remove_download_result(gid)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"[WS] remove_download_result 失败 task_id={task.id} gid={gid} error={exc}")
 
     # Update task status
     async with get_session() as db:

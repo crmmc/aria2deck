@@ -1,11 +1,16 @@
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
+
+
+logger = logging.getLogger(__name__)
 
 
 def setup_logging():
@@ -23,8 +28,14 @@ def setup_logging():
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
 
+    for handler in list(root_logger.handlers):
+        if getattr(handler, "_aria2deck_handler", False):
+            root_logger.removeHandler(handler)
+            handler.close()
+
     # 控制台 handler
     console_handler = logging.StreamHandler()
+    console_handler._aria2deck_handler = True
     console_handler.setLevel(log_level)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
@@ -41,6 +52,7 @@ def setup_logging():
         backupCount=5,
         encoding="utf-8",
     )
+    file_handler._aria2deck_handler = True
     file_handler.setLevel(log_level)
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
@@ -114,17 +126,72 @@ async def lifespan(app: FastAPI):
     try:
         await sync_task
     except asyncio.CancelledError:
-        pass
+        logger.debug("sync_tasks 已取消")
     try:
         await listener_task
     except asyncio.CancelledError:
-        pass
+        logger.debug("listen_aria2_events 已取消")
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name, debug=settings.debug, lifespan=lifespan)
     app.state.app_state = AppState()
     app.state.aria2_client = Aria2Client(settings.aria2_rpc_url, settings.aria2_rpc_secret)
+
+    @app.middleware("http")
+    async def request_audit_middleware(request: Request, call_next):
+        path = request.url.path
+        if not path.startswith("/api"):
+            return await call_next(request)
+
+        request_id = request.headers.get("X-Request-ID") or uuid4().hex
+        request.state.request_id = request_id
+        method = request.method
+        client_ip = request.client.host if request.client else "unknown"
+        start_time = time.perf_counter()
+
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            user_id = getattr(request.state, "auth_user_id", None)
+            logger.exception(
+                "[HTTP] %s %s -> 500 %.1fms request_id=%s user_id=%s ip=%s",
+                method,
+                path,
+                duration_ms,
+                request_id,
+                user_id,
+                client_ip,
+            )
+            raise
+
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        user_id = getattr(request.state, "auth_user_id", None)
+
+        log_msg = (
+            "[HTTP] %s %s -> %s %.1fms request_id=%s user_id=%s ip=%s"
+        )
+        log_args = (
+            method,
+            path,
+            status_code,
+            duration_ms,
+            request_id,
+            user_id,
+            client_ip,
+        )
+
+        if status_code >= 500:
+            logger.error(log_msg, *log_args)
+        elif status_code >= 400:
+            logger.warning(log_msg, *log_args)
+        else:
+            logger.info(log_msg, *log_args)
+
+        return response
 
     app.add_middleware(
         CORSMiddleware,

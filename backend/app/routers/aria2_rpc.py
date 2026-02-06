@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import logging
 import secrets
 from collections import defaultdict
 from time import time
@@ -19,6 +20,7 @@ from app.db import fetch_one
 from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
 
 router = APIRouter(tags=["aria2-rpc"])
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -180,10 +182,19 @@ async def process_single_request(
 
     try:
         result = await handler.handle(method, params)
+        logger.debug("RPC方法调用成功 method=%s user_id=%s request_id=%s", method, handler.user_id, request_id)
         return build_jsonrpc_response(result, request_id)
     except RpcError as exc:
+        logger.warning(
+            "RPC方法调用失败 method=%s user_id=%s code=%s request_id=%s",
+            method,
+            handler.user_id,
+            exc.code,
+            request_id,
+        )
         return build_jsonrpc_error(exc.code, exc.message, request_id, exc.data)
     except Exception:
+        logger.exception("RPC方法内部异常 method=%s user_id=%s request_id=%s", method, handler.user_id, request_id)
         return build_jsonrpc_error(
             RpcErrorCode.INTERNAL_ERROR,
             "Internal server error",
@@ -222,7 +233,9 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
     """
     # 0. 限流检查
     client_ip = request.client.host if request.client else "unknown"
+    request_id = getattr(request.state, "request_id", "-")
     if rpc_limiter.is_blocked(client_ip):
+        logger.warning("RPC请求被限流 ip=%s request_id=%s", client_ip, request_id)
         return JSONResponse(
             content=build_jsonrpc_error(
                 -32000,  # Server error
@@ -237,6 +250,7 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
     try:
         body = await request.json()
     except Exception:
+        logger.warning("RPC请求解析JSON失败 ip=%s request_id=%s", client_ip, request_id)
         return JSONResponse(
             content=build_jsonrpc_error(
                 RpcErrorCode.PARSE_ERROR,
@@ -251,6 +265,7 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
     # 对于批量请求，从第一个请求的 params[0] 提取
     if isinstance(body, list):
         if not body:
+            logger.warning("RPC空批量请求 ip=%s request_id=%s", client_ip, request_id)
             return JSONResponse(
                 content=build_jsonrpc_error(
                     RpcErrorCode.INVALID_REQUEST,
@@ -274,6 +289,7 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
         )
 
     if not isinstance(params, list):
+        logger.warning("RPC参数类型错误 ip=%s request_id=%s", client_ip, request_id)
         return JSONResponse(
             content=build_jsonrpc_error(
                 RpcErrorCode.INVALID_PARAMS,
@@ -286,6 +302,7 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
     secret, remaining_params = extract_secret_from_params(params)
 
     if not secret:
+        logger.warning("RPC缺少Token ip=%s request_id=%s", client_ip, request_id)
         return JSONResponse(
             content=build_jsonrpc_error(
                 1,  # Unauthorized
@@ -297,6 +314,7 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
 
     user = get_user_by_rpc_secret(secret)
     if not user:
+        logger.warning("RPC鉴权失败 ip=%s request_id=%s", client_ip, request_id)
         return JSONResponse(
             content=build_jsonrpc_error(
                 1,  # Unauthorized
@@ -310,6 +328,7 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
     aria2_client = request.app.state.aria2_client
     app_state = request.app.state.app_state
     handler = Aria2RpcHandler(user["id"], aria2_client, app_state)
+    logger.info("RPC请求通过鉴权 user_id=%s ip=%s request_id=%s", user["id"], client_ip, request_id)
 
     # 4. 处理请求（支持单个和批量）
     if isinstance(body, list):
@@ -329,8 +348,10 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
                     "Invalid request in batch",
                     None
                 ))
+        logger.info("RPC批量请求完成 user_id=%s count=%s request_id=%s", user["id"], len(responses), request_id)
         return JSONResponse(content=responses, status_code=200)
     else:
         # 单个请求
         response = await process_single_request(body, handler, remaining_params)
+        logger.info("RPC单请求完成 user_id=%s request_id=%s", user["id"], request_id)
         return JSONResponse(content=response, status_code=200)

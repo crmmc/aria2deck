@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 from uuid import uuid4
 
 from fastapi import Depends, HTTPException, Request, Response, status
@@ -9,6 +10,9 @@ from sqlmodel import select
 from app.core.config import settings
 from app.database import get_session
 from app.models import Session, User
+
+
+logger = logging.getLogger(__name__)
 
 
 async def create_session(user_id: int) -> str:
@@ -60,6 +64,7 @@ async def get_user_by_session(session_id: str | None) -> User | None:
         if expires_at < datetime.now(timezone.utc):
             await db.delete(session)
             await db.commit()
+            logger.info("会话已过期并自动清理")
             return None
         result = await db.exec(select(User).where(User.id == session.user_id))
         user = result.first()
@@ -70,7 +75,9 @@ async def require_user(request: Request) -> User:
     session_id = request.cookies.get(settings.session_cookie_name)
     user = await get_user_by_session(session_id)
     if not user:
+        request.state.auth_user_id = None
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    request.state.auth_user_id = user.id
     return user
 
 

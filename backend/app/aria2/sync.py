@@ -301,12 +301,12 @@ async def _cancel_task_sync(
     # Stop aria2 task
     try:
         await client.force_remove(gid)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"[Sync] force_remove 失败 task_id={task.id} gid={gid} error={exc}")
     try:
         await client.remove_download_result(gid)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"[Sync] remove_download_result 失败 task_id={task.id} gid={gid} error={exc}")
 
     # Update task status
     async with get_session() as db:
@@ -429,7 +429,8 @@ async def broadcast_notification(state: AppState, user_id: int, message: str, le
     for ws in sockets:
         try:
             await ws.send_json(notification)
-        except Exception:
+        except Exception as exc:
+            logger.debug(f"[Sync] 通知发送失败 user_id={user_id} error={exc}")
             failed_sockets.append(ws)
     
     if failed_sockets:
