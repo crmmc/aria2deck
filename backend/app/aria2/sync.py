@@ -118,6 +118,8 @@ async def sync_tasks(
                         "error_display": "后端错误",
                     }
                 )
+                await _handle_task_stop_or_error_sync(task.id, "后端错误")
+                await broadcast_task_update_to_subscribers(state, task.id)
                 return
 
             aria2_status = status.get("status")
@@ -375,8 +377,18 @@ async def _handle_task_stop_or_error_sync(
     task_id: int,
     error_display: str | None,
 ) -> None:
-    """同步路径处理任务停止/错误：释放冻结空间并标记订阅失败。"""
+    """同步路径处理任务停止/错误：释放冻结空间、标记订阅失败、写入历史记录。"""
+    from app.services.history import add_task_history
+
     message = error_display or "后端错误"
+
+    async with get_session() as db:
+        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+        task = result.first()
+
+    task_name = (task.name or "未知任务") if task else "未知任务"
+    task_uri = task.uri if task else None
+    task_total_length = task.total_length if task else 0
 
     async with get_session() as db:
         result = await db.exec(
@@ -400,6 +412,17 @@ async def _handle_task_stop_or_error_sync(
                     frozen_space=0,
                 )
             )
+
+    for sub in subscriptions:
+        await add_task_history(
+            owner_id=sub.owner_id,
+            task_name=task_name,
+            result="failed",
+            reason=message,
+            uri=task_uri,
+            total_length=task_total_length,
+            created_at=sub.created_at,
+        )
 
     if subscriptions:
         logger.info(f"[Sync] 任务 {task_id} 错误/停止，释放了 {len(subscriptions)} 个订阅的冻结空间")

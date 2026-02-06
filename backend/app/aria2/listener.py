@@ -506,13 +506,25 @@ async def _handle_task_stop_or_error(
 ) -> None:
     """处理任务停止或错误事件
 
-    释放所有订阅者的冻结空间并标记订阅为失败。
+    释放所有订阅者的冻结空间并标记订阅为失败，写入历史记录。
     """
     from sqlalchemy import update
     from sqlmodel import select
 
     from app.database import get_session
-    from app.models import UserTaskSubscription
+    from app.models import DownloadTask, UserTaskSubscription
+    from app.services.history import add_task_history
+
+    message = error_display or "后端错误"
+
+    # 获取任务信息（用于历史记录）
+    async with get_session() as db:
+        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+        task = result.first()
+
+    task_name = (task.name or "未知任务") if task else "未知任务"
+    task_uri = task.uri if task else None
+    task_total_length = task.total_length if task else 0
 
     async with get_session() as db:
         # 获取所有 pending 状态的订阅
@@ -525,7 +537,6 @@ async def _handle_task_stop_or_error(
         subscriptions = result.all()
 
         # 更新所有订阅：释放冻结空间，标记为失败
-        message = error_display or "后端错误"
         for sub in subscriptions:
             await db.execute(
                 update(UserTaskSubscription)
@@ -539,6 +550,18 @@ async def _handle_task_stop_or_error(
                     error_display=message,
                 )
             )
+
+    # 写入历史记录
+    for sub in subscriptions:
+        await add_task_history(
+            owner_id=sub.owner_id,
+            task_name=task_name,
+            result="failed",
+            reason=message,
+            uri=task_uri,
+            total_length=task_total_length,
+            created_at=sub.created_at,
+        )
 
     logger.info(f"[WS] 任务 {task_id} 停止/错误，释放了 {len(subscriptions)} 个订阅的冻结空间")
 
