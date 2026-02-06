@@ -80,7 +80,20 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       throw new ApiError("会话已过期，请重新登录", 401, true);
     }
     const text = await res.text();
-    throw new ApiError(text || `请求失败: ${res.status}`, res.status);
+    let message = text || `请求失败: ${res.status}`;
+    if (text) {
+      try {
+        const parsed = JSON.parse(text) as { detail?: unknown; message?: unknown };
+        if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+          message = parsed.detail;
+        } else if (typeof parsed.message === "string" && parsed.message.trim()) {
+          message = parsed.message;
+        }
+      } catch {
+        // Keep raw text message when response is not JSON
+      }
+    }
+    throw new ApiError(message, res.status);
   }
   return (await res.json()) as T;
 }

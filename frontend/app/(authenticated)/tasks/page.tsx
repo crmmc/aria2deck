@@ -378,12 +378,18 @@ export default function TasksPage() {
         }
         setUri("");
       } catch (err) {
-        setError((err as Error).message);
+        const message = (err as Error).message;
+        if (message.includes("您已拥有此文件")) {
+          showToast("您已拥有此文件", "warning");
+          setError(null);
+        } else {
+          setError(message);
+        }
       } finally {
         setIsSubmitting(false);
       }
     },
-    [uri, isSubmitting]
+    [uri, isSubmitting, showToast]
   );
 
   const handleTorrentUpload = useCallback(
@@ -415,14 +421,20 @@ export default function TasksPage() {
           setTasks((prev) => [task, ...prev]);
         }
       } catch (err) {
-        setError((err as Error).message);
+        const message = (err as Error).message;
+        if (message.includes("您已拥有此文件")) {
+          showToast("您已拥有此文件", "warning");
+          setError(null);
+        } else {
+          setError(message);
+        }
       } finally {
         if (torrentInputRef.current) {
           torrentInputRef.current.value = "";
         }
       }
     },
-    []
+    [showToast]
   );
 
   const cancelTask = useCallback(
