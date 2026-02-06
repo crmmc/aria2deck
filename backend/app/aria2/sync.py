@@ -105,21 +105,25 @@ async def sync_tasks(
             gid = task.gid
             if not gid:
                 return
+            task_id = task.id
+            if task_id is None:
+                logger.warning(f"[Sync] 任务缺少 task_id，跳过 gid={gid}")
+                return
 
             try:
                 status = await client.tell_status(gid)
             except Exception as exc:
                 logger.error(f"[Sync] 获取 GID {gid} 状态失败: {exc}")
                 await _update_task(
-                    task.id,
+                    task_id,
                     {
                         "status": "error",
                         "error": str(exc),
                         "error_display": "后端错误",
                     }
                 )
-                await _handle_task_stop_or_error_sync(task.id, "后端错误")
-                await broadcast_task_update_to_subscribers(state, task.id)
+                await _handle_task_stop_or_error_sync(task_id, "后端错误")
+                await broadcast_task_update_to_subscribers(state, task_id)
                 return
 
             aria2_status = status.get("status")
@@ -155,16 +159,20 @@ async def sync_tasks(
                 valid_subscribers = []
 
                 for sub, user in subscriptions:
-                    user_lock = await get_user_space_lock(state, user.id)
+                    if user.id is None:
+                        logger.warning(f"[Sync] 用户缺少 user_id，跳过订阅 sub_id={sub.id}")
+                        continue
+                    user_id = user.id
+                    user_lock = await get_user_space_lock(state, user_id)
                     async with user_lock:
-                        space_info = await get_user_space_info(user.id, user.quota)
+                        space_info = await get_user_space_info(user_id, user.quota)
                         # Each user's space is independent, use available directly
                         effective_available = space_info["available"]
 
                         if total_length <= effective_available:
                             # Use optimistic locking: only update if frozen_space is still 0
                             async with get_session() as db:
-                                result = await db.execute(
+                                await db.execute(
                                     update(UserTaskSubscription)
                                     .where(
                                         UserTaskSubscription.id == sub.id,
@@ -172,20 +180,15 @@ async def sync_tasks(
                                     )
                                     .values(frozen_space=total_length)
                                 )
-
-                                if result.rowcount > 0:
+                            async with get_session() as db:
+                                refreshed = await db.exec(
+                                    select(UserTaskSubscription).where(
+                                        UserTaskSubscription.id == sub.id
+                                    )
+                                )
+                                current = refreshed.first()
+                                if current and current.status == "pending" and current.frozen_space > 0:
                                     valid_subscribers.append((sub, user))
-                                else:
-                                    # Already frozen by another process, re-check current state
-                                    async with get_session() as db:
-                                        refreshed = await db.exec(
-                                            select(UserTaskSubscription).where(
-                                                UserTaskSubscription.id == sub.id
-                                            )
-                                        )
-                                        current = refreshed.first()
-                                        if current and current.status == "pending" and current.frozen_space > 0:
-                                            valid_subscribers.append((sub, user))
                         else:
                             # Mark subscription as failed atomically
                             async with get_session() as db:
@@ -208,7 +211,7 @@ async def sync_tasks(
                     return
 
             # Update task status with atomic peak value updates
-            mapped = _map_status(status, task.id)
+            mapped = _map_status(status, task_id)
             mapped_status = mapped["status"]
             raw_error = mapped.get("error")
             error_display = mapped.get("error_display")
@@ -223,7 +226,7 @@ async def sync_tasks(
             # Log and normalize error display
             if mapped_status == "error":
                 if raw_error:
-                    logger.error(f"[Sync] 任务 {task.id} 错误: {raw_error}")
+                    logger.error(f"[Sync] 任务 {task_id} 错误: {raw_error}")
                 if not error_display:
                     error_display = "后端错误"
 
@@ -233,7 +236,7 @@ async def sync_tasks(
                     if raw_error is None:
                         raw_error = task.error
 
-                await _handle_task_stop_or_error_sync(task.id, error_display)
+                await _handle_task_stop_or_error_sync(task_id, error_display)
 
             # Handle magnet link metadata completion
             if mapped_status == "complete":
@@ -241,7 +244,12 @@ async def sync_tasks(
                 if followed_by:
                     new_gid = followed_by[0]
                     logger.info(f"[Sync] 磁力链接元数据完成，更新 GID: {task.gid} -> {new_gid}")
-                    await _update_task(task.id, {"gid": new_gid})
+                    await _update_task(task_id, {"gid": new_gid})
+                    if gid != new_gid:
+                        try:
+                            await client.remove_download_result(gid)
+                        except Exception as exc:
+                            logger.debug(f"[Sync] 清理 metadata 任务结果失败 gid={gid} error={exc}")
                     return
 
             # Track peak values using SQL CASE for atomic conditional update
@@ -274,12 +282,12 @@ async def sync_tasks(
 
                 await db.execute(
                     update(DownloadTask)
-                    .where(DownloadTask.id == task.id)
+                    .where(DownloadTask.id == task_id)
                     .values(**update_values)
                 )
 
             # Broadcast update
-            await broadcast_task_update_to_subscribers(state, task.id)
+            await broadcast_task_update_to_subscribers(state, task_id)
 
         # Process all tasks concurrently
         await asyncio.gather(*[fetch_and_update(task) for task in tasks])
@@ -299,20 +307,27 @@ async def _cancel_task_sync(
     from app.services.storage import cleanup_task_download_dir
 
     gid = task.gid
+    task_id = task.id
+    if task_id is None:
+        logger.warning(f"[Sync] 取消任务缺少 task_id，跳过 gid={gid}")
+        return
+    if not gid:
+        logger.warning(f"[Sync] 取消任务缺少 gid，task_id={task_id}")
+        return
 
     # Stop aria2 task
     try:
         await client.force_remove(gid)
     except Exception as exc:
-        logger.debug(f"[Sync] force_remove 失败 task_id={task.id} gid={gid} error={exc}")
+        logger.debug(f"[Sync] force_remove 失败 task_id={task_id} gid={gid} error={exc}")
     try:
         await client.remove_download_result(gid)
     except Exception as exc:
-        logger.debug(f"[Sync] remove_download_result 失败 task_id={task.id} gid={gid} error={exc}")
+        logger.debug(f"[Sync] remove_download_result 失败 task_id={task_id} gid={gid} error={exc}")
 
     # Update task status
     async with get_session() as db:
-        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task.id))
+        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
         db_task = result.first()
         if db_task:
             db_task.status = "error"
@@ -334,7 +349,7 @@ async def _cancel_task_sync(
     async with get_session() as db:
         result = await db.exec(
             select(UserTaskSubscription).where(
-                UserTaskSubscription.task_id == task.id,
+                UserTaskSubscription.task_id == task_id,
                 UserTaskSubscription.status == "pending",
             )
         )
@@ -367,10 +382,10 @@ async def _cancel_task_sync(
         )
 
     # Clean up download directory
-    await cleanup_task_download_dir(task.id)
+    await cleanup_task_download_dir(task_id)
 
     # Broadcast update
-    await broadcast_task_update_to_subscribers(state, task.id)
+    await broadcast_task_update_to_subscribers(state, task_id)
 
 
 async def _handle_task_stop_or_error_sync(
