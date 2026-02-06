@@ -9,9 +9,9 @@ from fastapi import APIRouter, Depends
 from sqlmodel import select, func
 
 from app.auth import require_admin, require_user
+from app.core.config import settings
 from app.database import get_session
 from app.models import DownloadTask, User, UserTaskSubscription
-from app.routers.config import get_download_dir
 
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -31,7 +31,7 @@ async def get_stats(user: User = Depends(require_user)) -> dict:
     - active_task_count: 用户活跃任务数
     """
     # 计算用户已使用的空间
-    user_dir = Path(get_download_dir()) / str(user.id)
+    user_dir = Path(settings.download_dir) / str(user.id)
     used_space = 0
     if user_dir.exists():
         for file_path in user_dir.rglob("*"):
@@ -45,7 +45,7 @@ async def get_stats(user: User = Depends(require_user)) -> dict:
     user_quota = user.quota if user.quota else 100 * 1024 * 1024 * 1024  # 默认 100GB
 
     # 获取机器实际剩余空间
-    download_path = Path(get_download_dir())
+    download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
     machine_free = disk.free
@@ -113,7 +113,7 @@ async def get_machine_stats(user: User = Depends(require_admin)) -> dict:
     - disk_used: 磁盘已使用空间（字节）
     - disk_free: 磁盘剩余空间（字节）
     """
-    download_path = Path(get_download_dir())
+    download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
 

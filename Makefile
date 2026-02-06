@@ -44,6 +44,8 @@ run:
 # Use this when developing UI pages/components
 
 dev-front:
+	@echo "Building frontend static artifacts before dev..."
+	@$(MAKE) build
 	@echo "Starting frontend dev server on http://localhost:3000 ..."
 	cd $(FRONTEND_DIR) && $(BUN) run dev
 
