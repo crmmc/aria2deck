@@ -430,10 +430,11 @@ async def _handle_task_complete(
         for sub in subscriptions:
             # Create file reference and update status in single transaction
             # Use retry logic to handle UNIQUE constraint race condition
+            should_record_history = False
             try:
                 async with get_session() as db:
                     # Update subscription status first; skip if no longer pending
-                    result = await db.execute(
+                    await db.execute(
                         update(UserTaskSubscription)
                         .where(
                             UserTaskSubscription.id == sub.id,
@@ -441,6 +442,13 @@ async def _handle_task_complete(
                         )
                         .values(status="success", frozen_space=0)
                     )
+
+                    sub_result = await db.exec(
+                        select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                    )
+                    current_sub = sub_result.first()
+                    if not current_sub or current_sub.status != "success":
+                        continue
 
                     # Check if reference already exists
                     result = await db.exec(
@@ -467,6 +475,7 @@ async def _handle_task_complete(
                             .where(StoredFile.id == stored_file.id)
                             .values(ref_count=StoredFile.ref_count + 1)
                         )
+                    should_record_history = True
             except Exception as e:
                 # Race condition: another process created the UserFile between our check and insert
                 # The transaction rolled back, so subscription status is still "pending"
@@ -484,10 +493,18 @@ async def _handle_task_complete(
                             )
                             .values(status="success", frozen_space=0)
                         )
+                        sub_result = await db.exec(
+                            select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                        )
+                        current_sub = sub_result.first()
+                        should_record_history = bool(current_sub and current_sub.status == "success")
                 except Exception as retry_err:
                     logger.warning(
                         f"[WS] Failed to update subscription {sub.id} status after race: {retry_err}"
                     )
+
+            if not should_record_history:
+                continue
 
             # Write to history
             from app.services.history import add_task_history
