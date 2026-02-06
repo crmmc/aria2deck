@@ -58,6 +58,7 @@ export type SystemConfig = {
   ws_reconnect_jitter: number;
   ws_reconnect_factor: number;
   download_token_expiry: number;
+  download_dir: string;
 };
 
 // User file reference (user's view of a stored file)

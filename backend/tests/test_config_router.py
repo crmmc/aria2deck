@@ -30,6 +30,7 @@ class TestGetConfig:
         assert "ws_reconnect_jitter" in data
         assert "ws_reconnect_factor" in data
         assert "download_token_expiry" in data
+        assert "download_dir" in data
 
     def test_get_config_non_admin(self, authenticated_client: TestClient):
         response = authenticated_client.get("/api/config")
@@ -90,6 +91,11 @@ class TestUpdateConfig:
         extensions = response.json()["hidden_file_extensions"]
         assert ".txt" in extensions
         assert ".log" in extensions
+
+    def test_update_download_dir(self, admin_client: TestClient):
+        response = admin_client.put("/api/config", json={"download_dir": "/Downloads/aria2deck"})
+        assert response.status_code == 200
+        assert response.json()["download_dir"] == "/Downloads/aria2deck"
 
     def test_update_config_non_admin(self, authenticated_client: TestClient):
         response = authenticated_client.put("/api/config", json={"max_task_size": 1024})

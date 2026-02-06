@@ -84,6 +84,7 @@ export const createMockSystemConfig = (overrides: Partial<SystemConfig> = {}): S
   ws_reconnect_jitter: 0.3,
   ws_reconnect_factor: 2,
   download_token_expiry: 3600,
+  download_dir: "/Downloads/aria2deck",
   ...overrides,
 });
 
