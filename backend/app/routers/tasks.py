@@ -28,6 +28,7 @@ from app.core.state import AppState, get_aria2_client, get_user_space_lock
 from app.database import get_session
 from app.models import (
     DownloadTask,
+    StoredFile,
     User,
     UserFile,
     UserTaskSubscription,
@@ -43,6 +44,8 @@ from app.services.hash import (
 )
 from app.services.http_probe import probe_url_with_get_fallback
 from app.services.storage import (
+    create_user_file_reference,
+    delete_user_file_reference,
     get_task_download_dir,
     get_user_space_info,
 )
@@ -169,6 +172,46 @@ def _check_disk_space() -> tuple[bool, int]:
     disk = shutil.disk_usage(download_path)
     min_free = get_min_free_disk()
     return disk.free > min_free, disk.free
+
+
+async def _resolve_user_file_state(
+    user_id: int,
+    stored_file_id: int,
+) -> tuple[bool, int | None]:
+    """返回 (是否拥有可用文件, 脏引用ID)。"""
+    async with get_session() as db:
+        result = await db.exec(
+            select(UserFile, StoredFile)
+            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
+            .where(
+                UserFile.owner_id == user_id,
+                UserFile.stored_file_id == stored_file_id,
+            )
+        )
+        row = result.first()
+
+    if not row:
+        return False, None
+
+    user_file, stored_file = row
+    if Path(stored_file.real_path).exists():
+        return True, None
+
+    return False, user_file.id
+
+
+async def _ensure_user_file_reference_if_possible(user_id: int, stored_file_id: int) -> None:
+    """仅在物理文件存在时补建 UserFile 引用。"""
+    async with get_session() as db:
+        result = await db.exec(select(StoredFile).where(StoredFile.id == stored_file_id))
+        stored_file = result.first()
+
+    if not stored_file:
+        return
+    if not Path(stored_file.real_path).exists():
+        return
+
+    await create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id)
 
 
 def _get_display_name(task: DownloadTask) -> str:
@@ -345,8 +388,12 @@ async def create_task(
 
     返回用户的订阅信息。
     """
+    user_id = user.id
+    if user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户未登录")
+
     # Rate limit
-    if not await api_limiter.is_allowed(user.id, "create_task", limit=30, window_seconds=60):
+    if not await api_limiter.is_allowed(user_id, "create_task", limit=30, window_seconds=60):
         logger.warning("创建任务被限流 user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -366,7 +413,7 @@ async def create_task(
         )
 
     # Get user space info
-    space_info = await get_user_space_info(user.id, user.quota)
+    space_info = await get_user_space_info(user_id, user.quota)
     available_space = space_info["available"]
 
     # Determine URI type and get uri_hash
@@ -464,43 +511,44 @@ async def create_task(
     )
 
     # Check if user already subscribed
+    stale_user_file_id: int | None = None
     async with get_session() as db:
         result = await db.exec(
             select(UserTaskSubscription).where(
-                UserTaskSubscription.owner_id == user.id,
+                UserTaskSubscription.owner_id == user_id,
                 UserTaskSubscription.task_id == task.id,
             )
         )
         existing_sub = result.first()
 
         if existing_sub:
-            # Already subscribed - convert to dict inside session
-            if existing_sub.status == "success":
-                # Already completed, check if user has the file
-                result = await db.exec(
-                    select(UserFile).where(
-                        UserFile.owner_id == user.id,
-                        UserFile.stored_file_id == task.stored_file_id,
-                    )
+            if existing_sub.status == "success" and task.stored_file_id:
+                has_valid_file, stale_user_file_id = await _resolve_user_file_state(
+                    user_id=user_id,
+                    stored_file_id=task.stored_file_id,
                 )
-                user_file = result.first()
-
-                if user_file:
+                if has_valid_file:
                     logger.info("重复订阅已完成任务 user_id=%s task_id=%s", user.id, task.id)
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail="您已拥有此文件"
                     )
 
-            return _subscription_to_dict(existing_sub, task)
+    if existing_sub:
+        if stale_user_file_id is not None:
+            await delete_user_file_reference(stale_user_file_id)
+        if existing_sub.status == "success" and task.stored_file_id:
+            await _ensure_user_file_reference_if_possible(
+                user_id=user_id,
+                stored_file_id=task.stored_file_id,
+            )
+        return _subscription_to_dict(existing_sub, task)
 
     # Handle based on task status
     if task.status == "complete" and task.stored_file_id:
         # Task already complete, create file reference directly
-        from app.services.storage import create_user_file_reference
-
-        user_file = await create_user_file_reference(
-            user_id=user.id,
+        await _ensure_user_file_reference_if_possible(
+            user_id=user_id,
             stored_file_id=task.stored_file_id,
         )
 
@@ -508,7 +556,7 @@ async def create_task(
         # First try to create, if race condition occurs, _create_subscription handles it
         async with get_session() as db:
             subscription = UserTaskSubscription(
-                owner_id=user.id,
+                owner_id=user_id,
                 task_id=task.id,
                 frozen_space=0,
                 status="success",
@@ -524,7 +572,7 @@ async def create_task(
                 await db.rollback()
                 result = await db.exec(
                     select(UserTaskSubscription).where(
-                        UserTaskSubscription.owner_id == user.id,
+                        UserTaskSubscription.owner_id == user_id,
                         UserTaskSubscription.task_id == task.id,
                     )
                 )
@@ -688,8 +736,12 @@ async def create_torrent_task(
     user: User = Depends(require_user),
 ) -> dict:
     """通过种子文件创建下载任务"""
+    user_id = user.id
+    if user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户未登录")
+
     # Rate limit
-    if not await api_limiter.is_allowed(user.id, "create_torrent", limit=10, window_seconds=60):
+    if not await api_limiter.is_allowed(user_id, "create_torrent", limit=10, window_seconds=60):
         logger.warning("创建种子任务被限流 user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -724,7 +776,7 @@ async def create_torrent_task(
         )
 
     # Get user space info
-    space_info = await get_user_space_info(user.id, user.quota)
+    space_info = await get_user_space_info(user_id, user.quota)
     available_space = space_info["available"]
 
     # Check minimum space
@@ -744,32 +796,50 @@ async def create_torrent_task(
     )
 
     # Check if user already subscribed
+    stale_user_file_id: int | None = None
     async with get_session() as db:
         result = await db.exec(
             select(UserTaskSubscription).where(
-                UserTaskSubscription.owner_id == user.id,
+                UserTaskSubscription.owner_id == user_id,
                 UserTaskSubscription.task_id == task.id,
             )
         )
         existing_sub = result.first()
 
+        if existing_sub and existing_sub.status == "success" and task.stored_file_id:
+            has_valid_file, stale_user_file_id = await _resolve_user_file_state(
+                user_id=user_id,
+                stored_file_id=task.stored_file_id,
+            )
+            if has_valid_file:
+                logger.info("重复订阅种子已完成任务 user_id=%s task_id=%s", user.id, task.id)
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="您已拥有此文件"
+                )
+
     if existing_sub:
+        if stale_user_file_id is not None:
+            await delete_user_file_reference(stale_user_file_id)
+        if existing_sub.status == "success" and task.stored_file_id:
+            await _ensure_user_file_reference_if_possible(
+                user_id=user_id,
+                stored_file_id=task.stored_file_id,
+            )
         logger.info("重复订阅种子任务 user_id=%s task_id=%s", user.id, task.id)
         return _subscription_to_dict(existing_sub, task)
 
     # Handle completed task
     if task.status == "complete" and task.stored_file_id:
-        from app.services.storage import create_user_file_reference
-
-        await create_user_file_reference(
-            user_id=user.id,
+        await _ensure_user_file_reference_if_possible(
+            user_id=user_id,
             stored_file_id=task.stored_file_id,
         )
 
         # Create subscription marked as success (handle race condition)
         async with get_session() as db:
             subscription = UserTaskSubscription(
-                owner_id=user.id,
+                owner_id=user_id,
                 task_id=task.id,
                 frozen_space=0,
                 status="success",
@@ -785,7 +855,7 @@ async def create_torrent_task(
                 await db.rollback()
                 result = await db.exec(
                     select(UserTaskSubscription).where(
-                        UserTaskSubscription.owner_id == user.id,
+                        UserTaskSubscription.owner_id == user_id,
                         UserTaskSubscription.task_id == task.id,
                     )
                 )

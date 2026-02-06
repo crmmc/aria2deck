@@ -3292,11 +3292,15 @@ class TestCreateTaskConflict:
         uri_hash = calculate_url_hash(test_url)
 
         # Create stored file
+        real_path = os.path.join(temp_db_listener["store_dir"], "conflict_test.zip")
+        with open(real_path, "wb") as f:
+            f.write(b"conflict")
+
         async with get_session() as db:
             stored_file = StoredFile(
                 content_hash="conflict_test_sha256_001",
                 size=10240,
-                real_path="store/conflict_test.zip",
+                real_path=real_path,
                 ref_count=1,
                 original_name="conflict_test.zip",
                 created_at=utc_now_str(),
@@ -3401,11 +3405,15 @@ class TestCreateTaskConflict:
         uri_hash = calculate_url_hash(test_url)
 
         # Create stored file
+        real_path = os.path.join(temp_db_listener["store_dir"], "no_dup_ref.zip")
+        with open(real_path, "wb") as f:
+            f.write(b"no-dup")
+
         async with get_session() as db:
             stored_file = StoredFile(
                 content_hash="no_dup_ref_sha256_001",
                 size=20480,
-                real_path="store/no_dup_ref.zip",
+                real_path=real_path,
                 ref_count=1,
                 original_name="no_dup_ref.zip",
                 created_at=utc_now_str(),
@@ -3514,6 +3522,90 @@ class TestCreateTaskConflict:
             stored = result.first()
             assert stored.ref_count == 1, \
                 f"Expected ref_count 1, got {stored.ref_count}. ref_count was incorrectly incremented!"
+
+    @pytest.mark.asyncio
+    async def test_create_task_stale_reference_not_conflict(
+        self, temp_db_listener, test_user_listener, mock_app_state
+    ):
+        """Stale DB reference with missing physical file should not return 409."""
+        from app.routers.tasks import create_task, TaskCreate
+        from app.models import User
+        from app.services.hash import calculate_url_hash
+
+        test_url = "https://example.com/stale_ref.zip"
+        uri_hash = calculate_url_hash(test_url)
+        missing_path = os.path.join(temp_db_listener["store_dir"], "stale_ref.zip")
+
+        async with get_session() as db:
+            stored_file = StoredFile(
+                content_hash="stale_ref_sha256_001",
+                size=12345,
+                real_path=missing_path,
+                ref_count=1,
+                original_name="stale_ref.zip",
+                created_at=utc_now_str(),
+            )
+            db.add(stored_file)
+            await db.commit()
+            await db.refresh(stored_file)
+
+            task = DownloadTask(
+                uri_hash=uri_hash,
+                uri=test_url,
+                gid="gid_stale_ref_001",
+                status="complete",
+                name="stale_ref.zip",
+                total_length=12345,
+                completed_length=12345,
+                stored_file_id=stored_file.id,
+                created_at=utc_now_str(),
+                updated_at=utc_now_str(),
+            )
+            db.add(task)
+            await db.commit()
+            await db.refresh(task)
+
+            user_file = UserFile(
+                owner_id=test_user_listener["id"],
+                stored_file_id=stored_file.id,
+                display_name="stale_ref.zip",
+                created_at=utc_now_str(),
+            )
+            db.add(user_file)
+
+            subscription = UserTaskSubscription(
+                owner_id=test_user_listener["id"],
+                task_id=task.id,
+                frozen_space=0,
+                status="success",
+                created_at=utc_now_str(),
+            )
+            db.add(subscription)
+            await db.commit()
+
+        mock_user = User(
+            id=test_user_listener["id"],
+            username=test_user_listener["username"],
+            password_hash="dummy",
+            is_admin=False,
+            quota=test_user_listener["quota"],
+            created_at=utc_now_str(),
+        )
+        payload = TaskCreate(uri=test_url)
+        mock_request = AsyncMock()
+        mock_request.app.state.app_state = mock_app_state
+
+        with patch("app.routers.tasks.probe_url_with_get_fallback") as mock_probe:
+            from app.services.http_probe import ProbeResult
+            mock_probe.return_value = ProbeResult(
+                success=True,
+                final_url=test_url,
+                filename="stale_ref.zip",
+                content_length=12345,
+            )
+
+            result = await create_task(payload, mock_request, mock_user)
+            assert result["status"] == "complete"
 
 
 class TestCreateTaskErrorRetry:
