@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.core.rate_limit import api_limiter
 from app.database import get_session
 from app.models import User, PackTask, UserFile, StoredFile
+from app.routers.config import get_download_dir
 from app.services.storage import (
     delete_user_file_reference,
     get_user_space_info,
@@ -438,7 +439,7 @@ async def get_space(user: User = Depends(require_user)) -> dict:
 
 def _get_user_dir(user_id: int) -> Path:
     """获取用户目录的 Path 对象（兼容旧代码）"""
-    base = Path(settings.download_dir).resolve()
+    base = Path(get_download_dir()).resolve()
     user_dir = base / str(user_id)
     user_dir.mkdir(parents=True, exist_ok=True)
     return user_dir

@@ -46,6 +46,7 @@ class ConfigUpdate(BaseModel):
     ws_reconnect_factor: float | None = None  # 指数因子
     # 下载链接 Token 有效期
     download_token_expiry: int | None = None  # 下载链接 Token 有效期（秒）
+    download_dir: str | None = None  # 实际下载根目录（需与 aria2 机器路径一致）
 
 
 class Aria2TestRequest(BaseModel):
@@ -198,6 +199,16 @@ def get_download_token_expiry() -> int:
         return 7200
 
 
+def get_download_dir() -> str:
+    """获取实际下载根目录，默认使用环境变量配置。"""
+    val = get_config_value("download_dir")
+    if val and val.strip():
+        return val.strip()
+    from app.core.config import settings
+
+    return settings.download_dir
+
+
 @router.get("")
 async def get_config(admin: User = Depends(require_admin)) -> dict:
     """获取系统配置（管理员）
@@ -230,6 +241,7 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),
         "ws_reconnect_factor": get_ws_reconnect_factor(),
         "download_token_expiry": get_download_token_expiry(),
+        "download_dir": get_download_dir(),
     }
     logger.debug("获取系统配置 admin_id=%s", admin.id)
     return result
@@ -303,6 +315,15 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         expiry = max(60, min(86400 * 7, payload.download_token_expiry))  # 1分钟-7天
         await set_config_value_async("download_token_expiry", str(expiry))
         changed_keys.append("download_token_expiry")
+    if payload.download_dir is not None:
+        download_dir = payload.download_dir.strip()
+        if not download_dir:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="download_dir 不能为空",
+            )
+        await set_config_value_async("download_dir", download_dir)
+        changed_keys.append("download_dir")
 
     # 返回更新后的配置（secret 脱敏）
     aria2_rpc_url = await get_config_value_async("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
@@ -325,6 +346,7 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),
         "ws_reconnect_factor": get_ws_reconnect_factor(),
         "download_token_expiry": get_download_token_expiry(),
+        "download_dir": get_download_dir(),
     }
 
 

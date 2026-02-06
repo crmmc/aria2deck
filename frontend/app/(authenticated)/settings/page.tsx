@@ -27,6 +27,7 @@ export default function SettingsPage() {
   const [wsReconnectFactor, setWsReconnectFactor] = useState(2);
   // 下载链接 Token 有效期
   const [downloadTokenExpiry, setDownloadTokenExpiry] = useState(7200);
+  const [downloadDir, setDownloadDir] = useState("");
   const [aria2Status, setAria2Status] = useState<{
     connected: boolean;
     version?: string;
@@ -81,6 +82,7 @@ export default function SettingsPage() {
       setWsReconnectJitter(cfg.ws_reconnect_jitter || 0.2);
       setWsReconnectFactor(cfg.ws_reconnect_factor || 2);
       setDownloadTokenExpiry(cfg.download_token_expiry || 7200);
+      setDownloadDir(cfg.download_dir || "");
       setMachineStats(stats);
       setAria2Status(aria2Ver);
       setTestResult(null);
@@ -113,6 +115,7 @@ export default function SettingsPage() {
         ws_reconnect_jitter: wsReconnectJitter,
         ws_reconnect_factor: wsReconnectFactor,
         download_token_expiry: downloadTokenExpiry,
+        download_dir: downloadDir,
       });
 
       await loadConfig();
@@ -288,6 +291,18 @@ export default function SettingsPage() {
               value={aria2RpcSecret}
               onChange={(e) => setAria2RpcSecret(e.target.value)}
               placeholder="留空表示无密钥"
+            />
+          </div>
+
+          <div className="mb-7">
+            <label className="form-label-lg">实际下载根目录</label>
+            <p className="muted text-sm mb-2">用于下发给 aria2 的下载路径，必须与 aria2 所在机器可访问路径一致（并建议在后端容器中同路径挂载）。</p>
+            <input
+              className="input"
+              type="text"
+              value={downloadDir}
+              onChange={(e) => setDownloadDir(e.target.value)}
+              placeholder="/Downloads/aria2deck"
             />
           </div>
 
