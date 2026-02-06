@@ -333,6 +333,7 @@ async def _handle_task_complete(
 
     from app.database import get_session
     from app.models import DownloadTask, UserTaskSubscription, UserFile, StoredFile, utc_now_str
+    from app.services.history import add_task_history
     from app.services.storage import (
         cleanup_task_download_dir,
         get_task_download_dir,
@@ -507,7 +508,6 @@ async def _handle_task_complete(
                 continue
 
             # Write to history
-            from app.services.history import add_task_history
             await add_task_history(
                 owner_id=sub.owner_id,
                 task_name=original_name,
@@ -522,6 +522,7 @@ async def _handle_task_complete(
 
     except Exception as e:
         logger.error(f"[WS] 处理任务 {task_id} 完成事件失败: {e}")
+        return
 
     # Clean up task download directory
     await cleanup_task_download_dir(task_id)
