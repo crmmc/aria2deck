@@ -15,7 +15,7 @@ from app.core.security import hash_password
 from app.core.state import AppState
 from app.database import get_session, reset_engine, init_db as init_sqlmodel_db, dispose_engine
 from app.db import init_db, execute
-from app.models import DownloadTask, UserTaskSubscription, utc_now_str
+from app.models import DownloadTask, TaskHistory, UserFile, UserTaskSubscription, utc_now_str
 
 
 @pytest.fixture(scope="function")
@@ -73,18 +73,20 @@ async def _create_task_with_subs(user_ids: list[int], gid: str, total_length: in
         db.add(task)
         await db.commit()
         await db.refresh(task)
+        assert task.id is not None
+        task_id = task.id
 
         for user_id in user_ids:
             sub = UserTaskSubscription(
                 owner_id=user_id,
-                task_id=task.id,
+                task_id=task_id,
                 frozen_space=0,
                 status="pending",
                 created_at=utc_now_str(),
             )
             db.add(sub)
         await db.commit()
-        return task.id
+        return task_id
 
 
 class TestStartEventSpaceFreeze:
@@ -369,3 +371,100 @@ class TestSyncTasksSpaceFreeze:
             assert task is not None
             assert task.status == "error"
             assert task.gid is None
+
+
+class TestSyncCompletionFinalization:
+    """Tests for sync complete path finalization."""
+
+    @pytest.mark.asyncio
+    async def test_sync_complete_creates_userfile_and_history(self, temp_db_freeze):
+        user_id = _create_user("freezeuser_complete_1", 100 * 1024 * 1024 * 1024)
+        gid = "gid_complete_sync_1"
+        total_length = 4096
+
+        task_id = await _create_task_with_subs([user_id], gid, total_length=total_length, status="active")
+
+        task_dir = os.path.join(settings.download_dir, "downloading", str(task_id))
+        os.makedirs(task_dir, exist_ok=True)
+        source_file = os.path.join(task_dir, "done.bin")
+        with open(source_file, "wb") as f:
+            f.write(b"sync completion content")
+
+        state = AppState()
+        mock_client = AsyncMock()
+        mock_client.tell_status.return_value = {
+            "gid": gid,
+            "status": "complete",
+            "totalLength": str(total_length),
+            "completedLength": str(total_length),
+            "downloadSpeed": "0",
+            "uploadSpeed": "0",
+            "files": [{"path": source_file}],
+            "connections": "0",
+        }
+
+        with patch("app.core.state.get_aria2_client", return_value=mock_client), \
+             patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock), \
+             patch("app.aria2.sync.asyncio.sleep", new_callable=AsyncMock, side_effect=asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
+                await sync_tasks(state, interval=0.01)
+
+        async with get_session() as db:
+            result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+            task = result.first()
+            assert task is not None
+            assert task.status == "complete"
+            assert task.stored_file_id is not None
+
+            result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+            )
+            subs = result.all()
+            assert len(subs) == 1
+            assert subs[0].status == "success"
+            assert subs[0].frozen_space == 0
+
+            result = await db.exec(select(UserFile).where(UserFile.owner_id == user_id))
+            user_files = result.all()
+            assert len(user_files) == 1
+
+            result = await db.exec(select(TaskHistory).where(TaskHistory.owner_id == user_id))
+            history = result.all()
+            assert len(history) == 1
+            assert history[0].result == "completed"
+
+    @pytest.mark.asyncio
+    async def test_sync_repairs_inconsistent_completed_tasks(self, temp_db_freeze):
+        user_id = _create_user("freezeuser_complete_2", 100 * 1024 * 1024 * 1024)
+        gid = "gid_complete_sync_2"
+
+        task_id = await _create_task_with_subs([user_id], gid, total_length=2048, status="complete")
+
+        state = AppState()
+        mock_client = AsyncMock()
+
+        with patch("app.core.state.get_aria2_client", return_value=mock_client), \
+             patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock), \
+             patch("app.aria2.sync.asyncio.sleep", new_callable=AsyncMock, side_effect=asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
+                await sync_tasks(state, interval=0.01)
+
+        async with get_session() as db:
+            result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+            task = result.first()
+            assert task is not None
+            assert task.status == "error"
+            assert task.error_display == "下载完成但文件未入库"
+
+            result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+            )
+            subs = result.all()
+            assert len(subs) == 1
+            assert subs[0].status == "failed"
+
+            result = await db.exec(select(TaskHistory).where(TaskHistory.owner_id == user_id))
+            history = result.all()
+            assert len(history) == 1
+            assert history[0].result == "failed"
+            assert history[0].reason == "下载完成但文件未入库"

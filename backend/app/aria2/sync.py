@@ -89,6 +89,7 @@ async def sync_tasks(
     from app.services.storage import get_user_space_info
 
     while True:
+        await _repair_inconsistent_completed_tasks(state)
         client = get_aria2_client()
 
         # Get all active tasks
@@ -215,6 +216,11 @@ async def sync_tasks(
             mapped_status = mapped["status"]
             raw_error = mapped.get("error")
             error_display = mapped.get("error_display")
+            completion_handler = None
+            if mapped_status == "complete":
+                from app.aria2.listener import _handle_task_complete
+
+                completion_handler = _handle_task_complete
 
             # Handle removed tasks as external cancellations
             if mapped_status == "removed":
@@ -286,6 +292,9 @@ async def sync_tasks(
                     .values(**update_values)
                 )
 
+            if completion_handler is not None:
+                await completion_handler(state, task_id, status)
+
             # Broadcast update
             await broadcast_task_update_to_subscribers(state, task_id)
 
@@ -293,6 +302,41 @@ async def sync_tasks(
         await asyncio.gather(*[fetch_and_update(task) for task in tasks])
 
         await asyncio.sleep(interval)
+
+
+async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
+    """修复完成状态但未落库为用户文件/历史的脏任务。"""
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+
+    async with get_session() as db:
+        result = await db.exec(
+            select(DownloadTask).where(
+                DownloadTask.status == "complete",
+                DownloadTask.stored_file_id.is_(None),
+            )
+        )
+        tasks = result.all()
+
+    if not tasks:
+        return
+
+    logger.warning(f"[Sync] 检测到 {len(tasks)} 个完成但未落库任务，开始修复")
+    for task in tasks:
+        task_id = task.id
+        if task_id is None:
+            continue
+
+        reason = "下载完成但文件未入库"
+        await _update_task(
+            task_id,
+            {
+                "status": "error",
+                "error": reason,
+                "error_display": reason,
+            },
+        )
+        await _handle_task_stop_or_error_sync(task_id, reason)
+        await broadcast_task_update_to_subscribers(state, task_id)
 
 
 async def _cancel_task_sync(
