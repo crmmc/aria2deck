@@ -992,17 +992,10 @@ async def list_tasks(
                     DownloadTask.status.in_(["queued", "active"]),
                 )
             elif status_filter == "current":
-                # 当前任务：活跃 + 失败（不包括已完成）
+                # 当前任务：仅活跃（终态任务统一在历史页）
                 query = query.where(
-                    (
-                        (UserTaskSubscription.status == "pending") &
-                        (DownloadTask.status.in_(["queued", "active"]))
-                    ) |
-                    (UserTaskSubscription.status == "failed") |
-                    (
-                        (UserTaskSubscription.status == "pending") &
-                        (DownloadTask.status == "error")
-                    )
+                    UserTaskSubscription.status == "pending",
+                    DownloadTask.status.in_(["queued", "active"]),
                 )
             elif status_filter == "complete":
                 query = query.where(UserTaskSubscription.status == "success")

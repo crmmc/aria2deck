@@ -333,6 +333,7 @@ async def _handle_task_complete(
 
     from app.database import get_session
     from app.models import DownloadTask, UserTaskSubscription, UserFile, StoredFile, utc_now_str
+    from app.core.state import get_aria2_client
     from app.services.history import add_task_history
     from app.services.storage import (
         cleanup_task_download_dir,
@@ -352,6 +353,8 @@ async def _handle_task_complete(
     if task.stored_file_id is not None:
         logger.debug(f"[WS] Task {task_id} already processed (stored_file_id={task.stored_file_id}), skipping")
         return
+
+    completion_gid = task.gid
 
     # Additional check: verify task status is complete
     if task.status != "complete":
@@ -526,6 +529,27 @@ async def _handle_task_complete(
 
     # Clean up task download directory
     await cleanup_task_download_dir(task_id)
+
+    # Remove completed task from aria2 list and clear gid in DB.
+    if completion_gid:
+        try:
+            client = get_aria2_client()
+            await client.remove_download_result(completion_gid)
+        except Exception as exc:
+            logger.debug(f"[WS] 清理完成任务记录失败 gid={completion_gid} error={exc}")
+
+        async with get_session() as db:
+            await db.execute(
+                update(DownloadTask)
+                .where(
+                    DownloadTask.id == task_id,
+                    DownloadTask.gid == completion_gid,
+                )
+                .values(
+                    gid=None,
+                    updated_at=utc_now_str(),
+                )
+            )
 
 
 async def _handle_task_stop_or_error(

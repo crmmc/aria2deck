@@ -18,6 +18,7 @@ from app.database import get_session, reset_engine, init_db as init_sqlmodel_db,
 from app.db import init_db, execute
 from app.core.config import settings
 from app.core.security import hash_password
+from app.aria2.sync import _cleanup_orphan_aria2_tasks
 from app.models import DownloadTask, utc_now_str
 
 
@@ -360,3 +361,46 @@ class TestPeakValueSequentialUpdates:
                 )
                 db_task = result.first()
                 assert db_task.peak_download_speed == initial_peak
+
+
+class TestOrphanCleanup:
+    @pytest.mark.asyncio
+    async def test_cleanup_stopped_orphan_immediately(self):
+        client = AsyncMock()
+        client.tell_active.return_value = []
+        client.tell_waiting.return_value = []
+        client.tell_stopped.return_value = [{"gid": "orphan_stopped_1"}]
+
+        orphan_seen_at: dict[str, float] = {}
+        await _cleanup_orphan_aria2_tasks(
+            client=client,
+            tracked_gids=set(),
+            orphan_seen_at=orphan_seen_at,
+            grace_seconds=60.0,
+            max_actions=50,
+        )
+
+        client.remove_download_result.assert_awaited_once_with("orphan_stopped_1")
+        client.force_remove.assert_not_awaited()
+        assert "orphan_stopped_1" not in orphan_seen_at
+
+    @pytest.mark.asyncio
+    async def test_cleanup_active_orphan_after_grace(self):
+        client = AsyncMock()
+        client.tell_active.return_value = [{"gid": "orphan_active_1"}]
+        client.tell_waiting.return_value = []
+        client.tell_stopped.return_value = []
+
+        orphan_seen_at = {"orphan_active_1": 0.0}
+        with patch("app.aria2.sync.time.monotonic", return_value=120.0):
+            await _cleanup_orphan_aria2_tasks(
+                client=client,
+                tracked_gids=set(),
+                orphan_seen_at=orphan_seen_at,
+                grace_seconds=60.0,
+                max_actions=50,
+            )
+
+        client.force_remove.assert_awaited_once_with("orphan_active_1")
+        client.remove_download_result.assert_awaited_once_with("orphan_active_1")
+        assert "orphan_active_1" not in orphan_seen_at

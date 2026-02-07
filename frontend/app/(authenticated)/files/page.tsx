@@ -563,10 +563,13 @@ export default function FilesPage() {
                 <div className="table-cell text-right">操作</div>
           </div>
           
-          <div style={{ flex: 1 }}>
-            <AutoSizer renderProp={({ height, width }) => (
+          <div style={{ flex: 1, minHeight: 320 }}>
+            <AutoSizer renderProp={({ height, width }) => {
+                const safeHeight = typeof height === "number" && height > 0 ? height : 400;
+                const safeWidth = typeof width === "number" && width > 0 ? width : 1200;
+                return (
                 <List
-                  style={{ height: height ?? 0, width: width ?? 0 }}
+                  style={{ height: safeHeight, width: safeWidth }}
                   rowCount={sortedFiles.length}
                   rowHeight={60}
                   rowProps={{}}
@@ -679,7 +682,8 @@ export default function FilesPage() {
                     );
                   }}
                 />
-              )}
+              );
+              }}
             />
           </div>
         </div>

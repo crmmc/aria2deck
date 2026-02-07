@@ -18,6 +18,21 @@ router = APIRouter(prefix="/api/stats", tags=["stats"])
 logger = logging.getLogger(__name__)
 
 
+def _get_directory_size_bytes(path: Path) -> int:
+    """Recursively calculate directory size in bytes."""
+    if not path.exists():
+        return 0
+
+    total = 0
+    for entry in path.rglob("*"):
+        if entry.is_file():
+            try:
+                total += entry.stat().st_size
+            except Exception as exc:
+                logger.warning("统计目录大小失败 path=%s error=%s", entry, exc)
+    return total
+
+
 @router.get("")
 async def get_stats(user: User = Depends(require_user)) -> dict:
     """获取系统状态
@@ -112,15 +127,21 @@ async def get_machine_stats(user: User = Depends(require_admin)) -> dict:
     - disk_total: 磁盘总空间（字节）
     - disk_used: 磁盘已使用空间（字节）
     - disk_free: 磁盘剩余空间（字节）
+    - download_used: 下载目录占用（字节）
+    - system_used: 系统占用（字节，disk_used - download_used）
     """
     download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
+    download_used = _get_directory_size_bytes(download_path)
+    system_used = max(disk.used - download_used, 0)
 
     result = {
         "disk_total": disk.total,
         "disk_used": disk.used,
         "disk_free": disk.free,
+        "download_used": download_used,
+        "system_used": system_used,
     }
     logger.debug("获取机器统计 admin_id=%s", user.id)
     return result

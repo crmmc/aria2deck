@@ -91,6 +91,8 @@ export type MachineStats = {
   disk_total: number;
   disk_used: number;
   disk_free: number;
+  download_used: number;
+  system_used: number;
 };
 
 export type PackTask = {
