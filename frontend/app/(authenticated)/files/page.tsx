@@ -49,6 +49,15 @@ export default function FilesPage() {
   const [packTasksKey, setPackTasksKey] = useState(0);
   const [downloadingFile, setDownloadingFile] = useState<number | null>(null);
 
+  // Pack dialog state
+  const [packDialogOpen, setPackDialogOpen] = useState(false);
+  const [packSize, setPackSize] = useState<number | null>(null);
+  const [availableSpace, setAvailableSpace] = useState<number | null>(null);
+  const [packOutputName, setPackOutputName] = useState("");
+  const [packDeleteSource, setPackDeleteSource] = useState(false);
+  const [packing, setPacking] = useState(false);
+  const [packLoading, setPackLoading] = useState(false);
+
   useEffect(() => {
     if (showSearchModal || browsingFile) {
       document.body.style.overflow = "hidden";
@@ -224,6 +233,50 @@ export default function FilesPage() {
       showToast(`删除失败: ${(err as Error).message}`, "error");
     } finally {
       setIsBatchOperating(false);
+    }
+  };
+
+  const openPackDialog = async () => {
+    if (selectedFiles.size === 0) {
+      showToast("请先选择要打包的文件", "warning");
+      return;
+    }
+    setPackDialogOpen(true);
+    setPackLoading(true);
+    setPackSize(null);
+    setAvailableSpace(null);
+    setPackOutputName("");
+    try {
+      const fileIds = Array.from(selectedFiles);
+      const [sizeRes, spaceRes] = await Promise.all([
+        api.calculatePackSize(fileIds),
+        api.getAvailableSpace(),
+      ]);
+      setPackSize(sizeRes.total_size);
+      setAvailableSpace(spaceRes.available);
+    } catch (err) {
+      showToast(`获取信息失败: ${(err as Error).message}`, "error");
+      setPackDialogOpen(false);
+    } finally {
+      setPackLoading(false);
+    }
+  };
+
+  const handlePackConfirm = async () => {
+    setPacking(true);
+    try {
+      const fileIds = Array.from(selectedFiles);
+      await api.createPackTask(fileIds, packOutputName || undefined, packDeleteSource);
+      showToast("打包任务已创建", "success");
+      setPackDialogOpen(false);
+      setSelectedFiles(new Set());
+      setPackOutputName("");
+      setPackDeleteSource(false);
+      setPackTasksKey((k) => k + 1);
+    } catch (err) {
+      showToast(`创建打包任务失败: ${(err as Error).message}`, "error");
+    } finally {
+      setPacking(false);
     }
   };
 
@@ -502,6 +555,14 @@ export default function FilesPage() {
                 disabled={isBatchOperating}
               >
                 {isBatchOperating ? "删除中..." : "批量删除"}
+              </button>
+              <button
+                type="button"
+                className="button secondary btn-sm"
+                onClick={openPackDialog}
+                disabled={isBatchOperating}
+              >
+                打包下载
               </button>
             </>
           )}
@@ -891,6 +952,104 @@ export default function FilesPage() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Pack Dialog */}
+      {packDialogOpen && (
+        <div className="modal-overlay" onClick={() => !packing && setPackDialogOpen(false)}>
+          <div
+            className="batch-modal-content"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: "500px", width: "90%" }}
+          >
+            <div className="modal-header">
+              <h2 className="m-0">打包下载</h2>
+              <button
+                type="button"
+                onClick={() => !packing && setPackDialogOpen(false)}
+                className="modal-close-btn"
+                disabled={packing}
+              >
+                ×
+              </button>
+            </div>
+
+            {packLoading ? (
+              <div className="text-center py-8">
+                <p className="muted">计算中...</p>
+              </div>
+            ) : (
+              <div className="p-4">
+                <div className="mb-4">
+                  <p className="text-base mb-2">
+                    已选择 <strong>{selectedFiles.size}</strong> 个文件
+                  </p>
+                  {packSize !== null && (
+                    <p className="text-base mb-2">
+                      预估大小: <strong>{formatBytes(packSize)}</strong>
+                    </p>
+                  )}
+                  {availableSpace !== null && (
+                    <p className="text-base mb-2">
+                      可用空间: <strong>{formatBytes(availableSpace)}</strong>
+                    </p>
+                  )}
+                  {packSize !== null && availableSpace !== null && packSize > availableSpace && (
+                    <p className="text-danger text-sm">
+                      空间不足，无法创建打包任务
+                    </p>
+                  )}
+                </div>
+
+                <div className="mb-4">
+                  <label className="text-sm muted mb-1 block">
+                    输出文件名 (可选)
+                  </label>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="默认自动生成"
+                    value={packOutputName}
+                    onChange={(e) => setPackOutputName(e.target.value)}
+                    disabled={packing}
+                  />
+                </div>
+
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={packDeleteSource}
+                    onChange={(e) => setPackDeleteSource(e.target.checked)}
+                    disabled={packing}
+                  />
+                  <span>打包后删除源文件</span>
+                </label>
+
+                <div className="flex gap-3 flex-end">
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={() => setPackDialogOpen(false)}
+                    disabled={packing}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="button primary"
+                    onClick={handlePackConfirm}
+                    disabled={
+                      packing ||
+                      (packSize !== null && availableSpace !== null && packSize > availableSpace)
+                    }
+                  >
+                    {packing ? "创建中..." : "确认打包"}
+                  </button>
+                </div>
               </div>
             )}
           </div>

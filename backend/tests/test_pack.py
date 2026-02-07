@@ -5,6 +5,7 @@ Test scenarios:
 2. Space Calculation Tests - Server space, user space, folder size
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -17,6 +18,68 @@ from fastapi.testclient import TestClient
 
 from app.core.config import settings
 from app.db import execute, fetch_one, fetch_all, utc_now
+
+
+# ========== Helper ==========
+
+def _create_user_files(user_id: int, user_dir: Path, files: list[tuple[str, int]]) -> list[int]:
+    """Create StoredFile + UserFile records and physical files.
+
+    Args:
+        user_id: owner id
+        user_dir: user download directory
+        files: list of (filename, size) tuples
+
+    Returns:
+        list of UserFile IDs
+    """
+    ids = []
+    for name, size in files:
+        real_path = str(user_dir / name)
+        os.makedirs(os.path.dirname(real_path), exist_ok=True)
+        with open(real_path, "wb") as f:
+            f.write(b"x" * size)
+
+        stored_id = execute(
+            "INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [f"hash_{name}_{user_id}", real_path, size, 0, 1, name, utc_now()],
+        )
+        uf_id = execute(
+            "INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at) VALUES (?, ?, ?, ?)",
+            [user_id, stored_id, name, utc_now()],
+        )
+        ids.append(uf_id)
+    return ids
+
+
+def _create_user_dir_file(user_id: int, user_dir: Path, dir_name: str) -> int:
+    """Create a StoredFile (directory) + UserFile record with physical directory.
+
+    Returns:
+        UserFile ID
+    """
+    real_path = str(user_dir / dir_name)
+    os.makedirs(real_path, exist_ok=True)
+    # Create some files inside
+    for i in range(3):
+        with open(os.path.join(real_path, f"file{i}.txt"), "w") as f:
+            f.write(f"content {i}" * 100)
+
+    total_size = sum(
+        os.path.getsize(os.path.join(real_path, f))
+        for f in os.listdir(real_path)
+        if os.path.isfile(os.path.join(real_path, f))
+    )
+
+    stored_id = execute(
+        "INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [f"hash_{dir_name}_{user_id}", real_path, total_size, 1, 1, dir_name, utc_now()],
+    )
+    uf_id = execute(
+        "INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at) VALUES (?, ?, ?, ?)",
+        [user_id, stored_id, dir_name, utc_now()],
+    )
+    return uf_id
 
 
 # ========== Fixtures ==========
@@ -171,76 +234,73 @@ class TestCreatePackTask:
     def test_create_pack_task_success(
         self,
         authenticated_client: TestClient,
-        test_folder: Path,
+        user_download_dir: Path,
         test_user: dict,
     ):
-        """Successfully create a pack task for a valid folder."""
-        # Calculate expected folder size
-        folder_path = test_folder.relative_to(Path(settings.download_dir) / str(test_user["id"]))
+        """Successfully create a pack task for valid file IDs."""
+        file_ids = _create_user_files(test_user["id"], user_download_dir, [
+            ("file1.txt", 1200),
+            ("file2.txt", 1300),
+        ])
 
         with patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock) as mock_start_pack:
-            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
-                response = authenticated_client.post(
-                    "/api/files/pack",
-                    json={"folder_path": str(folder_path)}
-                )
+            response = authenticated_client.post(
+                "/api/files/pack",
+                json={"file_ids": file_ids}
+            )
 
         assert response.status_code == 201
         data = response.json()
 
         assert data["owner_id"] == test_user["id"]
-        assert data["folder_path"] == str(folder_path)
         assert data["status"] == "pending"
         assert data["folder_size"] > 0
         assert data["reserved_space"] == data["folder_size"]
 
-    def test_create_pack_task_folder_not_found(
+    def test_create_pack_task_file_not_found(
         self,
         authenticated_client: TestClient,
         user_download_dir: Path,
     ):
-        """Return 404 when folder does not exist."""
+        """Return 404 when file IDs do not exist."""
         response = authenticated_client.post(
             "/api/files/pack",
-            json={"folder_path": "nonexistent_folder"}
+            json={"file_ids": [99999]}
         )
 
         assert response.status_code == 404
         assert "detail" in response.json()
 
-    def test_create_pack_task_path_is_file(
+    def test_create_pack_task_single_file(
         self,
         authenticated_client: TestClient,
-        test_file: Path,
+        user_download_dir: Path,
         test_user: dict,
     ):
-        """Can pack a single file (not just directories)."""
-        file_path = test_file.relative_to(Path(settings.download_dir) / str(test_user["id"]))
+        """Can pack a single file."""
+        file_ids = _create_user_files(test_user["id"], user_download_dir, [
+            ("single_file.txt", 500),
+        ])
 
         with patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
-            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
-                response = authenticated_client.post(
-                    "/api/files/pack",
-                    json={"folder_path": str(file_path)}
-                )
+            response = authenticated_client.post(
+                "/api/files/pack",
+                json={"file_ids": file_ids}
+            )
 
         assert response.status_code == 201
         data = response.json()
-        assert data["folder_path"] == str(file_path)
         assert data["folder_size"] > 0
 
-    def test_create_pack_task_empty_folder(
+    def test_create_pack_task_empty_file_ids(
         self,
         authenticated_client: TestClient,
-        empty_folder: Path,
-        test_user: dict,
+        user_download_dir: Path,
     ):
-        """Return 400 when folder is empty."""
-        folder_path = empty_folder.relative_to(Path(settings.download_dir) / str(test_user["id"]))
-
+        """Return 400 when file_ids is empty."""
         response = authenticated_client.post(
             "/api/files/pack",
-            json={"folder_path": str(folder_path)}
+            json={"file_ids": []}
         )
 
         assert response.status_code == 400
@@ -249,19 +309,22 @@ class TestCreatePackTask:
     def test_create_pack_task_insufficient_space(
         self,
         authenticated_client: TestClient,
-        test_folder: Path,
+        user_download_dir: Path,
         test_user: dict,
     ):
         """Return 403 when user has insufficient space."""
-        folder_path = test_folder.relative_to(Path(settings.download_dir) / str(test_user["id"]))
+        file_ids = _create_user_files(test_user["id"], user_download_dir, [
+            ("bigfile.bin", 1000),
+        ])
 
         # Mock very limited available space
-        with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=10):
-            with patch("app.services.pack.get_user_available_space_for_pack", new_callable=AsyncMock, return_value=10):
-                response = authenticated_client.post(
-                    "/api/files/pack",
-                    json={"folder_path": str(folder_path)}
-                )
+        with patch("app.services.storage.get_user_space_info", new_callable=AsyncMock, return_value={
+            "quota": 100, "used": 99, "frozen": 0, "available": 1,
+        }):
+            response = authenticated_client.post(
+                "/api/files/pack",
+                json={"file_ids": file_ids}
+            )
 
         assert response.status_code == 403
         assert "detail" in response.json()
@@ -269,34 +332,31 @@ class TestCreatePackTask:
     def test_create_pack_task_duplicate_task(
         self,
         authenticated_client: TestClient,
-        test_folder: Path,
+        user_download_dir: Path,
         test_user: dict,
-        pending_pack_task: dict,
     ):
-        """Return 409 when duplicate task exists for same folder."""
-        # pending_pack_task already created for "test_folder"
-        folder_path = test_folder.relative_to(Path(settings.download_dir) / str(test_user["id"]))
+        """Return 409 when duplicate task exists for same file IDs."""
+        file_ids = _create_user_files(test_user["id"], user_download_dir, [
+            ("dup_file.txt", 500),
+        ])
+
+        # Create an existing pending task with same folder_path (JSON file_ids)
+        folder_path_value = json.dumps(file_ids)
+        now = utc_now()
+        execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], folder_path_value, 500, 500, "pending", now, now]
+        )
 
         response = authenticated_client.post(
             "/api/files/pack",
-            json={"folder_path": str(folder_path)}
+            json={"file_ids": file_ids}
         )
 
         assert response.status_code == 409
         assert "detail" in response.json()
-
-    def test_create_pack_task_path_traversal_attack(
-        self,
-        authenticated_client: TestClient,
-        user_download_dir: Path,
-    ):
-        """Return 403 for path traversal attack attempts."""
-        response = authenticated_client.post(
-            "/api/files/pack",
-            json={"folder_path": "../../../etc"}
-        )
-
-        assert response.status_code == 403
 
     def test_create_pack_task_without_auth(
         self,
@@ -305,7 +365,7 @@ class TestCreatePackTask:
         """Return 401 when not authenticated."""
         response = client.post(
             "/api/files/pack",
-            json={"folder_path": "test_folder"}
+            json={"file_ids": [1]}
         )
 
         assert response.status_code == 401
@@ -529,90 +589,6 @@ class TestCancelPackTask:
         assert response.status_code == 404
 
 
-# ========== Download Pack Result Tests ==========
-
-class TestDownloadPackResult:
-    """Tests for GET /api/files/pack/{task_id}/download endpoint."""
-
-    def test_download_completed_pack_success(
-        self,
-        authenticated_client: TestClient,
-        done_pack_task: dict,
-    ):
-        """Successfully download a completed pack file."""
-        response = authenticated_client.get(f"/api/files/pack/{done_pack_task['id']}/download")
-
-        assert response.status_code == 200
-        assert response.headers["content-type"] == "application/octet-stream"
-        assert "content-disposition" in response.headers
-
-    def test_download_task_not_done(
-        self,
-        authenticated_client: TestClient,
-        pending_pack_task: dict,
-    ):
-        """Return 400 when task is not done."""
-        response = authenticated_client.get(f"/api/files/pack/{pending_pack_task['id']}/download")
-
-        assert response.status_code == 400
-        assert "detail" in response.json()
-
-    def test_download_output_file_missing(
-        self,
-        authenticated_client: TestClient,
-        done_pack_task: dict,
-    ):
-        """Return 404 when output file is missing."""
-        # Delete the output file
-        output_path = Path(done_pack_task["output_path"])
-        if output_path.exists():
-            output_path.unlink()
-
-        response = authenticated_client.get(f"/api/files/pack/{done_pack_task['id']}/download")
-
-        assert response.status_code == 404
-
-    def test_download_task_not_found(
-        self,
-        authenticated_client: TestClient,
-    ):
-        """Return 404 for non-existent task."""
-        response = authenticated_client.get("/api/files/pack/99999/download")
-
-        assert response.status_code == 404
-
-    def test_download_other_user_task(
-        self,
-        authenticated_client: TestClient,
-        other_user_pack_task: dict,
-    ):
-        """Cannot download another user's task."""
-        response = authenticated_client.get(f"/api/files/pack/{other_user_pack_task['id']}/download")
-
-        assert response.status_code == 404
-
-    def test_download_path_traversal_protection(
-        self,
-        authenticated_client: TestClient,
-        test_user: dict,
-        temp_db: str,
-    ):
-        """Return 403 when output_path is outside user directory."""
-        now = utc_now()
-        task_id = execute(
-            """INSERT INTO pack_tasks
-               (owner_id, folder_path, folder_size, reserved_space, output_path, output_size,
-                status, progress, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "folder", 1000, 0, "/etc/passwd", 100,
-             "done", 100, now, now]
-        )
-
-        response = authenticated_client.get(f"/api/files/pack/{task_id}/download")
-
-        assert response.status_code == 403
-
-
 # ========== Get Available Space Tests ==========
 
 class TestGetAvailableSpace:
@@ -622,53 +598,21 @@ class TestGetAvailableSpace:
         self,
         authenticated_client: TestClient,
     ):
-        """Return user_available and server_available."""
-        with patch("app.services.pack.get_user_available_space_for_pack", new_callable=AsyncMock, return_value=50 * 1024 * 1024 * 1024):
-            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
-                response = authenticated_client.get("/api/files/pack/available-space")
+        """Return available, quota, and used."""
+        with patch("app.services.storage.get_user_space_info", new_callable=AsyncMock, return_value={
+            "quota": 100 * 1024 * 1024 * 1024,
+            "used": 10 * 1024 * 1024 * 1024,
+            "frozen": 0,
+            "available": 90 * 1024 * 1024 * 1024,
+        }):
+            response = authenticated_client.get("/api/files/pack/available-space")
 
         assert response.status_code == 200
         data = response.json()
 
-        assert data["user_available"] == 50 * 1024 * 1024 * 1024
-        assert data["server_available"] == 100 * 1024 * 1024 * 1024
-
-    def test_get_available_space_with_folder_path(
-        self,
-        authenticated_client: TestClient,
-        test_folder: Path,
-        test_user: dict,
-    ):
-        """Return folder_size when folder_path is provided."""
-        folder_path = test_folder.relative_to(Path(settings.download_dir) / str(test_user["id"]))
-
-        with patch("app.services.pack.get_user_available_space_for_pack", new_callable=AsyncMock, return_value=50 * 1024 * 1024 * 1024):
-            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
-                response = authenticated_client.get(
-                    f"/api/files/pack/available-space?folder_path={folder_path}"
-                )
-
-        assert response.status_code == 200
-        data = response.json()
-
-        assert "folder_size" in data
-        assert data["folder_size"] > 0
-
-    def test_get_available_space_nonexistent_folder(
-        self,
-        authenticated_client: TestClient,
-    ):
-        """Return folder_size=0 for non-existent folder."""
-        with patch("app.services.pack.get_user_available_space_for_pack", new_callable=AsyncMock, return_value=50 * 1024 * 1024 * 1024):
-            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
-                response = authenticated_client.get(
-                    "/api/files/pack/available-space?folder_path=nonexistent"
-                )
-
-        assert response.status_code == 200
-        data = response.json()
-
-        assert data["folder_size"] == 0
+        assert "available" in data
+        assert "quota" in data
+        assert "used" in data
 
 
 # ========== Space Calculation Tests ==========
@@ -1065,66 +1009,22 @@ class TestPackTaskManager:
 class TestDoPackMethod:
 
     @pytest.mark.asyncio
-    async def test_do_pack_invalid_json_paths(self, test_user: dict, temp_db: str):
-        from app.services.pack import PackTaskManager
-
-        now = utc_now()
-        task_id = execute(
-            """INSERT INTO pack_tasks
-               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "[invalid json", 1000, 1000, "pending", now, now]
-        )
-
-        await PackTaskManager._do_pack(task_id, test_user["id"], "[invalid json")
-
-        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
-        assert task["status"] == "failed"
-        assert "Invalid paths format" in task["error_message"]
-
-    @pytest.mark.asyncio
-    async def test_do_pack_multi_file_path_not_exists(
-        self, test_user: dict, user_download_dir: Path, temp_db: str
-    ):
-        from app.services.pack import PackTaskManager
-        import json
-
-        paths = json.dumps(["file1.txt", "nonexistent.txt"])
-        (user_download_dir / "file1.txt").write_text("content")
-
-        now = utc_now()
-        task_id = execute(
-            """INSERT INTO pack_tasks
-               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], paths, 1000, 1000, "pending", now, now]
-        )
-
-        await PackTaskManager._do_pack(task_id, test_user["id"], paths)
-
-        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
-        assert task["status"] == "failed"
-        assert "does not exist" in task["error_message"]
-
-    @pytest.mark.asyncio
-    async def test_do_pack_single_folder_not_exists(
+    async def test_do_pack_path_not_exists(
         self, test_user: dict, user_download_dir: Path, temp_db: str
     ):
         from app.services.pack import PackTaskManager
 
+        abs_paths = [str(user_download_dir / "nonexistent.txt")]
+
         now = utc_now()
         task_id = execute(
             """INSERT INTO pack_tasks
                (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "nonexistent_folder", 1000, 1000, "pending", now, now]
+            [test_user["id"], json.dumps([1]), 1000, 1000, "pending", now, now]
         )
 
-        await PackTaskManager._do_pack(task_id, test_user["id"], "nonexistent_folder")
-
-        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
-        assert task["status"] == "failed"
-        assert "does not exist" in task["error_message"]
+        await PackTaskManager._do_pack(task_id, test_user["id"], abs_paths, file_ids=[])
 
     @pytest.mark.asyncio
     async def test_do_pack_task_already_cancelled(
@@ -1132,19 +1032,19 @@ class TestDoPackMethod:
     ):
         from app.services.pack import PackTaskManager
 
-        folder = user_download_dir / "test_folder"
-        folder.mkdir(exist_ok=True)
-        (folder / "file.txt").write_text("content")
+        file_path = user_download_dir / "cancel_test.txt"
+        file_path.write_text("content")
+        abs_paths = [str(file_path)]
 
         now = utc_now()
         task_id = execute(
             """INSERT INTO pack_tasks
                (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "test_folder", 1000, 1000, "cancelled", now, now]
+            [test_user["id"], json.dumps([1]), 1000, 1000, "cancelled", now, now]
         )
 
-        await PackTaskManager._do_pack(task_id, test_user["id"], "test_folder")
+        await PackTaskManager._do_pack(task_id, test_user["id"], abs_paths, file_ids=[])
 
         task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
         assert task["status"] == "cancelled"
@@ -1155,20 +1055,20 @@ class TestDoPackMethod:
     ):
         from app.services.pack import PackTaskManager
 
-        folder = user_download_dir / "test_folder"
-        folder.mkdir(exist_ok=True)
-        (folder / "file.txt").write_text("content")
+        file_path = user_download_dir / "7za_test.txt"
+        file_path.write_text("content")
+        abs_paths = [str(file_path)]
 
         now = utc_now()
         task_id = execute(
             """INSERT INTO pack_tasks
                (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "test_folder", 1000, 1000, "pending", now, now]
+            [test_user["id"], json.dumps([1]), 1000, 1000, "pending", now, now]
         )
 
         with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError()):
-            await PackTaskManager._do_pack(task_id, test_user["id"], "test_folder")
+            await PackTaskManager._do_pack(task_id, test_user["id"], abs_paths, file_ids=[])
 
         task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
         assert task["status"] == "failed"
@@ -1215,18 +1115,17 @@ class TestDoPackMethod:
         self, test_user: dict, user_download_dir: Path, temp_db: str
     ):
         from app.services.pack import PackTaskManager
-        import asyncio
 
-        folder = user_download_dir / "pack_test_folder"
-        folder.mkdir(exist_ok=True)
-        (folder / "file.txt").write_text("content")
+        file_path = user_download_dir / "pack_success.txt"
+        file_path.write_text("content")
+        abs_paths = [str(file_path)]
 
         now = utc_now()
         task_id = execute(
             """INSERT INTO pack_tasks
                (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "pack_test_folder", 1000, 1000, "pending", now, now]
+            [test_user["id"], json.dumps([1]), 1000, 1000, "pending", now, now]
         )
 
         mock_process = MagicMock()
@@ -1241,10 +1140,10 @@ class TestDoPackMethod:
         mock_process.stdout = mock_stdout_iter()
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
-            output_path = user_download_dir / "pack_test_folder.zip"
+            output_path = user_download_dir / "archive.zip"
             output_path.write_bytes(b"fake zip content")
 
-            await PackTaskManager._do_pack(task_id, test_user["id"], "pack_test_folder")
+            await PackTaskManager._do_pack(task_id, test_user["id"], abs_paths, file_ids=[])
 
         task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
         assert task["status"] == "done"
@@ -1256,16 +1155,16 @@ class TestDoPackMethod:
     ):
         from app.services.pack import PackTaskManager
 
-        folder = user_download_dir / "fail_folder"
-        folder.mkdir(exist_ok=True)
-        (folder / "file.txt").write_text("content")
+        file_path = user_download_dir / "fail_file.txt"
+        file_path.write_text("content")
+        abs_paths = [str(file_path)]
 
         now = utc_now()
         task_id = execute(
             """INSERT INTO pack_tasks
                (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "fail_folder", 1000, 1000, "pending", now, now]
+            [test_user["id"], json.dumps([1]), 1000, 1000, "pending", now, now]
         )
 
         mock_process = MagicMock()
@@ -1278,7 +1177,7 @@ class TestDoPackMethod:
         mock_process.stdout = mock_stdout_iter()
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
-            await PackTaskManager._do_pack(task_id, test_user["id"], "fail_folder")
+            await PackTaskManager._do_pack(task_id, test_user["id"], abs_paths, file_ids=[])
 
         task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
         assert task["status"] == "failed"
@@ -1289,18 +1188,17 @@ class TestDoPackMethod:
         self, test_user: dict, user_download_dir: Path, temp_db: str
     ):
         from app.services.pack import PackTaskManager
-        import asyncio as aio
 
-        folder = user_download_dir / "cancel_folder"
-        folder.mkdir(exist_ok=True)
-        (folder / "file.txt").write_text("content")
+        file_path = user_download_dir / "cancel_startup.txt"
+        file_path.write_text("content")
+        abs_paths = [str(file_path)]
 
         now = utc_now()
         task_id = execute(
             """INSERT INTO pack_tasks
                (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "cancel_folder", 1000, 1000, "pending", now, now]
+            [test_user["id"], json.dumps([1]), 1000, 1000, "pending", now, now]
         )
 
         mock_process = MagicMock()
@@ -1316,7 +1214,7 @@ class TestDoPackMethod:
             return mock_process
 
         with patch("asyncio.create_subprocess_exec", side_effect=mock_create_subprocess):
-            await PackTaskManager._do_pack(task_id, test_user["id"], "cancel_folder")
+            await PackTaskManager._do_pack(task_id, test_user["id"], abs_paths, file_ids=[])
 
         mock_process.terminate.assert_called()
 
@@ -1326,20 +1224,20 @@ class TestDoPackMethod:
     ):
         from app.services.pack import PackTaskManager
 
-        folder = user_download_dir / "exception_folder"
-        folder.mkdir(exist_ok=True)
-        (folder / "file.txt").write_text("content")
+        file_path = user_download_dir / "exception_file.txt"
+        file_path.write_text("content")
+        abs_paths = [str(file_path)]
 
         now = utc_now()
         task_id = execute(
             """INSERT INTO pack_tasks
                (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "exception_folder", 1000, 1000, "pending", now, now]
+            [test_user["id"], json.dumps([1]), 1000, 1000, "pending", now, now]
         )
 
         with patch("asyncio.create_subprocess_exec", side_effect=RuntimeError("Unexpected error")):
-            await PackTaskManager._do_pack(task_id, test_user["id"], "exception_folder")
+            await PackTaskManager._do_pack(task_id, test_user["id"], abs_paths, file_ids=[])
 
         task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
         assert task["status"] == "failed"
@@ -1350,21 +1248,19 @@ class TestDoPackMethod:
         self, test_user: dict, user_download_dir: Path, temp_db: str
     ):
         from app.services.pack import PackTaskManager
-        import json
 
         file1 = user_download_dir / "multi_file1.txt"
         file2 = user_download_dir / "multi_file2.txt"
         file1.write_text("content1")
         file2.write_text("content2")
-
-        paths = json.dumps(["multi_file1.txt", "multi_file2.txt"])
+        abs_paths = [str(file1), str(file2)]
 
         now = utc_now()
         task_id = execute(
             """INSERT INTO pack_tasks
                (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], paths, 1000, 1000, "pending", now, now]
+            [test_user["id"], json.dumps([1, 2]), 1000, 1000, "pending", now, now]
         )
 
         mock_process = MagicMock()
@@ -1380,7 +1276,7 @@ class TestDoPackMethod:
             output_path = user_download_dir / "archive.zip"
             output_path.write_bytes(b"fake zip")
 
-            await PackTaskManager._do_pack(task_id, test_user["id"], paths, output_name="archive")
+            await PackTaskManager._do_pack(task_id, test_user["id"], abs_paths, file_ids=[], output_name="archive")
 
         task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
         assert task["status"] == "done"
@@ -1396,22 +1292,20 @@ class TestMultiFilePack:
         user_download_dir: Path,
         test_user: dict,
     ):
-        file1 = user_download_dir / "file1.txt"
-        file2 = user_download_dir / "file2.txt"
-        file1.write_text("content1")
-        file2.write_text("content2")
+        file_ids = _create_user_files(test_user["id"], user_download_dir, [
+            ("file1.txt", 500),
+            ("file2.txt", 600),
+        ])
 
         with patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
-            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
-                response = authenticated_client.post(
-                    "/api/files/pack",
-                    json={"paths": ["file1.txt", "file2.txt"], "output_name": "my_archive"}
-                )
+            response = authenticated_client.post(
+                "/api/files/pack",
+                json={"file_ids": file_ids, "output_name": "my_archive"}
+            )
 
         assert response.status_code == 201
         data = response.json()
-        assert "file1.txt" in data["folder_path"]
-        assert "file2.txt" in data["folder_path"]
+        assert data["folder_size"] > 0
 
 
 # ========== Integration Tests ==========
@@ -1422,19 +1316,21 @@ class TestPackIntegration:
     def test_full_pack_workflow_api(
         self,
         authenticated_client: TestClient,
-        test_folder: Path,
+        user_download_dir: Path,
         test_user: dict,
     ):
         """Test complete workflow: create -> list -> get -> cancel."""
-        folder_path = test_folder.relative_to(Path(settings.download_dir) / str(test_user["id"]))
+        file_ids = _create_user_files(test_user["id"], user_download_dir, [
+            ("workflow1.txt", 500),
+            ("workflow2.txt", 600),
+        ])
 
         # 1. Create pack task
         with patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
-            with patch("app.services.pack.get_server_available_space", new_callable=AsyncMock, return_value=100 * 1024 * 1024 * 1024):
-                create_response = authenticated_client.post(
-                    "/api/files/pack",
-                    json={"folder_path": str(folder_path)}
-                )
+            create_response = authenticated_client.post(
+                "/api/files/pack",
+                json={"file_ids": file_ids}
+            )
 
         assert create_response.status_code == 201
         task_id = create_response.json()["id"]

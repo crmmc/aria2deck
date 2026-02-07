@@ -71,15 +71,15 @@ class RenameRequest(BaseModel):
 
 
 class PackRequest(BaseModel):
-    """打包请求"""
-    folder_path: str | None = None
-    paths: list[str] | None = None
+    """打包请求 - 基于 UserFile ID"""
+    file_ids: list[int]
     output_name: str | None = None
+    delete_source: bool = False
 
 
 class CalculateSizeRequest(BaseModel):
-    """计算大小请求"""
-    paths: list[str]
+    """计算大小请求 - 基于 UserFile ID"""
+    file_ids: list[int]
 
 
 # ========== Helpers ==========
@@ -124,6 +124,31 @@ def _validate_subpath(base_path: Path, subpath: str) -> Path:
         )
 
     return target
+
+
+async def _resolve_file_ids(user_id: int, file_ids: list[int]) -> list[tuple[str, int]]:
+    """将 UserFile IDs 解析为 (绝对路径, 大小) 列表，验证归属"""
+    if not file_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="文件列表不能为空"
+        )
+
+    async with get_session() as db:
+        result = await db.exec(
+            select(UserFile, StoredFile)
+            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
+            .where(UserFile.id.in_(file_ids), UserFile.owner_id == user_id)
+        )
+        pairs = result.all()
+
+    if len(pairs) != len(file_ids):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="部分文件不存在或无权访问"
+        )
+
+    return [(sf.real_path, sf.size) for uf, sf in pairs]
 
 
 # ========== API Endpoints ==========
@@ -433,8 +458,7 @@ async def get_space(user: User = Depends(require_user)) -> dict:
 
 
 # ========== Legacy Pack Endpoints (kept for compatibility) ==========
-# These endpoints work with the old filesystem-based approach
-# and will be deprecated in favor of the new architecture
+# Legacy helper - still used by download_pack_result
 
 def _get_user_dir(user_id: int) -> Path:
     """获取用户目录的 Path 对象（兼容旧代码）"""
@@ -442,34 +466,6 @@ def _get_user_dir(user_id: int) -> Path:
     user_dir = base / str(user_id)
     user_dir.mkdir(parents=True, exist_ok=True)
     return user_dir
-
-
-def _validate_path(user_dir: Path, relative_path: str) -> Path:
-    """验证路径安全性（兼容旧代码）"""
-    if not relative_path:
-        return user_dir
-
-    target = (user_dir / relative_path).resolve()
-
-    try:
-        target.relative_to(user_dir)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="无权访问此路径"
-        )
-
-    if target.exists() and target.is_symlink():
-        real_target = target.resolve()
-        try:
-            real_target.relative_to(user_dir)
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="无权访问此路径"
-            )
-
-    return target
 
 
 def _pack_task_to_dict(task: PackTask) -> dict:
@@ -483,6 +479,8 @@ def _pack_task_to_dict(task: PackTask) -> dict:
         "output_path": task.output_path,
         "output_name": task.output_name,
         "output_size": task.output_size,
+        "stored_file_id": task.stored_file_id,
+        "delete_source": task.delete_source,
         "status": task.status,
         "progress": task.progress,
         "error_message": task.error_message,
@@ -499,77 +497,25 @@ async def calculate_paths_size(
     payload: CalculateSizeRequest,
     user: User = Depends(require_user)
 ) -> dict:
-    """计算多个文件/文件夹的总大小"""
-    from app.services.pack import calculate_folder_size, get_user_available_space_for_pack
-
-    if not payload.paths:
-        logger.warning("计算打包大小失败 user_id=%s reason=empty_paths", user.id)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="路径列表不能为空"
-        )
-
-    user_dir = _get_user_dir(user.id)
-    total_size = 0
-
-    for path in payload.paths:
-        # 禁止访问 .incomplete 目录
-        if path == ".incomplete" or path.startswith(".incomplete/"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="无权访问此文件"
-            )
-
-        target = _validate_path(user_dir, path)
-        if not target.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"路径不存在: {path}"
-            )
-        if target.is_dir():
-            total_size += calculate_folder_size(target)
-        else:
-            total_size += target.stat().st_size
-
-    available = await get_user_available_space_for_pack(user.id)
-
-    return {
-        "total_size": total_size,
-        "user_available": available,
-    }
+    """计算多个文件的总大小"""
+    resolved = await _resolve_file_ids(user.id, payload.file_ids)
+    total_size = sum(size for _, size in resolved)
+    return {"total_size": total_size}
 
 
 @router.get("/pack/available-space")
 async def get_pack_available_space(
-    folder_path: str | None = None,
     user: User = Depends(require_user)
 ) -> dict:
     """获取用户可用于打包的空间"""
-    from app.services.pack import (
-        calculate_folder_size,
-        get_server_available_space,
-        get_user_available_space_for_pack,
-    )
+    from app.services.storage import get_user_space_info
 
-    user_available = await get_user_available_space_for_pack(user.id)
-    server_available = await get_server_available_space()
-
-    result = {
-        "user_available": user_available,
-        "server_available": server_available,
+    info = await get_user_space_info(user.id, user.quota)
+    return {
+        "available": info["available"],
+        "quota": info["quota"],
+        "used": info["used"],
     }
-
-    if folder_path:
-        user_dir = _get_user_dir(user.id)
-        target = _validate_path(user_dir, folder_path)
-        if target.exists() and target.is_dir():
-            result["folder_size"] = calculate_folder_size(target)
-        else:
-            result["folder_size"] = 0
-
-    logger.debug("查询打包可用空间 user_id=%s", user.id)
-
-    return result
 
 
 @router.post("/pack", status_code=status.HTTP_201_CREATED)
@@ -577,12 +523,7 @@ async def create_pack_task(
     payload: PackRequest,
     user: User = Depends(require_user)
 ) -> dict:
-    """创建打包任务
-
-    支持两种模式：
-    1. 单文件夹打包：提供 folder_path
-    2. 多文件打包：提供 paths 列表
-    """
+    """创建打包任务 - 基于 UserFile ID"""
     # 频率限制
     if not await api_limiter.is_allowed(user.id, "create_pack", limit=5, window_seconds=60):
         logger.warning("创建打包任务被限流 user_id=%s", user.id)
@@ -591,54 +532,21 @@ async def create_pack_task(
             detail="操作过于频繁，请稍后再试"
         )
 
-    from app.services.pack import (
-        PackTaskManager, calculate_folder_size,
-        get_user_available_space_for_pack
-    )
+    from app.services.pack import PackTaskManager
+    from app.services.storage import get_user_space_info
 
-    user_dir = _get_user_dir(user.id)
-
-    # 确定打包路径列表
-    if payload.paths and len(payload.paths) > 0:
-        paths = payload.paths
-        is_multi = True
-    elif payload.folder_path:
-        paths = [payload.folder_path]
-        is_multi = False
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="请提供 folder_path 或 paths"
-        )
-
-    # 验证所有路径并计算总大小
-    total_size = 0
-    for path in paths:
-        if path == ".incomplete" or path.startswith(".incomplete/"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="无权访问此文件"
-            )
-
-        target = _validate_path(user_dir, path)
-        if not target.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"路径不存在: {path}"
-            )
-        if target.is_dir():
-            total_size += calculate_folder_size(target)
-        else:
-            total_size += target.stat().st_size
+    # 解析文件 ID → 绝对路径
+    resolved = await _resolve_file_ids(user.id, payload.file_ids)
+    abs_paths = [path for path, _ in resolved]
+    total_size = sum(size for _, size in resolved)
 
     if total_size == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="选中的文件/文件夹为空"
+            detail="选中的文件为空"
         )
 
-    folder_path_value = json.dumps(paths) if is_multi else paths[0]
-
+    folder_path_value = json.dumps(payload.file_ids)
     reserved_space = total_size
 
     # 验证输出文件名
@@ -649,9 +557,10 @@ async def create_pack_task(
             detail="输出文件名不能包含路径分隔符"
         )
 
-    # Check available space + create task record atomically (avoid concurrent oversell)
+    # Check available space + create task record atomically
     async with _get_pack_create_lock():
-        available = await get_user_available_space_for_pack(user.id)
+        info = await get_user_space_info(user.id, user.quota)
+        available = info["available"]
         if reserved_space > available:
             logger.warning(
                 "创建打包任务失败 user_id=%s reason=insufficient_space required=%s available=%s",
@@ -664,7 +573,6 @@ async def create_pack_task(
                 detail=f"空间不足。需要: {reserved_space / 1024**3:.2f} GB, 可用: {available / 1024**3:.2f} GB"
             )
 
-        # Create task record atomically (avoid concurrent duplicates)
         async with get_session() as db:
             now = utc_now()
             result = await db.execute(
@@ -672,11 +580,11 @@ async def create_pack_task(
                     """
                     INSERT INTO pack_tasks (
                         owner_id, folder_path, folder_size, reserved_space,
-                        output_name, status, created_at, updated_at
+                        output_name, delete_source, status, created_at, updated_at
                     )
                     SELECT
                         :owner_id, :folder_path, :folder_size, :reserved_space,
-                        :output_name, 'pending', :created_at, :updated_at
+                        :output_name, :delete_source, 'pending', :created_at, :updated_at
                     WHERE NOT EXISTS (
                         SELECT 1 FROM pack_tasks
                         WHERE owner_id = :owner_id
@@ -691,6 +599,7 @@ async def create_pack_task(
                     "folder_size": total_size,
                     "reserved_space": reserved_space,
                     "output_name": output_name,
+                    "delete_source": payload.delete_source,
                     "created_at": now,
                     "updated_at": now,
                 },
@@ -698,16 +607,15 @@ async def create_pack_task(
 
             if result.rowcount == 0:
                 logger.warning(
-                    "创建打包任务冲突 user_id=%s folder_path=%s",
+                    "创建打包任务冲突 user_id=%s file_ids=%s",
                     user.id,
-                    folder_path_value,
+                    payload.file_ids,
                 )
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="相同路径已有进行中的打包任务"
+                    detail="相同文件已有进行中的打包任务"
                 )
 
-            # Fetch newly created task
             result = await db.exec(
                 select(PackTask)
                 .where(
@@ -726,8 +634,8 @@ async def create_pack_task(
                 )
             task_id = pack_task.id
 
-    # Start async packing
-    asyncio.create_task(PackTaskManager.start_pack(task_id, user.id, folder_path_value, output_name))
+    # Start async packing - pass absolute paths directly
+    asyncio.create_task(PackTaskManager.start_pack(task_id, user.id, abs_paths, payload.file_ids, output_name, payload.delete_source))
     logger.info("创建打包任务成功 user_id=%s task_id=%s", user.id, task_id)
 
     async with get_session() as db:
@@ -819,6 +727,16 @@ async def cancel_or_delete_pack_task(
         task_status = task.status
 
     if task_status in ("done", "failed", "cancelled"):
+        # Clean up partial zip for failed/cancelled tasks
+        if task_status in ("failed", "cancelled") and task.output_path:
+            output_file = Path(task.output_path)
+            if output_file.exists():
+                try:
+                    output_file.unlink()
+                    logger.info("Cleaned up partial pack file: %s", task.output_path)
+                except Exception as e:
+                    logger.warning("Failed to clean up pack file %s: %s", task.output_path, e)
+
         async with get_session() as db:
             result = await db.exec(select(PackTask).where(PackTask.id == task_id))
             db_task = result.first()
@@ -830,52 +748,6 @@ async def cancel_or_delete_pack_task(
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="无法处理该任务状态"
-    )
-
-
-@router.get("/pack/{task_id}/download")
-async def download_pack_result(task_id: int, user: User = Depends(require_user)) -> FileResponse:
-    """下载已完成的打包文件"""
-    async with get_session() as db:
-        result = await db.exec(
-            select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
-        )
-        task = result.first()
-
-    if not task:
-        logger.warning("下载打包文件失败 user_id=%s task_id=%s reason=not_found", user.id, task_id)
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
-
-    if task.status != "done":
-        logger.warning("下载打包文件失败 user_id=%s task_id=%s reason=not_done", user.id, task_id)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="打包任务未完成"
-        )
-
-    output_path = task.output_path
-    if not output_path or not Path(output_path).exists():
-        logger.warning("下载打包文件失败 user_id=%s task_id=%s reason=file_missing", user.id, task_id)
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="打包文件不存在")
-
-    # Path traversal protection: ensure output_path is within user directory
-    user_dir = _get_user_dir(user.id)
-    output_path_resolved = Path(output_path).resolve()
-    try:
-        output_path_resolved.relative_to(user_dir)
-    except ValueError:
-        logger.warning("下载打包文件失败 user_id=%s task_id=%s reason=path_traversal", user.id, task_id)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="无权访问此文件"
-        )
-
-    logger.info("下载打包文件成功 user_id=%s task_id=%s", user.id, task_id)
-
-    return FileResponse(
-        path=output_path,
-        filename=Path(output_path).name,
-        media_type="application/octet-stream"
     )
 
 

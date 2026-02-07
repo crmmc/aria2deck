@@ -94,6 +94,25 @@ def test_admin(temp_db: str) -> dict:
 
 
 @pytest.fixture
+def user_file(test_user: dict, temp_db: str) -> dict:
+    """Create a StoredFile + UserFile for the test user and return info dict."""
+    real_path = os.path.join(settings.download_dir, str(test_user["id"]), "testfile.bin")
+    os.makedirs(os.path.dirname(real_path), exist_ok=True)
+    with open(real_path, "wb") as f:
+        f.write(b"x" * 1024)
+
+    stored_id = execute(
+        "INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ["hash_testfile", real_path, 1024, 0, 1, "testfile.bin", datetime.now(timezone.utc).isoformat()],
+    )
+    uf_id = execute(
+        "INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at) VALUES (?, ?, ?, ?)",
+        [test_user["id"], stored_id, "testfile.bin", datetime.now(timezone.utc).isoformat()],
+    )
+    return {"id": uf_id, "stored_id": stored_id, "real_path": real_path, "size": 1024}
+
+
+@pytest.fixture
 def user_session(test_user: dict, temp_db: str) -> str:
     """Create a session for the test user."""
     session_id = "test_session_123"

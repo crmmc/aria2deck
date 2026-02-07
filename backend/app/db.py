@@ -241,6 +241,19 @@ def init_db() -> None:
         except Exception:
             pass  # 列已存在
 
+        # 添加 stored_file_id 和 delete_source 列（兼容旧数据库）
+        try:
+            cur.execute("ALTER TABLE pack_tasks ADD COLUMN stored_file_id INTEGER")
+            conn.commit()
+        except Exception:
+            pass  # 列已存在
+
+        try:
+            cur.execute("ALTER TABLE pack_tasks ADD COLUMN delete_source INTEGER DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass  # 列已存在
+
         # 为 users 表添加 RPC 访问字段（兼容旧数据库）
         cur.execute("PRAGMA table_info(users)")
         user_columns = [row[1] for row in cur.fetchall()]

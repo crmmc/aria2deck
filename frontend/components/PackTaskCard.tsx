@@ -43,10 +43,15 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
     }
   }, [tasks, loadTasks]);
 
+  const notifiedTaskIdsRef = useRef<Set<number>>(new Set());
+
   useEffect(() => {
-    const hasJustCompleted = tasks.some((t) => t.status === "done");
-    if (hasJustCompleted && onTaskComplete) {
-      onTaskComplete();
+    const newlyDone = tasks.filter(
+      (t) => t.status === "done" && !notifiedTaskIdsRef.current.has(t.id)
+    );
+    if (newlyDone.length > 0) {
+      newlyDone.forEach((t) => notifiedTaskIdsRef.current.add(t.id));
+      onTaskComplete?.();
     }
   }, [tasks, onTaskComplete]);
 
@@ -77,43 +82,6 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   const activeTasks = tasks.filter(
     (t) => t.status === "pending" || t.status === "packing"
   );
-
-  const handleDownload = async (task: PackTask) => {
-    try {
-      const response = await fetch(api.downloadPackResult(task.id), {
-        credentials: "include",
-      });
-      if (!response.ok) {
-        if (response.status === 404) {
-          showToast("打包文件已被删除", "error");
-          loadTasks();
-          return;
-        }
-        const data = await response.json().catch(() => ({}));
-        showToast(`下载失败: ${data.detail || response.statusText}`, "error");
-        return;
-      }
-      const contentDisposition = response.headers.get("content-disposition");
-      let filename = "download";
-      if (contentDisposition) {
-        const match = contentDisposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)/i);
-        if (match) {
-          filename = decodeURIComponent(match[1]);
-        }
-      }
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-    } catch (err) {
-      showToast(`下载失败: ${(err as Error).message}`, "error");
-    }
-  };
 
   const handleCancel = async (taskId: number) => {
     const confirmed = await showConfirm({
@@ -236,21 +204,14 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
                 <div className="flex-between">
                   <span className="muted text-xs">
                     输出: {formatBytes(task.output_size || 0)}
+                    {task.delete_source && " · 已删除源文件"}
                   </span>
-                  <div className="flex gap-2">
-                    <button
-                      className="button secondary btn-sm"
-                      onClick={() => handleDownload(task)}
-                    >
-                      下载
-                    </button>
-                    <button
-                      className="button secondary danger btn-sm"
-                      onClick={() => handleDelete(task.id)}
-                    >
-                      删除
-                    </button>
-                  </div>
+                  <button
+                    className="button secondary danger btn-sm"
+                    onClick={() => handleDelete(task.id)}
+                  >
+                    删除
+                  </button>
                 </div>
               )}
 

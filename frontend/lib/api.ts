@@ -234,15 +234,27 @@ export const api = {
   // Pack Tasks
   listPackTasks: () => request<PackTask[]>("/api/files/pack"),
 
+  createPackTask: (fileIds: number[], outputName?: string, deleteSource: boolean = false) =>
+    request<PackTask>("/api/files/pack", {
+      method: "POST",
+      body: JSON.stringify({ file_ids: fileIds, output_name: outputName, delete_source: deleteSource }),
+    }),
+
+  calculatePackSize: (fileIds: number[]) =>
+    request<{ total_size: number }>("/api/files/pack/calculate-size", {
+      method: "POST",
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
+
+  getAvailableSpace: () =>
+    request<{ available: number; quota: number; used: number }>(
+      "/api/files/pack/available-space"
+    ),
+
   cancelPackTask: (id: number) =>
     request<{ ok: boolean; message: string }>(`/api/files/pack/${id}`, {
       method: "DELETE",
     }),
-
-  downloadPackResult: (id: number) => {
-    const base = getApiBase();
-    return `${base}/api/files/pack/${id}/download`;
-  },
 };
 
 export function taskWsUrl(): string {
