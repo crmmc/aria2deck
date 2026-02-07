@@ -248,8 +248,6 @@ export default function TasksPage() {
         .listTasks("active")
         .then((activeTasks) => {
           setTasks((prev) => {
-            // Keep failed tasks from previous state
-            const failedTasks = prev.filter((t) => t.status === "error");
             const activeMap = new Map(activeTasks.map((t) => [t.id, t]));
 
             const updatedActive = activeTasks.filter(
@@ -270,7 +268,7 @@ export default function TasksPage() {
             }
 
             deletedTaskIdsRef.current.clear();
-            return [...updatedActive, ...failedTasks];
+            return updatedActive;
           });
         })
         .catch(() => {});
@@ -286,10 +284,9 @@ export default function TasksPage() {
       return;
     }
 
-    // Only show active, queued, and error tasks
+    // Only show active and queued tasks in task page.
     const isActiveStatus =
       newTask.status === "active" || newTask.status === "queued";
-    const isErrorStatus = newTask.status === "error";
 
     setTasks((prev) => {
       const idx = prev.findIndex((task) => task.id === taskId);
@@ -310,6 +307,12 @@ export default function TasksPage() {
         } else if (oldTask.status !== "error" && newTask.status === "error") {
           sendTaskErrorNotification(taskName, newTask.id);
           showToast(`${taskName} 下载失败`, "error");
+          if (idx !== -1) {
+            const next = [...prev];
+            next.splice(idx, 1);
+            return next;
+          }
+          return prev;
         }
       }
 
@@ -323,8 +326,8 @@ export default function TasksPage() {
         return prev;
       }
 
-      // Keep active, queued, and error tasks
-      if (!isActiveStatus && !isErrorStatus) {
+      // Keep only active and queued tasks
+      if (!isActiveStatus) {
         if (idx !== -1) {
           const next = [...prev];
           next.splice(idx, 1);
@@ -533,38 +536,6 @@ export default function TasksPage() {
     }
   }, [selectedTasks, isBatchOperating, showConfirm, showToast]);
 
-  const batchDeleteFailed = useCallback(async () => {
-    const failedTasks = tasksRef.current.filter(
-      (t) => selectedTasks.has(t.id) && t.status === "error"
-    );
-    if (failedTasks.length === 0) {
-      showToast("没有可删除的失败任务", "warning");
-      return;
-    }
-
-    const confirmed = await showConfirm({
-      title: "删除失败任务",
-      message: `确定要删除选中的 ${failedTasks.length} 个失败任务吗？`,
-      confirmText: "删除",
-      danger: true,
-    });
-    if (!confirmed) return;
-
-    setIsBatchOperating(true);
-    try {
-      await Promise.all(failedTasks.map((t) => api.cancelTask(t.id)));
-      const deletedIds = new Set(failedTasks.map((t) => t.id));
-      deletedIds.forEach((id) => deletedTaskIdsRef.current.add(id));
-      setTasks((prev) => prev.filter((t) => !deletedIds.has(t.id)));
-      setSelectedTasks(new Set());
-      showToast(`已删除 ${failedTasks.length} 个失败任务`, "success");
-    } catch (err) {
-      showToast("删除失败：" + (err as Error).message, "error");
-    } finally {
-      setIsBatchOperating(false);
-    }
-  }, [selectedTasks, showConfirm, showToast]);
-
   const copyUri = useCallback(
     (uri: string) => {
       navigator.clipboard
@@ -646,8 +617,6 @@ export default function TasksPage() {
       filtered = filtered.filter(
         (t) => t.status === "active" || t.status === "queued"
       );
-    } else if (filterStatus === "error") {
-      filtered = filtered.filter((t) => t.status === "error");
     }
 
     return filtered;
@@ -667,14 +636,6 @@ export default function TasksPage() {
         (t) =>
           selectedTasks.has(t.id) &&
           (t.status === "active" || t.status === "queued")
-      ),
-    [tasks, selectedTasks]
-  );
-
-  const hasFailedTasks = useMemo(
-    () =>
-      tasks.some(
-        (t) => selectedTasks.has(t.id) && t.status === "error"
       ),
     [tasks, selectedTasks]
   );
@@ -753,7 +714,6 @@ export default function TasksPage() {
             >
               <option value="all">当前任务</option>
               <option value="active">进行中</option>
-              <option value="error">失败</option>
             </select>
           </div>
 
@@ -771,16 +731,6 @@ export default function TasksPage() {
                     disabled={isBatchOperating}
                   >
                     取消下载
-                  </button>
-                )}
-                {hasFailedTasks && (
-                  <button
-                    type="button"
-                    className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
-                    onClick={batchDeleteFailed}
-                    disabled={isBatchOperating}
-                  >
-                    删除失败
                   </button>
                 )}
               </>

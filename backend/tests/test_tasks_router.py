@@ -1026,4 +1026,4 @@ class TestTaskStatusFiltering:
         response = authenticated_client.get("/api/tasks?status_filter=current")
         assert response.status_code == 200
         data = response.json()
-        assert len(data) == 2
+        assert len(data) == 1

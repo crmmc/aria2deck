@@ -84,7 +84,9 @@ class TestGetMachineStats:
         mock_disk.used = 500 * 1024 * 1024 * 1024
         mock_disk.free = 500 * 1024 * 1024 * 1024
 
-        with patch("shutil.disk_usage", return_value=mock_disk):
+        with patch("shutil.disk_usage", return_value=mock_disk), patch(
+            "app.routers.stats._get_directory_size_bytes", return_value=120 * 1024 * 1024 * 1024
+        ):
             response = admin_client.get("/api/stats/machine")
 
         assert response.status_code == 200
@@ -92,6 +94,8 @@ class TestGetMachineStats:
         assert data["disk_total"] == 1000 * 1024 * 1024 * 1024
         assert data["disk_used"] == 500 * 1024 * 1024 * 1024
         assert data["disk_free"] == 500 * 1024 * 1024 * 1024
+        assert data["download_used"] == 120 * 1024 * 1024 * 1024
+        assert data["system_used"] == 380 * 1024 * 1024 * 1024
 
     def test_get_machine_stats_non_admin(self, authenticated_client: TestClient):
         response = authenticated_client.get("/api/stats/machine")
@@ -272,5 +276,4 @@ class TestGetStatsWithUserFiles:
         assert response.status_code == 200
         data = response.json()
         assert data["disk_used_space"] == 3000
-
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 
 from sqlalchemy import case, update
@@ -23,6 +24,9 @@ from app.database import get_session
 from app.models import DownloadTask, User, UserTaskSubscription, utc_now_str
 
 logger = logging.getLogger(__name__)
+
+ORPHAN_GRACE_SECONDS = 60.0
+ORPHAN_CLEANUP_BATCH = 50
 
 
 def _sanitize_path(file_path: str | None, task_id: int) -> str | None:
@@ -88,9 +92,16 @@ async def sync_tasks(
     from app.routers.tasks import broadcast_task_update_to_subscribers
     from app.services.storage import get_user_space_info
 
+    orphan_seen_at: dict[str, float] = {}
+
     while True:
         await _repair_inconsistent_completed_tasks(state)
         client = get_aria2_client()
+
+        async with get_session() as db:
+            result = await db.exec(select(DownloadTask))
+            tracked_tasks = result.all()
+        tracked_gids = {t.gid for t in tracked_tasks if t.gid}
 
         # Get all active tasks
         async with get_session() as db:
@@ -301,7 +312,102 @@ async def sync_tasks(
         # Process all tasks concurrently
         await asyncio.gather(*[fetch_and_update(task) for task in tasks])
 
+        await _cleanup_orphan_aria2_tasks(
+            client=client,
+            tracked_gids=tracked_gids,
+            orphan_seen_at=orphan_seen_at,
+            grace_seconds=ORPHAN_GRACE_SECONDS,
+            max_actions=ORPHAN_CLEANUP_BATCH,
+        )
+
         await asyncio.sleep(interval)
+
+
+async def _cleanup_orphan_aria2_tasks(
+    client: Aria2Client,
+    tracked_gids: set[str],
+    orphan_seen_at: dict[str, float],
+    grace_seconds: float,
+    max_actions: int,
+) -> None:
+    """清理 aria2 中无主任务（数据库不存在的 GID）。"""
+    try:
+        active = await client.tell_active()
+        waiting = await client.tell_waiting(0, 1000)
+        stopped = await client.tell_stopped(0, 1000)
+    except Exception as exc:
+        logger.warning(f"[Sync] 获取 aria2 全量任务失败，跳过孤立任务清理: {exc}")
+        return
+
+    now = time.monotonic()
+
+    def _extract_gids(rows: list[dict]) -> list[str]:
+        gids: list[str] = []
+        for row in rows:
+            gid = row.get("gid")
+            if isinstance(gid, str) and gid:
+                gids.append(gid)
+        return gids
+
+    active_gids = _extract_gids(active)
+    waiting_gids = _extract_gids(waiting)
+    stopped_gids = _extract_gids(stopped)
+
+    current_orphan_gids = {
+        gid
+        for gid in [*active_gids, *waiting_gids, *stopped_gids]
+        if gid not in tracked_gids
+    }
+
+    for gid in list(orphan_seen_at.keys()):
+        if gid not in current_orphan_gids:
+            orphan_seen_at.pop(gid, None)
+
+    for gid in current_orphan_gids:
+        if gid not in orphan_seen_at:
+            orphan_seen_at[gid] = now
+            logger.warning(f"[Sync] 发现 aria2 无主任务 gid={gid}")
+
+    actions = 0
+
+    # Stopped orphan tasks: safe to cleanup immediately.
+    for gid in stopped_gids:
+        if gid in tracked_gids:
+            continue
+        if actions >= max_actions:
+            break
+        try:
+            await client.remove_download_result(gid)
+            orphan_seen_at.pop(gid, None)
+            actions += 1
+            logger.info(f"[Sync] 已清理无主 stopped 任务 gid={gid}")
+        except Exception as exc:
+            logger.debug(f"[Sync] 清理无主 stopped 任务失败 gid={gid} error={exc}")
+
+    # Active/waiting orphan tasks: cleanup only after grace period.
+    for gid in [*active_gids, *waiting_gids]:
+        if gid in tracked_gids:
+            continue
+        if actions >= max_actions:
+            break
+
+        first_seen = orphan_seen_at.get(gid, now)
+        if (now - first_seen) < grace_seconds:
+            continue
+
+        try:
+            await client.force_remove(gid)
+        except Exception as exc:
+            logger.debug(f"[Sync] force_remove 无主任务失败 gid={gid} error={exc}")
+
+        try:
+            await client.remove_download_result(gid)
+        except Exception as exc:
+            logger.debug(f"[Sync] remove_download_result 无主任务失败 gid={gid} error={exc}")
+
+        orphan_seen_at.pop(gid, None)
+        actions += 1
+        logger.warning(f"[Sync] 已清理无主运行任务 gid={gid}")
 
 
 async def _repair_inconsistent_completed_tasks(state: AppState) -> None:

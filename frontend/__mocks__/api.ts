@@ -134,6 +134,8 @@ export const mockApi = {
     disk_total: 500000000000,
     disk_used: 250000000000,
     disk_free: 250000000000,
+    download_used: 100000000000,
+    system_used: 150000000000,
   } as MachineStats),
   getConfig: jest.fn().mockResolvedValue(createMockSystemConfig()),
   updateConfig: jest.fn().mockResolvedValue(createMockSystemConfig()),

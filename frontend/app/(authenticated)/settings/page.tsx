@@ -181,10 +181,9 @@ export default function SettingsPage() {
     }
   }
 
-  const getDiskColor = (percent: number) => {
-    if (percent >= 80) return "var(--danger)";
-    if (percent >= 50) return "var(--warning)";
-    return "var(--success)";
+  const toPercent = (value: number, total: number) => {
+    if (!total || total <= 0) return 0;
+    return (value / total) * 100;
   };
 
   if (loading) return null;
@@ -208,14 +207,32 @@ export default function SettingsPage() {
             <span className="stats-unit">/ {formatBytes(machineStats.disk_total)}</span>
             <span className="muted">可用</span>
           </div>
-          <div className="progress-container mt-2 max-w-600">
-            <div
-              className="progress-bar"
-              style={{
-                width: `${(machineStats.disk_used / machineStats.disk_total) * 100}%`,
-                background: getDiskColor((machineStats.disk_used / machineStats.disk_total) * 100),
-              }}
-            />
+          <div className="progress-container mt-2 max-w-600" style={{ overflow: "hidden" }}>
+            <div style={{ display: "flex", width: "100%", height: "100%" }}>
+              <div
+                style={{
+                  width: `${toPercent(machineStats.download_used, machineStats.disk_total)}%`,
+                  background: "#3b82f6",
+                }}
+              />
+              <div
+                style={{
+                  width: `${toPercent(machineStats.system_used, machineStats.disk_total)}%`,
+                  background: "#f59e0b",
+                }}
+              />
+            </div>
+          </div>
+          <div className="mt-3 text-sm" style={{ display: "grid", gap: 6 }}>
+            <div className="flex items-center gap-2">
+              <span style={{ width: 10, height: 10, borderRadius: 9999, background: "#3b82f6" }} />
+              <span>下载占用：{formatBytes(machineStats.download_used)}（{toPercent(machineStats.download_used, machineStats.disk_total).toFixed(1)}%）</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span style={{ width: 10, height: 10, borderRadius: 9999, background: "#f59e0b" }} />
+              <span>系统占用：{formatBytes(machineStats.system_used)}（{toPercent(machineStats.system_used, machineStats.disk_total).toFixed(1)}%）</span>
+            </div>
+            <div className="muted">总占用：{formatBytes(machineStats.disk_used)}（{toPercent(machineStats.disk_used, machineStats.disk_total).toFixed(1)}%）</div>
           </div>
         </div>
       )}
