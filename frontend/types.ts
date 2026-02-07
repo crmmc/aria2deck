@@ -103,6 +103,8 @@ export type PackTask = {
   reserved_space: number;
   output_path: string | null;
   output_size: number | null;
+  stored_file_id: number | null;
+  delete_source: boolean;
   status: "pending" | "packing" | "done" | "failed" | "cancelled";
   progress: number;
   error_message: string | null;

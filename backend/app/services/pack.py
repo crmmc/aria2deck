@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import shutil
@@ -94,50 +93,41 @@ class PackTaskManager:
         cls,
         task_id: int,
         user_id: int,
-        folder_path: str,
+        abs_paths: list[str],
+        file_ids: list[int],
         output_name: str | None = None,
+        delete_source: bool = False,
         on_progress: Callable[[int, int], None] | None = None
     ) -> None:
         """Start async packing process with global queue control
 
         Only one pack task runs at a time globally.
+        abs_paths: list of absolute file paths to pack.
+        file_ids: list of UserFile IDs (for ref_count deletion when delete_source=True).
         """
-        # 等待获取全局锁（确保同一时间只有一个任务在打包）
         async with _pack_queue_lock:
-            await cls._do_pack(task_id, user_id, folder_path, output_name, on_progress)
+            await cls._do_pack(task_id, user_id, abs_paths, file_ids, output_name, delete_source, on_progress)
 
     @classmethod
     async def _do_pack(
         cls,
         task_id: int,
         user_id: int,
-        folder_path: str,
+        abs_paths: list[str],
+        file_ids: list[int],
         output_name: str | None = None,
+        delete_source: bool = False,
         on_progress: Callable[[int, int], None] | None = None
     ) -> None:
         """Actually perform the packing (called within lock)"""
         user_dir = Path(settings.download_dir) / str(user_id)
 
-        # 判断是多文件还是单文件夹
-        is_multi = folder_path.startswith("[")
-        if is_multi:
-            try:
-                paths = json.loads(folder_path)
-            except json.JSONDecodeError:
-                await cls._update_task_error(task_id, "Invalid paths format")
-                return
-            sources = [user_dir / p for p in paths]
-            # 验证所有路径存在
-            for source in sources:
-                if not source.exists():
-                    await cls._update_task_error(task_id, f"Path does not exist: {source.name}")
-                    return
-        else:
-            source = user_dir / folder_path
+        sources = [Path(p) for p in abs_paths]
+        # 验证所有路径存在
+        for source in sources:
             if not source.exists():
-                await cls._update_task_error(task_id, "Source folder does not exist")
+                await cls._update_task_error(task_id, f"Path does not exist: {source.name}")
                 return
-            sources = [source]
 
         # Determine output format and path
         pack_format = cls.get_pack_format()
@@ -147,10 +137,10 @@ class PackTaskManager:
         # 确定输出文件名
         if output_name:
             base_name = output_name
-        elif is_multi:
-            base_name = "archive"
-        else:
+        elif len(sources) == 1:
             base_name = sources[0].name
+        else:
+            base_name = "archive"
 
         output_filename = f"{base_name}.{pack_format}"
         output_path = user_dir / output_filename
@@ -257,36 +247,47 @@ class PackTaskManager:
             await process.wait()
 
             if process.returncode == 0:
-                # Success: get output size, delete sources, update status
                 output_size = output_path.stat().st_size if output_path.exists() else 0
 
-                # Delete source files/folders and their .aria2 control files
-                for source in sources:
-                    if source.is_dir():
-                        shutil.rmtree(source)
-                        # 删除目录对应的 .aria2 控制文件（如果存在）
-                        aria2_file = source.parent / f"{source.name}.aria2"
-                        if aria2_file.exists():
-                            aria2_file.unlink()
-                    elif source.is_file():
-                        source.unlink()
-                        # 删除文件对应的 .aria2 控制文件（如果存在）
-                        aria2_file = source.parent / f"{source.name}.aria2"
-                        if aria2_file.exists():
-                            aria2_file.unlink()
+                stored_file_id = None
+                if output_path.exists():
+                    try:
+                        from app.services.storage import register_pack_output
+                        stored_file, _user_file = await register_pack_output(
+                            output_path=output_path,
+                            original_name=output_filename,
+                            user_id=user_id,
+                        )
+                        stored_file_id = stored_file.id
+                        logger.info(
+                            "Pack output registered: task_id=%s stored_file_id=%s",
+                            task_id, stored_file_id,
+                        )
+                    except Exception:
+                        logger.exception("Failed to register pack output: task_id=%s", task_id)
 
-                # Update status using CAS pattern
+                if delete_source and file_ids:
+                    from app.services.storage import delete_user_file_reference
+                    for uf_id in file_ids:
+                        try:
+                            await delete_user_file_reference(uf_id)
+                        except Exception:
+                            logger.warning(
+                                "Failed to delete source ref: user_file_id=%s", uf_id,
+                            )
+
                 async with get_session() as db:
                     result = await db.execute(
                         update(PackTask)
                         .where(
                             PackTask.id == task_id,
-                            PackTask.status == "packing"  # CAS: only packing can become done
+                            PackTask.status == "packing"
                         )
                         .values(
                             status="done",
                             progress=100,
                             output_size=output_size,
+                            stored_file_id=stored_file_id,
                             reserved_space=0,
                             updated_at=utc_now()
                         )

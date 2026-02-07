@@ -159,7 +159,7 @@ class TestApiRateLimitIntegration:
             mock_limiter.is_allowed = AsyncMock(return_value=False)
             response = client.post(
                 "/api/files/pack",
-                json={"folder_path": "/test"}
+                json={"file_ids": [1]}
             )
             assert response.status_code == 429
             assert "频繁" in response.json()["detail"]

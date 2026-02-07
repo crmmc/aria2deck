@@ -5,6 +5,7 @@ Tests for:
 2. Concurrent pack status update
 """
 import asyncio
+import json
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -347,30 +348,39 @@ class TestConcurrentPackCreation:
 
     @pytest.mark.asyncio
     async def test_concurrent_pack_create_same_path(self, temp_db_pack_race, test_user_pack_race):
-        """Only one pack task should be created for the same folder."""
+        """Only one pack task should be created for the same file IDs."""
         from app.routers.files import create_pack_task, PackRequest
         from app.models import User
 
         # Create user folder and test data
         user_dir = Path(settings.download_dir) / str(test_user_pack_race["id"])
         user_dir.mkdir(parents=True, exist_ok=True)
-        folder = user_dir / "race_folder"
-        folder.mkdir(exist_ok=True)
-        (folder / "file.txt").write_text("race content")
+        real_path = str(user_dir / "race_file.txt")
+        with open(real_path, "w") as f:
+            f.write("race content")
+
+        stored_id = execute(
+            "INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ["hash_race", real_path, 100, 0, 1, "race_file.txt", utc_now()],
+        )
+        uf_id = execute(
+            "INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at) VALUES (?, ?, ?, ?)",
+            [test_user_pack_race["id"], stored_id, "race_file.txt", utc_now()],
+        )
 
         async with get_session() as db:
             result = await db.exec(select(User).where(User.id == test_user_pack_race["id"]))
             user = result.first()
 
-        payload = PackRequest(folder_path="race_folder")
+        payload = PackRequest(file_ids=[uf_id])
 
         async def create_pack():
             return await create_pack_task(payload, user)
 
         with patch(
-            "app.services.pack.get_user_available_space_for_pack",
+            "app.services.storage.get_user_space_info",
             new_callable=AsyncMock,
-            return_value=10**12,
+            return_value={"quota": 10**12, "used": 0, "frozen": 0, "available": 10**12},
         ), patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
             results = await asyncio.gather(
                 create_pack(),
@@ -395,25 +405,42 @@ class TestConcurrentPackCreation:
         user_dir = Path(settings.download_dir) / str(test_user_pack_race["id"])
         user_dir.mkdir(parents=True, exist_ok=True)
 
-        folder_a = user_dir / "folder_a"
-        folder_b = user_dir / "folder_b"
-        folder_a.mkdir(exist_ok=True)
-        folder_b.mkdir(exist_ok=True)
-        (folder_a / "a.txt").write_bytes(b"a" * 80)
-        (folder_b / "b.txt").write_bytes(b"b" * 80)
+        real_path_a = str(user_dir / "a.txt")
+        real_path_b = str(user_dir / "b.txt")
+        with open(real_path_a, "wb") as f:
+            f.write(b"a" * 80)
+        with open(real_path_b, "wb") as f:
+            f.write(b"b" * 80)
+
+        stored_a = execute(
+            "INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ["hash_a", real_path_a, 80, 0, 1, "a.txt", utc_now()],
+        )
+        uf_a = execute(
+            "INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at) VALUES (?, ?, ?, ?)",
+            [test_user_pack_race["id"], stored_a, "a.txt", utc_now()],
+        )
+        stored_b = execute(
+            "INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ["hash_b", real_path_b, 80, 0, 1, "b.txt", utc_now()],
+        )
+        uf_b = execute(
+            "INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at) VALUES (?, ?, ?, ?)",
+            [test_user_pack_race["id"], stored_b, "b.txt", utc_now()],
+        )
 
         async with get_session() as db:
             result = await db.exec(select(User).where(User.id == test_user_pack_race["id"]))
             user = result.first()
 
-        payload_a = PackRequest(folder_path="folder_a")
-        payload_b = PackRequest(folder_path="folder_b")
+        payload_a = PackRequest(file_ids=[uf_a])
+        payload_b = PackRequest(file_ids=[uf_b])
 
         active_calls = 0
         concurrent = False
         calls = 0
 
-        async def fake_get_user_available_space_for_pack(_user_id: int) -> int:
+        async def fake_get_user_space_info(_user_id: int, _quota: int) -> dict:
             nonlocal active_calls, concurrent, calls
             active_calls += 1
             if active_calls > 1:
@@ -421,11 +448,12 @@ class TestConcurrentPackCreation:
             await asyncio.sleep(0.01)
             active_calls -= 1
             calls += 1
-            return 80 if calls == 1 else 40
+            avail = 80 if calls == 1 else 40
+            return {"quota": 200, "used": 200 - avail, "frozen": 0, "available": avail}
 
         with patch(
-            "app.services.pack.get_user_available_space_for_pack",
-            new=fake_get_user_available_space_for_pack,
+            "app.services.storage.get_user_space_info",
+            new=fake_get_user_space_info,
         ), patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
             results = await asyncio.gather(
                 create_pack_task(payload_a, user),

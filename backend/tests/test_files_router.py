@@ -180,17 +180,20 @@ class TestPackTasks:
 
 class TestCalculateSize:
 
-    def test_calculate_size_with_paths(self, authenticated_client: TestClient):
+    def test_calculate_size_with_file_ids(self, authenticated_client: TestClient, user_file: dict):
         response = authenticated_client.post(
             "/api/files/pack/calculate-size",
-            json={"paths": ["/nonexistent/path"]}
+            json={"file_ids": [user_file["id"]]}
         )
-        assert response.status_code in [200, 400, 403, 404]
+        assert response.status_code == 200
+        data = response.json()
+        assert "total_size" in data
+        assert data["total_size"] == user_file["size"]
 
     def test_calculate_size_unauthorized(self, client: TestClient, temp_db: str):
         response = client.post(
             "/api/files/pack/calculate-size",
-            json={"paths": ["/some/path"]}
+            json={"file_ids": [1]}
         )
         assert response.status_code == 401
 
@@ -201,7 +204,9 @@ class TestAvailableSpace:
         response = authenticated_client.get("/api/files/pack/available-space")
         assert response.status_code == 200
         data = response.json()
-        assert "server_available" in data or "user_available" in data or "available_space" in data
+        assert "available" in data
+        assert "quota" in data
+        assert "used" in data
 
     def test_get_available_space_unauthorized(self, client: TestClient, temp_db: str):
         response = client.get("/api/files/pack/available-space")
@@ -253,23 +258,19 @@ class TestPackTaskOperations:
         response = authenticated_client.delete("/api/files/pack/99999")
         assert response.status_code == 404
 
-    def test_download_pack_task_not_found(self, authenticated_client: TestClient):
-        response = authenticated_client.get("/api/files/pack/99999/download")
-        assert response.status_code == 404
-
-    def test_create_pack_task_path_traversal(self, authenticated_client: TestClient):
+    def test_create_pack_task_nonexistent_file_ids(self, authenticated_client: TestClient):
         response = authenticated_client.post(
             "/api/files/pack",
-            json={"folder_path": "../../../etc"}
-        )
-        assert response.status_code == 403
-
-    def test_create_pack_task_nonexistent_folder(self, authenticated_client: TestClient):
-        response = authenticated_client.post(
-            "/api/files/pack",
-            json={"folder_path": "nonexistent_folder_12345"}
+            json={"file_ids": [99999], "output_name": "test.7z"}
         )
         assert response.status_code == 404
+
+    def test_create_pack_task_empty_file_ids(self, authenticated_client: TestClient):
+        response = authenticated_client.post(
+            "/api/files/pack",
+            json={"file_ids": [], "output_name": "test.7z"}
+        )
+        assert response.status_code == 400
 
 
 class TestFileListWithSpace:
@@ -321,59 +322,26 @@ class TestRenameFileValidation:
 
 class TestPackTaskCreate:
 
-    def test_create_pack_task_empty_folder(self, authenticated_client: TestClient, temp_db: str):
-        from pathlib import Path
-        user_dir = Path(settings.download_dir) / "1"
-        user_dir.mkdir(parents=True, exist_ok=True)
-        empty_folder = user_dir / "empty_test_folder"
-        empty_folder.mkdir(exist_ok=True)
-
+    def test_create_pack_task_nonexistent_file_ids(self, authenticated_client: TestClient, temp_db: str):
         response = authenticated_client.post(
             "/api/files/pack",
-            json={"folder_path": "empty_test_folder"}
+            json={"file_ids": [99999], "output_name": "test.7z"}
         )
-        assert response.status_code in [400, 404]
+        assert response.status_code == 404
 
-    def test_create_pack_task_incomplete_folder(self, authenticated_client: TestClient):
-        response = authenticated_client.post(
-            "/api/files/pack",
-            json={"folder_path": ".incomplete/test"}
-        )
-        assert response.status_code == 403
-
-    def test_create_pack_task_no_path_provided(self, authenticated_client: TestClient):
+    def test_create_pack_task_no_file_ids_provided(self, authenticated_client: TestClient):
         response = authenticated_client.post(
             "/api/files/pack",
             json={}
         )
         assert response.status_code in [400, 422]
 
-
-class TestPackTaskDownload:
-
-    def test_download_pack_task_not_done(self, authenticated_client: TestClient, test_user: dict, temp_db: str):
-        from app.db import execute, utc_now
-        task_id = execute(
-            """INSERT INTO pack_tasks
-               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "folder", 1000, 1000, "pending", utc_now(), utc_now()]
+    def test_create_pack_task_empty_file_ids(self, authenticated_client: TestClient):
+        response = authenticated_client.post(
+            "/api/files/pack",
+            json={"file_ids": [], "output_name": "test.7z"}
         )
-
-        response = authenticated_client.get(f"/api/files/pack/{task_id}/download")
         assert response.status_code == 400
-
-    def test_download_pack_task_output_missing(self, authenticated_client: TestClient, test_user: dict, temp_db: str):
-        from app.db import execute, utc_now
-        task_id = execute(
-            """INSERT INTO pack_tasks
-               (owner_id, folder_path, folder_size, reserved_space, output_path, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "folder", 1000, 0, "/nonexistent/path.zip", "done", utc_now(), utc_now()]
-        )
-
-        response = authenticated_client.get(f"/api/files/pack/{task_id}/download")
-        assert response.status_code in [403, 404]
 
 
 class TestBrowseDirectory:
@@ -387,19 +355,19 @@ class TestBrowseDirectory:
 
 class TestCalculateSizeEndpoint:
 
-    def test_calculate_size_empty_paths(self, authenticated_client: TestClient):
+    def test_calculate_size_empty_file_ids(self, authenticated_client: TestClient):
         response = authenticated_client.post(
             "/api/files/pack/calculate-size",
-            json={"paths": []}
+            json={"file_ids": []}
         )
-        assert response.status_code in [200, 400, 422]
+        assert response.status_code in [200, 400]
 
-    def test_calculate_size_path_traversal(self, authenticated_client: TestClient):
+    def test_calculate_size_nonexistent_file_ids(self, authenticated_client: TestClient):
         response = authenticated_client.post(
             "/api/files/pack/calculate-size",
-            json={"paths": ["../../../etc/passwd"]}
+            json={"file_ids": [99999]}
         )
-        assert response.status_code in [400, 403]
+        assert response.status_code == 404
 
 
 class TestBrowseDirectoryWithRealFiles:

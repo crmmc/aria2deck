@@ -89,6 +89,8 @@ class PackTask(SQLModel, table=True):
     output_path: Optional[str] = None
     output_name: Optional[str] = None
     output_size: Optional[int] = None
+    stored_file_id: Optional[int] = Field(default=None)
+    delete_source: bool = Field(default=False)
     status: str = Field(default="pending")
     progress: int = Field(default=0)
     error_message: Optional[str] = None

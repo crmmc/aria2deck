@@ -195,6 +195,20 @@ async def move_to_store(
             raise RuntimeError(f"Failed to create or find StoredFile: {content_hash}") from e
 
 
+async def register_pack_output(
+    output_path: Path,
+    original_name: str,
+    user_id: int,
+) -> tuple[StoredFile, UserFile | None]:
+    stored_file = await move_to_store(output_path, original_name)
+    user_file = await create_user_file_reference(
+        user_id=user_id,
+        stored_file_id=stored_file.id,
+        display_name=original_name,
+    )
+    return stored_file, user_file
+
+
 async def create_user_file_reference(
     user_id: int,
     stored_file_id: int,
