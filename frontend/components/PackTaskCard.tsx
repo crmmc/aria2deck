@@ -83,6 +83,20 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
     (t) => t.status === "pending" || t.status === "packing"
   );
 
+  const terminalTasks = tasks.filter(
+    (t) => t.status === "done" || t.status === "failed" || t.status === "cancelled"
+  );
+
+  const handleClearAll = async () => {
+    try {
+      const result = await api.clearPackTasks();
+      showToast(`已清空 ${result.count} 条记录`, "success");
+      loadTasks();
+    } catch (err) {
+      showToast(`清空失败: ${(err as Error).message}`, "error");
+    }
+  };
+
   const handleCancel = async (taskId: number) => {
     const confirmed = await showConfirm({
       title: "取消打包任务",
@@ -169,6 +183,16 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
 
       {expanded && (
         <div className={`card pack-dropdown ${visible ? "pack-dropdown-visible" : "pack-dropdown-hidden"}`}>
+          {terminalTasks.length > 0 && (
+            <div className="pack-dropdown-header">
+              <button
+                className="button secondary btn-sm"
+                onClick={handleClearAll}
+              >
+                清空已完成
+              </button>
+            </div>
+          )}
           {tasks.map((task) => (
             <div key={task.id} className="pack-task-item">
               <div className="pack-task-header">
