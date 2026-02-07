@@ -1015,6 +1015,7 @@ export default function FilesPage() {
                     placeholder="默认自动生成"
                     value={packOutputName}
                     onChange={(e) => setPackOutputName(e.target.value)}
+                    maxLength={200}
                     disabled={packing}
                   />
                 </div>

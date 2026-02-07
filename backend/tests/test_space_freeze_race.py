@@ -265,6 +265,61 @@ class TestStartEventSpaceFreeze:
             cancel_mock.assert_called_once()
             assert "超过系统限制" in cancel_mock.call_args.args[4]
 
+    @pytest.mark.asyncio
+    async def test_start_event_growth_uses_incremental_required_space(self, temp_db_freeze):
+        """Listener start event should accept growth when available equals required delta."""
+        user_id = _create_user("freezeuser_listener_delta", 100 * 1024 * 1024 * 1024)
+        gid = "gid_listener_growth_delta"
+        original_total = 1024
+        grown_total = 4096
+        required_extra = grown_total - original_total
+
+        task_id = await _create_task_with_subs([user_id], gid, total_length=original_total, status="active")
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+            )
+            sub = result.first()
+            assert sub is not None
+            sub.frozen_space = original_total
+            db.add(sub)
+
+        state = AppState()
+        mock_client = AsyncMock()
+        mock_client.tell_status.return_value = {
+            "gid": gid,
+            "status": "active",
+            "totalLength": str(grown_total),
+            "completedLength": "0",
+            "downloadSpeed": "0",
+            "uploadSpeed": "0",
+            "files": [{"path": "dummy"}],
+        }
+
+        async def fake_space_info(user_id: int, quota: int):
+            return {
+                "available": required_extra,
+                "used": 0,
+                "frozen": original_total,
+                "quota": quota,
+            }
+
+        with patch("app.core.state.get_aria2_client", return_value=mock_client), \
+             patch("app.services.storage.get_user_space_info", new_callable=AsyncMock, side_effect=fake_space_info), \
+             patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock), \
+             patch("app.aria2.listener._cancel_task", new_callable=AsyncMock) as cancel_mock:
+            await handle_aria2_event(state, gid, "start")
+            cancel_mock.assert_not_called()
+
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+            )
+            sub = result.first()
+            assert sub is not None
+            assert sub.status == "pending"
+            assert sub.frozen_space == grown_total
+
 
 class TestSyncTasksSpaceFreeze:
     """Tests that sync loop freezes space per user using actual sync_tasks."""
@@ -371,6 +426,119 @@ class TestSyncTasksSpaceFreeze:
             assert task is not None
             assert task.status == "error"
             assert task.gid is None
+
+    @pytest.mark.asyncio
+    async def test_sync_tasks_updates_frozen_space_when_total_length_grows(self, temp_db_freeze):
+        """When aria2 reports a larger totalLength later, sync should refresh frozen space."""
+        user_id = _create_user("freezeuser_growth", 100 * 1024 * 1024 * 1024)
+        gid = "gid_freeze_sync_growth"
+        original_total = 1024
+        grown_total = 4096
+
+        task_id = await _create_task_with_subs([user_id], gid, total_length=original_total, status="active")
+
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+            )
+            sub = result.first()
+            assert sub is not None
+            sub.frozen_space = original_total
+            db.add(sub)
+
+        state = AppState()
+        mock_client = AsyncMock()
+        mock_client.tell_status.return_value = {
+            "gid": gid,
+            "status": "active",
+            "totalLength": str(grown_total),
+            "completedLength": "0",
+            "downloadSpeed": "0",
+            "uploadSpeed": "0",
+            "files": [{"path": "dummy"}],
+            "connections": "0",
+        }
+
+        async def fake_space_info(user_id: int, quota: int):
+            return {
+                "available": grown_total + 1,
+                "used": 0,
+                "frozen": original_total,
+                "quota": quota,
+            }
+
+        with patch("app.core.state.get_aria2_client", return_value=mock_client), \
+             patch("app.services.storage.get_user_space_info", new_callable=AsyncMock, side_effect=fake_space_info), \
+             patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock), \
+             patch("app.aria2.sync.asyncio.sleep", new_callable=AsyncMock, side_effect=asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
+                await sync_tasks(state, interval=0.01)
+
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+            )
+            sub = result.first()
+            assert sub is not None
+            assert sub.status == "pending"
+            assert sub.frozen_space == grown_total
+
+    @pytest.mark.asyncio
+    async def test_sync_tasks_growth_uses_incremental_required_space(self, temp_db_freeze):
+        """Space check should only require extra bytes when frozen_space already exists."""
+        user_id = _create_user("freezeuser_growth_delta", 100 * 1024 * 1024 * 1024)
+        gid = "gid_freeze_sync_growth_delta"
+        original_total = 1024
+        grown_total = 4096
+        required_extra = grown_total - original_total
+
+        task_id = await _create_task_with_subs([user_id], gid, total_length=original_total, status="active")
+
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+            )
+            sub = result.first()
+            assert sub is not None
+            sub.frozen_space = original_total
+            db.add(sub)
+
+        state = AppState()
+        mock_client = AsyncMock()
+        mock_client.tell_status.return_value = {
+            "gid": gid,
+            "status": "active",
+            "totalLength": str(grown_total),
+            "completedLength": "0",
+            "downloadSpeed": "0",
+            "uploadSpeed": "0",
+            "files": [{"path": "dummy"}],
+            "connections": "0",
+        }
+
+        async def fake_space_info(user_id: int, quota: int):
+            return {
+                "available": required_extra,
+                "used": 0,
+                "frozen": original_total,
+                "quota": quota,
+            }
+
+        with patch("app.core.state.get_aria2_client", return_value=mock_client), \
+             patch("app.services.storage.get_user_space_info", new_callable=AsyncMock, side_effect=fake_space_info), \
+             patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock), \
+             patch("app.aria2.sync.asyncio.sleep", new_callable=AsyncMock, side_effect=asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
+                await sync_tasks(state, interval=0.01)
+
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+            )
+            sub = result.first()
+            assert sub is not None
+            assert sub.status == "pending"
+            assert sub.frozen_space == grown_total
 
 
 class TestSyncCompletionFinalization:

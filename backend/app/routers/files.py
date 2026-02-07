@@ -194,8 +194,8 @@ def _range_file_response(request: Request, file_path: Path, filename: str):
     )
 
 
-async def _resolve_file_ids(user_id: int, file_ids: list[int]) -> list[tuple[str, int]]:
-    """将 UserFile IDs 解析为 (绝对路径, 大小) 列表，验证归属"""
+async def _resolve_file_ids(user_id: int, file_ids: list[int]) -> list[tuple[str, int, str]]:
+    """将 UserFile IDs 解析为 (绝对路径, 大小, 显示名) 列表，验证归属"""
     if not file_ids:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -216,7 +216,7 @@ async def _resolve_file_ids(user_id: int, file_ids: list[int]) -> list[tuple[str
             detail="部分文件不存在或无权访问"
         )
 
-    return [(sf.real_path, sf.size) for uf, sf in pairs]
+    return [(sf.real_path, sf.size, uf.display_name) for uf, sf in pairs]
 
 
 # ========== API Endpoints ==========
@@ -669,7 +669,7 @@ async def calculate_paths_size(
 ) -> dict:
     """计算多个文件的总大小"""
     resolved = await _resolve_file_ids(user.id, payload.file_ids)
-    total_size = sum(size for _, size in resolved)
+    total_size = sum(size for _, size, _ in resolved)
     return {"total_size": total_size}
 
 
@@ -707,8 +707,8 @@ async def create_pack_task(
 
     # 解析文件 ID → 绝对路径
     resolved = await _resolve_file_ids(user.id, payload.file_ids)
-    abs_paths = [path for path, _ in resolved]
-    total_size = sum(size for _, size in resolved)
+    abs_paths = [path for path, _, _ in resolved]
+    total_size = sum(size for _, size, _ in resolved)
 
     if total_size == 0:
         raise HTTPException(
@@ -719,13 +719,24 @@ async def create_pack_task(
     folder_path_value = json.dumps(payload.file_ids)
     reserved_space = total_size
 
-    # 验证输出文件名
+    # 验证输出文件名；未指定时用首个文件的显示名
     output_name = payload.output_name
-    if output_name and ("/" in output_name or "\\" in output_name):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="输出文件名不能包含路径分隔符"
-        )
+    if not output_name and len(resolved) == 1:
+        # 去掉扩展名，用 display_name 作为默认压缩包名
+        display_name = resolved[0][2]
+        output_name = Path(display_name).stem or display_name
+    if output_name:
+        if len(output_name) > 200:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="输出文件名不能超过 200 个字符"
+            )
+        _INVALID_CHARS = set('/\\:*?"<>|\0')
+        if _INVALID_CHARS & set(output_name):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="输出文件名包含非法字符"
+            )
 
     # Check available space + create task record atomically
     async with _get_pack_create_lock():
