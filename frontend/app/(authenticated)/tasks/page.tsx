@@ -377,7 +377,13 @@ export default function TasksPage() {
       try {
         const task = await api.createTask(uri);
         if (task.status === "active" || task.status === "queued") {
-          setTasks((prev) => [task, ...prev]);
+          setTasks((prev) => {
+            const idx = prev.findIndex((t) => t.id === task.id);
+            if (idx === -1) return [task, ...prev];
+            const next = [...prev];
+            next[idx] = task;
+            return next;
+          });
         }
         setUri("");
       } catch (err) {
@@ -421,7 +427,13 @@ export default function TasksPage() {
 
         const task = await api.uploadTorrent(base64Content);
         if (task.status === "active" || task.status === "queued") {
-          setTasks((prev) => [task, ...prev]);
+          setTasks((prev) => {
+            const idx = prev.findIndex((t) => t.id === task.id);
+            if (idx === -1) return [task, ...prev];
+            const next = [...prev];
+            next[idx] = task;
+            return next;
+          });
         }
       } catch (err) {
         const message = (err as Error).message;

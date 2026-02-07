@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import case, update
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 ORPHAN_GRACE_SECONDS = 60.0
 ORPHAN_CLEANUP_BATCH = 50
+COMPLETE_REPAIR_GRACE_SECONDS = 30.0
 
 
 def _sanitize_path(file_path: str | None, task_id: int) -> str | None:
@@ -427,10 +429,26 @@ async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
         return
 
     logger.warning(f"[Sync] 检测到 {len(tasks)} 个完成但未落库任务，开始修复")
+    now = datetime.now(timezone.utc)
     for task in tasks:
         task_id = task.id
         if task_id is None:
             continue
+
+        # Grace period: avoid racing with in-flight completion handler.
+        try:
+            updated_at = datetime.fromisoformat(task.updated_at)
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            age_seconds = (now - updated_at).total_seconds()
+            if age_seconds < COMPLETE_REPAIR_GRACE_SECONDS:
+                logger.debug(
+                    f"[Sync] 跳过最近完成任务修复 task_id={task_id} age={age_seconds:.1f}s"
+                )
+                continue
+        except Exception:
+            # Fallback to repair when timestamp parsing fails.
+            pass
 
         reason = "下载完成但文件未入库"
         await _update_task(
