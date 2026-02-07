@@ -18,18 +18,22 @@ HEARTBEAT_INTERVAL = 30
 
 @router.websocket("/ws/tasks")
 async def task_ws(websocket: WebSocket) -> None:
+    client_ip = websocket.client.host if websocket.client else "unknown"
     await websocket.accept()
     session_id = websocket.cookies.get(settings.session_cookie_name)
     user = await get_user_by_session(session_id)
     if not user:
+        logger.warning("WebSocket 未授权连接: path=/ws/tasks ip=%s", client_ip)
         await websocket.close(code=4401)
         return
 
     state = websocket.app.state.app_state
     user_id = user.id
     if user_id is None:
+        logger.warning("WebSocket 用户ID为空: path=/ws/tasks ip=%s", client_ip)
         await websocket.close(code=4401)
         return
+    logger.info("WebSocket 连接建立: path=/ws/tasks user_id=%s ip=%s", user_id, client_ip)
     await register_ws(state, user_id, websocket)
 
     async def heartbeat():
@@ -60,6 +64,7 @@ async def task_ws(websocket: WebSocket) -> None:
     finally:
         heartbeat_task.cancel()
         await unregister_ws(state, user_id, websocket)
+        logger.info("WebSocket 连接关闭: path=/ws/tasks user_id=%s ip=%s", user_id, client_ip)
 
 
 @router.websocket("/ws/tasks/")
@@ -71,6 +76,7 @@ async def task_ws_trailing_slash(websocket: WebSocket) -> None:
 @router.websocket("/{full_path:path}")
 async def unknown_ws(websocket: WebSocket, full_path: str) -> None:
     """兜底未知 WebSocket 路径，避免落入 StaticFiles 触发 AssertionError。"""
-    logger.warning("未知 WebSocket 路径: /%s", full_path)
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    logger.warning("未知 WebSocket 路径: /%s ip=%s", full_path, client_ip)
     await websocket.accept()
     await websocket.close(code=4404)
