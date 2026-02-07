@@ -131,8 +131,9 @@ def _validate_subpath(base_path: Path, subpath: str) -> Path:
 def _range_file_response(request: Request, file_path: Path, filename: str):
     """支持 Range 请求的文件下载响应（多线程下载/断点续传）"""
     file_size = file_path.stat().st_size
+    safe_name = filename.replace('"', '\\"')
     encoded_name = quote(filename)
-    disposition = f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded_name}"
+    disposition = f"attachment; filename=\"{safe_name}\"; filename*=UTF-8''{encoded_name}"
 
     range_header = request.headers.get("range")
     if not range_header:
@@ -150,8 +151,14 @@ def _range_file_response(request: Request, file_path: Path, filename: str):
             raise ValueError
         range_spec = ranges.split(",")[0].strip()
         parts = range_spec.split("-")
-        start = int(parts[0]) if parts[0] else 0
-        end = int(parts[1]) if parts[1] else file_size - 1
+        if not parts[0]:
+            # Suffix range: bytes=-500 means last 500 bytes
+            suffix_length = int(parts[1])
+            start = max(0, file_size - suffix_length)
+            end = file_size - 1
+        else:
+            start = int(parts[0])
+            end = int(parts[1]) if parts[1] else file_size - 1
     except (ValueError, IndexError):
         raise HTTPException(416, "Invalid Range header")
 
@@ -741,7 +748,7 @@ async def clear_finished_pack_tasks(
     async with get_session() as db:
         result = await db.exec(
             select(PackTask).where(
-                PackTask.user_id == user.id,
+                PackTask.owner_id == user.id,
                 PackTask.status.in_(terminal_statuses),
             )
         )

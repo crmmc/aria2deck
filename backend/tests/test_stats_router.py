@@ -230,15 +230,20 @@ class TestGetStatsWithUserFiles:
     def test_get_stats_with_user_files(
         self, authenticated_client: TestClient, test_user: dict, temp_db: str
     ):
-        import os
-        from app.core.config import settings
+        from app.db import execute, utc_now
 
-        user_dir = os.path.join(settings.download_dir, str(test_user["id"]))
-        os.makedirs(user_dir, exist_ok=True)
-
-        test_file = os.path.join(user_dir, "test_file.bin")
-        with open(test_file, "wb") as f:
-            f.write(b"x" * 1024 * 100)
+        execute(
+            """INSERT INTO stored_files
+               (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ["hash_abc", "/data/store/ab/hash_abc", 1024 * 100, 0, 1, "test_file.bin", utc_now()]
+        )
+        execute(
+            """INSERT INTO user_files
+               (owner_id, stored_file_id, display_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            [test_user["id"], 1, "test_file.bin", utc_now()]
+        )
 
         mock_disk = MagicMock()
         mock_disk.total = 1000 * 1024 * 1024 * 1024
@@ -251,20 +256,35 @@ class TestGetStatsWithUserFiles:
         data = response.json()
         assert data["disk_used_space"] == 1024 * 100
 
-    def test_get_stats_with_nested_user_files(
+    def test_get_stats_with_multiple_user_files(
         self, authenticated_client: TestClient, test_user: dict, temp_db: str
     ):
-        import os
-        from app.core.config import settings
+        from app.db import execute, utc_now
 
-        user_dir = os.path.join(settings.download_dir, str(test_user["id"]))
-        nested_dir = os.path.join(user_dir, "subdir", "nested")
-        os.makedirs(nested_dir, exist_ok=True)
-
-        with open(os.path.join(user_dir, "file1.bin"), "wb") as f:
-            f.write(b"x" * 1000)
-        with open(os.path.join(nested_dir, "file2.bin"), "wb") as f:
-            f.write(b"y" * 2000)
+        execute(
+            """INSERT INTO stored_files
+               (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ["hash_1", "/data/store/ab/hash_1", 1000, 0, 1, "file1.bin", utc_now()]
+        )
+        execute(
+            """INSERT INTO stored_files
+               (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ["hash_2", "/data/store/cd/hash_2", 2000, 0, 1, "file2.bin", utc_now()]
+        )
+        execute(
+            """INSERT INTO user_files
+               (owner_id, stored_file_id, display_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            [test_user["id"], 1, "file1.bin", utc_now()]
+        )
+        execute(
+            """INSERT INTO user_files
+               (owner_id, stored_file_id, display_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            [test_user["id"], 2, "file2.bin", utc_now()]
+        )
 
         mock_disk = MagicMock()
         mock_disk.total = 1000 * 1024 * 1024 * 1024
@@ -276,4 +296,35 @@ class TestGetStatsWithUserFiles:
         assert response.status_code == 200
         data = response.json()
         assert data["disk_used_space"] == 3000
+
+    def test_get_stats_returns_frozen_space(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ):
+        from app.db import execute, utc_now
+
+        execute(
+            """INSERT INTO download_tasks
+               (uri_hash, uri, gid, status, name, total_length, completed_length,
+                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ["hash1", "http://example.com/file1.zip", "gid1", "active", "file1.zip",
+             5000000, 0, 0, 0, 0, 0, utc_now(), utc_now()]
+        )
+        execute(
+            """INSERT INTO user_task_subscriptions
+               (owner_id, task_id, frozen_space, status, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            [test_user["id"], 1, 5000000, "pending", utc_now()]
+        )
+
+        mock_disk = MagicMock()
+        mock_disk.total = 1000 * 1024 * 1024 * 1024
+        mock_disk.free = 500 * 1024 * 1024 * 1024
+
+        with patch("shutil.disk_usage", return_value=mock_disk):
+            response = authenticated_client.get("/api/stats")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["disk_frozen_space"] == 5000000
 

@@ -19,6 +19,7 @@ export default function StatsWidget() {
   if (!stats) return null;
 
   const diskPercent = (stats.disk_used_space / stats.disk_total_space) * 100;
+  const frozenSpace = stats.disk_frozen_space || 0;
 
   const getDiskColor = (percent: number) => {
     if (percent >= 80) return "var(--danger)";
@@ -51,6 +52,11 @@ export default function StatsWidget() {
             }}
           />
         </div>
+        {frozenSpace > 0 && (
+          <div className="text-xs mt-1" style={{ color: "var(--text-tertiary)" }}>
+            已冻结: {formatBytes(frozenSpace)} (下载中)
+          </div>
+        )}
       </div>
 
       <div className="divider-v" />

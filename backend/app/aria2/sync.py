@@ -184,13 +184,14 @@ async def sync_tasks(
                         effective_available = space_info["available"]
 
                         if total_length <= effective_available:
-                            # Use optimistic locking: only update if frozen_space is still 0
+                            # Use optimistic locking: only update if frozen_space < total_length
+                            # This allows BT followedBy to update from metadata size to real size
                             async with get_session() as db:
                                 await db.execute(
                                     update(UserTaskSubscription)
                                     .where(
                                         UserTaskSubscription.id == sub.id,
-                                        UserTaskSubscription.frozen_space == 0  # Optimistic lock
+                                        UserTaskSubscription.frozen_space < total_length  # Optimistic lock
                                     )
                                     .values(frozen_space=total_length)
                                 )

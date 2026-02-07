@@ -265,8 +265,12 @@ class PackTaskManager:
                         )
                     except Exception:
                         logger.exception("Failed to register pack output: task_id=%s", task_id)
+                        if output_path.exists():
+                            output_path.unlink()
+                        await cls._update_task_error(task_id, "打包成功但注册文件失败，请重试")
+                        return
 
-                if delete_source and file_ids:
+                if stored_file_id and delete_source and file_ids:
                     from app.services.storage import delete_user_file_reference
                     for uf_id in file_ids:
                         try:

@@ -151,9 +151,8 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   };
 
   const getDisplayName = (task: PackTask) => {
-    if (task.output_path) {
-      const parts = task.output_path.split("/");
-      return parts[parts.length - 1];
+    if (task.output_name) {
+      return task.output_name;
     }
     if (task.folder_path.startsWith("[")) {
       try {
