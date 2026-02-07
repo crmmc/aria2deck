@@ -11,11 +11,13 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import text, update
 from sqlmodel import select
+from starlette.responses import StreamingResponse
+from urllib.parse import quote
 
 from app.auth import require_user
 from app.core.config import settings
@@ -124,6 +126,65 @@ def _validate_subpath(base_path: Path, subpath: str) -> Path:
         )
 
     return target
+
+
+def _range_file_response(request: Request, file_path: Path, filename: str):
+    """支持 Range 请求的文件下载响应（多线程下载/断点续传）"""
+    file_size = file_path.stat().st_size
+    encoded_name = quote(filename)
+    disposition = f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded_name}"
+
+    range_header = request.headers.get("range")
+    if not range_header:
+        return FileResponse(
+            path=str(file_path),
+            filename=filename,
+            media_type="application/octet-stream",
+            headers={"Accept-Ranges": "bytes", "Content-Disposition": disposition},
+        )
+
+    # Parse "bytes=start-end"
+    try:
+        unit, ranges = range_header.split("=", 1)
+        if unit.strip() != "bytes":
+            raise ValueError
+        range_spec = ranges.split(",")[0].strip()
+        parts = range_spec.split("-")
+        start = int(parts[0]) if parts[0] else 0
+        end = int(parts[1]) if parts[1] else file_size - 1
+    except (ValueError, IndexError):
+        raise HTTPException(416, "Invalid Range header")
+
+    if start >= file_size or start > end:
+        raise HTTPException(
+            416,
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+    end = min(end, file_size - 1)
+    content_length = end - start + 1
+
+    def iter_file():
+        with open(file_path, "rb") as f:
+            f.seek(start)
+            remaining = content_length
+            while remaining > 0:
+                chunk = f.read(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(
+        iter_file(),
+        status_code=206,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Content-Length": str(content_length),
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": disposition,
+        },
+    )
 
 
 async def _resolve_file_ids(user_id: int, file_ids: list[int]) -> list[tuple[str, int]]:
@@ -277,9 +338,10 @@ async def browse_file(
 @router.get("/{file_id}/download")
 async def download_file(
     file_id: int,
+    request: Request,
     path: str = "",
     user: User = Depends(require_user),
-) -> FileResponse:
+):
     """下载文件
 
     支持下载整个文件或 BT 文件夹内的单个文件。
@@ -351,11 +413,7 @@ async def download_file(
 
     logger.info("下载文件成功 user_id=%s file_id=%s file=%s", user.id, file_id, target_path.name)
 
-    return FileResponse(
-        path=str(target_path),
-        filename=target_path.name,
-        media_type="application/octet-stream"
-    )
+    return _range_file_response(request, target_path, target_path.name)
 
 
 @router.delete("/{file_id}")
@@ -672,6 +730,34 @@ async def get_pack_task(task_id: int, user: User = Depends(require_user)) -> dic
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
     logger.debug("查询打包任务详情 user_id=%s task_id=%s", user.id, task_id)
     return _pack_task_to_dict(task)
+
+
+@router.delete("/pack")
+async def clear_finished_pack_tasks(
+    user: User = Depends(require_user),
+) -> dict:
+    """一键清空已完成/失败/取消的打包任务记录"""
+    terminal_statuses = ["done", "failed", "cancelled"]
+    async with get_session() as db:
+        result = await db.exec(
+            select(PackTask).where(
+                PackTask.user_id == user.id,
+                PackTask.status.in_(terminal_statuses),
+            )
+        )
+        tasks = result.all()
+
+        count = 0
+        for task in tasks:
+            # failed/cancelled 任务可能有残留的半成品文件
+            if task.status in ("failed", "cancelled") and task.output_path:
+                output = Path(task.output_path)
+                if output.exists():
+                    output.unlink()
+            await db.delete(task)
+            count += 1
+
+    return {"ok": True, "count": count}
 
 
 @router.delete("/pack/{task_id}")

@@ -255,6 +255,11 @@ export const api = {
     request<{ ok: boolean; message: string }>(`/api/files/pack/${id}`, {
       method: "DELETE",
     }),
+
+  clearPackTasks: () =>
+    request<{ ok: boolean; count: number }>("/api/files/pack", {
+      method: "DELETE",
+    }),
 };
 
 export function taskWsUrl(): string {
