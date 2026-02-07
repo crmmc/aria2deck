@@ -27,6 +27,9 @@ async def task_ws(websocket: WebSocket) -> None:
 
     state = websocket.app.state.app_state
     user_id = user.id
+    if user_id is None:
+        await websocket.close(code=4401)
+        return
     await register_ws(state, user_id, websocket)
 
     async def heartbeat():
@@ -57,3 +60,17 @@ async def task_ws(websocket: WebSocket) -> None:
     finally:
         heartbeat_task.cancel()
         await unregister_ws(state, user_id, websocket)
+
+
+@router.websocket("/ws/tasks/")
+async def task_ws_trailing_slash(websocket: WebSocket) -> None:
+    """兼容带尾斜杠的 WebSocket 路径。"""
+    await task_ws(websocket)
+
+
+@router.websocket("/{full_path:path}")
+async def unknown_ws(websocket: WebSocket, full_path: str) -> None:
+    """兜底未知 WebSocket 路径，避免落入 StaticFiles 触发 AssertionError。"""
+    logger.warning("未知 WebSocket 路径: /%s", full_path)
+    await websocket.accept()
+    await websocket.close(code=4404)
