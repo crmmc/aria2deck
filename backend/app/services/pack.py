@@ -225,24 +225,43 @@ class PackTaskManager:
                     return
 
             # Parse progress from 7za output
+            # 7za uses \r (carriage return) to update progress on the same line,
+            # so we must read raw chunks instead of iterating lines (\n).
             progress = 0
-            async for line in process.stdout:
-                line_text = line.decode("utf-8", errors="ignore").strip()
-                # 7za progress format: " 45%" or similar
-                match = re.search(r"(\d+)%", line_text)
-                if match:
-                    new_progress = int(match.group(1))
-                    if new_progress != progress:
-                        progress = new_progress
-                        async with get_session() as db:
-                            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
-                            task = result.first()
-                            if task:
-                                task.progress = progress
-                                task.updated_at = utc_now()
-                                db.add(task)
-                        if on_progress:
-                            on_progress(task_id, progress)
+            buf = b""
+            while True:
+                chunk = await process.stdout.read(256)
+                if not chunk:
+                    break
+                buf += chunk
+                # Split on \r or \n to find progress segments
+                while b"\r" in buf or b"\n" in buf:
+                    idx_r = buf.find(b"\r")
+                    idx_n = buf.find(b"\n")
+                    if idx_r == -1:
+                        idx = idx_n
+                    elif idx_n == -1:
+                        idx = idx_r
+                    else:
+                        idx = min(idx_r, idx_n)
+                    segment = buf[:idx].decode("utf-8", errors="ignore").strip()
+                    buf = buf[idx + 1:]
+                    if not segment:
+                        continue
+                    match = re.search(r"(\d+)%", segment)
+                    if match:
+                        new_progress = int(match.group(1))
+                        if new_progress != progress:
+                            progress = new_progress
+                            async with get_session() as db:
+                                result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+                                task = result.first()
+                                if task:
+                                    task.progress = progress
+                                    task.updated_at = utc_now()
+                                    db.add(task)
+                            if on_progress:
+                                on_progress(task_id, progress)
 
             await process.wait()
 

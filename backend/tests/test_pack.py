@@ -1132,12 +1132,16 @@ class TestDoPackMethod:
         mock_process.returncode = 0
         mock_process.wait = AsyncMock()
 
-        async def mock_stdout_iter():
-            yield b"  10%\n"
-            yield b"  50%\n"
-            yield b" 100%\n"
+        class MockStdout:
+            def __init__(self):
+                self._data = b"  10%\r  50%\r 100%\n"
+                self._pos = 0
+            async def read(self, n):
+                chunk = self._data[self._pos:self._pos + n]
+                self._pos += len(chunk)
+                return chunk
 
-        mock_process.stdout = mock_stdout_iter()
+        mock_process.stdout = MockStdout()
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
             output_path = user_download_dir / "archive.zip"
@@ -1171,10 +1175,16 @@ class TestDoPackMethod:
         mock_process.returncode = 1
         mock_process.wait = AsyncMock()
 
-        async def mock_stdout_iter():
-            yield b"Error: something went wrong\n"
+        class MockStdout:
+            def __init__(self):
+                self._data = b"Error: something went wrong\n"
+                self._pos = 0
+            async def read(self, n):
+                chunk = self._data[self._pos:self._pos + n]
+                self._pos += len(chunk)
+                return chunk
 
-        mock_process.stdout = mock_stdout_iter()
+        mock_process.stdout = MockStdout()
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
             await PackTaskManager._do_pack(task_id, test_user["id"], abs_paths, file_ids=[])
@@ -1267,10 +1277,16 @@ class TestDoPackMethod:
         mock_process.returncode = 0
         mock_process.wait = AsyncMock()
 
-        async def mock_stdout_iter():
-            yield b" 100%\n"
+        class MockStdout:
+            def __init__(self):
+                self._data = b" 100%\n"
+                self._pos = 0
+            async def read(self, n):
+                chunk = self._data[self._pos:self._pos + n]
+                self._pos += len(chunk)
+                return chunk
 
-        mock_process.stdout = mock_stdout_iter()
+        mock_process.stdout = MockStdout()
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
             output_path = user_download_dir / "archive.zip"
