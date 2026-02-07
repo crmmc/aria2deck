@@ -1318,41 +1318,285 @@ class TestPackIntegration:
         authenticated_client: TestClient,
         user_download_dir: Path,
         test_user: dict,
+     ):
+         """Test complete workflow: create -> list -> get -> cancel."""
+         file_ids = _create_user_files(test_user["id"], user_download_dir, [
+             ("workflow1.txt", 500),
+             ("workflow2.txt", 600),
+         ])
+
+         # 1. Create pack task
+         with patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
+             create_response = authenticated_client.post(
+                 "/api/files/pack",
+                 json={"file_ids": file_ids}
+             )
+
+         assert create_response.status_code == 201
+         task_id = create_response.json()["id"]
+
+         # 2. List tasks - should include new task
+         list_response = authenticated_client.get("/api/files/pack")
+         assert list_response.status_code == 200
+         tasks = list_response.json()
+         assert any(t["id"] == task_id for t in tasks)
+
+         # 3. Get task details
+         get_response = authenticated_client.get(f"/api/files/pack/{task_id}")
+         assert get_response.status_code == 200
+         assert get_response.json()["id"] == task_id
+
+         # 4. Cancel task
+         with patch("app.services.pack.PackTaskManager.cancel_pack", new_callable=AsyncMock) as mock_cancel:
+             mock_cancel.return_value = False
+             cancel_response = authenticated_client.delete(f"/api/files/pack/{task_id}")
+
+         assert cancel_response.status_code == 200
+
+         # 5. Verify task is cancelled
+         task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
+         assert task["status"] == "cancelled"
+
+
+# ========== Clear Finished Pack Tasks Tests ==========
+
+class TestClearFinishedPackTasks:
+    """Tests for DELETE /api/files/pack endpoint (clear finished tasks)."""
+
+    def test_clear_finished_removes_done_tasks(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+        user_download_dir: Path,
+        temp_db: str,
     ):
-        """Test complete workflow: create -> list -> get -> cancel."""
-        file_ids = _create_user_files(test_user["id"], user_download_dir, [
-            ("workflow1.txt", 500),
-            ("workflow2.txt", 600),
-        ])
+        """Clear endpoint removes done/failed/cancelled tasks."""
+        now = utc_now()
+        
+        # Create done task with output file
+        output_path = user_download_dir / "done_task.zip"
+        output_path.write_bytes(b"PK" + b"\x00" * 100)
+        done_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, output_path, output_size,
+                status, progress, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder1", 1000, 0, str(output_path), 102,
+             "done", 100, now, now]
+        )
+        
+        # Create failed task
+        failed_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, progress,
+                error_message, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder2", 1000, 0, "failed", 30,
+             "error", now, now]
+        )
+        
+        # Create cancelled task
+        cancelled_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, progress,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder3", 1000, 0, "cancelled", 20, now, now]
+        )
+        
+        response = authenticated_client.delete("/api/files/pack")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["count"] == 3
+        
+        # Verify all tasks deleted
+        assert fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [done_id]) is None
+        assert fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [failed_id]) is None
+        assert fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [cancelled_id]) is None
 
-        # 1. Create pack task
-        with patch("app.services.pack.PackTaskManager.start_pack", new_callable=AsyncMock):
-            create_response = authenticated_client.post(
-                "/api/files/pack",
-                json={"file_ids": file_ids}
-            )
+    def test_clear_finished_preserves_active_tasks(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+        temp_db: str,
+    ):
+        """Clear endpoint preserves pending and packing tasks."""
+        now = utc_now()
+        
+        # Create pending task
+        pending_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, progress,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder1", 1000, 1000, "pending", 0, now, now]
+        )
+        
+        # Create packing task
+        packing_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, progress,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder2", 2000, 2000, "packing", 50, now, now]
+        )
+        
+        response = authenticated_client.delete("/api/files/pack")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 0
+        
+        # Verify active tasks still exist
+        pending = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [pending_id])
+        assert pending is not None
+        assert pending["status"] == "pending"
+        
+        packing = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [packing_id])
+        assert packing is not None
+        assert packing["status"] == "packing"
 
-        assert create_response.status_code == 201
-        task_id = create_response.json()["id"]
+    def test_clear_finished_mixed_statuses(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+        temp_db: str,
+    ):
+        """Clear endpoint removes only terminal statuses from mixed set."""
+        now = utc_now()
+        
+        # Create one of each status
+        done_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, progress,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder1", 1000, 0, "done", 100, now, now]
+        )
+        
+        failed_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, progress,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder2", 1000, 0, "failed", 30, now, now]
+        )
+        
+        pending_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, progress,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder3", 1000, 1000, "pending", 0, now, now]
+        )
+        
+        packing_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, progress,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder4", 2000, 2000, "packing", 50, now, now]
+        )
+        
+        response = authenticated_client.delete("/api/files/pack")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 2
+        
+        # Verify terminal tasks deleted
+        assert fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [done_id]) is None
+        assert fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [failed_id]) is None
+        
+        # Verify active tasks preserved
+        assert fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [pending_id]) is not None
+        assert fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [packing_id]) is not None
 
-        # 2. List tasks - should include new task
-        list_response = authenticated_client.get("/api/files/pack")
-        assert list_response.status_code == 200
-        tasks = list_response.json()
-        assert any(t["id"] == task_id for t in tasks)
+    def test_clear_finished_user_isolation(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+        test_admin: dict,
+        temp_db: str,
+    ):
+        """Clear endpoint only removes current user's terminal tasks."""
+        now = utc_now()
+        
+        # Create done task for test_user
+        user_done_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, progress,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "user_folder", 1000, 0, "done", 100, now, now]
+        )
+        
+        # Create done task for admin (other user)
+        admin_done_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, progress,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_admin["id"], "admin_folder", 1000, 0, "done", 100, now, now]
+        )
+        
+        response = authenticated_client.delete("/api/files/pack")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 1
+        
+        # Verify only test_user's task deleted
+        assert fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [user_done_id]) is None
+        
+        # Verify admin's task preserved
+        admin_task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [admin_done_id])
+        assert admin_task is not None
+        assert admin_task["owner_id"] == test_admin["id"]
 
-        # 3. Get task details
-        get_response = authenticated_client.get(f"/api/files/pack/{task_id}")
-        assert get_response.status_code == 200
-        assert get_response.json()["id"] == task_id
+    def test_clear_finished_no_tasks(
+        self,
+        authenticated_client: TestClient,
+    ):
+        """Clear endpoint returns count 0 when no terminal tasks exist."""
+        response = authenticated_client.delete("/api/files/pack")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["count"] == 0
 
-        # 4. Cancel task
-        with patch("app.services.pack.PackTaskManager.cancel_pack", new_callable=AsyncMock) as mock_cancel:
-            mock_cancel.return_value = False
-            cancel_response = authenticated_client.delete(f"/api/files/pack/{task_id}")
+    def test_clear_finished_cleans_output_files(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+        user_download_dir: Path,
+        temp_db: str,
+    ):
+        """Clear endpoint deletes orphan output files for failed/cancelled tasks."""
+        now = utc_now()
+        
+        output_path = user_download_dir / "partial_archive.zip"
+        output_path.write_bytes(b"PK" + b"\x00" * 500)
+        assert output_path.exists()
+        
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, output_path, output_size,
+                status, progress, error_message, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "folder", 1000, 0, str(output_path), 502,
+             "failed", 30, "zip error", now, now]
+        )
+        
+        response = authenticated_client.delete("/api/files/pack")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 1
+        
+        assert fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id]) is None
+        assert not output_path.exists()
 
-        assert cancel_response.status_code == 200
-
-        # 5. Verify task is cancelled
-        task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
-        assert task["status"] == "cancelled"

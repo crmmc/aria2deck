@@ -423,6 +423,111 @@ async def download_file(
     return _range_file_response(request, target_path, target_path.name)
 
 
+@router.delete("/pack")
+async def clear_finished_pack_tasks(
+    user: User = Depends(require_user),
+) -> dict:
+    """一键清空已完成/失败/取消的打包任务记录"""
+    terminal_statuses = ["done", "failed", "cancelled"]
+    async with get_session() as db:
+        result = await db.exec(
+            select(PackTask).where(
+                PackTask.owner_id == user.id,
+                PackTask.status.in_(terminal_statuses),
+            )
+        )
+        tasks = result.all()
+
+        count = 0
+        for task in tasks:
+            # failed/cancelled 任务可能有残留的半成品文件
+            if task.status in ("failed", "cancelled") and task.output_path:
+                output = Path(task.output_path)
+                if output.exists():
+                    output.unlink()
+            await db.delete(task)
+            count += 1
+
+    return {"ok": True, "count": count}
+
+
+@router.delete("/pack/{task_id}")
+async def cancel_or_delete_pack_task(
+    task_id: int,
+    user: User = Depends(require_user)
+) -> dict:
+    """取消或删除打包任务"""
+    from app.services.pack import PackTaskManager
+
+    async with get_session() as db:
+        result = await db.exec(
+            select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
+        )
+        task = result.first()
+
+    if not task:
+        logger.warning("取消/删除打包任务失败 user_id=%s task_id=%s reason=not_found", user.id, task_id)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+
+    task_status = task.status
+
+    if task_status in ("pending", "packing"):
+        await PackTaskManager.cancel_pack(task_id)
+        async with get_session() as db:
+            result = await db.execute(
+                update(PackTask)
+                .where(
+                    PackTask.id == task_id,
+                    PackTask.status.in_(["pending", "packing"]),
+                )
+                .values(
+                    status="cancelled",
+                    reserved_space=0,
+                    updated_at=utc_now()
+                )
+            )
+            cancelled = result.rowcount > 0
+
+        if cancelled:
+            logger.info("取消打包任务成功 user_id=%s task_id=%s", user.id, task_id)
+            return {"ok": True, "message": "任务已取消"}
+
+        # 状态已变化，重新读取并按实际状态处理
+        async with get_session() as db:
+            result = await db.exec(
+                select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
+            )
+            task = result.first()
+        if not task:
+            logger.warning("取消/删除打包任务失败 user_id=%s task_id=%s reason=not_found_after_reload", user.id, task_id)
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+        task_status = task.status
+
+    if task_status in ("done", "failed", "cancelled"):
+        # Clean up partial zip for failed/cancelled tasks
+        if task_status in ("failed", "cancelled") and task.output_path:
+            output_file = Path(task.output_path)
+            if output_file.exists():
+                try:
+                    output_file.unlink()
+                    logger.info("Cleaned up partial pack file: %s", task.output_path)
+                except Exception as e:
+                    logger.warning("Failed to clean up pack file %s: %s", task.output_path, e)
+
+        async with get_session() as db:
+            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+            db_task = result.first()
+            if db_task:
+                await db.delete(db_task)
+        logger.info("删除打包任务记录成功 user_id=%s task_id=%s status=%s", user.id, task_id, task_status)
+        return {"ok": True, "message": "任务已删除"}
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="无法处理该任务状态"
+    )
+
+
 @router.delete("/{file_id}")
 async def delete_file(
     file_id: int,
@@ -737,111 +842,6 @@ async def get_pack_task(task_id: int, user: User = Depends(require_user)) -> dic
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
     logger.debug("查询打包任务详情 user_id=%s task_id=%s", user.id, task_id)
     return _pack_task_to_dict(task)
-
-
-@router.delete("/pack")
-async def clear_finished_pack_tasks(
-    user: User = Depends(require_user),
-) -> dict:
-    """一键清空已完成/失败/取消的打包任务记录"""
-    terminal_statuses = ["done", "failed", "cancelled"]
-    async with get_session() as db:
-        result = await db.exec(
-            select(PackTask).where(
-                PackTask.owner_id == user.id,
-                PackTask.status.in_(terminal_statuses),
-            )
-        )
-        tasks = result.all()
-
-        count = 0
-        for task in tasks:
-            # failed/cancelled 任务可能有残留的半成品文件
-            if task.status in ("failed", "cancelled") and task.output_path:
-                output = Path(task.output_path)
-                if output.exists():
-                    output.unlink()
-            await db.delete(task)
-            count += 1
-
-    return {"ok": True, "count": count}
-
-
-@router.delete("/pack/{task_id}")
-async def cancel_or_delete_pack_task(
-    task_id: int,
-    user: User = Depends(require_user)
-) -> dict:
-    """取消或删除打包任务"""
-    from app.services.pack import PackTaskManager
-
-    async with get_session() as db:
-        result = await db.exec(
-            select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
-        )
-        task = result.first()
-
-    if not task:
-        logger.warning("取消/删除打包任务失败 user_id=%s task_id=%s reason=not_found", user.id, task_id)
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
-
-    task_status = task.status
-
-    if task_status in ("pending", "packing"):
-        await PackTaskManager.cancel_pack(task_id)
-        async with get_session() as db:
-            result = await db.execute(
-                update(PackTask)
-                .where(
-                    PackTask.id == task_id,
-                    PackTask.status.in_(["pending", "packing"]),
-                )
-                .values(
-                    status="cancelled",
-                    reserved_space=0,
-                    updated_at=utc_now()
-                )
-            )
-            cancelled = result.rowcount > 0
-
-        if cancelled:
-            logger.info("取消打包任务成功 user_id=%s task_id=%s", user.id, task_id)
-            return {"ok": True, "message": "任务已取消"}
-
-        # 状态已变化，重新读取并按实际状态处理
-        async with get_session() as db:
-            result = await db.exec(
-                select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
-            )
-            task = result.first()
-        if not task:
-            logger.warning("取消/删除打包任务失败 user_id=%s task_id=%s reason=not_found_after_reload", user.id, task_id)
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
-        task_status = task.status
-
-    if task_status in ("done", "failed", "cancelled"):
-        # Clean up partial zip for failed/cancelled tasks
-        if task_status in ("failed", "cancelled") and task.output_path:
-            output_file = Path(task.output_path)
-            if output_file.exists():
-                try:
-                    output_file.unlink()
-                    logger.info("Cleaned up partial pack file: %s", task.output_path)
-                except Exception as e:
-                    logger.warning("Failed to clean up pack file %s: %s", task.output_path, e)
-
-        async with get_session() as db:
-            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
-            db_task = result.first()
-            if db_task:
-                await db.delete(db_task)
-        logger.info("删除打包任务记录成功 user_id=%s task_id=%s status=%s", user.id, task_id, task_status)
-        return {"ok": True, "message": "任务已删除"}
-
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="无法处理该任务状态"
-    )
 
 
 # Legacy quota endpoint for backward compatibility

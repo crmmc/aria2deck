@@ -551,3 +551,220 @@ class TestBrowseDirectoryEdgeCases:
 
         response = authenticated_client.get(f"/api/files/{user_file_id}/browse?path=../../../etc")
         assert response.status_code == 403
+
+
+class TestDownloadFileRange:
+
+    def test_download_no_range_returns_accept_ranges(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ):
+        from pathlib import Path
+        from app.db import execute
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        test_file = Path(settings.download_dir) / "store" / "range_test_100bytes.bin"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_bytes(bytes(range(100)))
+
+        stored_file_id = execute(
+            """INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ["range_test_100", str(test_file), 100, 0, 1, "range_test_100bytes.bin", now]
+        )
+        user_file_id = execute(
+            """INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            [test_user["id"], stored_file_id, "range_test_100bytes.bin", now]
+        )
+
+        response = authenticated_client.get(f"/api/files/{user_file_id}/download")
+        assert response.status_code == 200
+        assert "Accept-Ranges" in response.headers
+        assert response.headers["Accept-Ranges"] == "bytes"
+
+    def test_download_range_start_end(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ):
+        from pathlib import Path
+        from app.db import execute
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        test_file = Path(settings.download_dir) / "store" / "range_test_start_end.bin"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_bytes(bytes(range(100)))
+
+        stored_file_id = execute(
+            """INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ["range_test_start_end", str(test_file), 100, 0, 1, "range_test_start_end.bin", now]
+        )
+        user_file_id = execute(
+            """INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            [test_user["id"], stored_file_id, "range_test_start_end.bin", now]
+        )
+
+        response = authenticated_client.get(
+            f"/api/files/{user_file_id}/download",
+            headers={"Range": "bytes=0-9"}
+        )
+        assert response.status_code == 206
+        assert response.headers["Content-Range"] == "bytes 0-9/100"
+        assert response.headers["Content-Length"] == "10"
+        assert response.content == bytes(range(10))
+
+    def test_download_range_start_only(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ):
+        from pathlib import Path
+        from app.db import execute
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        test_file = Path(settings.download_dir) / "store" / "range_test_start_only.bin"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_bytes(bytes(range(100)))
+
+        stored_file_id = execute(
+            """INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ["range_test_start_only", str(test_file), 100, 0, 1, "range_test_start_only.bin", now]
+        )
+        user_file_id = execute(
+            """INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            [test_user["id"], stored_file_id, "range_test_start_only.bin", now]
+        )
+
+        response = authenticated_client.get(
+            f"/api/files/{user_file_id}/download",
+            headers={"Range": "bytes=90-"}
+        )
+        assert response.status_code == 206
+        assert response.headers["Content-Range"] == "bytes 90-99/100"
+        assert response.headers["Content-Length"] == "10"
+        assert response.content == bytes(range(90, 100))
+
+    def test_download_range_suffix(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ):
+        from pathlib import Path
+        from app.db import execute
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        test_file = Path(settings.download_dir) / "store" / "range_test_suffix.bin"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_bytes(bytes(range(100)))
+
+        stored_file_id = execute(
+            """INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ["range_test_suffix", str(test_file), 100, 0, 1, "range_test_suffix.bin", now]
+        )
+        user_file_id = execute(
+            """INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            [test_user["id"], stored_file_id, "range_test_suffix.bin", now]
+        )
+
+        response = authenticated_client.get(
+            f"/api/files/{user_file_id}/download",
+            headers={"Range": "bytes=-20"}
+        )
+        assert response.status_code == 206
+        assert response.headers["Content-Range"] == "bytes 80-99/100"
+        assert response.headers["Content-Length"] == "20"
+        assert response.content == bytes(range(80, 100))
+
+    def test_download_range_invalid_format(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ):
+        from pathlib import Path
+        from app.db import execute
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        test_file = Path(settings.download_dir) / "store" / "range_test_invalid.bin"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_bytes(bytes(range(100)))
+
+        stored_file_id = execute(
+            """INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ["range_test_invalid", str(test_file), 100, 0, 1, "range_test_invalid.bin", now]
+        )
+        user_file_id = execute(
+            """INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            [test_user["id"], stored_file_id, "range_test_invalid.bin", now]
+        )
+
+        response = authenticated_client.get(
+            f"/api/files/{user_file_id}/download",
+            headers={"Range": "invalid"}
+        )
+        assert response.status_code == 416
+
+    def test_download_range_out_of_bounds(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ):
+        from pathlib import Path
+        from app.db import execute
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        test_file = Path(settings.download_dir) / "store" / "range_test_oob.bin"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_bytes(bytes(range(100)))
+
+        stored_file_id = execute(
+            """INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ["range_test_oob", str(test_file), 100, 0, 1, "range_test_oob.bin", now]
+        )
+        user_file_id = execute(
+            """INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            [test_user["id"], stored_file_id, "range_test_oob.bin", now]
+        )
+
+        response = authenticated_client.get(
+            f"/api/files/{user_file_id}/download",
+            headers={"Range": "bytes=200-300"}
+        )
+        assert response.status_code == 416
+
+    def test_download_range_end_exceeds_size(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ):
+        from pathlib import Path
+        from app.db import execute
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        test_file = Path(settings.download_dir) / "store" / "range_test_exceed.bin"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_bytes(bytes(range(100)))
+
+        stored_file_id = execute(
+            """INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ["range_test_exceed", str(test_file), 100, 0, 1, "range_test_exceed.bin", now]
+        )
+        user_file_id = execute(
+            """INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            [test_user["id"], stored_file_id, "range_test_exceed.bin", now]
+        )
+
+        response = authenticated_client.get(
+            f"/api/files/{user_file_id}/download",
+            headers={"Range": "bytes=90-200"}
+        )
+        assert response.status_code == 206
+        assert response.headers["Content-Range"] == "bytes 90-99/100"
+        assert response.headers["Content-Length"] == "10"
+        assert response.content == bytes(range(90, 100))
