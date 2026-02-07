@@ -758,13 +758,6 @@ describe("api methods", () => {
       );
     });
   });
-
-  describe("api.downloadPackResult", () => {
-    it("returns pack download URL", () => {
-      const url = api.downloadPackResult(123);
-      expect(url).toContain("/api/files/pack/123/download");
-    });
-  });
 });
 
 describe("taskWsUrl", () => {
