@@ -41,6 +41,7 @@ export type SystemStats = {
   upload_speed: number;
   active_task_count: number;
   disk_used_space: number;
+  disk_frozen_space: number;
   disk_total_space: number;
   disk_space_limited: boolean;
 };
@@ -102,6 +103,7 @@ export type PackTask = {
   folder_size: number;
   reserved_space: number;
   output_path: string | null;
+  output_name: string | null;
   output_size: number | null;
   stored_file_id: number | null;
   delete_source: boolean;

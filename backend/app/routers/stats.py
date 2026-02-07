@@ -12,6 +12,7 @@ from app.auth import require_admin, require_user
 from app.core.config import settings
 from app.database import get_session
 from app.models import DownloadTask, User, UserTaskSubscription
+from app.services.storage import get_user_used_space_async, get_user_frozen_space
 
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -40,21 +41,14 @@ async def get_stats(user: User = Depends(require_user)) -> dict:
     所有用户返回:
     - disk_total_space: 用户配额（字节）
     - disk_used_space: 用户已使用空间（字节）
+    - disk_frozen_space: 用户冻结空间（字节，下载中锁定）
     - disk_space_limited: 是否受机器空间限制
     - download_speed: 用户任务下载速度总和（字节/秒）
     - upload_speed: 用户任务上传速度总和（字节/秒）
     - active_task_count: 用户活跃任务数
     """
-    # 计算用户已使用的空间
-    user_dir = Path(settings.download_dir) / str(user.id)
-    used_space = 0
-    if user_dir.exists():
-        for file_path in user_dir.rglob("*"):
-            if file_path.is_file():
-                try:
-                    used_space += file_path.stat().st_size
-                except Exception as exc:
-                    logger.debug("统计文件大小失败 user_id=%s path=%s error=%s", user.id, file_path, exc)
+    used_space = await get_user_used_space_async(user.id)
+    frozen_space = await get_user_frozen_space(user.id)
 
     # 用户配额
     user_quota = user.quota if user.quota else 100 * 1024 * 1024 * 1024  # 默认 100GB
@@ -66,15 +60,15 @@ async def get_stats(user: User = Depends(require_user)) -> dict:
     machine_free = disk.free
 
     # 用户理论可用空间（基于配额）
-    user_free_by_quota = max(0, user_quota - used_space)
+    user_free_by_quota = max(0, user_quota - used_space - frozen_space)
 
     # 判断是否受机器空间限制
     is_limited = machine_free < user_free_by_quota
 
     # 动态调整显示的总空间：
-    # - 如果受限：总空间 = 已使用 + 机器剩余空间
+    # - 如果受限：总空间 = 已使用 + 冻结 + 机器剩余空间
     # - 如果不受限：总空间 = 用户配额
-    display_total = used_space + machine_free if is_limited else user_quota
+    display_total = used_space + frozen_space + machine_free if is_limited else user_quota
 
     # 当前用户活跃任务统计和速度总和
     async with get_session() as db:
@@ -110,6 +104,7 @@ async def get_stats(user: User = Depends(require_user)) -> dict:
     result = {
         "disk_total_space": display_total,
         "disk_used_space": used_space,
+        "disk_frozen_space": frozen_space,
         "disk_space_limited": is_limited,
         "download_speed": int(total_download),
         "upload_speed": int(total_upload),
