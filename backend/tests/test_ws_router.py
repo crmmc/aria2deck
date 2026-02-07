@@ -41,3 +41,18 @@ class TestTaskWebSocket:
             websocket.send_text("ping")
             response = websocket.receive_text()
             assert response == "pong"
+
+    def test_websocket_connect_trailing_slash(self, client: TestClient, user_session: str, test_user: dict):
+        with client.websocket_connect(
+            "/ws/tasks/",
+            cookies={settings.session_cookie_name: user_session}
+        ) as websocket:
+            websocket.send_text("ping")
+            response = websocket.receive_text()
+            assert response == "pong"
+
+    def test_websocket_unknown_path_closed(self, client: TestClient, temp_db: str):
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/ws/unknown") as websocket:
+                websocket.receive_text()
+        assert exc_info.value.code == 4404
