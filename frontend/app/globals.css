@@ -1286,6 +1286,7 @@ p {
   overflow-y: auto;
   z-index: 100;
   padding: 0;
+  background: #fff !important;
   transition: opacity 0.4s ease, transform 0.4s ease;
 }
 
