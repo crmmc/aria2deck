@@ -2,7 +2,7 @@
 import asyncio
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -440,6 +440,15 @@ class TestSyncCompletionFinalization:
 
         task_id = await _create_task_with_subs([user_id], gid, total_length=2048, status="complete")
 
+        # Make task old enough to pass repair grace window.
+        stale_time = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+        async with get_session() as db:
+            result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+            task = result.first()
+            assert task is not None
+            task.updated_at = stale_time
+            db.add(task)
+
         state = AppState()
         mock_client = AsyncMock()
 
@@ -468,3 +477,36 @@ class TestSyncCompletionFinalization:
             assert len(history) == 1
             assert history[0].result == "failed"
             assert history[0].reason == "下载完成但文件未入库"
+
+    @pytest.mark.asyncio
+    async def test_sync_skips_recent_inconsistent_completed_tasks(self, temp_db_freeze):
+        user_id = _create_user("freezeuser_complete_3", 100 * 1024 * 1024 * 1024)
+        gid = "gid_complete_sync_3"
+
+        task_id = await _create_task_with_subs([user_id], gid, total_length=2048, status="complete")
+
+        state = AppState()
+        mock_client = AsyncMock()
+
+        with patch("app.core.state.get_aria2_client", return_value=mock_client), \
+             patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock), \
+             patch("app.aria2.sync.asyncio.sleep", new_callable=AsyncMock, side_effect=asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
+                await sync_tasks(state, interval=0.01)
+
+        async with get_session() as db:
+            result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+            task = result.first()
+            assert task is not None
+            assert task.status == "complete"
+
+            result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+            )
+            subs = result.all()
+            assert len(subs) == 1
+            assert subs[0].status == "pending"
+
+            result = await db.exec(select(TaskHistory).where(TaskHistory.owner_id == user_id))
+            history = result.all()
+            assert len(history) == 0
