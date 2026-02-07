@@ -343,6 +343,48 @@ class TestPackTaskCreate:
         )
         assert response.status_code == 400
 
+    def test_create_pack_task_default_output_name_uses_display_name(
+        self,
+        authenticated_client: TestClient,
+        user_file: dict,
+    ):
+        response = authenticated_client.post(
+            "/api/files/pack",
+            json={"file_ids": [user_file["id"]]},
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["output_name"] == "test_file"
+
+    def test_create_pack_task_rejects_too_long_output_name(
+        self,
+        authenticated_client: TestClient,
+        user_file: dict,
+    ):
+        long_name = "a" * 201
+
+        response = authenticated_client.post(
+            "/api/files/pack",
+            json={"file_ids": [user_file["id"]], "output_name": long_name},
+        )
+
+        assert response.status_code == 400
+        assert "200" in response.json()["detail"]
+
+    def test_create_pack_task_rejects_invalid_output_name_chars(
+        self,
+        authenticated_client: TestClient,
+        user_file: dict,
+    ):
+        response = authenticated_client.post(
+            "/api/files/pack",
+            json={"file_ids": [user_file["id"]], "output_name": 'bad:name'},
+        )
+
+        assert response.status_code == 400
+        assert "非法字符" in response.json()["detail"]
+
 
 class TestBrowseDirectory:
 

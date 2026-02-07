@@ -143,8 +143,8 @@ async def sync_tasks(
             aria2_status = status.get("status")
             total_length = int(status.get("totalLength", 0))
 
-            # Check size when it becomes known
-            if aria2_status == "active" and total_length > 0 and (task.total_length or 0) == 0:
+            # Check size when it becomes known or grows (e.g. BT metadata -> real payload)
+            if aria2_status == "active" and total_length > 0 and (task.total_length or 0) < total_length:
                 # Check system limit
                 max_task_size = get_max_task_size()
                 if total_length > max_task_size:
@@ -183,7 +183,8 @@ async def sync_tasks(
                         # Each user's space is independent, use available directly
                         effective_available = space_info["available"]
 
-                        if total_length <= effective_available:
+                        required_extra = max(total_length - (sub.frozen_space or 0), 0)
+                        if required_extra <= effective_available:
                             # Use optimistic locking: only update if frozen_space < total_length
                             # This allows BT followedBy to update from metadata size to real size
                             async with get_session() as db:
