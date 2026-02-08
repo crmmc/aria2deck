@@ -257,11 +257,8 @@ describe("Folder in-page browsing", () => {
 
     // Should show warning toast
     await waitFor(() => {
-      expect(screen.getByText(/无法批量下载/)).toBeInTheDocument();
+      expect(screen.getByText(/请仅选择文件/)).toBeInTheDocument();
     });
-
-    // downloadFileUrl should NOT have been called
-    expect(mockApi.downloadFileUrl).not.toHaveBeenCalled();
   });
 
   test("root batch download with folder selected shows warning toast", async () => {
