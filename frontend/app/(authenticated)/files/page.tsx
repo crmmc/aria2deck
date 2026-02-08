@@ -261,6 +261,27 @@ export default function FilesPage() {
     }
   };
 
+  const handleBatchDownload = async () => {
+    if (selectedFiles.size === 0) return;
+    const hasFolder = files.some((f) => selectedFiles.has(f.id) && f.is_directory);
+    if (hasFolder) {
+      showToast("当前选择包含文件夹，无法批量下载，请先打包后下载", "warning");
+      return;
+    }
+    for (const fileId of selectedFiles) {
+      const url = api.downloadFileUrl(fileId);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    showToast(`已开始下载 ${selectedFiles.size} 个文件`, "success");
+    setSelectedFiles(new Set());
+  };
+
   const openPackDialog = async () => {
     if (selectedFiles.size === 0) {
       showToast("请先选择要打包的文件", "warning");
@@ -434,7 +455,6 @@ export default function FilesPage() {
 
   // Browse file selection helpers
   const toggleBrowseFileSelection = (item: BrowseFileInfo) => {
-    if (item.is_directory) return;
     const key = [...(browseContext?.path ?? []), item.name].join("/");
     setSelectedBrowseFiles((prev) => {
       const next = new Set(prev);
@@ -448,8 +468,7 @@ export default function FilesPage() {
   };
 
   const toggleAllBrowseFiles = () => {
-    const files = browseContents.filter((item) => !item.is_directory);
-    const keys = files.map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
+    const keys = browseContents.map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
     const allSelected = keys.length > 0 && keys.every((k) => selectedBrowseFiles.has(k));
     if (allSelected) {
       setSelectedBrowseFiles(new Set());
@@ -460,6 +479,15 @@ export default function FilesPage() {
 
   const handleBrowseBatchDownload = async () => {
     if (!browseContext || selectedBrowseFiles.size === 0) return;
+    // 检查选中项是否包含文件夹
+    const hasFolder = browseContents.some((item) => {
+      const key = [...(browseContext.path ?? []), item.name].join("/");
+      return item.is_directory && selectedBrowseFiles.has(key);
+    });
+    if (hasFolder) {
+      showToast("当前选择包含文件夹，无法批量下载，请先打包后下载", "warning");
+      return;
+    }
     for (const path of selectedBrowseFiles) {
       const url = api.downloadFileUrl(browseContext.fileId, path);
       const a = document.createElement("a");
@@ -664,17 +692,16 @@ export default function FilesPage() {
                   </button>
                 </>
               )}
-              {browseContents.some((item) => !item.is_directory) && (
+              {browseContents.length > 0 && (
                 <button
                   type="button"
                   className="button secondary btn-sm"
                   onClick={toggleAllBrowseFiles}
                 >
                   {(() => {
-                    const fileKeys = browseContents
-                      .filter((item) => !item.is_directory)
+                    const allKeys = browseContents
                       .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
-                    return fileKeys.length > 0 && fileKeys.every((k) => selectedBrowseFiles.has(k))
+                    return allKeys.length > 0 && allKeys.every((k) => selectedBrowseFiles.has(k))
                       ? "取消全选"
                       : "全选";
                   })()}
@@ -690,6 +717,14 @@ export default function FilesPage() {
                   </span>
                   <button
                     type="button"
+                    className="button secondary btn-sm"
+                    onClick={handleBatchDownload}
+                    disabled={isBatchOperating}
+                  >
+                    批量下载
+                  </button>
+                  <button
+                    type="button"
                     className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
                     onClick={handleBatchDelete}
                     disabled={isBatchOperating}
@@ -702,7 +737,7 @@ export default function FilesPage() {
                     onClick={openPackDialog}
                     disabled={isBatchOperating}
                   >
-                    打包下载
+                    打包
                   </button>
                 </>
               )}
@@ -739,10 +774,9 @@ export default function FilesPage() {
                 <input
                   type="checkbox"
                   checked={(() => {
-                    const fileKeys = browseContents
-                      .filter((item) => !item.is_directory)
+                    const allKeys = browseContents
                       .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
-                    return fileKeys.length > 0 && fileKeys.every((k) => selectedBrowseFiles.has(k));
+                    return allKeys.length > 0 && allKeys.every((k) => selectedBrowseFiles.has(k));
                   })()}
                   onChange={toggleAllBrowseFiles}
                   className="checkbox-sm cursor-pointer"
@@ -788,16 +822,12 @@ export default function FilesPage() {
                             }}
                           >
                             <div className="table-cell">
-                              {item.is_directory ? (
-                                <span style={{ width: 16, display: 'inline-block' }} />
-                              ) : (
-                                <input
-                                  type="checkbox"
-                                  checked={selectedBrowseFiles.has(itemKey)}
-                                  onChange={() => toggleBrowseFileSelection(item)}
-                                  className="checkbox-sm cursor-pointer"
-                                />
-                              )}
+                              <input
+                                type="checkbox"
+                                checked={selectedBrowseFiles.has(itemKey)}
+                                onChange={() => toggleBrowseFileSelection(item)}
+                                className="checkbox-sm cursor-pointer"
+                              />
                             </div>
                             <div className="table-cell" data-label="名称" style={{ overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
                               <div className="flex items-center gap-2">
@@ -1124,7 +1154,7 @@ export default function FilesPage() {
             style={{ maxWidth: "500px", width: "90%" }}
           >
             <div className="modal-header">
-              <h2 className="m-0">打包下载</h2>
+              <h2 className="m-0">打包</h2>
               <button
                 type="button"
                 onClick={() => !packing && setPackDialogOpen(false)}
