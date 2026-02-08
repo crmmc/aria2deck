@@ -393,7 +393,7 @@ async def create_task(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户未登录")
 
     # Rate limit
-    if not await api_limiter.is_allowed(user_id, "create_task", limit=30, window_seconds=60):
+    if not await api_limiter.is_allowed(user_id, "create_task", limit=settings.rate_limit_create_task, window_seconds=60):
         logger.warning("创建任务被限流 user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -741,7 +741,7 @@ async def create_torrent_task(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户未登录")
 
     # Rate limit
-    if not await api_limiter.is_allowed(user_id, "create_torrent", limit=10, window_seconds=60):
+    if not await api_limiter.is_allowed(user_id, "create_torrent", limit=settings.rate_limit_create_torrent, window_seconds=60):
         logger.warning("创建种子任务被限流 user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

@@ -357,7 +357,7 @@ async def download_file(
         file_id: UserFile ID
         path: BT 文件夹内的相对路径（可选）
     """
-    if not await api_limiter.is_allowed(user.id, "download_file", limit=60, window_seconds=60):
+    if not await api_limiter.is_allowed(user.id, "download_file", limit=settings.rate_limit_download_file, window_seconds=60):
         logger.warning("下载文件被限流 user_id=%s file_id=%s", user.id, file_id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -695,7 +695,7 @@ async def create_pack_task(
 ) -> dict:
     """创建打包任务 - 基于 UserFile ID"""
     # 频率限制
-    if not await api_limiter.is_allowed(user.id, "create_pack", limit=5, window_seconds=60):
+    if not await api_limiter.is_allowed(user.id, "create_pack", limit=settings.rate_limit_create_pack, window_seconds=60):
         logger.warning("创建打包任务被限流 user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -759,11 +759,12 @@ async def create_pack_task(
                     )
                 )
                 user_file = uf_result.first()
-                file_hint = user_file.display_name if user_file else "未知文件"
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"已存在打包完成的文件「{file_hint}」"
-                )
+                if user_file:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"已存在打包完成的文件「{user_file.display_name}」"
+                    )
+                # UserFile 已被删除，允许重新打包
 
         info = await get_user_space_info(user.id, user.quota)
         available = info["available"]

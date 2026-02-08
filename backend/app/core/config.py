@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     download_dir: str = str(BASE_DIR / "downloads")
     secret_key: str = "aria2deck-default-secret-key-change-in-production"
 
+    # Rate limits (times per minute)
+    rate_limit_login: int = 5
+    rate_limit_create_task: int = 60
+    rate_limit_create_torrent: int = 20
+    rate_limit_download_file: int = 300
+    rate_limit_create_pack: int = 10
+    rate_limit_aria2_test: int = 60
+
     class Config:
         env_prefix = "ARIA2C_"
 
