@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from time import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from app.auth import require_admin, require_user
@@ -33,18 +33,18 @@ def utc_now() -> str:
 
 class ConfigUpdate(BaseModel):
     """配置更新请求体"""
-    max_task_size: int | None = None  # 单任务最大大小（字节）
-    min_free_disk: int | None = None  # 磁盘最小剩余空间（字节）
+    max_task_size: int | None = Field(None, ge=0, description="单任务最大大小（字节）")
+    min_free_disk: int | None = Field(None, ge=0, description="磁盘最小剩余空间（字节）")
     aria2_rpc_url: str | None = None  # aria2 RPC URL
     aria2_rpc_secret: str | None = None  # aria2 RPC Secret
     hidden_file_extensions: list[str] | None = None  # 隐藏的文件后缀名列表
     pack_format: str | None = None  # 打包格式 (zip 或 7z)
-    pack_compression_level: int | None = None  # 压缩等级 (0-9)
+    pack_compression_level: int | None = Field(None, ge=0, le=9, description="压缩等级 (0-9)")
     pack_extra_args: str | None = None  # 7za 附加参数
     # WebSocket 重连参数
-    ws_reconnect_max_delay: float | None = None  # 最大重连延迟（秒）
-    ws_reconnect_jitter: float | None = None  # 抖动系数 (0-1)
-    ws_reconnect_factor: float | None = None  # 指数因子
+    ws_reconnect_max_delay: float | None = Field(None, ge=1.0, le=300.0, description="最大重连延迟（秒）")
+    ws_reconnect_jitter: float | None = Field(None, ge=0.0, le=1.0, description="抖动系数 (0-1)")
+    ws_reconnect_factor: float | None = Field(None, ge=1.0, le=5.0, description="指数因子")
 
 
 class Aria2TestRequest(BaseModel):

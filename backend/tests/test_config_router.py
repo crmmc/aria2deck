@@ -61,10 +61,13 @@ class TestUpdateConfig:
         assert response.status_code == 200
         assert response.json()["pack_compression_level"] == 9
 
-    def test_update_compression_level_clamped(self, admin_client: TestClient):
+    def test_update_compression_level_out_of_range(self, admin_client: TestClient):
         response = admin_client.put("/api/config", json={"pack_compression_level": 100})
-        assert response.status_code == 200
-        assert response.json()["pack_compression_level"] == 9
+        assert response.status_code == 422
+
+    def test_update_compression_level_negative(self, admin_client: TestClient):
+        response = admin_client.put("/api/config", json={"pack_compression_level": -1})
+        assert response.status_code == 422
 
     def test_update_compression_level_zero(self, admin_client: TestClient):
         response = admin_client.put("/api/config", json={"pack_compression_level": 0})
