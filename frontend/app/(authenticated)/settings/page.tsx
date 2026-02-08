@@ -73,7 +73,7 @@ export default function SettingsPage() {
       setAria2RpcSecret(cfg.aria2_rpc_secret || "");
       setHiddenExtensions(cfg.hidden_file_extensions || []);
       setPackFormat(cfg.pack_format || "zip");
-      setPackCompressionLevel(cfg.pack_compression_level || 5);
+      setPackCompressionLevel(cfg.pack_compression_level ?? 5);
       setPackExtraArgs(cfg.pack_extra_args || "");
       setWsReconnectMaxDelay(cfg.ws_reconnect_max_delay || 60);
       setWsReconnectJitter(cfg.ws_reconnect_jitter || 0.2);
