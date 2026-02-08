@@ -156,7 +156,7 @@ class TestRenameFile:
             f"/api/files/{user_file['id']}/rename",
             json={"name": ""}
         )
-        assert response.status_code == 400
+        assert response.status_code == 422
 
     def test_rename_file_unauthorized(self, client: TestClient, temp_db: str, user_file: dict):
         response = client.put(
@@ -270,7 +270,7 @@ class TestPackTaskOperations:
             "/api/files/pack",
             json={"file_ids": [], "output_name": "test.7z"}
         )
-        assert response.status_code == 400
+        assert response.status_code == 422
 
 
 class TestFileListWithSpace:
@@ -341,7 +341,7 @@ class TestPackTaskCreate:
             "/api/files/pack",
             json={"file_ids": [], "output_name": "test.7z"}
         )
-        assert response.status_code == 400
+        assert response.status_code == 422
 
     def test_create_pack_task_default_output_name_uses_display_name(
         self,

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text, update
 from sqlmodel import select
 from starlette.responses import StreamingResponse
@@ -69,12 +69,12 @@ class FileListResponse(BaseModel):
 
 class RenameRequest(BaseModel):
     """重命名请求"""
-    name: str
+    name: str = Field(..., min_length=1, max_length=200)
 
 
 class PackRequest(BaseModel):
     """打包请求 - 基于 UserFile ID"""
-    file_ids: list[int]
+    file_ids: list[int] = Field(..., min_length=1, max_length=100)
     output_name: str | None = None
     delete_source: bool = False
 
@@ -580,13 +580,6 @@ async def rename_file(
 
     只修改显示名称，不影响实际存储。
     """
-    if not payload.name:
-        logger.warning("重命名文件失败 user_id=%s file_id=%s reason=empty_name", user.id, file_id)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="名称不能为空"
-        )
-
     # Validate name
     if "/" in payload.name or "\\" in payload.name:
         logger.warning("重命名文件失败 user_id=%s file_id=%s reason=invalid_name", user.id, file_id)

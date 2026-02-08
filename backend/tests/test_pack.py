@@ -297,14 +297,13 @@ class TestCreatePackTask:
         authenticated_client: TestClient,
         user_download_dir: Path,
     ):
-        """Return 400 when file_ids is empty."""
+        """Return 422 when file_ids is empty (Pydantic min_length=1)."""
         response = authenticated_client.post(
             "/api/files/pack",
             json={"file_ids": []}
         )
 
-        assert response.status_code == 400
-        assert "detail" in response.json()
+        assert response.status_code == 422
 
     def test_create_pack_task_insufficient_space(
         self,
@@ -1043,17 +1042,29 @@ class TestPackTaskManager:
 
         assert level == 7
 
-    def test_get_compression_level_clamped_low(
+    def test_get_compression_level_zero_allowed(
         self,
         temp_db: str,
     ):
-        """get_compression_level clamps values below 1 to 1."""
+        """get_compression_level allows 0 (store only, no compression)."""
         from app.services.pack import PackTaskManager
 
         with patch("app.routers.config.get_config_value", return_value="0"):
             level = PackTaskManager.get_compression_level()
 
-        assert level == 1
+        assert level == 0
+
+    def test_get_compression_level_clamped_negative(
+        self,
+        temp_db: str,
+    ):
+        """get_compression_level clamps negative values to 0."""
+        from app.services.pack import PackTaskManager
+
+        with patch("app.routers.config.get_config_value", return_value="-1"):
+            level = PackTaskManager.get_compression_level()
+
+        assert level == 0
 
     def test_get_compression_level_clamped_high(
         self,
