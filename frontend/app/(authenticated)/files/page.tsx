@@ -485,7 +485,7 @@ export default function FilesPage() {
       return item.is_directory && selectedBrowseFiles.has(key);
     });
     if (hasFolder) {
-      showToast("当前选择包含文件夹，无法批量下载，请先打包后下载", "warning");
+      showToast("当前选择包含文件夹，无法批量下载，请仅选择文件", "warning");
       return;
     }
     for (const path of selectedBrowseFiles) {
