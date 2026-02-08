@@ -83,7 +83,6 @@ export const createMockSystemConfig = (overrides: Partial<SystemConfig> = {}): S
   ws_reconnect_max_delay: 30000,
   ws_reconnect_jitter: 0.3,
   ws_reconnect_factor: 2,
-  download_token_expiry: 3600,
   ...overrides,
 });
 

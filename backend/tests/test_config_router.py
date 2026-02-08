@@ -29,7 +29,6 @@ class TestGetConfig:
         assert "ws_reconnect_max_delay" in data
         assert "ws_reconnect_jitter" in data
         assert "ws_reconnect_factor" in data
-        assert "download_token_expiry" in data
 
     def test_get_config_non_admin(self, authenticated_client: TestClient):
         response = authenticated_client.get("/api/config")
@@ -78,11 +77,6 @@ class TestUpdateConfig:
         assert data["ws_reconnect_max_delay"] == 120.0
         assert data["ws_reconnect_jitter"] == 0.5
         assert data["ws_reconnect_factor"] == 3.0
-
-    def test_update_download_token_expiry(self, admin_client: TestClient):
-        response = admin_client.put("/api/config", json={"download_token_expiry": 3600})
-        assert response.status_code == 200
-        assert response.json()["download_token_expiry"] == 3600
 
     def test_update_hidden_file_extensions(self, admin_client: TestClient):
         response = admin_client.put("/api/config", json={"hidden_file_extensions": [".txt", "log"]})
