@@ -647,6 +647,7 @@ p {
 
 /* Pointer Events */
 .pointer-events-none { pointer-events: none; }
+.opacity-40 { opacity: 0.4; }
 .pointer-events-auto { pointer-events: auto; }
 
 /* User Select */
