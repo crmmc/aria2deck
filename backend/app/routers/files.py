@@ -716,7 +716,7 @@ async def create_pack_task(
             detail="选中的文件为空"
         )
 
-    folder_path_value = json.dumps(payload.file_ids)
+    folder_path_value = json.dumps(sorted(payload.file_ids))
     reserved_space = total_size
 
     # 验证输出文件名；未指定时用首个文件的显示名
@@ -740,6 +740,31 @@ async def create_pack_task(
 
     # Check available space + create task record atomically
     async with _get_pack_create_lock():
+        # 检查是否已有相同源文件的已完成打包产物
+        async with get_session() as db:
+            result = await db.exec(
+                select(PackTask).where(
+                    PackTask.owner_id == user.id,
+                    PackTask.folder_path == folder_path_value,
+                    PackTask.status == "done",
+                    PackTask.stored_file_id.isnot(None),
+                )
+            )
+            done_task = result.first()
+            if done_task:
+                uf_result = await db.exec(
+                    select(UserFile).where(
+                        UserFile.owner_id == user.id,
+                        UserFile.stored_file_id == done_task.stored_file_id,
+                    )
+                )
+                user_file = uf_result.first()
+                file_hint = user_file.display_name if user_file else "未知文件"
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"已存在打包完成的文件「{file_hint}」"
+                )
+
         info = await get_user_space_info(user.id, user.quota)
         available = info["available"]
         if reserved_space > available:

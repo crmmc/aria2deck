@@ -358,6 +358,73 @@ class TestCreatePackTask:
         assert response.status_code == 409
         assert "detail" in response.json()
 
+    def test_create_pack_task_rejects_done_duplicate(
+        self,
+        authenticated_client: TestClient,
+        user_download_dir: Path,
+        test_user: dict,
+    ):
+        """Return 409 with file hint when same files already packed."""
+        file_ids = _create_user_files(test_user["id"], user_download_dir, [
+            ("done_dup.txt", 300),
+        ])
+
+        # Simulate a completed pack task with stored_file_id
+        folder_path_value = json.dumps(sorted(file_ids))
+        stored_id = execute(
+            "INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ["hash_pack_done", str(user_download_dir / "done_dup.7z"), 200, 0, 1, "done_dup.7z", utc_now()],
+        )
+        execute(
+            "INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at) VALUES (?, ?, ?, ?)",
+            [test_user["id"], stored_id, "done_dup.7z", utc_now()],
+        )
+        now = utc_now()
+        execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, stored_file_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], folder_path_value, 300, 300, "done", stored_id, now, now],
+        )
+
+        response = authenticated_client.post(
+            "/api/files/pack",
+            json={"file_ids": file_ids},
+        )
+
+        assert response.status_code == 409
+        assert "done_dup.7z" in response.json()["detail"]
+
+    def test_create_pack_task_sorted_file_ids_dedup(
+        self,
+        authenticated_client: TestClient,
+        user_download_dir: Path,
+        test_user: dict,
+    ):
+        """Detect duplicate even when file_ids are in different order."""
+        file_ids = _create_user_files(test_user["id"], user_download_dir, [
+            ("sort_a.txt", 100),
+            ("sort_b.txt", 200),
+        ])
+
+        # Insert existing pending task with sorted file_ids
+        folder_path_value = json.dumps(sorted(file_ids))
+        now = utc_now()
+        execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], folder_path_value, 300, 300, "pending", now, now],
+        )
+
+        # Submit with reversed order
+        response = authenticated_client.post(
+            "/api/files/pack",
+            json={"file_ids": list(reversed(file_ids))},
+        )
+
+        assert response.status_code == 409
+
     def test_create_pack_task_without_auth(
         self,
         client: TestClient,
