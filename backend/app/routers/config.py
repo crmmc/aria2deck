@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from app.auth import require_admin, require_user
+from app.core.config import settings
 from app.core.rate_limit import api_limiter
 from app.database import get_session
 from app.models import Config, User
@@ -377,7 +378,7 @@ async def test_aria2_connection(
     - enabled_features: 启用的功能列表（如果连接成功）
     - error: 错误信息（如果连接失败）
     """
-    if not await api_limiter.is_allowed(admin.id, "aria2_test", limit=10, window_seconds=60):
+    if not await api_limiter.is_allowed(admin.id, "aria2_test", limit=settings.rate_limit_aria2_test, window_seconds=60):
         logger.warning("测试aria2连接被限流 admin_id=%s", admin.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

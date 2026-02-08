@@ -395,6 +395,40 @@ class TestCreatePackTask:
         assert response.status_code == 409
         assert "done_dup.7z" in response.json()["detail"]
 
+    def test_create_pack_task_allows_repack_after_file_deleted(
+        self,
+        authenticated_client: TestClient,
+        user_download_dir: Path,
+        test_user: dict,
+    ):
+        """Allow repacking when the previous pack output UserFile was deleted."""
+        file_ids = _create_user_files(test_user["id"], user_download_dir, [
+            ("repack.txt", 300),
+        ])
+
+        # Simulate a completed pack task (stored_file exists but NO user_file)
+        folder_path_value = json.dumps(sorted(file_ids))
+        stored_id = execute(
+            "INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ["hash_repack", str(user_download_dir / "repack.7z"), 200, 0, 0, "repack.7z", utc_now()],
+        )
+        now = utc_now()
+        execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, stored_file_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], folder_path_value, 300, 0, "done", stored_id, now, now],
+        )
+        # Note: no user_file row — simulates user having deleted the pack output
+
+        response = authenticated_client.post(
+            "/api/files/pack",
+            json={"file_ids": file_ids},
+        )
+
+        # Should NOT be 409 — the file was deleted, allow repack
+        assert response.status_code != 409
+
     def test_create_pack_task_sorted_file_ids_dedup(
         self,
         authenticated_client: TestClient,
@@ -1201,7 +1235,7 @@ class TestDoPackMethod:
 
         class MockStdout:
             def __init__(self):
-                self._data = b"  10%\r  50%\r 100%\n"
+                self._data = b"  0%\b\b\b\b 10%\b\b\b\b 50%\b\b\b\b100%\n"
                 self._pos = 0
             async def read(self, n):
                 chunk = self._data[self._pos:self._pos + n]
@@ -1346,7 +1380,7 @@ class TestDoPackMethod:
 
         class MockStdout:
             def __init__(self):
-                self._data = b" 100%\n"
+                self._data = b"100%\n"
                 self._pos = 0
             async def read(self, n):
                 chunk = self._data[self._pos:self._pos + n]

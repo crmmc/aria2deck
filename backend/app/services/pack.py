@@ -225,8 +225,8 @@ class PackTaskManager:
                     return
 
             # Parse progress from 7za output
-            # 7za uses \r (carriage return) to update progress on the same line,
-            # so we must read raw chunks instead of iterating lines (\n).
+            # 7za uses \b (backspace) to overwrite progress digits, not \r.
+            # We scan the raw buffer for all N% matches regardless of delimiters.
             progress = 0
             buf = b""
             while True:
@@ -234,34 +234,25 @@ class PackTaskManager:
                 if not chunk:
                     break
                 buf += chunk
-                # Split on \r or \n to find progress segments
-                while b"\r" in buf or b"\n" in buf:
-                    idx_r = buf.find(b"\r")
-                    idx_n = buf.find(b"\n")
-                    if idx_r == -1:
-                        idx = idx_n
-                    elif idx_n == -1:
-                        idx = idx_r
-                    else:
-                        idx = min(idx_r, idx_n)
-                    segment = buf[:idx].decode("utf-8", errors="ignore").strip()
-                    buf = buf[idx + 1:]
-                    if not segment:
-                        continue
-                    match = re.search(r"(\d+)%", segment)
-                    if match:
-                        new_progress = int(match.group(1))
-                        if new_progress != progress:
-                            progress = new_progress
-                            async with get_session() as db:
-                                result = await db.exec(select(PackTask).where(PackTask.id == task_id))
-                                task = result.first()
-                                if task:
-                                    task.progress = progress
-                                    task.updated_at = utc_now()
-                                    db.add(task)
-                            if on_progress:
-                                on_progress(task_id, progress)
+                # Find all N% occurrences in buffer
+                last_match = None
+                for m in re.finditer(rb"(\d+)%", buf):
+                    last_match = m
+                if last_match:
+                    new_progress = int(last_match.group(1))
+                    # Trim buffer: keep only bytes after last match
+                    buf = buf[last_match.end():]
+                    if new_progress != progress:
+                        progress = new_progress
+                        async with get_session() as db:
+                            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+                            task = result.first()
+                            if task:
+                                task.progress = progress
+                                task.updated_at = utc_now()
+                                db.add(task)
+                        if on_progress:
+                            on_progress(task_id, progress)
 
             await process.wait()
 
