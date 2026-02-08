@@ -40,11 +40,16 @@ export default function FilesPage() {
   const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
   const [isBatchOperating, setIsBatchOperating] = useState(false);
 
-  // BT folder browsing state
-  const [browsingFile, setBrowsingFile] = useState<FileInfo | null>(null);
-  const [browsePath, setBrowsePath] = useState<string[]>([]);
+  // Folder browsing state (in-page navigation)
+  const [browseContext, setBrowseContext] = useState<{
+    fileId: number;
+    fileName: string;
+    path: string[];
+  } | null>(null);
   const [browseContents, setBrowseContents] = useState<BrowseFileInfo[]>([]);
   const [browseLoading, setBrowseLoading] = useState(false);
+  const [selectedBrowseFiles, setSelectedBrowseFiles] = useState<Set<string>>(new Set());
+  const isInsideFolder = browseContext !== null;
 
   const [packTasksKey, setPackTasksKey] = useState(0);
   const [downloadingFile, setDownloadingFile] = useState<number | null>(null);
@@ -59,7 +64,7 @@ export default function FilesPage() {
   const [packLoading, setPackLoading] = useState(false);
 
   useEffect(() => {
-    if (showSearchModal || browsingFile) {
+    if (showSearchModal) {
       document.body.style.overflow = "hidden";
     } else {
       document.body.style.overflow = "";
@@ -67,7 +72,7 @@ export default function FilesPage() {
     return () => {
       document.body.style.overflow = "";
     };
-  }, [showSearchModal, browsingFile]);
+  }, [showSearchModal]);
 
   const loadFiles = useCallback(async () => {
     setLoading(true);
@@ -99,6 +104,7 @@ export default function FilesPage() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+        if (browseContext) return; // Disable search inside folder
         e.preventDefault();
         openSearchModal();
       }
@@ -108,7 +114,7 @@ export default function FilesPage() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showSearchModal, toolbarSearchKeyword]);
+  }, [showSearchModal, toolbarSearchKeyword, browseContext]);
 
   // Sorted files (folders first, then by sort field)
   const sortedFiles = useMemo(() => {
@@ -130,6 +136,25 @@ export default function FilesPage() {
     });
     return sorted;
   }, [files, sortField, sortOrder]);
+
+  // Sorted browse contents (inside folder)
+  const sortedBrowseContents = useMemo(() => {
+    return [...browseContents].sort((a, b) => {
+      // Directories always first
+      if (a.is_directory && !b.is_directory) return -1;
+      if (!a.is_directory && b.is_directory) return 1;
+
+      let cmp = 0;
+      // created_at not available in BrowseFileInfo, fallback to name
+      const effectiveField = sortField === "created_at" ? "name" : sortField;
+      if (effectiveField === "name") {
+        cmp = a.name.localeCompare(b.name);
+      } else if (effectiveField === "size") {
+        cmp = a.size - b.size;
+      }
+      return sortOrder === "asc" ? cmp : -cmp;
+    });
+  }, [browseContents, sortField, sortOrder]);
 
   // Search results for modal
   const searchResults = useMemo(() => {
@@ -184,7 +209,7 @@ export default function FilesPage() {
   const handleSearchResultClick = (file: FileInfo) => {
     closeSearchModal();
     if (file.is_directory) {
-      openBrowse(file);
+      enterFolder(file);
     }
   };
 
@@ -349,30 +374,31 @@ export default function FilesPage() {
     }
   };
 
-  // BT folder browsing
-  const openBrowse = async (file: FileInfo) => {
-    setBrowsingFile(file);
-    setBrowsePath([]);
+  // Folder in-page navigation
+  const enterFolder = async (file: FileInfo) => {
+    setBrowseContext({ fileId: file.id, fileName: file.name, path: [] });
+    setSelectedBrowseFiles(new Set());
     setBrowseLoading(true);
     try {
       const contents = await api.browseFile(file.id);
       setBrowseContents(contents);
     } catch (err) {
       showToast(`打开文件夹失败: ${(err as Error).message}`, "error");
-      setBrowsingFile(null);
+      setBrowseContext(null);
     } finally {
       setBrowseLoading(false);
     }
   };
 
-  const navigateBrowse = async (name: string) => {
-    if (!browsingFile) return;
-    const newPath = [...browsePath, name];
+  const navigateIntoSubfolder = async (name: string) => {
+    if (!browseContext) return;
+    const newPath = [...browseContext.path, name];
     setBrowseLoading(true);
     try {
-      const contents = await api.browseFile(browsingFile.id, newPath.join("/"));
+      const contents = await api.browseFile(browseContext.fileId, newPath.join("/"));
       setBrowseContents(contents);
-      setBrowsePath(newPath);
+      setBrowseContext({ ...browseContext, path: newPath });
+      setSelectedBrowseFiles(new Set());
     } catch (err) {
       showToast(`打开文件夹失败: ${(err as Error).message}`, "error");
     } finally {
@@ -380,18 +406,19 @@ export default function FilesPage() {
     }
   };
 
-  const navigateToPathIndex = async (index: number) => {
-    if (!browsingFile) return;
-    // index -1 means root
-    const newPath = index < 0 ? [] : browsePath.slice(0, index + 1);
+  const navigateToBreadcrumb = async (index: number) => {
+    if (!browseContext) return;
+    // index -1 means root of the folder
+    const newPath = index < 0 ? [] : browseContext.path.slice(0, index + 1);
     setBrowseLoading(true);
     try {
       const contents = await api.browseFile(
-        browsingFile.id,
+        browseContext.fileId,
         newPath.length > 0 ? newPath.join("/") : undefined
       );
       setBrowseContents(contents);
-      setBrowsePath(newPath);
+      setBrowseContext({ ...browseContext, path: newPath });
+      setSelectedBrowseFiles(new Set());
     } catch (err) {
       showToast(`导航失败: ${(err as Error).message}`, "error");
     } finally {
@@ -399,10 +426,52 @@ export default function FilesPage() {
     }
   };
 
-  const closeBrowse = () => {
-    setBrowsingFile(null);
-    setBrowsePath([]);
+  const returnToRoot = () => {
+    setBrowseContext(null);
     setBrowseContents([]);
+    setSelectedBrowseFiles(new Set());
+  };
+
+  // Browse file selection helpers
+  const toggleBrowseFileSelection = (item: BrowseFileInfo) => {
+    if (item.is_directory) return;
+    const key = [...(browseContext?.path ?? []), item.name].join("/");
+    setSelectedBrowseFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const toggleAllBrowseFiles = () => {
+    const files = browseContents.filter((item) => !item.is_directory);
+    const keys = files.map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
+    const allSelected = keys.length > 0 && keys.every((k) => selectedBrowseFiles.has(k));
+    if (allSelected) {
+      setSelectedBrowseFiles(new Set());
+    } else {
+      setSelectedBrowseFiles(new Set(keys));
+    }
+  };
+
+  const handleBrowseBatchDownload = async () => {
+    if (!browseContext || selectedBrowseFiles.size === 0) return;
+    for (const path of selectedBrowseFiles) {
+      const url = api.downloadFileUrl(browseContext.fileId, path);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    showToast(`已开始下载 ${selectedBrowseFiles.size} 个文件`, "success");
+    setSelectedBrowseFiles(new Set());
   };
 
   const handlePackTaskComplete = useCallback(() => {
@@ -481,9 +550,45 @@ export default function FilesPage() {
       <div className="card filter-toolbar mb-4">
         {/* Path breadcrumb */}
         <div className="filter-group path-breadcrumb">
-          <span className="file-icon">📁</span>
-          <span className="text-sm font-medium">根目录</span>
-          <span className="muted text-sm">({files.length} 项)</span>
+          {isInsideFolder ? (
+            <>
+              <button
+                type="button"
+                className="path-segment"
+                onClick={returnToRoot}
+              >
+                <span className="file-icon">📁</span>
+                <span className="text-sm font-medium">根目录</span>
+              </button>
+              <span className="path-separator">/</span>
+              <button
+                type="button"
+                className="path-segment"
+                onClick={() => navigateToBreadcrumb(-1)}
+              >
+                {browseContext!.fileName}
+              </button>
+              {browseContext!.path.map((segment, index) => (
+                <span key={index} className="path-segment-wrapper">
+                  <span className="path-separator">/</span>
+                  <button
+                    type="button"
+                    className="path-segment"
+                    onClick={() => navigateToBreadcrumb(index)}
+                  >
+                    {segment}
+                  </button>
+                </span>
+              ))}
+              <span className="muted text-sm">({browseContents.length} 项)</span>
+            </>
+          ) : (
+            <>
+              <span className="file-icon">📁</span>
+              <span className="text-sm font-medium">根目录</span>
+              <span className="muted text-sm">({files.length} 项)</span>
+            </>
+          )}
         </div>
 
         {/* Sort select */}
@@ -507,7 +612,7 @@ export default function FilesPage() {
         </div>
 
         {/* Search input */}
-        <div className="filter-group search-input-group">
+        <div className={`filter-group search-input-group${isInsideFolder ? " opacity-40 pointer-events-none" : ""}`}>
           <svg
             width="14"
             height="14"
@@ -543,44 +648,215 @@ export default function FilesPage() {
 
         {/* Batch operations */}
         <div className="filter-group ml-auto">
-          {selectedFiles.size > 0 && (
+          {isInsideFolder ? (
             <>
-              <span className="muted text-sm">
-                已选 {selectedFiles.size} 项 ({formatBytes(selectedSize)})
-              </span>
-              <button
-                type="button"
-                className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
-                onClick={handleBatchDelete}
-                disabled={isBatchOperating}
-              >
-                {isBatchOperating ? "删除中..." : "批量删除"}
-              </button>
-              <button
-                type="button"
-                className="button secondary btn-sm"
-                onClick={openPackDialog}
-                disabled={isBatchOperating}
-              >
-                打包下载
-              </button>
+              {selectedBrowseFiles.size > 0 && (
+                <>
+                  <span className="muted text-sm">
+                    已选 {selectedBrowseFiles.size} 项
+                  </span>
+                  <button
+                    type="button"
+                    className="button secondary btn-sm"
+                    onClick={handleBrowseBatchDownload}
+                  >
+                    批量下载
+                  </button>
+                </>
+              )}
+              {browseContents.some((item) => !item.is_directory) && (
+                <button
+                  type="button"
+                  className="button secondary btn-sm"
+                  onClick={toggleAllBrowseFiles}
+                >
+                  {(() => {
+                    const fileKeys = browseContents
+                      .filter((item) => !item.is_directory)
+                      .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
+                    return fileKeys.length > 0 && fileKeys.every((k) => selectedBrowseFiles.has(k))
+                      ? "取消全选"
+                      : "全选";
+                  })()}
+                </button>
+              )}
             </>
-          )}
-          {sortedFiles.length > 0 && (
-            <button
-              type="button"
-              className="button secondary btn-sm"
-              onClick={toggleSelectAll}
-            >
-              {selectedFiles.size === sortedFiles.length && sortedFiles.length > 0
-                ? "取消全选"
-                : "全选"}
-            </button>
+          ) : (
+            <>
+              {selectedFiles.size > 0 && (
+                <>
+                  <span className="muted text-sm">
+                    已选 {selectedFiles.size} 项 ({formatBytes(selectedSize)})
+                  </span>
+                  <button
+                    type="button"
+                    className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
+                    onClick={handleBatchDelete}
+                    disabled={isBatchOperating}
+                  >
+                    {isBatchOperating ? "删除中..." : "批量删除"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button secondary btn-sm"
+                    onClick={openPackDialog}
+                    disabled={isBatchOperating}
+                  >
+                    打包下载
+                  </button>
+                </>
+              )}
+              {sortedFiles.length > 0 && (
+                <button
+                  type="button"
+                  className="button secondary btn-sm"
+                  onClick={toggleSelectAll}
+                >
+                  {selectedFiles.size === sortedFiles.length && sortedFiles.length > 0
+                    ? "取消全选"
+                    : "全选"}
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>
 
-      {loading ? (
+      {/* Folder contents table (inside folder) */}
+      {isInsideFolder ? (
+        browseLoading ? (
+          <div className="card text-center py-8">
+            <p className="muted">加载中...</p>
+          </div>
+        ) : sortedBrowseContents.length === 0 ? (
+          <div className="card text-center py-8">
+            <p className="muted">文件夹为空</p>
+          </div>
+        ) : (
+          <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+            <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(200px, 1fr) 120px 200px', paddingRight: '16px' }}>
+              <div className="table-cell text-left">
+                <input
+                  type="checkbox"
+                  checked={(() => {
+                    const fileKeys = browseContents
+                      .filter((item) => !item.is_directory)
+                      .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
+                    return fileKeys.length > 0 && fileKeys.every((k) => selectedBrowseFiles.has(k));
+                  })()}
+                  onChange={toggleAllBrowseFiles}
+                  className="checkbox-sm cursor-pointer"
+                />
+              </div>
+              <div
+                className="table-cell text-left sortable-header"
+                onClick={() => handleSort("name")}
+              >
+                名称 <span className="sort-icon">{getSortIcon("name")}</span>
+              </div>
+              <div
+                className="table-cell text-right sortable-header"
+                onClick={() => handleSort("size")}
+              >
+                大小 <span className="sort-icon">{getSortIcon("size")}</span>
+              </div>
+              <div className="table-cell text-right">操作</div>
+            </div>
+
+            <div style={{ flex: 1, minHeight: 320 }}>
+              <AutoSizer renderProp={({ height, width }) => {
+                const safeHeight = typeof height === "number" && height > 0 ? height : 400;
+                const safeWidth = typeof width === "number" && width > 0 ? width : 1200;
+                return (
+                  <List
+                    style={{ height: safeHeight, width: safeWidth }}
+                    rowCount={sortedBrowseContents.length}
+                    rowHeight={60}
+                    rowProps={{}}
+                    rowComponent={({ index, style }) => {
+                      const item = sortedBrowseContents[index];
+                      const itemKey = [...(browseContext?.path ?? []), item.name].join("/");
+                      return (
+                        <div style={style} key={item.name}>
+                          <div
+                            className="table-row transition-bg"
+                            style={{
+                              display: 'grid',
+                              gridTemplateColumns: '40px minmax(200px, 1fr) 120px 200px',
+                              height: '100%',
+                              alignItems: 'center'
+                            }}
+                          >
+                            <div className="table-cell">
+                              {item.is_directory ? (
+                                <span style={{ width: 16, display: 'inline-block' }} />
+                              ) : (
+                                <input
+                                  type="checkbox"
+                                  checked={selectedBrowseFiles.has(itemKey)}
+                                  onChange={() => toggleBrowseFileSelection(item)}
+                                  className="checkbox-sm cursor-pointer"
+                                />
+                              )}
+                            </div>
+                            <div className="table-cell" data-label="名称" style={{ overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+                              <div className="flex items-center gap-2">
+                                <span className="file-icon">
+                                  {item.is_directory ? "📁" : "📄"}
+                                </span>
+                                {item.is_directory ? (
+                                  <button
+                                    className="file-name-btn"
+                                    onClick={() => navigateIntoSubfolder(item.name)}
+                                  >
+                                    {item.name}
+                                  </button>
+                                ) : (
+                                  <span className="text-base truncate" title={item.name}>{item.name}</span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="table-cell text-right muted text-base" data-label="大小">
+                              {item.is_directory ? "-" : formatBytes(item.size)}
+                            </div>
+                            <div className="table-cell text-right">
+                              <div className="flex gap-2 flex-end">
+                                {item.is_directory ? (
+                                  <button
+                                    className="button secondary btn-sm"
+                                    onClick={() => navigateIntoSubfolder(item.name)}
+                                  >
+                                    打开
+                                  </button>
+                                ) : (
+                                  <button
+                                    className="button secondary btn-sm"
+                                    onClick={() =>
+                                      handleDownload(
+                                        { id: browseContext!.fileId } as FileInfo,
+                                        [...browseContext!.path, item.name].join("/")
+                                      )
+                                    }
+                                  >
+                                    下载
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }}
+                  />
+                );
+              }}
+              />
+            </div>
+          </div>
+        )
+      ) : (
+      /* Root file table */
+      loading ? (
         <div className="card text-center py-8">
           <p className="muted">加载中...</p>
         </div>
@@ -690,7 +966,7 @@ export default function FilesPage() {
                                 {file.is_directory ? (
                                   <button
                                     className="file-name-btn"
-                                    onClick={() => openBrowse(file)}
+                                    onClick={() => enterFolder(file)}
                                   >
                                     {file.name}
                                   </button>
@@ -711,7 +987,7 @@ export default function FilesPage() {
                               {file.is_directory ? (
                                 <button
                                   className="button secondary btn-sm"
-                                  onClick={() => openBrowse(file)}
+                                  onClick={() => enterFolder(file)}
                                 >
                                   浏览
                                 </button>
@@ -748,6 +1024,7 @@ export default function FilesPage() {
             />
           </div>
         </div>
+      )
       )}
 
       {/* Search Modal */}
@@ -834,126 +1111,6 @@ export default function FilesPage() {
                   : "⌘F 打开搜索"}
               </span>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* BT Folder Browser Modal */}
-      {browsingFile && (
-        <div className="modal-overlay" onClick={closeBrowse}>
-          <div
-            className="batch-modal-content"
-            onClick={(e) => e.stopPropagation()}
-            style={{ maxWidth: "800px", width: "90%" }}
-          >
-            <div className="modal-header">
-              <h2 className="m-0">{browsingFile.name}</h2>
-              <button
-                type="button"
-                onClick={closeBrowse}
-                className="modal-close-btn"
-              >
-                ×
-              </button>
-            </div>
-
-            {/* Clickable path breadcrumb */}
-            <div className="card mb-4 py-3 px-4">
-              <div className="path-breadcrumb-nav">
-                <button
-                  type="button"
-                  className="path-segment"
-                  onClick={() => navigateToPathIndex(-1)}
-                >
-                  📁 {browsingFile.name}
-                </button>
-                {browsePath.map((segment, index) => (
-                  <span key={index} className="path-segment-wrapper">
-                    <span className="path-separator">/</span>
-                    <button
-                      type="button"
-                      className="path-segment"
-                      onClick={() => navigateToPathIndex(index)}
-                    >
-                      {segment}
-                    </button>
-                  </span>
-                ))}
-              </div>
-            </div>
-
-            {browseLoading ? (
-              <div className="text-center py-8">
-                <p className="muted">加载中...</p>
-              </div>
-            ) : browseContents.length === 0 ? (
-              <div className="text-center py-8">
-                <p className="muted">文件夹为空</p>
-              </div>
-            ) : (
-              <div
-                className="card p-0 overflow-hidden"
-                style={{ maxHeight: "400px", overflowY: "auto" }}
-              >
-                <table className="table">
-                  <thead className="table-header">
-                    <tr>
-                      <th className="table-cell text-left">名称</th>
-                      <th className="table-cell text-right">大小</th>
-                      <th className="table-cell text-right">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {browseContents.map((item) => (
-                      <tr key={item.name} className="table-row transition-bg">
-                        <td className="table-cell">
-                          <div className="flex items-center gap-2">
-                            <span className="file-icon">
-                              {item.is_directory ? "📁" : "📄"}
-                            </span>
-                            {item.is_directory ? (
-                              <button
-                                className="file-name-btn"
-                                onClick={() => navigateBrowse(item.name)}
-                              >
-                                {item.name}
-                              </button>
-                            ) : (
-                              <span className="text-base">{item.name}</span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="table-cell text-right muted text-base">
-                          {item.is_directory ? "-" : formatBytes(item.size)}
-                        </td>
-                        <td className="table-cell text-right">
-                          {item.is_directory ? (
-                            <button
-                              className="button secondary btn-sm"
-                              onClick={() => navigateBrowse(item.name)}
-                            >
-                              打开
-                            </button>
-                          ) : (
-                            <button
-                              className="button secondary btn-sm"
-                              onClick={() =>
-                                handleDownload(
-                                  browsingFile,
-                                  [...browsePath, item.name].join("/")
-                                )
-                              }
-                            >
-                              下载
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
           </div>
         </div>
       )}
