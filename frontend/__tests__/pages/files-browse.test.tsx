@@ -195,27 +195,25 @@ describe("Folder in-page browsing", () => {
     expect(screen.queryByText("file1.txt")).not.toBeInTheDocument();
   });
 
-  test("only files have checkboxes, not directories", async () => {
+  test("all items have checkboxes including directories", async () => {
     await renderAndWait();
     await enterFolder();
 
-    // Get all checkboxes in the browse table (excluding the header checkbox)
+    // Get all checkboxes: header + 3 items (file1.txt, file2.txt, subdir)
     const checkboxes = screen.getAllByRole("checkbox");
-    // Header checkbox + 2 file checkboxes = 3 (subdir has no checkbox)
-    expect(checkboxes).toHaveLength(3);
+    expect(checkboxes).toHaveLength(4);
   });
 
-  test("selecting a file and clicking batch download triggers download", async () => {
+  test("selecting only files and clicking batch download triggers download", async () => {
     mockApi.downloadFileUrl.mockImplementation(
       (fileId: number, path?: string) => `http://test/download/${fileId}/${path}`
     );
     await renderAndWait();
     await enterFolder();
 
-    // Select first file checkbox (skip header checkbox at index 0)
+    // After sort: header[0], subdir[1], file1.txt[2], file2.txt[3]
     const checkboxes = screen.getAllByRole("checkbox");
-    // After sort: header[0], file1.txt[1], file2.txt[2] (subdir has no checkbox)
-    fireEvent.click(checkboxes[1]); // file1.txt
+    fireEvent.click(checkboxes[2]); // file1.txt
 
     // "批量下载" button should appear
     const downloadBtn = await screen.findByRole("button", { name: "批量下载" });
@@ -224,11 +222,10 @@ describe("Folder in-page browsing", () => {
     await waitFor(() => {
       expect(mockApi.downloadFileUrl).toHaveBeenCalled();
     });
-    // Verify at least one call was made with the folder's fileId
     expect(mockApi.downloadFileUrl).toHaveBeenCalledWith(1, expect.any(String));
   });
 
-  test("select all only selects files, not directories", async () => {
+  test("select all selects all items including directories", async () => {
     await renderAndWait();
     await enterFolder();
 
@@ -236,9 +233,86 @@ describe("Folder in-page browsing", () => {
     const selectAllBtn = screen.getByRole("button", { name: "全选" });
     fireEvent.click(selectAllBtn);
 
-    // Should show "已选 2 项" (2 files, not the directory)
+    // Should show "已选 3 项" (2 files + 1 directory)
+    await waitFor(() => {
+      expect(screen.getByText(/已选 3 项/)).toBeInTheDocument();
+    });
+  });
+
+  test("batch download with folder selected shows warning toast", async () => {
+    await renderAndWait();
+    await enterFolder();
+
+    // Select all (includes subdir)
+    const selectAllBtn = screen.getByRole("button", { name: "全选" });
+    fireEvent.click(selectAllBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText(/已选 3 项/)).toBeInTheDocument();
+    });
+
+    // Click batch download
+    const downloadBtn = screen.getByRole("button", { name: "批量下载" });
+    fireEvent.click(downloadBtn);
+
+    // Should show warning toast
+    await waitFor(() => {
+      expect(screen.getByText(/无法批量下载/)).toBeInTheDocument();
+    });
+
+    // downloadFileUrl should NOT have been called
+    expect(mockApi.downloadFileUrl).not.toHaveBeenCalled();
+  });
+
+  test("root batch download with folder selected shows warning toast", async () => {
+    await renderAndWait();
+
+    // Select all in root (includes MyFolder which is a directory)
+    const selectAllBtn = screen.getByRole("button", { name: "全选" });
+    fireEvent.click(selectAllBtn);
+
     await waitFor(() => {
       expect(screen.getByText(/已选 2 项/)).toBeInTheDocument();
+    });
+
+    // Click batch download
+    const downloadBtn = screen.getByRole("button", { name: "批量下载" });
+    fireEvent.click(downloadBtn);
+
+    // Should show warning toast
+    await waitFor(() => {
+      expect(screen.getByText(/无法批量下载/)).toBeInTheDocument();
+    });
+  });
+
+  test("root batch download with only files succeeds", async () => {
+    mockApi.listFiles.mockResolvedValue({
+      files: [regularFile],
+      space: { used: 1024, quota: 10240, frozen: 0, available: 9216 },
+    } as any);
+    mockApi.downloadFileUrl.mockImplementation(
+      (fileId: number) => `http://test/download/${fileId}`
+    );
+
+    render(
+      <ToastProvider>
+        <FilesPage />
+      </ToastProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("readme.txt")).toBeInTheDocument();
+    });
+
+    // Select the file
+    const selectAllBtn = screen.getByRole("button", { name: "全选" });
+    fireEvent.click(selectAllBtn);
+
+    // Click batch download
+    const downloadBtn = await screen.findByRole("button", { name: "批量下载" });
+    fireEvent.click(downloadBtn);
+
+    await waitFor(() => {
+      expect(mockApi.downloadFileUrl).toHaveBeenCalledWith(2);
     });
   });
 
