@@ -750,8 +750,8 @@ async def create_pack_task(
                     PackTask.stored_file_id.isnot(None),
                 )
             )
-            done_task = result.first()
-            if done_task:
+            done_tasks = result.all()
+            for done_task in done_tasks:
                 uf_result = await db.exec(
                     select(UserFile).where(
                         UserFile.owner_id == user.id,
@@ -764,7 +764,7 @@ async def create_pack_task(
                         status_code=status.HTTP_409_CONFLICT,
                         detail=f"已存在打包完成的文件「{user_file.display_name}」"
                     )
-                # UserFile 已被删除，允许重新打包
+            # 所有历史产物的 UserFile 均已删除，允许重新打包
 
         info = await get_user_space_info(user.id, user.quota)
         available = info["available"]
