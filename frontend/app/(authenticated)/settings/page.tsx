@@ -75,9 +75,9 @@ export default function SettingsPage() {
       setPackFormat(cfg.pack_format || "zip");
       setPackCompressionLevel(cfg.pack_compression_level ?? 5);
       setPackExtraArgs(cfg.pack_extra_args || "");
-      setWsReconnectMaxDelay(cfg.ws_reconnect_max_delay || 60);
-      setWsReconnectJitter(cfg.ws_reconnect_jitter || 0.2);
-      setWsReconnectFactor(cfg.ws_reconnect_factor || 2);
+      setWsReconnectMaxDelay(cfg.ws_reconnect_max_delay ?? 60);
+      setWsReconnectJitter(cfg.ws_reconnect_jitter ?? 0.2);
+      setWsReconnectFactor(cfg.ws_reconnect_factor ?? 2);
       setMachineStats(stats);
       setAria2Status(aria2Ver);
       setTestResult(null);
