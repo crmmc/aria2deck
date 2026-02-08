@@ -66,6 +66,11 @@ class TestUpdateConfig:
         assert response.status_code == 200
         assert response.json()["pack_compression_level"] == 9
 
+    def test_update_compression_level_zero(self, admin_client: TestClient):
+        response = admin_client.put("/api/config", json={"pack_compression_level": 0})
+        assert response.status_code == 200
+        assert response.json()["pack_compression_level"] == 0
+
     def test_update_ws_reconnect_params(self, admin_client: TestClient):
         response = admin_client.put("/api/config", json={
             "ws_reconnect_max_delay": 120.0,

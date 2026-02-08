@@ -39,7 +39,7 @@ class ConfigUpdate(BaseModel):
     aria2_rpc_secret: str | None = None  # aria2 RPC Secret
     hidden_file_extensions: list[str] | None = None  # 隐藏的文件后缀名列表
     pack_format: str | None = None  # 打包格式 (zip 或 7z)
-    pack_compression_level: int | None = None  # 压缩等级 (1-9)
+    pack_compression_level: int | None = None  # 压缩等级 (0-9)
     pack_extra_args: str | None = None  # 7za 附加参数
     # WebSocket 重连参数
     ws_reconnect_max_delay: float | None = None  # 最大重连延迟（秒）
@@ -143,11 +143,11 @@ def get_pack_format() -> str:
 
 
 def get_pack_compression_level() -> int:
-    """获取压缩等级 (1-9)，默认 5"""
+    """获取压缩等级 (0-9)，默认 5"""
     val = get_config_value("pack_compression_level")
     try:
         level = int(val) if val else 5
-        return max(1, min(9, level))
+        return max(0, min(9, level))
     except ValueError:
         return 5
 
@@ -268,7 +268,7 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
             await set_config_value_async("pack_format", payload.pack_format)
             changed_keys.append("pack_format")
     if payload.pack_compression_level is not None:
-        level = max(1, min(9, payload.pack_compression_level))
+        level = max(0, min(9, payload.pack_compression_level))
         await set_config_value_async("pack_compression_level", str(level))
         changed_keys.append("pack_compression_level")
     if payload.pack_extra_args is not None:

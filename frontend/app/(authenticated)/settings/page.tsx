@@ -419,10 +419,10 @@ export default function SettingsPage() {
 
           <div className="mb-7">
             <label className="form-label-lg">压缩等级: {packCompressionLevel}</label>
-            <p className="muted text-sm mb-3">1 = 最快/最大体积, 9 = 最慢/最小体积</p>
+            <p className="muted text-sm mb-3">0 = 仅打包不压缩, 1 = 最快, 9 = 最慢/最小体积</p>
             <input
               type="range"
-              min="1"
+              min="0"
               max="9"
               value={packCompressionLevel}
               onChange={(e) => setPackCompressionLevel(parseInt(e.target.value))}
