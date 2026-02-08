@@ -57,12 +57,12 @@ class PackTaskManager:
 
     @classmethod
     def get_compression_level(cls) -> int:
-        """Get compression level (1-9)"""
+        """Get compression level (0-9)"""
         from app.routers.config import get_config_value
         val = get_config_value("pack_compression_level")
         try:
             level = int(val) if val else 5
-            return max(1, min(9, level))
+            return max(0, min(9, level))
         except ValueError:
             return 5
 
