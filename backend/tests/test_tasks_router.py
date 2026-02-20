@@ -648,9 +648,15 @@ class TestListTasksWithData:
 
 class TestCancelTaskWithData:
 
+    @patch("app.routers.tasks._get_client")
     def test_cancel_pending_subscription(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+        self, mock_get_client, authenticated_client: TestClient, test_user: dict, temp_db: str
     ):
+        mock_client = AsyncMock()
+        mock_client.force_remove.return_value = "gid1"
+        mock_client.remove_download_result.return_value = "OK"
+        mock_get_client.return_value = mock_client
+
         from app.db import execute, utc_now
 
         execute(
@@ -673,9 +679,15 @@ class TestCancelTaskWithData:
         assert response.status_code == 200
         assert response.json()["ok"] is True
 
+    @patch("app.routers.tasks._get_client")
     def test_cancel_other_user_subscription(
-        self, authenticated_client: TestClient, test_user: dict, test_admin: dict, temp_db: str
+        self, mock_get_client, authenticated_client: TestClient, test_user: dict, test_admin: dict, temp_db: str
     ):
+        mock_client = AsyncMock()
+        mock_client.force_remove.return_value = "gid1"
+        mock_client.remove_download_result.return_value = "OK"
+        mock_get_client.return_value = mock_client
+
         from app.db import execute, utc_now
 
         execute(
