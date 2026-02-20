@@ -63,8 +63,7 @@ class Task(SQLModel, table=True):
     error: Optional[str] = None
     created_at: str
     updated_at: str
-    artifact_path: Optional[str] = None
-    artifact_token: Optional[str] = None
+
     peak_download_speed: int = Field(default=0)
     peak_connections: int = Field(default=0)
 

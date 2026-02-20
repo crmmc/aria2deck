@@ -31,7 +31,7 @@ class UserOut(BaseModel):
     is_admin: bool
     quota: int
     password_warning: str | None = None  # 密码安全警告
-    is_default_password: bool = False  # deprecated, kept for compatibility
+
     is_initial_password: bool = False  # 是否为初始密码状态
 
 

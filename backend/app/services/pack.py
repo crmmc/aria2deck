@@ -376,7 +376,8 @@ def calculate_folder_size(path: Path) -> int:
         for entry in path.rglob("*"):
             if entry.is_file():
                 total += entry.stat().st_size
-    except Exception:
+    except OSError as e:
+        logger.error(f"Failed to calculate folder size for {path}: {e}")
         pass
     return total
 

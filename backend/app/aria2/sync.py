@@ -8,6 +8,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import asyncio
 import logging
 import time
@@ -39,7 +43,8 @@ def _sanitize_path(file_path: str | None, task_id: int) -> str | None:
     try:
         abs_path = Path(file_path)
         return abs_path.name if abs_path.name else file_path
-    except Exception:
+    except (ValueError, OSError) as e:
+        logger.debug(f"Failed to sanitize path for task {task_id}: {e}")
         return file_path
 
 
@@ -448,9 +453,9 @@ async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
                     f"[Sync] 跳过最近完成任务修复 task_id={task_id} age={age_seconds:.1f}s"
                 )
                 continue
-        except Exception:
+        except (ValueError, TypeError) as e:
             # Fallback to repair when timestamp parsing fails.
-            pass
+            logger.warning("Failed to parse timestamp for task_id=%s: %s", task_id, e)
 
         reason = "下载完成但文件未入库"
         await _update_task(

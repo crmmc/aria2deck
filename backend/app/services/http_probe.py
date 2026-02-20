@@ -9,6 +9,10 @@ Performs HEAD requests before creating HTTP(S) download tasks to:
 from __future__ import annotations
 
 import logging
+
+logger = logging.getLogger(__name__)
+
+import logging
 import re
 from dataclasses import dataclass
 from urllib.parse import unquote, urlparse
@@ -63,7 +67,8 @@ def _parse_content_disposition(header: str) -> str | None:
             charset, _lang, encoded = parts
             try:
                 return unquote(encoded, encoding=charset or "utf-8")
-            except Exception:
+            except (UnicodeDecodeError, LookupError) as e:
+                logger.debug(f"Failed to decode filename with charset {charset}: {e}")
                 pass
 
     # Try regular filename parameter
@@ -99,7 +104,7 @@ def _extract_filename_from_url(url: str) -> str | None:
                 # Only return if it looks like a filename (has extension)
                 if "." in filename:
                     return filename
-    except Exception:
+    except ValueError:
         pass
     return None
 

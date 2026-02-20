@@ -4,6 +4,7 @@
 实现用户隔离、数据脱敏、配额检查等安全机制。
 """
 from __future__ import annotations
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,9 @@ from app.aria2.client import Aria2Client
 from app.core.config import settings
 from app.core.state import AppState
 from app.db import execute, fetch_all, fetch_one, utc_now
+
+
+logger = logging.getLogger(__name__)
 
 
 # JSON-RPC 2.0 错误码
@@ -236,8 +240,8 @@ class Aria2RpcHandler:
                 if file_path.is_file():
                     try:
                         used_space += file_path.stat().st_size
-                    except Exception:
-                        pass
+                    except OSError as e:
+                        logger.warning("Failed to stat file %s: %s", file_path, e)
 
         # 获取机器实际剩余空间
         download_path = Path(settings.download_dir)
@@ -733,8 +737,8 @@ class Aria2RpcHandler:
                     if status.get("gid") in user_gids:
                         download_speed += int(status.get("downloadSpeed", 0))
                         upload_speed += int(status.get("uploadSpeed", 0))
-            except Exception:
-                pass
+            except (ValueError, KeyError) as e:
+                logger.warning("Failed to calculate speed stats: %s", e)
 
         return {
             "downloadSpeed": str(download_speed),

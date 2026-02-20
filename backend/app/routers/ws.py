@@ -44,7 +44,8 @@ async def task_ws(websocket: WebSocket) -> None:
                 if websocket.client_state == WebSocketState.CONNECTED:
                     try:
                         await websocket.send_json({"type": "ping"})
-                    except Exception:
+                    except WebSocketDisconnect:
+                        logger.debug("WebSocket disconnected during heartbeat")
                         break
         except asyncio.CancelledError:
             pass
