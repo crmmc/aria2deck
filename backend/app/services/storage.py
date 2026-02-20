@@ -9,6 +9,11 @@ Handles:
 from __future__ import annotations
 
 import logging
+from sqlalchemy.exc import IntegrityError
+
+logger = logging.getLogger(__name__)
+
+import logging
 import shutil
 from pathlib import Path
 
@@ -289,7 +294,7 @@ async def create_user_file_reference(
                 f"stored_file={stored_file_id}"
             )
             return user_file
-        except Exception:
+        except IntegrityError:
             # UNIQUE constraint violation - reference already exists
             # db.rollback() will automatically undo the ref_count +1 we did in this transaction
             await db.rollback()

@@ -548,6 +548,143 @@ class TestTaskCompletionWithStoredFile:
             assert task.stored_file_id == stored_files[0].id
 
     @pytest.mark.asyncio
+    async def test_completion_uses_existing_file_when_first_file_missing(
+        self,
+        temp_db_listener,
+        test_user_listener,
+        mock_app_state,
+    ):
+        """When aria2 files[0] is missing, handler should still find real payload and complete."""
+        from app.aria2.listener import _handle_task_complete
+
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="stored_file_missing_first_hash",
+                uri="magnet:?xt=urn:btih:missingfirst",
+                gid="gid_missing_first",
+                status="complete",
+                name="missing-first",
+                total_length=2048,
+                completed_length=2048,
+                created_at=utc_now_str(),
+                updated_at=utc_now_str(),
+            )
+            db.add(task)
+            await db.commit()
+            await db.refresh(task)
+            task_id = task.id
+
+            subscription = UserTaskSubscription(
+                owner_id=test_user_listener["id"],
+                task_id=task_id,
+                frozen_space=2048,
+                status="pending",
+                created_at=utc_now_str(),
+            )
+            db.add(subscription)
+            await db.commit()
+
+        task_dir = Path(temp_db_listener["downloading_dir"]) / str(task_id)
+        payload_dir = task_dir / "payload"
+        payload_dir.mkdir(parents=True, exist_ok=True)
+        real_file = payload_dir / "real.bin"
+        real_file.write_text("real payload")
+        missing_file = payload_dir / "missing.bin"
+
+        aria2_status = {
+            "files": [
+                {"path": str(missing_file)},  # first entry missing
+                {"path": str(real_file)},     # actual payload exists
+            ],
+            "totalLength": "2048",
+            "completedLength": "2048",
+        }
+
+        with patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock):
+            await _handle_task_complete(mock_app_state, task_id, aria2_status)
+
+        async with get_session() as db:
+            task_result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+            task = task_result.first()
+            assert task is not None
+            assert task.stored_file_id is not None
+
+            sub_result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+            )
+            sub = sub_result.first()
+            assert sub is not None
+            assert sub.status == "success"
+
+    @pytest.mark.asyncio
+    async def test_completion_moves_whole_task_dir_for_multi_root_payload(
+        self,
+        temp_db_listener,
+        test_user_listener,
+        mock_app_state,
+    ):
+        """BT payload with multiple top-level files should be stored as directory, not first file only."""
+        from app.aria2.listener import _handle_task_complete
+
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="stored_file_multi_root_hash",
+                uri="magnet:?xt=urn:btih:multiroot",
+                gid="gid_multi_root",
+                status="complete",
+                name="multi-root",
+                total_length=4096,
+                completed_length=4096,
+                created_at=utc_now_str(),
+                updated_at=utc_now_str(),
+            )
+            db.add(task)
+            await db.commit()
+            await db.refresh(task)
+            task_id = task.id
+
+            subscription = UserTaskSubscription(
+                owner_id=test_user_listener["id"],
+                task_id=task_id,
+                frozen_space=4096,
+                status="pending",
+                created_at=utc_now_str(),
+            )
+            db.add(subscription)
+            await db.commit()
+
+        task_dir = Path(temp_db_listener["downloading_dir"]) / str(task_id)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        file_a = task_dir / "a.bin"
+        file_b = task_dir / "b.bin"
+        file_a.write_text("payload-a")
+        file_b.write_text("payload-b")
+
+        aria2_status = {
+            "files": [{"path": str(file_a)}, {"path": str(file_b)}],
+            "totalLength": "4096",
+            "completedLength": "4096",
+        }
+
+        with patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock):
+            await _handle_task_complete(mock_app_state, task_id, aria2_status)
+
+        async with get_session() as db:
+            task_result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+            task = task_result.first()
+            assert task is not None
+            assert task.stored_file_id is not None
+
+            stored_result = await db.exec(select(StoredFile).where(StoredFile.id == task.stored_file_id))
+            stored = stored_result.first()
+            assert stored is not None
+            assert stored.is_directory is True
+
+            stored_path = Path(stored.real_path)
+            assert (stored_path / "a.bin").exists()
+            assert (stored_path / "b.bin").exists()
+
+    @pytest.mark.asyncio
     async def test_user_file_created_for_subscribers(self, temp_db_listener, test_user_listener, mock_app_state):
         """UserFile should be created for all pending subscribers."""
         from app.aria2.listener import _handle_task_complete

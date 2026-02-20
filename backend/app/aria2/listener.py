@@ -19,6 +19,8 @@ from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from app.core.state import AppState
 
@@ -36,6 +38,8 @@ EVENT_MAP = {
 
 # 重连参数默认值
 RECONNECT_BASE_DELAY = 1.0
+COMPLETE_SOURCE_RETRY_COUNT = 5
+COMPLETE_SOURCE_RETRY_INTERVAL = 1.0
 
 
 def _http_to_ws_url(http_url: str) -> str:
@@ -71,6 +75,114 @@ def _calculate_backoff(
     base_delay = min(RECONNECT_BASE_DELAY * (factor ** attempt), max_delay)
     jitter_offset = base_delay * jitter * (2 * random.random() - 1)
     return base_delay + jitter_offset
+
+
+def _list_task_dir_entries(task_dir: Path) -> list[Path]:
+    """列出任务目录内的真实载荷条目，忽略 aria2 控制文件。"""
+    if not task_dir.exists() or not task_dir.is_dir():
+        return []
+    try:
+        return [p for p in task_dir.iterdir() if not p.name.endswith(".aria2")]
+    except OSError as e:
+        logger.error(f"Failed to list task directory {task_dir}: {e}")
+        return []
+
+
+def _resolve_complete_source_path(
+    task_dir: Path,
+    files: list[dict],
+    task_name: str | None,
+) -> Path | None:
+    """从 aria2 files 列表 + task 目录推断应入库的源路径。"""
+    task_candidates: list[Path] = []
+    external_candidates: list[Path] = []
+
+    for file_item in files:
+        if not isinstance(file_item, dict):
+            continue
+        raw_path = file_item.get("path")
+        if not raw_path or not isinstance(raw_path, str):
+            continue
+
+        file_path = Path(raw_path)
+        try:
+            rel_path = file_path.relative_to(task_dir)
+            if rel_path.parts:
+                task_candidates.append(task_dir / rel_path.parts[0])
+            else:
+                task_candidates.append(task_dir)
+            continue
+        except (OSError, ValueError) as e:
+            logger.debug(f"Failed to resolve path {file_path} relative to {task_dir}: {e}")
+            pass
+
+        external_candidates.append(file_path)
+
+    existing_task_candidates: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in task_candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.exists():
+            existing_task_candidates.append(candidate)
+
+    # BT 根目录包含多个顶层条目时，移动整个 task 目录，避免丢文件。
+    if len(existing_task_candidates) > 1 and task_dir.exists():
+        return task_dir
+    if len(existing_task_candidates) == 1:
+        return existing_task_candidates[0]
+
+    task_entries = _list_task_dir_entries(task_dir)
+    if len(task_entries) > 1:
+        return task_dir
+    if len(task_entries) == 1:
+        return task_entries[0]
+
+    for candidate in external_candidates:
+        if candidate.exists():
+            return candidate
+
+    if task_name and task_dir.exists():
+        named_candidate = task_dir / task_name
+        if named_candidate.exists():
+            return named_candidate
+
+    return None
+
+
+async def _resolve_complete_source_with_retry(
+    completion_gid: str | None,
+    task_dir: Path,
+    files: list[dict],
+    task_name: str | None,
+) -> Path | None:
+    """在完成事件短时间路径抖动时进行重试，降低误判失败概率。"""
+    from app.core.state import get_aria2_client
+
+    latest_files = files
+    client = get_aria2_client()
+
+    for attempt in range(COMPLETE_SOURCE_RETRY_COUNT):
+        source = _resolve_complete_source_path(task_dir, latest_files, task_name)
+        if source:
+            return source
+
+        if attempt < COMPLETE_SOURCE_RETRY_COUNT - 1:
+            await asyncio.sleep(COMPLETE_SOURCE_RETRY_INTERVAL)
+
+        if not completion_gid:
+            continue
+
+        try:
+            refreshed_status = await client.tell_status(completion_gid)
+            refreshed_files = refreshed_status.get("files", [])
+            if isinstance(refreshed_files, list):
+                latest_files = refreshed_files
+        except Exception as exc:
+            logger.debug(f"[WS] 刷新完成任务状态失败 gid={completion_gid} error={exc}")
+
+    return None
 
 
 async def handle_aria2_event(
@@ -335,160 +447,94 @@ async def _handle_task_complete(
 
     from app.database import get_session
     from app.models import DownloadTask, UserTaskSubscription, UserFile, StoredFile, utc_now_str
-    from app.core.state import get_aria2_client
+    from app.core.state import get_aria2_client, get_task_complete_lock
     from app.services.history import add_task_history
     from app.services.storage import (
         cleanup_task_download_dir,
-        get_task_download_dir,
+        get_downloading_dir,
         move_to_store,
     )
 
-    # Get task with idempotency check
-    async with get_session() as db:
-        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-        task = result.first()
-
-    if not task:
+    lock = await get_task_complete_lock(state, task_id)
+    if lock.locked():
+        logger.debug(f"[WS] Task {task_id} completion already being processed, skipping")
         return
 
-    # Idempotency check: skip if already processed
-    if task.stored_file_id is not None:
-        logger.debug(f"[WS] Task {task_id} already processed (stored_file_id={task.stored_file_id}), skipping")
-        return
+    async with lock:
+        async with get_session() as db:
+            result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+            task = result.first()
 
-    completion_gid = task.gid
-
-    # Additional check: verify task status is complete
-    if task.status != "complete":
-        logger.warning(f"[WS] Task {task_id} status is {task.status}, not complete, skipping")
-        return
-
-    # Get source file path
-    files = aria2_status.get("files", [])
-    if not files:
-        logger.error(f"[WS] 任务 {task_id} 完成但没有文件信息")
-        return
-
-    first_file_path = files[0].get("path")
-    if not first_file_path:
-        logger.error(f"[WS] 任务 {task_id} 完成但文件路径为空")
-        return
-
-    source_path = Path(first_file_path)
-
-    # Determine the actual item to move (file or top-level directory)
-    task_dir = get_task_download_dir(task_id)
-    try:
-        if source_path.is_relative_to(task_dir):
-            rel_path = source_path.relative_to(task_dir)
-            top_level = rel_path.parts[0] if rel_path.parts else None
-            if top_level:
-                source_path = task_dir / top_level
-    except Exception:
-        pass
-
-    if not source_path.exists():
-        logger.error(f"[WS] 任务 {task_id} 完成但源文件不存在: {source_path}")
-        return
-
-    # Get original name
-    original_name = task.name or source_path.name
-
-    try:
-        # Move to store and create StoredFile
-        stored_file = await move_to_store(source_path, original_name)
-        if stored_file.id is None:
-            logger.error(f"[WS] StoredFile 缺少 id，task_id={task_id}")
+        if not task:
             return
 
-        # Update task with stored_file_id atomically using compare-and-swap pattern
-        async with get_session() as db:
-            await db.execute(
-                update(DownloadTask)
-                .where(
-                    DownloadTask.id == task_id,
-                    DownloadTask.stored_file_id.is_(None)  # Only update if not already set
-                )
-                .values(
-                    stored_file_id=stored_file.id,
-                    completed_at=utc_now_str()
-                )
-            )
+        if task.stored_file_id is not None:
+            logger.debug(f"[WS] Task {task_id} already processed (stored_file_id={task.stored_file_id}), skipping")
+            return
 
-        async with get_session() as db:
-            verify_result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-            verify_task = verify_result.first()
-            if not verify_task or verify_task.stored_file_id != stored_file.id:
-                logger.info(f"[WS] Task {task_id} already processed by another handler")
-                await cleanup_task_download_dir(task_id)
+        completion_gid = task.gid
+
+        if task.status != "complete":
+            logger.warning(f"[WS] Task {task_id} status is {task.status}, not complete, skipping")
+            return
+
+        files = aria2_status.get("files", [])
+        if not isinstance(files, list):
+            files = []
+        task_dir = get_downloading_dir() / str(task_id)
+        source_path = await _resolve_complete_source_with_retry(
+            completion_gid=completion_gid,
+            task_dir=task_dir,
+            files=files,
+            task_name=task.name,
+        )
+        if source_path is None:
+            logger.error(
+                f"[WS] 任务 {task_id} 完成但无法定位源文件 task_dir={task_dir} "
+                f"files_count={len(files)} gid={completion_gid}"
+            )
+            return
+
+        original_name = task.name or source_path.name
+
+        try:
+            stored_file = await move_to_store(source_path, original_name)
+            if stored_file.id is None:
+                logger.error(f"[WS] StoredFile 缺少 id，task_id={task_id}")
                 return
 
-        # Create UserFile references for all pending subscribers
-        async with get_session() as db:
-            result = await db.exec(
-                select(UserTaskSubscription).where(
-                    UserTaskSubscription.task_id == task_id,
-                    UserTaskSubscription.status == "pending",
+            async with get_session() as db:
+                await db.execute(
+                    update(DownloadTask)
+                    .where(
+                        DownloadTask.id == task_id,
+                        DownloadTask.stored_file_id.is_(None)
+                    )
+                    .values(
+                        stored_file_id=stored_file.id,
+                        completed_at=utc_now_str()
+                    )
                 )
-            )
-            subscriptions = result.all()
 
-        for sub in subscriptions:
-            # Create file reference and update status in single transaction
-            # Use retry logic to handle UNIQUE constraint race condition
-            should_record_history = False
-            try:
-                async with get_session() as db:
-                    # Update subscription status first; skip if no longer pending
-                    await db.execute(
-                        update(UserTaskSubscription)
-                        .where(
-                            UserTaskSubscription.id == sub.id,
-                            UserTaskSubscription.status == "pending",
-                        )
-                        .values(status="success", frozen_space=0)
+            async with get_session() as db:
+                verify_result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+                verify_task = verify_result.first()
+                if not verify_task or verify_task.stored_file_id != stored_file.id:
+                    logger.info(f"[WS] Task {task_id} already processed by another handler")
+                    await cleanup_task_download_dir(task_id)
+                    return
+
+            async with get_session() as db:
+                result = await db.exec(
+                    select(UserTaskSubscription).where(
+                        UserTaskSubscription.task_id == task_id,
+                        UserTaskSubscription.status == "pending",
                     )
-
-                    sub_result = await db.exec(
-                        select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
-                    )
-                    current_sub = sub_result.first()
-                    if not current_sub or current_sub.status != "success":
-                        continue
-
-                    # Check if reference already exists
-                    result = await db.exec(
-                        select(UserFile).where(
-                            UserFile.owner_id == sub.owner_id,
-                            UserFile.stored_file_id == stored_file.id,
-                        )
-                    )
-                    existing_ref = result.first()
-
-                    if not existing_ref:
-                        # Create file reference
-                        user_file = UserFile(
-                            owner_id=sub.owner_id,
-                            stored_file_id=stored_file.id,
-                            display_name=original_name,
-                            created_at=utc_now_str(),
-                        )
-                        db.add(user_file)
-
-                        # Increment reference count
-                        await db.execute(
-                            update(StoredFile)
-                            .where(StoredFile.id == stored_file.id)
-                            .values(ref_count=StoredFile.ref_count + 1)
-                        )
-                    should_record_history = True
-            except Exception as e:
-                # Race condition: another process created the UserFile between our check and insert
-                # The transaction rolled back, so subscription status is still "pending"
-                # Retry: just update subscription status (UserFile already exists)
-                logger.debug(
-                    f"[WS] UserFile creation race for sub {sub.id}, retrying status update: {e}"
                 )
+                subscriptions = result.all()
+
+            for sub in subscriptions:
+                should_record_history = False
                 try:
                     async with get_session() as db:
                         await db.execute(
@@ -499,59 +545,101 @@ async def _handle_task_complete(
                             )
                             .values(status="success", frozen_space=0)
                         )
+
                         sub_result = await db.exec(
                             select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
                         )
                         current_sub = sub_result.first()
-                        should_record_history = bool(current_sub and current_sub.status == "success")
-                except Exception as retry_err:
-                    logger.warning(
-                        f"[WS] Failed to update subscription {sub.id} status after race: {retry_err}"
+                        if not current_sub or current_sub.status != "success":
+                            continue
+
+                        result = await db.exec(
+                            select(UserFile).where(
+                                UserFile.owner_id == sub.owner_id,
+                                UserFile.stored_file_id == stored_file.id,
+                            )
+                        )
+                        existing_ref = result.first()
+
+                        if not existing_ref:
+                            user_file = UserFile(
+                                owner_id=sub.owner_id,
+                                stored_file_id=stored_file.id,
+                                display_name=original_name,
+                                created_at=utc_now_str(),
+                            )
+                            db.add(user_file)
+
+                            await db.execute(
+                                update(StoredFile)
+                                .where(StoredFile.id == stored_file.id)
+                                .values(ref_count=StoredFile.ref_count + 1)
+                            )
+                        should_record_history = True
+                except Exception as e:
+                    logger.debug(
+                        f"[WS] UserFile creation race for sub {sub.id}, retrying status update: {e}"
                     )
+                    try:
+                        async with get_session() as db:
+                            await db.execute(
+                                update(UserTaskSubscription)
+                                .where(
+                                    UserTaskSubscription.id == sub.id,
+                                    UserTaskSubscription.status == "pending",
+                                )
+                                .values(status="success", frozen_space=0)
+                            )
+                            sub_result = await db.exec(
+                                select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
+                            )
+                            current_sub = sub_result.first()
+                            should_record_history = bool(current_sub and current_sub.status == "success")
+                    except Exception as retry_err:
+                        logger.warning(
+                            f"[WS] Failed to update subscription {sub.id} status after race: {retry_err}"
+                        )
 
-            if not should_record_history:
-                continue
+                if not should_record_history:
+                    continue
 
-            # Write to history
-            await add_task_history(
-                owner_id=sub.owner_id,
-                task_name=original_name,
-                result="completed",
-                reason="下载完成",
-                uri=task.uri,
-                total_length=task.total_length,
-                created_at=sub.created_at,
-            )
-
-        logger.info(f"[WS] 任务 {task_id} 完成，创建了 {len(subscriptions)} 个用户文件引用")
-
-    except Exception as e:
-        logger.error(f"[WS] 处理任务 {task_id} 完成事件失败: {e}")
-        return
-
-    # Clean up task download directory
-    await cleanup_task_download_dir(task_id)
-
-    # Remove completed task from aria2 list and clear gid in DB.
-    if completion_gid:
-        try:
-            client = get_aria2_client()
-            await client.remove_download_result(completion_gid)
-        except Exception as exc:
-            logger.debug(f"[WS] 清理完成任务记录失败 gid={completion_gid} error={exc}")
-
-        async with get_session() as db:
-            await db.execute(
-                update(DownloadTask)
-                .where(
-                    DownloadTask.id == task_id,
-                    DownloadTask.gid == completion_gid,
+                await add_task_history(
+                    owner_id=sub.owner_id,
+                    task_name=original_name,
+                    result="completed",
+                    reason="下载完成",
+                    uri=task.uri,
+                    total_length=task.total_length,
+                    created_at=sub.created_at,
                 )
-                .values(
-                    gid=None,
-                    updated_at=utc_now_str(),
+
+            logger.info(f"[WS] 任务 {task_id} 完成，创建了 {len(subscriptions)} 个用户文件引用")
+
+        except Exception as e:
+            logger.error(f"[WS] 处理任务 {task_id} 完成事件失败: {e}")
+            return
+
+        await cleanup_task_download_dir(task_id)
+
+        if completion_gid:
+            try:
+                client = get_aria2_client()
+                await client.remove_download_result(completion_gid)
+            except Exception as exc:
+                logger.debug(f"[WS] 清理完成任务记录失败 gid={completion_gid} error={exc}")
+
+            async with get_session() as db:
+                await db.execute(
+                    update(DownloadTask)
+                    .where(
+                        DownloadTask.id == task_id,
+                        DownloadTask.gid == completion_gid,
+                    )
+                    .values(
+                        gid=None,
+                        updated_at=utc_now_str(),
+                    )
                 )
-            )
 
 
 async def _handle_task_stop_or_error(

@@ -21,6 +21,8 @@ class AppState:
     task_submit_locks: Dict[int, asyncio.Lock] = field(default_factory=dict)
     # 用户空间锁，避免并发冻结/校验导致超额
     user_space_locks: Dict[int, asyncio.Lock] = field(default_factory=dict)
+    # 任务完成处理锁，避免 WebSocket 和轮询同时处理同一任务的完成事件
+    task_complete_locks: Dict[int, asyncio.Lock] = field(default_factory=dict)
 
 
 async def get_user_space_lock(state: AppState, user_id: int) -> asyncio.Lock:
@@ -30,6 +32,15 @@ async def get_user_space_lock(state: AppState, user_id: int) -> asyncio.Lock:
         if lock is None:
             lock = asyncio.Lock()
             state.user_space_locks[user_id] = lock
+        return lock
+
+
+async def get_task_complete_lock(state: AppState, task_id: int) -> asyncio.Lock:
+    async with state.lock:
+        lock = state.task_complete_locks.get(task_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            state.task_complete_locks[task_id] = lock
         return lock
 
 

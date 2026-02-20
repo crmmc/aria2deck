@@ -9,47 +9,17 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections import defaultdict
-from time import time
 from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from app.core.rate_limit import rpc_limiter
 from app.db import fetch_one
 from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
 
 router = APIRouter(tags=["aria2-rpc"])
 logger = logging.getLogger(__name__)
-
-
-# ============================================================================
-# 限流器
-# ============================================================================
-
-class RpcRateLimiter:
-    """基于 IP 的 RPC 速率限制器
-
-    默认: 1 分钟内最多 100 次请求
-    """
-
-    def __init__(self, max_requests: int = 100, window_seconds: int = 60):
-        self.max_requests = max_requests
-        self.window = window_seconds
-        self._requests: dict[str, list[float]] = defaultdict(list)
-
-    def is_blocked(self, key: str) -> bool:
-        """检查是否被限制"""
-        now = time()
-        self._requests[key] = [t for t in self._requests[key] if now - t < self.window]
-        return len(self._requests[key]) >= self.max_requests
-
-    def record_request(self, key: str) -> None:
-        """记录请求"""
-        self._requests[key].append(time())
-
-
-rpc_limiter = RpcRateLimiter()
 
 
 # ============================================================================
@@ -234,7 +204,7 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
     # 0. 限流检查
     client_ip = request.client.host if request.client else "unknown"
     request_id = getattr(request.state, "request_id", "-")
-    if rpc_limiter.is_blocked(client_ip):
+    if await rpc_limiter.is_blocked(client_ip):
         logger.warning("RPC请求被限流 ip=%s request_id=%s", client_ip, request_id)
         return JSONResponse(
             content=build_jsonrpc_error(
@@ -244,7 +214,7 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
             ),
             status_code=200
         )
-    rpc_limiter.record_request(client_ip)
+    await rpc_limiter.record(client_ip)
 
     # 1. 解析请求体
     try:

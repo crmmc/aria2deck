@@ -1122,12 +1122,12 @@ async def cancel_task(
                 client = _get_client(request)
                 try:
                     await client.force_remove(db_task.gid)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Failed to force remove task gid=%s: %s", db_task.gid, e)
                 try:
                     await client.remove_download_result(db_task.gid)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Failed to remove download result gid=%s: %s", db_task.gid, e)
 
                 # Mark task as cancelled
                 async with get_session() as db:
@@ -1216,8 +1216,8 @@ async def _broadcast_task_update(state: AppState, task_id: int) -> None:
         for ws in failed_sockets:
             try:
                 await unregister_ws(state, sub.owner_id, ws)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to unregister websocket for user %s: %s", sub.owner_id, e)
 
 
 async def broadcast_task_update_to_subscribers(state: AppState, task_id: int) -> None:

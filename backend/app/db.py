@@ -9,6 +9,10 @@ Kept functions:
 """
 
 import logging
+
+logger = logging.getLogger(__name__)
+
+import logging
 import hashlib
 import sqlite3
 import sys
@@ -165,8 +169,7 @@ def init_db() -> None:
                 error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                artifact_path TEXT,
-                artifact_token TEXT,
+
                 peak_download_speed INTEGER DEFAULT 0,
                 peak_connections INTEGER DEFAULT 0,
                 FOREIGN KEY(owner_id) REFERENCES users(id)
@@ -238,21 +241,27 @@ def init_db() -> None:
         try:
             cur.execute("ALTER TABLE pack_tasks ADD COLUMN output_name TEXT")
             conn.commit()
-        except Exception:
-            pass  # 列已存在
+        except sqlite3.OperationalError:
+            # 列已存在
+            logger.debug("Column output_name already exists in pack_tasks")
+            pass
 
         # 添加 stored_file_id 和 delete_source 列（兼容旧数据库）
         try:
             cur.execute("ALTER TABLE pack_tasks ADD COLUMN stored_file_id INTEGER")
             conn.commit()
-        except Exception:
-            pass  # 列已存在
+        except sqlite3.OperationalError:
+            # 列已存在
+            logger.debug("Column stored_file_id already exists in pack_tasks")
+            pass
 
         try:
             cur.execute("ALTER TABLE pack_tasks ADD COLUMN delete_source INTEGER DEFAULT 0")
             conn.commit()
-        except Exception:
-            pass  # 列已存在
+        except sqlite3.OperationalError:
+            # 列已存在
+            logger.debug("Column delete_source already exists in pack_tasks")
+            pass
 
         # 为 users 表添加 RPC 访问字段（兼容旧数据库）
         cur.execute("PRAGMA table_info(users)")

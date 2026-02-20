@@ -9,6 +9,7 @@ Provides functions to:
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import logging
 import re
@@ -51,10 +52,10 @@ def extract_info_hash_from_magnet(magnet_uri: str) -> str | None:
             # Convert base32 to hex if needed
             if len(hash_value) == 32:
                 try:
-                    # Base32 decode and convert to hex
                     decoded = base64.b32decode(hash_value.upper())
                     return decoded.hex().lower()
-                except Exception:
+                except (ValueError, binascii.Error) as e:
+                    logger.debug(f"Failed to decode base32 hash {hash_value}: {e}")
                     continue
             elif len(hash_value) == 40:
                 return hash_value.lower()

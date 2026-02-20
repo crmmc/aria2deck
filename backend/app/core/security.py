@@ -1,9 +1,12 @@
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import re
 from urllib.parse import urlparse, urlunparse
+
+logger = logging.getLogger(__name__)
 
 
 def hash_password(password: str, salt: bytes | None = None) -> str:
@@ -92,6 +95,7 @@ def mask_url_credentials(url: str) -> str:
             parsed.query,
             parsed.fragment
         ))
-    except Exception:
+    except (ValueError, AttributeError) as e:
         # 解析失败时返回原 URL（可能是 magnet 等特殊协议）
+        logger.debug(f"Failed to parse URL for sanitization: {e}")
         return url

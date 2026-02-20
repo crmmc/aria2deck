@@ -328,7 +328,8 @@ async def browse_file(
                     "size": stat.st_size if entry.is_file() else 0,
                     "is_directory": entry.is_dir(),
                 })
-            except Exception:
+            except OSError as e:
+                logger.warning("Failed to stat file %s: %s", entry, e)
                 continue
     except PermissionError:
         logger.warning("浏览文件失败 user_id=%s file_id=%s reason=permission_denied", user.id, file_id)

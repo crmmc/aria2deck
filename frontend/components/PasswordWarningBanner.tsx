@@ -12,7 +12,7 @@ export default function PasswordWarningBanner({ user }: Props) {
   const router = useRouter();
   const [dismissed, setDismissed] = useState(false);
 
-  if (!user?.is_default_password || dismissed) {
+  if (!user?.is_initial_password || dismissed) {
     return null;
   }
 

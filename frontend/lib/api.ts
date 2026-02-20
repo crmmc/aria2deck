@@ -11,6 +11,9 @@ import type {
   PackTask,
   RpcAccessStatus,
   TaskHistory,
+  StoredFileListResponse,
+  FileUsersResponse,
+  BulkDeleteResponse,
 } from "@/types";
 import { hashPassword } from "./crypto";
 
@@ -259,6 +262,25 @@ export const api = {
   clearPackTasks: () =>
     request<{ ok: boolean; count: number }>("/api/files/pack", {
       method: "DELETE",
+    }),
+
+  listStoredFiles: (search?: string, orphanOnly?: boolean) => {
+    const params = new URLSearchParams();
+    if (search) params.set("search", search);
+    if (orphanOnly) params.set("orphan_only", "true");
+    const query = params.toString();
+    return request<StoredFileListResponse>(
+      `/api/admin/storage/files${query ? `?${query}` : ""}`
+    );
+  },
+
+  getFileUsers: (fileId: number) =>
+    request<FileUsersResponse>(`/api/admin/storage/files/${fileId}/users`),
+
+  bulkDeleteStoredFiles: (fileIds: number[]) =>
+    request<BulkDeleteResponse>("/api/admin/storage/files", {
+      method: "DELETE",
+      body: JSON.stringify({ file_ids: fileIds }),
     }),
 };
 

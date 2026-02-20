@@ -3,7 +3,7 @@ export type User = {
   username: string;
   is_admin: boolean;
   quota: number;
-  is_default_password?: boolean;  // deprecated
+
   is_initial_password?: boolean;  // whether user needs to reset password
 };
 
@@ -129,4 +129,38 @@ export type TaskHistory = {
   reason?: string | null;
   created_at: string;
   finished_at: string;
+};
+
+export type StoredFileInfo = {
+  id: number;
+  content_hash: string;
+  original_name: string;
+  size: number;
+  is_directory: boolean;
+  ref_count: number;
+  created_at: string;
+  real_path: string;
+  exists_on_disk: boolean;
+};
+
+export type StoredFileListResponse = {
+  files: StoredFileInfo[];
+  total: number;
+};
+
+export type FileUserInfo = {
+  user_id: number;
+  username: string;
+  display_name: string;
+};
+
+export type FileUsersResponse = {
+  file_id: number;
+  users: FileUserInfo[];
+};
+
+export type BulkDeleteResponse = {
+  deleted_count: number;
+  failed_ids: number[];
+  errors: string[];
 };

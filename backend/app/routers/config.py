@@ -131,7 +131,8 @@ def get_hidden_file_extensions() -> list[str]:
     if val:
         try:
             return json.loads(val)
-        except Exception:
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse hidden_file_extensions config: {e}")
             return []
     return []
 
