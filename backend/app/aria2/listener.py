@@ -474,10 +474,6 @@ async def _handle_task_complete(
 
         completion_gid = task.gid
 
-        if task.status != "complete":
-            logger.warning(f"[WS] Task {task_id} status is {task.status}, not complete, skipping")
-            return
-
         files = aria2_status.get("files", [])
         if not isinstance(files, list):
             files = []
@@ -511,6 +507,7 @@ async def _handle_task_complete(
                         DownloadTask.stored_file_id.is_(None)
                     )
                     .values(
+                        status="complete",
                         stored_file_id=stored_file.id,
                         completed_at=utc_now_str()
                     )

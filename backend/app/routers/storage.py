@@ -4,6 +4,8 @@
 - 列出所有存储文件及引用用户数
 - 查看引用某文件的用户列表
 - 批量删除存储文件
+- 扫描 store 目录补建缺失的 StoredFile 记录
+- 修复 Task 与 StoredFile 的关联
 """
 
 import logging
@@ -11,11 +13,13 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlmodel import func, select
+from sqlmodel import select
 
 from app.auth import require_admin
 from app.database import get_session
-from app.models import StoredFile, User, UserFile
+from app.models import DownloadTask, StoredFile, User, UserFile, utc_now_str
+from app.services.hash import calculate_content_hash
+from app.services.storage import get_store_dir
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +72,21 @@ class BulkDeleteRequest(BaseModel):
 
 
 class BulkDeleteResponse(BaseModel):
-    """批量删除响应"""
-
     deleted_count: int
     failed_ids: list[int]
+    errors: list[str]
+
+
+class ScanResult(BaseModel):
+    scanned_dirs: int
+    new_records: int
+    already_exists: int
+    errors: list[str]
+
+
+class RepairResult(BaseModel):
+    tasks_checked: int
+    tasks_repaired: int
     errors: list[str]
 
 
