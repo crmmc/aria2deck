@@ -23,8 +23,10 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    p7zip-full \
-    && rm -rf /var/lib/apt/lists/*
+    zstd \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -L https://7-zip.org/a/7z2408-linux-x64.tar.xz | tar -xJ -C /usr/local/bin 7zz
 
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
