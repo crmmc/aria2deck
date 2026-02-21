@@ -18,7 +18,7 @@ from sqlmodel import select
 from app.database import get_session, reset_engine, init_db as init_sqlmodel_db, dispose_engine
 from app.db import init_db
 from app.core.config import settings
-from app.models import StoredFile, UserFile, User, utc_now_str
+from app.models import DownloadTask, StoredFile, UserFile, User, UserTaskSubscription, utc_now_str
 
 
 @pytest.fixture(scope="function")
@@ -543,6 +543,94 @@ class TestRefCountDecrementDeletesFile:
 
         # Verify physical file is deleted
         assert not file_dir.exists(), "Physical file should be deleted"
+
+
+class TestDeleteReferenceStateSync:
+    @pytest.mark.asyncio
+    async def test_delete_last_reference_resets_task_and_subscription(self, temp_db_storage, test_user_storage):
+        from app.services.storage import delete_user_file_reference
+
+        user_id = test_user_storage["id"]
+        now = utc_now_str()
+
+        store_dir = Path(temp_db_storage["store_dir"])
+        content_hash = "sync_state_hash_001"
+        file_dir = store_dir / content_hash[:2]
+        file_dir.mkdir(parents=True, exist_ok=True)
+        file_path = file_dir / f"{content_hash}.bin"
+        file_path.write_bytes(b"sync")
+
+        async with get_session() as db:
+            stored_file = StoredFile(
+                content_hash=content_hash,
+                real_path=str(file_path),
+                size=4,
+                is_directory=False,
+                original_name="sync.bin",
+                ref_count=1,
+                created_at=now,
+            )
+            db.add(stored_file)
+            await db.commit()
+            await db.refresh(stored_file)
+
+            task = DownloadTask(
+                uri_hash="sync_task_hash_001",
+                uri="http://example.com/sync.bin",
+                status="complete",
+                name="sync.bin",
+                total_length=4,
+                completed_length=4,
+                stored_file_id=stored_file.id,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(task)
+            await db.commit()
+            await db.refresh(task)
+
+            sub = UserTaskSubscription(
+                owner_id=user_id,
+                task_id=task.id,
+                frozen_space=0,
+                status="success",
+                created_at=now,
+            )
+            user_file = UserFile(
+                owner_id=user_id,
+                stored_file_id=stored_file.id,
+                display_name="sync.bin",
+                created_at=now,
+            )
+            db.add(sub)
+            db.add(user_file)
+            await db.commit()
+            await db.refresh(sub)
+            await db.refresh(user_file)
+
+            sub_id = sub.id
+            task_id = task.id
+            user_file_id = user_file.id
+            stored_file_id = stored_file.id
+
+        assert user_file_id is not None
+        ok = await delete_user_file_reference(user_file_id)
+        assert ok is True
+
+        async with get_session() as db:
+            sf = (await db.exec(select(StoredFile).where(StoredFile.id == stored_file_id))).first()
+            assert sf is None
+
+            db_task = (await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))).first()
+            assert db_task is not None
+            assert db_task.status == "queued"
+            assert db_task.stored_file_id is None
+            assert db_task.gid is None
+
+            db_sub = (await db.exec(select(UserTaskSubscription).where(UserTaskSubscription.id == sub_id))).first()
+            assert db_sub is not None
+            assert db_sub.status == "failed"
+            assert db_sub.error_display == "文件已删除，请重新添加任务下载"
 
     @pytest.mark.asyncio
     async def test_ref_count_decrement_atomic(self, temp_db_storage, test_user_storage):

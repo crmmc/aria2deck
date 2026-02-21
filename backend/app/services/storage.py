@@ -22,7 +22,7 @@ from sqlmodel import select
 
 from app.core.config import settings
 from app.database import get_session
-from app.models import StoredFile, UserFile, utc_now_str
+from app.models import DownloadTask, StoredFile, UserFile, UserTaskSubscription, utc_now_str
 from app.services.hash import calculate_content_hash
 
 logger = logging.getLogger(__name__)
@@ -233,7 +233,6 @@ async def create_user_file_reference(
         UserFile record or None if already exists or StoredFile was deleted
     """
     async with get_session() as db:
-        # Check if reference already exists
         result = await db.exec(
             select(UserFile).where(
                 UserFile.owner_id == user_id,
@@ -247,9 +246,6 @@ async def create_user_file_reference(
             )
             return None
 
-        # CRITICAL: Atomically increment ref_count and return updated row
-        # This prevents race with delete_user_file_reference - if file is deleted
-        # concurrently, the UPDATE will fail and we get None
         result = await db.execute(
             update(StoredFile)
             .where(StoredFile.id == stored_file_id)
@@ -257,15 +253,13 @@ async def create_user_file_reference(
             .returning(StoredFile)
         )
         stored_file = result.scalar_one_or_none()
-        
+
         if not stored_file:
-            # StoredFile was deleted or doesn't exist
             logger.warning(
                 f"StoredFile {stored_file_id} not found or deleted during reference creation"
             )
             return None
 
-        # Create reference
         user_file = UserFile(
             owner_id=user_id,
             stored_file_id=stored_file_id,
@@ -277,21 +271,56 @@ async def create_user_file_reference(
         try:
             await db.commit()
             await db.refresh(user_file)
-
             logger.info(
                 f"Created user file reference: user={user_id}, "
                 f"stored_file={stored_file_id}"
             )
             return user_file
         except IntegrityError:
-            # UNIQUE constraint violation - reference already exists
-            # db.rollback() will automatically undo the ref_count +1 we did in this transaction
             await db.rollback()
-
             logger.debug(
                 f"Race condition: user {user_id} already has reference to stored file {stored_file_id}"
             )
             return None
+
+
+async def _sync_task_state_for_deleted_stored_file(db, stored_file_id: int) -> None:
+    result = await db.exec(
+        select(DownloadTask.id).where(DownloadTask.stored_file_id == stored_file_id)
+    )
+    task_ids = [task_id for task_id in result.all() if task_id is not None]
+    if not task_ids:
+        return
+
+    await db.execute(
+        update(DownloadTask)
+        .where(DownloadTask.id.in_(task_ids))
+        .values(
+            status="queued",
+            stored_file_id=None,
+            gid=None,
+            completed_at=None,
+            completed_length=0,
+            download_speed=0,
+            upload_speed=0,
+            error=None,
+            error_display=None,
+            updated_at=utc_now_str(),
+        )
+    )
+
+    await db.execute(
+        update(UserTaskSubscription)
+        .where(
+            UserTaskSubscription.task_id.in_(task_ids),
+            UserTaskSubscription.status.in_(["success", "pending", "active"]),
+        )
+        .values(
+            status="failed",
+            frozen_space=0,
+            error_display="文件已删除，请重新添加任务下载",
+        )
+    )
 
 
 async def delete_user_file_reference(user_file_id: int) -> bool:
@@ -347,6 +376,7 @@ async def delete_user_file_reference(user_file_id: int) -> bool:
             return True
         
         if stored_file.ref_count <= 0:
+            await _sync_task_state_for_deleted_stored_file(db, stored_file_id)
             await db.execute(
                 delete(StoredFile).where(StoredFile.id == stored_file_id)
             )
