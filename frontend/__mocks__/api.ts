@@ -78,6 +78,7 @@ export const createMockSystemConfig = (overrides: Partial<SystemConfig> = {}): S
   aria2_rpc_secret: "secret",
   hidden_file_extensions: [".aria2", ".torrent"],
   pack_format: "zip",
+  pack_7z_method: "lzma2",
   pack_compression_level: 5,
   pack_extra_args: "",
   ws_reconnect_max_delay: 30000,

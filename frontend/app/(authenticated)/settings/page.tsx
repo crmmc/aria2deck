@@ -18,7 +18,8 @@ export default function SettingsPage() {
   const [aria2RpcSecret, setAria2RpcSecret] = useState("");
   const [hiddenExtensions, setHiddenExtensions] = useState<string[]>([]);
   const [extensionInput, setExtensionInput] = useState("");
-  const [packFormat, setPackFormat] = useState<"zip" | "7z" | "tar.zst" | "tar.gz">("zip");
+  const [packFormat, setPackFormat] = useState<"zip" | "7z">("zip");
+  const [pack7zMethod, setPack7zMethod] = useState<"lzma2" | "zstd">("lzma2");
   const [packCompressionLevel, setPackCompressionLevel] = useState(5);
   const [packExtraArgs, setPackExtraArgs] = useState("");
   // WebSocket 重连配置
@@ -73,6 +74,7 @@ export default function SettingsPage() {
       setAria2RpcSecret(cfg.aria2_rpc_secret || "");
       setHiddenExtensions(cfg.hidden_file_extensions || []);
       setPackFormat(cfg.pack_format || "zip");
+      setPack7zMethod(cfg.pack_7z_method || "lzma2");
       setPackCompressionLevel(cfg.pack_compression_level ?? 5);
       setPackExtraArgs(cfg.pack_extra_args || "");
       setWsReconnectMaxDelay(cfg.ws_reconnect_max_delay ?? 60);
@@ -104,6 +106,7 @@ export default function SettingsPage() {
           : aria2RpcSecret,
         hidden_file_extensions: hiddenExtensions,
         pack_format: packFormat,
+        pack_7z_method: pack7zMethod,
         pack_compression_level: packCompressionLevel,
         pack_extra_args: packExtraArgs,
         ws_reconnect_max_delay: wsReconnectMaxDelay,
@@ -402,7 +405,7 @@ export default function SettingsPage() {
                   checked={packFormat === "zip"}
                   onChange={() => setPackFormat("zip")}
                 />
-                <span>ZIP</span>
+                <span>ZIP（Deflate64）</span>
               </label>
               <label className="checkbox-label">
                 <input
@@ -414,28 +417,37 @@ export default function SettingsPage() {
                 />
                 <span>7Z</span>
               </label>
-              <label className="checkbox-label">
-                <input
-                  type="radio"
-                  name="packFormat"
-                  value="tar.zst"
-                  checked={packFormat === "tar.zst"}
-                  onChange={() => setPackFormat("tar.zst")}
-                />
-                <span>TAR.ZST</span>
-              </label>
-              <label className="checkbox-label">
-                <input
-                  type="radio"
-                  name="packFormat"
-                  value="tar.gz"
-                  checked={packFormat === "tar.gz"}
-                  onChange={() => setPackFormat("tar.gz")}
-                />
-                <span>TAR.GZ</span>
-              </label>
             </div>
           </div>
+
+          {packFormat === "7z" && (
+            <div className="mb-6">
+              <label className="form-label-lg">7Z 压缩方法</label>
+              <p className="muted text-sm mb-3">选择 7Z 格式的压缩算法。</p>
+              <div className="flex gap-4">
+                <label className="checkbox-label">
+                  <input
+                    type="radio"
+                    name="pack7zMethod"
+                    value="lzma2"
+                    checked={pack7zMethod === "lzma2"}
+                    onChange={() => setPack7zMethod("lzma2")}
+                  />
+                  <span>LZMA2（兼容性好）</span>
+                </label>
+                <label className="checkbox-label">
+                  <input
+                    type="radio"
+                    name="pack7zMethod"
+                    value="zstd"
+                    checked={pack7zMethod === "zstd"}
+                    onChange={() => setPack7zMethod("zstd")}
+                  />
+                  <span>Zstandard（速度快）</span>
+                </label>
+              </div>
+            </div>
+          )}
 
           <div className="mb-7">
             <label className="form-label-lg">压缩等级: {packCompressionLevel}</label>

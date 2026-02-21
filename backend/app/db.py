@@ -208,6 +208,7 @@ def init_db() -> None:
             ('max_task_size', '10737418240'),
             ('min_free_disk', '1073741824'),
             ('pack_format', 'zip'),
+            ('pack_7z_method', 'lzma2'),
             ('pack_compression_level', '5'),
             ('pack_extra_args', '')
             """
