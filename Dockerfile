@@ -23,10 +23,14 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    zstd \
-    xz-utils \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -L https://7-zip.org/a/7z2408-linux-x64.tar.xz | tar -xJ -C /usr/local/bin 7zz
+    unzip \
+    && curl -sL "https://github.com/mcmilk/7-Zip-zstd/releases/download/v25.01-v1.5.7-R4/linux-gcc-x64.zip" -o /tmp/7z.zip \
+    && unzip -q /tmp/7z.zip 7zz -d /usr/local/bin \
+    && chmod +x /usr/local/bin/7zz \
+    && rm /tmp/7z.zip \
+    && apt-get purge -y unzip \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
