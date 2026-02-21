@@ -218,11 +218,13 @@ class PackTaskManager:
 
             progress = 0
             buf = b""
+            full_output = b""
             while True:
                 chunk = await process.stdout.read(256)
                 if not chunk:
                     break
                 buf += chunk
+                full_output += chunk
                 last_match = None
                 for m in re.finditer(rb"(\d+)%", buf):
                     last_match = m
@@ -297,10 +299,11 @@ class PackTaskManager:
                     if result.rowcount == 0:
                         logger.warning(f"Pack task {task_id} was cancelled during packing")
             else:
-                # Failed: cleanup partial output
                 if output_path.exists():
                     output_path.unlink()
-                await cls._update_task_error(task_id, f"7zz exited with code {process.returncode}")
+                output_text = full_output.decode("utf-8", errors="replace")[-2000:]
+                logger.error(f"Pack task {task_id} failed with code {process.returncode}: {output_text}")
+                await cls._update_task_error(task_id, f"7zz exited with code {process.returncode}: {output_text[:500]}")
 
         except FileNotFoundError:
             await cls._update_task_error(task_id, "7zz command not found. Please install 7-Zip.")
