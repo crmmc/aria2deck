@@ -179,7 +179,9 @@ class PackTaskManager:
         cmd = ["7zz", "a", format_flag, f"-mx={compression}", "-bsp1"]
         if pack_format == "7z":
             method = cls.get_7z_method()
-            cmd.append(f"-m0={method}")
+            # 7zz 需要正确的大小写: LZMA2, Zstd
+            method_map = {"lzma2": "LZMA2", "zstd": "Zstd"}
+            cmd.append(f"-m0={method_map.get(method, 'LZMA2')}")
         if extra_args:
             cmd.extend(extra_args)
         cmd.append(str(output_path))
@@ -298,10 +300,10 @@ class PackTaskManager:
                 # Failed: cleanup partial output
                 if output_path.exists():
                     output_path.unlink()
-                await cls._update_task_error(task_id, f"7za exited with code {process.returncode}")
+                await cls._update_task_error(task_id, f"7zz exited with code {process.returncode}")
 
         except FileNotFoundError:
-            await cls._update_task_error(task_id, "7za command not found. Please install p7zip.")
+            await cls._update_task_error(task_id, "7zz command not found. Please install 7-Zip.")
         except asyncio.CancelledError:
             # Task was cancelled
             if output_path.exists():

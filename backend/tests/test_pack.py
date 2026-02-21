@@ -1162,12 +1162,12 @@ class TestDoPackMethod:
         assert task["status"] == "cancelled"
 
     @pytest.mark.asyncio
-    async def test_do_pack_7za_not_found(
+    async def test_do_pack_7zz_not_found(
         self, test_user: dict, user_download_dir: Path, temp_db: str
     ):
         from app.services.pack import PackTaskManager
 
-        file_path = user_download_dir / "7za_test.txt"
+        file_path = user_download_dir / "7zz_test.txt"
         file_path.write_text("content")
         abs_paths = [str(file_path)]
 
@@ -1184,7 +1184,7 @@ class TestDoPackMethod:
 
         task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [task_id])
         assert task["status"] == "failed"
-        assert "7za command not found" in task["error_message"]
+        assert "7zz command not found" in task["error_message"]
 
     @pytest.mark.asyncio
     async def test_update_task_error(self, test_user: dict, temp_db: str):
