@@ -542,7 +542,28 @@ async def create_task(
                 user_id=user_id,
                 stored_file_id=task.stored_file_id,
             )
-        return _subscription_to_dict(existing_sub, task)
+            return _subscription_to_dict(existing_sub, task)
+        elif existing_sub.status == "failed" and task.stored_file_id:
+            await _ensure_user_file_reference_if_possible(
+                user_id=user_id,
+                stored_file_id=task.stored_file_id,
+            )
+            async with get_session() as db:
+                result = await db.exec(
+                    select(UserTaskSubscription).where(
+                        UserTaskSubscription.id == existing_sub.id
+                    )
+                )
+                sub = result.first()
+                if sub:
+                    sub.status = "success"
+                    await db.commit()
+                    await db.refresh(sub)
+                    existing_sub = sub
+            logger.info("恢复失败订阅 user_id=%s task_id=%s", user_id, task.id)
+            return _subscription_to_dict(existing_sub, task)
+        elif existing_sub.status in ("pending", "active"):
+            return _subscription_to_dict(existing_sub, task)
 
     # Handle based on task status
     if task.status == "complete" and task.stored_file_id:
