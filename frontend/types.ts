@@ -52,7 +52,7 @@ export type SystemConfig = {
   aria2_rpc_url: string;
   aria2_rpc_secret: string;
   hidden_file_extensions: string[];
-  pack_format: "zip" | "7z";
+  pack_format: "zip" | "7z" | "tar.zst" | "tar.gz";
   pack_compression_level: number;
   pack_extra_args: string;
   ws_reconnect_max_delay: number;

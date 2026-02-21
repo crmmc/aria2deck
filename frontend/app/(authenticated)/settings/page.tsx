@@ -18,7 +18,7 @@ export default function SettingsPage() {
   const [aria2RpcSecret, setAria2RpcSecret] = useState("");
   const [hiddenExtensions, setHiddenExtensions] = useState<string[]>([]);
   const [extensionInput, setExtensionInput] = useState("");
-  const [packFormat, setPackFormat] = useState<"zip" | "7z">("zip");
+  const [packFormat, setPackFormat] = useState<"zip" | "7z" | "tar.zst" | "tar.gz">("zip");
   const [packCompressionLevel, setPackCompressionLevel] = useState(5);
   const [packExtraArgs, setPackExtraArgs] = useState("");
   // WebSocket 重连配置
@@ -413,6 +413,26 @@ export default function SettingsPage() {
                   onChange={() => setPackFormat("7z")}
                 />
                 <span>7Z</span>
+              </label>
+              <label className="checkbox-label">
+                <input
+                  type="radio"
+                  name="packFormat"
+                  value="tar.zst"
+                  checked={packFormat === "tar.zst"}
+                  onChange={() => setPackFormat("tar.zst")}
+                />
+                <span>TAR.ZST</span>
+              </label>
+              <label className="checkbox-label">
+                <input
+                  type="radio"
+                  name="packFormat"
+                  value="tar.gz"
+                  checked={packFormat === "tar.gz"}
+                  onChange={() => setPackFormat("tar.gz")}
+                />
+                <span>TAR.GZ</span>
               </label>
             </div>
           </div>
