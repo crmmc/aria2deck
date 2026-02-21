@@ -464,14 +464,23 @@ async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
             logger.warning("Failed to parse timestamp for task_id=%s: %s", task_id, e)
 
         reason = "下载完成但文件未入库"
-        await _update_task(
-            task_id,
-            {
-                "status": "error",
-                "error": reason,
-                "error_display": reason,
-            },
-        )
+        async with get_session() as db:
+            result = await db.execute(
+                update(DownloadTask)
+                .where(
+                    DownloadTask.id == task_id,
+                    DownloadTask.stored_file_id.is_(None),
+                )
+                .values(
+                    status="error",
+                    error=reason,
+                    error_display=reason,
+                    updated_at=utc_now_str(),
+                )
+            )
+            if result.rowcount == 0:
+                logger.info(f"[Sync] 任务 {task_id} 已被 listener 处理，跳过修复")
+                continue
         await _handle_task_stop_or_error_sync(task_id, reason)
         await broadcast_task_update_to_subscribers(state, task_id)
 
