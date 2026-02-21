@@ -80,6 +80,7 @@ from app.database import (
     check_wal_integrity,
 )
 from app.routers import aria2_rpc, auth, config, files, history, stats, storage, tasks, users, ws
+from app.services.repair import run_startup_repair
 
 
 @asynccontextmanager
@@ -116,6 +117,8 @@ async def lifespan(app: FastAPI):
     # Development mode helper: reset admin password without clearing DB
     if settings.dev_reset_admin_password:
         reset_admin_password_for_dev()
+
+    asyncio.create_task(run_startup_repair())
 
     sync_task = asyncio.create_task(
         sync_tasks(app.state.app_state, settings.aria2_poll_interval)
