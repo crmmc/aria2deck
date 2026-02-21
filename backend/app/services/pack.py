@@ -1,4 +1,4 @@
-"""Async folder packing service using 7-zip CLI"""
+"""Async folder packing service using 7zz/tar CLI"""
 from __future__ import annotations
 
 import asyncio
@@ -25,13 +25,15 @@ _pack_queue_lock = asyncio.Lock()
 # 保护 _running_tasks 字典的锁
 _running_tasks_lock = asyncio.Lock()
 
+SUPPORTED_FORMATS = ("zip", "7z", "tar.zst", "tar.gz")
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# 允许的 7za 参数前缀白名单（防止命令注入）
-_ALLOWED_7ZA_ARG_PREFIXES = (
+# 允许的 7zz 参数前缀白名单（防止命令注入）
+_ALLOWED_7ZZ_ARG_PREFIXES = (
     "-mmt",   # 多线程
     "-mx",    # 压缩级别
     "-m0=",   # 压缩方法
@@ -50,14 +52,12 @@ class PackTaskManager:
 
     @classmethod
     def get_pack_format(cls) -> str:
-        """Get pack format from config (zip or 7z)"""
         from app.routers.config import get_config_value
         val = get_config_value("pack_format")
-        return val if val in ("zip", "7z") else "zip"
+        return val if val in SUPPORTED_FORMATS else "zip"
 
     @classmethod
     def get_compression_level(cls) -> int:
-        """Get compression level (0-9)"""
         from app.routers.config import get_config_value
         val = get_config_value("pack_compression_level")
         try:
@@ -68,7 +68,6 @@ class PackTaskManager:
 
     @classmethod
     def get_extra_args(cls) -> list[str]:
-        """Get extra 7za arguments from config (with whitelist validation)"""
         from app.routers.config import get_config_value
         val = get_config_value("pack_extra_args")
         if not val or not val.strip():
@@ -78,7 +77,7 @@ class PackTaskManager:
             # 只允许白名单中的参数前缀（防止命令注入）
             safe_args = []
             for arg in args:
-                if any(arg.startswith(prefix) for prefix in _ALLOWED_7ZA_ARG_PREFIXES):
+                if any(arg.startswith(prefix) for prefix in _ALLOWED_7ZZ_ARG_PREFIXES):
                     safe_args.append(arg)
             return safe_args
         except ValueError:
@@ -134,7 +133,6 @@ class PackTaskManager:
         compression = cls.get_compression_level()
         extra_args = cls.get_extra_args()
 
-        # 确定输出文件名
         if output_name:
             base_name = output_name
         elif len(sources) == 1:
@@ -145,20 +143,18 @@ class PackTaskManager:
         output_filename = f"{base_name}.{pack_format}"
         output_path = user_dir / output_filename
 
-        # Ensure unique filename
         counter = 1
         while output_path.exists():
             output_filename = f"{base_name}_{counter}.{pack_format}"
             output_path = user_dir / output_filename
             counter += 1
 
-        # Update status to packing using CAS pattern
         async with get_session() as db:
             result = await db.execute(
                 update(PackTask)
                 .where(
                     PackTask.id == task_id,
-                    PackTask.status == "pending"  # CAS: only pending can become packing
+                    PackTask.status == "pending"
                 )
                 .values(
                     status="packing",
@@ -168,32 +164,28 @@ class PackTaskManager:
             )
 
             if result.rowcount == 0:
-                # Task was cancelled or status already changed
                 logger.info(f"Pack task {task_id} status changed, skipping")
                 return
 
-        # Build 7za command
-        # -tzip or -t7z for format
-        # -mx=N for compression level
-        # -bsp1 for progress output
-        format_flag = f"-t{pack_format}"
-
-        # 基础命令
-        cmd = ["7za", "a", format_flag, f"-mx={compression}", "-bsp1"]
-
-        # 添加额外参数
-        if extra_args:
-            cmd.extend(extra_args)
-
-        # 添加输出路径
-        cmd.append(str(output_path))
-
-        # 添加源文件/文件夹
-        for source in sources:
-            if source.is_dir():
-                cmd.append(str(source) + "/*")
+        use_tar = pack_format in ("tar.zst", "tar.gz")
+        if use_tar:
+            if pack_format == "tar.zst":
+                cmd = ["tar", "--zstd", f"-{compression}", "-cvf", str(output_path)]
             else:
-                cmd.append(str(source))
+                cmd = ["tar", f"-{compression}", "-czvf", str(output_path)]
+            for source in sources:
+                cmd.extend(["-C", str(source.parent), source.name])
+        else:
+            format_flag = f"-t{pack_format}"
+            cmd = ["7zz", "a", format_flag, f"-mx={compression}", "-bsp1"]
+            if extra_args:
+                cmd.extend(extra_args)
+            cmd.append(str(output_path))
+            for source in sources:
+                if source.is_dir():
+                    cmd.append(str(source) + "/*")
+                else:
+                    cmd.append(str(source))
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -204,14 +196,10 @@ class PackTaskManager:
             async with _running_tasks_lock:
                 cls._running_tasks[task_id] = process
 
-            # CRITICAL: Check if task was cancelled during subprocess creation window
-            # This prevents race where cancel_pack() couldn't find the process
-            # but the API already marked the task as cancelled
             async with get_session() as db:
                 result = await db.exec(select(PackTask).where(PackTask.id == task_id))
                 task_check = result.first()
                 if task_check and task_check.status != "packing":
-                    # Task was cancelled during the window, terminate and exit
                     logger.info(f"Pack task {task_id} was cancelled during startup, terminating")
                     process.terminate()
                     try:
@@ -224,23 +212,20 @@ class PackTaskManager:
                         cls._running_tasks.pop(task_id, None)
                     return
 
-            # Parse progress from 7za output
-            # 7za uses \b (backspace) to overwrite progress digits, not \r.
-            # We scan the raw buffer for all N% matches regardless of delimiters.
             progress = 0
             buf = b""
             while True:
                 chunk = await process.stdout.read(256)
                 if not chunk:
                     break
+                if use_tar:
+                    continue
                 buf += chunk
-                # Find all N% occurrences in buffer
                 last_match = None
                 for m in re.finditer(rb"(\d+)%", buf):
                     last_match = m
                 if last_match:
                     new_progress = int(last_match.group(1))
-                    # Trim buffer: keep only bytes after last match
                     buf = buf[last_match.end():]
                     if new_progress != progress:
                         progress = new_progress

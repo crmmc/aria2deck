@@ -35,12 +35,12 @@ class ConfigUpdate(BaseModel):
     """配置更新请求体"""
     max_task_size: int | None = Field(None, ge=0, description="单任务最大大小（字节）")
     min_free_disk: int | None = Field(None, ge=0, description="磁盘最小剩余空间（字节）")
-    aria2_rpc_url: str | None = None  # aria2 RPC URL
-    aria2_rpc_secret: str | None = None  # aria2 RPC Secret
-    hidden_file_extensions: list[str] | None = None  # 隐藏的文件后缀名列表
-    pack_format: str | None = None  # 打包格式 (zip 或 7z)
+    aria2_rpc_url: str | None = None
+    aria2_rpc_secret: str | None = None
+    hidden_file_extensions: list[str] | None = None
+    pack_format: str | None = None
     pack_compression_level: int | None = Field(None, ge=0, le=9, description="压缩等级 (0-9)")
-    pack_extra_args: str | None = None  # 7za 附加参数
+    pack_extra_args: str | None = None
     # WebSocket 重连参数
     ws_reconnect_max_delay: float | None = Field(None, ge=1.0, le=300.0, description="最大重连延迟（秒）")
     ws_reconnect_jitter: float | None = Field(None, ge=0.0, le=1.0, description="抖动系数 (0-1)")
@@ -138,9 +138,8 @@ def get_hidden_file_extensions() -> list[str]:
 
 
 def get_pack_format() -> str:
-    """获取打包格式 (zip 或 7z)，默认 zip"""
     val = get_config_value("pack_format")
-    return val if val in ("zip", "7z") else "zip"
+    return val if val in ("zip", "7z", "tar.zst", "tar.gz") else "zip"
 
 
 def get_pack_compression_level() -> int:
@@ -265,7 +264,7 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         await set_config_value_async("hidden_file_extensions", json.dumps(normalized))
         changed_keys.append("hidden_file_extensions")
     if payload.pack_format is not None:
-        if payload.pack_format in ("zip", "7z"):
+        if payload.pack_format in ("zip", "7z", "tar.zst", "tar.gz"):
             await set_config_value_async("pack_format", payload.pack_format)
             changed_keys.append("pack_format")
     if payload.pack_compression_level is not None:
