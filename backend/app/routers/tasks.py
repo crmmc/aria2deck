@@ -583,6 +583,52 @@ async def create_task(
         return _subscription_to_dict(subscription, task)
 
     elif task.status == "error":
+        if task.stored_file_id:
+            await _ensure_user_file_reference_if_possible(
+                user_id=user_id,
+                stored_file_id=task.stored_file_id,
+            )
+
+            async with get_session() as db:
+                subscription = UserTaskSubscription(
+                    owner_id=user_id,
+                    task_id=task.id,
+                    frozen_space=0,
+                    status="success",
+                    created_at=utc_now_str(),
+                )
+                db.add(subscription)
+
+                try:
+                    await db.commit()
+                    await db.refresh(subscription)
+                except IntegrityError:
+                    await db.rollback()
+                    result = await db.exec(
+                        select(UserTaskSubscription).where(
+                            UserTaskSubscription.owner_id == user_id,
+                            UserTaskSubscription.task_id == task.id,
+                        )
+                    )
+                    subscription = result.first()
+                    if not subscription:
+                        raise
+
+            async with get_session() as db:
+                result = await db.exec(
+                    select(DownloadTask).where(DownloadTask.id == task.id)
+                )
+                db_task = result.first()
+                if db_task and db_task.status == "error":
+                    db_task.status = "complete"
+                    db_task.error = None
+                    db_task.error_display = None
+                    db_task.updated_at = utc_now_str()
+                    db.add(db_task)
+                    await db.commit()
+
+            return _subscription_to_dict(subscription, task)
+
         async with get_session() as db:
             result = await db.exec(
                 select(UserTaskSubscription).where(
