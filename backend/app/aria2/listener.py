@@ -416,9 +416,9 @@ async def handle_aria2_event(
                     logger.debug(f"[WS] 清理 metadata 任务结果失败 gid={gid} error={exc}")
             return
         else:
-            new_status = "complete"
+            new_status = None
     elif event == "bt_complete":
-        new_status = "complete"
+        new_status = None
     elif event == "error":
         new_status = "error"
         raw_error = aria2_status.get("errorMessage", "后端错误")
@@ -431,7 +431,8 @@ async def handle_aria2_event(
         result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
         db_task = result.first()
         if db_task:
-            db_task.status = new_status
+            if new_status is not None:
+                db_task.status = new_status
             db_task.updated_at = utc_now_str()
 
             if gid_updated:
@@ -439,7 +440,6 @@ async def handle_aria2_event(
             if error_msg:
                 db_task.error = error_msg
             if error_display:
-                # 避免 stop 事件覆盖用户主动取消的状态
                 if event == "stop" and db_task.error_display == "已取消":
                     pass
                 else:
@@ -458,8 +458,7 @@ async def handle_aria2_event(
 
             db.add(db_task)
 
-    # 5. 处理完成事件
-    if new_status == "complete":
+    if event in ("complete", "bt_complete"):
         await _handle_task_complete(state, task_id, aria2_status)
 
     # 5.1 处理 stop/error 事件 - 释放冻结空间并标记订阅失败
