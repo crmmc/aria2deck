@@ -12,14 +12,14 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from app.auth import require_admin
 from app.database import get_session
 from app.models import DownloadTask, StoredFile, User, UserFile, utc_now_str
 from app.services.hash import calculate_content_hash
-from app.services.storage import get_store_dir
+from app.services.storage import delete_user_file_reference, get_store_dir
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class FileUsersResponse(BaseModel):
 class BulkDeleteRequest(BaseModel):
     """批量删除请求"""
 
-    file_ids: list[int]
+    file_ids: list[int] = Field(..., min_length=1, max_length=1000)
 
 
 class BulkDeleteResponse(BaseModel):
@@ -211,29 +211,20 @@ async def bulk_delete_files(
                     errors.append(f"文件不存在: {file_id}")
                     continue
 
-                await db.exec(
-                    select(UserFile).where(UserFile.stored_file_id == file_id)
-                )
                 user_files = (
                     await db.exec(
                         select(UserFile).where(UserFile.stored_file_id == file_id)
                     )
                 ).all()
+
                 for uf in user_files:
-                    await db.delete(uf)
+                    if uf.id is not None:
+                        try:
+                            await delete_user_file_reference(uf.id)
+                        except Exception as e:
+                            logger.warning(f"删除用户文件引用失败 {uf.id}: {e!s}")
 
-                real_path = Path(stored_file.real_path)
-                if real_path.exists():
-                    if real_path.is_dir():
-                        import shutil
-
-                        shutil.rmtree(real_path)
-                    else:
-                        real_path.unlink()
-
-                await db.delete(stored_file)
                 deleted_count += 1
-
                 logger.info(f"管理员删除存储文件: {stored_file.content_hash}")
 
             except Exception as e:

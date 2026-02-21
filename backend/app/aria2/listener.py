@@ -292,22 +292,63 @@ async def handle_aria2_event(
                 user_lock = await get_user_space_lock(state, user_id)
                 async with user_lock:
                     space_info = await get_user_space_info(user_id, user.quota)
-                    # Each user's space is independent, use available directly
                     effective_available = space_info["available"]
 
                     required_extra = max(total_length - (sub.frozen_space or 0), 0)
                     if required_extra <= effective_available:
-                        # Use optimistic locking: only update if frozen_space < total_length
-                        # This allows BT followedBy to update from metadata size to real size
-                        async with get_session() as db:
-                            await db.execute(
-                                update(UserTaskSubscription)
-                                .where(
-                                    UserTaskSubscription.id == sub.id,
-                                    UserTaskSubscription.frozen_space < total_length  # Optimistic lock
+                        MAX_RETRIES = 3
+                        update_success = False
+                        
+                        for attempt in range(MAX_RETRIES):
+                            should_retry = False
+                            async with get_session() as db:
+                                result = await db.exec(
+                                    select(UserTaskSubscription).where(
+                                        UserTaskSubscription.id == sub.id
+                                    )
                                 )
-                                .values(frozen_space=total_length)
+                                current_sub = result.first()
+                                
+                                if not current_sub:
+                                    logger.warning(
+                                        f"[WS] 订阅 {sub.id} 在重试时已被删除"
+                                    )
+                                    break
+                                
+                                if current_sub.frozen_space >= total_length:
+                                    update_success = True
+                                    break
+                                
+                                update_result = await db.execute(
+                                    update(UserTaskSubscription)
+                                    .where(
+                                        UserTaskSubscription.id == sub.id,
+                                        UserTaskSubscription.frozen_space == current_sub.frozen_space,
+                                    )
+                                    .values(frozen_space=total_length)
+                                )
+                                
+                                if update_result.rowcount > 0:
+                                    update_success = True
+                                    break
+                                
+                                if attempt < MAX_RETRIES - 1:
+                                    should_retry = True
+                            
+                            if should_retry:
+                                backoff_ms = 10 * (attempt + 1)
+                                logger.debug(
+                                    f"[WS] 订阅 {sub.id} frozen_space 更新冲突，"
+                                    f"重试 {attempt + 1}/{MAX_RETRIES}，等待 {backoff_ms}ms"
+                                )
+                                await asyncio.sleep(backoff_ms / 1000.0)
+                        
+                        if not update_success:
+                            logger.warning(
+                                f"[WS] 订阅 {sub.id} frozen_space 更新失败，"
+                                f"已重试 {MAX_RETRIES} 次"
                             )
+                        
                         async with get_session() as db:
                             refreshed = await db.exec(
                                 select(UserTaskSubscription).where(
@@ -532,51 +573,10 @@ async def _handle_task_complete(
 
             for sub in subscriptions:
                 should_record_history = False
-                try:
-                    async with get_session() as db:
-                        await db.execute(
-                            update(UserTaskSubscription)
-                            .where(
-                                UserTaskSubscription.id == sub.id,
-                                UserTaskSubscription.status == "pending",
-                            )
-                            .values(status="success", frozen_space=0)
-                        )
+                MAX_RETRIES = 3
+                user_file_created = False
 
-                        sub_result = await db.exec(
-                            select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
-                        )
-                        current_sub = sub_result.first()
-                        if not current_sub or current_sub.status != "success":
-                            continue
-
-                        result = await db.exec(
-                            select(UserFile).where(
-                                UserFile.owner_id == sub.owner_id,
-                                UserFile.stored_file_id == stored_file.id,
-                            )
-                        )
-                        existing_ref = result.first()
-
-                        if not existing_ref:
-                            user_file = UserFile(
-                                owner_id=sub.owner_id,
-                                stored_file_id=stored_file.id,
-                                display_name=original_name,
-                                created_at=utc_now_str(),
-                            )
-                            db.add(user_file)
-
-                            await db.execute(
-                                update(StoredFile)
-                                .where(StoredFile.id == stored_file.id)
-                                .values(ref_count=StoredFile.ref_count + 1)
-                            )
-                        should_record_history = True
-                except Exception as e:
-                    logger.debug(
-                        f"[WS] UserFile creation race for sub {sub.id}, retrying status update: {e}"
-                    )
+                for attempt in range(MAX_RETRIES):
                     try:
                         async with get_session() as db:
                             await db.execute(
@@ -587,15 +587,62 @@ async def _handle_task_complete(
                                 )
                                 .values(status="success", frozen_space=0)
                             )
+
                             sub_result = await db.exec(
                                 select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
                             )
                             current_sub = sub_result.first()
-                            should_record_history = bool(current_sub and current_sub.status == "success")
-                    except Exception as retry_err:
+                            if not current_sub or current_sub.status != "success":
+                                break
+
+                            result = await db.exec(
+                                select(UserFile).where(
+                                    UserFile.owner_id == sub.owner_id,
+                                    UserFile.stored_file_id == stored_file.id,
+                                )
+                            )
+                            existing_ref = result.first()
+
+                            if not existing_ref:
+                                user_file = UserFile(
+                                    owner_id=sub.owner_id,
+                                    stored_file_id=stored_file.id,
+                                    display_name=original_name,
+                                    created_at=utc_now_str(),
+                                )
+                                db.add(user_file)
+
+                                await db.execute(
+                                    update(StoredFile)
+                                    .where(StoredFile.id == stored_file.id)
+                                    .values(ref_count=StoredFile.ref_count + 1)
+                                )
+                            user_file_created = True
+                            should_record_history = True
+                            break
+                    except Exception as e:
                         logger.warning(
-                            f"[WS] Failed to update subscription {sub.id} status after race: {retry_err}"
+                            f"[WS] UserFile creation attempt {attempt + 1}/{MAX_RETRIES} failed for sub {sub.id}: {e}"
                         )
+                        if attempt < MAX_RETRIES - 1:
+                            await asyncio.sleep(0.01 * (attempt + 1))
+
+                if not user_file_created:
+                    logger.error(
+                        f"[WS] Failed to create UserFile after {MAX_RETRIES} attempts for sub_id={sub.id}"
+                    )
+                    try:
+                        async with get_session() as db:
+                            await db.execute(
+                                update(UserTaskSubscription)
+                                .where(UserTaskSubscription.id == sub.id)
+                                .values(status="failed", error_display="文件引用创建失败")
+                            )
+                    except Exception as final_err:
+                        logger.error(
+                            f"[WS] Failed to mark subscription {sub.id} as failed: {final_err}"
+                        )
+                    continue
 
                 if not should_record_history:
                     continue

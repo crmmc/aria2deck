@@ -116,13 +116,23 @@ async def set_config_value_async(key: str, value: str) -> None:
 def get_max_task_size() -> int:
     """获取单任务最大大小（字节），默认 10GB"""
     val = get_config_value("max_task_size")
-    return int(val) if val else 10 * 1024 * 1024 * 1024
+    if val:
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            pass
+    return 10 * 1024 * 1024 * 1024
 
 
 def get_min_free_disk() -> int:
     """获取磁盘最小剩余空间（字节），默认 1GB"""
     val = get_config_value("min_free_disk")
-    return int(val) if val else 1 * 1024 * 1024 * 1024
+    if val:
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            pass
+    return 1 * 1024 * 1024 * 1024
 
 
 def get_hidden_file_extensions() -> list[str]:

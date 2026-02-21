@@ -17,7 +17,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from sqlalchemy import delete, update
+from sqlalchemy import delete, update, func
 from sqlmodel import select
 
 from app.core.config import settings
@@ -247,33 +247,22 @@ async def create_user_file_reference(
             )
             return None
 
-        # CRITICAL: Atomically increment ref_count FIRST, with condition ref_count > 0
-        # This prevents race with delete_user_file_reference which sets ref_count to 0
-        # before deleting the StoredFile record.
-        increment_result = await db.execute(
+        # CRITICAL: Atomically increment ref_count and return updated row
+        # This prevents race with delete_user_file_reference - if file is deleted
+        # concurrently, the UPDATE will fail and we get None
+        result = await db.execute(
             update(StoredFile)
-            .where(
-                StoredFile.id == stored_file_id,
-                StoredFile.ref_count >= 0,  # Allow 0 -> 1 for first reference
-            )
+            .where(StoredFile.id == stored_file_id)
             .values(ref_count=StoredFile.ref_count + 1)
+            .returning(StoredFile)
         )
-
-        if increment_result.rowcount == 0:
+        stored_file = result.scalar_one_or_none()
+        
+        if not stored_file:
             # StoredFile was deleted or doesn't exist
             logger.warning(
                 f"StoredFile {stored_file_id} not found or deleted during reference creation"
             )
-            return None
-
-        # Get stored file for default display name (now safe, ref_count > 0)
-        result = await db.exec(
-            select(StoredFile).where(StoredFile.id == stored_file_id)
-        )
-        stored_file = result.first()
-        if not stored_file:
-            # Should not happen after successful increment, but handle gracefully
-            logger.error(f"StoredFile {stored_file_id} disappeared after ref_count increment")
             return None
 
         # Create reference
@@ -330,6 +319,9 @@ async def delete_user_file_reference(user_file_id: int) -> bool:
             return False
 
         stored_file_id = user_file.stored_file_id
+        
+        if stored_file_id is None:
+            return False
 
         # Delete the user reference atomically, avoid double-decrement on races
         delete_result = await db.execute(
@@ -338,46 +330,34 @@ async def delete_user_file_reference(user_file_id: int) -> bool:
         if delete_result.rowcount == 0:
             return False
 
-        # Decrement reference count atomically
-        await db.execute(
+        stmt = (
             update(StoredFile)
-            .where(StoredFile.id == stored_file_id)
+            .where(
+                StoredFile.id == stored_file_id,
+                StoredFile.ref_count > 0,
+            )
             .values(ref_count=StoredFile.ref_count - 1)
+            .returning(StoredFile)
         )
-
-        # CRITICAL: Use conditional delete to prevent race with create_user_file_reference
-        # Only delete if ref_count is still <= 0 (no concurrent create incremented it)
-        # First, get the real_path before potential deletion
-        result = await db.exec(
-            select(StoredFile).where(StoredFile.id == stored_file_id)
-        )
-        stored_file = result.first()
-
-        if stored_file:
-            if stored_file.ref_count <= 0:
-                # Attempt conditional delete - only succeeds if ref_count still <= 0
-                conditional_delete = await db.execute(
-                    delete(StoredFile)
-                    .where(
-                        StoredFile.id == stored_file_id,
-                        StoredFile.ref_count <= 0,  # CAS condition
-                    )
-                )
-                if conditional_delete.rowcount > 0:
-                    # Successfully deleted, record path for physical deletion
-                    store_path_to_delete = stored_file.real_path
-                    stored_file_id_to_delete = stored_file.id
-                else:
-                    # Concurrent create incremented ref_count, don't delete
-                    logger.info(
-                        f"StoredFile {stored_file_id} ref_count was incremented concurrently, "
-                        f"skipping deletion"
-                    )
-            else:
-                logger.info(
-                    f"Deleted user file reference {user_file_id}, "
-                    f"ref_count now {stored_file.ref_count}"
-                )
+        result = await db.execute(stmt)
+        stored_file = result.scalar_one_or_none()
+        
+        if stored_file is None:
+            logger.warning(f"StoredFile {stored_file_id} not found or ref_count already 0")
+            return True
+        
+        if stored_file.ref_count <= 0:
+            await db.execute(
+                delete(StoredFile).where(StoredFile.id == stored_file_id)
+            )
+            store_path_to_delete = stored_file.real_path
+            stored_file_id_to_delete = stored_file_id
+            logger.info(f"StoredFile {stored_file_id} ref_count reached 0, deleted")
+        else:
+            logger.info(
+                f"Deleted user file reference {user_file_id}, "
+                f"ref_count now {stored_file.ref_count}"
+            )
         # Transaction commits here
 
     # Delete physical file AFTER transaction commit (avoid I/O in transaction)
@@ -461,7 +441,7 @@ async def get_user_frozen_space(user_id: int) -> int:
 
 
 async def get_user_space_info(user_id: int, user_quota: int) -> dict:
-    """Get comprehensive space information for a user.
+    """Get comprehensive space information for a user with atomic calculation.
 
     Args:
         user_id: The user ID
@@ -470,8 +450,27 @@ async def get_user_space_info(user_id: int, user_quota: int) -> dict:
     Returns:
         Dict with used, frozen, available, and quota
     """
-    used = await get_user_used_space_async(user_id)
-    frozen = await get_user_frozen_space(user_id)
+    from app.models import UserTaskSubscription
+
+    async with get_session() as db:
+        # Single query for used space (from UserFile + StoredFile)
+        used_result = await db.exec(
+            select(func.coalesce(func.sum(StoredFile.size), 0))
+            .select_from(UserFile)
+            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
+            .where(UserFile.owner_id == user_id)
+        )
+        used_space = used_result.one()
+
+        # Single query for frozen space (from pending subscriptions)
+        frozen_result = await db.exec(
+            select(func.coalesce(func.sum(UserTaskSubscription.frozen_space), 0))
+            .where(
+                UserTaskSubscription.owner_id == user_id,
+                UserTaskSubscription.status == "pending",
+            )
+        )
+        frozen_space = frozen_result.one()
 
     # Get machine free space
     download_path = Path(settings.download_dir)
@@ -480,12 +479,12 @@ async def get_user_space_info(user_id: int, user_quota: int) -> dict:
     machine_free = disk.free
 
     # Available = min(quota - used - frozen, machine_free)
-    quota_available = max(0, user_quota - used - frozen)
+    quota_available = max(0, user_quota - used_space - frozen_space)
     available = min(quota_available, machine_free)
 
     return {
         "quota": user_quota,
-        "used": used,
-        "frozen": frozen,
+        "used": used_space,
+        "frozen": frozen_space,
         "available": available,
     }

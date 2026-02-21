@@ -402,7 +402,8 @@ class TestCalculateSizeEndpoint:
             "/api/files/pack/calculate-size",
             json={"file_ids": []}
         )
-        assert response.status_code in [200, 400]
+        # Empty list now returns 422 due to min_length=1 validation
+        assert response.status_code == 422
 
     def test_calculate_size_nonexistent_file_ids(self, authenticated_client: TestClient):
         response = authenticated_client.post(
