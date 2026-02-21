@@ -186,10 +186,7 @@ class PackTaskManager:
             cmd.extend(extra_args)
         cmd.append(str(output_path))
         for source in sources:
-            if source.is_dir():
-                cmd.append(str(source) + "/*")
-            else:
-                cmd.append(str(source))
+            cmd.append(str(source))
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -301,9 +298,9 @@ class PackTaskManager:
             else:
                 if output_path.exists():
                     output_path.unlink()
-                output_text = full_output.decode("utf-8", errors="replace")[-2000:]
-                logger.error(f"Pack task {task_id} failed with code {process.returncode}: {output_text}")
-                await cls._update_task_error(task_id, f"7zz exited with code {process.returncode}: {output_text[:500]}")
+                output_text = full_output.decode("utf-8", errors="replace")
+                logger.error(f"Pack task {task_id} failed with code {process.returncode}:\n{output_text}")
+                await cls._update_task_error(task_id, f"7zz exited with code {process.returncode}")
 
         except FileNotFoundError:
             await cls._update_task_error(task_id, "7zz command not found. Please install 7-Zip.")
