@@ -521,29 +521,49 @@ async def create_task(
         )
         existing_sub = result.first()
 
-        if existing_sub:
-            if existing_sub.status == "success" and task.stored_file_id:
-                has_valid_file, stale_user_file_id = await _resolve_user_file_state(
-                    user_id=user_id,
-                    stored_file_id=task.stored_file_id,
+        has_valid_file = False
+        stale_user_file_id = None
+        if existing_sub and existing_sub.status == "success" and task.stored_file_id:
+            has_valid_file, stale_user_file_id = await _resolve_user_file_state(
+                user_id=user_id,
+                stored_file_id=task.stored_file_id,
+            )
+            if has_valid_file:
+                logger.info("重复订阅已完成任务 user_id=%s task_id=%s", user.id, task.id)
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="您已拥有此文件"
                 )
-                if has_valid_file:
-                    logger.info("重复订阅已完成任务 user_id=%s task_id=%s", user.id, task.id)
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="您已拥有此文件"
-                    )
 
     if existing_sub:
         if stale_user_file_id is not None:
             await delete_user_file_reference(stale_user_file_id)
         if existing_sub.status == "success" and task.stored_file_id:
-            await _ensure_user_file_reference_if_possible(
-                user_id=user_id,
-                stored_file_id=task.stored_file_id,
-            )
+            async with get_session() as db:
+                result = await db.exec(select(StoredFile).where(StoredFile.id == task.stored_file_id))
+                stored_file = result.first()
+            
+            if stored_file and Path(stored_file.real_path).exists():
+                await _ensure_user_file_reference_if_possible(
+                    user_id=user_id,
+                    stored_file_id=task.stored_file_id,
+                )
             return _subscription_to_dict(existing_sub, task)
         elif existing_sub.status == "failed" and task.stored_file_id:
+            async with get_session() as db:
+                result = await db.exec(select(StoredFile).where(StoredFile.id == task.stored_file_id))
+                stored_file = result.first()
+            
+            if not stored_file or not Path(stored_file.real_path).exists():
+                return _subscription_to_dict(existing_sub, task)
+            
+            space_info = await get_user_space_info(user_id, user.quota)
+            if space_info["used"] + stored_file.size > user.quota:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="空间不足"
+                )
+            
             await _ensure_user_file_reference_if_possible(
                 user_id=user_id,
                 stored_file_id=task.stored_file_id,
@@ -696,37 +716,27 @@ async def create_task(
                     task = db_task
                     is_new = True
 
-    # For existing tasks with known size, freeze space for new subscriber
-    # This handles the case where a magnet link's size became known after initial creation
-    if not is_new and frozen_space == 0 and task.total_length > 0:
-        frozen_space = task.total_length
-        # Re-check available space
-        space_info = await get_user_space_info(user.id, user.quota)
-        if frozen_space > space_info["available"]:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    f"文件大小 {task.total_length / 1024**3:.2f} GB 超过可用空间 "
-                    f"{space_info['available'] / 1024**3:.2f} GB"
-                )
-            )
+    # Create subscription with space lock protection
+    # All subscriptions go through lock to prevent race conditions
+    state = _get_state(request)
+    user_lock = await get_user_space_lock(state, user.id)
+    async with user_lock:
+        # For existing tasks with known size, freeze space for new subscriber
+        # This handles the case where a magnet link's size became known after initial creation
+        if not is_new and frozen_space == 0 and task.total_length > 0:
+            frozen_space = task.total_length
 
-    # Create subscription (protect space check for known-size downloads)
-    if frozen_space > 0:
-        state = _get_state(request)
-        user_lock = await get_user_space_lock(state, user.id)
-        async with user_lock:
+        if frozen_space > 0:
             space_info = await get_user_space_info(user.id, user.quota)
             if frozen_space > space_info["available"]:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=(
-                        f"文件大小 {total_length / 1024**3:.2f} GB 超过可用空间 "
+                        f"文件大小 {frozen_space / 1024**3:.2f} GB 超过可用空间 "
                         f"{space_info['available'] / 1024**3:.2f} GB"
                     )
                 )
-            subscription = await _create_subscription(user, task, frozen_space)
-    else:
+
         subscription = await _create_subscription(user, task, frozen_space)
 
     logger.info(
@@ -1154,7 +1164,7 @@ async def cancel_task(
                 update(DownloadTask)
                 .where(
                     DownloadTask.id == task.id,
-                    DownloadTask.status.in_(["queued", "active"])
+                    DownloadTask.status.in_(["queued", "active", "error"])
                 )
                 .values(
                     status="error",

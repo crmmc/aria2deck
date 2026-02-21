@@ -557,7 +557,7 @@ class TestAria2RpcHandlerUserSpaceExtended:
     async def test_get_user_available_space_no_user(self, handler, temp_db):
         from app.db import execute
         execute("DELETE FROM users WHERE id = ?", [handler.user_id])
-        result = handler._get_user_available_space()
+        result = await handler._get_user_available_space()
         assert result == 0
 
     async def test_check_disk_space_returns_tuple(self, handler):
@@ -568,7 +568,7 @@ class TestAria2RpcHandlerUserSpaceExtended:
         assert isinstance(result[1], int)
 
     async def test_get_user_available_space_with_user(self, handler, test_user, temp_db):
-        result = handler._get_user_available_space()
+        result = await handler._get_user_available_space()
         assert result > 0
 
     async def test_sanitize_path_absolute_outside_user_dir(self, handler):

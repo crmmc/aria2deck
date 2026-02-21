@@ -130,6 +130,11 @@ class PackTaskManager:
         user_dir = Path(settings.download_dir) / str(user_id)
 
         sources = [Path(p) for p in abs_paths]
+        
+        if not sources:
+            await cls._update_task_error(task_id, "No valid source files")
+            return
+        
         # 验证所有路径存在
         for source in sources:
             if not source.exists():

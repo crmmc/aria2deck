@@ -118,7 +118,13 @@ async def lifespan(app: FastAPI):
     if settings.dev_reset_admin_password:
         reset_admin_password_for_dev()
 
-    asyncio.create_task(run_startup_repair())
+    async def safe_startup_repair():
+        try:
+            await run_startup_repair()
+        except Exception:
+            logger.exception("启动修复任务失败")
+
+    asyncio.create_task(safe_startup_repair())
 
     sync_task = asyncio.create_task(
         sync_tasks(app.state.app_state, settings.aria2_poll_interval)

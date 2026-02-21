@@ -13,6 +13,7 @@ from app.aria2.client import Aria2Client
 from app.core.config import settings
 from app.core.state import AppState
 from app.db import execute, fetch_all, fetch_one, utc_now
+from app.services.storage import get_user_space_info
 
 
 logger = logging.getLogger(__name__)
@@ -224,7 +225,7 @@ class Aria2RpcHandler:
 
         return result
 
-    def _get_user_available_space(self) -> int:
+    async def _get_user_available_space(self) -> int:
         """获取用户实际可用空间（考虑配额和机器空间限制）"""
         # 获取用户配额
         user = fetch_one("SELECT quota FROM users WHERE id = ?", [self.user_id])
@@ -232,28 +233,8 @@ class Aria2RpcHandler:
             return 0
         user_quota = user.get("quota", 100 * 1024 * 1024 * 1024)  # 默认 100GB
 
-        # 计算用户已使用的空间
-        user_dir = Path(settings.download_dir) / str(self.user_id)
-        used_space = 0
-        if user_dir.exists():
-            for file_path in user_dir.rglob("*"):
-                if file_path.is_file():
-                    try:
-                        used_space += file_path.stat().st_size
-                    except OSError as e:
-                        logger.warning("Failed to stat file %s: %s", file_path, e)
-
-        # 获取机器实际剩余空间
-        download_path = Path(settings.download_dir)
-        download_path.mkdir(parents=True, exist_ok=True)
-        disk = shutil.disk_usage(download_path)
-        machine_free = disk.free
-
-        # 用户理论可用空间（基于配额）
-        user_free_by_quota = max(0, user_quota - used_space)
-
-        # 实际可用空间 = min(用户配额剩余, 机器剩余空间)
-        return min(user_free_by_quota, machine_free)
+        space_info = await get_user_space_info(self.user_id, user_quota)
+        return space_info["available"]
 
     def _check_disk_space(self) -> tuple[bool, int]:
         """检查磁盘空间是否足够"""
@@ -298,7 +279,7 @@ class Aria2RpcHandler:
                 )
 
             # 检查用户配额
-            user_available = self._get_user_available_space()
+            user_available = await self._get_user_available_space()
             if user_available <= 0:
                 raise RpcError(
                     RpcErrorCode.QUOTA_EXCEEDED,
@@ -380,7 +361,7 @@ class Aria2RpcHandler:
                 )
 
             # 检查用户配额
-            user_available = self._get_user_available_space()
+            user_available = await self._get_user_available_space()
             if user_available <= 0:
                 raise RpcError(
                     RpcErrorCode.QUOTA_EXCEEDED,

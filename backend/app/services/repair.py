@@ -160,13 +160,14 @@ async def repair_task_associations() -> int:
                 continue
             
             matched_sf = sf_by_name.get(task.name.lower())
-            if matched_sf:
-                task.stored_file_id = matched_sf.id
-                db.add(task)
-                repaired_count += 1
-                logger.info(
-                    f"Repaired task {task.id} ({task.name}) -> StoredFile {matched_sf.id}"
-                )
+            if not matched_sf:
+                continue
+            task.stored_file_id = matched_sf.id
+            db.add(task)
+            repaired_count += 1
+            logger.info(
+                f"Repaired task {task.id} ({task.name}) -> StoredFile {matched_sf.id}"
+            )
         
         if repaired_count > 0:
             await db.commit()

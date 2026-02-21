@@ -81,7 +81,7 @@ class PackRequest(BaseModel):
 
 class CalculateSizeRequest(BaseModel):
     """计算大小请求 - 基于 UserFile ID"""
-    file_ids: list[int]
+    file_ids: list[int] = Field(..., min_length=1, max_length=1000)
 
 
 # ========== Helpers ==========
@@ -152,13 +152,16 @@ def _range_file_response(request: Request, file_path: Path, filename: str):
         range_spec = ranges.split(",")[0].strip()
         parts = range_spec.split("-")
         if not parts[0]:
-            # Suffix range: bytes=-500 means last 500 bytes
             suffix_length = int(parts[1])
+            if suffix_length < 0:
+                raise ValueError
             start = max(0, file_size - suffix_length)
             end = file_size - 1
         else:
             start = int(parts[0])
             end = int(parts[1]) if parts[1] else file_size - 1
+            if start < 0 or end < 0:
+                raise ValueError
     except (ValueError, IndexError):
         raise HTTPException(416, "Invalid Range header")
 
@@ -216,7 +219,7 @@ async def _resolve_file_ids(user_id: int, file_ids: list[int]) -> list[tuple[str
             detail="部分文件不存在或无权访问"
         )
 
-    return [(sf.real_path, sf.size, uf.display_name) for uf, sf in pairs]
+    return [(sf.real_path, sf.size, uf.display_name or "未命名") for uf, sf in pairs]
 
 
 # ========== API Endpoints ==========
@@ -331,6 +334,12 @@ async def browse_file(
             except OSError as e:
                 logger.warning("Failed to stat file %s: %s", entry, e)
                 continue
+    except FileNotFoundError:
+        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=file_deleted", user.id, file_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文件或目录已被删除"
+        )
     except PermissionError:
         logger.warning("浏览文件失败 user_id=%s file_id=%s reason=permission_denied", user.id, file_id)
         raise HTTPException(
@@ -756,7 +765,7 @@ async def create_pack_task(
                 if user_file:
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
-                        detail=f"已存在打包完成的文件「{user_file.display_name}」"
+                        detail=f"已存在打包完成的文件「{user_file.display_name or '未知文件'}」"
                     )
             # 所有历史产物的 UserFile 均已删除，允许重新打包
 

@@ -62,13 +62,19 @@ def _map_status(status: dict, task_id: int) -> dict:
     error_display = parse_error_message(raw_error) if raw_error else None
     error_display = sanitize_string(error_display) if error_display else None
 
+    def safe_int(val, default: int = 0) -> int:
+        try:
+            return int(val) if val is not None else default
+        except (ValueError, TypeError):
+            return default
+
     return {
         "status": status.get("status", "unknown"),
         "name": sanitized_name,
-        "total_length": int(status.get("totalLength", 0)),
-        "completed_length": int(status.get("completedLength", 0)),
-        "download_speed": int(status.get("downloadSpeed", 0)),
-        "upload_speed": int(status.get("uploadSpeed", 0)),
+        "total_length": safe_int(status.get("totalLength")),
+        "completed_length": safe_int(status.get("completedLength")),
+        "download_speed": safe_int(status.get("downloadSpeed")),
+        "upload_speed": safe_int(status.get("uploadSpeed")),
         "error": raw_error,
         "error_display": error_display,
     }
