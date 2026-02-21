@@ -3605,7 +3605,7 @@ class TestCreateTaskConflict:
             )
 
             result = await create_task(payload, mock_request, mock_user)
-            assert result["status"] == "complete"
+            assert result["status"] == "queued"
 
 
 class TestCreateTaskErrorRetry:

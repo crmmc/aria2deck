@@ -200,18 +200,74 @@ async def _resolve_user_file_state(
     return False, user_file.id
 
 
-async def _ensure_user_file_reference_if_possible(user_id: int, stored_file_id: int) -> None:
-    """仅在物理文件存在时补建 UserFile 引用。"""
+async def _ensure_user_file_reference_if_possible(user_id: int, stored_file_id: int) -> bool:
+    """确保用户有文件引用。返回 True 表示成功（已有或新建），False 表示失败。"""
+    async with get_session() as db:
+        result = await db.exec(
+            select(UserFile).where(
+                UserFile.owner_id == user_id,
+                UserFile.stored_file_id == stored_file_id,
+            )
+        )
+        if result.first():
+            return True
+
+        result = await db.exec(select(StoredFile).where(StoredFile.id == stored_file_id))
+        stored_file = result.first()
+
+    if not stored_file:
+        return False
+    if not Path(stored_file.real_path).exists():
+        return False
+
+    await create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id)
+    return True
+
+
+async def _get_existing_stored_file(stored_file_id: int) -> StoredFile | None:
     async with get_session() as db:
         result = await db.exec(select(StoredFile).where(StoredFile.id == stored_file_id))
         stored_file = result.first()
 
     if not stored_file:
-        return
+        return None
     if not Path(stored_file.real_path).exists():
-        return
+        return None
+    return stored_file
 
-    await create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id)
+
+async def _reset_task_for_redownload(task_id: int) -> DownloadTask | None:
+    async with get_session() as db:
+        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
+        db_task = result.first()
+        if not db_task:
+            return None
+        db_task.status = "queued"
+        db_task.stored_file_id = None
+        db_task.gid = None
+        db_task.completed_at = None
+        db_task.completed_length = 0
+        db_task.download_speed = 0
+        db_task.upload_speed = 0
+        db_task.error = None
+        db_task.error_display = None
+        db_task.updated_at = utc_now_str()
+        db.add(db_task)
+        await db.commit()
+        await db.refresh(db_task)
+        return db_task
+
+
+async def _delete_subscription(subscription_id: int) -> None:
+    async with get_session() as db:
+        result = await db.exec(
+            select(UserTaskSubscription).where(UserTaskSubscription.id == subscription_id)
+        )
+        sub = result.first()
+        if not sub:
+            return
+        await db.delete(sub)
+        await db.commit()
 
 
 def _get_display_name(task: DownloadTask) -> str:
@@ -538,157 +594,175 @@ async def create_task(
     if existing_sub:
         if stale_user_file_id is not None:
             await delete_user_file_reference(stale_user_file_id)
+
         if existing_sub.status == "success" and task.stored_file_id:
-            async with get_session() as db:
-                result = await db.exec(select(StoredFile).where(StoredFile.id == task.stored_file_id))
-                stored_file = result.first()
-            
-            if stored_file and Path(stored_file.real_path).exists():
-                await _ensure_user_file_reference_if_possible(
+            stored_file = await _get_existing_stored_file(task.stored_file_id)
+            if stored_file:
+                ref_ok = await _ensure_user_file_reference_if_possible(
                     user_id=user_id,
                     stored_file_id=task.stored_file_id,
                 )
-            return _subscription_to_dict(existing_sub, task)
+                if ref_ok:
+                    return _subscription_to_dict(existing_sub, task)
+
+            if existing_sub.id is not None:
+                await _delete_subscription(existing_sub.id)
+            db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
+            if db_task:
+                task = db_task
+                is_new = True
+            existing_sub = None
+
         elif existing_sub.status == "failed" and task.stored_file_id:
-            async with get_session() as db:
-                result = await db.exec(select(StoredFile).where(StoredFile.id == task.stored_file_id))
-                stored_file = result.first()
-            
-            if not stored_file or not Path(stored_file.real_path).exists():
-                return _subscription_to_dict(existing_sub, task)
-            
-            space_info = await get_user_space_info(user_id, user.quota)
-            if space_info["used"] + stored_file.size > user.quota:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="空间不足"
-                )
-            
-            await _ensure_user_file_reference_if_possible(
-                user_id=user_id,
-                stored_file_id=task.stored_file_id,
-            )
-            async with get_session() as db:
-                result = await db.exec(
-                    select(UserTaskSubscription).where(
-                        UserTaskSubscription.id == existing_sub.id
+            stored_file = await _get_existing_stored_file(task.stored_file_id)
+            if not stored_file:
+                if existing_sub.id is not None:
+                    await _delete_subscription(existing_sub.id)
+                db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
+                if db_task:
+                    task = db_task
+                    is_new = True
+                existing_sub = None
+            else:
+                space_info = await get_user_space_info(user_id, user.quota)
+                if space_info["used"] + stored_file.size > user.quota:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="空间不足"
                     )
+
+                ref_ok = await _ensure_user_file_reference_if_possible(
+                    user_id=user_id,
+                    stored_file_id=task.stored_file_id,
                 )
-                sub = result.first()
-                if sub:
-                    sub.status = "success"
-                    await db.commit()
-                    await db.refresh(sub)
-                    existing_sub = sub
-            logger.info("恢复失败订阅 user_id=%s task_id=%s", user_id, task.id)
-            return _subscription_to_dict(existing_sub, task)
+                if not ref_ok:
+                    if existing_sub.id is not None:
+                        await _delete_subscription(existing_sub.id)
+                    db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
+                    if db_task:
+                        task = db_task
+                        is_new = True
+                    existing_sub = None
+                else:
+                    async with get_session() as db:
+                        result = await db.exec(
+                            select(UserTaskSubscription).where(
+                                UserTaskSubscription.id == existing_sub.id
+                            )
+                        )
+                        sub = result.first()
+                        if sub:
+                            sub.status = "success"
+                            await db.commit()
+                            await db.refresh(sub)
+                            existing_sub = sub
+                    logger.info("恢复失败订阅 user_id=%s task_id=%s", user_id, task.id)
+                    return _subscription_to_dict(existing_sub, task)
         elif existing_sub.status in ("pending", "active"):
             return _subscription_to_dict(existing_sub, task)
 
     # Handle based on task status
     if task.status == "complete" and task.stored_file_id:
-        async with get_session() as db:
-            result = await db.exec(select(StoredFile).where(StoredFile.id == task.stored_file_id))
-            stored_file = result.first()
+        stored_file = await _get_existing_stored_file(task.stored_file_id)
 
-        file_exists = stored_file and Path(stored_file.real_path).exists()
-
-        if file_exists:
-            await _ensure_user_file_reference_if_possible(
+        if stored_file:
+            ref_ok = await _ensure_user_file_reference_if_possible(
                 user_id=user_id,
                 stored_file_id=task.stored_file_id,
             )
-
-            async with get_session() as db:
-                subscription = UserTaskSubscription(
-                    owner_id=user_id,
-                    task_id=task.id,
-                    frozen_space=0,
-                    status="success",
-                    created_at=utc_now_str(),
-                )
-                db.add(subscription)
-
-                try:
-                    await db.commit()
-                    await db.refresh(subscription)
-                except IntegrityError:
-                    await db.rollback()
-                    result = await db.exec(
-                        select(UserTaskSubscription).where(
-                            UserTaskSubscription.owner_id == user_id,
-                            UserTaskSubscription.task_id == task.id,
-                        )
-                    )
-                    subscription = result.first()
-                    if not subscription:
-                        raise
-
-            return _subscription_to_dict(subscription, task)
-        else:
-            async with get_session() as db:
-                result = await db.exec(
-                    select(DownloadTask).where(DownloadTask.id == task.id)
-                )
-                db_task = result.first()
+            if not ref_ok:
+                db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
                 if db_task:
-                    db_task.status = "queued"
-                    db_task.stored_file_id = None
-                    db_task.gid = None
-                    db_task.updated_at = utc_now_str()
-                    db.add(db_task)
-                    await db.commit()
-                    await db.refresh(db_task)
                     task = db_task
                     is_new = True
+                logger.info("文件引用创建失败，重新下载 task_id=%s", task.id)
+            else:
+                async with get_session() as db:
+                    subscription = UserTaskSubscription(
+                        owner_id=user_id,
+                        task_id=task.id,
+                        frozen_space=0,
+                        status="success",
+                        created_at=utc_now_str(),
+                    )
+                    db.add(subscription)
+
+                    try:
+                        await db.commit()
+                        await db.refresh(subscription)
+                    except IntegrityError:
+                        await db.rollback()
+                        result = await db.exec(
+                            select(UserTaskSubscription).where(
+                                UserTaskSubscription.owner_id == user_id,
+                                UserTaskSubscription.task_id == task.id,
+                            )
+                        )
+                        subscription = result.first()
+                        if not subscription:
+                            raise
+
+                    return _subscription_to_dict(subscription, task)
+        else:
+            db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
+            if db_task:
+                task = db_task
+                is_new = True
             logger.info("任务文件已删除，重新下载 task_id=%s", task.id)
+
+    elif task.status == "complete" and not task.stored_file_id:
+        db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
+        if db_task:
+            task = db_task
+            is_new = True
+        logger.info("任务状态异常(complete但无stored_file_id)，重新下载 task_id=%s", task.id)
 
     elif task.status == "error":
         if task.stored_file_id:
-            await _ensure_user_file_reference_if_possible(
+            ref_ok = await _ensure_user_file_reference_if_possible(
                 user_id=user_id,
                 stored_file_id=task.stored_file_id,
             )
-
-            async with get_session() as db:
-                subscription = UserTaskSubscription(
-                    owner_id=user_id,
-                    task_id=task.id,
-                    frozen_space=0,
-                    status="success",
-                    created_at=utc_now_str(),
-                )
-                db.add(subscription)
-
-                try:
-                    await db.commit()
-                    await db.refresh(subscription)
-                except IntegrityError:
-                    await db.rollback()
-                    result = await db.exec(
-                        select(UserTaskSubscription).where(
-                            UserTaskSubscription.owner_id == user_id,
-                            UserTaskSubscription.task_id == task.id,
-                        )
+            if ref_ok:
+                async with get_session() as db:
+                    subscription = UserTaskSubscription(
+                        owner_id=user_id,
+                        task_id=task.id,
+                        frozen_space=0,
+                        status="success",
+                        created_at=utc_now_str(),
                     )
-                    subscription = result.first()
-                    if not subscription:
-                        raise
+                    db.add(subscription)
 
-            async with get_session() as db:
-                result = await db.exec(
-                    select(DownloadTask).where(DownloadTask.id == task.id)
-                )
-                db_task = result.first()
-                if db_task and db_task.status == "error":
-                    db_task.status = "complete"
-                    db_task.error = None
-                    db_task.error_display = None
-                    db_task.updated_at = utc_now_str()
-                    db.add(db_task)
-                    await db.commit()
+                    try:
+                        await db.commit()
+                        await db.refresh(subscription)
+                    except IntegrityError:
+                        await db.rollback()
+                        result = await db.exec(
+                            select(UserTaskSubscription).where(
+                                UserTaskSubscription.owner_id == user_id,
+                                UserTaskSubscription.task_id == task.id,
+                            )
+                        )
+                        subscription = result.first()
+                        if not subscription:
+                            raise
 
-            return _subscription_to_dict(subscription, task)
+                async with get_session() as db:
+                    result = await db.exec(
+                        select(DownloadTask).where(DownloadTask.id == task.id)
+                    )
+                    db_task = result.first()
+                    if db_task and db_task.status == "error":
+                        db_task.status = "complete"
+                        db_task.error = None
+                        db_task.error_display = None
+                        db_task.updated_at = utc_now_str()
+                        db.add(db_task)
+                        await db.commit()
+
+                return _subscription_to_dict(subscription, task)
 
         async with get_session() as db:
             result = await db.exec(
@@ -919,48 +993,83 @@ async def create_torrent_task(
         if stale_user_file_id is not None:
             await delete_user_file_reference(stale_user_file_id)
         if existing_sub.status == "success" and task.stored_file_id:
-            await _ensure_user_file_reference_if_possible(
-                user_id=user_id,
-                stored_file_id=task.stored_file_id,
-            )
-        logger.info("重复订阅种子任务 user_id=%s task_id=%s", user.id, task.id)
-        return _subscription_to_dict(existing_sub, task)
+            stored_file = await _get_existing_stored_file(task.stored_file_id)
+            if stored_file:
+                ref_ok = await _ensure_user_file_reference_if_possible(
+                    user_id=user_id,
+                    stored_file_id=task.stored_file_id,
+                )
+                if ref_ok:
+                    logger.info("重复订阅种子任务 user_id=%s task_id=%s", user.id, task.id)
+                    return _subscription_to_dict(existing_sub, task)
+
+            if existing_sub.id is not None:
+                await _delete_subscription(existing_sub.id)
+            db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
+            if db_task:
+                task = db_task
+                is_new = True
+            existing_sub = None
+        elif existing_sub.status in ("pending", "active", "failed"):
+            logger.info("重复订阅种子任务 user_id=%s task_id=%s", user.id, task.id)
+            return _subscription_to_dict(existing_sub, task)
 
     # Handle completed task
     if task.status == "complete" and task.stored_file_id:
-        await _ensure_user_file_reference_if_possible(
-            user_id=user_id,
-            stored_file_id=task.stored_file_id,
-        )
-
-        # Create subscription marked as success (handle race condition)
-        async with get_session() as db:
-            subscription = UserTaskSubscription(
-                owner_id=user_id,
-                task_id=task.id,
-                frozen_space=0,
-                status="success",
-                created_at=utc_now_str(),
+        stored_file = await _get_existing_stored_file(task.stored_file_id)
+        if not stored_file:
+            db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
+            if db_task:
+                task = db_task
+                is_new = True
+            logger.info("种子任务文件已删除，重新下载 task_id=%s", task.id)
+        else:
+            ref_ok = await _ensure_user_file_reference_if_possible(
+                user_id=user_id,
+                stored_file_id=task.stored_file_id,
             )
-            db.add(subscription)
-
-            try:
-                await db.commit()
-                await db.refresh(subscription)
-            except IntegrityError:
-                # Race condition: subscription already exists
-                await db.rollback()
-                result = await db.exec(
-                    select(UserTaskSubscription).where(
-                        UserTaskSubscription.owner_id == user_id,
-                        UserTaskSubscription.task_id == task.id,
+            if not ref_ok:
+                db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
+                if db_task:
+                    task = db_task
+                    is_new = True
+                logger.info("种子任务文件引用创建失败，重新下载 task_id=%s", task.id)
+            else:
+                # Create subscription marked as success (handle race condition)
+                async with get_session() as db:
+                    subscription = UserTaskSubscription(
+                        owner_id=user_id,
+                        task_id=task.id,
+                        frozen_space=0,
+                        status="success",
+                        created_at=utc_now_str(),
                     )
-                )
-                subscription = result.first()
-                if not subscription:
-                    raise  # Should not happen
+                    db.add(subscription)
 
-        return _subscription_to_dict(subscription, task)
+                    try:
+                        await db.commit()
+                        await db.refresh(subscription)
+                    except IntegrityError:
+                        # Race condition: subscription already exists
+                        await db.rollback()
+                        result = await db.exec(
+                            select(UserTaskSubscription).where(
+                                UserTaskSubscription.owner_id == user_id,
+                                UserTaskSubscription.task_id == task.id,
+                            )
+                        )
+                        subscription = result.first()
+                        if not subscription:
+                            raise  # Should not happen
+
+                    return _subscription_to_dict(subscription, task)
+
+    elif task.status == "complete" and not task.stored_file_id:
+        db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
+        if db_task:
+            task = db_task
+            is_new = True
+        logger.info("种子任务状态异常(complete但无stored_file_id)，重新下载 task_id=%s", task.id)
 
     # For existing tasks with known size, freeze space for new subscriber
     # This handles the case where a torrent's size became known after initial creation
