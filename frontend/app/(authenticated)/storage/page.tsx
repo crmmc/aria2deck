@@ -154,24 +154,25 @@ export default function StoragePage() {
         </div>
 
         <div className="card p-0 overflow-hidden">
-          <table className="table text-left">
-            <thead className="table-header">
-              <tr>
-                <th className="table-cell" style={{ width: 40 }}>
-                  <input
-                    type="checkbox"
-                    checked={files.length > 0 && selected.size === files.length}
-                    onChange={(e) => handleSelectAll(e.target.checked)}
-                  />
-                </th>
-                <th className="table-cell">文件名</th>
-                <th className="table-cell">大小</th>
-                <th className="table-cell">哈希</th>
-                <th className="table-cell">引用数</th>
-                <th className="table-cell">创建时间</th>
-                <th className="table-cell">磁盘状态</th>
-              </tr>
-            </thead>
+          <div style={{ overflowX: "auto" }}>
+            <table className="table text-left" style={{ minWidth: 800 }}>
+              <thead className="table-header">
+                <tr>
+                  <th className="table-cell" style={{ width: 40 }}>
+                    <input
+                      type="checkbox"
+                      checked={files.length > 0 && selected.size === files.length}
+                      onChange={(e) => handleSelectAll(e.target.checked)}
+                    />
+                  </th>
+                  <th className="table-cell">文件名</th>
+                  <th className="table-cell" style={{ width: 80 }}>大小</th>
+                  <th className="table-cell" style={{ width: 100 }}>哈希</th>
+                  <th className="table-cell" style={{ width: 70 }}>引用数</th>
+                  <th className="table-cell" style={{ width: 160 }}>创建时间</th>
+                  <th className="table-cell" style={{ width: 80 }}>状态</th>
+                </tr>
+              </thead>
             <tbody>
               {files.map((f) => (
                 <tr key={f.id} className="table-row">
@@ -218,7 +219,8 @@ export default function StoragePage() {
                 </tr>
               )}
             </tbody>
-          </table>
+            </table>
+          </div>
         </div>
       </div>
 
