@@ -23,6 +23,7 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    p7zip-full \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
