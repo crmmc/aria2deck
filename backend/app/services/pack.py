@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shutil
 import shlex
@@ -168,11 +169,14 @@ class PackTaskManager:
                 return
 
         use_tar = pack_format in ("tar.zst", "tar.gz")
+        env = None
         if use_tar:
             if pack_format == "tar.zst":
-                cmd = ["tar", "--zstd", f"-{compression}", "-cvf", str(output_path)]
+                cmd = ["tar", "--zstd", "-cvf", str(output_path)]
+                env = {"ZSTD_CLEVEL": str(compression)}
             else:
-                cmd = ["tar", f"-{compression}", "-czvf", str(output_path)]
+                cmd = ["tar", "-czvf", str(output_path)]
+                env = {"GZIP": f"-{compression}"}
             for source in sources:
                 cmd.extend(["-C", str(source.parent), source.name])
         else:
@@ -188,10 +192,12 @@ class PackTaskManager:
                     cmd.append(str(source))
 
         try:
+            proc_env = {**os.environ, **env} if env else None
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT
+                stderr=asyncio.subprocess.STDOUT,
+                env=proc_env
             )
             async with _running_tasks_lock:
                 cls._running_tasks[task_id] = process
