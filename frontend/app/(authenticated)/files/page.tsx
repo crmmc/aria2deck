@@ -829,7 +829,7 @@ export default function FilesPage() {
                                 className="checkbox-sm cursor-pointer"
                               />
                             </div>
-                            <div className="table-cell" data-label="名称" style={{ overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+                            <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
                               <div className="flex items-center gap-2">
                                 <span className="file-icon">
                                   {item.is_directory ? "📁" : "📄"}
@@ -838,11 +838,12 @@ export default function FilesPage() {
                                   <button
                                     className="file-name-btn"
                                     onClick={() => navigateIntoSubfolder(item.name)}
+                                    style={{ wordBreak: 'break-all', textAlign: 'left' }}
                                   >
                                     {item.name}
                                   </button>
                                 ) : (
-                                  <span className="text-base truncate" title={item.name}>{item.name}</span>
+                                  <span className="text-base" style={{ wordBreak: 'break-all' }}>{item.name}</span>
                                 )}
                               </div>
                             </div>
@@ -961,7 +962,7 @@ export default function FilesPage() {
                               className="checkbox-sm cursor-pointer"
                             />
                           </div>
-                          <div className="table-cell" data-label="名称" style={{ overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+                          <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
                             {renaming === file.id ? (
                               <div className="flex gap-2">
                                 <input
@@ -997,11 +998,12 @@ export default function FilesPage() {
                                   <button
                                     className="file-name-btn"
                                     onClick={() => enterFolder(file)}
+                                    style={{ wordBreak: 'break-all', textAlign: 'left' }}
                                   >
                                     {file.name}
                                   </button>
                                 ) : (
-                                  <span className="text-base truncate" title={file.name}>{file.name}</span>
+                                  <span className="text-base" style={{ wordBreak: 'break-all' }}>{file.name}</span>
                                 )}
                               </div>
                             )}
