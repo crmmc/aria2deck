@@ -80,6 +80,7 @@ export const createMockSystemConfig = (overrides: Partial<SystemConfig> = {}): S
   pack_format: "zip",
   pack_7z_method: "lzma2",
   pack_compression_level: 5,
+  pack_memory_limit: 128,
   pack_extra_args: "",
   ws_reconnect_max_delay: 30000,
   ws_reconnect_jitter: 0.3,

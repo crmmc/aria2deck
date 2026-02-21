@@ -21,6 +21,7 @@ export default function SettingsPage() {
   const [packFormat, setPackFormat] = useState<"zip" | "7z">("zip");
   const [pack7zMethod, setPack7zMethod] = useState<"lzma2" | "zstd">("lzma2");
   const [packCompressionLevel, setPackCompressionLevel] = useState(5);
+  const [packMemoryLimit, setPackMemoryLimit] = useState(128);
   const [packExtraArgs, setPackExtraArgs] = useState("");
   // WebSocket 重连配置
   const [wsReconnectMaxDelay, setWsReconnectMaxDelay] = useState(60);
@@ -76,6 +77,7 @@ export default function SettingsPage() {
       setPackFormat(cfg.pack_format || "zip");
       setPack7zMethod(cfg.pack_7z_method || "lzma2");
       setPackCompressionLevel(cfg.pack_compression_level ?? 5);
+      setPackMemoryLimit(cfg.pack_memory_limit ?? 128);
       setPackExtraArgs(cfg.pack_extra_args || "");
       setWsReconnectMaxDelay(cfg.ws_reconnect_max_delay ?? 60);
       setWsReconnectJitter(cfg.ws_reconnect_jitter ?? 0.2);
@@ -108,6 +110,7 @@ export default function SettingsPage() {
         pack_format: packFormat,
         pack_7z_method: pack7zMethod,
         pack_compression_level: packCompressionLevel,
+        pack_memory_limit: packMemoryLimit,
         pack_extra_args: packExtraArgs,
         ws_reconnect_max_delay: wsReconnectMaxDelay,
         ws_reconnect_jitter: wsReconnectJitter,
@@ -458,6 +461,21 @@ export default function SettingsPage() {
               max="9"
               value={packCompressionLevel}
               onChange={(e) => setPackCompressionLevel(parseInt(e.target.value))}
+              className="w-full"
+              style={{ maxWidth: 300 }}
+            />
+          </div>
+
+          <div className="mb-7">
+            <label className="form-label-lg">内存限制: {packMemoryLimit === 0 ? "不限制" : `${packMemoryLimit} MB`}</label>
+            <p className="muted text-sm mb-3">限制 7zz 内存使用，防止 OOM。0 = 不限制，建议 128-512 MB</p>
+            <input
+              type="range"
+              min="0"
+              max="1024"
+              step="64"
+              value={packMemoryLimit}
+              onChange={(e) => setPackMemoryLimit(parseInt(e.target.value))}
               className="w-full"
               style={{ maxWidth: 300 }}
             />
