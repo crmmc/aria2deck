@@ -26,7 +26,8 @@ _pack_queue_lock = asyncio.Lock()
 # 保护 _running_tasks 字典的锁
 _running_tasks_lock = asyncio.Lock()
 
-SUPPORTED_FORMATS = ("zip", "7z", "tar.zst", "tar.gz")
+SUPPORTED_FORMATS = ("zip", "7z")
+SUPPORTED_7Z_METHODS = ("lzma2", "zstd")
 
 
 def utc_now() -> str:
@@ -66,6 +67,12 @@ class PackTaskManager:
             return max(0, min(9, level))
         except ValueError:
             return 5
+
+    @classmethod
+    def get_7z_method(cls) -> str:
+        from app.routers.config import get_config_value
+        val = get_config_value("pack_7z_method")
+        return val if val in SUPPORTED_7Z_METHODS else "lzma2"
 
     @classmethod
     def get_extra_args(cls) -> list[str]:
@@ -168,36 +175,25 @@ class PackTaskManager:
                 logger.info(f"Pack task {task_id} status changed, skipping")
                 return
 
-        use_tar = pack_format in ("tar.zst", "tar.gz")
-        env = None
-        if use_tar:
-            if pack_format == "tar.zst":
-                cmd = ["tar", "--zstd", "-cvf", str(output_path)]
-                env = {"ZSTD_CLEVEL": str(compression)}
+        format_flag = f"-t{pack_format}"
+        cmd = ["7zz", "a", format_flag, f"-mx={compression}", "-bsp1"]
+        if pack_format == "7z":
+            method = cls.get_7z_method()
+            cmd.append(f"-m0={method}")
+        if extra_args:
+            cmd.extend(extra_args)
+        cmd.append(str(output_path))
+        for source in sources:
+            if source.is_dir():
+                cmd.append(str(source) + "/*")
             else:
-                cmd = ["tar", "-czvf", str(output_path)]
-                env = {"GZIP": f"-{compression}"}
-            for source in sources:
-                cmd.extend(["-C", str(source.parent), source.name])
-        else:
-            format_flag = f"-t{pack_format}"
-            cmd = ["7zz", "a", format_flag, f"-mx={compression}", "-bsp1"]
-            if extra_args:
-                cmd.extend(extra_args)
-            cmd.append(str(output_path))
-            for source in sources:
-                if source.is_dir():
-                    cmd.append(str(source) + "/*")
-                else:
-                    cmd.append(str(source))
+                cmd.append(str(source))
 
         try:
-            proc_env = {**os.environ, **env} if env else None
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=proc_env
+                stderr=asyncio.subprocess.STDOUT
             )
             async with _running_tasks_lock:
                 cls._running_tasks[task_id] = process
@@ -224,8 +220,6 @@ class PackTaskManager:
                 chunk = await process.stdout.read(256)
                 if not chunk:
                     break
-                if use_tar:
-                    continue
                 buf += chunk
                 last_match = None
                 for m in re.finditer(rb"(\d+)%", buf):

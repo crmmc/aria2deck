@@ -39,6 +39,7 @@ class ConfigUpdate(BaseModel):
     aria2_rpc_secret: str | None = None
     hidden_file_extensions: list[str] | None = None
     pack_format: str | None = None
+    pack_7z_method: str | None = None
     pack_compression_level: int | None = Field(None, ge=0, le=9, description="压缩等级 (0-9)")
     pack_extra_args: str | None = None
     # WebSocket 重连参数
@@ -139,7 +140,13 @@ def get_hidden_file_extensions() -> list[str]:
 
 def get_pack_format() -> str:
     val = get_config_value("pack_format")
-    return val if val in ("zip", "7z", "tar.zst", "tar.gz") else "zip"
+    return val if val in ("zip", "7z") else "zip"
+
+
+def get_pack_7z_method() -> str:
+    """获取 7z 压缩方法，默认 lzma2"""
+    val = get_config_value("pack_7z_method")
+    return val if val in ("lzma2", "zstd") else "lzma2"
 
 
 def get_pack_compression_level() -> int:
@@ -213,6 +220,7 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
         "aria2_rpc_secret": masked_secret,
         "hidden_file_extensions": get_hidden_file_extensions(),
         "pack_format": get_pack_format(),
+        "pack_7z_method": get_pack_7z_method(),
         "pack_compression_level": get_pack_compression_level(),
         "pack_extra_args": get_pack_extra_args(),
         "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
@@ -264,9 +272,13 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         await set_config_value_async("hidden_file_extensions", json.dumps(normalized))
         changed_keys.append("hidden_file_extensions")
     if payload.pack_format is not None:
-        if payload.pack_format in ("zip", "7z", "tar.zst", "tar.gz"):
+        if payload.pack_format in ("zip", "7z"):
             await set_config_value_async("pack_format", payload.pack_format)
             changed_keys.append("pack_format")
+    if payload.pack_7z_method is not None:
+        if payload.pack_7z_method in ("lzma2", "zstd"):
+            await set_config_value_async("pack_7z_method", payload.pack_7z_method)
+            changed_keys.append("pack_7z_method")
     if payload.pack_compression_level is not None:
         level = max(0, min(9, payload.pack_compression_level))
         await set_config_value_async("pack_compression_level", str(level))
@@ -302,6 +314,7 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         "aria2_rpc_secret": masked_secret,
         "hidden_file_extensions": get_hidden_file_extensions(),
         "pack_format": get_pack_format(),
+        "pack_7z_method": get_pack_7z_method(),
         "pack_compression_level": get_pack_compression_level(),
         "pack_extra_args": get_pack_extra_args(),
         "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
