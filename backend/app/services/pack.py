@@ -76,6 +76,16 @@ class PackTaskManager:
         return val if val in SUPPORTED_7Z_METHODS else "lzma2"
 
     @classmethod
+    def get_memory_limit(cls) -> int:
+        from app.routers.config import get_config_value
+        val = get_config_value("pack_memory_limit")
+        try:
+            limit = int(val) if val else 128
+            return max(0, min(1024, limit))
+        except ValueError:
+            return 128
+
+    @classmethod
     def get_extra_args(cls) -> list[str]:
         from app.routers.config import get_config_value
         val = get_config_value("pack_extra_args")
@@ -145,6 +155,7 @@ class PackTaskManager:
         # Determine output format and path
         pack_format = cls.get_pack_format()
         compression = cls.get_compression_level()
+        memory_limit = cls.get_memory_limit()
         extra_args = cls.get_extra_args()
 
         if output_name:
@@ -183,6 +194,8 @@ class PackTaskManager:
 
         format_flag = f"-t{pack_format}"
         cmd = ["7zz", "a", format_flag, f"-mx={compression}", "-bsp1"]
+        if memory_limit > 0:
+            cmd.append(f"-mmemuse={memory_limit}m")
         if pack_format == "7z":
             method = cls.get_7z_method()
             # 7zz 需要正确的大小写: LZMA2, Zstd

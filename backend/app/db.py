@@ -210,6 +210,7 @@ def init_db() -> None:
             ('pack_format', 'zip'),
             ('pack_7z_method', 'lzma2'),
             ('pack_compression_level', '5'),
+            ('pack_memory_limit', '128'),
             ('pack_extra_args', '')
             """
         )

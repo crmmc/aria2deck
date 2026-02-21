@@ -41,6 +41,7 @@ class ConfigUpdate(BaseModel):
     pack_format: str | None = None
     pack_7z_method: str | None = None
     pack_compression_level: int | None = Field(None, ge=0, le=9, description="压缩等级 (0-9)")
+    pack_memory_limit: int | None = Field(None, ge=0, le=1024, description="内存限制 (MB, 0=不限制)")
     pack_extra_args: str | None = None
     # WebSocket 重连参数
     ws_reconnect_max_delay: float | None = Field(None, ge=1.0, le=300.0, description="最大重连延迟（秒）")
@@ -169,6 +170,16 @@ def get_pack_compression_level() -> int:
         return 5
 
 
+def get_pack_memory_limit() -> int:
+    """获取内存限制 (MB)，默认 128，0 表示不限制"""
+    val = get_config_value("pack_memory_limit")
+    try:
+        limit = int(val) if val else 128
+        return max(0, min(1024, limit))
+    except ValueError:
+        return 128
+
+
 def get_pack_extra_args() -> str:
     """获取 7za 附加参数，默认空字符串"""
     val = get_config_value("pack_extra_args")
@@ -232,6 +243,7 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
         "pack_format": get_pack_format(),
         "pack_7z_method": get_pack_7z_method(),
         "pack_compression_level": get_pack_compression_level(),
+        "pack_memory_limit": get_pack_memory_limit(),
         "pack_extra_args": get_pack_extra_args(),
         "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),
@@ -293,6 +305,10 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         level = max(0, min(9, payload.pack_compression_level))
         await set_config_value_async("pack_compression_level", str(level))
         changed_keys.append("pack_compression_level")
+    if payload.pack_memory_limit is not None:
+        limit = max(0, min(1024, payload.pack_memory_limit))
+        await set_config_value_async("pack_memory_limit", str(limit))
+        changed_keys.append("pack_memory_limit")
     if payload.pack_extra_args is not None:
         await set_config_value_async("pack_extra_args", payload.pack_extra_args)
         changed_keys.append("pack_extra_args")
@@ -326,6 +342,7 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         "pack_format": get_pack_format(),
         "pack_7z_method": get_pack_7z_method(),
         "pack_compression_level": get_pack_compression_level(),
+        "pack_memory_limit": get_pack_memory_limit(),
         "pack_extra_args": get_pack_extra_args(),
         "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),

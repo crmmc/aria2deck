@@ -151,6 +151,7 @@ async def init_default_config(session: AsyncSession) -> None:
         ("min_free_disk", "1073741824"),
         ("pack_format", "zip"),
         ("pack_compression_level", "5"),
+        ("pack_memory_limit", "128"),
         ("pack_extra_args", ""),
     ]
 
