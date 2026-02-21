@@ -567,41 +567,61 @@ async def create_task(
 
     # Handle based on task status
     if task.status == "complete" and task.stored_file_id:
-        # Task already complete, create file reference directly
-        await _ensure_user_file_reference_if_possible(
-            user_id=user_id,
-            stored_file_id=task.stored_file_id,
-        )
-
-        # Create subscription marked as success (use _create_subscription to handle race)
-        # First try to create, if race condition occurs, _create_subscription handles it
         async with get_session() as db:
-            subscription = UserTaskSubscription(
-                owner_id=user_id,
-                task_id=task.id,
-                frozen_space=0,
-                status="success",
-                created_at=utc_now_str(),
+            result = await db.exec(select(StoredFile).where(StoredFile.id == task.stored_file_id))
+            stored_file = result.first()
+
+        file_exists = stored_file and Path(stored_file.real_path).exists()
+
+        if file_exists:
+            await _ensure_user_file_reference_if_possible(
+                user_id=user_id,
+                stored_file_id=task.stored_file_id,
             )
-            db.add(subscription)
 
-            try:
-                await db.commit()
-                await db.refresh(subscription)
-            except IntegrityError:
-                # Race condition: subscription already exists
-                await db.rollback()
-                result = await db.exec(
-                    select(UserTaskSubscription).where(
-                        UserTaskSubscription.owner_id == user_id,
-                        UserTaskSubscription.task_id == task.id,
-                    )
+            async with get_session() as db:
+                subscription = UserTaskSubscription(
+                    owner_id=user_id,
+                    task_id=task.id,
+                    frozen_space=0,
+                    status="success",
+                    created_at=utc_now_str(),
                 )
-                subscription = result.first()
-                if not subscription:
-                    raise  # Should not happen
+                db.add(subscription)
 
-        return _subscription_to_dict(subscription, task)
+                try:
+                    await db.commit()
+                    await db.refresh(subscription)
+                except IntegrityError:
+                    await db.rollback()
+                    result = await db.exec(
+                        select(UserTaskSubscription).where(
+                            UserTaskSubscription.owner_id == user_id,
+                            UserTaskSubscription.task_id == task.id,
+                        )
+                    )
+                    subscription = result.first()
+                    if not subscription:
+                        raise
+
+            return _subscription_to_dict(subscription, task)
+        else:
+            async with get_session() as db:
+                result = await db.exec(
+                    select(DownloadTask).where(DownloadTask.id == task.id)
+                )
+                db_task = result.first()
+                if db_task:
+                    db_task.status = "queued"
+                    db_task.stored_file_id = None
+                    db_task.gid = None
+                    db_task.updated_at = utc_now_str()
+                    db.add(db_task)
+                    await db.commit()
+                    await db.refresh(db_task)
+                    task = db_task
+                    is_new = True
+            logger.info("任务文件已删除，重新下载 task_id=%s", task.id)
 
     elif task.status == "error":
         if task.stored_file_id:
