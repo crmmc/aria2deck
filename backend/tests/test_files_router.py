@@ -33,6 +33,7 @@ def user_file(test_user: dict, temp_db: str) -> dict:
     )
     return {
         "id": user_file_id,
+        "content_hash": "hash123",
         "stored_file_id": stored_file_id,
         "display_name": "test_file.txt",
         "size": 1024
@@ -58,6 +59,7 @@ def user_directory(test_user: dict, temp_db: str) -> dict:
     )
     return {
         "id": user_file_id,
+        "content_hash": "dirhash456",
         "stored_file_id": stored_file_id,
         "display_name": "test_folder",
         "is_directory": True
@@ -120,16 +122,16 @@ class TestDeleteFile:
 
     def test_delete_file_success(self, authenticated_client: TestClient, user_file: dict):
         with patch("app.services.storage.delete_user_file_reference", new_callable=AsyncMock, return_value=True):
-            response = authenticated_client.delete(f"/api/files/{user_file['id']}")
+            response = authenticated_client.delete(f"/api/files/{user_file['content_hash']}")
         assert response.status_code == 200
         assert response.json()["ok"] is True
 
     def test_delete_file_not_found(self, authenticated_client: TestClient):
-        response = authenticated_client.delete("/api/files/99999")
+        response = authenticated_client.delete("/api/files/nonexistent_hash")
         assert response.status_code == 404
 
     def test_delete_file_unauthorized(self, client: TestClient, temp_db: str, user_file: dict):
-        response = client.delete(f"/api/files/{user_file['id']}")
+        response = client.delete(f"/api/files/{user_file['content_hash']}")
         assert response.status_code == 401
 
 
@@ -137,7 +139,7 @@ class TestRenameFile:
 
     def test_rename_file_success(self, authenticated_client: TestClient, user_file: dict):
         response = authenticated_client.put(
-            f"/api/files/{user_file['id']}/rename",
+            f"/api/files/{user_file['content_hash']}/rename",
             json={"name": "new_name.txt"}
         )
         assert response.status_code == 200
@@ -146,21 +148,21 @@ class TestRenameFile:
 
     def test_rename_file_not_found(self, authenticated_client: TestClient):
         response = authenticated_client.put(
-            "/api/files/99999/rename",
+            "/api/files/nonexistent_hash/rename",
             json={"name": "new_name.txt"}
         )
         assert response.status_code == 404
 
     def test_rename_file_empty_name(self, authenticated_client: TestClient, user_file: dict):
         response = authenticated_client.put(
-            f"/api/files/{user_file['id']}/rename",
+            f"/api/files/{user_file['content_hash']}/rename",
             json={"name": ""}
         )
         assert response.status_code == 422
 
     def test_rename_file_unauthorized(self, client: TestClient, temp_db: str, user_file: dict):
         response = client.put(
-            f"/api/files/{user_file['id']}/rename",
+            f"/api/files/{user_file['content_hash']}/rename",
             json={"name": "new_name.txt"}
         )
         assert response.status_code == 401
@@ -217,15 +219,15 @@ class TestBrowseFile:
     """Tests for browsing directory contents."""
 
     def test_browse_file_not_found(self, authenticated_client: TestClient):
-        response = authenticated_client.get("/api/files/99999/browse")
+        response = authenticated_client.get("/api/files/nonexistent_hash/browse")
         assert response.status_code == 404
 
     def test_browse_file_not_directory(self, authenticated_client: TestClient, user_file: dict):
-        response = authenticated_client.get(f"/api/files/{user_file['id']}/browse")
+        response = authenticated_client.get(f"/api/files/{user_file['content_hash']}/browse")
         assert response.status_code == 400
 
     def test_browse_file_unauthorized(self, client: TestClient, temp_db: str, user_directory: dict):
-        response = client.get(f"/api/files/{user_directory['id']}/browse")
+        response = client.get(f"/api/files/{user_directory['content_hash']}/browse")
         assert response.status_code == 401
 
 
@@ -233,16 +235,16 @@ class TestDownloadFile:
     """Tests for file download endpoint."""
 
     def test_download_file_not_found(self, authenticated_client: TestClient):
-        response = authenticated_client.get("/api/files/99999/download")
+        response = authenticated_client.get("/api/files/nonexistent_hash/download")
         assert response.status_code == 404
 
     def test_download_file_unauthorized(self, client: TestClient, temp_db: str, user_file: dict):
-        response = client.get(f"/api/files/{user_file['id']}/download")
+        response = client.get(f"/api/files/{user_file['content_hash']}/download")
         assert response.status_code == 401
 
     def test_download_file_path_traversal(self, authenticated_client: TestClient, user_directory: dict):
         response = authenticated_client.get(
-            f"/api/files/{user_directory['id']}/download?path=../../../etc/passwd"
+            f"/api/files/{user_directory['content_hash']}/download?path=../../../etc/passwd"
         )
         assert response.status_code in [400, 403, 404]
 
@@ -300,21 +302,21 @@ class TestRenameFileValidation:
 
     def test_rename_file_with_path_separator(self, authenticated_client: TestClient, user_file: dict):
         response = authenticated_client.put(
-            f"/api/files/{user_file['id']}/rename",
+            f"/api/files/{user_file['content_hash']}/rename",
             json={"name": "path/to/file.txt"}
         )
         assert response.status_code in [200, 400]
 
     def test_rename_file_with_special_chars(self, authenticated_client: TestClient, user_file: dict):
         response = authenticated_client.put(
-            f"/api/files/{user_file['id']}/rename",
+            f"/api/files/{user_file['content_hash']}/rename",
             json={"name": "file<>:\"|?*.txt"}
         )
         assert response.status_code in [200, 400]
 
     def test_rename_file_whitespace_only(self, authenticated_client: TestClient, user_file: dict):
         response = authenticated_client.put(
-            f"/api/files/{user_file['id']}/rename",
+            f"/api/files/{user_file['content_hash']}/rename",
             json={"name": "   "}
         )
         assert response.status_code in [200, 400]
@@ -390,7 +392,7 @@ class TestBrowseDirectory:
 
     def test_browse_directory_path_traversal(self, authenticated_client: TestClient, user_directory: dict):
         response = authenticated_client.get(
-            f"/api/files/{user_directory['id']}/browse?path=../../../etc"
+            f"/api/files/{user_directory['content_hash']}/browse?path=../../../etc"
         )
         assert response.status_code in [400, 403, 404]
 
@@ -433,7 +435,7 @@ class TestBrowseDirectoryWithRealFiles:
             [test_user["id"], stored_file_id, "nonexistent", now]
         )
 
-        response = authenticated_client.get(f"/api/files/{user_file_id}/browse")
+        response = authenticated_client.get(f"/api/files/browse_nonexistent_base/browse")
         assert response.status_code == 404
 
 
@@ -457,7 +459,7 @@ class TestDownloadFileWithRealFiles:
             [test_user["id"], stored_file_id, "file.txt", now]
         )
 
-        response = authenticated_client.get(f"/api/files/{user_file_id}/download")
+        response = authenticated_client.get("/api/files/download_nonexistent_base/download")
         assert response.status_code == 404
 
     def test_download_file_path_on_non_directory(
@@ -483,7 +485,7 @@ class TestDownloadFileWithRealFiles:
             [test_user["id"], stored_file_id, "test_single_file.txt", now]
         )
 
-        response = authenticated_client.get(f"/api/files/{user_file_id}/download?path=subpath")
+        response = authenticated_client.get("/api/files/single_file_hash/download?path=subpath")
         assert response.status_code == 400
 
 
@@ -511,7 +513,7 @@ class TestBrowseDirectoryEdgeCases:
             [test_user["id"], stored_file_id, "browse_test_dir", now]
         )
 
-        response = authenticated_client.get(f"/api/files/{user_file_id}/browse?path=nonexistent")
+        response = authenticated_client.get(f"/api/files/browse_subpath_test/browse?path=nonexistent")
         assert response.status_code in [403, 404]
 
     def test_browse_directory_subpath_is_file(
@@ -537,7 +539,7 @@ class TestBrowseDirectoryEdgeCases:
             [test_user["id"], stored_file_id, "browse_file_test", now]
         )
 
-        response = authenticated_client.get(f"/api/files/{user_file_id}/browse?path=file.txt")
+        response = authenticated_client.get("/api/files/browse_file_test/browse?path=file.txt")
         assert response.status_code in [400, 403]
 
     def test_browse_directory_with_contents(
@@ -565,7 +567,7 @@ class TestBrowseDirectoryEdgeCases:
             [test_user["id"], stored_file_id, "browse_contents_test", now]
         )
 
-        response = authenticated_client.get(f"/api/files/{user_file_id}/browse")
+        response = authenticated_client.get(f"/api/files/browse_contents_test/browse")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 3
@@ -592,7 +594,7 @@ class TestBrowseDirectoryEdgeCases:
             [test_user["id"], stored_file_id, "browse_traversal_test", now]
         )
 
-        response = authenticated_client.get(f"/api/files/{user_file_id}/browse?path=../../../etc")
+        response = authenticated_client.get(f"/api/files/browse_traversal_test/browse?path=../../../etc")
         assert response.status_code == 403
 
 
@@ -621,7 +623,7 @@ class TestDownloadFileRange:
             [test_user["id"], stored_file_id, "range_test_100bytes.bin", now]
         )
 
-        response = authenticated_client.get(f"/api/files/{user_file_id}/download")
+        response = authenticated_client.get(f"/api/files/range_test_100/download")
         assert response.status_code == 200
         assert "Accept-Ranges" in response.headers
         assert response.headers["Accept-Ranges"] == "bytes"
@@ -650,7 +652,7 @@ class TestDownloadFileRange:
         )
 
         response = authenticated_client.get(
-            f"/api/files/{user_file_id}/download",
+            f"/api/files/range_test_start_end/download",
             headers={"Range": "bytes=0-9"}
         )
         assert response.status_code == 206
@@ -682,7 +684,7 @@ class TestDownloadFileRange:
         )
 
         response = authenticated_client.get(
-            f"/api/files/{user_file_id}/download",
+            f"/api/files/range_test_start_only/download",
             headers={"Range": "bytes=90-"}
         )
         assert response.status_code == 206
@@ -714,7 +716,7 @@ class TestDownloadFileRange:
         )
 
         response = authenticated_client.get(
-            f"/api/files/{user_file_id}/download",
+            f"/api/files/range_test_suffix/download",
             headers={"Range": "bytes=-20"}
         )
         assert response.status_code == 206
@@ -746,7 +748,7 @@ class TestDownloadFileRange:
         )
 
         response = authenticated_client.get(
-            f"/api/files/{user_file_id}/download",
+            f"/api/files/range_test_invalid/download",
             headers={"Range": "invalid"}
         )
         assert response.status_code == 416
@@ -775,7 +777,7 @@ class TestDownloadFileRange:
         )
 
         response = authenticated_client.get(
-            f"/api/files/{user_file_id}/download",
+            f"/api/files/range_test_oob/download",
             headers={"Range": "bytes=200-300"}
         )
         assert response.status_code == 416
@@ -804,7 +806,7 @@ class TestDownloadFileRange:
         )
 
         response = authenticated_client.get(
-            f"/api/files/{user_file_id}/download",
+            f"/api/files/range_test_exceed/download",
             headers={"Range": "bytes=90-200"}
         )
         assert response.status_code == 206

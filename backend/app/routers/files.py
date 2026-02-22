@@ -55,6 +55,7 @@ def utc_now() -> str:
 class FileInfo(BaseModel):
     """文件信息"""
     id: int
+    content_hash: str  # 用于 URL 路径，隐藏真实 ID
     name: str
     size: int
     is_directory: bool
@@ -90,11 +91,29 @@ def _user_file_to_dict(user_file: UserFile, stored_file: StoredFile) -> dict:
     """Convert UserFile + StoredFile to API response dict"""
     return {
         "id": user_file.id,
+        "content_hash": stored_file.content_hash,
         "name": user_file.display_name,
         "size": stored_file.size,
         "is_directory": stored_file.is_directory,
         "created_at": user_file.created_at,
     }
+
+
+async def _get_user_file_by_hash(
+    user_id: int, content_hash: str
+) -> tuple[UserFile, StoredFile] | None:
+    """通过 content_hash 和 owner_id 查找用户文件"""
+    async with get_session() as db:
+        result = await db.exec(
+            select(UserFile, StoredFile)
+            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
+            .where(
+                StoredFile.content_hash == content_hash,
+                UserFile.owner_id == user_id,
+            )
+        )
+        return result.first()
+
 
 
 def _validate_subpath(base_path: Path, subpath: str) -> Path:
@@ -255,32 +274,23 @@ async def list_files(user: User = Depends(require_user)) -> FileListResponse:
     )
 
 
-@router.get("/{file_id}/browse")
+@router.get("/{file_hash}/browse")
 async def browse_file(
-    file_id: int,
+    file_hash: str,
     path: str = "",
     user: User = Depends(require_user),
 ) -> list[dict]:
     """浏览 BT 文件夹内容
 
     Args:
-        file_id: UserFile ID
+        file_hash: 文件的 content_hash
         path: 文件夹内的相对路径
     """
     # Get user file and stored file
-    async with get_session() as db:
-        result = await db.exec(
-            select(UserFile, StoredFile)
-            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
-            .where(
-                UserFile.id == file_id,
-                UserFile.owner_id == user.id,
-            )
-        )
-        row = result.first()
+    row = await _get_user_file_by_hash(user.id, file_hash)
 
     if not row:
-        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=not_found", user.id, file_id)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=not_found", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
@@ -289,7 +299,7 @@ async def browse_file(
     user_file, stored_file = row
 
     if not stored_file.is_directory:
-        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=not_directory", user.id, file_id)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=not_directory", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="此文件不是文件夹"
@@ -298,7 +308,7 @@ async def browse_file(
     # Validate and resolve path
     base_path = Path(stored_file.real_path)
     if not base_path.exists():
-        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=base_missing", user.id, file_id)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=base_missing", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件夹不存在"
@@ -307,14 +317,14 @@ async def browse_file(
     target_path = _validate_subpath(base_path, path)
 
     if not target_path.exists():
-        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=path_missing", user.id, file_id)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=path_missing", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="路径不存在"
         )
 
     if not target_path.is_dir():
-        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=path_not_directory", user.id, file_id)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=path_not_directory", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="路径不是文件夹"
@@ -335,77 +345,63 @@ async def browse_file(
                 logger.warning("Failed to stat file %s: %s", entry, e)
                 continue
     except FileNotFoundError:
-        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=file_deleted", user.id, file_id)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=file_deleted", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件或目录已被删除"
         )
     except PermissionError:
-        logger.warning("浏览文件失败 user_id=%s file_id=%s reason=permission_denied", user.id, file_id)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=permission_denied", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="无权访问此目录"
         )
 
-    logger.debug("浏览文件成功 user_id=%s file_id=%s count=%s", user.id, file_id, len(files))
+    logger.debug("浏览文件成功 user_id=%s file_hash=%s count=%s", user.id, file_hash, len(files))
 
     return files
 
 
-@router.get("/{file_id}/download")
+@router.get("/{file_hash}/download")
 async def download_file(
-    file_id: int,
+    file_hash: str,
     request: Request,
     path: str = "",
     user: User = Depends(require_user),
 ):
     """下载文件
-
     支持下载整个文件或 BT 文件夹内的单个文件。
 
     Args:
-        file_id: UserFile ID
+        file_hash: 文件的 content_hash
         path: BT 文件夹内的相对路径（可选）
     """
     if not await api_limiter.is_allowed(user.id, "download_file", limit=settings.rate_limit_download_file, window_seconds=60):
-        logger.warning("下载文件被限流 user_id=%s file_id=%s", user.id, file_id)
+        logger.warning("下载文件被限流 user_id=%s file_hash=%s", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="下载请求过于频繁，请稍后再试"
+            detail="下载请求过于频繁，请稀后再试"
         )
     # Get user file and stored file
-    async with get_session() as db:
-        result = await db.exec(
-            select(UserFile, StoredFile)
-            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
-            .where(
-                UserFile.id == file_id,
-                UserFile.owner_id == user.id,
-            )
-        )
-        row = result.first()
-
+    row = await _get_user_file_by_hash(user.id, file_hash)
     if not row:
-        logger.warning("下载文件失败 user_id=%s file_id=%s reason=not_found", user.id, file_id)
+        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=not_found", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
         )
-
     user_file, stored_file = row
     base_path = Path(stored_file.real_path)
-
     if not base_path.exists():
-        logger.warning("下载文件失败 user_id=%s file_id=%s reason=base_missing", user.id, file_id)
+        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=base_missing", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
         )
-
     # Determine target file
     if path:
         if not stored_file.is_directory:
-            logger.warning("下载文件失败 user_id=%s file_id=%s reason=path_on_non_dir", user.id, file_id)
+            logger.warning("下载文件失败 user_id=%s file_hash=%s reason=path_on_non_dir", user.id, file_hash)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="此文件不是文件夹，不支持路径参数"
@@ -413,24 +409,22 @@ async def download_file(
         target_path = _validate_subpath(base_path, path)
     else:
         target_path = base_path
-
     if not target_path.exists():
-        logger.warning("下载文件失败 user_id=%s file_id=%s reason=target_missing", user.id, file_id)
+        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=target_missing", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
         )
-
     if target_path.is_dir():
-        logger.warning("下载文件失败 user_id=%s file_id=%s reason=target_is_directory", user.id, file_id)
+        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=target_is_directory", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="不能直接下载文件夹，请选择具体文件"
         )
-
-    logger.info("下载文件成功 user_id=%s file_id=%s file=%s", user.id, file_id, target_path.name)
-
-    return _range_file_response(request, target_path, target_path.name)
+    # 确定下载文件名：整个文件用 display_name，子文件用实际文件名
+    download_name = target_path.name if path else user_file.display_name
+    logger.info("下载文件成功 user_id=%s file_hash=%s file=%s", user.id, file_hash, download_name)
+    return _range_file_response(request, target_path, download_name)
 
 
 @router.delete("/pack")
@@ -538,86 +532,82 @@ async def cancel_or_delete_pack_task(
     )
 
 
-@router.delete("/{file_id}")
+@router.delete("/{file_hash}")
 async def delete_file(
-    file_id: int,
+    file_hash: str,
     user: User = Depends(require_user),
 ) -> dict:
     """删除文件引用
-
-    只能删除根目录的整个文件/文件夹引用。
     如果是最后一个引用，物理文件也会被删除。
+    Args:
+        file_hash: 文件的 content_hash
     """
     # Verify ownership
-    async with get_session() as db:
-        result = await db.exec(
-            select(UserFile).where(
-                UserFile.id == file_id,
-                UserFile.owner_id == user.id,
-            )
-        )
-        user_file = result.first()
+    row = await _get_user_file_by_hash(user.id, file_hash)
 
-    if not user_file:
-        logger.warning("删除文件失败 user_id=%s file_id=%s reason=not_found", user.id, file_id)
+    if not row:
+        logger.warning("删除文件失败 user_id=%s file_hash=%s reason=not_found", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
         )
 
+    user_file, _ = row
     # Delete reference (handles ref_count and physical file cleanup)
-    success = await delete_user_file_reference(file_id)
-
+    success = await delete_user_file_reference(user_file.id)
     if not success:
-        logger.warning("删除文件失败 user_id=%s file_id=%s reason=delete_reference_failed", user.id, file_id)
+        logger.warning("删除文件失败 user_id=%s file_hash=%s reason=delete_reference_failed", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
         )
 
-    logger.info("删除文件成功 user_id=%s file_id=%s", user.id, file_id)
+    logger.info("删除文件成功 user_id=%s file_hash=%s", user.id, file_hash)
 
     return {"ok": True}
 
 
-@router.put("/{file_id}/rename")
+@router.put("/{file_hash}/rename")
 async def rename_file(
-    file_id: int,
+    file_hash: str,
     payload: RenameRequest,
     user: User = Depends(require_user),
 ) -> dict:
     """重命名文件
-
     只修改显示名称，不影响实际存储。
+
+    Args:
+        file_hash: 文件的 content_hash
     """
     # Validate name
     if "/" in payload.name or "\\" in payload.name:
-        logger.warning("重命名文件失败 user_id=%s file_id=%s reason=invalid_name", user.id, file_id)
+        logger.warning("重命名文件失败 user_id=%s file_hash=%s reason=invalid_name", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="名称不能包含路径分隔符"
         )
 
+    row = await _get_user_file_by_hash(user.id, file_hash)
+
+    if not row:
+        logger.warning("重命名文件失败 user_id=%s file_hash=%s reason=not_found", user.id, file_hash)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文件不存在"
+        )
+
+    user_file, _ = row
+
     async with get_session() as db:
         result = await db.exec(
-            select(UserFile).where(
-                UserFile.id == file_id,
-                UserFile.owner_id == user.id,
-            )
+            select(UserFile).where(UserFile.id == user_file.id)
         )
-        user_file = result.first()
+        db_user_file = result.first()
+        if db_user_file:
+            db_user_file.display_name = payload.name
+            db.add(db_user_file)
 
-        if not user_file:
-            logger.warning("重命名文件失败 user_id=%s file_id=%s reason=not_found", user.id, file_id)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="文件不存在"
-            )
-
-        user_file.display_name = payload.name
-        db.add(user_file)
-
-    logger.info("重命名文件成功 user_id=%s file_id=%s", user.id, file_id)
+    logger.info("重命名文件成功 user_id=%s file_hash=%s", user.id, file_hash)
 
     return {"ok": True}
 
