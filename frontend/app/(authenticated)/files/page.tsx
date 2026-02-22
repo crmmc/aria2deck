@@ -42,7 +42,7 @@ export default function FilesPage() {
 
   // Folder browsing state (in-page navigation)
   const [browseContext, setBrowseContext] = useState<{
-    fileId: number;
+    fileHash: string;
     fileName: string;
     path: string[];
   } | null>(null);
@@ -227,7 +227,7 @@ export default function FilesPage() {
     if (!confirmed) return;
 
     try {
-      await api.deleteFile(file.id);
+      await api.deleteFile(file.content_hash);
       loadFiles();
     } catch (err) {
       showToast(`删除失败: ${(err as Error).message}`, "error");
@@ -251,7 +251,7 @@ export default function FilesPage() {
 
     setIsBatchOperating(true);
     try {
-      await Promise.all(selectedList.map((f) => api.deleteFile(f.id)));
+      await Promise.all(selectedList.map((f) => api.deleteFile(f.content_hash)));
       showToast(`已删除 ${selectedList.length} 个文件`, "success");
       loadFiles();
     } catch (err) {
@@ -269,7 +269,9 @@ export default function FilesPage() {
       return;
     }
     for (const fileId of selectedFiles) {
-      const url = api.downloadFileUrl(fileId);
+      const file = files.find(f => f.id === fileId);
+      if (!file) continue;
+      const url = api.downloadFileUrl(file.content_hash);
       const a = document.createElement("a");
       a.href = url;
       a.download = "";
@@ -359,7 +361,7 @@ export default function FilesPage() {
     }
 
     try {
-      await api.renameFile(file.id, newName.trim());
+      await api.renameFile(file.content_hash, newName.trim());
       setRenaming(null);
       setNewName("");
       loadFiles();
@@ -381,7 +383,7 @@ export default function FilesPage() {
   const handleDownload = async (file: FileInfo, subpath?: string) => {
     setDownloadingFile(file.id);
     try {
-      const url = api.downloadFileUrl(file.id, subpath);
+      const url = api.downloadFileUrl(file.content_hash, subpath);
       const a = document.createElement("a");
       a.href = url;
       a.download = subpath ? subpath.split("/").pop() || file.name : file.name;
@@ -397,11 +399,11 @@ export default function FilesPage() {
 
   // Folder in-page navigation
   const enterFolder = async (file: FileInfo) => {
-    setBrowseContext({ fileId: file.id, fileName: file.name, path: [] });
+    setBrowseContext({ fileHash: file.content_hash, fileName: file.name, path: [] });
     setSelectedBrowseFiles(new Set());
     setBrowseLoading(true);
     try {
-      const contents = await api.browseFile(file.id);
+      const contents = await api.browseFile(file.content_hash);
       setBrowseContents(contents);
     } catch (err) {
       showToast(`打开文件夹失败: ${(err as Error).message}`, "error");
@@ -416,7 +418,7 @@ export default function FilesPage() {
     const newPath = [...browseContext.path, name];
     setBrowseLoading(true);
     try {
-      const contents = await api.browseFile(browseContext.fileId, newPath.join("/"));
+      const contents = await api.browseFile(browseContext.fileHash, newPath.join("/"));
       setBrowseContents(contents);
       setBrowseContext({ ...browseContext, path: newPath });
       setSelectedBrowseFiles(new Set());
@@ -434,7 +436,7 @@ export default function FilesPage() {
     setBrowseLoading(true);
     try {
       const contents = await api.browseFile(
-        browseContext.fileId,
+        browseContext.fileHash,
         newPath.length > 0 ? newPath.join("/") : undefined
       );
       setBrowseContents(contents);
@@ -489,7 +491,7 @@ export default function FilesPage() {
       return;
     }
     for (const path of selectedBrowseFiles) {
-      const url = api.downloadFileUrl(browseContext.fileId, path);
+      const url = api.downloadFileUrl(browseContext.fileHash, path);
       const a = document.createElement("a");
       a.href = url;
       a.download = "";
@@ -864,7 +866,7 @@ export default function FilesPage() {
                                     className="button secondary btn-sm"
                                     onClick={() =>
                                       handleDownload(
-                                        { id: browseContext!.fileId } as FileInfo,
+                                        { content_hash: browseContext!.fileHash } as FileInfo,
                                         [...browseContext!.path, item.name].join("/")
                                       )
                                     }

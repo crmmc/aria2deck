@@ -215,21 +215,21 @@ export const api = {
 
   // Files (UserFile-based)
   listFiles: () => request<FileListResponse>("/api/files"),
-  browseFile: (fileId: number, path?: string) =>
+  browseFile: (fileHash: string, path?: string) =>
     request<BrowseFileInfo[]>(
-      `/api/files/${fileId}/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`
+      `/api/files/${fileHash}/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`
     ),
-  downloadFileUrl: (fileId: number, path?: string) => {
+  downloadFileUrl: (fileHash: string, path?: string) => {
     const base = getApiBase();
     const pathParam = path ? `?path=${encodeURIComponent(path)}` : "";
-    return `${base}/api/files/${fileId}/download${pathParam}`;
+    return `${base}/api/files/${fileHash}/download${pathParam}`;
   },
-  deleteFile: (fileId: number) =>
-    request<{ ok: boolean }>(`/api/files/${fileId}`, {
+  deleteFile: (fileHash: string) =>
+    request<{ ok: boolean }>(`/api/files/${fileHash}`, {
       method: "DELETE",
     }),
-  renameFile: (fileId: number, newName: string) =>
-    request<{ ok: boolean }>(`/api/files/${fileId}/rename`, {
+  renameFile: (fileHash: string, newName: string) =>
+    request<{ ok: boolean }>(`/api/files/${fileHash}/rename`, {
       method: "PUT",
       body: JSON.stringify({ name: newName }),
     }),

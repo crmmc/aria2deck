@@ -65,6 +65,7 @@ export type SystemConfig = {
 // User file reference (user's view of a stored file)
 export type FileInfo = {
   id: number;  // UserFile ID
+  content_hash: string;  // Used for API URLs instead of id
   name: string;  // display_name
   size: number;
   is_directory: boolean;
