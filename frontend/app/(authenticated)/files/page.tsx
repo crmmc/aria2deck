@@ -380,13 +380,13 @@ export default function FilesPage() {
     setNewName("");
   };
 
-  const handleDownload = async (file: FileInfo, subpath?: string) => {
-    setDownloadingFile(file.id);
+  const handleDownload = async (contentHash: string, fileName: string, fileId?: number, subpath?: string) => {
+    setDownloadingFile(fileId ?? null);
     try {
-      const url = api.downloadFileUrl(file.content_hash, subpath);
+      const url = api.downloadFileUrl(contentHash, subpath);
       const a = document.createElement("a");
       a.href = url;
-      a.download = subpath ? subpath.split("/").pop() || file.name : file.name;
+      a.download = subpath ? subpath.split("/").pop() || fileName : fileName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -866,10 +866,11 @@ export default function FilesPage() {
                                     className="button secondary btn-sm"
                                     onClick={() =>
                                       handleDownload(
-                                        { content_hash: browseContext!.fileHash } as FileInfo,
+                                        browseContext!.fileHash,
+                                        item.name,
+                                        undefined,
                                         [...browseContext!.path, item.name].join("/")
-                                      )
-                                    }
+                                    )}
                                   >
                                     下载
                                   </button>
@@ -1028,7 +1029,7 @@ export default function FilesPage() {
                               ) : (
                                 <button
                                   className="button secondary btn-sm"
-                                  onClick={() => handleDownload(file)}
+                                  onClick={() => handleDownload(file.content_hash, file.name, file.id)}
                                   disabled={downloadingFile === file.id}
                                 >
                                   {downloadingFile === file.id ? "下载中..." : "下载"}
