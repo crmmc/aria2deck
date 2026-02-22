@@ -111,9 +111,9 @@ async def _get_user_file_by_hash(
                 StoredFile.content_hash == content_hash,
                 UserFile.owner_id == user_id,
             )
+            .order_by(UserFile.id.asc())
         )
         return result.first()
-
 
 
 def _validate_subpath(base_path: Path, subpath: str) -> Path:
@@ -380,7 +380,7 @@ async def download_file(
         logger.warning("下载文件被限流 user_id=%s file_hash=%s", user.id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="下载请求过于频繁，请稀后再试"
+            detail="下载请求过于频繁，请稍后再试"
         )
     # Get user file and stored file
     row = await _get_user_file_by_hash(user.id, file_hash)
@@ -587,25 +587,26 @@ async def rename_file(
             detail="名称不能包含路径分隔符"
         )
 
-    row = await _get_user_file_by_hash(user.id, file_hash)
-
-    if not row:
-        logger.warning("重命名文件失败 user_id=%s file_hash=%s reason=not_found", user.id, file_hash)
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="文件不存在"
-        )
-
-    user_file, _ = row
-
     async with get_session() as db:
         result = await db.exec(
-            select(UserFile).where(UserFile.id == user_file.id)
+            select(UserFile, StoredFile)
+            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
+            .where(
+                StoredFile.content_hash == file_hash,
+                UserFile.owner_id == user.id,
+            )
+            .order_by(UserFile.id.asc())
         )
-        db_user_file = result.first()
-        if db_user_file:
-            db_user_file.display_name = payload.name
-            db.add(db_user_file)
+        row = result.first()
+        if not row:
+            logger.warning("重命名文件失败 user_id=%s file_hash=%s reason=not_found", user.id, file_hash)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="文件不存在"
+            )
+        user_file, _ = row
+        user_file.display_name = payload.name
+        db.add(user_file)
 
     logger.info("重命名文件成功 user_id=%s file_hash=%s", user.id, file_hash)
 
