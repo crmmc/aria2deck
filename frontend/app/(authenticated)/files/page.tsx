@@ -402,7 +402,7 @@ export default function FilesPage() {
     setDownloadingFile(fileId ?? null);
     try {
       const downloadName = subpath ? subpath.split("/").pop() || fileName : fileName;
-      const url = api.downloadFileUrl(contentHash, subpath, fileName);
+      const url = api.downloadFileUrl(contentHash, subpath);
       const a = document.createElement("a");
       a.href = url;
       a.download = downloadName;
