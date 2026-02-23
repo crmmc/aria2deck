@@ -3,7 +3,9 @@ import { useEffect, useState } from "react";
 import { ShareInfo } from "@/types";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
+
 type DirItem = { name: string; is_dir: boolean; size: number; path: string };
+
 export default function SharePageClient() {
   const [code, setCode] = useState("");
   const [shareInfo, setShareInfo] = useState<ShareInfo | null>(null);
@@ -17,6 +19,8 @@ export default function SharePageClient() {
   const [dirItems, setDirItems] = useState<DirItem[]>([]);
   const [loadingDir, setLoadingDir] = useState(false);
   const [dirError, setDirError] = useState("");
+  const [siteTitle, setSiteTitle] = useState('aria2 控制器');
+
   const loadDirectory = async (shareCode: string, token: string, path: string) => {
     setLoadingDir(true);
     setDirError("");
@@ -30,8 +34,8 @@ export default function SharePageClient() {
       setLoadingDir(false);
     }
   };
+
   useEffect(() => {
-    // Extract share code from URL: /s/{code}
     const parts = window.location.pathname.split("/");
     const idx = parts.indexOf("s");
     const urlCode = idx >= 0 && parts.length > idx + 1 ? parts[idx + 1] : "";
@@ -42,11 +46,14 @@ export default function SharePageClient() {
     }
     setCode(urlCode);
     let mounted = true;
+    api.getSiteInfo().then(info => setSiteTitle(info.site_title)).catch(() => {});
     api.getShareInfo(urlCode)
       .then((info) => {
         if (!mounted) return;
         setShareInfo(info);
-        document.title = `分享 - ${info.file_name}`;
+        if (!info.is_expired && !info.is_exhausted) {
+          // document.title 由下方 useEffect 统一处理
+        }
         if (info.is_directory && !info.has_password) {
           loadDirectory(urlCode, "", "");
         }
@@ -58,6 +65,13 @@ export default function SharePageClient() {
       .finally(() => { if (mounted) setLoading(false); });
     return () => { mounted = false; };
   }, []);
+  // 当 siteTitle 或 shareInfo 变化时更新页面标题
+  useEffect(() => {
+    if (shareInfo && !shareInfo.is_expired && !shareInfo.is_exhausted) {
+      document.title = `${shareInfo.file_name} - ${siteTitle}`;
+    }
+  }, [siteTitle, shareInfo]);
+
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!password) return;
@@ -70,105 +84,231 @@ export default function SharePageClient() {
       setPasswordError(err instanceof Error ? err.message : "密码错误");
     }
   };
+
   const handleDownload = () => {
     setDownloading(true);
     setTimeout(() => setDownloading(false), 2000);
     window.open(api.shareDownloadUrl(code, accessToken || undefined), "_blank");
   };
+
   const handleItemDownload = (itemPath: string) => {
     window.open(api.shareDownloadUrl(code, accessToken || undefined, itemPath), "_blank");
   };
+
   const handleDirClick = (itemPath: string) => loadDirectory(code, accessToken, itemPath);
+
   const handleGoBack = () => {
     if (!currentPath) return;
     const parts = currentPath.split("/").filter(Boolean);
     parts.pop();
     loadDirectory(code, accessToken, parts.join("/"));
   };
-  const S = {
-    wrap: { display: "flex", justifyContent: "center", alignItems: "center", minHeight: "100vh", backgroundColor: "#0a0a0a", color: "#e5e5e5", fontFamily: "system-ui, sans-serif", padding: 20, boxSizing: "border-box" } as React.CSSProperties,
-    card: { backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, padding: 32, width: "100%", maxWidth: 480, boxShadow: "0 4px 24px -4px rgba(0,0,0,0.5)" } as React.CSSProperties,
-    title: { margin: "0 0 16px", fontSize: 20, fontWeight: 600, wordBreak: "break-all" as const, lineHeight: 1.4 },
-    muted: { color: "#a3a3a3", fontSize: 14 },
-    input: { width: "100%", padding: "10px 12px", backgroundColor: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 6, color: "#e5e5e5", fontSize: 14, marginBottom: 16, boxSizing: "border-box" as const, outline: "none" } as React.CSSProperties,
-    btn: { width: "100%", padding: "10px 16px", backgroundColor: "#3b82f6", color: "white", border: "none", borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: "pointer" } as React.CSSProperties,
-    err: { color: "#ef4444", fontSize: 14, marginBottom: 16, backgroundColor: "rgba(239,68,68,0.1)", padding: "8px 12px", borderRadius: 6, border: "1px solid rgba(239,68,68,0.2)" } as React.CSSProperties,
-    list: { listStyle: "none", padding: 0, margin: 0, maxHeight: 360, overflowY: "auto" as const, border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, backgroundColor: "rgba(0,0,0,0.2)" } as React.CSSProperties,
-    li: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)" } as React.CSSProperties,
-  };
-  const msgCard = { ...S.card, textAlign: "center" as const, padding: "48px 32px" };
-  if (loading) return <div style={S.wrap}><div style={msgCard}><div style={S.muted}>加载中...</div></div></div>;
-  if (error) return <div style={S.wrap}><div style={msgCard}><h2 style={{ ...S.title, color: "#ef4444" }}>访问出错</h2><div style={S.muted}>{error}</div></div></div>;
-  if (!shareInfo) return null;
-  if (shareInfo.is_expired) return <div style={S.wrap}><div style={msgCard}><h2 style={S.title}>该分享已失效</h2><p style={{ ...S.muted, margin: 0 }}>分享链接已过期，请联系分享者重新分享</p></div></div>;
-  if (shareInfo.is_exhausted) return <div style={S.wrap}><div style={msgCard}><h2 style={S.title}>下载次数已用完</h2><p style={{ ...S.muted, margin: 0 }}>该分享的下载次数已达上限</p></div></div>;
-  if (shareInfo.has_password && !accessToken) {
+
+
+  if (loading) {
     return (
-      <div style={S.wrap}><div style={S.card}>
-        <div style={{ textAlign: "center", marginBottom: 32 }}>
-          <div style={{ fontSize: 48, marginBottom: 16 }}>🔒</div>
-          <h2 style={S.title}>{shareInfo.file_name}</h2>
-          <p style={{ ...S.muted, margin: 0 }}>该分享需要提取码才能查看</p>
-        </div>
-        <form onSubmit={handlePasswordSubmit}>
-          <input type="password" placeholder="请输入提取码" value={password}
-            onChange={(e) => setPassword(e.target.value)} style={S.input} required autoFocus />
-          {passwordError && <div style={S.err}>{passwordError}</div>}
-          <button type="submit" style={S.btn}>提取文件</button>
-        </form>
-      </div></div>
-    );
-  }
-  return (
-    <div style={S.wrap}><div style={S.card}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 16, marginBottom: 24 }}>
-        <div style={{ fontSize: 32, lineHeight: 1 }}>{shareInfo.is_directory ? "📁" : "📄"}</div>
-        <div>
-          <h2 style={{ ...S.title, margin: "0 0 4px" }}>{shareInfo.file_name}</h2>
-          <p style={{ ...S.muted, margin: 0 }}>{formatBytes(shareInfo.file_size)}</p>
+      <div className="fixed inset-0 flex-center p-4">
+        <div className="glass-frame animate-in max-w-400 w-full text-center py-12">
+          <p className="muted">加载中...</p>
         </div>
       </div>
-      {!shareInfo.is_directory ? (
-        <button onClick={handleDownload} style={{ ...S.btn, opacity: downloading ? 0.7 : 1 }} disabled={downloading}>
-          {downloading ? "准备下载..." : "下载文件"}
-        </button>
-      ) : (
-        <div>
-          <div style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: "rgba(0,0,0,0.2)", padding: "8px 12px", borderRadius: 6 }}>
-            <span style={{ fontSize: 13, color: "#a3a3a3", fontFamily: "monospace" }}>/{currentPath || "."}</span>
-            {currentPath !== "" && (
-              <button onClick={handleGoBack} style={{ background: "none", border: "none", color: "#e5e5e5", cursor: "pointer", fontSize: 13 }}>
-                ↵ 返回上级
-              </button>
+    );
+  }
+
+
+  if (error) {
+    return (
+      <div className="fixed inset-0 flex-center p-4">
+        <div className="glass-frame animate-in max-w-400 w-full text-center py-12">
+          <div className="text-4xl mb-4">😕</div>
+          <h2 className="text-lg mb-2" style={{ color: "var(--danger)" }}>访问出错</h2>
+          <p className="muted">{error}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!shareInfo) return null;
+
+
+  if (shareInfo.is_expired) {
+    return (
+      <div className="fixed inset-0 flex-center p-4">
+        <div className="glass-frame animate-in max-w-400 w-full text-center py-12">
+          <div className="text-4xl mb-4">⏰</div>
+          <h2 className="text-lg mb-2">该分享已失效</h2>
+          <p className="muted">分享链接已过期，请联系分享者重新分享</p>
+        </div>
+      </div>
+    );
+  }
+
+
+  if (shareInfo.is_exhausted) {
+    return (
+      <div className="fixed inset-0 flex-center p-4">
+        <div className="glass-frame animate-in max-w-400 w-full text-center py-12">
+          <div className="text-4xl mb-4">📊</div>
+          <h2 className="text-lg mb-2">下载次数已用完</h2>
+          <p className="muted">该分享的下载次数已达上限</p>
+        </div>
+      </div>
+    );
+  }
+
+
+  if (shareInfo.has_password && !accessToken) {
+    return (
+      <div className="fixed inset-0 flex-center p-4">
+        <div className="glass-frame animate-in max-w-400 w-full">
+          <div className="text-center mb-7">
+            <div className="text-4xl mb-4">🔒</div>
+            <h2 className="text-lg mb-1" style={{ wordBreak: "break-all" }}>{shareInfo.file_name}</h2>
+            <p className="muted">该分享需要提取码才能查看</p>
+          </div>
+          <form onSubmit={handlePasswordSubmit}>
+            <div className="mb-4">
+              <input
+                type="password"
+                className="input"
+                placeholder="请输入提取码"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                autoFocus
+              />
+            </div>
+            {passwordError && (
+              <div className="alert alert-danger text-center mb-4">{passwordError}</div>
+            )}
+            <button type="submit" className="button w-full">提取文件</button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+
+  return (
+    <div className="fixed inset-0 flex-center p-4">
+      <div className="glass-frame animate-in w-full" style={{ maxWidth: 520 }}>
+
+        <div className="row mb-6">
+          <div className="text-3xl">{shareInfo.is_directory ? "📁" : "📄"}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h2 className="text-lg mb-1" style={{ wordBreak: "break-all", margin: 0 }}>
+              {shareInfo.file_name}
+            </h2>
+            <p className="muted">{formatBytes(shareInfo.file_size)}</p>
+          </div>
+        </div>
+
+
+        {!shareInfo.is_directory && (
+          <button
+            onClick={handleDownload}
+            className="button w-full"
+            disabled={downloading}
+            style={{ opacity: downloading ? 0.7 : 1 }}
+          >
+            {downloading ? "准备下载..." : "下载文件"}
+          </button>
+        )}
+
+
+        {shareInfo.is_directory && (
+          <div>
+
+            <div className="card mb-4" style={{ padding: "10px 16px" }}>
+              <div className="space-between">
+                <code className="muted" style={{ fontSize: 13 }}>/{currentPath || "."}</code>
+                {currentPath !== "" && (
+                  <button onClick={handleGoBack} className="button secondary" style={{ padding: "6px 12px", fontSize: 13 }}>
+                    ↵ 返回上级
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {dirError && (
+              <div className="alert alert-danger mb-4">{dirError}</div>
+            )}
+
+            {loadingDir ? (
+              <div className="text-center py-8">
+                <p className="muted">加载目录中...</p>
+              </div>
+            ) : (
+              <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+                {dirItems.length === 0 ? (
+                  <div className="text-center py-8">
+                    <p className="muted">空文件夹</p>
+                  </div>
+                ) : (
+                  <ul style={{ listStyle: "none", padding: 0, margin: 0, maxHeight: 360, overflowY: "auto" }}>
+                    {dirItems.map((item, i) => (
+                      <li
+                        key={i}
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          padding: "12px 16px",
+                          borderBottom: i < dirItems.length - 1 ? "1px solid rgba(0,0,0,0.05)" : "none",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                            flex: 1,
+                            overflow: "hidden",
+                            cursor: item.is_dir ? "pointer" : "default",
+                          }}
+                          onClick={() => item.is_dir && handleDirClick(item.path)}
+                        >
+                          <span style={{ fontSize: 16 }}>{item.is_dir ? "📁" : "📄"}</span>
+                          <span
+                            style={{
+                              fontWeight: item.is_dir ? 500 : 400,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {item.name}
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                          {!item.is_dir && (
+                            <span className="muted" style={{ fontSize: 12, minWidth: 60, textAlign: "right" }}>
+                              {formatBytes(item.size)}
+                            </span>
+                          )}
+                          {!item.is_dir && (
+                            <button
+                              onClick={() => handleItemDownload(item.path)}
+                              className="button secondary"
+                              style={{ padding: "4px 10px", fontSize: 12 }}
+                              title="下载"
+                            >
+                              下载
+                            </button>
+                          )}
+                          {item.is_dir && (
+                            <span className="muted" style={{ fontSize: 12 }}>❯</span>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             )}
           </div>
-          {dirError && <div style={{ color: "#ef4444", fontSize: 13, marginBottom: 8 }}>{dirError}</div>}
-          {loadingDir ? (
-            <div style={{ textAlign: "center", padding: "48px 24px", ...S.muted }}>加载目录中...</div>
-          ) : (
-            <ul style={S.list}>
-              {dirItems.length === 0 ? (
-                <li style={{ padding: "32px 16px", textAlign: "center", color: "#525252", fontSize: 14 }}>空文件夹</li>
-              ) : dirItems.map((item, i) => (
-                <li key={i} style={S.li}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, overflow: "hidden", cursor: item.is_dir ? "pointer" : "default" }}
-                    onClick={() => item.is_dir && handleDirClick(item.path)}>
-                    <span style={{ fontSize: 16 }}>{item.is_dir ? "📁" : "📄"}</span>
-                    <span style={{ color: item.is_dir ? "#e5e5e5" : "#a3a3a3", fontWeight: item.is_dir ? 500 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                    {!item.is_dir && <span style={{ fontSize: 12, color: "#737373", minWidth: 60, textAlign: "right" }}>{formatBytes(item.size)}</span>}
-                    {!item.is_dir && (
-                      <button onClick={() => handleItemDownload(item.path)} style={{ background: "none", border: "none", color: "#3b82f6", cursor: "pointer", padding: "4px 8px" }} title="下载">⬇</button>
-                    )}
-                    {item.is_dir && <span style={{ color: "#525252", fontSize: 12 }}>❯</span>}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-    </div></div>
+        )}
+      </div>
+    </div>
   );
 }

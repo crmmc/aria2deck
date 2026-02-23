@@ -61,7 +61,7 @@ export default function CreateShareDialog({
   };
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-content max-w-400" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3 className="modal-title">创建分享</h3>
           <button type="button" className="modal-close" onClick={onClose}>

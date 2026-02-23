@@ -774,7 +774,7 @@ export default function FilesPage() {
           </div>
         ) : (
           <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-            <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(200px, 1fr) 120px 200px', paddingRight: '16px' }}>
+              <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px', paddingRight: '16px' }}>
               <div className="table-cell text-left">
                 <input
                   type="checkbox"
@@ -821,7 +821,7 @@ export default function FilesPage() {
                             className="table-row transition-bg"
                             style={{
                               display: 'grid',
-                              gridTemplateColumns: '40px minmax(200px, 1fr) 120px 200px',
+                        gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px',
                               height: '100%',
                               alignItems: 'center'
                             }}
@@ -907,7 +907,7 @@ export default function FilesPage() {
         </div>
       ) : (
         <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-          <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(200px, 1fr) 120px 180px 200px', paddingRight: '16px' }}>
+              <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px', paddingRight: '16px' }}>
              <div className="table-cell text-left">
                   <input
                     type="checkbox"
@@ -955,7 +955,7 @@ export default function FilesPage() {
                           className="table-row transition-bg" 
                           style={{ 
                             display: 'grid', 
-                            gridTemplateColumns: '40px minmax(200px, 1fr) 120px 180px 200px',
+                        gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px',
                             height: '100%',
                             alignItems: 'center'
                           }}

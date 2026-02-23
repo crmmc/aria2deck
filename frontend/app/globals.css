@@ -2382,6 +2382,8 @@ p {
 
   .file-table-wrapper .table-cell:last-child .flex {
     justify-content: flex-start;
+    flex-wrap: wrap;
+    row-gap: 8px;
   }
 
   /* Users table card view */

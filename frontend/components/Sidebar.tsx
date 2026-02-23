@@ -186,7 +186,7 @@ const MoreIcon = () => (
 
 function SidebarContent({ user }: SidebarProps) {
   const pathname = usePathname();
-  const { logout, sidebarExpanded, setSidebarExpanded } = useAuth();
+  const { logout, sidebarExpanded, setSidebarExpanded, siteTitle } = useAuth();
   const [isMobile, setIsMobile] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
 
@@ -321,7 +321,7 @@ function SidebarContent({ user }: SidebarProps) {
       >
         <div className="sidebar-header">
           <div className="sidebar-logo">AD</div>
-          {sidebarExpanded && <span className="sidebar-title">Aria2Deck</span>}
+          {sidebarExpanded && <span className="sidebar-title">{siteTitle}</span>}
         </div>
 
         <nav className="sidebar-nav">

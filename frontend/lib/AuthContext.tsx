@@ -15,6 +15,7 @@ type AuthContextType = {
   user: User | null;
   loading: boolean;
   error: string | null;  // 非 401 错误信息
+  siteTitle: string;
   sidebarExpanded: boolean;
   setSidebarExpanded: (expanded: boolean) => void;
   logout: () => Promise<void>;
@@ -33,6 +34,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const [initialized, setInitialized] = useState(false);
   const [isUnauthorized, setIsUnauthorized] = useState(false);
+  const [siteTitle, setSiteTitle] = useState<string>('aria2 控制器');
 
   const refreshUser = useCallback(async () => {
     try {
@@ -63,6 +65,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setError(null);
         setIsUnauthorized(false);
         setInitialized(true);
+        // 获取网站标题（无需认证）
+        api.getSiteInfo().then(info => setSiteTitle(info.site_title)).catch(() => {});
       })
       .catch((err) => {
         if (err instanceof ApiError) {
@@ -87,7 +91,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     // 只有确认是 401 未授权时才跳转登录页
-    if (!loading && isUnauthorized && pathname !== "/login") {
+    if (!loading && isUnauthorized && pathname !== "/login" && !pathname.startsWith("/s/")) {
       router.push("/login");
     }
   }, [loading, isUnauthorized, pathname, router]);
@@ -97,11 +101,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return authEvents.onUnauthorized(() => {
       setUser(null);
       setIsUnauthorized(true);
-      if (pathname !== "/login") {
+      if (pathname !== "/login" && !pathname.startsWith("/s/")) {
         router.push("/login");
       }
     });
   }, [pathname, router]);
+
+  // 动态更新页面标题
+  useEffect(() => {
+    if (siteTitle) {
+      document.title = siteTitle;
+    }
+  }, [siteTitle]);
 
   const logout = useCallback(async () => {
     await api.logout();
@@ -116,6 +127,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         user,
         loading,
         error,
+        siteTitle,
         sidebarExpanded,
         setSidebarExpanded,
         logout,
