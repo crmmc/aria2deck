@@ -2319,51 +2319,58 @@ p {
 }
 
 /* ==================== MOBILE TABLE TO CARD VIEW ==================== */
-
 @media (max-width: 767px) {
-  /* File table card view - only target file-table specifically */
-  .file-table-wrapper .table,
-  .file-table-wrapper .table thead,
-  .file-table-wrapper .table tbody,
-  .file-table-wrapper .table tr,
-  .file-table-wrapper .table td,
-  .file-table-wrapper .table th {
-    display: block;
+  /* Hide grid table header on mobile */
+  .file-table-wrapper .table-header {
+    display: none !important;
   }
 
-  .file-table-wrapper .table thead {
-    display: none;
-  }
-
+  /* Override react-window row inline grid → block card */
   .file-table-wrapper .table-row {
-    padding: 16px;
-    margin-bottom: 8px;
+    display: flex !important;
+    flex-wrap: wrap !important;
+    grid-template-columns: none !important;
+    position: relative;
+    padding: 12px 12px 12px 40px;
+    margin: 0 8px 8px 8px;
     border-radius: 12px;
     background: rgba(255, 255, 255, 0.5);
     border: 1px solid rgba(0, 0, 0, 0.05);
+    height: auto !important;
+    align-items: flex-start !important;
   }
 
-  .file-table-wrapper .table-row:last-child {
-    margin-bottom: 0;
+  /* Checkbox — absolute top-left */
+  .file-table-wrapper .table-row > .table-cell:first-child {
+    position: absolute;
+    top: 14px;
+    left: 10px;
+    width: auto;
+    padding: 0;
   }
 
-  .file-table-wrapper .table-cell {
-    padding: 4px 0;
+  /* Name cell — full width row */
+  .file-table-wrapper .table-row > .table-cell:nth-child(2) {
+    width: 100%;
+    flex: 0 0 100%;
+    padding: 0 0 4px 0;
+    font-size: 14px;
     text-align: left !important;
   }
 
-  /* File card layout - checkbox positioning */
-  .file-table-wrapper .table-cell:first-child {
-    position: absolute;
-    top: 16px;
-    left: 16px;
+  /* Size cell — inline */
+  .file-table-wrapper .table-row > .table-cell:nth-child(3) {
+    text-align: left !important;
+    padding: 2px 0;
+    font-size: 12px;
   }
 
-  .file-table-wrapper .table-row {
-    position: relative;
-    padding-left: 44px;
+  /* Date cell (root table only) — inline after size */
+  .file-table-wrapper .table-row > .table-cell:nth-child(4):not(:last-child) {
+    text-align: left !important;
+    padding: 2px 0 2px 8px;
+    font-size: 12px;
   }
-
   /* Data labels for card view */
   .file-table-wrapper .table-cell[data-label]::before {
     content: attr(data-label) ": ";
@@ -2373,17 +2380,35 @@ p {
     margin-right: 4px;
   }
 
-  /* Actions row */
-  .file-table-wrapper .table-cell:last-child {
-    margin-top: 12px;
-    padding-top: 12px;
+  /* Actions cell — full width, top border */
+  .file-table-wrapper .table-row > .table-cell:last-child {
+    width: 100%;
+    flex: 0 0 100%;
+    margin-top: 8px;
+    padding-top: 8px;
     border-top: 1px solid rgba(0, 0, 0, 0.05);
+    text-align: left !important;
   }
-
   .file-table-wrapper .table-cell:last-child .flex {
     justify-content: flex-start;
     flex-wrap: wrap;
-    row-gap: 8px;
+    gap: 6px;
+  }
+
+
+  /* react-window containers — disable virtualization on mobile */
+  .file-table-wrapper [style*="overflow"] {
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  .file-table-wrapper [style*="overflow"] > div {
+    height: auto !important;
+  }
+  .file-table-wrapper [style*="overflow"] > div > div {
+    position: relative !important;
+    top: auto !important;
+    height: auto !important;
   }
 
   /* Users table card view */
@@ -2395,11 +2420,9 @@ p {
   .users-table-wrapper .table th {
     display: block;
   }
-
   .users-table-wrapper .table thead {
     display: none;
   }
-
   .users-table-wrapper .table-row {
     padding: 16px;
     margin-bottom: 8px;
@@ -2407,17 +2430,13 @@ p {
     background: rgba(255, 255, 255, 0.5);
     border: 1px solid rgba(0, 0, 0, 0.05);
   }
-
   .users-table-wrapper .table-row:last-child {
     margin-bottom: 0;
   }
-
   .users-table-wrapper .table-cell {
     padding: 4px 0;
     text-align: left !important;
   }
-
-  /* Data labels for users card view */
   .users-table-wrapper .table-cell[data-label]::before {
     content: attr(data-label) ": ";
     font-weight: 500;
@@ -2425,14 +2444,11 @@ p {
     font-size: 12px;
     margin-right: 4px;
   }
-
-  /* Actions row for users */
   .users-table-wrapper .table-cell:last-child {
     margin-top: 12px;
     padding-top: 12px;
     border-top: 1px solid rgba(0, 0, 0, 0.05);
   }
-
   .users-table-wrapper .table-cell:last-child .flex {
     justify-content: flex-start;
   }
