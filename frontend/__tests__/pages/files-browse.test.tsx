@@ -51,6 +51,7 @@ const mockApi = api as jest.Mocked<typeof api>;
 // Test data
 const folderFile: FileInfo = {
   id: 1,
+  content_hash: "hash_folder",
   name: "MyFolder",
   size: 0,
   is_directory: true,
@@ -59,6 +60,7 @@ const folderFile: FileInfo = {
 
 const regularFile: FileInfo = {
   id: 2,
+  content_hash: "hash_readme",
   name: "readme.txt",
   size: 1024,
   is_directory: false,
@@ -150,7 +152,7 @@ describe("Folder in-page browsing", () => {
     // Breadcrumb should contain "subdir"
     expect(screen.getByRole("button", { name: "subdir" })).toBeInTheDocument();
     // browseFile called with path "subdir"
-    expect(mockApi.browseFile).toHaveBeenCalledWith(1, "subdir");
+    expect(mockApi.browseFile).toHaveBeenCalledWith(folderFile.content_hash, "subdir");
   });
 
   test("clicking breadcrumb navigates back to folder root", async () => {
@@ -174,7 +176,7 @@ describe("Folder in-page browsing", () => {
       expect(screen.getByText("file1.txt")).toBeInTheDocument();
     });
     // browseFile called without path (root of folder)
-    expect(mockApi.browseFile).toHaveBeenLastCalledWith(1, undefined);
+    expect(mockApi.browseFile).toHaveBeenLastCalledWith(folderFile.content_hash, undefined);
   });
 
   test("clicking 根目录 returns to file list", async () => {
@@ -206,7 +208,7 @@ describe("Folder in-page browsing", () => {
 
   test("selecting only files and clicking batch download triggers download", async () => {
     mockApi.downloadFileUrl.mockImplementation(
-      (fileId: number, path?: string) => `http://test/download/${fileId}/${path}`
+      (fileHash: string, path?: string) => `http://test/download/${fileHash}/${path}`
     );
     await renderAndWait();
     await enterFolder();
@@ -222,7 +224,7 @@ describe("Folder in-page browsing", () => {
     await waitFor(() => {
       expect(mockApi.downloadFileUrl).toHaveBeenCalled();
     });
-    expect(mockApi.downloadFileUrl).toHaveBeenCalledWith(1, expect.any(String));
+    expect(mockApi.downloadFileUrl).toHaveBeenCalledWith(folderFile.content_hash, expect.any(String));
   });
 
   test("select all selects all items including directories", async () => {
@@ -288,7 +290,7 @@ describe("Folder in-page browsing", () => {
       space: { used: 1024, quota: 10240, frozen: 0, available: 9216 },
     } as any);
     mockApi.downloadFileUrl.mockImplementation(
-      (fileId: number) => `http://test/download/${fileId}`
+      (fileHash: string) => `http://test/download/${fileHash}`
     );
 
     render(
@@ -309,7 +311,7 @@ describe("Folder in-page browsing", () => {
     fireEvent.click(downloadBtn);
 
     await waitFor(() => {
-      expect(mockApi.downloadFileUrl).toHaveBeenCalledWith(2);
+      expect(mockApi.downloadFileUrl).toHaveBeenCalledWith(regularFile.content_hash);
     });
   });
 

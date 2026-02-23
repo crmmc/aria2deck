@@ -92,10 +92,14 @@ describe("AuthProvider", () => {
     render(
       <AuthProvider>
         <div data-testid="child">Child</div>
+        <TestComponent />
       </AuthProvider>
     );
     
     expect(screen.getByTestId("child")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("loading").textContent).toBe("false");
+    });
   });
 
   it("shows loading state initially", async () => {
@@ -198,12 +202,14 @@ describe("AuthProvider", () => {
       expect(screen.getByTestId("user").textContent).toBe("test");
     });
     
-    await act(async () => {
+    act(() => {
       screen.getByText("Logout").click();
     });
-    
-    expect(mockApi.logout).toHaveBeenCalled();
-    expect(mockRouter.push).toHaveBeenCalledWith("/login");
+
+    await waitFor(() => {
+      expect(mockApi.logout).toHaveBeenCalled();
+      expect(mockRouter.push).toHaveBeenCalledWith("/login");
+    });
   });
 
   it("refreshUser updates user state", async () => {
@@ -221,7 +227,7 @@ describe("AuthProvider", () => {
       expect(screen.getByTestId("user").textContent).toBe("user1");
     });
     
-    await act(async () => {
+    act(() => {
       screen.getByText("Refresh").click();
     });
     
@@ -246,7 +252,7 @@ describe("AuthProvider", () => {
       expect(screen.getByTestId("error").textContent).toBe("无法连接服务器，请检查网络连接");
     });
     
-    await act(async () => {
+    act(() => {
       screen.getByText("Retry").click();
     });
     
@@ -269,7 +275,7 @@ describe("AuthProvider", () => {
       expect(screen.getByTestId("user").textContent).toBe("test");
     });
     
-    await act(async () => {
+    act(() => {
       mockAuthEvents.emit();
     });
     
