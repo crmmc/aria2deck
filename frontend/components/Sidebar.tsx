@@ -260,16 +260,6 @@ function SidebarContent({ user }: SidebarProps) {
             </div>
 
             <Link
-              href="/shares"
-              className="more-menu-item"
-              onClick={() => setShowMoreMenu(false)}
-            >
-              <span className="more-menu-icon">
-                <ShareIcon />
-              </span>
-              分享
-            </Link>
-            <Link
               href="/profile"
               className="more-menu-item"
               onClick={() => setShowMoreMenu(false)}
@@ -354,15 +344,15 @@ function SidebarContent({ user }: SidebarProps) {
             { name: "设置", href: "/profile", icon: <ProfileIcon /> },
             ...(user?.is_admin
               ? [
-                  {
-                    name: "多用户管理",
-                    href: "/users",
-                    dividerBefore: true,
-                    icon: <UsersIcon />,
-                  },
-                  { name: "存储管理", href: "/storage", icon: <StorageIcon /> },
-                  { name: "系统设置", href: "/settings", icon: <SettingsIcon /> },
-                ]
+                {
+                  name: "多用户管理",
+                  href: "/users",
+                  dividerBefore: true,
+                  icon: <UsersIcon />,
+                },
+                { name: "存储管理", href: "/storage", icon: <StorageIcon /> },
+                { name: "系统设置", href: "/settings", icon: <SettingsIcon /> },
+              ]
               : []),
           ].map((item) => (
             <div key={item.href}>
