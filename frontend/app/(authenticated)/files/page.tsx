@@ -899,7 +899,7 @@ export default function FilesPage() {
                     <List
                       style={{ height: safeHeight, width: safeWidth }}
                       rowCount={sortedBrowseContents.length}
-                      rowHeight={60}
+                      rowHeight={80}
                       rowProps={{}}
                       rowComponent={({ index, style }) => {
                         const item = sortedBrowseContents[index];
@@ -912,10 +912,10 @@ export default function FilesPage() {
                                 display: 'grid',
                                 gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px',
                                 height: '100%',
-                                alignItems: 'center'
+                                alignItems: 'flex-start'
                               }}
                             >
-                              <div className="table-cell">
+                              <div className="table-cell" style={{ paddingTop: '20px' }}>
                                 <input
                                   type="checkbox"
                                   checked={selectedBrowseFiles.has(itemKey)}
@@ -923,7 +923,7 @@ export default function FilesPage() {
                                   className="checkbox-sm cursor-pointer"
                                 />
                               </div>
-                              <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
+                              <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all', paddingTop: '14px', paddingBottom: '14px' }}>
                                 <div className="flex items-center gap-2">
                                   <span className="file-icon">
                                     {item.is_directory ? "📁" : "📄"}
@@ -941,10 +941,10 @@ export default function FilesPage() {
                                   )}
                                 </div>
                               </div>
-                              <div className="table-cell text-right muted text-base" data-label="大小">
+                              <div className="table-cell text-right muted text-base" data-label="大小" style={{ paddingTop: '20px' }}>
                                 {item.is_directory ? "-" : formatBytes(item.size)}
                               </div>
-                              <div className="table-cell text-right">
+                              <div className="table-cell text-right" style={{ paddingTop: '14px' }}>
                                 <div className="flex gap-2 flex-end">
                                   {item.is_directory ? (
                                     <button
@@ -1135,7 +1135,7 @@ export default function FilesPage() {
                     <List
                       style={{ height: safeHeight, width: safeWidth }}
                       rowCount={sortedFiles.length}
-                      rowHeight={60}
+                      rowHeight={80}
                       rowProps={{}}
                       rowComponent={({ index, style }) => {
                         const file = sortedFiles[index];
@@ -1147,10 +1147,10 @@ export default function FilesPage() {
                                 display: 'grid',
                                 gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px',
                                 height: '100%',
-                                alignItems: 'center'
+                                alignItems: 'flex-start'
                               }}
                             >
-                              <div className="table-cell">
+                              <div className="table-cell" style={{ paddingTop: '20px' }}>
                                 <input
                                   type="checkbox"
                                   checked={selectedFiles.has(file.id)}
@@ -1158,7 +1158,7 @@ export default function FilesPage() {
                                   className="checkbox-sm cursor-pointer"
                                 />
                               </div>
-                              <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
+                              <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all', paddingTop: '14px', paddingBottom: '14px' }}>
                                 {renaming === file.id ? (
                                   <div className="flex gap-2">
                                     <input
@@ -1204,13 +1204,13 @@ export default function FilesPage() {
                                   </div>
                                 )}
                               </div>
-                              <div className="table-cell text-right muted text-base" data-label="大小">
+                              <div className="table-cell text-right muted text-base" data-label="大小" style={{ paddingTop: '20px' }}>
                                 {formatBytes(file.size)}
                               </div>
-                              <div className="table-cell text-right muted text-sm" data-label="添加时间">
+                              <div className="table-cell text-right muted text-sm" data-label="添加时间" style={{ paddingTop: '22px' }}>
                                 {formatDate(file.created_at)}
                               </div>
-                              <div className="table-cell text-right">
+                              <div className="table-cell text-right" style={{ paddingTop: '14px' }}>
                                 <div className="flex gap-2 flex-end">
                                   {file.is_directory ? (
                                     <button
