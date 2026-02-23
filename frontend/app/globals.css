@@ -1851,6 +1851,21 @@ p {
   flex-shrink: 0;
 }
 
+/* Task Progress (in footer-right) */
+.task-progress {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Task Speed (in footer-right) */
+.task-speed {
+  font-size: 12px;
+  color: var(--success);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Task Error Text */
 .task-error-text {
   font-size: 13px;

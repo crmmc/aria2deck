@@ -123,11 +123,6 @@ const TaskCard = memo(function TaskCard({
                     ? "失败"
                     : task.status}
             </span>
-            {task.total_length > 0 && task.status !== "error" && (
-              <span className="muted tabular-nums text-sm">
-                {((task.completed_length / task.total_length) * 100).toFixed(1)}%
-              </span>
-            )}
             {task.error && (
               <span className="text-danger text-sm" title={task.error}>
                 {task.error}
@@ -172,6 +167,16 @@ const TaskCard = memo(function TaskCard({
               >
                 删除
               </button>
+            )}
+            {task.total_length > 0 && task.status !== "error" && (
+              <span className="task-progress-text">
+                {((task.completed_length / task.total_length) * 100).toFixed(0)}%
+              </span>
+            )}
+            {task.status === "active" && task.download_speed > 0 && (
+              <span className="task-speed-badge">
+                {formatBytes(task.download_speed)}/s
+              </span>
             )}
           </div>
         </div>
