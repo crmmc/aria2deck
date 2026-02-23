@@ -51,3 +51,49 @@ class RpcAccessStatus(BaseModel):
 class RpcAccessToggle(BaseModel):
     """RPC 访问开关请求"""
     enabled: bool
+
+
+# ========== Share Schemas ==========
+
+
+class CreateShareRequest(BaseModel):
+    """创建分享请求"""
+    user_file_id: int
+    password: str | None = Field(default=None, max_length=100)
+    expires_in: int | None = Field(default=None, gt=0, le=2592000)  # 秒，最大30天
+    max_downloads: int | None = Field(default=None, gt=0, le=10000)
+
+
+class ShareLinkOut(BaseModel):
+    """分享链接响应"""
+    id: int
+    share_code: str
+    file_name: str
+    file_size: int
+    has_password: bool
+    expires_at: str | None
+    max_downloads: int | None
+    download_count: int
+    status: str
+    created_at: str
+    last_accessed_at: str | None
+
+
+class ShareInfoOut(BaseModel):
+    """公开分享信息（无需登录）"""
+    file_name: str
+    file_size: int
+    is_directory: bool
+    has_password: bool
+    is_expired: bool
+    is_exhausted: bool  # 下载次数已用完
+
+
+class ShareAccessRequest(BaseModel):
+    """分享密码验证请求"""
+    password: str = Field(min_length=1, max_length=100)
+
+
+class ShareAccessResponse(BaseModel):
+    """分享密码验证响应"""
+    access_token: str

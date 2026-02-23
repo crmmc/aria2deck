@@ -301,6 +301,38 @@ def init_db() -> None:
         )
         conn.commit()
 
+
+        # 分享链接表
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS share_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                share_code TEXT NOT NULL UNIQUE,
+                owner_id INTEGER NOT NULL,
+                user_file_id INTEGER NOT NULL,
+                password_hash TEXT,
+                expires_at TEXT,
+                max_downloads INTEGER,
+                download_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                last_accessed_at TEXT,
+                FOREIGN KEY(owner_id) REFERENCES users(id),
+                FOREIGN KEY(user_file_id) REFERENCES user_files(id)
+            )
+            """
+        )
+        conn.commit()
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS ix_share_links_share_code ON share_links(share_code)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS ix_share_links_owner_id ON share_links(owner_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS ix_share_links_user_file_id ON share_links(user_file_id)"
+        )
+        conn.commit()
     finally:
         cur.close()
         conn.close()

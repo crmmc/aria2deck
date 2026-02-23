@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text, update
-from sqlmodel import select
+from sqlmodel import func, or_, select
 from starlette.responses import StreamingResponse
 from urllib.parse import quote
 
@@ -23,7 +23,7 @@ from app.auth import require_user
 from app.core.config import settings
 from app.core.rate_limit import api_limiter
 from app.database import get_session
-from app.models import User, PackTask, UserFile, StoredFile
+from app.models import User, PackTask, UserFile, StoredFile, ShareLink
 from app.services.storage import (
     delete_user_file_reference,
     get_user_space_info,
@@ -553,6 +553,25 @@ async def delete_file(
         )
 
     user_file, _ = row
+    # 检查是否有活跃分享
+    async with get_session() as db:
+
+        now_str = datetime.now(timezone.utc).isoformat()
+        active_share_count = await db.scalar(
+            select(func.count()).select_from(ShareLink).where(
+                ShareLink.user_file_id == user_file.id,
+                ShareLink.status == "active",
+                or_(
+                    ShareLink.expires_at.is_(None),  # type: ignore[union-attr]
+                    ShareLink.expires_at > now_str,  # type: ignore[operator]
+                ),
+            )
+        )
+        if active_share_count and active_share_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="该文件有活跃的分享链接，请先失效所有分享后再删除"
+            )
     # Delete reference (handles ref_count and physical file cleanup)
     success = await delete_user_file_reference(user_file.id)
     if not success:

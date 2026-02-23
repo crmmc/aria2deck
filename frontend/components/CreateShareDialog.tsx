@@ -1,0 +1,162 @@
+"use client";
+
+import { useState } from "react";
+import { api } from "@/lib/api";
+import { useToast } from "@/components/Toast";
+import type { ShareLink } from "@/types";
+
+interface CreateShareDialogProps {
+  userFileId: number;
+  fileName: string;
+  onClose: () => void;
+  onCreated?: (share: ShareLink) => void;
+}
+
+const EXPIRE_OPTIONS = [
+  { label: "1 小时", value: 3600 },
+  { label: "1 天", value: 86400 },
+  { label: "7 天", value: 604800 },
+  { label: "30 天", value: 2592000 },
+  { label: "永久", value: 0 },
+];
+
+export default function CreateShareDialog({
+  userFileId,
+  fileName,
+  onClose,
+  onCreated,
+}: CreateShareDialogProps) {
+  const { showToast } = useToast();
+  const [password, setPassword] = useState("");
+  const [expiresIn, setExpiresIn] = useState(604800); // 默认7天
+  const [maxDownloads, setMaxDownloads] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createdShare, setCreatedShare] = useState<ShareLink | null>(null);
+  const handleCreate = async () => {
+    setCreating(true);
+    try {
+      const share = await api.createShare({
+        user_file_id: userFileId,
+        password: password || undefined,
+        expires_in: expiresIn || undefined,
+        max_downloads: maxDownloads ? parseInt(maxDownloads, 10) : undefined,
+      });
+      setCreatedShare(share);
+      onCreated?.(share);
+      showToast("分享创建成功", "success");
+    } catch (err) {
+      showToast(`创建失败: ${(err as Error).message}`, "error");
+    } finally {
+      setCreating(false);
+    }
+  };
+  const shareUrl = createdShare
+    ? `${window.location.origin}/s/${createdShare.share_code}`
+    : "";
+  const copyLink = () => {
+    navigator.clipboard.writeText(shareUrl).then(
+      () => showToast("链接已复制", "success"),
+      () => showToast("复制失败", "error"),
+    );
+  };
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 className="modal-title">创建分享</h3>
+          <button type="button" className="modal-close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <div className="modal-body">
+          <p className="text-sm muted mb-3">文件: {fileName}</p>
+          {createdShare ? (
+            <div>
+              <div className="mb-3">
+                <label className="label">分享链接</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    className="input flex-1"
+                    value={shareUrl}
+                    readOnly
+                  />
+                  <button
+                    type="button"
+                    className="button primary"
+                    onClick={copyLink}
+                  >
+                    复制
+                  </button>
+                </div>
+              </div>
+              {createdShare.has_password && (
+                <p className="text-sm muted">密码: {password}</p>
+              )}
+              <button
+                type="button"
+                className="button secondary mt-3"
+                style={{ width: "100%" }}
+                onClick={onClose}
+              >
+                关闭
+              </button>
+            </div>
+          ) : (
+            <div>
+              <div className="mb-3">
+                <label className="label">有效期</label>
+                <select
+                  className="select"
+                  style={{ width: "100%" }}
+                  value={expiresIn}
+                  onChange={(e) => setExpiresIn(Number(e.target.value))}
+                >
+                  {EXPIRE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="mb-3">
+                <label className="label">密码（可选）</label>
+                <input
+                  type="text"
+                  className="input"
+                  style={{ width: "100%" }}
+                  placeholder="留空则无需密码"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  maxLength={100}
+                />
+              </div>
+              <div className="mb-3">
+                <label className="label">下载次数限制（可选）</label>
+                <input
+                  type="number"
+                  className="input"
+                  style={{ width: "100%" }}
+                  placeholder="留空则不限"
+                  value={maxDownloads}
+                  onChange={(e) => setMaxDownloads(e.target.value)}
+                  min={1}
+                  max={10000}
+                />
+              </div>
+              <button
+                type="button"
+                className={`button primary${creating ? " opacity-60" : ""}`}
+                style={{ width: "100%" }}
+                onClick={handleCreate}
+                disabled={creating}
+              >
+                {creating ? "创建中..." : "创建分享"}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

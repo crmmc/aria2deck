@@ -79,7 +79,7 @@ from app.database import (
     check_database_integrity,
     check_wal_integrity,
 )
-from app.routers import aria2_rpc, auth, config, files, history, stats, storage, tasks, users, ws
+from app.routers import aria2_rpc, auth, config, files, history, shares, stats, storage, tasks, users, ws
 from app.services.repair import run_startup_repair
 
 
@@ -224,6 +224,7 @@ def create_app() -> FastAPI:
     app.include_router(storage.router)
     app.include_router(ws.router)
     app.include_router(aria2_rpc.router)
+    app.include_router(shares.router)
 
     # 静态导出时，Next.js 生成的是 /tasks.html 而不是 /tasks/index.html
     # 这里通过中间件统一把无后缀路径映射到对应 HTML，避免直接刷新 404
@@ -242,6 +243,7 @@ def create_app() -> FastAPI:
             "/history": "history.html",
             "/profile": "profile.html",
             "/storage": "storage.html",
+            "/shares": "shares.html",
         }
 
         @app.middleware("http")
@@ -251,6 +253,11 @@ def create_app() -> FastAPI:
                 target = html_path(alias_map[path])
                 if target.exists():
                     return FileResponse(target)
+            # 公开分享页面：/s/{code} 统一返回 s/[code].html
+            if path.startswith("/s/") and len(path) > 3:
+                share_html = static_dir / "s" / "[code].html"
+                if share_html.exists():
+                    return FileResponse(share_html)
             return await call_next(request)
 
     # 挂载静态文件用于服务前端

@@ -35,6 +35,7 @@ class User(SQLModel, table=True):
     )
     files: list["UserFile"] = Relationship(back_populates="owner", cascade_delete=True)
     task_history: list["TaskHistory"] = Relationship(back_populates="owner", cascade_delete=True)
+    share_links: list["ShareLink"] = Relationship(back_populates="owner", cascade_delete=True)
 
 
 class Session(SQLModel, table=True):
@@ -206,6 +207,7 @@ class UserFile(SQLModel, table=True):
     # Relationships
     owner: Optional[User] = Relationship(back_populates="files")
     stored_file: Optional[StoredFile] = Relationship(back_populates="user_files")
+    share_links: list["ShareLink"] = Relationship(back_populates="user_file", cascade_delete=True)
 
 
 class UserTaskSubscription(SQLModel, table=True):
@@ -266,3 +268,40 @@ class TaskHistory(SQLModel, table=True):
 
     # Relationships
     owner: Optional[User] = Relationship(back_populates="task_history")
+
+
+
+class ShareLink(SQLModel, table=True):
+    """文件分享链接
+    允许未注册用户通过短码下载文件。
+    支持密码保护、有效期、下载次数限制。
+    """
+    __tablename__ = "share_links"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    # 分享标识
+    share_code: str = Field(index=True, unique=True, max_length=16)
+
+    # 归属
+    owner_id: int = Field(foreign_key="users.id", index=True)
+    user_file_id: int = Field(foreign_key="user_files.id", index=True)
+
+    # 访问控制
+    password_hash: Optional[str] = None  # None = 无密码
+    expires_at: Optional[str] = None  # ISO datetime, None = 永不过期
+    max_downloads: Optional[int] = None  # None = 不限次数
+
+    # 统计
+    download_count: int = Field(default=0)
+
+    # 状态: active / revoked
+    status: str = Field(default="active")
+
+    # 时间戳
+    created_at: str = Field(default_factory=utc_now_str)
+    last_accessed_at: Optional[str] = None
+
+    # Relationships
+    owner: Optional[User] = Relationship(back_populates="share_links")
+    user_file: Optional[UserFile] = Relationship(back_populates="share_links")

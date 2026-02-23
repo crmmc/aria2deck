@@ -167,3 +167,36 @@ export type BulkDeleteResponse = {
   failed_ids: number[];
   errors: string[];
 };
+
+
+// Share link (user's view)
+export type ShareLink = {
+  id: number;
+  share_code: string;
+  file_name: string;
+  file_size: number;
+  has_password: boolean;
+  expires_at: string | null;
+  max_downloads: number | null;
+  download_count: number;
+  status: "active" | "revoked";
+  created_at: string;
+  last_accessed_at: string | null;
+};
+
+// Public share info (no auth required)
+export type ShareInfo = {
+  file_name: string;
+  file_size: number;
+  is_directory: boolean;
+  has_password: boolean;
+  is_expired: boolean;
+  is_exhausted: boolean;
+};
+
+export type CreateShareRequest = {
+  user_file_id: number;
+  password?: string;
+  expires_in?: number;  // seconds
+  max_downloads?: number;
+};

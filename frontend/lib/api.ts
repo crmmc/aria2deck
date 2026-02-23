@@ -14,6 +14,9 @@ import type {
   StoredFileListResponse,
   FileUsersResponse,
   BulkDeleteResponse,
+  ShareLink,
+  ShareInfo,
+  CreateShareRequest,
 } from "@/types";
 import { hashPassword } from "./crypto";
 
@@ -282,6 +285,50 @@ export const api = {
       method: "DELETE",
       body: JSON.stringify({ file_ids: fileIds }),
     }),
+  // Shares
+  createShare: (data: CreateShareRequest) =>
+    request<ShareLink>("/api/shares", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  listShares: () => request<ShareLink[]>("/api/shares"),
+  revokeShare: (shareId: number) =>
+    request<{ ok: boolean }>(`/api/shares/${shareId}/revoke`, {
+      method: "PUT",
+    }),
+  deleteShare: (shareId: number) =>
+    request<{ ok: boolean }>(`/api/shares/${shareId}`, {
+      method: "DELETE",
+    }),
+  revokeAllShares: () =>
+    request<{ ok: boolean; count: number }>("/api/shares/revoke-all", {
+      method: "PUT",
+    }),
+  // Public share (no auth)
+  getShareInfo: (code: string) =>
+    request<ShareInfo>(`/api/s/${code}`),
+  accessShare: (code: string, password: string) =>
+    request<{ access_token: string }>(`/api/s/${code}/access`, {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    }),
+  shareDownloadUrl: (code: string, token?: string, subpath?: string) => {
+    const base = getApiBase();
+    const params = new URLSearchParams();
+    if (token) params.set("token", token);
+    if (subpath) params.set("subpath", subpath);
+    const query = params.toString();
+    return `${base}/api/s/${code}/download${query ? `?${query}` : ""}`;
+  },
+  browseShare: (code: string, token?: string, subpath?: string) => {
+    const params = new URLSearchParams();
+    if (token) params.set("token", token);
+    if (subpath) params.set("subpath", subpath);
+    const query = params.toString();
+    return request<Array<{ name: string; is_dir: boolean; size: number; path: string }>>(
+      `/api/s/${code}/browse${query ? `?${query}` : ""}`
+    );
+  },
 };
 
 export function taskWsUrl(): string {
