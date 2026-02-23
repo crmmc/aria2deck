@@ -222,10 +222,14 @@ export const api = {
     request<BrowseFileInfo[]>(
       `/api/files/${fileHash}/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`
     ),
-  downloadFileUrl: (fileHash: string, path?: string) => {
+  downloadFileUrl: (fileHash: string, path?: string, displayName?: string) => {
     const base = getApiBase();
+    // Put real filename as last URL path segment for download-manager compatibility
+    const urlFileName = path
+      ? encodeURIComponent(path.split("/").pop() || "download")
+      : encodeURIComponent(displayName || "download");
     const pathParam = path ? `?path=${encodeURIComponent(path)}` : "";
-    return `${base}/api/files/${fileHash}/download${pathParam}`;
+    return `${base}/api/files/${fileHash}/download/${urlFileName}${pathParam}`;
   },
   deleteFile: (fileHash: string) =>
     request<{ ok: boolean }>(`/api/files/${fileHash}`, {
