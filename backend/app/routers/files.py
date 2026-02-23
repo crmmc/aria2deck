@@ -156,9 +156,11 @@ def _range_file_response(request: Request, file_path: Path, filename: str):
 
     range_header = request.headers.get("range")
     if not range_header:
+        # Do NOT pass `filename=` to FileResponse — uvicorn encodes headers
+        # with latin-1, which crashes on CJK characters (UnicodeEncodeError).
+        # We set Content-Disposition manually with RFC 5987 UTF-8 encoding.
         return FileResponse(
             path=str(file_path),
-            filename=filename,
             media_type="application/octet-stream",
             headers={"Accept-Ranges": "bytes", "Content-Disposition": disposition},
         )
