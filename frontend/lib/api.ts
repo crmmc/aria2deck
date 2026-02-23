@@ -222,15 +222,10 @@ export const api = {
     request<BrowseFileInfo[]>(
       `/api/files/${fileHash}/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`
     ),
-  downloadFileUrl: (fileHash: string, path?: string, displayName?: string) => {
+  downloadFileUrl: (fileHash: string, path?: string) => {
     const base = getApiBase();
-    // Use short hint in URL path (extension only) to keep URLs proxy-safe.
-    // The real filename is delivered via Content-Disposition header.
-    const nameSource = path ? (path.split("/").pop() || "") : (displayName || "");
-    const extMatch = nameSource.match(/\.[a-zA-Z0-9]+$/);
-    const urlHint = extMatch ? `file${extMatch[0]}` : "file";
     const pathParam = path ? `?path=${encodeURIComponent(path)}` : "";
-    return `${base}/api/files/${fileHash}/download/${encodeURIComponent(urlHint)}${pathParam}`;
+    return `${base}/api/files/${fileHash}/download${pathParam}`;
   },
   deleteFile: (fileHash: string) =>
     request<{ ok: boolean }>(`/api/files/${fileHash}`, {

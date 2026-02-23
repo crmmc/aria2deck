@@ -150,9 +150,11 @@ def _validate_subpath(base_path: Path, subpath: str) -> Path:
 def _range_file_response(request: Request, file_path: Path, filename: str):
     """支持 Range 请求的文件下载响应（多线程下载/断点续传）"""
     file_size = file_path.stat().st_size
-    safe_name = filename.replace('"', '\\"')
     encoded_name = quote(filename)
-    disposition = f"attachment; filename=\"{safe_name}\"; filename*=UTF-8''{encoded_name}"
+    if encoded_name != filename:
+        disposition = f"attachment; filename*=utf-8''{encoded_name}"
+    else:
+        disposition = f'attachment; filename="{filename}"'
 
     range_header = request.headers.get("range")
     if not range_header:
@@ -364,13 +366,11 @@ async def browse_file(
     return files
 
 
-@router.get("/{file_hash}/download/{_filename:path}")
 @router.get("/{file_hash}/download")
 async def download_file(
     file_hash: str,
     request: Request,
     path: str = "",
-    _filename: str = "",
     user: User = Depends(require_user),
 ):
     """下载文件
