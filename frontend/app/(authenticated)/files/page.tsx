@@ -401,28 +401,14 @@ export default function FilesPage() {
   const handleDownload = async (contentHash: string, fileName: string, fileId?: number, subpath?: string) => {
     setDownloadingFile(fileId ?? null);
     try {
-      const url = api.downloadFileUrl(contentHash, subpath);
       const downloadName = subpath ? subpath.split("/").pop() || fileName : fileName;
-      const res = await fetch(url, { credentials: "include" });
-      if (!res.ok) {
-        const text = await res.text();
-        let msg = `下载失败 (${res.status})`;
-        try {
-          const parsed = JSON.parse(text);
-          if (parsed.detail) msg = parsed.detail;
-        } catch { /* ignore */ }
-        showToast(msg, "error");
-        return;
-      }
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
+      const url = api.downloadFileUrl(contentHash, subpath, fileName);
       const a = document.createElement("a");
-      a.href = blobUrl;
+      a.href = url;
       a.download = downloadName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(blobUrl);
     } catch (err) {
       showToast(`下载失败: ${(err as Error).message}`, "error");
     } finally {

@@ -362,11 +362,13 @@ async def browse_file(
     return files
 
 
+@router.get("/{file_hash}/download/{_filename:path}")
 @router.get("/{file_hash}/download")
 async def download_file(
     file_hash: str,
     request: Request,
     path: str = "",
+    _filename: str = "",
     user: User = Depends(require_user),
 ):
     """下载文件
