@@ -131,6 +131,25 @@ const StorageIcon = () => (
   </svg>
 );
 
+const ShareIcon = () => (
+  <svg
+    width="20"
+    height="20"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <circle cx="18" cy="5" r="3" />
+    <circle cx="6" cy="12" r="3" />
+    <circle cx="18" cy="19" r="3" />
+    <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+    <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+  </svg>
+);
+
 const LogoutIcon = () => (
   <svg
     width="20"
@@ -196,6 +215,7 @@ function SidebarContent({ user }: SidebarProps) {
     { name: "任务", href: "/tasks", icon: <TasksIcon /> },
     { name: "历史", href: "/history", icon: <HistoryIcon /> },
     { name: "文件", href: "/files", icon: <FilesIcon /> },
+    { name: "分享", href: "/shares", icon: <ShareIcon /> },
     { name: "设置", href: "/profile", icon: <ProfileIcon /> },
   ];
 
@@ -309,6 +329,7 @@ function SidebarContent({ user }: SidebarProps) {
             { name: "任务", href: "/tasks", icon: <TasksIcon /> },
             { name: "任务历史", href: "/history", icon: <HistoryIcon /> },
             { name: "文件", href: "/files", icon: <FilesIcon /> },
+            { name: "分享", href: "/shares", icon: <ShareIcon /> },
             { name: "设置", href: "/profile", icon: <ProfileIcon /> },
             ...(user?.is_admin
               ? [

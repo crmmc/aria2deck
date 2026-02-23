@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
 import PackTaskCard from "@/components/PackTaskCard";
+import CreateShareDialog from "@/components/CreateShareDialog";
 import type { FileInfo, BrowseFileInfo, SpaceInfo } from "@/types";
 import { List } from "react-window";
 import { AutoSizer } from "react-virtualized-auto-sizer";
@@ -54,6 +55,8 @@ export default function FilesPage() {
   const [packTasksKey, setPackTasksKey] = useState(0);
   const [downloadingFile, setDownloadingFile] = useState<number | null>(null);
 
+  // Share dialog state
+  const [shareDialogFile, setShareDialogFile] = useState<{ id: number; name: string } | null>(null);
   // Pack dialog state
   const [packDialogOpen, setPackDialogOpen] = useState(false);
   const [packSize, setPackSize] = useState<number | null>(null);
@@ -1042,6 +1045,12 @@ export default function FilesPage() {
                                 重命名
                               </button>
                               <button
+                                className="button secondary btn-sm"
+                                onClick={() => setShareDialogFile({ id: file.id, name: file.name })}
+                              >
+                                分享
+                              </button>
+                              <button
                                 className="button secondary danger btn-sm"
                                 onClick={() => handleDelete(file)}
                               >
@@ -1247,6 +1256,14 @@ export default function FilesPage() {
             )}
           </div>
         </div>
+      )}
+      {/* Share Dialog */}
+      {shareDialogFile && (
+        <CreateShareDialog
+          userFileId={shareDialogFile.id}
+          fileName={shareDialogFile.name}
+          onClose={() => setShareDialogFile(null)}
+        />
       )}
     </div>
   );
