@@ -224,12 +224,13 @@ export const api = {
     ),
   downloadFileUrl: (fileHash: string, path?: string, displayName?: string) => {
     const base = getApiBase();
-    // Put real filename as last URL path segment for download-manager compatibility
-    const urlFileName = path
-      ? encodeURIComponent(path.split("/").pop() || "download")
-      : encodeURIComponent(displayName || "download");
+    // Use short hint in URL path (extension only) to keep URLs proxy-safe.
+    // The real filename is delivered via Content-Disposition header.
+    const nameSource = path ? (path.split("/").pop() || "") : (displayName || "");
+    const extMatch = nameSource.match(/\.[a-zA-Z0-9]+$/);
+    const urlHint = extMatch ? `file${extMatch[0]}` : "file";
     const pathParam = path ? `?path=${encodeURIComponent(path)}` : "";
-    return `${base}/api/files/${fileHash}/download/${urlFileName}${pathParam}`;
+    return `${base}/api/files/${fileHash}/download/${encodeURIComponent(urlHint)}${pathParam}`;
   },
   deleteFile: (fileHash: string) =>
     request<{ ok: boolean }>(`/api/files/${fileHash}`, {
