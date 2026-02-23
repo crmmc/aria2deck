@@ -215,6 +215,7 @@ function SidebarContent({ user }: SidebarProps) {
     { name: "任务", href: "/tasks", icon: <TasksIcon /> },
     { name: "历史", href: "/history", icon: <HistoryIcon /> },
     { name: "文件", href: "/files", icon: <FilesIcon /> },
+    { name: "分享", href: "/shares", icon: <ShareIcon /> },
   ];
 
   return (
