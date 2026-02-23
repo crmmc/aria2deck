@@ -7,6 +7,7 @@ jest.mock("@/lib/api", () => ({
   api: {
     me: jest.fn(),
     logout: jest.fn(),
+    getSiteInfo: jest.fn().mockResolvedValue({ site_title: 'Test Site' }),
   },
   authEvents: {
     listeners: new Set<() => void>(),
