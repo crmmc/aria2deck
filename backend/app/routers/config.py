@@ -47,6 +47,7 @@ class ConfigUpdate(BaseModel):
     ws_reconnect_max_delay: float | None = Field(None, ge=1.0, le=300.0, description="最大重连延迟（秒）")
     ws_reconnect_jitter: float | None = Field(None, ge=0.0, le=1.0, description="抖动系数 (0-1)")
     ws_reconnect_factor: float | None = Field(None, ge=1.0, le=5.0, description="指数因子")
+    site_title: str | None = Field(None, max_length=50, description="网站标题")
 
 
 class Aria2TestRequest(BaseModel):
@@ -214,6 +215,17 @@ def get_ws_reconnect_factor() -> float:
     except ValueError:
         return 2.0
 
+def get_site_title() -> str:
+    """获取网站标题，默认 'Aria2 控制器'"""
+    val = get_config_value("site_title")
+    return val if val else "Aria2 控制器"
+
+@router.get("/public/site-info")
+async def get_public_site_info() -> dict:
+    """获取公开的网站信息（无需认证）"""
+    return {
+        "site_title": get_site_title(),
+    }
 
 @router.get("")
 async def get_config(admin: User = Depends(require_admin)) -> dict:
@@ -248,6 +260,7 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
         "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),
         "ws_reconnect_factor": get_ws_reconnect_factor(),
+        "site_title": get_site_title(),
     }
     logger.debug("获取系统配置 admin_id=%s", admin.id)
     return result
@@ -325,6 +338,9 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         factor = max(1.1, min(10.0, payload.ws_reconnect_factor))  # 1.1-10
         await set_config_value_async("ws_reconnect_factor", str(factor))
         changed_keys.append("ws_reconnect_factor")
+    if payload.site_title is not None:
+        await set_config_value_async("site_title", payload.site_title)
+        changed_keys.append("site_title")
     # 返回更新后的配置（secret 脱敏）
     aria2_rpc_url = await get_config_value_async("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
     aria2_rpc_secret = await get_config_value_async("aria2_rpc_secret") or ""
@@ -347,6 +363,7 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),
         "ws_reconnect_factor": get_ws_reconnect_factor(),
+        "site_title": get_site_title(),
     }
 
 

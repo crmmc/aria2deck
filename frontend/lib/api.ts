@@ -329,6 +329,8 @@ export const api = {
       `/api/s/${code}/browse${query ? `?${query}` : ""}`
     );
   },
+  // 公开 API（无需认证）
+  getSiteInfo: () => request<{ site_title: string }>("/api/config/public/site-info"),
 };
 
 export function taskWsUrl(): string {

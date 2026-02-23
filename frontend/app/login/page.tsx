@@ -9,6 +9,7 @@ export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [siteTitle, setSiteTitle] = useState('aria2 控制器');
 
   useEffect(() => {
     api
@@ -23,6 +24,12 @@ export default function LoginPage() {
       })
       .catch(() => {});
   }, [router]);
+  useEffect(() => {
+    api.getSiteInfo().then(info => {
+      setSiteTitle(info.site_title);
+      document.title = info.site_title;
+    }).catch(() => {});
+  }, []);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -44,7 +51,7 @@ export default function LoginPage() {
     <div className="fixed inset-0 flex-center p-4">
       <div className="glass-frame animate-in max-w-400 w-full">
         <div className="text-center mb-7">
-          <h1 className="text-xl">登录</h1>
+          <h1 className="text-xl">{siteTitle}</h1>
           <p className="muted">输入您的凭据以继续</p>
         </div>
 

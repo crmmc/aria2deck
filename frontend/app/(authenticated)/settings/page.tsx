@@ -27,6 +27,7 @@ export default function SettingsPage() {
   const [wsReconnectMaxDelay, setWsReconnectMaxDelay] = useState(60);
   const [wsReconnectJitter, setWsReconnectJitter] = useState(0.2);
   const [wsReconnectFactor, setWsReconnectFactor] = useState(2);
+  const [siteTitle, setSiteTitle] = useState("");
   const [aria2Status, setAria2Status] = useState<{
     connected: boolean;
     version?: string;
@@ -82,6 +83,7 @@ export default function SettingsPage() {
       setWsReconnectMaxDelay(cfg.ws_reconnect_max_delay ?? 60);
       setWsReconnectJitter(cfg.ws_reconnect_jitter ?? 0.2);
       setWsReconnectFactor(cfg.ws_reconnect_factor ?? 2);
+      setSiteTitle(cfg.site_title || "");
       setMachineStats(stats);
       setAria2Status(aria2Ver);
       setTestResult(null);
@@ -115,6 +117,7 @@ export default function SettingsPage() {
         ws_reconnect_max_delay: wsReconnectMaxDelay,
         ws_reconnect_jitter: wsReconnectJitter,
         ws_reconnect_factor: wsReconnectFactor,
+        site_title: siteTitle || undefined,
       });
 
       await loadConfig();
@@ -242,6 +245,19 @@ export default function SettingsPage() {
       <div className="card">
         <form onSubmit={saveConfig} className="max-w-600">
           <h2 className="section-title">系统配置</h2>
+
+          <div className="mb-6">
+            <label className="form-label-lg">网站标题</label>
+            <p className="muted text-sm mb-2">自定义网站标题，显示在侧边栏和页面标题中。留空使用默认值。</p>
+            <input
+              className="input"
+              type="text"
+              value={siteTitle}
+              onChange={(e) => setSiteTitle(e.target.value)}
+              placeholder="Aria2 控制器"
+              maxLength={50}
+            />
+          </div>
 
           <div className="mb-6">
             <label className="form-label-lg">最大任务大小 (GB)</label>

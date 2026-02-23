@@ -255,7 +255,7 @@ def create_app() -> FastAPI:
                     return FileResponse(target)
             # 公开分享页面：/s/{code} 统一返回 s/[code].html
             if path.startswith("/s/") and len(path) > 3:
-                share_html = static_dir / "s" / "[code].html"
+                share_html = static_dir / "s" / "_.html"
                 if share_html.exists():
                     return FileResponse(share_html)
             return await call_next(request)
