@@ -66,6 +66,16 @@ export default function FilesPage() {
   const [packing, setPacking] = useState(false);
   const [packLoading, setPackLoading] = useState(false);
 
+
+  // Mobile detection
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+
   useEffect(() => {
     if (showSearchModal) {
       document.body.style.overflow = "hidden";
@@ -774,121 +784,189 @@ export default function FilesPage() {
           </div>
         ) : (
           <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-              <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px', paddingRight: '16px' }}>
-              <div className="table-cell text-left">
-                <input
-                  type="checkbox"
-                  checked={(() => {
-                    const allKeys = browseContents
-                      .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
-                    return allKeys.length > 0 && allKeys.every((k) => selectedBrowseFiles.has(k));
-                  })()}
-                  onChange={toggleAllBrowseFiles}
-                  className="checkbox-sm cursor-pointer"
-                />
-              </div>
-              <div
-                className="table-cell text-left sortable-header"
-                onClick={() => handleSort("name")}
-              >
-                名称 <span className="sort-icon">{getSortIcon("name")}</span>
-              </div>
-              <div
-                className="table-cell text-right sortable-header"
-                onClick={() => handleSort("size")}
-              >
-                大小 <span className="sort-icon">{getSortIcon("size")}</span>
-              </div>
-              <div className="table-cell text-right">操作</div>
-            </div>
+              {!isMobile && (
+                <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px', paddingRight: '16px' }}>
+                  <div className="table-cell text-left">
+                    <input
+                      type="checkbox"
+                      checked={(() => {
+                        const allKeys = browseContents
+                          .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
+                        return allKeys.length > 0 && allKeys.every((k) => selectedBrowseFiles.has(k));
+                      })()}
+                      onChange={toggleAllBrowseFiles}
+                      className="checkbox-sm cursor-pointer"
+                    />
+                  </div>
+                  <div
+                    className="table-cell text-left sortable-header"
+                    onClick={() => handleSort("name")}
+                  >
+                    名称 <span className="sort-icon">{getSortIcon("name")}</span>
+                  </div>
+                  <div
+                    className="table-cell text-right sortable-header"
+                    onClick={() => handleSort("size")}
+                  >
+                    大小 <span className="sort-icon">{getSortIcon("size")}</span>
+                  </div>
+                  <div className="table-cell text-right">操作</div>
+                </div>
+              )}
 
-            <div style={{ flex: 1, minHeight: 320 }}>
-              <AutoSizer renderProp={({ height, width }) => {
-                const safeHeight = typeof height === "number" && height > 0 ? height : 400;
-                const safeWidth = typeof width === "number" && width > 0 ? width : 1200;
-                return (
-                  <List
-                    style={{ height: safeHeight, width: safeWidth }}
-                    rowCount={sortedBrowseContents.length}
-                    rowHeight={60}
-                    rowProps={{}}
-                    rowComponent={({ index, style }) => {
-                      const item = sortedBrowseContents[index];
-                      const itemKey = [...(browseContext?.path ?? []), item.name].join("/");
-                      return (
-                        <div style={style} key={item.name}>
-                          <div
-                            className="table-row transition-bg"
-                            style={{
-                              display: 'grid',
-                        gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px',
-                              height: '100%',
-                              alignItems: 'center'
-                            }}
-                          >
-                            <div className="table-cell">
-                              <input
-                                type="checkbox"
-                                checked={selectedBrowseFiles.has(itemKey)}
-                                onChange={() => toggleBrowseFileSelection(item)}
-                                className="checkbox-sm cursor-pointer"
-                              />
-                            </div>
-                            <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
-                              <div className="flex items-center gap-2">
-                                <span className="file-icon">
-                                  {item.is_directory ? "📁" : "📄"}
-                                </span>
-                                {item.is_directory ? (
-                                  <button
-                                    className="file-name-btn"
-                                    onClick={() => navigateIntoSubfolder(item.name)}
-                                    style={{ wordBreak: 'break-all', textAlign: 'left' }}
-                                  >
-                                    {item.name}
-                                  </button>
-                                ) : (
-                                  <span className="text-base" style={{ wordBreak: 'break-all' }}>{item.name}</span>
-                                )}
+            {isMobile ? (
+              <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+                {sortedBrowseContents.map((item) => {
+                  const itemKey = [...(browseContext?.path ?? []), item.name].join("/");
+                  return (
+                    <div key={item.name} className="table-row mobile-card">
+                      <div className="table-cell">
+                        <input
+                          type="checkbox"
+                          checked={selectedBrowseFiles.has(itemKey)}
+                          onChange={() => toggleBrowseFileSelection(item)}
+                          className="checkbox-sm cursor-pointer"
+                        />
+                      </div>
+                      <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
+                        <div className="flex items-center gap-2">
+                          <span className="file-icon">
+                            {item.is_directory ? "📁" : "📄"}
+                          </span>
+                          {item.is_directory ? (
+                            <button
+                              className="file-name-btn"
+                              onClick={() => navigateIntoSubfolder(item.name)}
+                              style={{ wordBreak: 'break-all', textAlign: 'left' }}
+                            >
+                              {item.name}
+                            </button>
+                          ) : (
+                            <span className="text-base" style={{ wordBreak: 'break-all' }}>{item.name}</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="table-cell text-right muted text-base" data-label="大小">
+                        {item.is_directory ? "-" : formatBytes(item.size)}
+                      </div>
+                      <div className="table-cell text-right">
+                        <div className="flex gap-2 flex-end">
+                          {item.is_directory ? (
+                            <button
+                              className="button secondary btn-sm"
+                              onClick={() => navigateIntoSubfolder(item.name)}
+                            >
+                              打开
+                            </button>
+                          ) : (
+                            <button
+                              className="button secondary btn-sm"
+                              onClick={() =>
+                                handleDownload(
+                                  browseContext!.fileHash,
+                                  item.name,
+                                  undefined,
+                                  [...browseContext!.path, item.name].join("/")
+                              )}
+                            >
+                              下载
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div style={{ flex: 1, minHeight: 320 }}>
+                <AutoSizer renderProp={({ height, width }) => {
+                  const safeHeight = typeof height === "number" && height > 0 ? height : 400;
+                  const safeWidth = typeof width === "number" && width > 0 ? width : 1200;
+                  return (
+                    <List
+                      style={{ height: safeHeight, width: safeWidth }}
+                      rowCount={sortedBrowseContents.length}
+                      rowHeight={60}
+                      rowProps={{}}
+                      rowComponent={({ index, style }) => {
+                        const item = sortedBrowseContents[index];
+                        const itemKey = [...(browseContext?.path ?? []), item.name].join("/");
+                        return (
+                          <div style={style} key={item.name}>
+                            <div
+                              className="table-row transition-bg"
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px',
+                                height: '100%',
+                                alignItems: 'center'
+                              }}
+                            >
+                              <div className="table-cell">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedBrowseFiles.has(itemKey)}
+                                  onChange={() => toggleBrowseFileSelection(item)}
+                                  className="checkbox-sm cursor-pointer"
+                                />
                               </div>
-                            </div>
-                            <div className="table-cell text-right muted text-base" data-label="大小">
-                              {item.is_directory ? "-" : formatBytes(item.size)}
-                            </div>
-                            <div className="table-cell text-right">
-                              <div className="flex gap-2 flex-end">
-                                {item.is_directory ? (
-                                  <button
-                                    className="button secondary btn-sm"
-                                    onClick={() => navigateIntoSubfolder(item.name)}
-                                  >
-                                    打开
-                                  </button>
-                                ) : (
-                                  <button
-                                    className="button secondary btn-sm"
-                                    onClick={() =>
-                                      handleDownload(
-                                        browseContext!.fileHash,
-                                        item.name,
-                                        undefined,
-                                        [...browseContext!.path, item.name].join("/")
-                                    )}
-                                  >
-                                    下载
-                                  </button>
-                                )}
+                              <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
+                                <div className="flex items-center gap-2">
+                                  <span className="file-icon">
+                                    {item.is_directory ? "📁" : "📄"}
+                                  </span>
+                                  {item.is_directory ? (
+                                    <button
+                                      className="file-name-btn"
+                                      onClick={() => navigateIntoSubfolder(item.name)}
+                                      style={{ wordBreak: 'break-all', textAlign: 'left' }}
+                                    >
+                                      {item.name}
+                                    </button>
+                                  ) : (
+                                    <span className="text-base" style={{ wordBreak: 'break-all' }}>{item.name}</span>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="table-cell text-right muted text-base" data-label="大小">
+                                {item.is_directory ? "-" : formatBytes(item.size)}
+                              </div>
+                              <div className="table-cell text-right">
+                                <div className="flex gap-2 flex-end">
+                                  {item.is_directory ? (
+                                    <button
+                                      className="button secondary btn-sm"
+                                      onClick={() => navigateIntoSubfolder(item.name)}
+                                    >
+                                      打开
+                                    </button>
+                                  ) : (
+                                    <button
+                                      className="button secondary btn-sm"
+                                      onClick={() =>
+                                        handleDownload(
+                                          browseContext!.fileHash,
+                                          item.name,
+                                          undefined,
+                                          [...browseContext!.path, item.name].join("/")
+                                      )}
+                                    >
+                                      下载
+                                    </button>
+                                  )}
+                                </div>
                               </div>
                             </div>
                           </div>
-                        </div>
-                      );
-                    }}
-                  />
-                );
-              }}
-              />
-            </div>
+                        );
+                      }}
+                    />
+                  );
+                }}
+                />
+              </div>
+            )}
           </div>
         )
       ) : (
@@ -907,166 +985,275 @@ export default function FilesPage() {
         </div>
       ) : (
         <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-              <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px', paddingRight: '16px' }}>
-             <div className="table-cell text-left">
-                  <input
-                    type="checkbox"
-                    checked={selectedFiles.size === sortedFiles.length && sortedFiles.length > 0}
-                    onChange={toggleSelectAll}
-                    className="checkbox-sm cursor-pointer"
-                  />
+              {!isMobile && (
+                <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px', paddingRight: '16px' }}>
+                  <div className="table-cell text-left">
+                    <input
+                      type="checkbox"
+                      checked={selectedFiles.size === sortedFiles.length && sortedFiles.length > 0}
+                      onChange={toggleSelectAll}
+                      className="checkbox-sm cursor-pointer"
+                    />
+                  </div>
+                  <div
+                    className="table-cell text-left sortable-header"
+                    onClick={() => handleSort("name")}
+                  >
+                    名称 <span className="sort-icon">{getSortIcon("name")}</span>
+                  </div>
+                  <div
+                    className="table-cell text-right sortable-header"
+                    onClick={() => handleSort("size")}
+                  >
+                    大小 <span className="sort-icon">{getSortIcon("size")}</span>
+                  </div>
+                  <div
+                    className="table-cell text-right sortable-header"
+                    onClick={() => handleSort("created_at")}
+                  >
+                    添加时间 <span className="sort-icon">{getSortIcon("created_at")}</span>
+                  </div>
+                  <div className="table-cell text-right">操作</div>
                 </div>
-                <div
-                  className="table-cell text-left sortable-header"
-                  onClick={() => handleSort("name")}
-                >
-                  名称 <span className="sort-icon">{getSortIcon("name")}</span>
-                </div>
-                <div
-                  className="table-cell text-right sortable-header"
-                  onClick={() => handleSort("size")}
-                >
-                  大小 <span className="sort-icon">{getSortIcon("size")}</span>
-                </div>
-                <div
-                  className="table-cell text-right sortable-header"
-                  onClick={() => handleSort("created_at")}
-                >
-                  添加时间 <span className="sort-icon">{getSortIcon("created_at")}</span>
-                </div>
-                <div className="table-cell text-right">操作</div>
-          </div>
+              )}
           
-          <div style={{ flex: 1, minHeight: 320 }}>
-            <AutoSizer renderProp={({ height, width }) => {
-                const safeHeight = typeof height === "number" && height > 0 ? height : 400;
-                const safeWidth = typeof width === "number" && width > 0 ? width : 1200;
-                return (
-                <List
-                  style={{ height: safeHeight, width: safeWidth }}
-                  rowCount={sortedFiles.length}
-                  rowHeight={60}
-                  rowProps={{}}
-                  rowComponent={({ index, style }) => {
-                    const file = sortedFiles[index];
-                    return (
-                      <div style={style} key={file.id}>
-                        <div 
-                          className="table-row transition-bg" 
-                          style={{ 
-                            display: 'grid', 
-                        gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px',
-                            height: '100%',
-                            alignItems: 'center'
+          {isMobile ? (
+            <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+              {sortedFiles.map((file) => (
+                <div key={file.id} className="table-row mobile-card">
+                  <div className="table-cell">
+                    <input
+                      type="checkbox"
+                      checked={selectedFiles.has(file.id)}
+                      onChange={() => toggleFileSelection(file.id)}
+                      className="checkbox-sm cursor-pointer"
+                    />
+                  </div>
+                  <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
+                    {renaming === file.id ? (
+                      <div className="flex gap-2">
+                        <input
+                          className="input py-1 px-3 text-base"
+                          value={newName}
+                          onChange={(e) => setNewName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleRename(file);
+                            if (e.key === "Escape") cancelRename();
                           }}
+                          autoFocus
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                        <button
+                          className="button secondary btn-sm"
+                          onClick={(e) => { e.stopPropagation(); handleRename(file); }}
                         >
-                          <div className="table-cell">
-                            <input
-                              type="checkbox"
-                              checked={selectedFiles.has(file.id)}
-                              onChange={() => toggleFileSelection(file.id)}
-                              className="checkbox-sm cursor-pointer"
-                            />
-                          </div>
-                          <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
-                            {renaming === file.id ? (
-                              <div className="flex gap-2">
-                                <input
-                                  className="input py-1 px-3 text-base"
-                                  value={newName}
-                                  onChange={(e) => setNewName(e.target.value)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") handleRename(file);
-                                    if (e.key === "Escape") cancelRename();
-                                  }}
-                                  autoFocus
-                                  onClick={(e) => e.stopPropagation()}
-                                />
-                                <button
-                                  className="button secondary btn-sm"
-                                  onClick={(e) => { e.stopPropagation(); handleRename(file); }}
-                                >
-                                  ✓
-                                </button>
-                                <button
-                                  className="button secondary btn-sm"
-                                  onClick={(e) => { e.stopPropagation(); cancelRename(); }}
-                                >
-                                  ✕
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="flex items-center gap-2">
-                                <span className="file-icon">
-                                  {file.is_directory ? "📁" : "📄"}
-                                </span>
+                          ✓
+                        </button>
+                        <button
+                          className="button secondary btn-sm"
+                          onClick={(e) => { e.stopPropagation(); cancelRename(); }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="file-icon">
+                          {file.is_directory ? "📁" : "📄"}
+                        </span>
+                        {file.is_directory ? (
+                          <button
+                            className="file-name-btn"
+                            onClick={() => enterFolder(file)}
+                            style={{ wordBreak: 'break-all', textAlign: 'left' }}
+                          >
+                            {file.name}
+                          </button>
+                        ) : (
+                          <span className="text-base" style={{ wordBreak: 'break-all' }}>{file.name}</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="table-cell text-right muted text-base" data-label="大小">
+                    {formatBytes(file.size)}
+                  </div>
+                  <div className="table-cell text-right muted text-sm" data-label="添加时间">
+                    {formatDate(file.created_at)}
+                  </div>
+                  <div className="table-cell text-right">
+                    <div className="flex gap-2 flex-end">
+                      {file.is_directory ? (
+                        <button
+                          className="button secondary btn-sm"
+                          onClick={() => enterFolder(file)}
+                        >
+                          浏览
+                        </button>
+                      ) : (
+                        <button
+                          className="button secondary btn-sm"
+                          onClick={() => handleDownload(file.content_hash, file.name, file.id)}
+                          disabled={downloadingFile === file.id}
+                        >
+                          {downloadingFile === file.id ? "下载中..." : "下载"}
+                        </button>
+                      )}
+                      <button
+                        className="button secondary btn-sm"
+                        onClick={() => startRename(file)}
+                      >
+                        重命名
+                      </button>
+                      <button
+                        className="button secondary btn-sm"
+                        onClick={() => setShareDialogFile({ id: file.id, name: file.name })}
+                      >
+                        分享
+                      </button>
+                      <button
+                        className="button secondary danger btn-sm"
+                        onClick={() => handleDelete(file)}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ flex: 1, minHeight: 320 }}>
+              <AutoSizer renderProp={({ height, width }) => {
+                  const safeHeight = typeof height === "number" && height > 0 ? height : 400;
+                  const safeWidth = typeof width === "number" && width > 0 ? width : 1200;
+                  return (
+                  <List
+                    style={{ height: safeHeight, width: safeWidth }}
+                    rowCount={sortedFiles.length}
+                    rowHeight={60}
+                    rowProps={{}}
+                    rowComponent={({ index, style }) => {
+                      const file = sortedFiles[index];
+                      return (
+                        <div style={style} key={file.id}>
+                          <div 
+                            className="table-row transition-bg" 
+                            style={{ 
+                              display: 'grid', 
+                              gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px',
+                              height: '100%',
+                              alignItems: 'center'
+                            }}
+                          >
+                            <div className="table-cell">
+                              <input
+                                type="checkbox"
+                                checked={selectedFiles.has(file.id)}
+                                onChange={() => toggleFileSelection(file.id)}
+                                className="checkbox-sm cursor-pointer"
+                              />
+                            </div>
+                            <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
+                              {renaming === file.id ? (
+                                <div className="flex gap-2">
+                                  <input
+                                    className="input py-1 px-3 text-base"
+                                    value={newName}
+                                    onChange={(e) => setNewName(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") handleRename(file);
+                                      if (e.key === "Escape") cancelRename();
+                                    }}
+                                    autoFocus
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                  <button
+                                    className="button secondary btn-sm"
+                                    onClick={(e) => { e.stopPropagation(); handleRename(file); }}
+                                  >
+                                    ✓
+                                  </button>
+                                  <button
+                                    className="button secondary btn-sm"
+                                    onClick={(e) => { e.stopPropagation(); cancelRename(); }}
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="flex items-center gap-2">
+                                  <span className="file-icon">
+                                    {file.is_directory ? "📁" : "📄"}
+                                  </span>
+                                  {file.is_directory ? (
+                                    <button
+                                      className="file-name-btn"
+                                      onClick={() => enterFolder(file)}
+                                      style={{ wordBreak: 'break-all', textAlign: 'left' }}
+                                    >
+                                      {file.name}
+                                    </button>
+                                  ) : (
+                                    <span className="text-base" style={{ wordBreak: 'break-all' }}>{file.name}</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                            <div className="table-cell text-right muted text-base" data-label="大小">
+                              {formatBytes(file.size)}
+                            </div>
+                            <div className="table-cell text-right muted text-sm" data-label="添加时间">
+                              {formatDate(file.created_at)}
+                            </div>
+                            <div className="table-cell text-right">
+                              <div className="flex gap-2 flex-end">
                                 {file.is_directory ? (
                                   <button
-                                    className="file-name-btn"
+                                    className="button secondary btn-sm"
                                     onClick={() => enterFolder(file)}
-                                    style={{ wordBreak: 'break-all', textAlign: 'left' }}
                                   >
-                                    {file.name}
+                                    浏览
                                   </button>
                                 ) : (
-                                  <span className="text-base" style={{ wordBreak: 'break-all' }}>{file.name}</span>
+                                  <button
+                                    className="button secondary btn-sm"
+                                    onClick={() => handleDownload(file.content_hash, file.name, file.id)}
+                                    disabled={downloadingFile === file.id}
+                                  >
+                                    {downloadingFile === file.id ? "下载中..." : "下载"}
+                                  </button>
                                 )}
+                                <button
+                                  className="button secondary btn-sm"
+                                  onClick={() => startRename(file)}
+                                >
+                                  重命名
+                                </button>
+                                <button
+                                  className="button secondary btn-sm"
+                                  onClick={() => setShareDialogFile({ id: file.id, name: file.name })}
+                                >
+                                  分享
+                                </button>
+                                <button
+                                  className="button secondary danger btn-sm"
+                                  onClick={() => handleDelete(file)}
+                                >
+                                  删除
+                                </button>
                               </div>
-                            )}
-                          </div>
-                          <div className="table-cell text-right muted text-base" data-label="大小">
-                            {formatBytes(file.size)}
-                          </div>
-                          <div className="table-cell text-right muted text-sm" data-label="添加时间">
-                            {formatDate(file.created_at)}
-                          </div>
-                          <div className="table-cell text-right">
-                            <div className="flex gap-2 flex-end">
-                              {file.is_directory ? (
-                                <button
-                                  className="button secondary btn-sm"
-                                  onClick={() => enterFolder(file)}
-                                >
-                                  浏览
-                                </button>
-                              ) : (
-                                <button
-                                  className="button secondary btn-sm"
-                                  onClick={() => handleDownload(file.content_hash, file.name, file.id)}
-                                  disabled={downloadingFile === file.id}
-                                >
-                                  {downloadingFile === file.id ? "下载中..." : "下载"}
-                                </button>
-                              )}
-                              <button
-                                className="button secondary btn-sm"
-                                onClick={() => startRename(file)}
-                              >
-                                重命名
-                              </button>
-                              <button
-                                className="button secondary btn-sm"
-                                onClick={() => setShareDialogFile({ id: file.id, name: file.name })}
-                              >
-                                分享
-                              </button>
-                              <button
-                                className="button secondary danger btn-sm"
-                                onClick={() => handleDelete(file)}
-                              >
-                                删除
-                              </button>
                             </div>
                           </div>
                         </div>
-                      </div>
-                    );
-                  }}
-                />
-              );
-              }}
-            />
-          </div>
+                      );
+                    }}
+                  />
+                );
+                }}
+              />
+            </div>
+          )}
         </div>
       )
       )}

@@ -2394,23 +2394,6 @@ p {
     flex-wrap: wrap;
     gap: 6px;
   }
-
-
-  /* react-window containers — disable virtualization on mobile */
-  .file-table-wrapper [style*="overflow"] {
-    height: auto !important;
-    max-height: none !important;
-    overflow: visible !important;
-  }
-  .file-table-wrapper [style*="overflow"] > div {
-    height: auto !important;
-  }
-  .file-table-wrapper [style*="overflow"] > div > div {
-    position: relative !important;
-    top: auto !important;
-    height: auto !important;
-  }
-
   /* Users table card view */
   .users-table-wrapper .table,
   .users-table-wrapper .table thead,
