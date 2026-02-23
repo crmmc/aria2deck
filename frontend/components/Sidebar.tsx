@@ -215,8 +215,6 @@ function SidebarContent({ user }: SidebarProps) {
     { name: "任务", href: "/tasks", icon: <TasksIcon /> },
     { name: "历史", href: "/history", icon: <HistoryIcon /> },
     { name: "文件", href: "/files", icon: <FilesIcon /> },
-    { name: "分享", href: "/shares", icon: <ShareIcon /> },
-    { name: "设置", href: "/profile", icon: <ProfileIcon /> },
   ];
 
   return (
@@ -259,6 +257,28 @@ function SidebarContent({ user }: SidebarProps) {
                 ×
               </button>
             </div>
+
+            <Link
+              href="/shares"
+              className="more-menu-item"
+              onClick={() => setShowMoreMenu(false)}
+            >
+              <span className="more-menu-icon">
+                <ShareIcon />
+              </span>
+              分享
+            </Link>
+            <Link
+              href="/profile"
+              className="more-menu-item"
+              onClick={() => setShowMoreMenu(false)}
+            >
+              <span className="more-menu-icon">
+                <ProfileIcon />
+              </span>
+              个人设置
+            </Link>
+            <div className="more-menu-divider" />
 
             {user?.is_admin && (
               <>

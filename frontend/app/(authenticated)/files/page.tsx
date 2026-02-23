@@ -12,7 +12,12 @@ import { AutoSizer } from "react-virtualized-auto-sizer";
 
 function formatDate(dateStr: string): string {
   const date = new Date(dateStr);
-  return date.toLocaleString();
+  const y = date.getFullYear();
+  const m = date.getMonth() + 1;
+  const d = date.getDate();
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  return `${y}/${m}/${d} ${hh}:${mm}`;
 }
 
 type SortField = "name" | "size" | "created_at";
@@ -634,59 +639,62 @@ export default function FilesPage() {
           )}
         </div>
 
-        {/* Sort select */}
-        <div className="filter-group">
-          <select
-            className="select"
-            value={`${sortField}-${sortOrder}`}
-            onChange={(e) => {
-              const [field, order] = e.target.value.split("-") as [SortField, SortOrder];
-              setSortField(field);
-              setSortOrder(order);
-            }}
-          >
-            <option value="created_at-desc">时间 (最新)</option>
-            <option value="created_at-asc">时间 (最早)</option>
-            <option value="name-asc">名称 (A-Z)</option>
-            <option value="name-desc">名称 (Z-A)</option>
-            <option value="size-desc">大小 (最大)</option>
-            <option value="size-asc">大小 (最小)</option>
-          </select>
-        </div>
-
-        {/* Search input */}
-        <div className={`filter-group search-input-group${isInsideFolder ? " opacity-40 pointer-events-none" : ""}`}>
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="search-input-icon"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <path d="m21 21-4.35-4.35" />
-          </svg>
-          <input
-            type="text"
-            className="toolbar-search-input"
-            placeholder="搜索文件名... (回车搜索)"
-            value={toolbarSearchKeyword}
-            onChange={(e) => setToolbarSearchKeyword(e.target.value)}
-            onKeyDown={handleToolbarSearchKeyDown}
-          />
-          {toolbarSearchKeyword && (
-            <button
-              type="button"
-              className="search-clear-btn"
-              onClick={() => setToolbarSearchKeyword("")}
+        {/* Search and Sort Row */}
+        <div className="search-sort-row">
+          {/* Sort select */}
+          <div className="filter-group sort-group">
+            <select
+              className="select"
+              value={`${sortField}-${sortOrder}`}
+              onChange={(e) => {
+                const [field, order] = e.target.value.split("-") as [SortField, SortOrder];
+                setSortField(field);
+                setSortOrder(order);
+              }}
             >
-              ✕
-            </button>
-          )}
+              <option value="created_at-desc">时间 (最新)</option>
+              <option value="created_at-asc">时间 (最早)</option>
+              <option value="name-asc">名称 (A-Z)</option>
+              <option value="name-desc">名称 (Z-A)</option>
+              <option value="size-desc">大小 (最大)</option>
+              <option value="size-asc">大小 (最小)</option>
+            </select>
+          </div>
+
+          {/* Search input */}
+          <div className={`filter-group search-input-group${isInsideFolder ? " opacity-40 pointer-events-none" : ""}`}>
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="search-input-icon"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              type="text"
+              className="toolbar-search-input"
+              placeholder={isMobile ? "搜索文件..." : "搜索文件名... (回车搜索)"}
+              value={toolbarSearchKeyword}
+              onChange={(e) => setToolbarSearchKeyword(e.target.value)}
+              onKeyDown={handleToolbarSearchKeyDown}
+            />
+            {toolbarSearchKeyword && (
+              <button
+                type="button"
+                className="search-clear-btn"
+                onClick={() => setToolbarSearchKeyword("")}
+              >
+                ✕
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Batch operations */}
@@ -784,95 +792,99 @@ export default function FilesPage() {
           </div>
         ) : (
           <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-              {!isMobile && (
-                <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px', paddingRight: '16px' }}>
-                  <div className="table-cell text-left">
-                    <input
-                      type="checkbox"
-                      checked={(() => {
-                        const allKeys = browseContents
-                          .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
-                        return allKeys.length > 0 && allKeys.every((k) => selectedBrowseFiles.has(k));
-                      })()}
-                      onChange={toggleAllBrowseFiles}
-                      className="checkbox-sm cursor-pointer"
-                    />
-                  </div>
-                  <div
-                    className="table-cell text-left sortable-header"
-                    onClick={() => handleSort("name")}
-                  >
-                    名称 <span className="sort-icon">{getSortIcon("name")}</span>
-                  </div>
-                  <div
-                    className="table-cell text-right sortable-header"
-                    onClick={() => handleSort("size")}
-                  >
-                    大小 <span className="sort-icon">{getSortIcon("size")}</span>
-                  </div>
-                  <div className="table-cell text-right">操作</div>
+            {!isMobile && (
+              <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px', paddingRight: '16px' }}>
+                <div className="table-cell text-left">
+                  <input
+                    type="checkbox"
+                    checked={(() => {
+                      const allKeys = browseContents
+                        .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
+                      return allKeys.length > 0 && allKeys.every((k) => selectedBrowseFiles.has(k));
+                    })()}
+                    onChange={toggleAllBrowseFiles}
+                    className="checkbox-sm cursor-pointer"
+                  />
                 </div>
-              )}
+                <div
+                  className="table-cell text-left sortable-header"
+                  onClick={() => handleSort("name")}
+                >
+                  名称 <span className="sort-icon">{getSortIcon("name")}</span>
+                </div>
+                <div
+                  className="table-cell text-right sortable-header"
+                  onClick={() => handleSort("size")}
+                >
+                  大小 <span className="sort-icon">{getSortIcon("size")}</span>
+                </div>
+                <div className="table-cell text-right">操作</div>
+              </div>
+            )}
 
             {isMobile ? (
               <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
                 {sortedBrowseContents.map((item) => {
                   const itemKey = [...(browseContext?.path ?? []), item.name].join("/");
                   return (
-                    <div key={item.name} className="table-row mobile-card">
-                      <div className="table-cell">
+                    <div key={item.name} className="mobile-file-card">
+                      <div className="card-header">
                         <input
                           type="checkbox"
                           checked={selectedBrowseFiles.has(itemKey)}
                           onChange={() => toggleBrowseFileSelection(item)}
                           className="checkbox-sm cursor-pointer"
                         />
-                      </div>
-                      <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
-                        <div className="flex items-center gap-2">
+                        <div className="file-title">
                           <span className="file-icon">
                             {item.is_directory ? "📁" : "📄"}
                           </span>
                           {item.is_directory ? (
                             <button
-                              className="file-name-btn"
+                              className="mobile-name"
                               onClick={() => navigateIntoSubfolder(item.name)}
-                              style={{ wordBreak: 'break-all', textAlign: 'left' }}
                             >
                               {item.name}
                             </button>
                           ) : (
-                            <span className="text-base" style={{ wordBreak: 'break-all' }}>{item.name}</span>
+                            <span className="mobile-name">{item.name}</span>
                           )}
                         </div>
                       </div>
-                      <div className="table-cell text-right muted text-base" data-label="大小">
+                      <div className="card-meta">
                         {item.is_directory ? "-" : formatBytes(item.size)}
                       </div>
-                      <div className="table-cell text-right">
-                        <div className="flex gap-2 flex-end">
-                          {item.is_directory ? (
-                            <button
-                              className="button secondary btn-sm"
-                              onClick={() => navigateIntoSubfolder(item.name)}
-                            >
-                              打开
-                            </button>
-                          ) : (
-                            <button
-                              className="button secondary btn-sm"
-                              onClick={() =>
-                                handleDownload(
-                                  browseContext!.fileHash,
-                                  item.name,
-                                  undefined,
-                                  [...browseContext!.path, item.name].join("/")
-                              )}
-                            >
-                              下载
-                            </button>
-                          )}
-                        </div>
+                      <div className="card-actions">
+                        {item.is_directory ? (
+                          <button
+                            className="button secondary btn-sm"
+                            onClick={() => navigateIntoSubfolder(item.name)}
+                          >
+                            打开
+                          </button>
+                        ) : (
+                          <button
+                            className="button secondary btn-sm"
+                            onClick={() => {
+                              handleDownload(
+                                browseContext!.fileHash,
+                                item.name,
+                                undefined,
+                                [...browseContext!.path, item.name].join("/")
+                              );
+                            }}
+                          >
+                            下载
+                          </button>
+                        )}
+                        <button
+                          className="button secondary danger btn-sm"
+                          onClick={() => {
+                            showToast("文件夹内暂不支持在此页面单文件直接删除", "warning");
+                          }}
+                        >
+                          删除
+                        </button>
                       </div>
                     </div>
                   );
@@ -950,7 +962,7 @@ export default function FilesPage() {
                                           item.name,
                                           undefined,
                                           [...browseContext!.path, item.name].join("/")
-                                      )}
+                                        )}
                                     >
                                       下载
                                     </button>
@@ -970,119 +982,112 @@ export default function FilesPage() {
           </div>
         )
       ) : (
-      /* Root file table */
-      loading ? (
-        <div className="card text-center py-8">
-          <p className="muted">加载中...</p>
-        </div>
-      ) : error ? (
-        <div className="card text-center py-8">
-          <p className="text-danger">{error}</p>
-        </div>
-      ) : sortedFiles.length === 0 ? (
-        <div className="card text-center py-8">
-          <p className="muted">暂无文件</p>
-        </div>
-      ) : (
-        <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-              {!isMobile && (
-                <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px', paddingRight: '16px' }}>
-                  <div className="table-cell text-left">
-                    <input
-                      type="checkbox"
-                      checked={selectedFiles.size === sortedFiles.length && sortedFiles.length > 0}
-                      onChange={toggleSelectAll}
-                      className="checkbox-sm cursor-pointer"
-                    />
-                  </div>
-                  <div
-                    className="table-cell text-left sortable-header"
-                    onClick={() => handleSort("name")}
-                  >
-                    名称 <span className="sort-icon">{getSortIcon("name")}</span>
-                  </div>
-                  <div
-                    className="table-cell text-right sortable-header"
-                    onClick={() => handleSort("size")}
-                  >
-                    大小 <span className="sort-icon">{getSortIcon("size")}</span>
-                  </div>
-                  <div
-                    className="table-cell text-right sortable-header"
-                    onClick={() => handleSort("created_at")}
-                  >
-                    添加时间 <span className="sort-icon">{getSortIcon("created_at")}</span>
-                  </div>
-                  <div className="table-cell text-right">操作</div>
+        /* Root file table */
+        loading ? (
+          <div className="card text-center py-8">
+            <p className="muted">加载中...</p>
+          </div>
+        ) : error ? (
+          <div className="card text-center py-8">
+            <p className="text-danger">{error}</p>
+          </div>
+        ) : sortedFiles.length === 0 ? (
+          <div className="card text-center py-8">
+            <p className="muted">暂无文件</p>
+          </div>
+        ) : (
+          <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+            {!isMobile && (
+              <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px', paddingRight: '16px' }}>
+                <div className="table-cell text-left">
+                  <input
+                    type="checkbox"
+                    checked={selectedFiles.size === sortedFiles.length && sortedFiles.length > 0}
+                    onChange={toggleSelectAll}
+                    className="checkbox-sm cursor-pointer"
+                  />
                 </div>
-              )}
-          
-          {isMobile ? (
-            <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
-              {sortedFiles.map((file) => (
-                <div key={file.id} className="table-row mobile-card">
-                  <div className="table-cell">
-                    <input
-                      type="checkbox"
-                      checked={selectedFiles.has(file.id)}
-                      onChange={() => toggleFileSelection(file.id)}
-                      className="checkbox-sm cursor-pointer"
-                    />
-                  </div>
-                  <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
-                    {renaming === file.id ? (
-                      <div className="flex gap-2">
-                        <input
-                          className="input py-1 px-3 text-base"
-                          value={newName}
-                          onChange={(e) => setNewName(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") handleRename(file);
-                            if (e.key === "Escape") cancelRename();
-                          }}
-                          autoFocus
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                        <button
-                          className="button secondary btn-sm"
-                          onClick={(e) => { e.stopPropagation(); handleRename(file); }}
-                        >
-                          ✓
-                        </button>
-                        <button
-                          className="button secondary btn-sm"
-                          onClick={(e) => { e.stopPropagation(); cancelRename(); }}
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
+                <div
+                  className="table-cell text-left sortable-header"
+                  onClick={() => handleSort("name")}
+                >
+                  名称 <span className="sort-icon">{getSortIcon("name")}</span>
+                </div>
+                <div
+                  className="table-cell text-right sortable-header"
+                  onClick={() => handleSort("size")}
+                >
+                  大小 <span className="sort-icon">{getSortIcon("size")}</span>
+                </div>
+                <div
+                  className="table-cell text-right sortable-header"
+                  onClick={() => handleSort("created_at")}
+                >
+                  添加时间 <span className="sort-icon">{getSortIcon("created_at")}</span>
+                </div>
+                <div className="table-cell text-right">操作</div>
+              </div>
+            )}
+
+            {isMobile ? (
+              <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+                {sortedFiles.map((file) => (
+                  <div key={file.id} className="mobile-file-card">
+                    <div className="card-header">
+                      <input
+                        type="checkbox"
+                        checked={selectedFiles.has(file.id)}
+                        onChange={() => toggleFileSelection(file.id)}
+                        className="checkbox-sm cursor-pointer"
+                      />
+                      <div className="file-title">
                         <span className="file-icon">
                           {file.is_directory ? "📁" : "📄"}
                         </span>
-                        {file.is_directory ? (
-                          <button
-                            className="file-name-btn"
-                            onClick={() => enterFolder(file)}
-                            style={{ wordBreak: 'break-all', textAlign: 'left' }}
-                          >
-                            {file.name}
-                          </button>
+                        {renaming === file.id ? (
+                          <div className="flex gap-2 flex-1" style={{ minWidth: 0 }}>
+                            <input
+                              className="input py-1 px-3 text-base"
+                              value={newName}
+                              onChange={(e) => setNewName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") handleRename(file);
+                                if (e.key === "Escape") cancelRename();
+                              }}
+                              autoFocus
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                            <button
+                              className="button secondary btn-sm"
+                              onClick={(e) => { e.stopPropagation(); handleRename(file); }}
+                            >
+                              ✓
+                            </button>
+                            <button
+                              className="button secondary btn-sm"
+                              onClick={(e) => { e.stopPropagation(); cancelRename(); }}
+                            >
+                              ✕
+                            </button>
+                          </div>
                         ) : (
-                          <span className="text-base" style={{ wordBreak: 'break-all' }}>{file.name}</span>
+                          file.is_directory ? (
+                            <button
+                              className="mobile-name"
+                              onClick={() => enterFolder(file)}
+                            >
+                              {file.name}
+                            </button>
+                          ) : (
+                            <span className="mobile-name">{file.name}</span>
+                          )
                         )}
                       </div>
-                    )}
-                  </div>
-                  <div className="table-cell text-right muted text-base" data-label="大小">
-                    {formatBytes(file.size)}
-                  </div>
-                  <div className="table-cell text-right muted text-sm" data-label="添加时间">
-                    {formatDate(file.created_at)}
-                  </div>
-                  <div className="table-cell text-right">
-                    <div className="flex gap-2 flex-end">
+                    </div>
+                    <div className="card-meta">
+                      {formatBytes(file.size)} • {formatDate(file.created_at)}
+                    </div>
+                    <div className="card-actions">
                       {file.is_directory ? (
                         <button
                           className="button secondary btn-sm"
@@ -1119,143 +1124,142 @@ export default function FilesPage() {
                       </button>
                     </div>
                   </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div style={{ flex: 1, minHeight: 320 }}>
-              <AutoSizer renderProp={({ height, width }) => {
+                ))}
+              </div>
+            ) : (
+              <div style={{ flex: 1, minHeight: 320 }}>
+                <AutoSizer renderProp={({ height, width }) => {
                   const safeHeight = typeof height === "number" && height > 0 ? height : 400;
                   const safeWidth = typeof width === "number" && width > 0 ? width : 1200;
                   return (
-                  <List
-                    style={{ height: safeHeight, width: safeWidth }}
-                    rowCount={sortedFiles.length}
-                    rowHeight={60}
-                    rowProps={{}}
-                    rowComponent={({ index, style }) => {
-                      const file = sortedFiles[index];
-                      return (
-                        <div style={style} key={file.id}>
-                          <div 
-                            className="table-row transition-bg" 
-                            style={{ 
-                              display: 'grid', 
-                              gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px',
-                              height: '100%',
-                              alignItems: 'center'
-                            }}
-                          >
-                            <div className="table-cell">
-                              <input
-                                type="checkbox"
-                                checked={selectedFiles.has(file.id)}
-                                onChange={() => toggleFileSelection(file.id)}
-                                className="checkbox-sm cursor-pointer"
-                              />
-                            </div>
-                            <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
-                              {renaming === file.id ? (
-                                <div className="flex gap-2">
-                                  <input
-                                    className="input py-1 px-3 text-base"
-                                    value={newName}
-                                    onChange={(e) => setNewName(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      if (e.key === "Enter") handleRename(file);
-                                      if (e.key === "Escape") cancelRename();
-                                    }}
-                                    autoFocus
-                                    onClick={(e) => e.stopPropagation()}
-                                  />
-                                  <button
-                                    className="button secondary btn-sm"
-                                    onClick={(e) => { e.stopPropagation(); handleRename(file); }}
-                                  >
-                                    ✓
-                                  </button>
-                                  <button
-                                    className="button secondary btn-sm"
-                                    onClick={(e) => { e.stopPropagation(); cancelRename(); }}
-                                  >
-                                    ✕
-                                  </button>
-                                </div>
-                              ) : (
-                                <div className="flex items-center gap-2">
-                                  <span className="file-icon">
-                                    {file.is_directory ? "📁" : "📄"}
-                                  </span>
+                    <List
+                      style={{ height: safeHeight, width: safeWidth }}
+                      rowCount={sortedFiles.length}
+                      rowHeight={60}
+                      rowProps={{}}
+                      rowComponent={({ index, style }) => {
+                        const file = sortedFiles[index];
+                        return (
+                          <div style={style} key={file.id}>
+                            <div
+                              className="table-row transition-bg"
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px',
+                                height: '100%',
+                                alignItems: 'center'
+                              }}
+                            >
+                              <div className="table-cell">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedFiles.has(file.id)}
+                                  onChange={() => toggleFileSelection(file.id)}
+                                  className="checkbox-sm cursor-pointer"
+                                />
+                              </div>
+                              <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all' }}>
+                                {renaming === file.id ? (
+                                  <div className="flex gap-2">
+                                    <input
+                                      className="input py-1 px-3 text-base"
+                                      value={newName}
+                                      onChange={(e) => setNewName(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") handleRename(file);
+                                        if (e.key === "Escape") cancelRename();
+                                      }}
+                                      autoFocus
+                                      onClick={(e) => e.stopPropagation()}
+                                    />
+                                    <button
+                                      className="button secondary btn-sm"
+                                      onClick={(e) => { e.stopPropagation(); handleRename(file); }}
+                                    >
+                                      ✓
+                                    </button>
+                                    <button
+                                      className="button secondary btn-sm"
+                                      onClick={(e) => { e.stopPropagation(); cancelRename(); }}
+                                    >
+                                      ✕
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-2">
+                                    <span className="file-icon">
+                                      {file.is_directory ? "📁" : "📄"}
+                                    </span>
+                                    {file.is_directory ? (
+                                      <button
+                                        className="file-name-btn"
+                                        onClick={() => enterFolder(file)}
+                                        style={{ wordBreak: 'break-all', textAlign: 'left' }}
+                                      >
+                                        {file.name}
+                                      </button>
+                                    ) : (
+                                      <span className="text-base" style={{ wordBreak: 'break-all' }}>{file.name}</span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                              <div className="table-cell text-right muted text-base" data-label="大小">
+                                {formatBytes(file.size)}
+                              </div>
+                              <div className="table-cell text-right muted text-sm" data-label="添加时间">
+                                {formatDate(file.created_at)}
+                              </div>
+                              <div className="table-cell text-right">
+                                <div className="flex gap-2 flex-end">
                                   {file.is_directory ? (
                                     <button
-                                      className="file-name-btn"
+                                      className="button secondary btn-sm"
                                       onClick={() => enterFolder(file)}
-                                      style={{ wordBreak: 'break-all', textAlign: 'left' }}
                                     >
-                                      {file.name}
+                                      浏览
                                     </button>
                                   ) : (
-                                    <span className="text-base" style={{ wordBreak: 'break-all' }}>{file.name}</span>
+                                    <button
+                                      className="button secondary btn-sm"
+                                      onClick={() => handleDownload(file.content_hash, file.name, file.id)}
+                                      disabled={downloadingFile === file.id}
+                                    >
+                                      {downloadingFile === file.id ? "下载中..." : "下载"}
+                                    </button>
                                   )}
+                                  <button
+                                    className="button secondary btn-sm"
+                                    onClick={() => startRename(file)}
+                                  >
+                                    重命名
+                                  </button>
+                                  <button
+                                    className="button secondary btn-sm"
+                                    onClick={() => setShareDialogFile({ id: file.id, name: file.name })}
+                                  >
+                                    分享
+                                  </button>
+                                  <button
+                                    className="button secondary danger btn-sm"
+                                    onClick={() => handleDelete(file)}
+                                  >
+                                    删除
+                                  </button>
                                 </div>
-                              )}
-                            </div>
-                            <div className="table-cell text-right muted text-base" data-label="大小">
-                              {formatBytes(file.size)}
-                            </div>
-                            <div className="table-cell text-right muted text-sm" data-label="添加时间">
-                              {formatDate(file.created_at)}
-                            </div>
-                            <div className="table-cell text-right">
-                              <div className="flex gap-2 flex-end">
-                                {file.is_directory ? (
-                                  <button
-                                    className="button secondary btn-sm"
-                                    onClick={() => enterFolder(file)}
-                                  >
-                                    浏览
-                                  </button>
-                                ) : (
-                                  <button
-                                    className="button secondary btn-sm"
-                                    onClick={() => handleDownload(file.content_hash, file.name, file.id)}
-                                    disabled={downloadingFile === file.id}
-                                  >
-                                    {downloadingFile === file.id ? "下载中..." : "下载"}
-                                  </button>
-                                )}
-                                <button
-                                  className="button secondary btn-sm"
-                                  onClick={() => startRename(file)}
-                                >
-                                  重命名
-                                </button>
-                                <button
-                                  className="button secondary btn-sm"
-                                  onClick={() => setShareDialogFile({ id: file.id, name: file.name })}
-                                >
-                                  分享
-                                </button>
-                                <button
-                                  className="button secondary danger btn-sm"
-                                  onClick={() => handleDelete(file)}
-                                >
-                                  删除
-                                </button>
                               </div>
                             </div>
                           </div>
-                        </div>
-                      );
-                    }}
-                  />
-                );
+                        );
+                      }}
+                    />
+                  );
                 }}
-              />
-            </div>
-          )}
-        </div>
-      )
+                />
+              </div>
+            )}
+          </div>
+        )
       )}
 
       {/* Search Modal */}
