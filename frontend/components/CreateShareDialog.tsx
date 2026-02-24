@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/Toast";
 import type { ShareLink } from "@/types";
@@ -59,13 +60,21 @@ export default function CreateShareDialog({
       () => showToast("复制失败", "error"),
     );
   };
-  return (
+
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted) return null;
+
+  return createPortal(
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content max-w-400" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3 className="modal-title">创建分享</h3>
-          <button type="button" className="modal-close" onClick={onClose}>
-            ×
+          <button type="button" className="modal-close-btn" onClick={onClose}>
+            ✕
           </button>
         </div>
         <div className="modal-body">
@@ -157,6 +166,7 @@ export default function CreateShareDialog({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
