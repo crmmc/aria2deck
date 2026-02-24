@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
@@ -74,7 +75,9 @@ export default function FilesPage() {
 
   // Mobile detection
   const [isMobile, setIsMobile] = useState(false);
+  const [mounted, setMounted] = useState(false);
   useEffect(() => {
+    setMounted(true);
     const check = () => setIsMobile(window.innerWidth < 768);
     check();
     window.addEventListener('resize', check);
@@ -696,11 +699,9 @@ export default function FilesPage() {
               </button>
             )}
           </div>
-        </div>
-
-        {/* Batch operations */}
-        <div className="filter-group ml-auto">
-          {isInsideFolder ? (
+          {/* Batch operations */}
+          <div className="filter-group batch-actions">
+            {isInsideFolder ? (
             <>
               {selectedBrowseFiles.size > 0 && (
                 <>
@@ -778,6 +779,7 @@ export default function FilesPage() {
               )}
             </>
           )}
+          </div>
         </div>
       </div>
 
@@ -1264,7 +1266,7 @@ export default function FilesPage() {
       )}
 
       {/* Search Modal */}
-      {showSearchModal && (
+      {showSearchModal && mounted && createPortal(
         <div
           className="modal-overlay"
           onClick={closeSearchModal}
@@ -1348,11 +1350,12 @@ export default function FilesPage() {
               </span>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Pack Dialog */}
-      {packDialogOpen && (
+      {packDialogOpen && mounted && createPortal(
         <div className="modal-overlay" onClick={() => !packing && setPackDialogOpen(false)}>
           <div
             className="batch-modal-content"
@@ -1447,7 +1450,8 @@ export default function FilesPage() {
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
       {/* Share Dialog */}
       {shareDialogFile && (

@@ -1914,9 +1914,36 @@ p {
   margin-bottom: 16px;
   padding: 12px 16px;
   display: flex;
-  gap: 16px;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.filter-toolbar .path-breadcrumb {
+  display: flex;
   align-items: center;
+  gap: 8px;
   flex-wrap: wrap;
+}
+
+.filter-toolbar .search-sort-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filter-toolbar .search-sort-row .sort-group {
+  flex-shrink: 0;
+}
+
+.filter-toolbar .search-sort-row .search-input-group {
+  flex: 1;
+  min-width: 180px;
+}
+
+.filter-toolbar .search-sort-row .batch-actions {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .filter-group {
@@ -1963,11 +1990,25 @@ p {
 }
 
 .modal-close-btn {
-  background: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
   border: none;
-  font-size: 24px;
+  background: rgba(0, 0, 0, 0.06);
+  font-size: 18px;
+  line-height: 1;
   cursor: pointer;
   color: #666;
+  transition: background 0.2s, color 0.2s;
+  flex-shrink: 0;
+}
+
+.modal-close-btn:hover {
+  background: rgba(0, 0, 0, 0.12);
+  color: #333;
 }
 
 .batch-textarea {
@@ -2677,37 +2718,31 @@ p {
 
 @media (max-width: 767px) {
   .filter-toolbar {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 12px;
     padding: 12px;
+    gap: 10px;
   }
 
   .filter-toolbar .search-sort-row {
-    display: flex;
     flex-direction: row;
-    width: 100%;
+    flex-wrap: wrap;
     gap: 8px;
   }
 
-  .filter-toolbar .filter-group {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: nowrap;
-  }
-
-  .filter-toolbar .filter-group.ml-auto {
-    margin-left: 0;
-  }
-
-  .filter-toolbar .search-input-group {
-    flex: 6;
-  }
-
-  .filter-toolbar .sort-group {
+  .filter-toolbar .search-sort-row .sort-group {
     flex: 4;
+    min-width: 0;
+  }
+
+  .filter-toolbar .search-sort-row .search-input-group {
+    flex: 6;
+    min-width: 0;
+  }
+
+  .filter-toolbar .search-sort-row .batch-actions {
+    margin-left: 0;
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
   }
 
   .filter-toolbar .search-input,
@@ -2718,12 +2753,6 @@ p {
   .filter-toolbar .filter-group .select {
     width: 100%;
     min-width: 0;
-  }
-
-  /* Batch operations row - allow wrapping */
-  .filter-toolbar .filter-group:last-child {
-    flex-wrap: wrap;
-    justify-content: flex-start;
   }
 }
 
