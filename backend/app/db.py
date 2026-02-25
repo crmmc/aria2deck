@@ -207,11 +207,8 @@ def init_db() -> None:
             INSERT OR IGNORE INTO config (key, value) VALUES
             ('max_task_size', '10737418240'),
             ('min_free_disk', '1073741824'),
-            ('pack_format', 'zip'),
-            ('pack_7z_method', 'lzma2'),
-            ('pack_compression_level', '5'),
-            ('pack_memory_limit', '128'),
-            ('pack_extra_args', '')
+            ('pack_format', 'tar.zst'),
+            ('pack_compression_level', '5')
             """
         )
         conn.commit()

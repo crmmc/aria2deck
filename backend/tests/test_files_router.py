@@ -260,6 +260,25 @@ class TestPackTaskOperations:
         response = authenticated_client.delete("/api/files/pack/99999")
         assert response.status_code == 404
 
+    def test_cancel_pack_task_resets_progress(self, authenticated_client: TestClient, test_user: dict):
+        now = datetime.now(timezone.utc).isoformat()
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, status, progress, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "[]", 100, 100, "pending", 88, now, now],
+        )
+
+        with patch("app.services.pack.PackTaskManager.cancel_pack", new_callable=AsyncMock, return_value=True):
+            response = authenticated_client.delete(f"/api/files/pack/{task_id}")
+        assert response.status_code == 200
+
+        detail = authenticated_client.get(f"/api/files/pack/{task_id}")
+        assert detail.status_code == 200
+        data = detail.json()
+        assert data["status"] == "cancelled"
+        assert data["progress"] == 0
+
     def test_create_pack_task_nonexistent_file_ids(self, authenticated_client: TestClient):
         response = authenticated_client.post(
             "/api/files/pack",
@@ -319,7 +338,21 @@ class TestRenameFileValidation:
             f"/api/files/{user_file['content_hash']}/rename",
             json={"name": "   "}
         )
-        assert response.status_code in [200, 400]
+        assert response.status_code == 400
+
+    def test_rename_file_with_dotdot(self, authenticated_client: TestClient, user_file: dict):
+        response = authenticated_client.put(
+            f"/api/files/{user_file['content_hash']}/rename",
+            json={"name": ".."}
+        )
+        assert response.status_code == 400
+
+    def test_rename_file_with_control_char(self, authenticated_client: TestClient, user_file: dict):
+        response = authenticated_client.put(
+            f"/api/files/{user_file['content_hash']}/rename",
+            json={"name": "bad\u0000name.txt"}
+        )
+        assert response.status_code in [400, 422]
 
 
 class TestPackTaskCreate:

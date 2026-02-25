@@ -39,10 +39,7 @@ class ConfigUpdate(BaseModel):
     aria2_rpc_secret: str | None = None
     hidden_file_extensions: list[str] | None = None
     pack_format: str | None = None
-    pack_7z_method: str | None = None
     pack_compression_level: int | None = Field(None, ge=0, le=9, description="压缩等级 (0-9)")
-    pack_memory_limit: int | None = Field(None, ge=0, le=1024, description="内存限制 (MB, 0=不限制)")
-    pack_extra_args: str | None = None
     # WebSocket 重连参数
     ws_reconnect_max_delay: float | None = Field(None, ge=1.0, le=300.0, description="最大重连延迟（秒）")
     ws_reconnect_jitter: float | None = Field(None, ge=0.0, le=1.0, description="抖动系数 (0-1)")
@@ -152,13 +149,9 @@ def get_hidden_file_extensions() -> list[str]:
 
 def get_pack_format() -> str:
     val = get_config_value("pack_format")
-    return val if val in ("zip", "7z") else "zip"
-
-
-def get_pack_7z_method() -> str:
-    """获取 7z 压缩方法，默认 lzma2"""
-    val = get_config_value("pack_7z_method")
-    return val if val in ("lzma2", "zstd") else "lzma2"
+    if val == "7z":
+        return "tar.zst"
+    return val if val in ("zip", "tar.zst") else "zip"
 
 
 def get_pack_compression_level() -> int:
@@ -169,22 +162,6 @@ def get_pack_compression_level() -> int:
         return max(0, min(9, level))
     except ValueError:
         return 5
-
-
-def get_pack_memory_limit() -> int:
-    """获取内存限制 (MB)，默认 128，0 表示不限制"""
-    val = get_config_value("pack_memory_limit")
-    try:
-        limit = int(val) if val else 128
-        return max(0, min(1024, limit))
-    except ValueError:
-        return 128
-
-
-def get_pack_extra_args() -> str:
-    """获取 7za 附加参数，默认空字符串"""
-    val = get_config_value("pack_extra_args")
-    return val if val else ""
 
 
 def get_ws_reconnect_max_delay() -> float:
@@ -253,10 +230,7 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
         "aria2_rpc_secret": masked_secret,
         "hidden_file_extensions": get_hidden_file_extensions(),
         "pack_format": get_pack_format(),
-        "pack_7z_method": get_pack_7z_method(),
         "pack_compression_level": get_pack_compression_level(),
-        "pack_memory_limit": get_pack_memory_limit(),
-        "pack_extra_args": get_pack_extra_args(),
         "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),
         "ws_reconnect_factor": get_ws_reconnect_factor(),
@@ -307,24 +281,14 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         await set_config_value_async("hidden_file_extensions", json.dumps(normalized))
         changed_keys.append("hidden_file_extensions")
     if payload.pack_format is not None:
-        if payload.pack_format in ("zip", "7z"):
-            await set_config_value_async("pack_format", payload.pack_format)
+        pack_format = "tar.zst" if payload.pack_format == "7z" else payload.pack_format
+        if pack_format in ("zip", "tar.zst"):
+            await set_config_value_async("pack_format", pack_format)
             changed_keys.append("pack_format")
-    if payload.pack_7z_method is not None:
-        if payload.pack_7z_method in ("lzma2", "zstd"):
-            await set_config_value_async("pack_7z_method", payload.pack_7z_method)
-            changed_keys.append("pack_7z_method")
     if payload.pack_compression_level is not None:
         level = max(0, min(9, payload.pack_compression_level))
         await set_config_value_async("pack_compression_level", str(level))
         changed_keys.append("pack_compression_level")
-    if payload.pack_memory_limit is not None:
-        limit = max(0, min(1024, payload.pack_memory_limit))
-        await set_config_value_async("pack_memory_limit", str(limit))
-        changed_keys.append("pack_memory_limit")
-    if payload.pack_extra_args is not None:
-        await set_config_value_async("pack_extra_args", payload.pack_extra_args)
-        changed_keys.append("pack_extra_args")
     # WebSocket 重连参数
     if payload.ws_reconnect_max_delay is not None:
         delay = max(1.0, min(300.0, payload.ws_reconnect_max_delay))  # 1-300秒
@@ -356,10 +320,7 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
         "aria2_rpc_secret": masked_secret,
         "hidden_file_extensions": get_hidden_file_extensions(),
         "pack_format": get_pack_format(),
-        "pack_7z_method": get_pack_7z_method(),
         "pack_compression_level": get_pack_compression_level(),
-        "pack_memory_limit": get_pack_memory_limit(),
-        "pack_extra_args": get_pack_extra_args(),
         "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),
         "ws_reconnect_factor": get_ws_reconnect_factor(),
@@ -417,7 +378,12 @@ async def test_aria2_connection(
     - enabled_features: 启用的功能列表（如果连接成功）
     - error: 错误信息（如果连接失败）
     """
-    if not await api_limiter.is_allowed(admin.id, "aria2_test", limit=settings.rate_limit_aria2_test, window_seconds=60):
+    admin_id = admin.id
+    if admin_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录")
+    admin_id_int = int(admin_id)
+
+    if not await api_limiter.is_allowed(admin_id_int, "aria2_test", limit=settings.rate_limit_aria2_test, window_seconds=60):
         logger.warning("测试aria2连接被限流 admin_id=%s", admin.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

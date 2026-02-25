@@ -18,11 +18,8 @@ export default function SettingsPage() {
   const [aria2RpcSecret, setAria2RpcSecret] = useState("");
   const [hiddenExtensions, setHiddenExtensions] = useState<string[]>([]);
   const [extensionInput, setExtensionInput] = useState("");
-  const [packFormat, setPackFormat] = useState<"zip" | "7z">("zip");
-  const [pack7zMethod, setPack7zMethod] = useState<"lzma2" | "zstd">("lzma2");
+  const [packFormat, setPackFormat] = useState<"zip" | "tar.zst">("zip");
   const [packCompressionLevel, setPackCompressionLevel] = useState(5);
-  const [packMemoryLimit, setPackMemoryLimit] = useState(128);
-  const [packExtraArgs, setPackExtraArgs] = useState("");
   // WebSocket 重连配置
   const [wsReconnectMaxDelay, setWsReconnectMaxDelay] = useState(60);
   const [wsReconnectJitter, setWsReconnectJitter] = useState(0.2);
@@ -76,10 +73,7 @@ export default function SettingsPage() {
       setAria2RpcSecret(cfg.aria2_rpc_secret || "");
       setHiddenExtensions(cfg.hidden_file_extensions || []);
       setPackFormat(cfg.pack_format || "zip");
-      setPack7zMethod(cfg.pack_7z_method || "lzma2");
       setPackCompressionLevel(cfg.pack_compression_level ?? 5);
-      setPackMemoryLimit(cfg.pack_memory_limit ?? 128);
-      setPackExtraArgs(cfg.pack_extra_args || "");
       setWsReconnectMaxDelay(cfg.ws_reconnect_max_delay ?? 60);
       setWsReconnectJitter(cfg.ws_reconnect_jitter ?? 0.2);
       setWsReconnectFactor(cfg.ws_reconnect_factor ?? 2);
@@ -110,10 +104,7 @@ export default function SettingsPage() {
           : aria2RpcSecret,
         hidden_file_extensions: hiddenExtensions,
         pack_format: packFormat,
-        pack_7z_method: pack7zMethod,
         pack_compression_level: packCompressionLevel,
-        pack_memory_limit: packMemoryLimit,
-        pack_extra_args: packExtraArgs,
         ws_reconnect_max_delay: wsReconnectMaxDelay,
         ws_reconnect_jitter: wsReconnectJitter,
         ws_reconnect_factor: wsReconnectFactor,
@@ -430,47 +421,22 @@ export default function SettingsPage() {
                 <input
                   type="radio"
                   name="packFormat"
-                  value="7z"
-                  checked={packFormat === "7z"}
-                  onChange={() => setPackFormat("7z")}
+                  value="tar.zst"
+                  checked={packFormat === "tar.zst"}
+                  onChange={() => setPackFormat("tar.zst")}
                 />
-                <span>7Z</span>
+                <span>TAR + Zstandard</span>
               </label>
             </div>
           </div>
 
-          {packFormat === "7z" && (
-            <div className="mb-6">
-              <label className="form-label-lg">7Z 压缩方法</label>
-              <p className="muted text-sm mb-3">选择 7Z 格式的压缩算法。</p>
-              <div className="flex gap-4">
-                <label className="checkbox-label">
-                  <input
-                    type="radio"
-                    name="pack7zMethod"
-                    value="lzma2"
-                    checked={pack7zMethod === "lzma2"}
-                    onChange={() => setPack7zMethod("lzma2")}
-                  />
-                  <span>LZMA2（兼容性好）</span>
-                </label>
-                <label className="checkbox-label">
-                  <input
-                    type="radio"
-                    name="pack7zMethod"
-                    value="zstd"
-                    checked={pack7zMethod === "zstd"}
-                    onChange={() => setPack7zMethod("zstd")}
-                  />
-                  <span>Zstandard（速度快）</span>
-                </label>
-              </div>
-            </div>
-          )}
-
           <div className="mb-7">
             <label className="form-label-lg">压缩等级: {packCompressionLevel}</label>
-            <p className="muted text-sm mb-3">0 = 仅打包不压缩, 1 = 最快, 9 = 最慢/最小体积</p>
+            <p className="muted text-sm mb-3">
+              {packFormat === "zip"
+                ? "ZIP: 0 = 仅打包不压缩, 1 = 最快, 9 = 最慢/最小体积"
+                : "TAR+Zstandard: 0-9 会映射到 zstd 速度/压缩率档位"}
+            </p>
             <input
               type="range"
               min="0"
@@ -479,33 +445,6 @@ export default function SettingsPage() {
               onChange={(e) => setPackCompressionLevel(parseInt(e.target.value))}
               className="w-full"
               style={{ maxWidth: 300 }}
-            />
-          </div>
-
-          <div className="mb-7">
-            <label className="form-label-lg">内存限制: {packMemoryLimit === 0 ? "不限制" : `${packMemoryLimit} MB`}</label>
-            <p className="muted text-sm mb-3">限制 7zz 内存使用，防止 OOM。0 = 不限制，建议 128-512 MB</p>
-            <input
-              type="range"
-              min="0"
-              max="1024"
-              step="64"
-              value={packMemoryLimit}
-              onChange={(e) => setPackMemoryLimit(parseInt(e.target.value))}
-              className="w-full"
-              style={{ maxWidth: 300 }}
-            />
-          </div>
-
-          <div className="mb-7">
-            <label className="form-label-lg">7za 附加参数</label>
-            <p className="muted text-sm mb-2">自定义 7za 命令参数，如 -mmt=2 限制 CPU 核心数</p>
-            <input
-              className="input"
-              type="text"
-              value={packExtraArgs}
-              onChange={(e) => setPackExtraArgs(e.target.value)}
-              placeholder="-mmt=2"
             />
           </div>
 
