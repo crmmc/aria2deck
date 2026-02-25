@@ -192,7 +192,47 @@ class Aria2RpcHandler:
             if task_statuses:
                 stmt = stmt.where(col(DownloadTask.status).in_(task_statuses))
             result = await db.exec(stmt)
-            return set(result.all())  # type: ignore[arg-type]
+            return self._normalize_gid_collection(result.all())
+
+    @staticmethod
+    def _extract_scalar_value(value: Any) -> Any:
+        scalar: Any = value
+        if isinstance(scalar, (tuple, list)):
+            if not scalar:
+                return None
+            return scalar[0]
+
+        mapping = getattr(scalar, "_mapping", None)
+        if mapping:
+            try:
+                return next(iter(mapping.values()))
+            except StopIteration:
+                return None
+        return scalar
+
+    @classmethod
+    def _to_int_scalar(cls, value: Any, default: int = 0) -> int:
+        scalar = cls._extract_scalar_value(value)
+        if scalar is None:
+            return default
+        try:
+            return int(scalar)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _normalize_gid_collection(values: Any) -> set[str]:
+        gids: set[str] = set()
+        for raw in values:
+            value = Aria2RpcHandler._extract_scalar_value(raw)
+
+            if value is None:
+                continue
+
+            gid = str(value)
+            if gid:
+                gids.add(gid)
+        return gids
     def _sanitize_path(self, path: str) -> str:
         """将服务器绝对路径转为用户相对路径"""
         if not path:
@@ -317,8 +357,8 @@ class Aria2RpcHandler:
         """获取用户实际可用空间"""
         async with get_session() as db:
             result = await db.exec(select(User.quota).where(User.id == self.user_id))
-            user_quota = result.first()
-        if user_quota is None:
+            user_quota = self._to_int_scalar(result.first(), default=0)
+        if user_quota <= 0:
             return 0
         space_info = await get_user_space_info(self.user_id, user_quota)
         return space_info["available"]
@@ -662,7 +702,7 @@ class Aria2RpcHandler:
                     UserTaskSubscription.status == "pending",
                 )
             )
-            remaining_count = result.one()
+            remaining_count = self._to_int_scalar(result.one(), default=0)
 
             if remaining_count == 0:
                 await db.execute(
@@ -697,7 +737,7 @@ class Aria2RpcHandler:
                             UserTaskSubscription.status == "pending",
                         )
                     )
-                    still_pending = result.one()
+                    still_pending = self._to_int_scalar(result.one(), default=0)
                     if still_pending != 0:
                         return gid
 
@@ -806,7 +846,7 @@ class Aria2RpcHandler:
                     DownloadTask.status == "active",
                 )
             )
-            num_active = r_active.one()
+            num_active = self._to_int_scalar(r_active.one(), default=0)
             # waiting: subscription pending + task queued/waiting
             r_waiting = await db.exec(
                 select(func.count()).select_from(UserTaskSubscription)
@@ -817,14 +857,14 @@ class Aria2RpcHandler:
                     col(DownloadTask.status).in_(["queued", "waiting"]),
                 )
             )
-            num_waiting = r_waiting.one()
+            num_waiting = self._to_int_scalar(r_waiting.one(), default=0)
             # stopped
             r_stopped = await db.exec(
                 select(func.count()).select_from(TaskHistory).where(
                     TaskHistory.owner_id == self.user_id,
                 )
             )
-            num_stopped = r_stopped.one()
+            num_stopped = self._to_int_scalar(r_stopped.one(), default=0)
         # 获取全局速度
         try:
             global_stat = await self.client.get_global_stat()

@@ -2,7 +2,7 @@
 import asyncio
 import pytest
 from typing import cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from sqlmodel import col, select
 
@@ -602,6 +602,21 @@ class TestAria2RpcHandlerTellMethods:
         assert len(result) == 1
         assert result[0]["gid"] == "u-2"
 
+    async def test_tell_active_filters_with_string_gid_set(self, handler):
+        handler.client.tell_active.return_value = [
+            {"gid": "u-1", "status": "active", "totalLength": "0", "completedLength": "0", "downloadSpeed": "0", "uploadSpeed": "0"},
+            {"gid": "x-1", "status": "active", "totalLength": "0", "completedLength": "0", "downloadSpeed": "0", "uploadSpeed": "0"},
+        ]
+        handler._get_user_gids = AsyncMock(return_value={"u-1", "u-2"})
+
+        result = await handler.handle("aria2.tellActive", [])
+        assert len(result) == 1
+        assert result[0]["gid"] == "u-1"
+
+    async def test_normalize_gid_collection_accepts_tuple_values(self, handler):
+        gids = handler._normalize_gid_collection({("u-1",), ("u-2",)})
+        assert gids == {"u-1", "u-2"}
+
     async def test_tell_stopped_negative_offset_reverse_order(self, handler):
         async with get_session() as db:
             h1 = TaskHistory(owner_id=handler.user_id, task_name="h1", uri="https://x/1", total_length=1, result="completed")
@@ -774,6 +789,65 @@ class TestAria2RpcHandlerGetGlobalStat:
         result = await handler.handle("aria2.getGlobalStat", [])
         assert isinstance(result["downloadSpeed"], str)
         assert isinstance(result["numActive"], str)
+
+    async def test_get_global_stat_accepts_tuple_and_row_like_counts(self, handler):
+        class _FakeRow:
+            def __init__(self, value):
+                self._mapping = {"count": value}
+
+        class _FakeResult:
+            def __init__(self, value):
+                self._value = value
+
+            def one(self):
+                return self._value
+
+        class _FakeDb:
+            def __init__(self):
+                self._values = iter([(1,), _FakeRow("2"), ("3",)])
+
+            async def exec(self, _stmt):
+                return _FakeResult(next(self._values))
+
+        class _FakeSession:
+            def __init__(self):
+                self._db = _FakeDb()
+
+            async def __aenter__(self):
+                return self._db
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return False
+
+        with patch("app.services.aria2_rpc_handler.get_session", return_value=_FakeSession()):
+            result = await handler._handle_get_global_stat([])
+
+        assert result["numActive"] == "1"
+        assert result["numWaiting"] == "2"
+        assert result["numStopped"] == "3"
+
+    async def test_get_user_available_space_accepts_tuple_quota(self, handler):
+        class _QuotaResult:
+            def first(self):
+                return ("1024",)
+
+        class _QuotaDb:
+            async def exec(self, _stmt):
+                return _QuotaResult()
+
+        class _QuotaSession:
+            async def __aenter__(self):
+                return _QuotaDb()
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return False
+
+        with patch("app.services.aria2_rpc_handler.get_session", return_value=_QuotaSession()), \
+             patch("app.services.aria2_rpc_handler.get_user_space_info", new_callable=AsyncMock, return_value={"available": 123}) as mock_space:
+            available = await handler._get_user_available_space()
+
+        assert available == 123
+        mock_space.assert_awaited_once_with(handler.user_id, 1024)
 
 
 @pytest.mark.asyncio
