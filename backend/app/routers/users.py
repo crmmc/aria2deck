@@ -27,6 +27,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+async def _generate_unique_rpc_secret(db, max_attempts: int = 20) -> str:
+    for _ in range(max_attempts):
+        candidate = "aria2_" + secrets.token_urlsafe(32)
+        result = await db.exec(select(User.id).where(User.rpc_secret == candidate))
+        if result.first() is None:
+            return candidate
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="生成 RPC 密钥失败，请稍后重试",
+    )
+
+
 async def _has_any_user() -> bool:
     async with get_session() as db:
         result = await db.exec(select(User).limit(1))
@@ -143,7 +156,9 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
             },
         )
 
-        if result.rowcount == 0:
+        result = await db.exec(select(User).where(User.username == payload.username))
+        user = result.first()
+        if not user:
             logger.warning(
                 "创建首个用户失败 username=%s reason=race_or_permission request_id=%s",
                 payload.username,
@@ -152,19 +167,6 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="需要管理员权限"
-            )
-
-        result = await db.exec(select(User).where(User.username == payload.username))
-        user = result.first()
-        if not user:
-            logger.error(
-                "创建首个用户后查询失败 username=%s request_id=%s",
-                payload.username,
-                request_id,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="创建用户失败"
             )
 
         logger.info(
@@ -262,7 +264,7 @@ async def delete_user(
 
         # 获取用户的所有文件引用 ID（在事务外删除以正确处理 ref_count）
         user_files_result = await db.exec(select(UserFile).where(UserFile.owner_id == user_id))
-        user_file_ids = [uf.id for uf in user_files_result.all()]
+        user_file_ids = [uf.id for uf in user_files_result.all() if uf.id is not None]
 
         # 删除用户
         await db.delete(user)
@@ -447,8 +449,7 @@ async def set_rpc_access(
             )
 
         if payload.enabled:
-            # 开启：生成新 secret
-            new_secret = "aria2_" + secrets.token_urlsafe(32)
+            new_secret = await _generate_unique_rpc_secret(db)
             created_at = utc_now()
             db_user.rpc_secret = new_secret
             db_user.rpc_secret_created_at = created_at
@@ -493,8 +494,7 @@ async def refresh_rpc_secret(request: Request, user: User = Depends(require_user
                 detail="RPC 访问未开启，请先开启后再刷新"
             )
 
-        # 生成新 secret
-        new_secret = "aria2_" + secrets.token_urlsafe(32)
+        new_secret = await _generate_unique_rpc_secret(db)
         created_at = utc_now()
         db_user.rpc_secret = new_secret
         db_user.rpc_secret_created_at = created_at
