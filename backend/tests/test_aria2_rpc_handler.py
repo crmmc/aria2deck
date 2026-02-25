@@ -9,7 +9,7 @@ from sqlmodel import col, select
 from app.aria2.client import Aria2Client
 from app.core.state import AppState
 from app.database import get_session
-from app.models import DownloadTask, UserTaskSubscription
+from app.models import DownloadTask, TaskHistory, UserTaskSubscription
 from app.services.hash import get_uri_hash
 from app.services.aria2_rpc_handler import (
     Aria2RpcHandler,
@@ -190,6 +190,63 @@ class TestAria2RpcHandlerAddMethods:
             assert refreshed_sub is not None
             assert refreshed_sub.status == "pending"
 
+    async def test_add_uri_failure_marks_subscription_failed(self, handler):
+        handler.client.add_uri.side_effect = RuntimeError("rpc unavailable")
+        uri = "https://example.com/fail.bin"
+
+        with pytest.raises(RpcError) as exc_info:
+            await handler.handle("aria2.addUri", [[uri]])
+        assert exc_info.value.code == RpcErrorCode.INTERNAL_ERROR
+
+        async with get_session() as db:
+            task = (
+                await db.exec(select(DownloadTask).where(DownloadTask.uri == uri))
+            ).first()
+            assert task is not None
+            assert task.id is not None
+            assert task.status == "error"
+
+            sub = (
+                await db.exec(
+                    select(UserTaskSubscription).where(
+                        UserTaskSubscription.owner_id == handler.user_id,
+                        UserTaskSubscription.task_id == task.id,
+                    )
+                )
+            ).first()
+            assert sub is not None
+            assert sub.status == "failed"
+
+    async def test_add_torrent_failure_marks_subscription_failed(self, handler):
+        handler.client.add_torrent.side_effect = RuntimeError("rpc unavailable")
+        torrent_data = "d" * 100
+
+        with pytest.raises(RpcError) as exc_info:
+            await handler.handle("aria2.addTorrent", [torrent_data])
+        assert exc_info.value.code == RpcErrorCode.INTERNAL_ERROR
+
+        async with get_session() as db:
+            task = (
+                await db.exec(
+                    select(DownloadTask).where(col(DownloadTask.uri).like("torrent:%"))
+                    .order_by(col(DownloadTask.id).desc())
+                )
+            ).first()
+            assert task is not None
+            assert task.id is not None
+            assert task.status == "error"
+
+            sub = (
+                await db.exec(
+                    select(UserTaskSubscription).where(
+                        UserTaskSubscription.owner_id == handler.user_id,
+                        UserTaskSubscription.task_id == task.id,
+                    )
+                )
+            ).first()
+            assert sub is not None
+            assert sub.status == "failed"
+
 
 @pytest.mark.asyncio
 class TestAria2RpcHandlerTaskMethods:
@@ -283,6 +340,8 @@ class TestAria2RpcHandlerBulkMethods:
             assert active_task.id is not None
             db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=done_task.id, status="success"))
             db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=active_task.id, status="pending"))
+            db.add(TaskHistory(owner_id=handler.user_id, task_name="h1", uri="https://x/1", result="completed"))
+            db.add(TaskHistory(owner_id=handler.user_id, task_name="h2", uri="https://x/2", result="cancelled"))
 
         result = await handler.handle("aria2.purgeDownloadResult", [])
         assert result == "OK"
@@ -296,8 +355,10 @@ class TestAria2RpcHandlerBulkMethods:
                 UserTaskSubscription.owner_id == handler.user_id,
                 UserTaskSubscription.status == "pending",
             )
+            history_stmt = select(TaskHistory).where(TaskHistory.owner_id == handler.user_id)
             assert len((await db.exec(stopped_stmt)).all()) == 0
             assert len((await db.exec(pending_stmt)).all()) == 1
+            assert len((await db.exec(history_stmt)).all()) == 0
 
     async def test_remove_download_result_no_gid(self, handler):
         with pytest.raises(RpcError) as exc_info:
@@ -358,24 +419,63 @@ class TestAria2RpcHandlerSanitization:
 
     async def test_sanitize_status_empty(self, handler):
         result = handler._sanitize_status({})
-        assert result == {}
+        assert result["uploadLength"] == "0"
+        assert result["files"] == []
 
     async def test_sanitize_status_with_dir(self, handler):
-        status = {"dir": "/some/path", "gid": "abc123"}
+        status = {"dir": "/some/path", "gid": "abc123", "connections": "12"}
         result = handler._sanitize_status(status)
-        assert "dir" in result
         assert "gid" in result
+        assert "dir" not in result
+        assert "connections" not in result
 
     async def test_sanitize_status_with_files(self, handler):
         status = {
             "files": [
-                {"path": "/some/path/file.txt", "length": "1000"},
-                {"path": "/another/path/file2.txt", "length": "2000"}
-            ]
+                {"path": "/some/path/file.txt", "length": "1000", "uris": [{"uri": "http://x"}]},
+                {"path": "/another/path/file2.txt", "length": "2000", "uris": [{"uri": "http://y"}]},
+            ],
+            "bittorrent": {
+                "announceList": [["udp://tracker.example.com:6969/announce"]],
+                "info": {"name": "my-torrent"},
+            },
         }
         result = handler._sanitize_status(status)
         assert "files" in result
         assert len(result["files"]) == 2
+        assert result["files"][0]["path"] == "file.txt"
+        assert result["files"][0]["uris"] == []
+        assert result["bittorrent"]["announceList"] == []
+        assert result["bittorrent"]["info"]["name"] == "my-torrent"
+
+    async def test_get_files_strips_path_and_uris(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-files-1",
+                uri="https://example.com/file.bin",
+                gid="gid-files-1",
+                status="active",
+                name="file.bin",
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.get_files.return_value = [
+            {
+                "index": "1",
+                "path": "/private/downloads/42/secret/file.bin",
+                "length": "10",
+                "completedLength": "0",
+                "uris": [{"uri": "https://example.com/file.bin"}],
+            }
+        ]
+
+        result = await handler.handle("aria2.getFiles", ["gid-files-1"])
+        assert len(result) == 1
+        assert result[0]["path"] == "file.bin"
+        assert result[0]["uris"] == []
 
 
 @pytest.mark.asyncio
@@ -504,22 +604,18 @@ class TestAria2RpcHandlerTellMethods:
 
     async def test_tell_stopped_negative_offset_reverse_order(self, handler):
         async with get_session() as db:
-            t1 = DownloadTask(uri_hash="stopped-hash-1", uri="https://x/1", gid="stopped-1", status="complete")
-            t2 = DownloadTask(uri_hash="stopped-hash-2", uri="https://x/2", gid="stopped-2", status="complete")
-            t3 = DownloadTask(uri_hash="stopped-hash-3", uri="https://x/3", gid="stopped-3", status="complete")
-            db.add(t1)
-            db.add(t2)
-            db.add(t3)
+            h1 = TaskHistory(owner_id=handler.user_id, task_name="h1", uri="https://x/1", total_length=1, result="completed")
+            h2 = TaskHistory(owner_id=handler.user_id, task_name="h2", uri="https://x/2", total_length=2, result="cancelled", reason="用户取消")
+            h3 = TaskHistory(owner_id=handler.user_id, task_name="h3", uri="https://x/3", total_length=3, result="failed", reason="No peers")
+            db.add(h1)
+            db.add(h2)
+            db.add(h3)
             await db.flush()
-            assert t1.id is not None
-            assert t2.id is not None
-            assert t3.id is not None
-            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=t1.id, status="success", created_at="2026-01-01T00:00:01+00:00"))
-            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=t2.id, status="success", created_at="2026-01-01T00:00:02+00:00"))
-            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=t3.id, status="success", created_at="2026-01-01T00:00:03+00:00"))
+            assert h2.id is not None
+            assert h3.id is not None
 
         result = await handler.handle("aria2.tellStopped", [-1, 2])
-        assert [item["gid"] for item in result] == ["stopped-3", "stopped-2"]
+        assert [item["gid"] for item in result] == [f"hist-{h3.id}", f"hist-{h2.id}"]
 
 
 @pytest.mark.asyncio
@@ -597,9 +693,35 @@ class TestAria2RpcHandlerStaticMethods:
             await db.flush()
             assert task.id is not None
             db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="success"))
+            db.add(TaskHistory(owner_id=handler.user_id, task_name="fallback", uri="https://x/fallback", result="completed"))
 
         result = await handler.handle("aria2.removeDownloadResult", [f"task-{task.id}"])
         assert result == "OK"
+
+        async with get_session() as db:
+            history = (
+                await db.exec(
+                    select(TaskHistory).where(
+                        TaskHistory.owner_id == handler.user_id,
+                        TaskHistory.uri == "https://x/fallback",
+                    )
+                )
+            ).first()
+            assert history is None
+
+    async def test_remove_download_result_accepts_history_gid(self, handler):
+        async with get_session() as db:
+            history = TaskHistory(owner_id=handler.user_id, task_name="hist-only", uri="https://x/hist-only", total_length=10, result="cancelled")
+            db.add(history)
+            await db.flush()
+            assert history.id is not None
+
+        result = await handler.handle("aria2.removeDownloadResult", [f"hist-{history.id}"])
+        assert result == "OK"
+
+        async with get_session() as db:
+            deleted = await db.get(TaskHistory, history.id)
+            assert deleted is None
 
     async def test_pause_all_returns_ok(self, handler):
         result = await handler.handle("aria2.pauseAll", [])

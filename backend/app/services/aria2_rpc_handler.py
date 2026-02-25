@@ -20,7 +20,7 @@ from app.aria2.client import Aria2Client
 from app.core.config import settings
 from app.core.state import AppState
 from app.database import get_session
-from app.models import DownloadTask, User, UserTaskSubscription
+from app.models import DownloadTask, TaskHistory, User, UserTaskSubscription, utc_now_str
 from app.routers.config import get_min_free_disk
 from app.services.hash import extract_info_hash_from_torrent_base64, get_uri_hash
 from app.services.storage import get_user_space_info
@@ -205,19 +205,69 @@ class Aria2RpcHandler:
         except (ValueError, RuntimeError):
             pass
         return path
+
+    def _sanitize_file_path(self, path: str) -> str:
+        safe_path = self._sanitize_path(path)
+        if not safe_path:
+            return safe_path
+        return Path(safe_path).name
+
     def _sanitize_status(self, status: dict) -> dict:
         """对 tellStatus 返回的数据进行脱敏处理"""
-        result = dict(status)
-        if "dir" in result:
-            result["dir"] = self._sanitize_path(result["dir"])
+        result: dict[str, Any] = {}
+
+        allowed_top_level = [
+            "gid",
+            "status",
+            "totalLength",
+            "completedLength",
+            "uploadLength",
+            "downloadSpeed",
+            "uploadSpeed",
+            "errorCode",
+            "errorMessage",
+            "files",
+        ]
+
+        for key in allowed_top_level:
+            if key in status:
+                result[key] = status[key]
+
+        if "uploadLength" not in result:
+            result["uploadLength"] = "0"
+
         if "files" in result and isinstance(result["files"], list):
             sanitized_files = []
             for f in result["files"]:
-                sanitized_file = dict(f)
-                if "path" in sanitized_file:
-                    sanitized_file["path"] = self._sanitize_path(sanitized_file["path"])
+                if not isinstance(f, dict):
+                    continue
+                sanitized_file = {}
+                if "index" in f:
+                    sanitized_file["index"] = f["index"]
+                if "length" in f:
+                    sanitized_file["length"] = f["length"]
+                if "completedLength" in f:
+                    sanitized_file["completedLength"] = f["completedLength"]
+                if "selected" in f:
+                    sanitized_file["selected"] = f["selected"]
+                if "path" in f:
+                    sanitized_file["path"] = self._sanitize_file_path(f["path"])
+                sanitized_file["uris"] = []
                 sanitized_files.append(sanitized_file)
             result["files"] = sanitized_files
+        else:
+            result["files"] = []
+
+        bt_info = status.get("bittorrent")
+        if isinstance(bt_info, dict):
+            sanitized_bt: dict[str, Any] = {"announceList": []}
+            info_dict = bt_info.get("info")
+            if isinstance(info_dict, dict):
+                name = info_dict.get("name")
+                if isinstance(name, str) and name:
+                    sanitized_bt["info"] = {"name": name}
+            result["bittorrent"] = sanitized_bt
+
         return result
 
     @staticmethod
@@ -229,12 +279,39 @@ class Aria2RpcHandler:
         return ""
 
     @staticmethod
-    def _parse_history_gid(gid: str) -> tuple[str | None, int | None]:
+    def _parse_history_gid(gid: str) -> tuple[str | None, int | None, int | None]:
+        if gid.startswith("hist-"):
+            suffix = gid[5:]
+            if suffix.isdigit():
+                return None, None, int(suffix)
         if gid.startswith("task-"):
             suffix = gid[5:]
             if suffix.isdigit():
-                return None, int(suffix)
-        return gid, None
+                return None, int(suffix), None
+        return gid, None, None
+
+    @staticmethod
+    def _build_status_from_history(history: TaskHistory) -> dict:
+        if history.result == "completed":
+            status = "complete"
+            error_message = ""
+        else:
+            status = "error"
+            error_message = history.reason or ""
+
+        gid = f"hist-{history.id}" if history.id is not None else ""
+        return {
+            "gid": gid,
+            "status": status,
+            "totalLength": str(history.total_length or 0),
+            "completedLength": str(history.total_length or 0),
+            "uploadLength": "0",
+            "downloadSpeed": "0",
+            "uploadSpeed": "0",
+            "errorCode": "0",
+            "errorMessage": error_message,
+            "files": [],
+        }
 
     async def _get_user_available_space(self) -> int:
         """获取用户实际可用空间"""
@@ -395,6 +472,28 @@ class Aria2RpcHandler:
             await self.client.remove_download_result(gid)
         except Exception:
             logger.warning("Failed to remove aria2 result %s during compensation", gid)
+
+    async def _mark_submit_failed(self, task_id: int, message: str) -> None:
+        async with get_session() as db:
+            task = await db.get(DownloadTask, task_id)
+            if task and task.status in ("queued", "active", "waiting"):
+                task.status = "error"
+                task.error_display = message
+                task.updated_at = utc_now_str()
+                db.add(task)
+
+            result = await db.exec(
+                select(UserTaskSubscription).where(
+                    UserTaskSubscription.owner_id == self.user_id,
+                    UserTaskSubscription.task_id == task_id,
+                    UserTaskSubscription.status == "pending",
+                )
+            )
+            sub = result.first()
+            if sub:
+                sub.status = "failed"
+                sub.error_display = message
+                db.add(sub)
     async def _check_quota_and_disk(self) -> None:
         """检查配额和磁盘空间，不足则抛异常"""
         disk_ok, disk_free = self._check_disk_space()
@@ -444,7 +543,12 @@ class Aria2RpcHandler:
                     if db_task.gid and db_task.status in ("active", "queued", "waiting"):
                         return db_task.gid
 
-                gid = await self.client.add_uri(uris, options)
+                try:
+                    gid = await self.client.add_uri(uris, options)
+                except Exception as exc:
+                    await self._mark_submit_failed(task_id, str(exc))
+                    raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc))
+
                 try:
                     async with get_session() as db:
                         db_task = await db.get(DownloadTask, task_id)
@@ -499,7 +603,12 @@ class Aria2RpcHandler:
                     if db_task.gid and db_task.status in ("active", "queued", "waiting"):
                         return db_task.gid
 
-                gid = await self.client.add_torrent(torrent_data, uris, options)
+                try:
+                    gid = await self.client.add_torrent(torrent_data, uris, options)
+                except Exception as exc:
+                    await self._mark_submit_failed(task_id, str(exc))
+                    raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc))
+
                 try:
                     name = task_name
                     try:
@@ -634,12 +743,11 @@ class Aria2RpcHandler:
             "status": aria2_status,
             "totalLength": str(task.total_length or 0),
             "completedLength": str(task.completed_length or 0),
+            "uploadLength": "0",
             "downloadSpeed": "0",
             "uploadSpeed": "0",
-            "connections": "0",
             "errorCode": "0",
             "errorMessage": task.error or task.error_display or "",
-            "dir": "",
             "files": [],
         }
     async def _handle_tell_active(self, params: list) -> list:
@@ -670,21 +778,20 @@ class Aria2RpcHandler:
     async def _handle_tell_stopped(self, params: list) -> list:
         """aria2.tellStopped(offset, num[, keys])"""
         offset, num = self._normalize_pagination(params)
-        # stopped 任务从 DB 查询（aria2 可能已清理）
+
         async with get_session() as db:
             stmt = (
-                select(DownloadTask, UserTaskSubscription)
-                .join(UserTaskSubscription, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
+                select(TaskHistory)
                 .where(
-                    UserTaskSubscription.owner_id == self.user_id,
-                    col(UserTaskSubscription.status).in_(["success", "failed"]),
+                    TaskHistory.owner_id == self.user_id,
                 )
-                .order_by(col(UserTaskSubscription.created_at).asc())
+                .order_by(col(TaskHistory.id).asc())
             )
             result = await db.exec(stmt)
             rows = result.all()
+
         sliced_rows = self._slice_with_offset(rows, offset, num)
-        return [self._build_status_from_db(task, sub) for task, sub in sliced_rows]
+        return [self._build_status_from_history(history) for history in sliced_rows]
     async def _handle_get_global_stat(self, params: list) -> dict:
         """aria2.getGlobalStat()"""
         # 用户级别统计
@@ -713,9 +820,8 @@ class Aria2RpcHandler:
             num_waiting = r_waiting.one()
             # stopped
             r_stopped = await db.exec(
-                select(func.count()).select_from(UserTaskSubscription).where(
-                    UserTaskSubscription.owner_id == self.user_id,
-                    col(UserTaskSubscription.status).in_(["success", "failed"]),
+                select(func.count()).select_from(TaskHistory).where(
+                    TaskHistory.owner_id == self.user_id,
                 )
             )
             num_stopped = r_stopped.one()
@@ -747,7 +853,8 @@ class Aria2RpcHandler:
             files = await self.client.get_files(gid)
             for f in files:
                 if "path" in f:
-                    f["path"] = self._sanitize_path(f["path"])
+                    f["path"] = self._sanitize_file_path(f["path"])
+                f["uris"] = []
             return files
         except Exception:
             return []
@@ -773,8 +880,16 @@ class Aria2RpcHandler:
         gid_param = params[0]
         if not isinstance(gid_param, str):
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid must be a string")
-        gid, task_id = self._parse_history_gid(gid_param)
+        gid, task_id, history_id = self._parse_history_gid(gid_param)
         async with get_session() as db:
+            if history_id is not None:
+                history = await db.get(TaskHistory, history_id)
+                if history is None or history.owner_id != self.user_id:
+                    raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid_param}")
+                await db.delete(history)
+                await db.commit()
+                return "OK"
+
             stmt = (
                 select(UserTaskSubscription)
                 .join(DownloadTask, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
@@ -793,7 +908,23 @@ class Aria2RpcHandler:
             sub = result.first()
             if not sub:
                 raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid_param}")
+
+            task = await db.get(DownloadTask, sub.task_id)
             await db.delete(sub)
+
+            if task is not None:
+                history_stmt = (
+                    select(TaskHistory)
+                    .where(
+                        TaskHistory.owner_id == self.user_id,
+                        TaskHistory.uri == task.uri,
+                    )
+                    .order_by(col(TaskHistory.id).desc())
+                )
+                history = (await db.exec(history_stmt)).first()
+                if history is not None:
+                    await db.delete(history)
+
             await db.commit()
         return "OK"
     async def _handle_purge_download_result(self, params: list) -> str:
@@ -808,6 +939,13 @@ class Aria2RpcHandler:
             subs = result.all()
             for sub in subs:
                 await db.delete(sub)
+
+            history_result = await db.exec(
+                select(TaskHistory).where(TaskHistory.owner_id == self.user_id)
+            )
+            for history in history_result.all():
+                await db.delete(history)
+
             await db.commit()
         return "OK"
     # ========== 静默返回的方法（不支持但不报错） ==========
