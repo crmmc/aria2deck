@@ -15,7 +15,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.core.rate_limit import rpc_limiter
-from app.db import fetch_one
+from app.database import get_session
+from app.models import User
+from sqlmodel import select
 from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
 
 router = APIRouter(tags=["aria2-rpc"])
@@ -26,7 +28,7 @@ logger = logging.getLogger(__name__)
 # 用户认证
 # ============================================================================
 
-def get_user_by_rpc_secret(secret: str) -> dict | None:
+async def get_user_by_rpc_secret(secret: str) -> dict | None:
     """通过 RPC Secret 获取用户信息（常量时间验证）
 
     Args:
@@ -35,21 +37,66 @@ def get_user_by_rpc_secret(secret: str) -> dict | None:
     Returns:
         用户信息字典，包含 id, username 等，无效 Secret 返回 None
     """
-    user = fetch_one(
-        """
-        SELECT id, username, is_admin, quota
-        FROM users
-        WHERE rpc_secret = ?
-        """,
-        [secret]
-    )
+    async with get_session() as db:
+        result = await db.exec(select(User).where(User.rpc_secret == secret).limit(2))
+        users = result.all()
 
-    if not user:
+    if len(users) != 1:
         # 执行虚拟比较以保持时间一致，防止时序攻击
         secrets.compare_digest(secret, "dummy_secret_placeholder_value")
+        if len(users) > 1:
+            logger.error("RPC secret 冲突，拒绝鉴权 secret_prefix=%s***", secret[:8])
         return None
 
-    return dict(user)
+    user = users[0]
+
+    return {"id": user.id, "username": user.username, "is_admin": user.is_admin, "quota": user.quota}
+
+
+def _build_rate_limit_response() -> JSONResponse:
+    return JSONResponse(
+        content=build_jsonrpc_error(
+            -32000,  # Server error
+            "Rate limit exceeded, please try again later",
+            None,
+        ),
+        status_code=200,
+    )
+
+
+async def _authenticate_from_params(
+    params: Any,
+    request_id: str | int | None,
+    client_ip: str,
+    outer_request_id: str,
+) -> tuple[dict | None, list | None, dict | None]:
+    if not isinstance(params, list):
+        logger.warning("RPC参数类型错误 ip=%s request_id=%s", client_ip, outer_request_id)
+        return None, None, build_jsonrpc_error(
+            RpcErrorCode.INVALID_PARAMS,
+            "Params must be an array",
+            request_id,
+        )
+
+    secret, remaining_params = extract_secret_from_params(params)
+    if not secret:
+        logger.warning("RPC缺少Token ip=%s request_id=%s", client_ip, outer_request_id)
+        return None, None, build_jsonrpc_error(
+            1,  # Unauthorized
+            "Missing token parameter",
+            request_id,
+        )
+
+    user = await get_user_by_rpc_secret(secret)
+    if not user:
+        logger.warning("RPC鉴权失败 ip=%s request_id=%s", client_ip, outer_request_id)
+        return None, None, build_jsonrpc_error(
+            1,  # Unauthorized
+            "Invalid token",
+            request_id,
+        )
+
+    return user, remaining_params, None
 
 
 def extract_secret_from_params(params: list) -> tuple[str | None, list]:
@@ -201,20 +248,11 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
     返回:
         JSON-RPC 2.0 响应格式
     """
-    # 0. 限流检查
     client_ip = request.client.host if request.client else "unknown"
     request_id = getattr(request.state, "request_id", "-")
-    if await rpc_limiter.is_blocked(client_ip):
+    if not await rpc_limiter.is_allowed(client_ip):
         logger.warning("RPC请求被限流 ip=%s request_id=%s", client_ip, request_id)
-        return JSONResponse(
-            content=build_jsonrpc_error(
-                -32000,  # Server error
-                "Rate limit exceeded, please try again later",
-                None
-            ),
-            status_code=200
-        )
-    await rpc_limiter.record(client_ip)
+        return _build_rate_limit_response()
 
     # 1. 解析请求体
     try:
@@ -230,9 +268,6 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
             status_code=200
         )
 
-    # 2. 提取 token 并验证用户
-    # 对于单个请求，从 params[0] 提取
-    # 对于批量请求，从第一个请求的 params[0] 提取
     if isinstance(body, list):
         if not body:
             logger.warning("RPC空批量请求 ip=%s request_id=%s", client_ip, request_id)
@@ -244,10 +279,13 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
                 ),
                 status_code=200
             )
-        first_request = body[0] if isinstance(body[0], dict) else {}
-        params = first_request.get("params", [])
+
+        for _ in range(max(0, len(body) - 1)):
+            if not await rpc_limiter.is_allowed(client_ip):
+                logger.warning("RPC批量请求被限流 ip=%s request_id=%s", client_ip, request_id)
+                return _build_rate_limit_response()
     elif isinstance(body, dict):
-        params = body.get("params", [])
+        pass
     else:
         return JSONResponse(
             content=build_jsonrpc_error(
@@ -258,59 +296,30 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
             status_code=200
         )
 
-    if not isinstance(params, list):
-        logger.warning("RPC参数类型错误 ip=%s request_id=%s", client_ip, request_id)
-        return JSONResponse(
-            content=build_jsonrpc_error(
-                RpcErrorCode.INVALID_PARAMS,
-                "Params must be an array",
-                None
-            ),
-            status_code=200
-        )
-
-    secret, remaining_params = extract_secret_from_params(params)
-
-    if not secret:
-        logger.warning("RPC缺少Token ip=%s request_id=%s", client_ip, request_id)
-        return JSONResponse(
-            content=build_jsonrpc_error(
-                1,  # Unauthorized
-                "Missing token parameter",
-                None
-            ),
-            status_code=200
-        )
-
-    user = get_user_by_rpc_secret(secret)
-    if not user:
-        logger.warning("RPC鉴权失败 ip=%s request_id=%s", client_ip, request_id)
-        return JSONResponse(
-            content=build_jsonrpc_error(
-                1,  # Unauthorized
-                "Invalid token",
-                None
-            ),
-            status_code=200
-        )
-
-    # 3. 创建处理器
     aria2_client = request.app.state.aria2_client
     app_state = request.app.state.app_state
-    handler = Aria2RpcHandler(user["id"], aria2_client, app_state)
-    logger.info("RPC请求通过鉴权 user_id=%s ip=%s request_id=%s", user["id"], client_ip, request_id)
 
     # 4. 处理请求（支持单个和批量）
     if isinstance(body, list):
-        # 批量请求
         responses = []
-        for idx, item in enumerate(body):
+        for item in body:
             if isinstance(item, dict):
-                # 第一个请求使用已提取的 remaining_params
-                if idx == 0:
-                    response = await process_single_request(item, handler, remaining_params)
-                else:
-                    response = await process_single_request(item, handler)
+                item_request_id = item.get("id")
+                user, remaining_params, auth_error = await _authenticate_from_params(
+                    item.get("params", []),
+                    item_request_id,
+                    client_ip,
+                    request_id,
+                )
+                if auth_error is not None:
+                    responses.append(auth_error)
+                    continue
+                if user is None or remaining_params is None:
+                    responses.append(build_jsonrpc_error(RpcErrorCode.INTERNAL_ERROR, "Internal server error", item_request_id))
+                    continue
+
+                handler = Aria2RpcHandler(user["id"], aria2_client, app_state)
+                response = await process_single_request(item, handler, remaining_params)
                 responses.append(response)
             else:
                 responses.append(build_jsonrpc_error(
@@ -318,10 +327,26 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
                     "Invalid request in batch",
                     None
                 ))
-        logger.info("RPC批量请求完成 user_id=%s count=%s request_id=%s", user["id"], len(responses), request_id)
+        logger.info("RPC批量请求完成 count=%s request_id=%s", len(responses), request_id)
         return JSONResponse(content=responses, status_code=200)
     else:
-        # 单个请求
+        user, remaining_params, auth_error = await _authenticate_from_params(
+            body.get("params", []),
+            body.get("id"),
+            client_ip,
+            request_id,
+        )
+        if auth_error is not None:
+            return JSONResponse(content=auth_error, status_code=200)
+        if user is None or remaining_params is None:
+            return JSONResponse(
+                content=build_jsonrpc_error(RpcErrorCode.INTERNAL_ERROR, "Internal server error", body.get("id")),
+                status_code=200,
+            )
+
+        handler = Aria2RpcHandler(user["id"], aria2_client, app_state)
+        logger.info("RPC请求通过鉴权 user_id=%s ip=%s request_id=%s", user["id"], client_ip, request_id)
+
         response = await process_single_request(body, handler, remaining_params)
         logger.info("RPC单请求完成 user_id=%s request_id=%s", user["id"], request_id)
         return JSONResponse(content=response, status_code=200)

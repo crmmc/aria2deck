@@ -1,8 +1,16 @@
 """Tests for Aria2RpcHandler construction requirements."""
+import asyncio
 import pytest
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
+from sqlmodel import col, select
+
 from app.aria2.client import Aria2Client
+from app.core.state import AppState
+from app.database import get_session
+from app.models import DownloadTask, UserTaskSubscription
+from app.services.hash import get_uri_hash
 from app.services.aria2_rpc_handler import (
     Aria2RpcHandler,
     RpcError,
@@ -14,7 +22,7 @@ def test_aria2_rpc_handler_requires_app_state():
     """Handler should fail fast when app_state is missing."""
     client = Aria2Client("http://localhost:6800/jsonrpc")
     with pytest.raises(RuntimeError):
-        Aria2RpcHandler(user_id=1, aria2_client=client, app_state=None)
+        Aria2RpcHandler(user_id=1, aria2_client=client, app_state=cast(AppState, None))
 
 
 class TestRpcError:
@@ -79,6 +87,8 @@ def mock_aria2_client():
 def mock_app_state():
     state = MagicMock()
     state.user_space_locks = {}
+    state.task_submit_locks = {}
+    state.lock = asyncio.Lock()
     return state
 
 
@@ -148,6 +158,38 @@ class TestAria2RpcHandlerAddMethods:
             await handler.handle("aria2.addTorrent", [])
         assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
 
+    async def test_add_uri_existing_subscription_resets_to_pending(self, handler):
+        handler.client.add_uri.return_value = "gid-existing"
+        uri = "https://example.com/file.iso"
+        uri_hash = get_uri_hash(uri)
+        assert uri_hash is not None
+
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash=uri_hash,
+                uri=uri,
+                gid="gid-existing",
+                status="active",
+                name="file.iso",
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            sub = UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="success")
+            db.add(sub)
+
+        result = await handler.handle("aria2.addUri", [[uri]])
+        assert result == "gid-existing"
+
+        async with get_session() as db:
+            stmt = select(UserTaskSubscription).where(
+                UserTaskSubscription.owner_id == handler.user_id,
+                UserTaskSubscription.task_id == task.id,
+            )
+            refreshed_sub = (await db.exec(stmt)).first()
+            assert refreshed_sub is not None
+            assert refreshed_sub.status == "pending"
+
 
 @pytest.mark.asyncio
 class TestAria2RpcHandlerTaskMethods:
@@ -163,21 +205,17 @@ class TestAria2RpcHandlerTaskMethods:
             await handler.handle("aria2.forceRemove", [])
         assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
 
-    async def test_pause_invalid_gid(self, handler):
-        with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.pause", [])
-        assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
+    async def test_pause_returns_gid(self, handler):
+        result = await handler.handle("aria2.pause", ["some_gid"])
+        assert result == "some_gid"
 
-    async def test_force_pause_invalid_gid(self, handler):
-        with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.forcePause", [])
-        assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
+    async def test_force_pause_returns_gid(self, handler):
+        result = await handler.handle("aria2.forcePause", ["some_gid"])
+        assert result == "some_gid"
 
-    async def test_unpause_invalid_gid(self, handler):
-        with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.unpause", [])
-        assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
-
+    async def test_unpause_returns_gid(self, handler):
+        result = await handler.handle("aria2.unpause", ["some_gid"])
+        assert result == "some_gid"
 
 @pytest.mark.asyncio
 class TestAria2RpcHandlerStatusMethods:
@@ -203,21 +241,15 @@ class TestAria2RpcHandlerStatusMethods:
 class TestAria2RpcHandlerOptionMethods:
     """Tests for option methods."""
 
-    async def test_get_option_task_not_found(self, handler):
-        with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.getOption", ["nonexistent_gid"])
-        assert exc_info.value.code == RpcErrorCode.TASK_NOT_FOUND
-
-    async def test_change_option_task_not_found(self, handler):
-        with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.changeOption", ["nonexistent_gid", {"max-download-limit": "1M"}])
-        assert exc_info.value.code == RpcErrorCode.TASK_NOT_FOUND
-
-    async def test_get_global_option(self, handler):
-        handler.client.get_global_option.return_value = {"max-concurrent-downloads": "5"}
+    async def test_get_option_returns_empty(self, handler):
+        result = await handler.handle("aria2.getOption", ["some_gid"])
+        assert result == {}
+    async def test_change_option_returns_ok(self, handler):
+        result = await handler.handle("aria2.changeOption", ["some_gid", {"max-download-limit": "1M"}])
+        assert result == "OK"
+    async def test_get_global_option_returns_empty(self, handler):
         result = await handler.handle("aria2.getGlobalOption", [])
-        assert isinstance(result, dict)
-
+        assert result == {}
     async def test_change_global_option(self, handler):
         handler.client.change_global_option.return_value = "OK"
         result = await handler.handle("aria2.changeGlobalOption", [{"max-concurrent-downloads": "10"}])
@@ -229,29 +261,48 @@ class TestAria2RpcHandlerBulkMethods:
     """Tests for bulk operation methods."""
 
     async def test_pause_all(self, handler):
-        handler.client.pause_all.return_value = "OK"
         result = await handler.handle("aria2.pauseAll", [])
         assert result == "OK"
 
     async def test_force_pause_all(self, handler):
-        handler.client.force_pause_all.return_value = "OK"
         result = await handler.handle("aria2.forcePauseAll", [])
         assert result == "OK"
 
     async def test_unpause_all(self, handler):
-        handler.client.unpause_all.return_value = "OK"
         result = await handler.handle("aria2.unpauseAll", [])
         assert result == "OK"
 
     async def test_purge_download_result(self, handler):
-        handler.client.purge_download_result.return_value = "OK"
+        async with get_session() as db:
+            done_task = DownloadTask(uri_hash="purge-hash-1", uri="https://x/1", gid="purge-gid-1", status="complete")
+            active_task = DownloadTask(uri_hash="purge-hash-2", uri="https://x/2", gid="purge-gid-2", status="active")
+            db.add(done_task)
+            db.add(active_task)
+            await db.flush()
+            assert done_task.id is not None
+            assert active_task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=done_task.id, status="success"))
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=active_task.id, status="pending"))
+
         result = await handler.handle("aria2.purgeDownloadResult", [])
         assert result == "OK"
 
-    async def test_remove_download_result_with_gid(self, handler):
-        handler.client.remove_download_result.return_value = "OK"
-        result = await handler.handle("aria2.removeDownloadResult", ["abc123"])
-        assert result == "OK"
+        async with get_session() as db:
+            stopped_stmt = select(UserTaskSubscription).where(
+                UserTaskSubscription.owner_id == handler.user_id,
+                col(UserTaskSubscription.status).in_(["success", "failed"]),
+            )
+            pending_stmt = select(UserTaskSubscription).where(
+                UserTaskSubscription.owner_id == handler.user_id,
+                UserTaskSubscription.status == "pending",
+            )
+            assert len((await db.exec(stopped_stmt)).all()) == 0
+            assert len((await db.exec(pending_stmt)).all()) == 1
+
+    async def test_remove_download_result_no_gid(self, handler):
+        with pytest.raises(RpcError) as exc_info:
+            await handler.handle("aria2.removeDownloadResult", [])
+        assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
 
 
 @pytest.mark.asyncio
@@ -268,7 +319,8 @@ class TestAria2RpcHandlerSystemMethods:
             {"methodName": "aria2.getVersion", "params": []}
         ]])
         assert len(result) == 1
-        assert isinstance(result[0], (dict, list))
+        assert isinstance(result[0], list)
+        assert result[0][0]["version"] == "1.36.0"
 
 
 @pytest.mark.asyncio
@@ -341,7 +393,7 @@ class TestAria2RpcHandlerUserSpace:
         assert ".incomplete" in result
 
     async def test_verify_task_owner_not_found(self, handler):
-        result = handler._verify_task_owner("nonexistent_gid")
+        result = await handler._verify_task_owner("nonexistent_gid")
         assert result is None
 
 
@@ -350,17 +402,13 @@ class TestAria2RpcHandlerShutdown:
     """Tests for shutdown methods."""
 
     async def test_shutdown(self, handler):
-        handler.client.shutdown.return_value = "OK"
         result = await handler.handle("aria2.shutdown", [])
         assert result == "OK"
-
     async def test_force_shutdown(self, handler):
-        handler.client.force_shutdown.return_value = "OK"
         result = await handler.handle("aria2.forceShutdown", [])
         assert result == "OK"
 
     async def test_save_session(self, handler):
-        handler.client.save_session.return_value = "OK"
         result = await handler.handle("aria2.saveSession", [])
         assert result == "OK"
 
@@ -368,15 +416,13 @@ class TestAria2RpcHandlerShutdown:
 @pytest.mark.asyncio
 class TestAria2RpcHandlerChangePosition:
 
-    async def test_change_position_invalid_params(self, handler):
-        with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.changePosition", [])
-        assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
+    async def test_change_position_returns_zero(self, handler):
+        result = await handler.handle("aria2.changePosition", [])
+        assert result == 0
 
-    async def test_change_position_task_not_found(self, handler):
-        with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.changePosition", ["nonexistent_gid", 0, "POS_SET"])
-        assert exc_info.value.code == RpcErrorCode.TASK_NOT_FOUND
+    async def test_change_position_with_params_returns_zero(self, handler):
+        result = await handler.handle("aria2.changePosition", ["some_gid", 0, "POS_SET"])
+        assert result == 0
 
 
 @pytest.mark.asyncio
@@ -392,15 +438,12 @@ class TestAria2RpcHandlerWithTasks:
             await handler.handle("aria2.forceRemove", ["nonexistent_gid"])
         assert exc_info.value.code == RpcErrorCode.TASK_NOT_FOUND
 
-    async def test_pause_task_not_found(self, handler):
-        with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.pause", ["nonexistent_gid"])
-        assert exc_info.value.code == RpcErrorCode.TASK_NOT_FOUND
-
-    async def test_unpause_task_not_found(self, handler):
-        with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.unpause", ["nonexistent_gid"])
-        assert exc_info.value.code == RpcErrorCode.TASK_NOT_FOUND
+    async def test_pause_returns_gid_for_nonexistent(self, handler):
+        result = await handler.handle("aria2.pause", ["nonexistent_gid"])
+        assert result == "nonexistent_gid"
+    async def test_unpause_returns_gid_for_nonexistent(self, handler):
+        result = await handler.handle("aria2.unpause", ["nonexistent_gid"])
+        assert result == "nonexistent_gid"
 
     async def test_tell_status_task_not_found(self, handler):
         with pytest.raises(RpcError) as exc_info:
@@ -421,15 +464,62 @@ class TestAria2RpcHandlerWithTasks:
 @pytest.mark.asyncio
 class TestAria2RpcHandlerTellMethods:
 
-    async def test_tell_waiting_invalid_params(self, handler):
+    async def test_tell_waiting_empty_params(self, handler):
+        result = await handler.handle("aria2.tellWaiting", [])
+        assert result == []
+
+    async def test_tell_stopped_empty_params(self, handler):
+        result = await handler.handle("aria2.tellStopped", [])
+        assert result == []
+
+    async def test_tell_waiting_negative_offset_reverse_order(self, handler):
+        handler.client.tell_waiting.return_value = [
+            {"gid": "x-1"},
+            {"gid": "u-1"},
+            {"gid": "x-2"},
+            {"gid": "u-2"},
+        ]
+        handler._get_user_gids = AsyncMock(return_value={"u-1", "u-2"})
+
+        result = await handler.handle("aria2.tellWaiting", [-1, 2])
+        assert [item["gid"] for item in result] == ["u-2", "u-1"]
+
+    async def test_tell_waiting_non_integer_params_invalid(self, handler):
         with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.tellWaiting", [])
+            await handler.handle("aria2.tellWaiting", ["1", 10])
         assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
 
-    async def test_tell_stopped_invalid_params(self, handler):
-        with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.tellStopped", [])
-        assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
+    async def test_tell_waiting_paginated_after_filter(self, handler):
+        handler.client.tell_waiting.return_value = [
+            {"gid": "x-1"},
+            {"gid": "u-1"},
+            {"gid": "x-2"},
+            {"gid": "u-2"},
+        ]
+        handler._get_user_gids = AsyncMock(return_value={"u-1", "u-2"})
+
+        result = await handler.handle("aria2.tellWaiting", [1, 1])
+        assert len(result) == 1
+        assert result[0]["gid"] == "u-2"
+
+    async def test_tell_stopped_negative_offset_reverse_order(self, handler):
+        async with get_session() as db:
+            t1 = DownloadTask(uri_hash="stopped-hash-1", uri="https://x/1", gid="stopped-1", status="complete")
+            t2 = DownloadTask(uri_hash="stopped-hash-2", uri="https://x/2", gid="stopped-2", status="complete")
+            t3 = DownloadTask(uri_hash="stopped-hash-3", uri="https://x/3", gid="stopped-3", status="complete")
+            db.add(t1)
+            db.add(t2)
+            db.add(t3)
+            await db.flush()
+            assert t1.id is not None
+            assert t2.id is not None
+            assert t3.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=t1.id, status="success", created_at="2026-01-01T00:00:01+00:00"))
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=t2.id, status="success", created_at="2026-01-01T00:00:02+00:00"))
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=t3.id, status="success", created_at="2026-01-01T00:00:03+00:00"))
+
+        result = await handler.handle("aria2.tellStopped", [-1, 2])
+        assert [item["gid"] for item in result] == ["stopped-3", "stopped-2"]
 
 
 @pytest.mark.asyncio
@@ -443,19 +533,29 @@ class TestAria2RpcHandlerMulticall:
     async def test_multicall_invalid_method_call(self, handler):
         result = await handler.handle("system.multicall", [["not_a_dict"]])
         assert len(result) == 1
-        assert "faultCode" in result[0]
+        assert result[0]["faultCode"] == RpcErrorCode.INVALID_PARAMS
+        assert "faultString" in result[0]
 
     async def test_multicall_missing_method_name(self, handler):
         result = await handler.handle("system.multicall", [[{"params": []}]])
         assert len(result) == 1
-        assert result[0]["faultCode"] == RpcErrorCode.INVALID_PARAMS
+        assert result[0]["faultCode"] == RpcErrorCode.METHOD_NOT_FOUND
 
     async def test_multicall_method_error(self, handler):
         result = await handler.handle("system.multicall", [[
             {"methodName": "aria2.tellStatus", "params": []}
         ]])
         assert len(result) == 1
-        assert "faultCode" in result[0]
+        assert result[0]["faultCode"] == RpcErrorCode.INVALID_PARAMS
+        assert "faultString" in result[0]
+
+    async def test_multicall_strips_inner_token(self, handler):
+        handler.client.get_version.return_value = {"version": "1.36.0"}
+        result = await handler.handle("system.multicall", [[
+            {"methodName": "aria2.getVersion", "params": ["token:inner"]}
+        ]])
+        assert len(result) == 1
+        assert result[0][0]["version"] == "1.36.0"
 
 
 @pytest.mark.asyncio
@@ -481,12 +581,24 @@ class TestAria2RpcHandlerStaticMethods:
         result = await handler.handle("aria2.saveSession", [])
         assert result == "OK"
 
-    async def test_purge_download_result_returns_ok(self, handler):
+    async def test_purge_download_result(self, handler):
         result = await handler.handle("aria2.purgeDownloadResult", [])
         assert result == "OK"
 
-    async def test_remove_download_result_returns_ok(self, handler):
-        result = await handler.handle("aria2.removeDownloadResult", ["gid123"])
+    async def test_remove_download_result(self, handler):
+        with pytest.raises(RpcError) as exc_info:
+            await handler.handle("aria2.removeDownloadResult", ["gid123"])
+        assert exc_info.value.code == RpcErrorCode.TASK_NOT_FOUND
+
+    async def test_remove_download_result_accepts_task_fallback_gid(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(uri_hash="fallback-hash-1", uri="https://x/fallback", gid=None, status="complete")
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="success"))
+
+        result = await handler.handle("aria2.removeDownloadResult", [f"task-{task.id}"])
         assert result == "OK"
 
     async def test_pause_all_returns_ok(self, handler):
@@ -555,8 +667,13 @@ class TestAria2RpcHandlerGetSessionInfo:
 class TestAria2RpcHandlerUserSpaceExtended:
 
     async def test_get_user_available_space_no_user(self, handler, temp_db):
-        from app.db import execute
-        execute("DELETE FROM users WHERE id = ?", [handler.user_id])
+        from app.database import get_session
+        from app.models import User
+        async with get_session() as db:
+            user = await db.get(User, handler.user_id)
+            if user:
+                await db.delete(user)
+                await db.commit()
         result = await handler._get_user_available_space()
         assert result == 0
 

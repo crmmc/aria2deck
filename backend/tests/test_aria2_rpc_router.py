@@ -167,6 +167,91 @@ class TestJsonrpcHandler:
         assert "error" in data
         assert "Empty batch" in data["error"]["message"]
 
+    def test_batch_auth_per_request(self, client: TestClient, rpc_user: dict):
+        response = client.post("/aria2/jsonrpc", json=[
+            {
+                "jsonrpc": "2.0",
+                "method": "aria2.getVersion",
+                "params": [f"token:{rpc_user['rpc_secret']}"],
+                "id": "1",
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "aria2.getVersion",
+                "params": ["token:invalid_secret"],
+                "id": "2",
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "aria2.getVersion",
+                "params": [],
+                "id": "3",
+            },
+        ])
+
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert len(data) == 3
+        assert data[0]["id"] == "1"
+        if "error" in data[0]:
+            assert data[0]["error"]["message"] == "Internal server error"
+        else:
+            assert "result" in data[0]
+        assert data[1]["error"]["message"] == "Invalid token"
+        assert data[2]["error"]["message"] == "Missing token parameter"
+
+    def test_batch_invalid_item_does_not_block_other_items(self, client: TestClient, rpc_user: dict):
+        response = client.post("/aria2/jsonrpc", json=[
+            "not_an_object",
+            {
+                "jsonrpc": "2.0",
+                "method": "aria2.getVersion",
+                "params": [f"token:{rpc_user['rpc_secret']}"],
+                "id": "2",
+            },
+        ])
+
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert len(data) == 2
+        assert "error" in data[0]
+        assert data[0]["error"]["message"] == "Invalid request in batch"
+        assert data[1]["id"] == "2"
+        if "error" in data[1]:
+            assert data[1]["error"]["message"] == "Internal server error"
+        else:
+            assert "result" in data[1]
+
+    def test_batch_item_params_must_be_array(self, client: TestClient, rpc_user: dict):
+        response = client.post("/aria2/jsonrpc", json=[
+            {
+                "jsonrpc": "2.0",
+                "method": "aria2.getVersion",
+                "params": "not_an_array",
+                "id": "1",
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "aria2.getVersion",
+                "params": [f"token:{rpc_user['rpc_secret']}"],
+                "id": "2",
+            },
+        ])
+
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert len(data) == 2
+        assert "error" in data[0]
+        assert "array" in data[0]["error"]["message"].lower()
+        assert data[1]["id"] == "2"
+        if "error" in data[1]:
+            assert data[1]["error"]["message"] == "Internal server error"
+        else:
+            assert "result" in data[1]
+
     def test_invalid_request_type(self, client: TestClient, temp_db: str):
         response = client.post("/aria2/jsonrpc", json="string_not_object")
         assert response.status_code == 200
@@ -174,15 +259,40 @@ class TestJsonrpcHandler:
         assert "error" in data
 
 
+@pytest.mark.asyncio
 class TestGetUserByRpcSecret:
 
-    def test_get_user_valid_secret(self, temp_db: str, rpc_user: dict):
+    async def test_get_user_valid_secret(self, temp_db: str, rpc_user: dict):
         from app.routers.aria2_rpc import get_user_by_rpc_secret
-        user = get_user_by_rpc_secret(rpc_user["rpc_secret"])
+        user = await get_user_by_rpc_secret(rpc_user["rpc_secret"])
         assert user is not None
         assert user["username"] == "rpcuser"
 
-    def test_get_user_invalid_secret(self, temp_db: str):
+    async def test_get_user_invalid_secret(self, temp_db: str):
         from app.routers.aria2_rpc import get_user_by_rpc_secret
-        user = get_user_by_rpc_secret("nonexistent_secret")
+        user = await get_user_by_rpc_secret("nonexistent_secret")
+        assert user is None
+
+    async def test_get_user_duplicate_secret_returns_none(self, temp_db: str):
+        from app.core.security import hash_password
+        from datetime import datetime, timezone
+        from app.routers.aria2_rpc import get_user_by_rpc_secret
+
+        duplicate_secret = "dup_secret_for_rpc_test"
+        execute(
+            """
+            INSERT INTO users (username, password_hash, is_admin, created_at, quota, rpc_secret)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ["dup_user_1", hash_password("p1"), 0, datetime.now(timezone.utc).isoformat(), 10 * 1024**3, duplicate_secret],
+        )
+        execute(
+            """
+            INSERT INTO users (username, password_hash, is_admin, created_at, quota, rpc_secret)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ["dup_user_2", hash_password("p2"), 0, datetime.now(timezone.utc).isoformat(), 10 * 1024**3, duplicate_secret],
+        )
+
+        user = await get_user_by_rpc_secret(duplicate_secret)
         assert user is None
