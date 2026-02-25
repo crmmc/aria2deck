@@ -47,7 +47,8 @@ dev-front:
 	@echo "Building frontend static artifacts before dev..."
 	@$(MAKE) build
 	@echo "Starting frontend dev server on http://localhost:3000 ..."
-	cd $(FRONTEND_DIR) && $(BUN) run dev
+	@echo "API requests will be sent to http://localhost:8000"
+	cd $(FRONTEND_DIR) && NEXT_PUBLIC_API_BASE=http://localhost:8000 $(BUN) run dev
 
 # Backend development mode (verbose logs)
 # Difference from `run`: ARIA2C_DEBUG=true and uvicorn --log-level debug
