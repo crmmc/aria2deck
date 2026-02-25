@@ -47,6 +47,7 @@ export const createMockTask = (overrides: Partial<Task> = {}): Task => ({
 
 export const createMockFileInfo = (overrides: Partial<FileInfo> = {}): FileInfo => ({
   id: 1,
+  content_hash: "hash_test_file",
   name: "test-file.zip",
   size: 1073741824,
   is_directory: false,
@@ -66,6 +67,7 @@ export const createMockSystemStats = (overrides: Partial<SystemStats> = {}): Sys
   upload_speed: 524288,
   active_task_count: 2,
   disk_used_space: 53687091200,
+  disk_frozen_space: 0,
   disk_total_space: 107374182400,
   disk_space_limited: false,
   ...overrides,
@@ -78,13 +80,11 @@ export const createMockSystemConfig = (overrides: Partial<SystemConfig> = {}): S
   aria2_rpc_secret: "secret",
   hidden_file_extensions: [".aria2", ".torrent"],
   pack_format: "zip",
-  pack_7z_method: "lzma2",
   pack_compression_level: 5,
-  pack_memory_limit: 128,
-  pack_extra_args: "",
   ws_reconnect_max_delay: 30000,
   ws_reconnect_jitter: 0.3,
   ws_reconnect_factor: 2,
+  site_title: "Aria2 控制器",
   ...overrides,
 });
 
@@ -297,9 +297,12 @@ export const createNotificationMock = () => {
     writable: true,
   });
 
-  mockNotification.requestPermission = jest.fn().mockResolvedValue("granted");
+  const notificationMock = mockNotification as typeof mockNotification & {
+    requestPermission: jest.Mock<Promise<NotificationPermission>, []>;
+  };
+  notificationMock.requestPermission = jest.fn().mockResolvedValue("granted");
 
-  return mockNotification;
+  return notificationMock;
 };
 
 // Crypto.subtle mock for PBKDF2

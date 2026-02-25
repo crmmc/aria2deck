@@ -10,11 +10,12 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import text, update
+from sqlalchemy import update
 from sqlmodel import func, or_, select
 from starlette.responses import StreamingResponse
 from urllib.parse import quote
@@ -30,6 +31,11 @@ from app.services.storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+UF: Any = UserFile.__dict__["__table__"].c
+SF: Any = StoredFile.__dict__["__table__"].c
+PT: Any = PackTask.__dict__["__table__"].c
+SL: Any = ShareLink.__dict__["__table__"].c
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 # 打包任务创建锁，防止并发校验导致空间超卖（按事件循环隔离）
@@ -48,6 +54,12 @@ def _get_pack_create_lock() -> asyncio.Lock:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _require_user_id(user: User) -> int:
+    if user.id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录")
+    return int(user.id)
 
 
 # ========== Schemas ==========
@@ -106,12 +118,12 @@ async def _get_user_file_by_hash(
     async with get_session() as db:
         result = await db.exec(
             select(UserFile, StoredFile)
-            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
+            .join(StoredFile, UF.stored_file_id == SF.id)
             .where(
-                StoredFile.content_hash == content_hash,
-                UserFile.owner_id == user_id,
+                SF.content_hash == content_hash,
+                UF.owner_id == user_id,
             )
-            .order_by(UserFile.id.asc())
+            .order_by(UF.id.asc())
         )
         return result.first()
 
@@ -231,8 +243,8 @@ async def _resolve_file_ids(user_id: int, file_ids: list[int]) -> list[tuple[str
     async with get_session() as db:
         result = await db.exec(
             select(UserFile, StoredFile)
-            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
-            .where(UserFile.id.in_(file_ids), UserFile.owner_id == user_id)
+            .join(StoredFile, UF.stored_file_id == SF.id)
+            .where(UF.id.in_(file_ids), UF.owner_id == user_id)
         )
         pairs = result.all()
 
@@ -253,20 +265,20 @@ async def list_files(user: User = Depends(require_user)) -> FileListResponse:
 
     返回用户根目录下的所有文件/文件夹条目。
     """
+    user_id = _require_user_id(user)
     async with get_session() as db:
         result = await db.exec(
             select(UserFile, StoredFile)
-            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
-            .where(UserFile.owner_id == user.id)
-            .order_by(UserFile.created_at.desc())
+            .join(StoredFile, UF.stored_file_id == SF.id)
+            .where(UF.owner_id == user_id)
+            .order_by(UF.created_at.desc())
         )
         rows = result.all()
 
-    files = [_user_file_to_dict(uf, sf) for uf, sf in rows]
-    logger.debug("查询文件列表 user_id=%s count=%s", user.id, len(files))
+    files = [FileInfo(**_user_file_to_dict(uf, sf)) for uf, sf in rows]
+    logger.debug("查询文件列表 user_id=%s count=%s", user_id, len(files))
 
-    # Get space info
-    space_info = await get_user_space_info(user.id, user.quota)
+    space_info = await get_user_space_info(user_id, user.quota)
 
     return FileListResponse(
         files=files,
@@ -291,10 +303,11 @@ async def browse_file(
         path: 文件夹内的相对路径
     """
     # Get user file and stored file
-    row = await _get_user_file_by_hash(user.id, file_hash)
+    user_id = _require_user_id(user)
+    row = await _get_user_file_by_hash(user_id, file_hash)
 
     if not row:
-        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=not_found", user.id, file_hash)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=not_found", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
@@ -303,7 +316,7 @@ async def browse_file(
     user_file, stored_file = row
 
     if not stored_file.is_directory:
-        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=not_directory", user.id, file_hash)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=not_directory", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="此文件不是文件夹"
@@ -312,7 +325,7 @@ async def browse_file(
     # Validate and resolve path
     base_path = Path(stored_file.real_path)
     if not base_path.exists():
-        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=base_missing", user.id, file_hash)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=base_missing", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件夹不存在"
@@ -321,14 +334,14 @@ async def browse_file(
     target_path = _validate_subpath(base_path, path)
 
     if not target_path.exists():
-        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=path_missing", user.id, file_hash)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=path_missing", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="路径不存在"
         )
 
     if not target_path.is_dir():
-        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=path_not_directory", user.id, file_hash)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=path_not_directory", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="路径不是文件夹"
@@ -349,19 +362,19 @@ async def browse_file(
                 logger.warning("Failed to stat file %s: %s", entry, e)
                 continue
     except FileNotFoundError:
-        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=file_deleted", user.id, file_hash)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=file_deleted", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件或目录已被删除"
         )
     except PermissionError:
-        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=permission_denied", user.id, file_hash)
+        logger.warning("浏览文件失败 user_id=%s file_hash=%s reason=permission_denied", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="无权访问此目录"
         )
 
-    logger.debug("浏览文件成功 user_id=%s file_hash=%s count=%s", user.id, file_hash, len(files))
+    logger.debug("浏览文件成功 user_id=%s file_hash=%s count=%s", user_id, file_hash, len(files))
 
     return files
 
@@ -380,16 +393,17 @@ async def download_file(
         file_hash: 文件的 content_hash
         path: BT 文件夹内的相对路径（可选）
     """
-    if not await api_limiter.is_allowed(user.id, "download_file", limit=settings.rate_limit_download_file, window_seconds=60):
-        logger.warning("下载文件被限流 user_id=%s file_hash=%s", user.id, file_hash)
+    user_id = _require_user_id(user)
+    if not await api_limiter.is_allowed(user_id, "download_file", limit=settings.rate_limit_download_file, window_seconds=60):
+        logger.warning("下载文件被限流 user_id=%s file_hash=%s", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="下载请求过于频繁，请稍后再试"
         )
     # Get user file and stored file
-    row = await _get_user_file_by_hash(user.id, file_hash)
+    row = await _get_user_file_by_hash(user_id, file_hash)
     if not row:
-        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=not_found", user.id, file_hash)
+        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=not_found", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
@@ -397,7 +411,7 @@ async def download_file(
     user_file, stored_file = row
     base_path = Path(stored_file.real_path)
     if not base_path.exists():
-        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=base_missing", user.id, file_hash)
+        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=base_missing", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
@@ -405,7 +419,7 @@ async def download_file(
     # Determine target file
     if path:
         if not stored_file.is_directory:
-            logger.warning("下载文件失败 user_id=%s file_hash=%s reason=path_on_non_dir", user.id, file_hash)
+            logger.warning("下载文件失败 user_id=%s file_hash=%s reason=path_on_non_dir", user_id, file_hash)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="此文件不是文件夹，不支持路径参数"
@@ -414,20 +428,20 @@ async def download_file(
     else:
         target_path = base_path
     if not target_path.exists():
-        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=target_missing", user.id, file_hash)
+        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=target_missing", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
         )
     if target_path.is_dir():
-        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=target_is_directory", user.id, file_hash)
+        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=target_is_directory", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="不能直接下载文件夹，请选择具体文件"
         )
     # 确定下载文件名：整个文件用 display_name，子文件用实际文件名
     download_name = target_path.name if path else user_file.display_name
-    logger.info("下载文件成功 user_id=%s file_hash=%s file=%s", user.id, file_hash, download_name)
+    logger.info("下载文件成功 user_id=%s file_hash=%s file=%s", user_id, file_hash, download_name)
     return _range_file_response(request, target_path, download_name)
 
 
@@ -436,12 +450,13 @@ async def clear_finished_pack_tasks(
     user: User = Depends(require_user),
 ) -> dict:
     """一键清空已完成/失败/取消的打包任务记录"""
+    user_id = _require_user_id(user)
     terminal_statuses = ["done", "failed", "cancelled"]
     async with get_session() as db:
         result = await db.exec(
             select(PackTask).where(
-                PackTask.owner_id == user.id,
-                PackTask.status.in_(terminal_statuses),
+                PT.owner_id == user_id,
+                PT.status.in_(terminal_statuses),
             )
         )
         tasks = result.all()
@@ -465,16 +480,17 @@ async def cancel_or_delete_pack_task(
     user: User = Depends(require_user)
 ) -> dict:
     """取消或删除打包任务"""
+    user_id = _require_user_id(user)
     from app.services.pack import PackTaskManager
 
     async with get_session() as db:
         result = await db.exec(
-            select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
+            select(PackTask).where(PT.id == task_id, PT.owner_id == user_id)
         )
         task = result.first()
 
     if not task:
-        logger.warning("取消/删除打包任务失败 user_id=%s task_id=%s reason=not_found", user.id, task_id)
+        logger.warning("取消/删除打包任务失败 user_id=%s task_id=%s reason=not_found", user_id, task_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
 
     task_status = task.status
@@ -482,32 +498,35 @@ async def cancel_or_delete_pack_task(
     if task_status in ("pending", "packing"):
         await PackTaskManager.cancel_pack(task_id)
         async with get_session() as db:
-            result = await db.execute(
+            await db.execute(
                 update(PackTask)
                 .where(
-                    PackTask.id == task_id,
-                    PackTask.status.in_(["pending", "packing"]),
+                    PT.id == task_id,
+                    PT.status.in_(["pending", "packing"]),
                 )
                 .values(
                     status="cancelled",
+                    progress=0,
                     reserved_space=0,
                     updated_at=utc_now()
                 )
             )
-            cancelled = result.rowcount > 0
+            refreshed = await db.exec(select(PackTask).where(PT.id == task_id, PT.owner_id == user_id))
+            refreshed_task = refreshed.first()
+            cancelled = bool(refreshed_task and refreshed_task.status == "cancelled")
 
         if cancelled:
-            logger.info("取消打包任务成功 user_id=%s task_id=%s", user.id, task_id)
+            logger.info("取消打包任务成功 user_id=%s task_id=%s", user_id, task_id)
             return {"ok": True, "message": "任务已取消"}
 
         # 状态已变化，重新读取并按实际状态处理
         async with get_session() as db:
             result = await db.exec(
-                select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
+                select(PackTask).where(PT.id == task_id, PT.owner_id == user_id)
             )
             task = result.first()
         if not task:
-            logger.warning("取消/删除打包任务失败 user_id=%s task_id=%s reason=not_found_after_reload", user.id, task_id)
+            logger.warning("取消/删除打包任务失败 user_id=%s task_id=%s reason=not_found_after_reload", user_id, task_id)
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
         task_status = task.status
 
@@ -527,7 +546,7 @@ async def cancel_or_delete_pack_task(
             db_task = result.first()
             if db_task:
                 await db.delete(db_task)
-        logger.info("删除打包任务记录成功 user_id=%s task_id=%s status=%s", user.id, task_id, task_status)
+        logger.info("删除打包任务记录成功 user_id=%s task_id=%s status=%s", user_id, task_id, task_status)
         return {"ok": True, "message": "任务已删除"}
 
     raise HTTPException(
@@ -547,10 +566,11 @@ async def delete_file(
         file_hash: 文件的 content_hash
     """
     # Verify ownership
-    row = await _get_user_file_by_hash(user.id, file_hash)
+    user_id = _require_user_id(user)
+    row = await _get_user_file_by_hash(user_id, file_hash)
 
     if not row:
-        logger.warning("删除文件失败 user_id=%s file_hash=%s reason=not_found", user.id, file_hash)
+        logger.warning("删除文件失败 user_id=%s file_hash=%s reason=not_found", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
@@ -563,11 +583,11 @@ async def delete_file(
         now_str = datetime.now(timezone.utc).isoformat()
         active_share_count = await db.scalar(
             select(func.count()).select_from(ShareLink).where(
-                ShareLink.user_file_id == user_file.id,
-                ShareLink.status == "active",
+                SL.user_file_id == user_file.id,
+                SL.status == "active",
                 or_(
-                    ShareLink.expires_at.is_(None),  # type: ignore[union-attr]
-                    ShareLink.expires_at > now_str,  # type: ignore[operator]
+                    SL.expires_at.is_(None),
+                    SL.expires_at > now_str,
                 ),
             )
         )
@@ -577,15 +597,17 @@ async def delete_file(
                 detail="该文件有活跃的分享链接，请先失效所有分享后再删除"
             )
     # Delete reference (handles ref_count and physical file cleanup)
+    if user_file.id is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="文件记录异常")
     success = await delete_user_file_reference(user_file.id)
     if not success:
-        logger.warning("删除文件失败 user_id=%s file_hash=%s reason=delete_reference_failed", user.id, file_hash)
+        logger.warning("删除文件失败 user_id=%s file_hash=%s reason=delete_reference_failed", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文件不存在"
         )
 
-    logger.info("删除文件成功 user_id=%s file_hash=%s", user.id, file_hash)
+    logger.info("删除文件成功 user_id=%s file_hash=%s", user_id, file_hash)
 
     return {"ok": True}
 
@@ -602,36 +624,58 @@ async def rename_file(
     Args:
         file_hash: 文件的 content_hash
     """
-    # Validate name
-    if "/" in payload.name or "\\" in payload.name:
-        logger.warning("重命名文件失败 user_id=%s file_hash=%s reason=invalid_name", user.id, file_hash)
+    user_id = _require_user_id(user)
+    name = payload.name.strip()
+    if not name:
+        logger.warning("重命名文件失败 user_id=%s file_hash=%s reason=empty_name", user_id, file_hash)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="名称不能为空"
+        )
+
+    if "/" in name or "\\" in name:
+        logger.warning("重命名文件失败 user_id=%s file_hash=%s reason=invalid_name", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="名称不能包含路径分隔符"
         )
 
+    if name in {".", ".."}:
+        logger.warning("重命名文件失败 user_id=%s file_hash=%s reason=dot_name", user_id, file_hash)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="名称不合法"
+        )
+
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+        logger.warning("重命名文件失败 user_id=%s file_hash=%s reason=control_char", user_id, file_hash)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="名称包含非法字符"
+        )
+
     async with get_session() as db:
         result = await db.exec(
             select(UserFile, StoredFile)
-            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)
+            .join(StoredFile, UF.stored_file_id == SF.id)
             .where(
-                StoredFile.content_hash == file_hash,
-                UserFile.owner_id == user.id,
+                SF.content_hash == file_hash,
+                UF.owner_id == user_id,
             )
-            .order_by(UserFile.id.asc())
+            .order_by(UF.id.asc())
         )
         row = result.first()
         if not row:
-            logger.warning("重命名文件失败 user_id=%s file_hash=%s reason=not_found", user.id, file_hash)
+            logger.warning("重命名文件失败 user_id=%s file_hash=%s reason=not_found", user_id, file_hash)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="文件不存在"
             )
         user_file, _ = row
-        user_file.display_name = payload.name
+        user_file.display_name = name
         db.add(user_file)
 
-    logger.info("重命名文件成功 user_id=%s file_hash=%s", user.id, file_hash)
+    logger.info("重命名文件成功 user_id=%s file_hash=%s", user_id, file_hash)
 
     return {"ok": True}
 
@@ -639,8 +683,9 @@ async def rename_file(
 @router.get("/space")
 async def get_space(user: User = Depends(require_user)) -> dict:
     """获取用户空间信息"""
-    space_info = await get_user_space_info(user.id, user.quota)
-    logger.debug("查询空间信息 user_id=%s", user.id)
+    user_id = _require_user_id(user)
+    space_info = await get_user_space_info(user_id, user.quota)
+    logger.debug("查询空间信息 user_id=%s", user_id)
     return space_info
 
 
@@ -685,7 +730,8 @@ async def calculate_paths_size(
     user: User = Depends(require_user)
 ) -> dict:
     """计算多个文件的总大小"""
-    resolved = await _resolve_file_ids(user.id, payload.file_ids)
+    user_id = _require_user_id(user)
+    resolved = await _resolve_file_ids(user_id, payload.file_ids)
     total_size = sum(size for _, size, _ in resolved)
     return {"total_size": total_size}
 
@@ -697,7 +743,8 @@ async def get_pack_available_space(
     """获取用户可用于打包的空间"""
     from app.services.storage import get_user_space_info
 
-    info = await get_user_space_info(user.id, user.quota)
+    user_id = _require_user_id(user)
+    info = await get_user_space_info(user_id, user.quota)
     return {
         "available": info["available"],
         "quota": info["quota"],
@@ -711,9 +758,10 @@ async def create_pack_task(
     user: User = Depends(require_user)
 ) -> dict:
     """创建打包任务 - 基于 UserFile ID"""
+    user_id = _require_user_id(user)
     # 频率限制
-    if not await api_limiter.is_allowed(user.id, "create_pack", limit=settings.rate_limit_create_pack, window_seconds=60):
-        logger.warning("创建打包任务被限流 user_id=%s", user.id)
+    if not await api_limiter.is_allowed(user_id, "create_pack", limit=settings.rate_limit_create_pack, window_seconds=60):
+        logger.warning("创建打包任务被限流 user_id=%s", user_id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="操作过于频繁，请稍后再试"
@@ -723,8 +771,9 @@ async def create_pack_task(
     from app.services.storage import get_user_space_info
 
     # 解析文件 ID → 绝对路径
-    resolved = await _resolve_file_ids(user.id, payload.file_ids)
+    resolved = await _resolve_file_ids(user_id, payload.file_ids)
     abs_paths = [path for path, _, _ in resolved]
+    source_names = [name for _, _, name in resolved]
     total_size = sum(size for _, size, _ in resolved)
 
     if total_size == 0:
@@ -761,18 +810,18 @@ async def create_pack_task(
         async with get_session() as db:
             result = await db.exec(
                 select(PackTask).where(
-                    PackTask.owner_id == user.id,
-                    PackTask.folder_path == folder_path_value,
-                    PackTask.status == "done",
-                    PackTask.stored_file_id.isnot(None),
+                    PT.owner_id == user_id,
+                    PT.folder_path == folder_path_value,
+                    PT.status == "done",
+                    PT.stored_file_id.is_not(None),
                 )
             )
             done_tasks = result.all()
             for done_task in done_tasks:
                 uf_result = await db.exec(
                     select(UserFile).where(
-                        UserFile.owner_id == user.id,
-                        UserFile.stored_file_id == done_task.stored_file_id,
+                        UF.owner_id == user_id,
+                        UF.stored_file_id == done_task.stored_file_id,
                     )
                 )
                 user_file = uf_result.first()
@@ -783,12 +832,12 @@ async def create_pack_task(
                     )
             # 所有历史产物的 UserFile 均已删除，允许重新打包
 
-        info = await get_user_space_info(user.id, user.quota)
+        info = await get_user_space_info(user_id, user.quota)
         available = info["available"]
         if reserved_space > available:
             logger.warning(
                 "创建打包任务失败 user_id=%s reason=insufficient_space required=%s available=%s",
-                user.id,
+                user_id,
                 reserved_space,
                 available,
             )
@@ -799,40 +848,17 @@ async def create_pack_task(
 
         async with get_session() as db:
             now = utc_now()
-            result = await db.execute(
-                text(
-                    """
-                    INSERT INTO pack_tasks (
-                        owner_id, folder_path, folder_size, reserved_space,
-                        output_name, delete_source, status, created_at, updated_at
-                    )
-                    SELECT
-                        :owner_id, :folder_path, :folder_size, :reserved_space,
-                        :output_name, :delete_source, 'pending', :created_at, :updated_at
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM pack_tasks
-                        WHERE owner_id = :owner_id
-                          AND folder_path = :folder_path
-                          AND status IN ('pending', 'packing')
-                    )
-                    """
-                ),
-                {
-                    "owner_id": user.id,
-                    "folder_path": folder_path_value,
-                    "folder_size": total_size,
-                    "reserved_space": reserved_space,
-                    "output_name": output_name,
-                    "delete_source": payload.delete_source,
-                    "created_at": now,
-                    "updated_at": now,
-                },
+            existing_result = await db.exec(
+                select(PackTask).where(
+                    PT.owner_id == user_id,
+                    PT.folder_path == folder_path_value,
+                    PT.status.in_(["pending", "packing"]),
+                )
             )
-
-            if result.rowcount == 0:
+            if existing_result.first() is not None:
                 logger.warning(
                     "创建打包任务冲突 user_id=%s file_ids=%s",
-                    user.id,
+                    user_id,
                     payload.file_ids,
                 )
                 raise HTTPException(
@@ -840,61 +866,74 @@ async def create_pack_task(
                     detail="相同文件已有进行中的打包任务"
                 )
 
-            result = await db.exec(
-                select(PackTask)
-                .where(
-                    PackTask.owner_id == user.id,
-                    PackTask.folder_path == folder_path_value,
-                    PackTask.status == "pending",
-                )
-                .order_by(PackTask.id.desc())
+            pack_task_obj = PackTask(
+                owner_id=user_id,
+                folder_path=folder_path_value,
+                folder_size=total_size,
+                reserved_space=reserved_space,
+                output_name=output_name,
+                delete_source=payload.delete_source,
+                status="pending",
+                created_at=now,
+                updated_at=now,
             )
-            pack_task = result.first()
-            if not pack_task:
-                logger.error("创建打包任务失败 user_id=%s reason=task_not_found_after_insert", user.id)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="创建打包任务失败"
-                )
-            task_id = pack_task.id
+            db.add(pack_task_obj)
+            await db.flush()
+            if pack_task_obj.id is None:
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="创建打包任务失败")
+            task_id = int(pack_task_obj.id)
 
     # Start async packing - pass absolute paths directly
-    asyncio.create_task(PackTaskManager.start_pack(task_id, user.id, abs_paths, payload.file_ids, output_name, payload.delete_source))
-    logger.info("创建打包任务成功 user_id=%s task_id=%s", user.id, task_id)
+    asyncio.create_task(
+        PackTaskManager.start_pack(
+            task_id,
+            user_id,
+            abs_paths,
+            payload.file_ids,
+            output_name,
+            payload.delete_source,
+            source_names=source_names,
+        )
+    )
+    logger.info("创建打包任务成功 user_id=%s task_id=%s", user_id, task_id)
 
     async with get_session() as db:
         result = await db.exec(select(PackTask).where(PackTask.id == task_id))
         task = result.first()
+        if not task:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="创建打包任务失败")
         return _pack_task_to_dict(task)
 
 
 @router.get("/pack")
 async def list_pack_tasks(user: User = Depends(require_user)) -> list[dict]:
     """列出用户的打包任务"""
+    user_id = _require_user_id(user)
     async with get_session() as db:
         result = await db.exec(
             select(PackTask)
-            .where(PackTask.owner_id == user.id)
-            .order_by(PackTask.created_at.desc())
+            .where(PT.owner_id == user_id)
+            .order_by(PT.created_at.desc())
         )
         tasks = result.all()
-        logger.debug("查询打包任务列表 user_id=%s count=%s", user.id, len(tasks))
+        logger.debug("查询打包任务列表 user_id=%s count=%s", user_id, len(tasks))
         return [_pack_task_to_dict(t) for t in tasks]
 
 
 @router.get("/pack/{task_id}")
 async def get_pack_task(task_id: int, user: User = Depends(require_user)) -> dict:
     """获取打包任务详情"""
+    user_id = _require_user_id(user)
     async with get_session() as db:
         result = await db.exec(
-            select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user.id)
+            select(PackTask).where(PT.id == task_id, PT.owner_id == user_id)
         )
         task = result.first()
 
     if not task:
-        logger.warning("查询打包任务失败 user_id=%s task_id=%s reason=not_found", user.id, task_id)
+        logger.warning("查询打包任务失败 user_id=%s task_id=%s reason=not_found", user_id, task_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
-    logger.debug("查询打包任务详情 user_id=%s task_id=%s", user.id, task_id)
+    logger.debug("查询打包任务详情 user_id=%s task_id=%s", user_id, task_id)
     return _pack_task_to_dict(task)
 
 
@@ -902,13 +941,14 @@ async def get_pack_task(task_id: int, user: User = Depends(require_user)) -> dic
 @router.get("/quota")
 async def get_quota(user: User = Depends(require_user)) -> dict:
     """获取用户空间配额信息（兼容旧接口）"""
-    space_info = await get_user_space_info(user.id, user.quota)
+    user_id = _require_user_id(user)
+    space_info = await get_user_space_info(user_id, user.quota)
 
     # Calculate percentage
     total = space_info["used"] + space_info["available"]
     percentage = (space_info["used"] / total * 100) if total > 0 else 0
 
-    logger.debug("查询配额信息 user_id=%s", user.id)
+    logger.debug("查询配额信息 user_id=%s", user_id)
 
     return {
         "used": space_info["used"],

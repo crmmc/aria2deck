@@ -26,6 +26,7 @@ class TestGetConfig:
         assert "hidden_file_extensions" in data
         assert "pack_format" in data
         assert "pack_compression_level" in data
+        assert "pack_memory_limit" not in data
         assert "ws_reconnect_max_delay" in data
         assert "ws_reconnect_jitter" in data
         assert "ws_reconnect_factor" in data
@@ -52,9 +53,14 @@ class TestUpdateConfig:
         assert response.json()["min_free_disk"] == 2 * 1024 * 1024 * 1024
 
     def test_update_pack_format(self, admin_client: TestClient):
+        response = admin_client.put("/api/config", json={"pack_format": "tar.zst"})
+        assert response.status_code == 200
+        assert response.json()["pack_format"] == "tar.zst"
+
+    def test_update_pack_format_legacy_7z_maps_tar_zst(self, admin_client: TestClient):
         response = admin_client.put("/api/config", json={"pack_format": "7z"})
         assert response.status_code == 200
-        assert response.json()["pack_format"] == "7z"
+        assert response.json()["pack_format"] == "tar.zst"
 
     def test_update_pack_compression_level(self, admin_client: TestClient):
         response = admin_client.put("/api/config", json={"pack_compression_level": 9})

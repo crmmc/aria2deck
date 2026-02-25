@@ -117,7 +117,7 @@ async def test_init_default_config_idempotent(temp_db: str):
         result = await session.exec(select(Config).where(Config.key == "pack_format"))
         config = result.first()
         assert config is not None
-        assert config.value == "zip"
+        assert config.value == "tar.zst"
 
 
 @pytest.mark.asyncio

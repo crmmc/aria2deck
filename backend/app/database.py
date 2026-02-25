@@ -149,10 +149,8 @@ async def init_default_config(session: AsyncSession) -> None:
     default_configs = [
         ("max_task_size", "10737418240"),
         ("min_free_disk", "1073741824"),
-        ("pack_format", "zip"),
+        ("pack_format", "tar.zst"),
         ("pack_compression_level", "5"),
-        ("pack_memory_limit", "128"),
-        ("pack_extra_args", ""),
     ]
 
     for key, value in default_configs:
