@@ -35,7 +35,7 @@ def setup_logging():
 
     # 控制台 handler
     console_handler = logging.StreamHandler()
-    console_handler._aria2deck_handler = True
+    setattr(console_handler, "_aria2deck_handler", True)
     console_handler.setLevel(log_level)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
@@ -52,7 +52,7 @@ def setup_logging():
         backupCount=5,
         encoding="utf-8",
     )
-    file_handler._aria2deck_handler = True
+    setattr(file_handler, "_aria2deck_handler", True)
     file_handler.setLevel(log_level)
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
@@ -208,7 +208,15 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "https://ariang.mayswind.net",
+            "https://ariang.js.org",
+            "null",
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

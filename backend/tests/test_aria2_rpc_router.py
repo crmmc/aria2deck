@@ -1,4 +1,6 @@
 """Tests for aria2 RPC router."""
+import base64
+import json
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
@@ -257,6 +259,80 @@ class TestJsonrpcHandler:
         assert response.status_code == 200
         data = response.json()
         assert "error" in data
+
+    def test_get_query_json_params(self, client: TestClient, rpc_user: dict):
+        response = client.get(
+            "/aria2/jsonrpc",
+            params={
+                "jsonrpc": "2.0",
+                "method": "aria2.pause",
+                "id": "get-json-1",
+                "params": json.dumps([f"token:{rpc_user['rpc_secret']}", "dummy-gid"]),
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "get-json-1"
+        assert data["result"] == "dummy-gid"
+
+    def test_get_query_base64_params(self, client: TestClient, rpc_user: dict):
+        encoded_params = base64.b64encode(
+            json.dumps([f"token:{rpc_user['rpc_secret']}", "dummy-gid"]).encode("utf-8")
+        ).decode("ascii")
+
+        response = client.get(
+            "/aria2/jsonrpc",
+            params={
+                "jsonrpc": "2.0",
+                "method": "aria2.pause",
+                "id": "get-b64-1",
+                "params": encoded_params,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "get-b64-1"
+        assert data["result"] == "dummy-gid"
+
+    def test_get_query_invalid_params_encoding(self, client: TestClient):
+        response = client.get(
+            "/aria2/jsonrpc",
+            params={
+                "jsonrpc": "2.0",
+                "method": "aria2.pause",
+                "id": "get-invalid-1",
+                "params": "%%%",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "error" in data
+        assert data["error"]["code"] == -32602
+
+    def test_cors_preflight_allows_null_origin(self, client: TestClient):
+        response = client.options(
+            "/aria2/jsonrpc",
+            headers={
+                "Origin": "null",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers.get("access-control-allow-origin") == "null"
+
+    def test_cors_get_allows_ariang_origin(self, client: TestClient, rpc_user: dict):
+        response = client.get(
+            "/aria2/jsonrpc",
+            params={
+                "jsonrpc": "2.0",
+                "method": "aria2.pause",
+                "id": "cors-get-1",
+                "params": json.dumps([f"token:{rpc_user['rpc_secret']}", "dummy-gid"]),
+            },
+            headers={"Origin": "https://ariang.mayswind.net"},
+        )
+        assert response.status_code == 200
+        assert response.headers.get("access-control-allow-origin") == "https://ariang.mayswind.net"
 
 
 @pytest.mark.asyncio
