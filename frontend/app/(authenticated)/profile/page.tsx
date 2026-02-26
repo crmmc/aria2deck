@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import {
@@ -40,6 +40,7 @@ export default function ProfilePage() {
   const [rpcLoading, setRpcLoading] = useState(false);
   const [copiedSecret, setCopiedSecret] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const copyTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   useEffect(() => {
     let active = true;
@@ -57,7 +58,10 @@ export default function ProfilePage() {
         setShowInitialPasswordAlert(true);
       }
     }
-    return () => { active = false; };
+    return () => {
+      active = false;
+      copyTimers.current.forEach(clearTimeout);
+    };
   }, []);
 
   const loadRpcAccess = async () => {
@@ -106,8 +110,12 @@ export default function ProfilePage() {
     if (rpcAccess?.secret) {
       navigator.clipboard.writeText(rpcAccess.secret).then(() => {
         setCopiedSecret(true);
-        setTimeout(() => setCopiedSecret(false), 2000);
-      });
+        const t = setTimeout(() => {
+          setCopiedSecret(false);
+          copyTimers.current.delete(t);
+        }, 2000);
+        copyTimers.current.add(t);
+      }).catch(() => {});
     }
   };
 
@@ -116,8 +124,12 @@ export default function ProfilePage() {
     if (url) {
       navigator.clipboard.writeText(url).then(() => {
         setCopiedUrl(true);
-        setTimeout(() => setCopiedUrl(false), 2000);
-      });
+        const t = setTimeout(() => {
+          setCopiedUrl(false);
+          copyTimers.current.delete(t);
+        }, 2000);
+        copyTimers.current.add(t);
+      }).catch(() => {});
     }
   };
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/AuthContext";
 import { useToast } from "@/components/Toast";
@@ -35,6 +35,7 @@ export default function StoragePage() {
   const [userModalFile, setUserModalFile] = useState<StoredFileInfo | null>(null);
   const [userModalUsers, setUserModalUsers] = useState<FileUserInfo[]>([]);
   const [userModalLoading, setUserModalLoading] = useState(false);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
     if (user && !user.is_admin) {
@@ -45,11 +46,13 @@ export default function StoragePage() {
   const loadFiles = useCallback(async () => {
     try {
       const res = await api.listStoredFiles(search || undefined, orphanOnly);
+      if (!mountedRef.current) return;
       setFiles(res.files);
     } catch {
+      if (!mountedRef.current) return;
       showToast("加载存储文件失败", "error");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }, [search, orphanOnly, showToast]);
 
@@ -57,6 +60,7 @@ export default function StoragePage() {
     if (user?.is_admin) {
       loadFiles();
     }
+    return () => { mountedRef.current = false; };
   }, [user, loadFiles]);
 
   const handleSelectAll = (checked: boolean) => {

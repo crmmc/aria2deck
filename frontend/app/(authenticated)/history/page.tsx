@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/lib/api";
 import type { TaskHistory } from "@/types";
@@ -140,20 +140,24 @@ export default function HistoryPage() {
   const [filterStatus, setFilterStatus] = useState<string>("all");
   const [searchKeyword, setSearchKeyword] = useState("");
   const [isBatchOperating, setIsBatchOperating] = useState(false);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
     loadHistory();
+    return () => { mountedRef.current = false; };
   }, []);
 
   async function loadHistory() {
     setLoading(true);
     try {
       const history = await api.listHistory();
+      if (!mountedRef.current) return;
       setRecords(history);
-    } catch (err) {
+    } catch {
+      if (!mountedRef.current) return;
       showToast("加载历史失败", "error");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }
 
