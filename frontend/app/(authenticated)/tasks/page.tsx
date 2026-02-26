@@ -288,8 +288,16 @@ export default function TasksPage() {
             }
           }
 
+          const deletedIds = new Set(deletedTaskIdsRef.current);
           deletedTaskIdsRef.current.clear();
-          setTasks(updatedActive);
+
+          // Merge: update active/queued tasks, preserve other statuses (error etc.)
+          setTasks((prev) => {
+            const nonActive = prev.filter(
+              (t) => t.status !== "active" && t.status !== "queued" && !deletedIds.has(t.id)
+            );
+            return [...updatedActive, ...nonActive];
+          });
 
           if (needRefresh) {
             api

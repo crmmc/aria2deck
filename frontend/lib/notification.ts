@@ -70,7 +70,7 @@ function sendNotification(
   const notification = new Notification(title, {
     body,
     icon: "/favicon.ico",
-    tag: "aria2-task",
+    tag: `aria2-task-${Date.now()}`,
   });
 
   if (onClick) {

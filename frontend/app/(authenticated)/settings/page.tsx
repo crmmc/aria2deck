@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { MachineStats } from "@/types";
@@ -57,11 +57,15 @@ export default function SettingsPage() {
         if (mounted) setLoading(false);
       }
     })();
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
   }, [router]);
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   async function loadConfig() {
@@ -117,7 +121,8 @@ export default function SettingsPage() {
 
       await loadConfig();
       setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3000);
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = setTimeout(() => setSaveSuccess(false), 3000);
     } catch (err) {
       const message = (err as Error).message || "保存配置失败";
       setSaveError(message);
