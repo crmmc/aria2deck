@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 type ToastType = "success" | "error" | "info" | "warning";
@@ -44,27 +44,38 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [mounted, setMounted] = useState(false);
+  const toastTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const confirmRef = useRef<ConfirmState | null>(null);
 
   useEffect(() => {
     setMounted(true);
+    return () => {
+      toastTimers.current.forEach(clearTimeout);
+      confirmRef.current?.resolve(false);
+    };
   }, []);
 
   const showToast = useCallback((message: string, type: ToastType = "info") => {
     const id = ++toastId;
     setToasts((prev) => [...prev, { id, message, type }]);
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
+      toastTimers.current.delete(timer);
     }, 3000);
+    toastTimers.current.add(timer);
   }, []);
 
   const showConfirm = useCallback((options: ConfirmOptions): Promise<boolean> => {
     return new Promise((resolve) => {
-      setConfirm({ ...options, resolve });
+      const state = { ...options, resolve };
+      confirmRef.current = state;
+      setConfirm(state);
     });
   }, []);
 
   const handleConfirm = (result: boolean) => {
     confirm?.resolve(result);
+    confirmRef.current = null;
     setConfirm(null);
   };
 
