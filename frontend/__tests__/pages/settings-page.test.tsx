@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import SettingsPage from "@/app/(authenticated)/settings/page";
 import { api } from "@/lib/api";
 
@@ -45,6 +45,20 @@ const baseConfig = {
 };
 
 describe("SettingsPage", () => {
+  const originalError = console.error;
+
+  beforeAll(() => {
+    // Suppress act() warnings from async useEffect + multiple setState in loadConfig
+    console.error = (...args: unknown[]) => {
+      if (typeof args[0] === "string" && args[0].includes("was not wrapped in act")) return;
+      originalError(...args);
+    };
+  });
+
+  afterAll(() => {
+    console.error = originalError;
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
     mockApi.me.mockResolvedValue(adminUser as never);
@@ -68,10 +82,29 @@ describe("SettingsPage", () => {
     } as never);
   });
 
-  test("renders config form for admin", async () => {
-    render(<SettingsPage />);
+  afterEach(async () => {
+    // Flush all pending microtasks / state updates to avoid act() warnings
+    await act(async () => {});
+  });
 
-    expect(await screen.findByText("系统设置")).toBeInTheDocument();
+  /** Flush all pending microtasks and state updates */
+  async function flushAll() {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  }
+
+  /** Wait for loadConfig to fully complete (all setState calls flushed) */
+  async function renderAndWaitForLoad() {
+    render(<SettingsPage />);
+    await screen.findByText(/1\.36\.0/);
+    await flushAll();
+  }
+
+  test("renders config form for admin", async () => {
+    await renderAndWaitForLoad();
+
+    expect(screen.getByText("系统设置")).toBeInTheDocument();
     expect(screen.getByText("系统配置（仅管理员）")).toBeInTheDocument();
     expect(mockApi.getConfig).toHaveBeenCalled();
     expect(mockApi.getMachineStats).toHaveBeenCalled();
@@ -82,27 +115,22 @@ describe("SettingsPage", () => {
     mockApi.me.mockResolvedValue({ ...adminUser, is_admin: false } as never);
 
     render(<SettingsPage />);
+    await flushAll();
 
-    await waitFor(() => {
-      expect(pushMock).toHaveBeenCalledWith("/tasks");
-    });
+    expect(pushMock).toHaveBeenCalledWith("/tasks");
     expect(screen.queryByText("系统设置")).not.toBeInTheDocument();
   });
 
   test("submits save and connection test", async () => {
-    render(<SettingsPage />);
-
-    expect(await screen.findByText("系统设置")).toBeInTheDocument();
+    await renderAndWaitForLoad();
 
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
-    await waitFor(() => {
-      expect(mockApi.testAria2Connection).toHaveBeenCalled();
-    });
+    await flushAll();
+    expect(mockApi.testAria2Connection).toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
-    await waitFor(() => {
-      expect(mockApi.updateConfig).toHaveBeenCalled();
-    });
+    await flushAll();
+    expect(mockApi.updateConfig).toHaveBeenCalled();
   });
 
   test("shows validation message when testing empty rpc url", async () => {
@@ -110,9 +138,8 @@ describe("SettingsPage", () => {
       ...baseConfig,
       aria2_rpc_url: "",
     } as never);
-    render(<SettingsPage />);
+    await renderAndWaitForLoad();
 
-    expect(await screen.findByText("系统设置")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
 
     await waitFor(() => {
@@ -121,9 +148,7 @@ describe("SettingsPage", () => {
   });
 
   test("handles extension add/remove and pack format switch", async () => {
-    render(<SettingsPage />);
-
-    expect(await screen.findByText("系统设置")).toBeInTheDocument();
+    await renderAndWaitForLoad();
 
     const extensionInput = screen.getByPlaceholderText("输入后缀名，按回车添加");
     const addButton = screen.getByRole("button", { name: "添加" });
