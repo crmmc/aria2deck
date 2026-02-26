@@ -38,26 +38,34 @@ export default function UsersPage() {
   const [deleteFiles, setDeleteFiles] = useState(false);
 
   useEffect(() => {
+    let mounted = true;
     api
       .me()
       .then((me) => {
+        if (!mounted) return null;
         setCurrentUser(me);
         if (!me.is_admin) {
           router.push("/tasks");
-          throw new Error("Unauthorized");
+          return null;
         }
         return api.listUsers();
       })
       .then((data) => {
+        if (!mounted || !data) return;
         setUsers(data);
-        setLoading(false);
       })
       .catch((err) => {
-        if (err.message !== "Unauthorized") {
-          console.error(err);
+        if (!mounted) return;
+        console.error(err);
+      })
+      .finally(() => {
+        if (mounted) {
           setLoading(false);
         }
       });
+    return () => {
+      mounted = false;
+    };
   }, [router]);
 
   async function handleCreateUser(e: React.FormEvent) {
