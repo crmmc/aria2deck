@@ -45,20 +45,6 @@ const baseConfig = {
 };
 
 describe("SettingsPage", () => {
-  const originalError = console.error;
-
-  beforeAll(() => {
-    // Suppress act() warnings from async useEffect + multiple setState in loadConfig
-    console.error = (...args: unknown[]) => {
-      if (typeof args[0] === "string" && args[0].includes("was not wrapped in act")) return;
-      originalError(...args);
-    };
-  });
-
-  afterAll(() => {
-    console.error = originalError;
-  });
-
   beforeEach(() => {
     jest.clearAllMocks();
     mockApi.me.mockResolvedValue(adminUser as never);

@@ -15,10 +15,10 @@ jest.mock("@/components/Toast", () => ({
 
 jest.mock("@/lib/api", () => ({
   api: {
-    listPackTasks: jest.fn(),
-    clearPackTasks: jest.fn(),
-    cancelPackTask: jest.fn(),
-    deletePackTask: jest.fn(),
+    listPackTasks: jest.fn<Promise<PackTask[]>, []>(),
+    clearPackTasks: jest.fn<Promise<{ ok: boolean; count: number }>, []>(),
+    cancelPackTask: jest.fn<Promise<{ ok: boolean; message: string }>, [number]>(),
+    deletePackTask: jest.fn<Promise<{ ok: boolean; message: string }>, [number]>(),
   },
 }));
 
@@ -58,7 +58,7 @@ describe("PackTaskCard", () => {
   });
 
   it("renders nothing when there are no tasks", async () => {
-    mockApi.listPackTasks.mockResolvedValue([] as never);
+    mockApi.listPackTasks.mockResolvedValue([]);
 
     render(<PackTaskCard />);
 
@@ -69,8 +69,8 @@ describe("PackTaskCard", () => {
   });
 
   it("expands dropdown and can cancel active task", async () => {
-    mockApi.listPackTasks.mockResolvedValue([makeTask({ status: "pending", id: 1 })] as never);
-    mockApi.cancelPackTask.mockResolvedValue({ ok: true, message: "ok" } as never);
+    mockApi.listPackTasks.mockResolvedValue([makeTask({ status: "pending", id: 1 })]);
+    mockApi.cancelPackTask.mockResolvedValue({ ok: true, message: "ok" });
 
     render(<PackTaskCard />);
 
@@ -93,9 +93,9 @@ describe("PackTaskCard", () => {
 
   it("clears terminal tasks and shows success toast", async () => {
     mockApi.listPackTasks
-      .mockResolvedValueOnce([makeTask({ status: "done", id: 2, output_name: "result.zip" })] as never)
-      .mockResolvedValueOnce([] as never);
-    mockApi.clearPackTasks.mockResolvedValue({ ok: true, count: 1 } as never);
+      .mockResolvedValueOnce([makeTask({ status: "done", id: 2, output_name: "result.zip" })])
+      .mockResolvedValueOnce([]);
+    mockApi.clearPackTasks.mockResolvedValue({ ok: true, count: 1 });
 
     render(<PackTaskCard />);
 
@@ -117,7 +117,7 @@ describe("PackTaskCard", () => {
 
   it("calls onTaskComplete when done task appears", async () => {
     const onTaskComplete = jest.fn();
-    mockApi.listPackTasks.mockResolvedValue([makeTask({ status: "done", id: 3 })] as never);
+    mockApi.listPackTasks.mockResolvedValue([makeTask({ status: "done", id: 3 })]);
 
     render(<PackTaskCard onTaskComplete={onTaskComplete} />);
 
@@ -127,8 +127,8 @@ describe("PackTaskCard", () => {
   });
 
   it("shows error toast when clear tasks fails", async () => {
-    mockApi.listPackTasks.mockResolvedValue([makeTask({ status: "done", id: 4 })] as never);
-    mockApi.clearPackTasks.mockRejectedValue(new Error("clear failed") as never);
+    mockApi.listPackTasks.mockResolvedValue([makeTask({ status: "done", id: 4 })]);
+    mockApi.clearPackTasks.mockRejectedValue(new Error("clear failed"));
 
     render(<PackTaskCard />);
 
@@ -148,9 +148,9 @@ describe("PackTaskCard", () => {
 
   it("deletes a done task when delete button clicked", async () => {
     mockApi.listPackTasks
-      .mockResolvedValueOnce([makeTask({ status: "done", id: 5, output_name: "done.zip" })] as never)
-      .mockResolvedValueOnce([] as never);
-    mockApi.deletePackTask.mockResolvedValue({ ok: true, message: "Deleted" } as never);
+      .mockResolvedValueOnce([makeTask({ status: "done", id: 5, output_name: "done.zip" })])
+      .mockResolvedValueOnce([]);
+    mockApi.deletePackTask.mockResolvedValue({ ok: true, message: "Deleted" });
 
     render(<PackTaskCard />);
 
@@ -170,8 +170,8 @@ describe("PackTaskCard", () => {
   });
 
   it("shows error toast when delete task fails", async () => {
-    mockApi.listPackTasks.mockResolvedValue([makeTask({ status: "failed", id: 6, error_message: "some error" })] as never);
-    mockApi.deletePackTask.mockRejectedValue(new Error("delete failed") as never);
+    mockApi.listPackTasks.mockResolvedValue([makeTask({ status: "failed", id: 6, error_message: "some error" })]);
+    mockApi.deletePackTask.mockRejectedValue(new Error("delete failed"));
 
     render(<PackTaskCard />);
 
