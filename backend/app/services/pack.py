@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable
 
 import zstandard as zstd
-from sqlmodel import func, select
+from sqlmodel import select
 
 from app.core.config import settings
 from app.database import get_session
@@ -307,8 +307,12 @@ class PackTaskManager:
             if writer_task is not None:
                 try:
                     await writer_task
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "Pack writer task raised during cancellation task_id=%s",
+                        task_id,
+                        exc_info=exc,
+                    )
             if output_path.exists():
                 output_path.unlink()
             raise

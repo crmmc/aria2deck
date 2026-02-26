@@ -655,8 +655,13 @@ class Aria2RpcHandler:
                         status = await self.client.tell_status(gid)
                         bt_info = status.get("bittorrent", {})
                         name = bt_info.get("info", {}).get("name", "") or name
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug(
+                            "Failed to fetch bittorrent metadata for gid=%s user_id=%s",
+                            gid,
+                            self.user_id,
+                            exc_info=exc,
+                        )
 
                     async with get_session() as db:
                         db_task = await db.get(DownloadTask, task_id)
@@ -683,7 +688,7 @@ class Aria2RpcHandler:
         task, sub = pair
         if sub.status != "pending":
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-        is_active_cancel = sub.status == "pending" and task.status in ("queued", "active")
+        is_active_cancel = task.status in ("queued", "active")
         if sub.id is None:
             raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Subscription id missing")
         if task.id is None:
@@ -764,8 +769,14 @@ class Aria2RpcHandler:
         try:
             status = await self.client.tell_status(gid)
             return self._sanitize_status(status)
-        except Exception:
+        except Exception as exc:
             # aria2 中已不存在（已完成/失败），从 DB 构造
+            logger.debug(
+                "Fallback to DB status for gid=%s user_id=%s",
+                gid,
+                self.user_id,
+                exc_info=exc,
+            )
             return self._build_status_from_db(task, sub)
     def _build_status_from_db(self, task: DownloadTask, sub: UserTaskSubscription) -> dict:
         """从数据库记录构造 aria2 tellStatus 格式的响应"""
@@ -798,7 +809,12 @@ class Aria2RpcHandler:
             return []
         try:
             all_active = await self.client.tell_active()
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "aria2.tellActive failed for user_id=%s",
+                self.user_id,
+                exc_info=exc,
+            )
             return []
         return [self._sanitize_status(t) for t in all_active if t.get("gid") in user_gids]
     async def _handle_tell_waiting(self, params: list) -> list:
@@ -810,7 +826,12 @@ class Aria2RpcHandler:
             return []
         try:
             all_waiting = await self._fetch_waiting_tasks()
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "aria2.tellWaiting failed for user_id=%s",
+                self.user_id,
+                exc_info=exc,
+            )
             return []
 
         filtered = [self._sanitize_status(t) for t in all_waiting if t.get("gid") in user_gids]
@@ -870,7 +891,12 @@ class Aria2RpcHandler:
             global_stat = await self.client.get_global_stat()
             download_speed = global_stat.get("downloadSpeed", "0")
             upload_speed = global_stat.get("uploadSpeed", "0")
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "aria2.getGlobalStat failed for user_id=%s, fallback to zero speed",
+                self.user_id,
+                exc_info=exc,
+            )
             download_speed = "0"
             upload_speed = "0"
         return {
@@ -896,7 +922,13 @@ class Aria2RpcHandler:
                     f["path"] = self._sanitize_file_path(f["path"])
                 f["uris"] = []
             return files
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "aria2.getFiles failed for gid=%s user_id=%s",
+                gid,
+                self.user_id,
+                exc_info=exc,
+            )
             return []
     async def _handle_get_uris(self, params: list) -> list:
         """aria2.getUris(gid)"""
@@ -908,7 +940,13 @@ class Aria2RpcHandler:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
         try:
             return await self.client.get_uris(gid)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "aria2.getUris failed for gid=%s user_id=%s",
+                gid,
+                self.user_id,
+                exc_info=exc,
+            )
             return []
     async def _handle_get_version(self, params: list) -> dict:
         """aria2.getVersion()"""

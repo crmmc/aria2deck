@@ -13,13 +13,12 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlmodel import select
+from sqlmodel import col, select
 
 from app.auth import require_admin
 from app.database import get_session
-from app.models import DownloadTask, StoredFile, User, UserFile, utc_now_str
-from app.services.hash import calculate_content_hash
-from app.services.storage import delete_user_file_reference, get_store_dir
+from app.models import StoredFile, User, UserFile
+from app.services.storage import delete_user_file_reference
 
 logger = logging.getLogger(__name__)
 
@@ -111,19 +110,22 @@ async def list_stored_files(
 
         # 搜索过滤
         if search:
-            query = query.where(StoredFile.original_name.contains(search))
+            query = query.where(col(StoredFile.original_name).contains(search))
 
         # 孤立文件过滤
         if orphan_only:
             query = query.where(StoredFile.ref_count <= 0)
 
-        query = query.order_by(StoredFile.created_at.desc())
+        query = query.order_by(col(StoredFile.created_at).desc())
 
         result = await db.exec(query)
         stored_files = result.all()
 
         files = []
         for sf in stored_files:
+            if sf.id is None:
+                logger.warning("Skip stored_file with null id while listing admin storage files")
+                continue
             exists_on_disk = Path(sf.real_path).exists()
             files.append(
                 StoredFileInfo(
@@ -164,7 +166,7 @@ async def get_file_users(
         # 查询引用用户
         query = (
             select(UserFile, User)
-            .join(User, UserFile.owner_id == User.id)
+            .join(User, UserFile.owner_id == User.id)  # type: ignore[arg-type]
             .where(UserFile.stored_file_id == file_id)
         )
         result = await db.exec(query)
@@ -177,6 +179,7 @@ async def get_file_users(
                 display_name=user_file.display_name,
             )
             for user_file, user in rows
+            if user.id is not None
         ]
 
         return FileUsersResponse(file_id=file_id, users=users)
