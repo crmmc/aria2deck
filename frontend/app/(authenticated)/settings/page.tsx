@@ -185,6 +185,11 @@ export default function SettingsPage() {
   };
 
   if (loading) return null;
+  if (error) return (
+    <div className="glass-frame full-height animate-in">
+      <div className="card text-danger">{error}</div>
+    </div>
+  );
   if (!isAdmin) return null;
 
   return (

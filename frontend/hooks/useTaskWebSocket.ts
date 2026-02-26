@@ -98,6 +98,7 @@ export function useTaskWebSocket(callbacks: TaskWebSocketCallbacks) {
     let pingInterval: ReturnType<typeof setInterval>;
     let retryCount = 0;
     let lastPongTime = Date.now();
+    let disposed = false;
 
     function getReconnectDelay(): number {
       const base = Math.min(1000 * Math.pow(2, retryCount), 30000);
@@ -157,6 +158,7 @@ export function useTaskWebSocket(callbacks: TaskWebSocketCallbacks) {
       ws.onclose = () => {
         clearInterval(pingInterval);
         callbacksRef.current.onDisconnected?.();
+        if (disposed) return;
         retryCount++;
         reconnectTimeout = setTimeout(connect, getReconnectDelay());
       };
@@ -165,6 +167,7 @@ export function useTaskWebSocket(callbacks: TaskWebSocketCallbacks) {
     connect();
 
     return () => {
+      disposed = true;
       clearTimeout(reconnectTimeout);
       clearInterval(pingInterval);
       ws?.close();
