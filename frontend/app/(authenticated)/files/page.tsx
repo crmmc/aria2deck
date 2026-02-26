@@ -214,12 +214,6 @@ export default function FilesPage() {
     }
   };
 
-  const handleSearchModalKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      // Search is already active via searchResults memo
-    }
-  };
-
   // Sync modal input back to toolbar when closing
   const handleSearchModalInputChange = (value: string) => {
     setSearchKeyword(value);
@@ -1297,7 +1291,6 @@ export default function FilesPage() {
                 placeholder="搜索文件名..."
                 value={searchKeyword}
                 onChange={(e) => handleSearchModalInputChange(e.target.value)}
-                onKeyDown={handleSearchModalKeyDown}
               />
               {searchKeyword && (
                 <button

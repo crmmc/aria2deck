@@ -46,7 +46,12 @@ export default function SharePageClient() {
     }
     setCode(urlCode);
     let mounted = true;
-    api.getSiteInfo().then(info => setSiteTitle(info.site_title)).catch(() => {});
+    api
+      .getSiteInfo()
+      .then((info) => setSiteTitle(info.site_title))
+      .catch((err: unknown) => {
+        console.warn("加载站点标题失败", err);
+      });
     api.getShareInfo(urlCode)
       .then((info) => {
         if (!mounted) return;

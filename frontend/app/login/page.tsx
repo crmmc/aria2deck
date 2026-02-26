@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -22,13 +22,23 @@ export default function LoginPage() {
           router.push("/tasks");
         }
       })
-      .catch(() => {});
+      .catch((err: unknown) => {
+        if (!(err instanceof ApiError && err.isUnauthorized)) {
+          console.warn("自动登录检查失败", err);
+        }
+      });
   }, [router]);
+
   useEffect(() => {
-    api.getSiteInfo().then(info => {
-      setSiteTitle(info.site_title);
-      document.title = info.site_title;
-    }).catch(() => {});
+    api
+      .getSiteInfo()
+      .then((info) => {
+        setSiteTitle(info.site_title);
+        document.title = info.site_title;
+      })
+      .catch((err: unknown) => {
+        console.warn("加载站点标题失败", err);
+      });
   }, []);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {

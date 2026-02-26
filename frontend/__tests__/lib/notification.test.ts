@@ -97,6 +97,7 @@ describe("notification", () => {
 
     it("handles invalid JSON gracefully", () => {
       localStorageMock.store[STORAGE_KEY] = "invalid json";
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
 
       const settings = getNotificationSettings();
       expect(settings).toEqual({
@@ -104,6 +105,8 @@ describe("notification", () => {
         onComplete: true,
         onError: true,
       });
+      expect(warnSpy).toHaveBeenCalled();
+      warnSpy.mockRestore();
     });
 
     it("merges partial stored settings with defaults", () => {
@@ -133,6 +136,40 @@ describe("notification", () => {
         JSON.stringify(settings)
       );
     });
+
+    it("handles localStorage write errors gracefully", () => {
+      localStorageMock.setItem.mockImplementation(() => {
+        throw new Error("quota exceeded");
+      });
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+      expect(() =>
+        saveNotificationSettings({
+          enabled: true,
+          onComplete: true,
+          onError: true,
+        })
+      ).not.toThrow();
+
+      expect(warnSpy).toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+  });
+
+  it("returns defaults when localStorage read throws", () => {
+    localStorageMock.getItem.mockImplementation(() => {
+      throw new Error("storage blocked");
+    });
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+    expect(getNotificationSettings()).toEqual({
+      enabled: false,
+      onComplete: true,
+      onError: true,
+    });
+
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   describe("requestNotificationPermission", () => {
@@ -201,6 +238,22 @@ describe("notification", () => {
       }));
     });
 
+    it("clicking completion notification redirects to tasks page", () => {
+      localStorageMock.store[STORAGE_KEY] = JSON.stringify({
+        enabled: true,
+        onComplete: true,
+        onError: true,
+      });
+      const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+
+      sendTaskCompleteNotification("test-file.zip", 123);
+      mockNotificationInstance.onclick?.(new Event("click"));
+
+      expect(window.focus).toHaveBeenCalled();
+      expect(mockNotificationInstance.close).toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+
     it("does not create notification when disabled", () => {
       localStorageMock.store[STORAGE_KEY] = JSON.stringify({
         enabled: false,
@@ -256,6 +309,21 @@ describe("notification", () => {
       expect(MockNotification).toHaveBeenCalledWith("下载失败", expect.objectContaining({
         body: "test-file.zip",
       }));
+    });
+
+    it("clicking error notification redirects to tasks page", () => {
+      localStorageMock.store[STORAGE_KEY] = JSON.stringify({
+        enabled: true,
+        onComplete: true,
+        onError: true,
+      });
+      const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+
+      sendTaskErrorNotification("test-file.zip", 123);
+      mockNotificationInstance.onclick?.(new Event("click"));
+
+      expect(mockNotificationInstance.close).toHaveBeenCalled();
+      errorSpy.mockRestore();
     });
 
     it("does not create notification when disabled", () => {

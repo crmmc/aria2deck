@@ -193,7 +193,11 @@ export default function TasksPage() {
   const [selectedTasks, setSelectedTasks] = useState<Set<number>>(new Set());
   const [filterStatus, setFilterStatus] = useState<string>(() => {
     if (typeof window !== "undefined") {
-      return localStorage.getItem("tasks_filterStatus") || "all";
+      try {
+        return localStorage.getItem("tasks_filterStatus") || "all";
+      } catch (err) {
+        console.warn("读取任务筛选条件失败", err);
+      }
     }
     return "all";
   });
@@ -230,7 +234,11 @@ export default function TasksPage() {
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      localStorage.setItem("tasks_filterStatus", filterStatus);
+      try {
+        localStorage.setItem("tasks_filterStatus", filterStatus);
+      } catch (err) {
+        console.warn("保存任务筛选条件失败", err);
+      }
     }
   }, [filterStatus]);
 
@@ -265,9 +273,14 @@ export default function TasksPage() {
             for (const t of prevActive) {
               if (!activeMap.has(t.id) && !deletedTaskIdsRef.current.has(t.id)) {
                 // Task disappeared, fetch current list to check if it failed
-                api.listTasks("current").then((currentTasks) => {
-                  setTasks(currentTasks);
-                }).catch(() => {});
+                api
+                  .listTasks("current")
+                  .then((currentTasks) => {
+                    setTasks(currentTasks);
+                  })
+                  .catch((err: unknown) => {
+                    console.warn("刷新当前任务列表失败", err);
+                  });
                 break;
               }
             }
@@ -276,7 +289,9 @@ export default function TasksPage() {
             return updatedActive;
           });
         })
-        .catch(() => {});
+        .catch((err: unknown) => {
+          console.warn("轮询活动任务失败", err);
+        });
     }, 5000);
 
     return () => clearInterval(pollInterval);
@@ -356,11 +371,17 @@ export default function TasksPage() {
   );
 
   const handleWsConnected = useCallback(() => {
-    api.listTasks("current").then((currentTasks) => {
-      setTasks(currentTasks);
-    }).catch(() => {});
+    api
+      .listTasks("current")
+      .then((currentTasks) => {
+        setTasks(currentTasks);
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : "未知错误";
+        showToast(`同步任务状态失败: ${message}`, "warning");
+      });
     setWsConnected(true);
-  }, []);
+  }, [showToast]);
 
   const handleWsDisconnected = useCallback(() => {
     setWsConnected(false);
