@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 type ToastType = "success" | "error" | "info" | "warning";
@@ -45,9 +45,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [mounted, setMounted] = useState(false);
 
-  useState(() => {
+  useEffect(() => {
     setMounted(true);
-  });
+  }, []);
 
   const showToast = useCallback((message: string, type: ToastType = "info") => {
     const id = ++toastId;

@@ -82,18 +82,18 @@ function sendNotification(
   }
 }
 
-export function sendTaskCompleteNotification(taskName: string, taskId: number): void {
+export function sendTaskCompleteNotification(taskName: string, _taskId: number): void {
   const settings = getNotificationSettings();
   if (!settings.onComplete) return;
   sendNotification("下载完成", taskName, () => {
-    window.location.href = `/tasks?task_id=${taskId}`;
+    window.location.href = "/tasks";
   });
 }
 
-export function sendTaskErrorNotification(taskName: string, taskId: number): void {
+export function sendTaskErrorNotification(taskName: string, _taskId: number): void {
   const settings = getNotificationSettings();
   if (!settings.onError) return;
   sendNotification("下载失败", taskName, () => {
-    window.location.href = `/tasks?task_id=${taskId}`;
+    window.location.href = "/tasks";
   });
 }

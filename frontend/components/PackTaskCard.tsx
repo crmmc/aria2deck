@@ -122,7 +122,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
     });
     if (!confirmed) return;
     try {
-      await api.cancelPackTask(taskId);
+      await api.deletePackTask(taskId);
       loadTasks();
     } catch (err) {
       showToast(`删除失败: ${(err as Error).message}`, "error");

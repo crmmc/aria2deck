@@ -49,7 +49,7 @@ const TaskCard = memo(function TaskCard({
   }, [task.id, onToggleSelection]);
 
   const handleCopyClick = useCallback(() => {
-    onCopyUri(task.uri!);
+    if (task.uri) onCopyUri(task.uri);
   }, [task.uri, onCopyUri]);
 
   const handleCancelClick = useCallback(() => {
@@ -443,8 +443,17 @@ export default function TasksPage() {
         const base64Content = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => {
-            const result = reader.result as string;
-            const base64 = result.split(",")[1];
+            const result = reader.result;
+            if (typeof result !== "string") {
+              reject(new Error("文件读取结果无效"));
+              return;
+            }
+            const splitIndex = result.indexOf(",");
+            if (splitIndex < 0 || splitIndex === result.length - 1) {
+              reject(new Error("文件编码格式无效"));
+              return;
+            }
+            const base64 = result.slice(splitIndex + 1);
             resolve(base64);
           };
           reader.onerror = () => reject(new Error("文件读取失败"));
