@@ -116,6 +116,7 @@ class TestSetSessionCookie:
             settings.session_cookie_name,
             "test_session_id",
             httponly=True,
+            secure=not settings.debug,
             samesite="lax",
             max_age=settings.session_ttl_seconds,
         )

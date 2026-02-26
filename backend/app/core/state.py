@@ -23,6 +23,9 @@ class AppState:
     user_space_locks: Dict[int, asyncio.Lock] = field(default_factory=dict)
     # 任务完成处理锁，避免 WebSocket 和轮询同时处理同一任务的完成事件
     task_complete_locks: Dict[int, asyncio.Lock] = field(default_factory=dict)
+    # 缓存的 aria2 配置
+    _cached_rpc_url: str | None = field(default=None, repr=False)
+    _cached_rpc_secret: str | None = field(default=None, repr=False)
 
 
 async def get_user_space_lock(state: AppState, user_id: int) -> asyncio.Lock:
@@ -44,26 +47,34 @@ async def get_task_complete_lock(state: AppState, task_id: int) -> asyncio.Lock:
         return lock
 
 
-def get_aria2_client(request: Request | None = None) -> Aria2Client:
+def get_aria2_client(request: Request | None = None, state: "AppState | None" = None) -> Aria2Client:
     """获取 aria2 客户端实例
-    
-    优先从数据库读取配置，如果数据库中没有配置则使用环境变量配置
+
+    优先使用缓存的配置，避免在 async 上下文中做同步 DB 查询。
+    配置通过 refresh_aria2_config() 刷新。
     """
-    from app.db import fetch_one
-    
-    # 尝试从数据库读取配置
-    rpc_url_row = fetch_one("SELECT value FROM config WHERE key = ?", ["aria2_rpc_url"])
-    rpc_secret_row = fetch_one("SELECT value FROM config WHERE key = ?", ["aria2_rpc_secret"])
-    
-    rpc_url = rpc_url_row["value"] if rpc_url_row else settings.aria2_rpc_url
-    rpc_secret = rpc_secret_row["value"] if rpc_secret_row else settings.aria2_rpc_secret
-    
-    # 如果提供了 request，从 app.state 获取客户端并检查配置是否变化
+    # 优先从 app.state 获取已有客户端
     if request and hasattr(request.app.state, "aria2_client"):
-        client = request.app.state.aria2_client
-        # 如果配置没有变化，直接返回现有客户端
-        if client._rpc_url == rpc_url and client._secret == rpc_secret:
-            return client
-    
-    # 创建新的客户端实例
-    return Aria2Client(rpc_url, rpc_secret)
+        return request.app.state.aria2_client
+
+    # 从 AppState 缓存读取配置
+    resolved_state = state
+    if resolved_state is None and request and hasattr(request.app.state, "app_state"):
+        resolved_state = request.app.state.app_state
+
+    if resolved_state is not None:
+        rpc_url = resolved_state._cached_rpc_url or settings.aria2_rpc_url
+        rpc_secret = resolved_state._cached_rpc_secret or settings.aria2_rpc_secret
+        return Aria2Client(rpc_url, rpc_secret)
+
+    return Aria2Client(settings.aria2_rpc_url, settings.aria2_rpc_secret)
+
+
+async def refresh_aria2_config(state: AppState) -> None:
+    """从数据库异步刷新 aria2 配置到 AppState 缓存"""
+    from app.routers.config import get_config_value_async
+
+    rpc_url = await get_config_value_async("aria2_rpc_url")
+    rpc_secret = await get_config_value_async("aria2_rpc_secret")
+    state._cached_rpc_url = rpc_url or settings.aria2_rpc_url
+    state._cached_rpc_secret = rpc_secret or settings.aria2_rpc_secret

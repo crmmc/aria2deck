@@ -8,12 +8,8 @@ Kept functions:
 - ensure_default_admin(): Admin user creation
 """
 
-import logging
-
-logger = logging.getLogger(__name__)
-
-import logging
 import hashlib
+import logging
 import sqlite3
 import sys
 import threading
@@ -67,6 +63,9 @@ def _db_cursor():
         try:
             yield cur
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             cur.close()
             conn.close()

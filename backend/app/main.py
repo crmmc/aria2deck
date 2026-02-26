@@ -104,12 +104,19 @@ async def lifespan(app: FastAPI):
     # WAL 完整性检查
     wal_ok = await check_wal_integrity()
     if not wal_ok:
-        import logging
-        logging.warning("WAL 文件检查发现问题，但不影响启动。建议检查磁盘空间和文件系统。")
+        logger.warning("WAL 文件检查发现问题，但不影响启动。建议检查磁盘空间和文件系统。")
 
     # Initialize default config values
     async with get_session() as session:
         await init_default_config(session)
+
+    # Check secret key safety
+    from app.core.config import check_secret_key
+    check_secret_key()
+
+    # Refresh aria2 config cache from DB
+    from app.core.state import refresh_aria2_config
+    await refresh_aria2_config(app.state.app_state)
 
     # Ensure default admin exists
     ensure_default_admin()
@@ -215,7 +222,6 @@ def create_app() -> FastAPI:
             "http://127.0.0.1:8080",
             "https://ariang.mayswind.net",
             "https://ariang.js.org",
-            "null",
         ],
         allow_credentials=True,
         allow_methods=["*"],

@@ -9,15 +9,11 @@ Handles:
 from __future__ import annotations
 
 import logging
-from sqlalchemy.exc import IntegrityError
-
-logger = logging.getLogger(__name__)
-
-import logging
 import shutil
 from pathlib import Path
 
 from sqlalchemy import delete, update, func
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from app.core.config import settings
