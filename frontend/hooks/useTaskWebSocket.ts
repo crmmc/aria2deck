@@ -149,7 +149,8 @@ export function useTaskWebSocket(callbacks: TaskWebSocketCallbacks) {
         callbacksRef.current.onNotification(payload.message, level);
       };
 
-      ws.onerror = () => {
+      ws.onerror = (event) => {
+        console.warn("[ws] WebSocket error", event);
         ws?.close();
       };
 

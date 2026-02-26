@@ -262,6 +262,12 @@ export const api = {
       method: "DELETE",
     }),
 
+  // 删除打包任务记录（与 cancelPackTask 共用后端端点）
+  deletePackTask: (id: number) =>
+    request<{ ok: boolean; message: string }>(`/api/files/pack/${id}`, {
+      method: "DELETE",
+    }),
+
   clearPackTasks: () =>
     request<{ ok: boolean; count: number }>("/api/files/pack", {
       method: "DELETE",
