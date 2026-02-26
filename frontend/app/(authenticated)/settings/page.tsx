@@ -9,6 +9,7 @@ import { formatBytes, bytesToGB, gbToBytes } from "@/lib/utils";
 export default function SettingsPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [machineStats, setMachineStats] = useState<MachineStats | null>(null);
 
@@ -45,6 +46,7 @@ export default function SettingsPage() {
           router.push("/tasks");
           return null;
         }
+        setIsAdmin(true);
         return loadConfig();
       })
       .then(() => {
@@ -183,6 +185,7 @@ export default function SettingsPage() {
   };
 
   if (loading) return null;
+  if (!isAdmin) return null;
 
   return (
     <div className="glass-frame full-height animate-in">
