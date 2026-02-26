@@ -11,7 +11,6 @@ import type {
   FileInfo,
   BrowseFileInfo,
   MachineStats,
-  PackTask,
   RpcAccessStatus,
   TaskHistory,
   SpaceInfo,
@@ -352,7 +351,7 @@ export const resetAllMocks = () => {
 
 // Setup fetch mock
 export const setupFetchMock = (responses: Record<string, unknown> = {}) => {
-  const mockFetch = jest.fn().mockImplementation(async (url: string, options?: RequestInit) => {
+  const mockFetch = jest.fn().mockImplementation(async (url: string, _options?: RequestInit) => {
     const path = new URL(url, "http://localhost").pathname;
     const response = responses[path];
 

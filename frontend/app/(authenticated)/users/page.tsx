@@ -55,6 +55,7 @@ export default function UsersPage() {
       .catch((err) => {
         if (err.message !== "Unauthorized") {
           console.error(err);
+          setLoading(false);
         }
       });
   }, [router]);
