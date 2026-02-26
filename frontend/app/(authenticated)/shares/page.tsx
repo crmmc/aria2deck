@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/lib/api";
 import type { ShareLink } from "@/types";
@@ -162,20 +162,24 @@ export default function SharesPage() {
   const [filterStatus, setFilterStatus] = useState<string>("all");
   const [searchKeyword, setSearchKeyword] = useState("");
   const [isOperating, setIsOperating] = useState(false);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
     loadShares();
+    return () => { mountedRef.current = false; };
   }, []);
 
   async function loadShares() {
     setLoading(true);
     try {
       const shares = await api.listShares();
+      if (!mountedRef.current) return;
       setRecords(shares);
-    } catch (err) {
+    } catch {
+      if (!mountedRef.current) return;
       showToast("加载分享记录失败", "error");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }
 
