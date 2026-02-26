@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ShareInfo } from "@/types";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
@@ -68,7 +68,10 @@ export default function SharePageClient() {
         setError(err instanceof Error ? err.message : "获取分享信息失败");
       })
       .finally(() => { if (mounted) setLoading(false); });
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+      if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
+    };
   }, []);
   // 当 siteTitle 或 shareInfo 变化时更新页面标题
   useEffect(() => {
@@ -90,9 +93,12 @@ export default function SharePageClient() {
     }
   };
 
+  const downloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const handleDownload = () => {
     setDownloading(true);
-    setTimeout(() => setDownloading(false), 2000);
+    if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
+    downloadTimerRef.current = setTimeout(() => setDownloading(false), 2000);
     window.open(api.shareDownloadUrl(code, accessToken || undefined), "_blank");
   };
 

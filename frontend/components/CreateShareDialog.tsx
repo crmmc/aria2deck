@@ -51,7 +51,7 @@ export default function CreateShareDialog({
       setCreating(false);
     }
   };
-  const shareUrl = createdShare
+  const shareUrl = createdShare && typeof window !== "undefined"
     ? `${window.location.origin}/s/${createdShare.share_code}`
     : "";
   const copyLink = () => {

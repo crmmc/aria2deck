@@ -57,10 +57,13 @@ export default function StoragePage() {
   }, [search, orphanOnly, showToast]);
 
   useEffect(() => {
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
     if (user?.is_admin) {
       loadFiles();
     }
-    return () => { mountedRef.current = false; };
   }, [user, loadFiles]);
 
   const handleSelectAll = (checked: boolean) => {
