@@ -10,6 +10,20 @@ const config = {
   coverageProvider: 'v8',
   testEnvironment: 'jsdom',
   setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
+  collectCoverageFrom: [
+    'app/(authenticated)/files/page.tsx',
+    'components/{CreateShareDialog,PackTaskCard,Toast}.tsx',
+    'hooks/useTaskWebSocket.ts',
+    'lib/**/*.{ts,tsx}',
+    '!**/*.d.ts',
+  ],
+  coverageThreshold: {
+    global: {
+      branches: 75,
+      lines: 75,
+      statements: 75,
+    },
+  },
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
   },

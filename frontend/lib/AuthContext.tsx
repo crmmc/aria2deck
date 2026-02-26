@@ -66,7 +66,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setIsUnauthorized(false);
         setInitialized(true);
         // 获取网站标题（无需认证）
-        api.getSiteInfo().then(info => setSiteTitle(info.site_title)).catch(() => {});
+        api
+          .getSiteInfo()
+          .then((info) => setSiteTitle(info.site_title))
+          .catch((err: unknown) => {
+            console.warn("加载站点标题失败", err);
+          });
       })
       .catch((err) => {
         if (err instanceof ApiError) {

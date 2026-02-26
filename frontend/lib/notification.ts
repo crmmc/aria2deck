@@ -14,20 +14,33 @@ const defaultSettings: NotificationSettings = {
 
 export function getNotificationSettings(): NotificationSettings {
   if (typeof window === "undefined") return defaultSettings;
-  const stored = localStorage.getItem(STORAGE_KEY);
+  let stored: string | null = null;
+  try {
+    stored = localStorage.getItem(STORAGE_KEY);
+  } catch (err) {
+    console.warn("读取通知设置失败", err);
+    return defaultSettings;
+  }
+
   if (stored) {
     try {
       return { ...defaultSettings, ...JSON.parse(stored) };
-    } catch {
+    } catch (err) {
+      console.warn("解析通知设置失败", err);
       return defaultSettings;
     }
   }
+
   return defaultSettings;
 }
 
 export function saveNotificationSettings(settings: NotificationSettings): void {
   if (typeof window === "undefined") return;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  } catch (err) {
+    console.warn("保存通知设置失败", err);
+  }
 }
 
 export async function requestNotificationPermission(): Promise<boolean> {
@@ -73,7 +86,7 @@ export function sendTaskCompleteNotification(taskName: string, taskId: number): 
   const settings = getNotificationSettings();
   if (!settings.onComplete) return;
   sendNotification("下载完成", taskName, () => {
-    window.location.href = `/tasks/detail?id=${taskId}`;
+    window.location.href = `/tasks?task_id=${taskId}`;
   });
 }
 
@@ -81,6 +94,6 @@ export function sendTaskErrorNotification(taskName: string, taskId: number): voi
   const settings = getNotificationSettings();
   if (!settings.onError) return;
   sendNotification("下载失败", taskName, () => {
-    window.location.href = `/tasks/detail?id=${taskId}`;
+    window.location.href = `/tasks?task_id=${taskId}`;
   });
 }
