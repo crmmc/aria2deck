@@ -187,18 +187,7 @@ const MoreIcon = () => (
 function SidebarContent({ user }: SidebarProps) {
   const pathname = usePathname();
   const { logout, sidebarExpanded, setSidebarExpanded, siteTitle } = useAuth();
-  const [isMobile, setIsMobile] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
-
-  // Detect mobile viewport
-  useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(window.innerWidth < 768);
-    };
-    checkMobile();
-    window.addEventListener("resize", checkMobile);
-    return () => window.removeEventListener("resize", checkMobile);
-  }, []);
 
   // Close more menu when navigating
   useEffect(() => {

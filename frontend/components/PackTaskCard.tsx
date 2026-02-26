@@ -41,6 +41,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
       }, 2000);
       return () => clearInterval(interval);
     }
+    return undefined;
   }, [tasks, loadTasks]);
 
   const notifiedTaskIdsRef = useRef<Set<number>>(new Set());
