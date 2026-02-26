@@ -170,7 +170,7 @@ def _decode_query_params(raw_params: str | None) -> list | None:
             parsed = json.loads(decoded.decode("utf-8"))
             if isinstance(parsed, list):
                 return parsed
-        except Exception:
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
             continue
 
     return None
