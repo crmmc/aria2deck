@@ -8,10 +8,6 @@
 """
 from __future__ import annotations
 
-import logging
-
-logger = logging.getLogger(__name__)
-
 import asyncio
 import logging
 import time
@@ -109,7 +105,7 @@ async def sync_tasks(
 
     while True:
         await _repair_inconsistent_completed_tasks(state)
-        client = get_aria2_client()
+        client = get_aria2_client(state=state)
 
         async with get_session() as db:
             result = await db.exec(select(DownloadTask))

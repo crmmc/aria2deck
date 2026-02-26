@@ -158,5 +158,3 @@ async def init_default_config(session: AsyncSession) -> None:
         existing = result.first()
         if not existing:
             session.add(Config(key=key, value=value))
-
-    await session.commit()

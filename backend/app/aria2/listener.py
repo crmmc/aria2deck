@@ -19,8 +19,6 @@ from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 
-logger = logging.getLogger(__name__)
-
 if TYPE_CHECKING:
     from app.core.state import AppState
 
@@ -156,12 +154,13 @@ async def _resolve_complete_source_with_retry(
     task_dir: Path,
     files: list[dict],
     task_name: str | None,
+    state: "AppState | None" = None,
 ) -> Path | None:
     """在完成事件短时间路径抖动时进行重试，降低误判失败概率。"""
     from app.core.state import get_aria2_client
 
     latest_files = files
-    client = get_aria2_client()
+    client = get_aria2_client(state=state)
 
     for attempt in range(COMPLETE_SOURCE_RETRY_COUNT):
         source = _resolve_complete_source_path(task_dir, latest_files, task_name)
@@ -215,7 +214,7 @@ async def handle_aria2_event(
     from app.routers.tasks import broadcast_task_update_to_subscribers
     from app.services.storage import get_user_space_info
 
-    client = get_aria2_client()
+    client = get_aria2_client(state=state)
 
     # 1. 获取 aria2 状态
     try:
@@ -496,10 +495,6 @@ async def _handle_task_complete(
     )
 
     lock = await get_task_complete_lock(state, task_id)
-    if lock.locked():
-        logger.debug(f"[WS] Task {task_id} completion already being processed, skipping")
-        return
-
     async with lock:
         async with get_session() as db:
             result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
@@ -523,6 +518,7 @@ async def _handle_task_complete(
             task_dir=task_dir,
             files=files,
             task_name=task.name,
+            state=state,
         )
         if source_path is None:
             logger.error(
@@ -666,7 +662,7 @@ async def _handle_task_complete(
 
         if completion_gid:
             try:
-                client = get_aria2_client()
+                client = get_aria2_client(state=state)
                 await client.remove_download_result(completion_gid)
             except Exception as exc:
                 logger.debug(f"[WS] 清理完成任务记录失败 gid={completion_gid} error={exc}")
@@ -856,7 +852,7 @@ async def listen_aria2_events(state: AppState) -> None:
         ws_url = _http_to_ws_url(rpc_url)
 
         try:
-            timeout = aiohttp.ClientTimeout(total=30)
+            timeout = aiohttp.ClientTimeout(connect=10, sock_connect=10, sock_read=None)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 logger.info(f"[WS] 正在连接 aria2 WebSocket: {ws_url}")
 

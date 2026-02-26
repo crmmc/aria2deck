@@ -125,11 +125,14 @@ def _extract_info_dict_bytes(data: bytes) -> bytes | None:
     return data[dict_start:end_pos]
 
 
-def _find_bencode_end(data: bytes, start: int) -> int:
+def _find_bencode_end(data: bytes, start: int, depth: int = 0) -> int:
     """Find the end position of a bencoded value starting at 'start'.
 
     Returns the position after the last byte of the value, or -1 on error.
     """
+    if depth > 100:
+        return -1
+
     if start >= len(data):
         return -1
 
@@ -146,13 +149,13 @@ def _find_bencode_end(data: bytes, start: int) -> int:
         while pos < len(data) and data[pos:pos + 1] != b"e":
             if char == b"d":
                 # Dictionary has key-value pairs, skip the key first
-                key_end = _find_bencode_end(data, pos)
+                key_end = _find_bencode_end(data, pos, depth + 1)
                 if key_end == -1:
                     return -1
                 pos = key_end
 
             # Find end of value
-            value_end = _find_bencode_end(data, pos)
+            value_end = _find_bencode_end(data, pos, depth + 1)
             if value_end == -1:
                 return -1
             pos = value_end

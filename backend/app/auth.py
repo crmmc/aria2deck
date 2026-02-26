@@ -63,7 +63,6 @@ async def get_user_by_session(session_id: str | None) -> User | None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if expires_at < datetime.now(timezone.utc):
             await db.delete(session)
-            await db.commit()
             logger.info("会话已过期并自动清理")
             return None
         result = await db.exec(select(User).where(User.id == session.user_id))
@@ -92,6 +91,7 @@ def set_session_cookie(response: Response, session_id: str) -> None:
         settings.session_cookie_name,
         session_id,
         httponly=True,
+        secure=not settings.debug,
         samesite="lax",
         max_age=settings.session_ttl_seconds,
     )

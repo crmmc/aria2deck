@@ -42,57 +42,63 @@ class TestSSRFProtection:
         assert _is_private_ip(ipaddress.ip_address("8.8.8.8")) is False
         assert _is_private_ip(ipaddress.ip_address("1.1.1.1")) is False
 
-    def test_check_url_safety_localhost(self):
+    @pytest.mark.asyncio
+    async def test_check_url_safety_localhost(self):
         """Test localhost URLs are blocked."""
         from fastapi import HTTPException
         from app.routers.tasks import _check_url_safety
 
         with pytest.raises(HTTPException) as exc_info:
-            _check_url_safety("http://localhost/file.zip")
+            await _check_url_safety("http://localhost/file.zip")
         assert exc_info.value.status_code == 400
         assert "本机地址" in exc_info.value.detail
 
-    def test_check_url_safety_127_0_0_1(self):
+    @pytest.mark.asyncio
+    async def test_check_url_safety_127_0_0_1(self):
         """Test 127.0.0.1 URLs are blocked."""
         from fastapi import HTTPException
         from app.routers.tasks import _check_url_safety
 
         with pytest.raises(HTTPException) as exc_info:
-            _check_url_safety("http://127.0.0.1/file.zip")
+            await _check_url_safety("http://127.0.0.1/file.zip")
         assert exc_info.value.status_code == 400
 
-    def test_check_url_safety_private_ip(self):
+    @pytest.mark.asyncio
+    async def test_check_url_safety_private_ip(self):
         """Test private IP URLs are blocked."""
         from fastapi import HTTPException
         from app.routers.tasks import _check_url_safety
 
         with pytest.raises(HTTPException) as exc_info:
-            _check_url_safety("http://192.168.1.1/file.zip")
+            await _check_url_safety("http://192.168.1.1/file.zip")
         assert exc_info.value.status_code == 400
         assert "内网地址" in exc_info.value.detail
 
-    def test_check_url_safety_public_url(self):
+    @pytest.mark.asyncio
+    async def test_check_url_safety_public_url(self):
         """Test public URLs are allowed."""
         from app.routers.tasks import _check_url_safety
 
         # Should not raise
-        _check_url_safety("http://example.com/file.zip")
-        _check_url_safety("https://github.com/file.zip")
+        await _check_url_safety("http://example.com/file.zip")
+        await _check_url_safety("https://github.com/file.zip")
 
-    def test_check_url_safety_magnet(self):
+    @pytest.mark.asyncio
+    async def test_check_url_safety_magnet(self):
         """Test magnet links bypass SSRF check."""
         from app.routers.tasks import _check_url_safety
 
         # Should not raise (magnet is not http/https/ftp)
-        _check_url_safety("magnet:?xt=urn:btih:abc123")
+        await _check_url_safety("magnet:?xt=urn:btih:abc123")
 
-    def test_check_url_safety_no_hostname(self):
+    @pytest.mark.asyncio
+    async def test_check_url_safety_no_hostname(self):
         """Test URLs without hostname are blocked."""
         from fastapi import HTTPException
         from app.routers.tasks import _check_url_safety
 
         with pytest.raises(HTTPException) as exc_info:
-            _check_url_safety("http:///file.zip")
+            await _check_url_safety("http:///file.zip")
         assert exc_info.value.status_code == 400
 
 
@@ -816,34 +822,41 @@ class TestClearHistoryWithData:
 
 class TestDNSResolutionSSRF:
 
-    def test_check_url_safety_dns_resolves_to_private(self):
+    @pytest.mark.asyncio
+    async def test_check_url_safety_dns_resolves_to_private(self):
         from fastapi import HTTPException
         from app.routers.tasks import _check_url_safety
         import socket
 
         mock_result = [(socket.AF_INET, socket.SOCK_STREAM, 0, '', ('192.168.1.100', 80))]
 
-        with patch("socket.getaddrinfo", return_value=mock_result):
+        with patch("app.routers.tasks.socket.getaddrinfo", return_value=mock_result):
             with pytest.raises(HTTPException) as exc_info:
-                _check_url_safety("http://evil.example.com/file.zip")
+                await _check_url_safety("http://evil.example.com/file.zip")
             assert exc_info.value.status_code == 400
             assert "内网地址" in exc_info.value.detail
 
-    def test_check_url_safety_dns_failure_allowed(self):
+    @pytest.mark.asyncio
+    async def test_check_url_safety_dns_failure_rejected(self):
+        from fastapi import HTTPException
         from app.routers.tasks import _check_url_safety
         import socket
 
-        with patch("socket.getaddrinfo", side_effect=socket.gaierror("DNS failed")):
-            _check_url_safety("http://nonexistent.example.com/file.zip")
+        with patch("app.routers.tasks.socket.getaddrinfo", side_effect=socket.gaierror("DNS failed")):
+            with pytest.raises(HTTPException) as exc_info:
+                await _check_url_safety("http://nonexistent.example.com/file.zip")
+            assert exc_info.value.status_code == 400
+            assert "无法解析" in exc_info.value.detail
 
-    def test_check_url_safety_invalid_ip_in_dns(self):
+    @pytest.mark.asyncio
+    async def test_check_url_safety_invalid_ip_in_dns(self):
         from app.routers.tasks import _check_url_safety
         import socket
 
         mock_result = [(socket.AF_INET, socket.SOCK_STREAM, 0, '', ('invalid_ip', 80))]
 
-        with patch("socket.getaddrinfo", return_value=mock_result):
-            _check_url_safety("http://example.com/file.zip")
+        with patch("app.routers.tasks.socket.getaddrinfo", return_value=mock_result):
+            await _check_url_safety("http://example.com/file.zip")
 
 
 class TestSubscriptionToCompleteTask:

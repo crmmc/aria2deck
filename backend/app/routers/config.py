@@ -8,7 +8,7 @@ import string
 from datetime import datetime, timezone
 from time import time
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
@@ -241,7 +241,7 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
 
 
 @router.put("")
-async def update_config(payload: ConfigUpdate, admin: User = Depends(require_admin)) -> dict:
+async def update_config(payload: ConfigUpdate, request: Request, admin: User = Depends(require_admin)) -> dict:
     """更新系统配置（管理员）
 
     可更新字段:
@@ -305,6 +305,12 @@ async def update_config(payload: ConfigUpdate, admin: User = Depends(require_adm
     if payload.site_title is not None:
         await set_config_value_async("site_title", payload.site_title)
         changed_keys.append("site_title")
+    # 如果 aria2 配置变更，刷新缓存
+    if "aria2_rpc_url" in changed_keys or "aria2_rpc_secret" in changed_keys:
+        from app.core.state import refresh_aria2_config
+        if hasattr(request.app.state, "app_state"):
+            await refresh_aria2_config(request.app.state.app_state)
+
     # 返回更新后的配置（secret 脱敏）
     aria2_rpc_url = await get_config_value_async("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
     aria2_rpc_secret = await get_config_value_async("aria2_rpc_secret") or ""

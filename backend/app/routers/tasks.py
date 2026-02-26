@@ -71,7 +71,7 @@ def _is_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
-def _check_url_safety(url: str) -> None:
+async def _check_url_safety(url: str) -> None:
     """检查 URL 是否安全（SSRF 防护）"""
     safe_url = mask_url_credentials(url)
     try:
@@ -110,7 +110,8 @@ def _check_url_safety(url: str) -> None:
             pass
 
         try:
-            addr_infos = socket.getaddrinfo(hostname, None)
+            loop = asyncio.get_running_loop()
+            addr_infos = await loop.run_in_executor(None, socket.getaddrinfo, hostname, None)
             for addr_info in addr_infos:
                 ip_str = addr_info[4][0]
                 try:
@@ -123,7 +124,10 @@ def _check_url_safety(url: str) -> None:
                 except ValueError:
                     continue
         except socket.gaierror:
-            pass
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"域名 {hostname} 无法解析"
+            )
 
     except HTTPException:
         raise
@@ -457,7 +461,7 @@ async def create_task(
         )
 
     # SSRF protection
-    _check_url_safety(payload.uri)
+    await _check_url_safety(payload.uri)
 
     # Check disk space
     disk_ok, disk_free = _check_disk_space()

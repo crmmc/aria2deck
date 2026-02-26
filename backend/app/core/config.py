@@ -32,3 +32,14 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def check_secret_key() -> None:
+    """Raise if secret_key is still the insecure default in non-debug mode."""
+    if not settings.debug and settings.secret_key == "aria2deck-default-secret-key-change-in-production":
+        import warnings
+        warnings.warn(
+            "ARIA2C_SECRET_KEY 使用了默认值，生产环境请务必设置安全的密钥。"
+            "可通过环境变量 ARIA2C_SECRET_KEY 配置。",
+            stacklevel=2,
+        )

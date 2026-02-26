@@ -309,7 +309,7 @@ class TestJsonrpcHandler:
         assert "error" in data
         assert data["error"]["code"] == -32602
 
-    def test_cors_preflight_allows_null_origin(self, client: TestClient):
+    def test_cors_preflight_rejects_null_origin(self, client: TestClient):
         response = client.options(
             "/aria2/jsonrpc",
             headers={
@@ -317,8 +317,8 @@ class TestJsonrpcHandler:
                 "Access-Control-Request-Method": "GET",
             },
         )
-        assert response.status_code == 200
-        assert response.headers.get("access-control-allow-origin") == "null"
+        # "null" origin should not be allowed (CSRF vector)
+        assert response.headers.get("access-control-allow-origin") != "null"
 
     def test_cors_get_allows_ariang_origin(self, client: TestClient, rpc_user: dict):
         response = client.get(
