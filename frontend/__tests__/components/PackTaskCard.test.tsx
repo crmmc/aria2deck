@@ -18,6 +18,7 @@ jest.mock("@/lib/api", () => ({
     listPackTasks: jest.fn(),
     clearPackTasks: jest.fn(),
     cancelPackTask: jest.fn(),
+    deletePackTask: jest.fn(),
   },
 }));
 
@@ -142,6 +143,49 @@ describe("PackTaskCard", () => {
 
     await waitFor(() => {
       expect(showToast).toHaveBeenCalledWith("清空失败: clear failed", "error");
+    });
+  });
+
+  it("deletes a done task when delete button clicked", async () => {
+    mockApi.listPackTasks
+      .mockResolvedValueOnce([makeTask({ status: "done", id: 5, output_name: "done.zip" })] as never)
+      .mockResolvedValueOnce([] as never);
+    mockApi.deletePackTask.mockResolvedValue({ ok: true, message: "Deleted" } as never);
+
+    render(<PackTaskCard />);
+
+    const trigger = await screen.findByRole("button", { name: /打包任务/ });
+    const wrapper = trigger.closest(".relative") as HTMLElement;
+    fireEvent.mouseEnter(wrapper);
+    act(() => {
+      jest.advanceTimersByTime(20);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+    await waitFor(() => {
+      expect(showConfirm).toHaveBeenCalledWith(expect.objectContaining({ title: "删除任务记录" }));
+      expect(mockApi.deletePackTask).toHaveBeenCalledWith(5);
+    });
+  });
+
+  it("shows error toast when delete task fails", async () => {
+    mockApi.listPackTasks.mockResolvedValue([makeTask({ status: "failed", id: 6, error_message: "some error" })] as never);
+    mockApi.deletePackTask.mockRejectedValue(new Error("delete failed") as never);
+
+    render(<PackTaskCard />);
+
+    const trigger = await screen.findByRole("button", { name: /打包任务/ });
+    const wrapper = trigger.closest(".relative") as HTMLElement;
+    fireEvent.mouseEnter(wrapper);
+    act(() => {
+      jest.advanceTimersByTime(20);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+    await waitFor(() => {
+      expect(showToast).toHaveBeenCalledWith("删除失败: delete failed", "error");
     });
   });
 });

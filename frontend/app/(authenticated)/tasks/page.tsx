@@ -19,6 +19,16 @@ function getTaskDisplayName(task: Task): string {
   return task.name || "未知文件";
 }
 
+function upsertTaskById(tasks: Task[], task: Task): Task[] {
+  const existingIndex = tasks.findIndex((item) => item.id === task.id);
+  if (existingIndex === -1) {
+    return [task, ...tasks];
+  }
+  const next = [...tasks];
+  next[existingIndex] = task;
+  return next;
+}
+
 interface TaskCardProps {
   task: Task;
   isSelected: boolean;
@@ -403,13 +413,7 @@ export default function TasksPage() {
       try {
         const task = await api.createTask(uri);
         if (task.status === "active" || task.status === "queued") {
-          setTasks((prev) => {
-            const idx = prev.findIndex((t) => t.id === task.id);
-            if (idx === -1) return [task, ...prev];
-            const next = [...prev];
-            next[idx] = task;
-            return next;
-          });
+          setTasks((prev) => upsertTaskById(prev, task));
         }
         setUri("");
       } catch (err) {
@@ -462,13 +466,7 @@ export default function TasksPage() {
 
         const task = await api.uploadTorrent(base64Content);
         if (task.status === "active" || task.status === "queued") {
-          setTasks((prev) => {
-            const idx = prev.findIndex((t) => t.id === task.id);
-            if (idx === -1) return [task, ...prev];
-            const next = [...prev];
-            next[idx] = task;
-            return next;
-          });
+          setTasks((prev) => upsertTaskById(prev, task));
         }
       } catch (err) {
         const message = (err as Error).message;
@@ -537,7 +535,7 @@ export default function TasksPage() {
       try {
         const newTask = await api.createTask(task.uri);
         if (newTask.status === "active" || newTask.status === "queued") {
-          setTasks((prev) => [newTask, ...prev]);
+          setTasks((prev) => upsertTaskById(prev, newTask));
         }
         showToast("已重新添加下载任务", "success");
       } catch (err) {
@@ -616,7 +614,7 @@ export default function TasksPage() {
       try {
         const task = await api.createTask(uri);
         if (task.status === "active" || task.status === "queued") {
-          setTasks((prev) => [task, ...prev]);
+          setTasks((prev) => upsertTaskById(prev, task));
         }
         successCount++;
       } catch (err) {

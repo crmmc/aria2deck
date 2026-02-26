@@ -187,6 +187,7 @@ export default function UsersPage() {
   }
 
   if (loading) return null;
+  if (!currentUser?.is_admin) return null;
 
   return (
     <>

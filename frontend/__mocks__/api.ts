@@ -176,6 +176,8 @@ export const mockApi = {
   // Pack Tasks
   listPackTasks: jest.fn().mockResolvedValue([]),
   cancelPackTask: jest.fn().mockResolvedValue({ ok: true, message: "Cancelled" }),
+  deletePackTask: jest.fn().mockResolvedValue({ ok: true, message: "Deleted" }),
+  clearPackTasks: jest.fn().mockResolvedValue({ ok: true, count: 0 }),
   downloadPackResult: jest.fn().mockReturnValue("http://localhost:8000/api/files/pack/1/download"),
 };
 

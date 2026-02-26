@@ -64,7 +64,7 @@ describe("UsersPage auth guard", () => {
       expect(pushMock).toHaveBeenCalledWith("/tasks");
     });
     await waitFor(() => {
-      expect(screen.getByText("用户")).toBeInTheDocument();
+      expect(screen.queryByText("用户")).not.toBeInTheDocument();
     });
     expect(mockApi.listUsers).not.toHaveBeenCalled();
   });
@@ -75,7 +75,7 @@ describe("UsersPage auth guard", () => {
     renderPage();
 
     await waitFor(() => {
-      expect(screen.getByText("用户")).toBeInTheDocument();
+      expect(screen.queryByText("用户")).not.toBeInTheDocument();
     });
     expect(console.error).toHaveBeenCalled();
   });
