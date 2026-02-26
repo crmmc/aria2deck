@@ -270,27 +270,20 @@ export default function TasksPage() {
       api
         .listTasks("active")
         .then((activeTasks) => {
+          const activeMap = new Map(activeTasks.map((t) => [t.id, t]));
+
+          const updatedActive = activeTasks.filter(
+            (t) => !deletedTaskIdsRef.current.has(t.id)
+          );
+
+          let needRefresh = false;
           setTasks((prev) => {
-            const activeMap = new Map(activeTasks.map((t) => [t.id, t]));
-
-            const updatedActive = activeTasks.filter(
-              (t) => !deletedTaskIdsRef.current.has(t.id)
-            );
-
             const prevActive = prev.filter(
               (t) => t.status === "active" || t.status === "queued"
             );
             for (const t of prevActive) {
               if (!activeMap.has(t.id) && !deletedTaskIdsRef.current.has(t.id)) {
-                // Task disappeared, fetch current list to check if it failed
-                api
-                  .listTasks("current")
-                  .then((currentTasks) => {
-                    setTasks(currentTasks);
-                  })
-                  .catch((err: unknown) => {
-                    console.warn("刷新当前任务列表失败", err);
-                  });
+                needRefresh = true;
                 break;
               }
             }
@@ -298,6 +291,17 @@ export default function TasksPage() {
             deletedTaskIdsRef.current.clear();
             return updatedActive;
           });
+
+          if (needRefresh) {
+            api
+              .listTasks("current")
+              .then((currentTasks) => {
+                setTasks(currentTasks);
+              })
+              .catch((err: unknown) => {
+                console.warn("刷新当前任务列表失败", err);
+              });
+          }
         })
         .catch((err: unknown) => {
           console.warn("轮询活动任务失败", err);

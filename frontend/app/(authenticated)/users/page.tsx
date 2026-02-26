@@ -22,6 +22,7 @@ export default function UsersPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -57,6 +58,7 @@ export default function UsersPage() {
       .catch((err) => {
         if (!mounted) return;
         console.error(err);
+        setLoadError("加载用户列表失败");
       })
       .finally(() => {
         if (mounted) {
@@ -187,6 +189,11 @@ export default function UsersPage() {
   }
 
   if (loading) return null;
+  if (loadError) return (
+    <div className="glass-frame full-height animate-in">
+      <div className="card text-danger">{loadError}</div>
+    </div>
+  );
   if (!currentUser?.is_admin) return null;
 
   return (
