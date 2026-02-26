@@ -11,7 +11,10 @@ const config = {
   testEnvironment: 'jsdom',
   setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
   collectCoverageFrom: [
+    'app/s/[code]/SharePageClient.tsx',
+    'app/login/page.tsx',
     'app/(authenticated)/files/page.tsx',
+    'app/(authenticated)/users/page.tsx',
     'components/{CreateShareDialog,PackTaskCard,Toast}.tsx',
     'hooks/useTaskWebSocket.ts',
     'lib/**/*.{ts,tsx}',
