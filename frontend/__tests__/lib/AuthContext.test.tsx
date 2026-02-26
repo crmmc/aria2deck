@@ -2,12 +2,13 @@ import React from "react";
 import { render, screen, waitFor, act } from "@testing-library/react";
 import { AuthProvider, useAuth } from "@/lib/AuthContext";
 import { api, authEvents, ApiError } from "@/lib/api";
+import type { User } from "@/types";
 
 jest.mock("@/lib/api", () => ({
   api: {
-    me: jest.fn(),
-    logout: jest.fn(),
-    getSiteInfo: jest.fn().mockResolvedValue({ site_title: 'Test Site' }),
+    me: jest.fn<Promise<User>, []>(),
+    logout: jest.fn<Promise<{ ok: boolean }>, []>(),
+    getSiteInfo: jest.fn<Promise<{ site_title: string }>, []>().mockResolvedValue({ site_title: 'Test Site' }),
   },
   authEvents: {
     listeners: new Set<() => void>(),
@@ -88,15 +89,15 @@ describe("AuthProvider", () => {
   });
 
   it("renders children", async () => {
-    mockApi.me.mockResolvedValue({ id: 1, username: "test", is_admin: false } as never);
-    
+    mockApi.me.mockResolvedValue({ id: 1, username: "test", is_admin: false });
+
     render(
       <AuthProvider>
         <div data-testid="child">Child</div>
         <TestComponent />
       </AuthProvider>
     );
-    
+
     expect(screen.getByTestId("child")).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByTestId("loading").textContent).toBe("false");
@@ -104,10 +105,10 @@ describe("AuthProvider", () => {
   });
 
   it("shows loading state initially", async () => {
-    let resolveMe: (value: unknown) => void;
+    let resolveMe: (value: User) => void;
     mockApi.me.mockImplementation(() => new Promise((resolve) => {
       resolveMe = resolve;
-    }) as never);
+    }));
     
     render(
       <AuthProvider>
@@ -123,7 +124,7 @@ describe("AuthProvider", () => {
   });
 
   it("sets user on successful api.me()", async () => {
-    mockApi.me.mockResolvedValue({ id: 1, username: "testuser", is_admin: false } as never);
+    mockApi.me.mockResolvedValue({ id: 1, username: "testuser", is_admin: false });
     
     render(
       <AuthProvider>
@@ -190,8 +191,8 @@ describe("AuthProvider", () => {
   });
 
   it("logout calls api.logout and redirects", async () => {
-    mockApi.me.mockResolvedValue({ id: 1, username: "test", is_admin: false } as never);
-    mockApi.logout.mockResolvedValue({ ok: true } as never);
+    mockApi.me.mockResolvedValue({ id: 1, username: "test", is_admin: false });
+    mockApi.logout.mockResolvedValue({ ok: true });
     
     render(
       <AuthProvider>
@@ -215,8 +216,8 @@ describe("AuthProvider", () => {
 
   it("refreshUser updates user state", async () => {
     mockApi.me
-      .mockResolvedValueOnce({ id: 1, username: "user1", is_admin: false } as never)
-      .mockResolvedValueOnce({ id: 1, username: "user2", is_admin: true } as never);
+      .mockResolvedValueOnce({ id: 1, username: "user1", is_admin: false })
+      .mockResolvedValueOnce({ id: 1, username: "user2", is_admin: true });
     
     render(
       <AuthProvider>
@@ -241,7 +242,7 @@ describe("AuthProvider", () => {
     const { ApiError: MockApiError } = jest.requireMock("@/lib/api");
     mockApi.me
       .mockRejectedValueOnce(new MockApiError("Network error", 0, false, true))
-      .mockResolvedValueOnce({ id: 1, username: "recovered", is_admin: false } as never);
+      .mockResolvedValueOnce({ id: 1, username: "recovered", is_admin: false });
     
     render(
       <AuthProvider>
@@ -264,18 +265,18 @@ describe("AuthProvider", () => {
   });
 
   it("authEvents.onUnauthorized triggers redirect", async () => {
-    mockApi.me.mockResolvedValue({ id: 1, username: "test", is_admin: false } as never);
-    
+    mockApi.me.mockResolvedValue({ id: 1, username: "test", is_admin: false });
+
     render(
       <AuthProvider>
         <TestComponent />
       </AuthProvider>
     );
-    
+
     await waitFor(() => {
       expect(screen.getByTestId("user").textContent).toBe("test");
     });
-    
+
     act(() => {
       mockAuthEvents.emit();
     });

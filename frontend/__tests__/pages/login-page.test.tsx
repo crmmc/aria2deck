@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import LoginPage from "@/app/login/page";
 import { api, ApiError } from "@/lib/api";
+import type { User } from "@/types";
 
 const pushMock = jest.fn();
 
@@ -25,9 +26,9 @@ jest.mock("@/lib/api", () => {
   return {
     __esModule: true,
     api: {
-      me: jest.fn(),
-      getSiteInfo: jest.fn(),
-      login: jest.fn(),
+      me: jest.fn<Promise<User>, []>(),
+      getSiteInfo: jest.fn<Promise<{ site_title: string }>, []>(),
+      login: jest.fn<Promise<User>, [string, string]>(),
     },
     ApiError: MockApiError,
   };
@@ -46,11 +47,11 @@ const normalUser = {
 describe("LoginPage", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockApi.getSiteInfo.mockResolvedValue({ site_title: "Test Site" } as never);
+    mockApi.getSiteInfo.mockResolvedValue({ site_title: "Test Site" });
   });
 
   test("redirects to tasks when existing session is valid", async () => {
-    mockApi.me.mockResolvedValue(normalUser as never);
+    mockApi.me.mockResolvedValue(normalUser);
 
     render(<LoginPage />);
 
@@ -61,7 +62,7 @@ describe("LoginPage", () => {
   });
 
   test("redirects to profile when current user uses initial password", async () => {
-    mockApi.me.mockResolvedValue({ ...normalUser, is_initial_password: true } as never);
+    mockApi.me.mockResolvedValue({ ...normalUser, is_initial_password: true });
 
     render(<LoginPage />);
 
@@ -117,7 +118,7 @@ describe("LoginPage", () => {
   test("redirects to tasks after successful login", async () => {
     const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
     mockApi.me.mockRejectedValue(new ApiError("unauthorized", 401, true));
-    mockApi.login.mockResolvedValue(normalUser as never);
+    mockApi.login.mockResolvedValue(normalUser);
 
     render(<LoginPage />);
 
@@ -138,7 +139,7 @@ describe("LoginPage", () => {
   test("redirects to profile after successful login with initial password", async () => {
     const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
     mockApi.me.mockRejectedValue(new ApiError("unauthorized", 401, true));
-    mockApi.login.mockResolvedValue({ ...normalUser, is_initial_password: true } as never);
+    mockApi.login.mockResolvedValue({ ...normalUser, is_initial_password: true });
 
     render(<LoginPage />);
 

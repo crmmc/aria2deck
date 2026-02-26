@@ -2,7 +2,9 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import FilesPage from "@/app/(authenticated)/files/page";
 import { ToastProvider } from "@/components/Toast";
 import { api } from "@/lib/api";
-import type { FileInfo, BrowseFileInfo } from "@/types";
+import type { FileInfo, BrowseFileInfo, FileListResponse } from "@/types";
+import type { ListProps } from "react-window";
+import type { AutoSizerProps } from "react-virtualized-auto-sizer";
 
 // Mock next/navigation
 jest.mock("next/navigation", () => ({
@@ -12,15 +14,15 @@ jest.mock("next/navigation", () => ({
 // Mock react-virtualized-auto-sizer — render children with fixed dimensions
 jest.mock("react-virtualized-auto-sizer", () => ({
   __esModule: true,
-  AutoSizer: ({ renderProp, children }: any) => {
-    const render = renderProp || children;
-    return render({ height: 600, width: 1200 });
+  AutoSizer: ({ renderProp }: AutoSizerProps) => {
+    if (!renderProp) return null;
+    return renderProp({ height: 600, width: 1200 });
   },
 }));
 
 // Mock react-window — render all rows without virtualization
 jest.mock("react-window", () => ({
-  List: ({ rowCount, rowComponent: Row, rowProps, style }: any) => (
+  List: ({ rowCount, rowComponent: Row, rowProps, style }: ListProps<Record<string, unknown>>) => (
     <div style={style} data-testid="virtual-list">
       {Array.from({ length: rowCount }, (_, i) => (
         <Row key={i} index={i} style={{}} {...rowProps} />
@@ -80,8 +82,8 @@ const subfolderItems: BrowseFileInfo[] = [
 function setupListFiles(files: FileInfo[] = [folderFile, regularFile]) {
   mockApi.listFiles.mockResolvedValue({
     files,
-    space: { used: 1024, quota: 10240, frozen: 0, available: 9216 },
-  } as any);
+    space: { used: 1024, frozen: 0, available: 9216 },
+  } satisfies FileListResponse);
 }
 
 /** Render page and wait for initial file list to load */
@@ -287,8 +289,8 @@ describe("Folder in-page browsing", () => {
   test("root batch download with only files succeeds", async () => {
     mockApi.listFiles.mockResolvedValue({
       files: [regularFile],
-      space: { used: 1024, quota: 10240, frozen: 0, available: 9216 },
-    } as any);
+      space: { used: 1024, frozen: 0, available: 9216 },
+    } satisfies FileListResponse);
     mockApi.downloadFileUrl.mockImplementation(
       (fileHash: string) => `http://test/download/${fileHash}`
     );

@@ -291,11 +291,11 @@ describe("api methods", () => {
         json: () => Promise.resolve({ ok: true }),
       });
 
-      const result = await api.deleteFile(456);
-      
+      const result = await api.deleteFile("abc123hash");
+
       expect(result).toEqual({ ok: true });
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/files/456"),
+        expect.stringContaining("/api/files/abc123hash"),
         expect.objectContaining({
           method: "DELETE",
         })
@@ -305,14 +305,14 @@ describe("api methods", () => {
 
   describe("api.downloadFileUrl", () => {
     it("returns download URL without path", () => {
-      const url = api.downloadFileUrl(123);
-      expect(url).toContain("/api/files/123/download");
+      const url = api.downloadFileUrl("abc123hash");
+      expect(url).toContain("/api/files/abc123hash/download");
       expect(url).not.toContain("?path=");
     });
 
     it("returns download URL with path", () => {
-      const url = api.downloadFileUrl(123, "subdir/file.txt");
-      expect(url).toContain("/api/files/123/download");
+      const url = api.downloadFileUrl("abc123hash", "subdir/file.txt");
+      expect(url).toContain("/api/files/abc123hash/download");
       expect(url).toContain("?path=");
       expect(url).toContain(encodeURIComponent("subdir/file.txt"));
     });
@@ -678,11 +678,11 @@ describe("api methods", () => {
         json: () => Promise.resolve(mockFiles),
       });
 
-      const result = await api.browseFile(123);
-      
+      const result = await api.browseFile("abc123hash");
+
       expect(result).toEqual(mockFiles);
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/files/123/browse"),
+        expect.stringContaining("/api/files/abc123hash/browse"),
         expect.any(Object)
       );
     });
@@ -694,11 +694,11 @@ describe("api methods", () => {
         json: () => Promise.resolve(mockFiles),
       });
 
-      const result = await api.browseFile(123, "subdir");
-      
+      const result = await api.browseFile("abc123hash", "subdir");
+
       expect(result).toEqual(mockFiles);
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/files/123/browse?path=subdir"),
+        expect.stringContaining("/api/files/abc123hash/browse?path=subdir"),
         expect.any(Object)
       );
     });
@@ -711,11 +711,11 @@ describe("api methods", () => {
         json: () => Promise.resolve({ ok: true }),
       });
 
-      const result = await api.renameFile(123, "newname.txt");
-      
+      const result = await api.renameFile("abc123hash", "newname.txt");
+
       expect(result).toEqual({ ok: true });
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/files/123/rename"),
+        expect.stringContaining("/api/files/abc123hash/rename"),
         expect.objectContaining({
           method: "PUT",
           body: JSON.stringify({ name: "newname.txt" }),

@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import TasksPage from "@/app/(authenticated)/tasks/page";
 import { api } from "@/lib/api";
+import type { Task } from "@/types";
 
 const showToastMock = jest.fn();
 const showConfirmMock = jest.fn();
@@ -32,10 +33,10 @@ jest.mock("@/lib/notification", () => ({
 jest.mock("@/lib/api", () => ({
   __esModule: true,
   api: {
-    listTasks: jest.fn(),
-    createTask: jest.fn(),
-    uploadTorrent: jest.fn(),
-    cancelTask: jest.fn(),
+    listTasks: jest.fn<Promise<Task[]>, [string?]>(),
+    createTask: jest.fn<Promise<Task>, [string]>(),
+    uploadTorrent: jest.fn<Promise<Task>, [string, Record<string, unknown>?]>(),
+    cancelTask: jest.fn<Promise<{ ok: boolean }>, [number]>(),
   },
 }));
 
@@ -63,17 +64,17 @@ describe("TasksPage", () => {
     jest.spyOn(global, "clearInterval").mockImplementation((() => undefined) as never);
     mockApi.listTasks.mockImplementation(async (statusFilter?: string) => {
       if (statusFilter === "active") {
-        return [activeTask] as never;
+        return [activeTask];
       }
-      return [activeTask] as never;
+      return [activeTask];
     });
     mockApi.createTask.mockResolvedValue({
       ...activeTask,
       id: 2,
       name: "new-task.zip",
       uri: "https://example.com/new-task.zip",
-    } as never);
-    mockApi.cancelTask.mockResolvedValue({ ok: true } as never);
+    });
+    mockApi.cancelTask.mockResolvedValue({ ok: true });
     Object.assign(navigator, {
       clipboard: {
         writeText: jest.fn().mockResolvedValue(undefined),
