@@ -277,17 +277,18 @@ export default function TasksPage() {
           );
 
           let needRefresh = false;
-          setTasks((prev) => {
-            const prevActive = prev.filter(
-              (t) => t.status === "active" || t.status === "queued"
-            );
-            for (const t of prevActive) {
-              if (!activeMap.has(t.id) && !deletedTaskIdsRef.current.has(t.id)) {
-                needRefresh = true;
-                break;
-              }
+          const prevTasks = tasksRef.current;
+          const prevActive = prevTasks.filter(
+            (t) => t.status === "active" || t.status === "queued"
+          );
+          for (const t of prevActive) {
+            if (!activeMap.has(t.id) && !deletedTaskIdsRef.current.has(t.id)) {
+              needRefresh = true;
+              break;
             }
+          }
 
+          setTasks(() => {
             deletedTaskIdsRef.current.clear();
             return updatedActive;
           });

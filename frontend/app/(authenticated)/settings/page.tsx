@@ -39,23 +39,25 @@ export default function SettingsPage() {
   const [testingConnection, setTestingConnection] = useState(false);
 
   useEffect(() => {
-    api
-      .me()
-      .then((user) => {
+    let mounted = true;
+    (async () => {
+      try {
+        const user = await api.me();
+        if (!mounted) return;
         if (!user.is_admin) {
           router.push("/tasks");
-          return null;
+          return;
         }
         setIsAdmin(true);
-        return loadConfig();
-      })
-      .then(() => {
-        setLoading(false);
-      })
-      .catch(() => {
+        await loadConfig();
+      } catch {
+        if (!mounted) return;
         setError("加载配置失败");
-        setLoading(false);
-      });
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
   }, [router]);
 
   const [saving, setSaving] = useState(false);
@@ -198,10 +200,6 @@ export default function SettingsPage() {
         <h1 className="page-title">系统设置</h1>
         <p className="muted">系统配置（仅管理员）</p>
       </div>
-
-      {error && (
-        <div className="card text-danger">{error}</div>
-      )}
 
       {machineStats && (
         <div className="card mb-6">
