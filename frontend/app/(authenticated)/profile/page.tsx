@@ -42,10 +42,13 @@ export default function ProfilePage() {
   const [copiedUrl, setCopiedUrl] = useState(false);
 
   useEffect(() => {
+    let active = true;
     setMounted(true);
     setNotificationSettings(getNotificationSettings());
     setNotificationSupported(typeof window !== "undefined" && "Notification" in window);
-    loadRpcAccess().then(() => setLoading(false));
+    loadRpcAccess().finally(() => {
+      if (active) setLoading(false);
+    });
 
     // 检查是否需要显示初始密码提醒
     if (typeof window !== "undefined") {
@@ -54,6 +57,7 @@ export default function ProfilePage() {
         setShowInitialPasswordAlert(true);
       }
     }
+    return () => { active = false; };
   }, []);
 
   const loadRpcAccess = async () => {

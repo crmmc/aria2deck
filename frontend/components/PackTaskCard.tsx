@@ -16,6 +16,8 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [visible, setVisible] = useState(false);
   const hideTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const expandTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const loadTasks = useCallback(async () => {
     try {
@@ -58,9 +60,9 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
 
   useEffect(() => {
     return () => {
-      if (hideTimerRef.current) {
-        clearTimeout(hideTimerRef.current);
-      }
+      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+      if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current);
+      if (expandTimerRef.current) clearTimeout(expandTimerRef.current);
     };
   }, []);
 
@@ -69,14 +71,18 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
       clearTimeout(hideTimerRef.current);
       hideTimerRef.current = null;
     }
+    if (collapseTimerRef.current) {
+      clearTimeout(collapseTimerRef.current);
+      collapseTimerRef.current = null;
+    }
     setExpanded(true);
-    setTimeout(() => setVisible(true), 10);
+    expandTimerRef.current = setTimeout(() => setVisible(true), 10);
   };
 
   const handleMouseLeave = () => {
     hideTimerRef.current = setTimeout(() => {
       setVisible(false);
-      setTimeout(() => setExpanded(false), 400);
+      collapseTimerRef.current = setTimeout(() => setExpanded(false), 400);
     }, 1200);
   };
 

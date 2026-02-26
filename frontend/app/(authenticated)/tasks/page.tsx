@@ -288,10 +288,8 @@ export default function TasksPage() {
             }
           }
 
-          setTasks(() => {
-            deletedTaskIdsRef.current.clear();
-            return updatedActive;
-          });
+          deletedTaskIdsRef.current.clear();
+          setTasks(updatedActive);
 
           if (needRefresh) {
             api

@@ -120,7 +120,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [siteTitle]);
 
   const logout = useCallback(async () => {
-    await api.logout();
+    try {
+      await api.logout();
+    } catch {
+      // 忽略网络错误，强制本地登出
+    }
     setUser(null);
     setIsUnauthorized(true);
     router.push("/login");
