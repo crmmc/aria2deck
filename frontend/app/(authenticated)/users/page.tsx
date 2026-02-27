@@ -80,6 +80,10 @@ export default function UsersPage() {
         GB: 1024 * 1024 * 1024,
       };
       const quotaBytes = parseFloat(quotaValue) * unitMultiplier[quotaUnit];
+      if (isNaN(quotaBytes) || quotaBytes <= 0) {
+        setError("配额必须为正数");
+        return;
+      }
 
       const newUser = await api.createUser({
         username,
@@ -87,7 +91,7 @@ export default function UsersPage() {
         is_admin: isAdmin,
         quota: quotaBytes,
       });
-      setUsers([...users, newUser]);
+      setUsers((prev) => [...prev, newUser]);
       setUsername("");
       setPassword("");
       setIsAdmin(false);
@@ -107,7 +111,7 @@ export default function UsersPage() {
     if (!deletingUser) return;
     try {
       await api.deleteUser(deletingUser.id, deleteFiles);
-      setUsers(users.filter((u) => u.id !== deletingUser.id));
+      setUsers((prev) => prev.filter((u) => u.id !== deletingUser.id));
       setDeletingUser(null);
       showToast("用户已删除", "success");
     } catch {
@@ -150,13 +154,17 @@ export default function UsersPage() {
     const updates: UserUpdate = {};
 
     const originalUser = users.find((u) => u.id === editingUser.id);
-    if (editingUser.username !== originalUser?.username) {
+    if (!originalUser) {
+      setEditError("用户不存在或已被删除");
+      return;
+    }
+    if (editingUser.username !== originalUser.username) {
       updates.username = editingUser.username;
     }
     if (editingUser.password) {
       updates.password = editingUser.password;
     }
-    if (editingUser.is_admin !== originalUser?.is_admin) {
+    if (editingUser.is_admin !== originalUser.is_admin) {
       updates.is_admin = editingUser.is_admin;
     }
 
@@ -169,7 +177,12 @@ export default function UsersPage() {
       parseFloat(editingUser.quotaValue) *
       unitMultiplier[editingUser.quotaUnit];
 
-    if (newQuotaBytes !== originalUser?.quota) {
+    if (isNaN(newQuotaBytes) || newQuotaBytes <= 0) {
+      setEditError("配额必须为正数");
+      return;
+    }
+
+    if (newQuotaBytes !== originalUser.quota) {
       updates.quota = newQuotaBytes;
     }
 
@@ -180,8 +193,8 @@ export default function UsersPage() {
 
     try {
       // 传入原始用户名用于密码哈希
-      const updated = await api.updateUser(editingUser.id, updates, originalUser!.username);
-      setUsers(users.map((u) => (u.id === updated.id ? updated : u)));
+      const updated = await api.updateUser(editingUser.id, updates, originalUser.username);
+      setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
       setEditingUser(null);
     } catch (err) {
       setEditError((err as Error).message);

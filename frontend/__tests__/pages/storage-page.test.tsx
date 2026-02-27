@@ -94,4 +94,17 @@ describe("StoragePage", () => {
       expect(mockApi.bulkDeleteStoredFiles).toHaveBeenCalledWith([1]);
     });
   });
+
+  test("shows error toast when deleting selected files fails", async () => {
+    mockApi.bulkDeleteStoredFiles.mockRejectedValue(new Error("delete failed") as never);
+    render(<StoragePage />);
+
+    expect(await screen.findByText("存储管理")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("checkbox")[1]);
+    fireEvent.click(screen.getByRole("button", { name: "删除选中 (1)" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("删除失败", "error");
+    });
+  });
 });

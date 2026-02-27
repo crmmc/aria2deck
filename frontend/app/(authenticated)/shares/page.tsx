@@ -164,12 +164,7 @@ export default function SharesPage() {
   const [isOperating, setIsOperating] = useState(false);
   const mountedRef = useRef(true);
 
-  useEffect(() => {
-    loadShares();
-    return () => { mountedRef.current = false; };
-  }, []);
-
-  async function loadShares() {
+  const loadShares = useCallback(async () => {
     setLoading(true);
     try {
       const shares = await api.listShares();
@@ -181,7 +176,13 @@ export default function SharesPage() {
     } finally {
       if (mountedRef.current) setLoading(false);
     }
-  }
+  }, [showToast]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    loadShares();
+    return () => { mountedRef.current = false; };
+  }, [loadShares]);
 
   const copyLink = useCallback(
     (shareCode: string) => {
@@ -203,12 +204,12 @@ export default function SharesPage() {
       try {
         await api.revokeShare(id);
         showToast("分享已失效", "success");
-        loadShares();
+        if (mountedRef.current) loadShares();
       } catch (err) {
         showToast("操作失败：" + (err as Error).message, "error");
       }
     },
-    [showToast]
+    [showToast, loadShares]
   );
 
   const deleteShare = useCallback(
@@ -224,12 +225,12 @@ export default function SharesPage() {
       try {
         await api.deleteShare(id);
         showToast("分享已删除", "success");
-        loadShares();
+        if (mountedRef.current) loadShares();
       } catch (err) {
         showToast("删除失败：" + (err as Error).message, "error");
       }
     },
-    [showToast, showConfirm]
+    [showToast, showConfirm, loadShares]
   );
 
   async function revokeAllShares() {
@@ -250,11 +251,11 @@ export default function SharesPage() {
     try {
       await api.revokeAllShares();
       showToast("已让所有分享失效", "success");
-      loadShares();
+      if (mountedRef.current) loadShares();
     } catch (err) {
       showToast("操作失败：" + (err as Error).message, "error");
     } finally {
-      setIsOperating(false);
+      if (mountedRef.current) setIsOperating(false);
     }
   }
 
@@ -326,11 +327,13 @@ export default function SharesPage() {
       await Promise.all(selectedList.map((r) => api.deleteShare(r.id)));
       setSelectedRecords(new Set());
       showToast(`已删除 ${selectedList.length} 条分享记录`, "success");
-      loadShares();
     } catch (err) {
-      showToast("删除失败：" + (err as Error).message, "error");
+      showToast("部分删除失败：" + (err as Error).message, "error");
     } finally {
-      setIsOperating(false);
+      if (mountedRef.current) {
+        setIsOperating(false);
+        loadShares();
+      }
     }
   }
 

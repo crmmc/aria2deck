@@ -8,17 +8,28 @@ import { formatBytes } from "@/lib/utils";
 export default function StatsWidget() {
   const [stats, setStats] = useState<SystemStats | null>(null);
 
+  const toPercent = (used: number, total: number): number => {
+    if (!Number.isFinite(total) || total <= 0) return 0;
+    const value = (used / total) * 100;
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(100, value));
+  };
+
   useEffect(() => {
-    api.getStats().then(setStats).catch(console.error);
+    let cancelled = false;
+    api.getStats().then((s) => { if (!cancelled) setStats(s); }).catch(console.error);
     const interval = setInterval(() => {
-      api.getStats().then(setStats).catch(console.error);
+      api.getStats().then((s) => { if (!cancelled) setStats(s); }).catch(console.error);
     }, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, []);
 
   if (!stats) return null;
 
-  const diskPercent = (stats.disk_used_space / stats.disk_total_space) * 100;
+  const diskPercent = toPercent(stats.disk_used_space, stats.disk_total_space);
   const frozenSpace = stats.disk_frozen_space || 0;
 
   const getDiskColor = (percent: number) => {

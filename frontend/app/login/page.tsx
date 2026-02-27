@@ -12,9 +12,11 @@ export default function LoginPage() {
   const [siteTitle, setSiteTitle] = useState('aria2 控制器');
 
   useEffect(() => {
+    let mounted = true;
     api
       .me()
       .then((user) => {
+        if (!mounted) return;
         if (user.is_initial_password) {
           // 需要修改密码，跳转到 profile 页面
           router.push("/profile?initial_password=1");
@@ -27,18 +29,26 @@ export default function LoginPage() {
           console.warn("自动登录检查失败", err);
         }
       });
+    return () => {
+      mounted = false;
+    };
   }, [router]);
 
   useEffect(() => {
+    let mounted = true;
     api
       .getSiteInfo()
       .then((info) => {
+        if (!mounted) return;
         setSiteTitle(info.site_title);
         document.title = info.site_title;
       })
       .catch((err: unknown) => {
         console.warn("加载站点标题失败", err);
       });
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {

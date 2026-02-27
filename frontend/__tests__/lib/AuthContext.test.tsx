@@ -214,6 +214,37 @@ describe("AuthProvider", () => {
     });
   });
 
+  it("logout logs error and still redirects when api.logout fails", async () => {
+    mockApi.me.mockResolvedValue({ id: 1, username: "test", is_admin: false });
+    mockApi.logout.mockRejectedValue(new Error("logout failed"));
+    const consoleSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+
+    render(
+      <AuthProvider>
+        <TestComponent />
+      </AuthProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("user").textContent).toBe("test");
+    });
+
+    act(() => {
+      screen.getByText("Logout").click();
+    });
+
+    await waitFor(() => {
+      expect(mockApi.logout).toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "退出登录请求失败，已执行本地登出",
+        expect.any(Error),
+      );
+      expect(mockRouter.push).toHaveBeenCalledWith("/login");
+    });
+
+    consoleSpy.mockRestore();
+  });
+
   it("refreshUser updates user state", async () => {
     mockApi.me
       .mockResolvedValueOnce({ id: 1, username: "user1", is_admin: false })

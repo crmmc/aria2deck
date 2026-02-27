@@ -8,6 +8,7 @@ import { formatBytes, bytesToGB, gbToBytes } from "@/lib/utils";
 
 export default function SettingsPage() {
   const router = useRouter();
+  const mountedRef = useRef(true);
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,11 +40,11 @@ export default function SettingsPage() {
   const [testingConnection, setTestingConnection] = useState(false);
 
   useEffect(() => {
-    let mounted = true;
+    mountedRef.current = true;
     (async () => {
       try {
         const user = await api.me();
-        if (!mounted) return;
+        if (!mountedRef.current) return;
         if (!user.is_admin) {
           router.push("/tasks");
           return;
@@ -51,14 +52,14 @@ export default function SettingsPage() {
         setIsAdmin(true);
         await loadConfig();
       } catch {
-        if (!mounted) return;
+        if (!mountedRef.current) return;
         setError("加载配置失败");
       } finally {
-        if (mounted) setLoading(false);
+        if (mountedRef.current) setLoading(false);
       }
     })();
     return () => {
-      mounted = false;
+      mountedRef.current = false;
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, [router]);
@@ -68,13 +69,14 @@ export default function SettingsPage() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  async function loadConfig() {
+  async function loadConfig(throwOnError: boolean = false) {
     try {
       const [cfg, stats, aria2Ver] = await Promise.all([
         api.getConfig(),
         api.getMachineStats(),
         api.getAria2Version(),
       ]);
+      if (!mountedRef.current) return;
       setMaxTaskSize(bytesToGB(cfg.max_task_size));
       setMinFreeDisk(bytesToGB(cfg.min_free_disk));
       setAria2RpcUrl(cfg.aria2_rpc_url || "");
@@ -90,7 +92,11 @@ export default function SettingsPage() {
       setAria2Status(aria2Ver);
       setTestResult(null);
     } catch {
+      if (!mountedRef.current) return;
       setError("加载配置失败");
+      if (throwOnError) {
+        throw new Error("加载配置失败");
+      }
     }
   }
 
@@ -100,8 +106,22 @@ export default function SettingsPage() {
     setSaveSuccess(false);
     setSaveError(null);
     try {
-      const newMax = gbToBytes(parseFloat(maxTaskSize));
-      const newMin = gbToBytes(parseFloat(minFreeDisk));
+      const maxTaskSizeGb = parseFloat(maxTaskSize);
+      const minFreeDiskGb = parseFloat(minFreeDisk);
+      if (!Number.isFinite(maxTaskSizeGb) || maxTaskSizeGb <= 0) {
+        setSaveError("最大任务大小必须为正数");
+        return;
+      }
+      if (!Number.isFinite(minFreeDiskGb) || minFreeDiskGb <= 0) {
+        setSaveError("最小剩余磁盘空间必须为正数");
+        return;
+      }
+      const newMax = gbToBytes(maxTaskSizeGb);
+      const newMin = gbToBytes(minFreeDiskGb);
+      if (isNaN(newMax) || isNaN(newMin) || newMax <= 0 || newMin <= 0) {
+        setSaveError("请输入有效的数值");
+        return;
+      }
 
       await api.updateConfig({
         max_task_size: newMax,
@@ -119,15 +139,17 @@ export default function SettingsPage() {
         site_title: siteTitle || undefined,
       });
 
-      await loadConfig();
+      await loadConfig(true);
+      if (!mountedRef.current) return;
       setSaveSuccess(true);
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(() => setSaveSuccess(false), 3000);
     } catch (err) {
+      if (!mountedRef.current) return;
       const message = (err as Error).message || "保存配置失败";
       setSaveError(message);
     } finally {
-      setSaving(false);
+      if (mountedRef.current) setSaving(false);
     }
   }
 
@@ -144,11 +166,13 @@ export default function SettingsPage() {
         aria2RpcUrl,
         aria2RpcSecret.startsWith("*") ? undefined : aria2RpcSecret,
       );
+      if (!mountedRef.current) return;
       setTestResult(result);
     } catch (err) {
+      if (!mountedRef.current) return;
       setTestResult({ connected: false, error: (err as Error).message });
     } finally {
-      setTestingConnection(false);
+      if (mountedRef.current) setTestingConnection(false);
     }
   }
 

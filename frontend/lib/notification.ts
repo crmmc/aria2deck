@@ -61,6 +61,7 @@ function canSendNotification(): boolean {
 function sendNotification(
   title: string,
   body: string,
+  tag: string,
   onClick?: () => void,
 ): void {
   const settings = getNotificationSettings();
@@ -70,7 +71,7 @@ function sendNotification(
   const notification = new Notification(title, {
     body,
     icon: "/favicon.ico",
-    tag: `aria2-task-${Date.now()}`,
+    tag,
   });
 
   if (onClick) {
@@ -82,18 +83,18 @@ function sendNotification(
   }
 }
 
-export function sendTaskCompleteNotification(taskName: string, _taskId: number): void {
+export function sendTaskCompleteNotification(taskName: string, taskId: number): void {
   const settings = getNotificationSettings();
   if (!settings.onComplete) return;
-  sendNotification("下载完成", taskName, () => {
+  sendNotification("下载完成", taskName, `aria2-complete-${taskId}`, () => {
     window.location.href = "/tasks";
   });
 }
 
-export function sendTaskErrorNotification(taskName: string, _taskId: number): void {
+export function sendTaskErrorNotification(taskName: string, taskId: number): void {
   const settings = getNotificationSettings();
   if (!settings.onError) return;
-  sendNotification("下载失败", taskName, () => {
+  sendNotification("下载失败", taskName, `aria2-error-${taskId}`, () => {
     window.location.href = "/tasks";
   });
 }

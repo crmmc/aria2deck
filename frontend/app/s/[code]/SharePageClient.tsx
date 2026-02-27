@@ -20,22 +20,28 @@ export default function SharePageClient() {
   const [loadingDir, setLoadingDir] = useState(false);
   const [dirError, setDirError] = useState("");
   const [siteTitle, setSiteTitle] = useState('aria2 控制器');
+  const mountedRef = useRef(true);
+  const downloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadDirectory = async (shareCode: string, token: string, path: string) => {
+    if (!mountedRef.current) return;
     setLoadingDir(true);
     setDirError("");
     try {
       const items = await api.browseShare(shareCode, token || undefined, path || undefined);
+      if (!mountedRef.current) return;
       setDirItems(items);
       setCurrentPath(path);
     } catch (err: unknown) {
+      if (!mountedRef.current) return;
       setDirError(err instanceof Error ? err.message : "加载目录失败");
     } finally {
-      setLoadingDir(false);
+      if (mountedRef.current) setLoadingDir(false);
     }
   };
 
   useEffect(() => {
+    mountedRef.current = true;
     const parts = window.location.pathname.split("/");
     const idx = parts.indexOf("s");
     const urlCode = idx >= 0 && parts.length > idx + 1 ? parts[idx + 1] : "";
@@ -45,16 +51,18 @@ export default function SharePageClient() {
       return;
     }
     setCode(urlCode);
-    let mounted = true;
     api
       .getSiteInfo()
-      .then((info) => setSiteTitle(info.site_title))
+      .then((info) => {
+        if (!mountedRef.current) return;
+        setSiteTitle(info.site_title);
+      })
       .catch((err: unknown) => {
         console.warn("加载站点标题失败", err);
       });
     api.getShareInfo(urlCode)
       .then((info) => {
-        if (!mounted) return;
+        if (!mountedRef.current) return;
         setShareInfo(info);
         if (!info.is_expired && !info.is_exhausted) {
           // document.title 由下方 useEffect 统一处理
@@ -64,12 +72,14 @@ export default function SharePageClient() {
         }
       })
       .catch((err: unknown) => {
-        if (!mounted) return;
+        if (!mountedRef.current) return;
         setError(err instanceof Error ? err.message : "获取分享信息失败");
       })
-      .finally(() => { if (mounted) setLoading(false); });
+      .finally(() => {
+        if (mountedRef.current) setLoading(false);
+      });
     return () => {
-      mounted = false;
+      mountedRef.current = false;
       if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
     };
   }, []);
@@ -86,14 +96,14 @@ export default function SharePageClient() {
     setPasswordError("");
     try {
       const res = await api.accessShare(code, password);
+      if (!mountedRef.current) return;
       setAccessToken(res.access_token);
       if (shareInfo?.is_directory) loadDirectory(code, res.access_token, "");
     } catch (err: unknown) {
+      if (!mountedRef.current) return;
       setPasswordError(err instanceof Error ? err.message : "密码错误");
     }
   };
-
-  const downloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleDownload = () => {
     setDownloading(true);
