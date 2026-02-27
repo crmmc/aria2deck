@@ -1,10 +1,13 @@
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_SECRET_KEY = "aria2deck-default-secret-key-change-in-production"
+SHARE_JWT_SECRET_ENV = "ARIA2DECK_SHARE_JWT_SECRET"
+LEGACY_SHARE_JWT_SECRET_ENV = "ARIA2C_SECRET_KEY"
 
 
 class Settings(BaseSettings):
@@ -18,7 +21,10 @@ class Settings(BaseSettings):
     aria2_rpc_secret: str = ""
     aria2_poll_interval: float = 2.0
     download_dir: str = str(BASE_DIR / "downloads")
-    secret_key: str = DEFAULT_SECRET_KEY
+    secret_key: str = Field(
+        default=DEFAULT_SECRET_KEY,
+        validation_alias=AliasChoices(SHARE_JWT_SECRET_ENV, LEGACY_SHARE_JWT_SECRET_ENV),
+    )
 
     # Rate limits (times per minute)
     rate_limit_login: int = 5
@@ -39,6 +45,6 @@ def check_secret_key() -> None:
     """Raise if secret_key is still the insecure default in non-debug mode."""
     if not settings.debug and settings.secret_key == DEFAULT_SECRET_KEY:
         raise RuntimeError(
-            "ARIA2C_SECRET_KEY 使用了默认值，生产环境禁止启动。"
-            "请通过环境变量 ARIA2C_SECRET_KEY 配置安全密钥。"
+            f"{SHARE_JWT_SECRET_ENV} 使用了默认值，生产环境禁止启动。"
+            f"请通过环境变量 {SHARE_JWT_SECRET_ENV} 配置安全密钥。"
         )
