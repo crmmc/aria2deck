@@ -118,7 +118,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (siteTitle) {
       document.title = siteTitle;
     }
-  }, [siteTitle]);
+  }, [siteTitle, pathname]);
 
   const logout = useCallback(async () => {
     try {

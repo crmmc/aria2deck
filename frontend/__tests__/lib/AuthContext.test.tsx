@@ -42,9 +42,11 @@ const mockRouter = {
   back: jest.fn(),
 };
 
+let mockPathname = "/tasks";
+
 jest.mock("next/navigation", () => ({
   useRouter: () => mockRouter,
-  usePathname: () => "/tasks",
+  usePathname: () => mockPathname,
 }));
 
 function TestComponent() {
@@ -86,6 +88,7 @@ describe("AuthProvider", () => {
     jest.clearAllMocks();
     mockRouter.push.mockClear();
     mockAuthEvents.listeners.clear();
+    mockPathname = "/tasks";
   });
 
   it("renders children", async () => {
@@ -315,6 +318,36 @@ describe("AuthProvider", () => {
     await waitFor(() => {
       expect(screen.getByTestId("user").textContent).toBe("null");
       expect(mockRouter.push).toHaveBeenCalledWith("/login");
+    });
+  });
+
+  it("keeps custom site title after route change", async () => {
+    mockApi.me.mockResolvedValue({ id: 1, username: "test", is_admin: false });
+    mockApi.getSiteInfo.mockResolvedValue({ site_title: "My Custom Title" });
+
+    const { rerender } = render(
+      <AuthProvider>
+        <TestComponent />
+      </AuthProvider>
+    );
+
+    await waitFor(() => {
+      expect(document.title).toBe("My Custom Title");
+    });
+
+    act(() => {
+      document.title = "aria2 控制器";
+      mockPathname = "/history";
+    });
+
+    rerender(
+      <AuthProvider>
+        <TestComponent />
+      </AuthProvider>
+    );
+
+    await waitFor(() => {
+      expect(document.title).toBe("My Custom Title");
     });
   });
 });
