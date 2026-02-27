@@ -73,11 +73,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const handleConfirm = (result: boolean) => {
-    confirm?.resolve(result);
+  const handleConfirm = useCallback((result: boolean) => {
+    confirmRef.current?.resolve(result);
     confirmRef.current = null;
     setConfirm(null);
-  };
+  }, []);
 
   const getToastClass = (type: ToastType) => {
     switch (type) {

@@ -41,14 +41,15 @@ export default function ProfilePage() {
   const [copiedSecret, setCopiedSecret] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
   const copyTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const mountedRef = useRef(true);
 
   useEffect(() => {
-    let active = true;
+    mountedRef.current = true;
     setMounted(true);
     setNotificationSettings(getNotificationSettings());
     setNotificationSupported(typeof window !== "undefined" && "Notification" in window);
     loadRpcAccess().finally(() => {
-      if (active) setLoading(false);
+      if (mountedRef.current) setLoading(false);
     });
 
     // 检查是否需要显示初始密码提醒
@@ -59,7 +60,7 @@ export default function ProfilePage() {
       }
     }
     return () => {
-      active = false;
+      mountedRef.current = false;
       copyTimers.current.forEach(clearTimeout);
     };
   }, []);
@@ -67,6 +68,7 @@ export default function ProfilePage() {
   const loadRpcAccess = async () => {
     try {
       const data = await api.getRpcAccess();
+      if (!mountedRef.current) return;
       setRpcAccess(data);
     } catch (err) {
       console.error("加载 RPC 访问状态失败", err);
@@ -77,12 +79,14 @@ export default function ProfilePage() {
     setRpcLoading(true);
     try {
       const data = await api.setRpcAccess(enabled);
+      if (!mountedRef.current) return;
       setRpcAccess(data);
     } catch (err) {
+      if (!mountedRef.current) return;
       console.error("设置 RPC 访问失败", err);
       setError("设置 RPC 访问失败: " + (err as Error).message);
     } finally {
-      setRpcLoading(false);
+      if (mountedRef.current) setRpcLoading(false);
     }
   };
 
@@ -97,25 +101,31 @@ export default function ProfilePage() {
     setRpcLoading(true);
     try {
       const data = await api.refreshRpcSecret();
+      if (!mountedRef.current) return;
       setRpcAccess(data);
     } catch (err) {
+      if (!mountedRef.current) return;
       console.error("刷新 Secret 失败", err);
       setError("刷新 Secret 失败: " + (err as Error).message);
     } finally {
-      setRpcLoading(false);
+      if (mountedRef.current) setRpcLoading(false);
     }
   };
 
   const copySecret = () => {
     if (rpcAccess?.secret) {
       navigator.clipboard.writeText(rpcAccess.secret).then(() => {
+        if (!mountedRef.current) return;
         setCopiedSecret(true);
         const t = setTimeout(() => {
+          if (!mountedRef.current) return;
           setCopiedSecret(false);
           copyTimers.current.delete(t);
         }, 2000);
         copyTimers.current.add(t);
-      }).catch(() => {});
+      }).catch(() => {
+        showToast("复制失败", "error");
+      });
     }
   };
 
@@ -123,13 +133,17 @@ export default function ProfilePage() {
     const url = getRpcUrl();
     if (url) {
       navigator.clipboard.writeText(url).then(() => {
+        if (!mountedRef.current) return;
         setCopiedUrl(true);
         const t = setTimeout(() => {
+          if (!mountedRef.current) return;
           setCopiedUrl(false);
           copyTimers.current.delete(t);
         }, 2000);
         copyTimers.current.add(t);
-      }).catch(() => {});
+      }).catch(() => {
+        showToast("复制失败", "error");
+      });
     }
   };
 
@@ -141,6 +155,10 @@ export default function ProfilePage() {
   async function handleChangePassword(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    if (!user?.username) {
+      setError("用户信息未加载，请刷新页面后重试");
+      return;
+    }
 
     if (newPassword !== confirmPassword) {
       setError("两次输入的新密码不一致");
@@ -155,13 +173,15 @@ export default function ProfilePage() {
     setPasswordChanging(true);
     try {
       // 需要传入当前用户名
-      await api.changePassword(oldPassword, newPassword, user!.username);
+      await api.changePassword(oldPassword, newPassword, user.username);
+      if (!mountedRef.current) return;
       showToast("密码修改成功", "success");
       setOldPassword("");
       setNewPassword("");
       setConfirmPassword("");
       await refreshUser();
     } catch (err) {
+      if (!mountedRef.current) return;
       const message = (err as Error).message;
       try {
         const parsed = JSON.parse(message);
@@ -170,24 +190,27 @@ export default function ProfilePage() {
         setError(message || "密码修改失败");
       }
     } finally {
-      setPasswordChanging(false);
+      if (mountedRef.current) setPasswordChanging(false);
     }
   }
 
   async function handleNotificationToggle(enabled: boolean) {
     if (enabled) {
       const granted = await requestNotificationPermission();
+      if (!mountedRef.current) return;
       if (!granted) {
         showToast("浏览器通知权限被拒绝，请在浏览器设置中允许通知", "warning");
         return;
       }
     }
+    if (!mountedRef.current) return;
     const newSettings = { ...notificationSettings, enabled };
     setNotificationSettings(newSettings);
     saveNotificationSettings(newSettings);
   }
 
   function handleNotificationOptionChange(key: "onComplete" | "onError", value: boolean) {
+    if (!mountedRef.current) return;
     const newSettings = { ...notificationSettings, [key]: value };
     setNotificationSettings(newSettings);
     saveNotificationSettings(newSettings);

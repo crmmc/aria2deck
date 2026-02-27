@@ -148,7 +148,17 @@ export default function CreateShareDialog({
                   style={{ width: "100%" }}
                   placeholder="留空则不限"
                   value={maxDownloads}
-                  onChange={(e) => setMaxDownloads(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === "") {
+                      setMaxDownloads(val);
+                      return;
+                    }
+                    const num = Number(val);
+                    if (Number.isInteger(num) && num >= 1 && num <= 10000) {
+                      setMaxDownloads(val);
+                    }
+                  }}
                   min={1}
                   max={10000}
                 />

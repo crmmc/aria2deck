@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import UsersPage from "@/app/(authenticated)/users/page";
 import { ToastProvider } from "@/components/Toast";
 import { api } from "@/lib/api";
@@ -92,5 +92,29 @@ describe("UsersPage auth guard", () => {
     await waitFor(() => {
       expect(screen.getByText("alice")).toBeInTheDocument();
     });
+  });
+
+  test("blocks create user when quota is invalid", async () => {
+    mockApi.me.mockResolvedValue(adminUser as never);
+    mockApi.listUsers.mockResolvedValue([adminUser] as never);
+
+    const { container } = renderPage();
+
+    expect(await screen.findByText("创建新用户")).toBeInTheDocument();
+    const textInput = container.querySelector("input:not([type]), input[type='text']");
+    const passwordInput = container.querySelector("input[type='password']");
+    expect(textInput).not.toBeNull();
+    expect(passwordInput).not.toBeNull();
+    fireEvent.change(textInput as HTMLInputElement, { target: { value: "new-user" } });
+    fireEvent.change(passwordInput as HTMLInputElement, { target: { value: "pass123456" } });
+    const quotaInput = container.querySelector("input[type='number']");
+    expect(quotaInput).not.toBeNull();
+    fireEvent.change(quotaInput as HTMLInputElement, { target: { value: "0" } });
+    const form = container.querySelector("form.create-user-form");
+    expect(form).not.toBeNull();
+    fireEvent.submit(form as HTMLFormElement);
+
+    expect(await screen.findByText("配额必须为正数")).toBeInTheDocument();
+    expect(mockApi.createUser).not.toHaveBeenCalled();
   });
 });

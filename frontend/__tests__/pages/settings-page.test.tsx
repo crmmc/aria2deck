@@ -3,9 +3,10 @@ import SettingsPage from "@/app/(authenticated)/settings/page";
 import { api } from "@/lib/api";
 
 const pushMock = jest.fn();
+const routerMock = { push: pushMock };
 
 jest.mock("next/navigation", () => ({
-  useRouter: () => ({ push: pushMock }),
+  useRouter: () => routerMock,
 }));
 
 jest.mock("@/lib/api", () => ({
@@ -44,23 +45,100 @@ const baseConfig = {
   site_title: "Aria2 控制器",
 };
 
+const baseMachineStats = {
+  disk_total: 100 * 1024 * 1024 * 1024,
+  disk_used: 50 * 1024 * 1024 * 1024,
+  disk_free: 50 * 1024 * 1024 * 1024,
+  download_used: 20 * 1024 * 1024 * 1024,
+  system_used: 30 * 1024 * 1024 * 1024,
+};
+
+const baseAria2Version = {
+  connected: true,
+  version: "1.36.0",
+  enabled_features: ["BitTorrent"],
+};
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+interface InitialLoadOptions {
+  config?: typeof baseConfig;
+  configError?: Error;
+  meError?: Error;
+  user?: typeof adminUser;
+}
+
+async function renderWithInitialLoad(options: InitialLoadOptions = {}) {
+  const meDeferred = createDeferred<typeof adminUser>();
+  const configDeferred = createDeferred<typeof baseConfig>();
+  const statsDeferred = createDeferred<typeof baseMachineStats>();
+  const versionDeferred = createDeferred<typeof baseAria2Version>();
+  const user = options.user ?? adminUser;
+
+  mockApi.me.mockReturnValue(meDeferred.promise as never);
+  mockApi.getConfig.mockReturnValue(configDeferred.promise as never);
+  mockApi.getMachineStats.mockReturnValue(statsDeferred.promise as never);
+  mockApi.getAria2Version.mockReturnValue(versionDeferred.promise as never);
+
+  await act(async () => {
+    render(<SettingsPage />);
+  });
+
+  await act(async () => {
+    if (options.meError) {
+      meDeferred.reject(options.meError);
+    } else {
+      meDeferred.resolve(user);
+    }
+    await meDeferred.promise.catch(() => undefined);
+    await Promise.resolve();
+  });
+
+  if (options.meError || !user.is_admin) {
+    await act(async () => {
+      await Promise.resolve();
+    });
+    return;
+  }
+
+  await act(async () => {
+    if (options.configError) {
+      configDeferred.reject(options.configError);
+    } else {
+      configDeferred.resolve(options.config ?? baseConfig);
+    }
+    statsDeferred.resolve(baseMachineStats);
+    versionDeferred.resolve(baseAria2Version);
+    await Promise.allSettled([
+      configDeferred.promise,
+      statsDeferred.promise,
+      versionDeferred.promise,
+    ]);
+    await Promise.resolve();
+  });
+
+  await act(async () => {
+    await Promise.resolve();
+  });
+}
+
 describe("SettingsPage", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockApi.me.mockResolvedValue(adminUser as never);
-    mockApi.getConfig.mockResolvedValue(baseConfig as never);
-    mockApi.getMachineStats.mockResolvedValue({
-      disk_total: 100 * 1024 * 1024 * 1024,
-      disk_used: 50 * 1024 * 1024 * 1024,
-      disk_free: 50 * 1024 * 1024 * 1024,
-      download_used: 20 * 1024 * 1024 * 1024,
-      system_used: 30 * 1024 * 1024 * 1024,
-    } as never);
-    mockApi.getAria2Version.mockResolvedValue({
-      connected: true,
-      version: "1.36.0",
-      enabled_features: ["BitTorrent"],
-    } as never);
     mockApi.updateConfig.mockResolvedValue({} as never);
     mockApi.testAria2Connection.mockResolvedValue({
       connected: true,
@@ -68,27 +146,12 @@ describe("SettingsPage", () => {
     } as never);
   });
 
-  afterEach(async () => {
-    // Flush all pending microtasks / state updates to avoid act() warnings
-    await act(async () => {});
+  afterEach(() => {
+    jest.clearAllTimers();
   });
 
-  /** Flush all pending microtasks and state updates */
-  async function flushAll() {
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0));
-    });
-  }
-
-  /** Wait for loadConfig to fully complete (all setState calls flushed) */
-  async function renderAndWaitForLoad() {
-    render(<SettingsPage />);
-    await screen.findByText(/1\.36\.0/);
-    await flushAll();
-  }
-
   test("renders config form for admin", async () => {
-    await renderAndWaitForLoad();
+    await renderWithInitialLoad();
 
     expect(screen.getByText("系统设置")).toBeInTheDocument();
     expect(screen.getByText("系统配置（仅管理员）")).toBeInTheDocument();
@@ -98,33 +161,34 @@ describe("SettingsPage", () => {
   });
 
   test("redirects non-admin and does not render admin content", async () => {
-    mockApi.me.mockResolvedValue({ ...adminUser, is_admin: false } as never);
+    await renderWithInitialLoad({ user: { ...adminUser, is_admin: false } });
 
-    render(<SettingsPage />);
-    await flushAll();
-
-    expect(pushMock).toHaveBeenCalledWith("/tasks");
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith("/tasks");
+    });
     expect(screen.queryByText("系统设置")).not.toBeInTheDocument();
   });
 
   test("submits save and connection test", async () => {
-    await renderAndWaitForLoad();
+    await renderWithInitialLoad();
 
-    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
-    await flushAll();
-    expect(mockApi.testAria2Connection).toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    });
+    await waitFor(() => {
+      expect(mockApi.testAria2Connection).toHaveBeenCalled();
+    });
 
-    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
-    await flushAll();
-    expect(mockApi.updateConfig).toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    });
+    await waitFor(() => {
+      expect(mockApi.updateConfig).toHaveBeenCalled();
+    });
   });
 
   test("shows validation message when testing empty rpc url", async () => {
-    mockApi.getConfig.mockResolvedValue({
-      ...baseConfig,
-      aria2_rpc_url: "",
-    } as never);
-    await renderAndWaitForLoad();
+    await renderWithInitialLoad({ config: { ...baseConfig, aria2_rpc_url: "" } });
 
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
 
@@ -133,8 +197,56 @@ describe("SettingsPage", () => {
     });
   });
 
+  test("shows connection error message when test api rejects", async () => {
+    await renderWithInitialLoad();
+    mockApi.testAria2Connection.mockRejectedValueOnce(new Error("rpc down") as never);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    });
+
+    expect(await screen.findByText("测试结果：连接失败")).toBeInTheDocument();
+    expect(screen.getByText("rpc down")).toBeInTheDocument();
+  });
+
+  test("submits undefined secret when masked secret value is kept", async () => {
+    await renderWithInitialLoad();
+
+    fireEvent.change(screen.getByPlaceholderText("留空表示无密钥"), {
+      target: { value: "***" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+
+    await waitFor(() => {
+      expect(mockApi.updateConfig).toHaveBeenCalled();
+    });
+
+    const lastCall = mockApi.updateConfig.mock.calls.at(-1)?.[0];
+    expect(lastCall?.aria2_rpc_secret).toBeUndefined();
+  });
+
+  test("shows save error and blocks submit when max task size is invalid", async () => {
+    await renderWithInitialLoad();
+    const numberInputs = screen.getAllByRole("spinbutton");
+    fireEvent.change(numberInputs[0], { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+
+    expect(await screen.findByText("最大任务大小必须为正数")).toBeInTheDocument();
+    expect(mockApi.updateConfig).not.toHaveBeenCalled();
+  });
+
+  test("shows save error and blocks submit when min free disk is invalid", async () => {
+    await renderWithInitialLoad();
+    const numberInputs = screen.getAllByRole("spinbutton");
+    fireEvent.change(numberInputs[1], { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+
+    expect(await screen.findByText("最小剩余磁盘空间必须为正数")).toBeInTheDocument();
+    expect(mockApi.updateConfig).not.toHaveBeenCalled();
+  });
+
   test("handles extension add/remove and pack format switch", async () => {
-    await renderAndWaitForLoad();
+    await renderWithInitialLoad();
 
     const extensionInput = screen.getByPlaceholderText("输入后缀名，按回车添加");
     const addButton = screen.getByRole("button", { name: "添加" });
@@ -160,5 +272,24 @@ describe("SettingsPage", () => {
     expect(
       screen.getByText("TAR+Zstandard: 0-9 会映射到 zstd 速度/压缩率档位"),
     ).toBeInTheDocument();
+  });
+
+  test("shows page error when initial config loading fails", async () => {
+    await renderWithInitialLoad({ configError: new Error("load failed") });
+
+    expect(await screen.findByText("加载配置失败")).toBeInTheDocument();
+    expect(screen.queryByText("系统设置")).not.toBeInTheDocument();
+  });
+
+  test("does not show save success when reload fails after save", async () => {
+    await renderWithInitialLoad();
+    mockApi.getConfig.mockRejectedValueOnce(new Error("reload failed") as never);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    });
+
+    expect(screen.queryByText("✓ 配置已保存")).not.toBeInTheDocument();
+    expect(await screen.findByText("加载配置失败")).toBeInTheDocument();
   });
 });

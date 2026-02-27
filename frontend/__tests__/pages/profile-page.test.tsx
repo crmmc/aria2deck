@@ -5,6 +5,23 @@ import { api } from "@/lib/api";
 const showToastMock = jest.fn();
 const showConfirmMock = jest.fn();
 const refreshUserMock = jest.fn();
+const authState: {
+  user: {
+    id: number;
+    username: string;
+    is_admin: boolean;
+    quota: number;
+    is_initial_password: boolean;
+  } | null;
+} = {
+  user: {
+    id: 1,
+    username: "admin",
+    is_admin: true,
+    quota: 1024 * 1024 * 1024,
+    is_initial_password: false,
+  },
+};
 
 jest.mock("@/components/Toast", () => ({
   __esModule: true,
@@ -17,13 +34,7 @@ jest.mock("@/components/Toast", () => ({
 jest.mock("@/lib/AuthContext", () => ({
   __esModule: true,
   useAuth: () => ({
-    user: {
-      id: 1,
-      username: "admin",
-      is_admin: true,
-      quota: 1024 * 1024 * 1024,
-      is_initial_password: false,
-    },
+    user: authState.user,
     refreshUser: refreshUserMock,
   }),
 }));
@@ -50,6 +61,18 @@ const mockApi = api as jest.Mocked<typeof api>;
 describe("ProfilePage", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    authState.user = {
+      id: 1,
+      username: "admin",
+      is_admin: true,
+      quota: 1024 * 1024 * 1024,
+      is_initial_password: false,
+    };
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: jest.fn().mockResolvedValue(undefined),
+      },
+    });
     showConfirmMock.mockResolvedValue(false);
     mockApi.getRpcAccess.mockResolvedValue({
       enabled: false,
@@ -107,5 +130,48 @@ describe("ProfilePage", () => {
     await waitFor(() => {
       expect(screen.getByText("新密码长度至少为 6 位")).toBeInTheDocument();
     });
+  });
+
+  test("shows error toast when copy secret/url fails", async () => {
+    mockApi.getRpcAccess.mockResolvedValue({
+      enabled: true,
+      secret: "rpc-secret",
+      created_at: "2024-01-01T00:00:00Z",
+    } as never);
+    (navigator.clipboard.writeText as jest.Mock).mockRejectedValue(new Error("copy failed"));
+
+    render(<ProfilePage />);
+    expect(await screen.findByRole("heading", { name: "用户设置" })).toBeInTheDocument();
+
+    const copyButtons = screen.getAllByRole("button", { name: "复制" });
+    fireEvent.click(copyButtons[0]);
+    fireEvent.click(copyButtons[1]);
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("复制失败", "error");
+    });
+  });
+
+  test("shows error instead of crashing when user info is missing on password submit", async () => {
+    authState.user = null;
+    const { container } = render(<ProfilePage />);
+    expect(await screen.findByText("用户设置")).toBeInTheDocument();
+
+    const passwordInputs = container.querySelectorAll("input[type='password']");
+    fireEvent.change(passwordInputs[0], {
+      target: { value: "old-pass" },
+    });
+    fireEvent.change(passwordInputs[1], {
+      target: { value: "new-pass-1" },
+    });
+    fireEvent.change(passwordInputs[2], {
+      target: { value: "new-pass-1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "修改密码" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("用户信息未加载，请刷新页面后重试")).toBeInTheDocument();
+    });
+    expect(mockApi.changePassword).not.toHaveBeenCalled();
   });
 });

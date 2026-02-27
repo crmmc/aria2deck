@@ -51,6 +51,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const retryAuth = useCallback(() => {
     setError(null);
+    setIsUnauthorized(false);
     setInitialized(false);
     setLoading(true);
   }, []);
@@ -122,8 +123,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = useCallback(async () => {
     try {
       await api.logout();
-    } catch {
-      // 忽略网络错误，强制本地登出
+    } catch (err) {
+      console.error("退出登录请求失败，已执行本地登出", err);
     }
     setUser(null);
     setIsUnauthorized(true);

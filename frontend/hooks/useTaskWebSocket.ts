@@ -107,6 +107,7 @@ export function useTaskWebSocket(callbacks: TaskWebSocketCallbacks) {
     }
 
     function connect() {
+      clearInterval(pingInterval);
       ws = new WebSocket(taskWsUrl());
 
       ws.onopen = () => {

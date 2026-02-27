@@ -213,6 +213,7 @@ export default function TasksPage() {
   });
   const [searchKeyword, setSearchKeyword] = useState("");
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
+  const [isBatchAdding, setIsBatchAdding] = useState(false);
   const [batchUris, setBatchUris] = useState("");
   const [mounted, setMounted] = useState(false);
   const torrentInputRef = useRef<HTMLInputElement>(null);
@@ -288,11 +289,10 @@ export default function TasksPage() {
             }
           }
 
-          const deletedIds = new Set(deletedTaskIdsRef.current);
-          deletedTaskIdsRef.current.clear();
-
           // Merge: update active/queued tasks, preserve other statuses (error etc.)
           setTasks((prev) => {
+            const deletedIds = new Set(deletedTaskIdsRef.current);
+            deletedTaskIdsRef.current.clear();
             const nonActive = prev.filter(
               (t) => t.status !== "active" && t.status !== "queued" && !deletedIds.has(t.id)
             );
@@ -303,7 +303,10 @@ export default function TasksPage() {
             api
               .listTasks("current")
               .then((currentTasks) => {
-                setTasks(currentTasks);
+                setTasks((prev) => {
+                  const freshDeletedIds = new Set(deletedTaskIdsRef.current);
+                  return currentTasks.filter((t) => !freshDeletedIds.has(t.id));
+                });
               })
               .catch((err: unknown) => {
                 console.warn("刷新当前任务列表失败", err);
@@ -325,9 +328,11 @@ export default function TasksPage() {
       return;
     }
 
-    // Only show active and queued tasks in task page.
-    const isActiveStatus =
-      newTask.status === "active" || newTask.status === "queued";
+    // Keep active/queued/error in task page; complete is moved to history.
+    const isVisibleStatus =
+      newTask.status === "active" ||
+      newTask.status === "queued" ||
+      newTask.status === "error";
 
     setTasks((prev) => {
       const idx = prev.findIndex((task) => task.id === taskId);
@@ -348,12 +353,6 @@ export default function TasksPage() {
         } else if (oldTask.status !== "error" && newTask.status === "error") {
           sendTaskErrorNotification(taskName, newTask.id);
           showToast(`${taskName} 下载失败`, "error");
-          if (idx !== -1) {
-            const next = [...prev];
-            next.splice(idx, 1);
-            return next;
-          }
-          return prev;
         }
       }
 
@@ -367,8 +366,8 @@ export default function TasksPage() {
         return prev;
       }
 
-      // Keep only active and queued tasks
-      if (!isActiveStatus) {
+      // Keep only active, queued and error tasks in current list
+      if (!isVisibleStatus) {
         if (idx !== -1) {
           const next = [...prev];
           next.splice(idx, 1);
@@ -395,7 +394,10 @@ export default function TasksPage() {
     api
       .listTasks("current")
       .then((currentTasks) => {
-        setTasks(currentTasks);
+        setTasks(() => {
+          const deletedIds = deletedTaskIdsRef.current;
+          return currentTasks.filter((t) => !deletedIds.has(t.id));
+        });
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : "未知错误";
@@ -607,6 +609,7 @@ export default function TasksPage() {
   );
 
   const batchAddTasks = useCallback(async () => {
+    if (isBatchAdding) return;
     const uris = batchUris
       .split("\n")
       .map((line) => line.trim())
@@ -617,35 +620,40 @@ export default function TasksPage() {
       return;
     }
 
+    setIsBatchAdding(true);
     setError(null);
     let successCount = 0;
     let failCount = 0;
 
-    for (const uri of uris) {
-      try {
-        const task = await api.createTask(uri);
-        if (task.status === "active" || task.status === "queued") {
-          setTasks((prev) => upsertTaskById(prev, task));
+    try {
+      for (const uri of uris) {
+        try {
+          const task = await api.createTask(uri);
+          if (task.status === "active" || task.status === "queued") {
+            setTasks((prev) => upsertTaskById(prev, task));
+          }
+          successCount++;
+        } catch (err) {
+          failCount++;
+          console.error(`Failed to add ${uri}:`, err);
         }
-        successCount++;
-      } catch (err) {
-        failCount++;
-        console.error(`Failed to add ${uri}:`, err);
       }
-    }
 
-    setBatchUris("");
-    setShowBatchAddModal(false);
+      setBatchUris("");
+      setShowBatchAddModal(false);
 
-    if (failCount > 0) {
-      showToast(
-        `添加完成：成功 ${successCount} 个，失败 ${failCount} 个`,
-        "warning"
-      );
-    } else {
-      showToast(`成功添加 ${successCount} 个任务`, "success");
+      if (failCount > 0) {
+        showToast(
+          `添加完成：成功 ${successCount} 个，失败 ${failCount} 个`,
+          "warning"
+        );
+      } else {
+        showToast(`成功添加 ${successCount} 个任务`, "success");
+      }
+    } finally {
+      setIsBatchAdding(false);
     }
-  }, [batchUris, showToast]);
+  }, [batchUris, showToast, isBatchAdding]);
 
   const toggleTaskSelection = useCallback((id: number) => {
     setSelectedTasks((prev) => {
@@ -892,8 +900,9 @@ export default function TasksPage() {
                   type="button"
                   className="button btn-task"
                   onClick={batchAddTasks}
+                  disabled={isBatchAdding}
                 >
-                  添加任务
+                  {isBatchAdding ? "添加中..." : "添加任务"}
                 </button>
               </div>
             </div>

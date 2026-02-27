@@ -44,7 +44,11 @@ jest.mock("@/lib/api", () => ({
     createPackTask: jest.fn(),
     renameFile: jest.fn(),
   },
-  authEvents: { on: jest.fn(), off: jest.fn() },
+  authEvents: {
+    listeners: new Set(),
+    onUnauthorized: jest.fn().mockReturnValue(jest.fn()),
+    emit: jest.fn(),
+  },
   ApiError: class ApiError extends Error {},
 }));
 

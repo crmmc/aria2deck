@@ -143,6 +143,7 @@ export default function HistoryPage() {
   const mountedRef = useRef(true);
 
   useEffect(() => {
+    mountedRef.current = true;
     loadHistory();
     return () => { mountedRef.current = false; };
   }, []);
@@ -205,15 +206,17 @@ export default function HistoryPage() {
     if (!confirmed) return;
 
     setIsBatchOperating(true);
+    const idsToDelete = new Set(selectedList.map((r) => r.id));
     try {
       await Promise.all(selectedList.map((r) => api.deleteHistory(r.id)));
-      setRecords((prev) => prev.filter((r) => !selectedRecords.has(r.id)));
+      setRecords((prev) => prev.filter((r) => !idsToDelete.has(r.id)));
       setSelectedRecords(new Set());
       showToast(`已删除 ${selectedList.length} 条历史记录`, "success");
     } catch (err) {
-      showToast("删除失败：" + (err as Error).message, "error");
+      showToast("部分删除失败：" + (err as Error).message, "error");
+      if (mountedRef.current) loadHistory();
     } finally {
-      setIsBatchOperating(false);
+      if (mountedRef.current) setIsBatchOperating(false);
     }
   }
 
@@ -240,7 +243,7 @@ export default function HistoryPage() {
     } catch (err) {
       showToast("清空失败：" + (err as Error).message, "error");
     } finally {
-      setIsBatchOperating(false);
+      if (mountedRef.current) setIsBatchOperating(false);
     }
   }
 

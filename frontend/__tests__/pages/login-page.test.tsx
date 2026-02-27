@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import LoginPage from "@/app/login/page";
 import { api, ApiError } from "@/lib/api";
 import type { User } from "@/types";
@@ -43,6 +43,16 @@ const normalUser = {
   quota: 1024 * 1024 * 1024,
   is_initial_password: false,
 };
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 describe("LoginPage", () => {
   beforeEach(() => {
@@ -133,6 +143,7 @@ describe("LoginPage", () => {
     await waitFor(() => {
       expect(mockApi.login).toHaveBeenCalledWith("admin", "123456");
     });
+    expect(pushMock).not.toHaveBeenCalled();
     errorSpy.mockRestore();
   });
 
@@ -154,6 +165,26 @@ describe("LoginPage", () => {
     await waitFor(() => {
       expect(mockApi.login).toHaveBeenCalledWith("admin", "123456");
     });
+    expect(pushMock).not.toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+
+  test("does not redirect after unmount when async checks resolve late", async () => {
+    const meDeferred = createDeferred<User>();
+    const siteInfoDeferred = createDeferred<{ site_title: string }>();
+    mockApi.me.mockReturnValue(meDeferred.promise);
+    mockApi.getSiteInfo.mockReturnValue(siteInfoDeferred.promise);
+
+    const { unmount } = render(<LoginPage />);
+    unmount();
+
+    await act(async () => {
+      meDeferred.resolve(normalUser);
+      siteInfoDeferred.resolve({ site_title: "Late Site" });
+      await Promise.allSettled([meDeferred.promise, siteInfoDeferred.promise]);
+      await Promise.resolve();
+    });
+
+    expect(pushMock).not.toHaveBeenCalled();
   });
 });

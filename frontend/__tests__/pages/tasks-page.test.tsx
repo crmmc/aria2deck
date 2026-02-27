@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import TasksPage from "@/app/(authenticated)/tasks/page";
 import { api } from "@/lib/api";
+import { useTaskWebSocket } from "@/hooks/useTaskWebSocket";
 import type { Task } from "@/types";
 
 const showToastMock = jest.fn();
@@ -41,6 +42,7 @@ jest.mock("@/lib/api", () => ({
 }));
 
 const mockApi = api as jest.Mocked<typeof api>;
+const mockUseTaskWebSocket = useTaskWebSocket as jest.MockedFunction<typeof useTaskWebSocket>;
 
 const activeTask = {
   id: 1,
@@ -59,6 +61,7 @@ const activeTask = {
 describe("TasksPage", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockUseTaskWebSocket.mockImplementation(() => undefined);
     showConfirmMock.mockResolvedValue(true);
     jest.spyOn(global, "setInterval").mockImplementation((() => 1) as never);
     jest.spyOn(global, "clearInterval").mockImplementation((() => undefined) as never);
@@ -137,5 +140,28 @@ describe("TasksPage", () => {
       expect(mockApi.createTask).toHaveBeenCalledWith("https://example.com/a");
       expect(mockApi.createTask).toHaveBeenCalledWith("https://example.com/b");
     });
+  });
+
+  test("keeps error task in list after websocket update", async () => {
+    let wsCallbacks: {
+      onTaskUpdate: (task: Task) => void;
+    } | null = null;
+    mockUseTaskWebSocket.mockImplementation((callbacks) => {
+      wsCallbacks = callbacks;
+    });
+
+    render(<TasksPage />);
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+
+    act(() => {
+      wsCallbacks?.onTaskUpdate({
+        ...activeTask,
+        status: "error",
+        error: "network error",
+      });
+    });
+
+    expect(screen.getByText("ubuntu.iso")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
   });
 });

@@ -43,11 +43,15 @@ export default function StoragePage() {
     }
   }, [user, router]);
 
+  const initialLoadDone = useRef(false);
+
   const loadFiles = useCallback(async () => {
+    if (!initialLoadDone.current) setLoading(true);
     try {
       const res = await api.listStoredFiles(search || undefined, orphanOnly);
       if (!mountedRef.current) return;
       setFiles(res.files);
+      initialLoadDone.current = true;
     } catch {
       if (!mountedRef.current) return;
       showToast("加载存储文件失败", "error");
@@ -57,6 +61,7 @@ export default function StoragePage() {
   }, [search, orphanOnly, showToast]);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
 
@@ -89,6 +94,7 @@ export default function StoragePage() {
     setDeleting(true);
     try {
       const res = await api.bulkDeleteStoredFiles(Array.from(selected));
+      if (!mountedRef.current) return;
       showToast(`已删除 ${res.deleted_count} 个文件`, "success");
       if (res.errors.length > 0) {
         showToast(res.errors[0], "error");
@@ -96,9 +102,10 @@ export default function StoragePage() {
       setSelected(new Set());
       loadFiles();
     } catch {
+      if (!mountedRef.current) return;
       showToast("删除失败", "error");
     } finally {
-      setDeleting(false);
+      if (mountedRef.current) setDeleting(false);
     }
   };
 
@@ -108,11 +115,13 @@ export default function StoragePage() {
     setUserModalLoading(true);
     try {
       const res = await api.getFileUsers(file.id);
+      if (!mountedRef.current) return;
       setUserModalUsers(res.users);
     } catch {
+      if (!mountedRef.current) return;
       showToast("加载用户列表失败", "error");
     } finally {
-      setUserModalLoading(false);
+      if (mountedRef.current) setUserModalLoading(false);
     }
   };
 
