@@ -7,7 +7,14 @@ from types import SimpleNamespace
 import pytest
 
 from app.aria2.client import Aria2Client
-from app.core.config import DEFAULT_SECRET_KEY, check_secret_key, settings
+from app.core.config import (
+    DEFAULT_SECRET_KEY,
+    LEGACY_SHARE_JWT_SECRET_ENV,
+    SHARE_JWT_SECRET_ENV,
+    Settings,
+    check_secret_key,
+    settings,
+)
 from app.core.state import AppState, get_aria2_client, get_task_complete_lock, get_user_space_lock, refresh_aria2_config
 
 
@@ -24,6 +31,34 @@ def test_check_secret_key_allows_default_in_debug(monkeypatch):
     monkeypatch.setattr(settings, "secret_key", DEFAULT_SECRET_KEY)
 
     check_secret_key()
+
+
+def test_settings_reads_share_jwt_secret_from_new_env(monkeypatch):
+    monkeypatch.delenv(SHARE_JWT_SECRET_ENV, raising=False)
+    monkeypatch.delenv(LEGACY_SHARE_JWT_SECRET_ENV, raising=False)
+    monkeypatch.setenv(SHARE_JWT_SECRET_ENV, "new-secret")
+
+    configured = Settings()
+
+    assert configured.secret_key == "new-secret"
+
+
+def test_settings_prefers_new_share_jwt_secret_over_legacy(monkeypatch):
+    monkeypatch.setenv(LEGACY_SHARE_JWT_SECRET_ENV, "legacy-secret")
+    monkeypatch.setenv(SHARE_JWT_SECRET_ENV, "new-secret")
+
+    configured = Settings()
+
+    assert configured.secret_key == "new-secret"
+
+
+def test_settings_accepts_legacy_share_jwt_secret_env(monkeypatch):
+    monkeypatch.delenv(SHARE_JWT_SECRET_ENV, raising=False)
+    monkeypatch.setenv(LEGACY_SHARE_JWT_SECRET_ENV, "legacy-secret")
+
+    configured = Settings()
+
+    assert configured.secret_key == "legacy-secret"
 
 
 def test_get_aria2_client_preserves_empty_cached_secret(monkeypatch):
