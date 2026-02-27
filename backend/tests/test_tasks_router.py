@@ -287,7 +287,7 @@ class TestCreateTask:
     @patch("app.routers.tasks._create_subscription")
     @patch("app.routers.tasks.get_user_space_info")
     @patch("app.routers.tasks._check_disk_space")
-    async def test_create_task_success(
+    def test_create_task_success(
         self,
         mock_disk,
         mock_space_info,
@@ -334,6 +334,14 @@ class TestCreateTask:
             created_at="2024-01-01T00:00:00Z",
         )
         mock_create_sub.return_value = subscription
+
+        response = authenticated_client.post("/api/tasks", json={
+            "uri": "http://example.com/file.zip"
+        })
+        assert response.status_code == 201
+        data = response.json()
+        assert data["uri"] == "http://example.com/file.zip"
+        assert data["status"] == "queued"
 
 
 class TestCreateTorrentTask:

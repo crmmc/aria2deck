@@ -44,7 +44,8 @@ async def task_ws(websocket: WebSocket) -> None:
                 if websocket.client_state == WebSocketState.CONNECTED:
                     try:
                         await websocket.send_json({"type": "ping"})
-                    except WebSocketDisconnect:
+                    except (WebSocketDisconnect, RuntimeError):
+                        # RuntimeError: Starlette 在 closed socket 上 send 会抛
                         logger.debug("WebSocket disconnected during heartbeat")
                         break
         except asyncio.CancelledError:

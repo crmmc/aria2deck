@@ -143,18 +143,31 @@ async def change_password(
 
     # 更新密码
     async with get_session() as db:
-        user.password_hash = hash_password(payload.new_password)
-        user.is_initial_password = False  # 清除初始密码标记
-        db.add(user)
+        # 重新查询 user，避免使用 detached ORM 对象
+        from sqlmodel import select
+        result = await db.exec(select(User).where(User.id == user.id))
+        db_user = result.first()
+        if not db_user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="用户不存在"
+            )
+        db_user.password_hash = hash_password(payload.new_password)
+        db_user.is_initial_password = False  # 清除初始密码标记
+        db.add(db_user)
         await db.commit()
 
         # 使该用户的所有 session 失效
         from sqlmodel import delete
         from app.models import Session
-        await db.exec(delete(Session).where(Session.user_id == user.id))
+        # user.id 来自 require_user 依赖，保证非空
+        user_id = user.id
+        assert user_id is not None
+        await db.exec(delete(Session).where(Session.user_id == user_id))
         await db.commit()
 
     # 创建新 session
+    assert user.id is not None
     session_id = await create_session(user.id)
     set_session_cookie(response, session_id)
     logger.info(
