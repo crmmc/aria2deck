@@ -2,10 +2,8 @@
 import base64
 import json
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
-from app.core.config import settings
 from app.db import execute
 
 
@@ -293,6 +291,34 @@ class TestJsonrpcHandler:
         data = response.json()
         assert data["id"] == "get-b64-1"
         assert data["result"] == "dummy-gid"
+
+    def test_uses_refreshed_aria2_client_config(self, client: TestClient, rpc_user: dict, monkeypatch):
+        from app.aria2.client import Aria2Client
+
+        app_state = client.app.state.app_state
+        app_state._cached_rpc_url = "http://new-rpc:6800/jsonrpc"
+        app_state._cached_rpc_secret = "new-secret"
+        client.app.state.aria2_client = Aria2Client("http://old-rpc:6800/jsonrpc", "old-secret")
+
+        async def fake_get_version(self):
+            return {"rpc_url": self._rpc_url, "secret": self._secret}
+
+        monkeypatch.setattr(Aria2Client, "get_version", fake_get_version)
+
+        response = client.post(
+            "/aria2/jsonrpc",
+            json={
+                "jsonrpc": "2.0",
+                "method": "aria2.getVersion",
+                "params": [f"token:{rpc_user['rpc_secret']}"],
+                "id": "cfg-sync-1",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["result"]["rpc_url"] == "http://new-rpc:6800/jsonrpc"
+        assert data["result"]["secret"] == "new-secret"
+        assert client.app.state.aria2_client._rpc_url == "http://new-rpc:6800/jsonrpc"
 
     def test_get_query_invalid_params_encoding(self, client: TestClient):
         response = client.get(

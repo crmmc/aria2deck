@@ -17,6 +17,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.core.rate_limit import rpc_limiter
+from app.core.state import get_aria2_client
 from app.database import get_session
 from app.models import User
 from sqlmodel import select
@@ -312,7 +313,7 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
             status_code=200
         )
 
-    aria2_client = request.app.state.aria2_client
+    aria2_client = get_aria2_client(request=request)
     app_state = request.app.state.app_state
 
     if isinstance(body, list):
