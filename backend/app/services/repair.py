@@ -96,9 +96,13 @@ async def _create_stored_file_for_path(path: Path, content_hash: str) -> bool:
                 f"Content hash mismatch for {path}: "
                 f"expected={content_hash}, actual={actual_hash}"
             )
+            # Hash 不匹配，不创建记录以保证数据完整性
+            return False
     except Exception as e:
         logger.warning(f"Could not verify content hash for {path}: {e}")
-    
+        # 无法验证 hash，不创建记录
+        return False
+
     is_directory = path.is_dir()
     if is_directory:
         size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())

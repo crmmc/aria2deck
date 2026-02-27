@@ -8,7 +8,9 @@
 - 修复 Task 与 StoredFile 的关联
 """
 
+import asyncio
 import logging
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -18,7 +20,7 @@ from sqlmodel import col, select
 from app.auth import require_admin
 from app.database import get_session
 from app.models import StoredFile, User, UserFile
-from app.services.storage import delete_user_file_reference
+from app.services.storage import delete_user_file_reference, get_store_path_for_hash
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +222,9 @@ async def bulk_delete_files(
                     )
                 ).all()
 
+                # 保存 content_hash 用于后续删除物理文件
+                content_hash = stored_file.content_hash
+
                 for uf in user_files:
                     if uf.id is not None:
                         try:
@@ -227,8 +232,27 @@ async def bulk_delete_files(
                         except Exception as e:
                             logger.warning(f"删除用户文件引用失败 {uf.id}: {e!s}")
 
+                # delete_user_file_reference 会在 ref_count 归零时自动删除
+                # StoredFile 记录和物理文件。但如果有引用删除失败，
+                # StoredFile 可能仍然存在，需要重新查询确认。
+                db.expire_all()
+                remaining = await db.exec(
+                    select(StoredFile).where(StoredFile.id == file_id)
+                )
+                leftover = remaining.first()
+                if leftover:
+                    # 仍有残留记录，强制删除
+                    store_path = get_store_path_for_hash(leftover.content_hash)
+                    await db.delete(leftover)
+                    await db.commit()
+                    if store_path.exists():
+                        if store_path.is_dir():
+                            await asyncio.to_thread(shutil.rmtree, store_path)
+                        else:
+                            await asyncio.to_thread(store_path.unlink)
+
                 deleted_count += 1
-                logger.info(f"管理员删除存储文件: {stored_file.content_hash}")
+                logger.info(f"管理员删除存储文件: {content_hash}")
 
             except Exception as e:
                 failed_ids.append(file_id)

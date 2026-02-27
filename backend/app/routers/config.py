@@ -43,7 +43,7 @@ class ConfigUpdate(BaseModel):
     # WebSocket 重连参数
     ws_reconnect_max_delay: float | None = Field(None, ge=1.0, le=300.0, description="最大重连延迟（秒）")
     ws_reconnect_jitter: float | None = Field(None, ge=0.0, le=1.0, description="抖动系数 (0-1)")
-    ws_reconnect_factor: float | None = Field(None, ge=1.0, le=5.0, description="指数因子")
+    ws_reconnect_factor: float | None = Field(None, ge=1.1, le=5.0, description="指数因子")
     site_title: str | None = Field(None, max_length=50, description="网站标题")
 
 

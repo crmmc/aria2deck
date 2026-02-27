@@ -114,9 +114,9 @@ def init_db() -> None:
     This function is kept for backward compatibility with existing deployments.
     """
     conn = _get_connection()
-    cur = conn.cursor()
-
+    cur = None
     try:
+        cur = conn.cursor()
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -330,7 +330,8 @@ def init_db() -> None:
         )
         conn.commit()
     finally:
-        cur.close()
+        if cur is not None:
+            cur.close()
         conn.close()
 
 

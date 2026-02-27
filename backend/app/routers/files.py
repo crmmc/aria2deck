@@ -142,14 +142,15 @@ def _validate_subpath(base_path: Path, subpath: str) -> Path:
         HTTPException: If path is invalid or escapes base directory
     """
     if not subpath:
-        return base_path
+        return base_path.resolve()
 
-    # Normalize and resolve
-    target = (base_path / subpath).resolve()
+    # Normalize and resolve both paths
+    resolved_base = base_path.resolve()
+    target = (resolved_base / subpath).resolve()
 
     # Ensure it's within base path
     try:
-        target.relative_to(base_path)
+        target.relative_to(resolved_base)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

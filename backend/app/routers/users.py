@@ -262,17 +262,22 @@ async def delete_user(
         for pack_task in pack_tasks_result.all():
             await db.delete(pack_task)
 
-        # 获取用户的所有文件引用 ID（在事务外删除以正确处理 ref_count）
+        # 获取用户的所有文件引用 ID
         user_files_result = await db.exec(select(UserFile).where(UserFile.owner_id == user_id))
         user_file_ids = [uf.id for uf in user_files_result.all() if uf.id is not None]
 
-        # 删除用户
-        await db.delete(user)
-
-    # 删除用户文件引用（正确递减 ref_count 并清理物理文件）
+    # 先删除用户文件引用（正确递减 ref_count 并清理物理文件）
+    # 必须在删除 User 之前处理，否则级联删除会跳过 ref_count 递减
     from app.services.storage import delete_user_file_reference
     for user_file_id in user_file_ids:
         await delete_user_file_reference(user_file_id)
+
+    # 再删除用户
+    async with get_session() as db:
+        result = await db.exec(select(User).where(User.id == user_id))
+        user = result.first()
+        if user:
+            await db.delete(user)
 
     # 可选：删除用户下载目录
     if delete_files:
