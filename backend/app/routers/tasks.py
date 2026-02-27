@@ -794,10 +794,14 @@ async def create_task(
                     task = db_task
                     is_new = True
 
+    user_id = user.id
+    if user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户未登录")
+
     # Create subscription with space lock protection
     # All subscriptions go through lock to prevent race conditions
     state = _get_state(request)
-    user_lock = await get_user_space_lock(state, user.id)
+    user_lock = await get_user_space_lock(state, user_id)
     async with user_lock:
         # For existing tasks with known size, freeze space for new subscriber
         # This handles the case where a magnet link's size became known after initial creation
@@ -805,7 +809,7 @@ async def create_task(
             frozen_space = task.total_length
 
         if frozen_space > 0:
-            space_info = await get_user_space_info(user.id, user.quota)
+            space_info = await get_user_space_info(user_id, user.quota)
             if frozen_space > space_info["available"]:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,

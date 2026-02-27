@@ -503,6 +503,20 @@ async def _handle_task_complete(
         if not task:
             return
 
+        aria2_status_value = aria2_status.get("status")
+        should_process_complete = (
+            task.status == "complete"
+            or aria2_status_value == "complete"
+        )
+        if not should_process_complete:
+            logger.debug(
+                "[WS] Skip complete handler for task %s: task.status=%s aria2.status=%s",
+                task_id,
+                task.status,
+                aria2_status_value,
+            )
+            return
+
         if task.stored_file_id is not None:
             logger.debug(f"[WS] Task {task_id} already processed (stored_file_id={task.stored_file_id}), skipping")
             return

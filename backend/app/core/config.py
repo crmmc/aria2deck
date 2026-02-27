@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_SECRET_KEY = "aria2deck-default-secret-key-change-in-production"
 
 
 class Settings(BaseSettings):
@@ -17,7 +18,7 @@ class Settings(BaseSettings):
     aria2_rpc_secret: str = ""
     aria2_poll_interval: float = 2.0
     download_dir: str = str(BASE_DIR / "downloads")
-    secret_key: str = "aria2deck-default-secret-key-change-in-production"
+    secret_key: str = DEFAULT_SECRET_KEY
 
     # Rate limits (times per minute)
     rate_limit_login: int = 5
@@ -36,10 +37,8 @@ settings = Settings()
 
 def check_secret_key() -> None:
     """Raise if secret_key is still the insecure default in non-debug mode."""
-    if not settings.debug and settings.secret_key == "aria2deck-default-secret-key-change-in-production":
-        import warnings
-        warnings.warn(
-            "ARIA2C_SECRET_KEY 使用了默认值，生产环境请务必设置安全的密钥。"
-            "可通过环境变量 ARIA2C_SECRET_KEY 配置。",
-            stacklevel=2,
+    if not settings.debug and settings.secret_key == DEFAULT_SECRET_KEY:
+        raise RuntimeError(
+            "ARIA2C_SECRET_KEY 使用了默认值，生产环境禁止启动。"
+            "请通过环境变量 ARIA2C_SECRET_KEY 配置安全密钥。"
         )
