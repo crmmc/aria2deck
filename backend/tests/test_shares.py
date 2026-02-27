@@ -1,9 +1,10 @@
 """Tests for file sharing feature."""
-import pytest
+from datetime import timedelta
+
 from fastapi.testclient import TestClient
-from app.core.config import settings
 from app.db import execute
-from app.main import app
+from app.models import utc_now, utc_now_str
+from app.routers.shares import MAX_ACTIVE_SHARES_PER_FILE
 
 
 def _create_share(client: TestClient, user_file_id: int, **kwargs) -> dict:
@@ -44,6 +45,54 @@ class TestCreateShare:
         resp = client.post("/api/shares", json={"user_file_id": user_file["id"]})
         assert resp.status_code == 401
 class TestShareManagement:
+    def test_create_share_ignores_expired_and_exhausted_in_limit(self, authenticated_client, user_file, temp_db):
+        # 先造 10 条“status=active 但实际失效”的分享（过期 + 次数耗尽）
+        expired_at = (utc_now() - timedelta(hours=1)).isoformat()
+        for i in range(MAX_ACTIVE_SHARES_PER_FILE):
+            execute(
+                """
+                INSERT INTO share_links
+                (share_code, owner_id, user_file_id, expires_at, max_downloads, download_count, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    f"expired{i}",
+                    1,
+                    user_file["id"],
+                    expired_at,
+                    1,
+                    1,
+                    "active",
+                    utc_now_str(),
+                ],
+            )
+
+        # 应该还能创建，因为前面的都不算“活跃有效”
+        data = _create_share(authenticated_client, user_file["id"])
+        assert data["share_code"]
+
+    def test_create_share_blocked_when_effective_active_reaches_limit(self, authenticated_client, user_file, temp_db):
+        # 造满 10 条真正有效的 active 分享
+        for i in range(MAX_ACTIVE_SHARES_PER_FILE):
+            execute(
+                """
+                INSERT INTO share_links
+                (share_code, owner_id, user_file_id, status, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    f"active{i}",
+                    1,
+                    user_file["id"],
+                    "active",
+                    utc_now_str(),
+                ],
+            )
+
+        resp = authenticated_client.post("/api/shares", json={"user_file_id": user_file["id"]})
+        assert resp.status_code == 400
+        assert "最多" in resp.json()["detail"]
+
     def test_list_shares(self, authenticated_client, user_file):
         _create_share(authenticated_client, user_file["id"])
         _create_share(authenticated_client, user_file["id"])

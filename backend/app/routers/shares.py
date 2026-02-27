@@ -11,7 +11,8 @@ from pathlib import Path
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from sqlmodel import select, func
+from sqlalchemy import or_
+from sqlmodel import col, select, func
 
 from app.auth import require_user
 from app.core.config import settings
@@ -125,6 +126,11 @@ async def create_share(
             select(func.count()).select_from(ShareLink).where(
                 ShareLink.user_file_id == req.user_file_id,
                 ShareLink.status == "active",
+                or_(col(ShareLink.expires_at).is_(None), col(ShareLink.expires_at) > now_str),
+                or_(
+                    col(ShareLink.max_downloads).is_(None),
+                    col(ShareLink.download_count) < col(ShareLink.max_downloads),
+                ),
             )
         )
         active_count = active_count_result.one()
@@ -182,7 +188,7 @@ async def list_shares(user: User = Depends(require_user)) -> list[ShareLinkOut]:
             .join(UserFile, ShareLink.user_file_id == UserFile.id)  # type: ignore[arg-type]
             .join(StoredFile, UserFile.stored_file_id == StoredFile.id)  # type: ignore[arg-type]
             .where(ShareLink.owner_id == user.id)
-            .order_by(ShareLink.id.desc())
+            .order_by(col(ShareLink.id).desc())
         )
         rows = result.all()
     return [
