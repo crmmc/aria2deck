@@ -23,31 +23,10 @@ from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
 
 if TYPE_CHECKING:
     from app.aria2.client import Aria2Client
+    from app.core.state import AppState
     from app.models import DownloadTask
 
-
-async def _get_representative_owner_id(task_id: int) -> int | None:
-    """Get owner_id from first pending subscription for logging."""
-    from sqlmodel import select
-
-    from app.database import get_session
-    from app.models import UserTaskSubscription
-
-    async with get_session() as db:
-        result = await db.exec(
-            select(UserTaskSubscription.owner_id)
-            .where(
-                UserTaskSubscription.task_id == task_id,
-                UserTaskSubscription.status == "pending",
-            )
-            .limit(1)
-        )
-        row = result.first()
-        return row if row else None
-
-
-if TYPE_CHECKING:
-    from app.core.state import AppState
+from app.aria2.failed_task_cleanup import get_representative_owner_id
 
 logger = logging.getLogger(__name__)
 
@@ -491,7 +470,7 @@ async def handle_aria2_event(
     # 5.1 处理 stop/error 事件 - 释放冻结空间并标记订阅失败
     if event in ("stop", "error"):
         await _handle_task_stop_or_error(task_id, error_display)
-        owner_id = await _get_representative_owner_id(task_id)
+        owner_id = await get_representative_owner_id(task_id)
         await cleanup_failed_task_artifacts(
             client=client,
             task_id=task_id,
@@ -872,7 +851,7 @@ async def _cancel_task(
         )
 
     # Clean up via unified entry point
-    owner_id = await _get_representative_owner_id(task_id)
+    owner_id = await get_representative_owner_id(task_id)
     await cleanup_failed_task_artifacts(
         client=client,
         task_id=task_id,

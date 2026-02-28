@@ -8,7 +8,7 @@ from sqlmodel import select
 
 from app.aria2.client import Aria2Client
 from app.database import get_session
-from app.models import DownloadTask
+from app.models import DownloadTask, UserTaskSubscription
 from app.services.storage import cleanup_task_download_dir, get_downloading_dir
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,21 @@ class CleanupErrorType(str, Enum):
     FS_FAILURE = "FS_FAILURE"
     STATUS_CONFLICT = "STATUS_CONFLICT"
     NONE = "NONE"
+
+
+async def get_representative_owner_id(task_id: int) -> int | None:
+    """Get owner_id from first pending subscription for logging."""
+    async with get_session() as db:
+        result = await db.exec(
+            select(UserTaskSubscription.owner_id)
+            .where(
+                UserTaskSubscription.task_id == task_id,
+                UserTaskSubscription.status == "pending",
+            )
+            .limit(1)
+        )
+        row = result.first()
+        return row if row else None
 
 
 async def cleanup_failed_task_artifacts(

@@ -341,7 +341,9 @@ async def _fail_task_and_pending_subscriptions(
         )
     )
 
+    representative_owner_id: int | None = None
     for owner_id, created_at in subscription_snapshots:
+        representative_owner_id = owner_id
         await add_task_history(
             owner_id=owner_id,
             task_name=task_name,
@@ -356,7 +358,7 @@ async def _fail_task_and_pending_subscriptions(
         client=client,
         task_id=task_id,
         gid=gid_to_cleanup,
-        owner_id=owner_id,
+        owner_id=representative_owner_id,
         log_prefix="[Tasks]",
     )
 

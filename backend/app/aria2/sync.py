@@ -20,7 +20,7 @@ from sqlalchemy import case, update
 from sqlmodel import select
 
 from app.aria2.client import Aria2Client
-from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
+from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts, get_representative_owner_id
 from app.aria2.errors import parse_error_message
 from app.core.security import sanitize_string
 from app.core.state import AppState
@@ -29,20 +29,6 @@ from app.models import DownloadTask, User, UserTaskSubscription, utc_now_str
 
 logger = logging.getLogger(__name__)
 
-
-async def _get_representative_owner_id(task_id: int) -> int | None:
-    """Get owner_id from first pending subscription for logging."""
-    async with get_session() as db:
-        result = await db.exec(
-            select(UserTaskSubscription.owner_id)
-            .where(
-                UserTaskSubscription.task_id == task_id,
-                UserTaskSubscription.status == "pending",
-            )
-            .limit(1)
-        )
-        row = result.first()
-        return row if row else None
 
 ORPHAN_GRACE_SECONDS = 60.0
 ORPHAN_CLEANUP_BATCH = 50
@@ -189,7 +175,7 @@ async def sync_tasks(
                         }
                     )
                     await _handle_task_stop_or_error_sync(task_id, "后端错误")
-                    owner_id = await _get_representative_owner_id(task_id)
+                    owner_id = await get_representative_owner_id(task_id)
                     await cleanup_failed_task_artifacts(
                         client=client,
                         task_id=task_id,
@@ -373,7 +359,7 @@ async def sync_tasks(
                 )
 
             if mapped_status == "error":
-                owner_id = await _get_representative_owner_id(task_id)
+                owner_id = await get_representative_owner_id(task_id)
                 await cleanup_failed_task_artifacts(
                     client=client,
                     task_id=task_id,
@@ -449,7 +435,7 @@ async def _cleanup_stale_queued_tasks(
                     )
                     continue
 
-            owner_id = await _get_representative_owner_id(task_id)
+            owner_id = await get_representative_owner_id(task_id)
             logger.warning(
                 f"[CLEANUP] stale_queued [Sync] task_id={task_id} owner_id={owner_id} "
                 f"updated_at={task.updated_at} reason=no_gid_timeout"
@@ -637,7 +623,7 @@ async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
                 logger.info(f"[Sync] 任务 {task_id} 已被 listener 处理，跳过修复")
                 continue
         await _handle_task_stop_or_error_sync(task_id, reason)
-        owner_id = await _get_representative_owner_id(task_id)
+        owner_id = await get_representative_owner_id(task_id)
         await cleanup_failed_task_artifacts(
             client=client,
             task_id=task_id,
@@ -724,7 +710,7 @@ async def _cancel_task_sync(
         )
 
     # Clean up via unified entry point
-    owner_id = await _get_representative_owner_id(task_id)
+    owner_id = await get_representative_owner_id(task_id)
     await cleanup_failed_task_artifacts(
         client=client,
         task_id=task_id,
