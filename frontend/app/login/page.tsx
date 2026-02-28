@@ -62,8 +62,24 @@ export default function LoginPage() {
       } else {
         window.location.href = "/tasks";
       }
-    } catch (err) {
-      setError("用户名或密码无效");
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        if (err.isUnauthorized) {
+          setError("用户名或密码无效");
+          return;
+        }
+        if (err.isNetworkError) {
+          setError("网络连接失败，请检查地址或网络");
+          return;
+        }
+        setError(err.message || "登录失败，请稍后重试");
+        return;
+      }
+      if (err instanceof Error) {
+        setError(err.message || "登录失败，请稍后重试");
+        return;
+      }
+      setError("登录失败，请稍后重试");
     }
   }
 
