@@ -429,3 +429,118 @@ class TestCancelNotOnlySubscriberKeepsAria2Task:
             db_task = result.first()
             assert db_task.status == "active"
             assert db_task.gid == "test_gid_cancel_123"
+
+
+class _InjectSubscriberLock:
+    """Inject a new pending subscriber before cancellation re-check."""
+
+    def __init__(self, task_id: int, owner_id: int) -> None:
+        self.task_id = task_id
+        self.owner_id = owner_id
+
+    async def __aenter__(self):
+        async with get_session() as db:
+            result = await db.exec(
+                select(UserTaskSubscription).where(
+                    UserTaskSubscription.task_id == self.task_id,
+                    UserTaskSubscription.owner_id == self.owner_id,
+                    UserTaskSubscription.status == "pending",
+                )
+            )
+            existing = result.first()
+            if not existing:
+                db.add(
+                    UserTaskSubscription(
+                        owner_id=self.owner_id,
+                        task_id=self.task_id,
+                        frozen_space=1,
+                        status="pending",
+                        created_at=utc_now_str(),
+                    )
+                )
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+        return False
+
+
+class TestCancelRecheckRace:
+    """Test cancellation race when a new subscriber appears on re-check."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_recheck_new_subscriber_keeps_task_state(
+        self,
+        temp_db_cancel,
+        test_users_cancel,
+    ):
+        from starlette.requests import Request
+
+        from app.main import app
+        from app.models import User
+        from app.routers.tasks import cancel_task
+
+        app.state.app_state = AppState()
+
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="recheck_race_hash_001",
+                uri="https://example.com/recheck.bin",
+                gid="gid-recheck-race-001",
+                status="active",
+                name="recheck.bin",
+                total_length=1024,
+                completed_length=256,
+                created_at=utc_now_str(),
+                updated_at=utc_now_str(),
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+
+            owner_sub = UserTaskSubscription(
+                owner_id=test_users_cancel[0]["id"],
+                task_id=task.id,
+                frozen_space=1024,
+                status="pending",
+                created_at=utc_now_str(),
+            )
+            db.add(owner_sub)
+            await db.flush()
+            assert owner_sub.id is not None
+
+            result = await db.exec(select(User).where(User.id == test_users_cancel[0]["id"]))
+            owner = result.first()
+            assert owner is not None
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "DELETE",
+                "path": f"/api/tasks/{owner_sub.id}",
+                "headers": [],
+                "client": ("test", 1234),
+                "app": app,
+            }
+        )
+
+        injected_lock = _InjectSubscriberLock(task.id, test_users_cancel[1]["id"])
+        with patch("app.routers.tasks._get_task_submit_lock", new=AsyncMock(return_value=injected_lock)):
+            result = await cancel_task(owner_sub.id, request, user=owner)
+            assert result == {"ok": True}
+
+        async with get_session() as db:
+            latest_task = await db.get(DownloadTask, task.id)
+            assert latest_task is not None
+            assert latest_task.status == "active"
+            assert latest_task.gid == "gid-recheck-race-001"
+
+            pending_subs = (
+                await db.exec(
+                    select(UserTaskSubscription).where(
+                        UserTaskSubscription.task_id == task.id,
+                        UserTaskSubscription.status == "pending",
+                    )
+                )
+            ).all()
+            assert len(pending_subs) == 1
+            assert pending_subs[0].owner_id == test_users_cancel[1]["id"]

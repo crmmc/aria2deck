@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import aiohttp
 from sqlalchemy import case, update
 from sqlmodel import select
 
@@ -30,6 +31,14 @@ logger = logging.getLogger(__name__)
 ORPHAN_GRACE_SECONDS = 60.0
 ORPHAN_CLEANUP_BATCH = 50
 COMPLETE_REPAIR_GRACE_SECONDS = 30.0
+SYNC_TRACKED_TASK_STATUSES = ("queued", "active", "waiting", "paused")
+MISSING_GID_KEYWORDS = ("gid", "not found")
+TRANSIENT_RPC_ERROR_KEYWORDS = (
+    "cannot connect to host",
+    "connection refused",
+    "temporarily unavailable",
+    "timed out",
+)
 
 
 def _sanitize_path(file_path: str | None, task_id: int) -> str | None:
@@ -77,6 +86,22 @@ def _map_status(status: dict, task_id: int) -> dict:
     }
 
 
+def _exception_message(exc: Exception) -> str:
+    return str(exc).lower()
+
+
+def _is_missing_gid_error(exc: Exception) -> bool:
+    message = _exception_message(exc)
+    return all(keyword in message for keyword in MISSING_GID_KEYWORDS)
+
+
+def _is_transient_rpc_error(exc: Exception) -> bool:
+    if isinstance(exc, (aiohttp.ClientError, TimeoutError, OSError, ConnectionError)):
+        return True
+    message = _exception_message(exc)
+    return any(keyword in message for keyword in TRANSIENT_RPC_ERROR_KEYWORDS)
+
+
 async def _update_task(task_id: int, values: dict) -> None:
     """更新任务字段"""
     async with get_session() as db:
@@ -118,7 +143,7 @@ async def sync_tasks(
             result = await db.exec(
                 select(DownloadTask).where(
                     DownloadTask.gid.isnot(None),
-                    DownloadTask.status.in_(["queued", "active"]),
+                    DownloadTask.status.in_(SYNC_TRACKED_TASK_STATUSES),
                 )
             )
             tasks = result.all()
@@ -135,24 +160,29 @@ async def sync_tasks(
             try:
                 status = await client.tell_status(gid)
             except Exception as exc:
-                logger.error(f"[Sync] 获取 GID {gid} 状态失败: {exc}")
-                await _update_task(
-                    task_id,
-                    {
-                        "status": "error",
-                        "gid": None,
-                        "error": str(exc),
-                        "error_display": "后端错误",
-                    }
-                )
-                await _handle_task_stop_or_error_sync(task_id, "后端错误")
-                await cleanup_failed_task_artifacts(
-                    client=client,
-                    task_id=task_id,
-                    gid=gid,
-                    log_prefix="[Sync]",
-                )
-                await broadcast_task_update_to_subscribers(state, task_id)
+                if _is_missing_gid_error(exc):
+                    logger.error(f"[Sync] GID {gid} 不存在，标记任务失败并清理: {exc}")
+                    await _update_task(
+                        task_id,
+                        {
+                            "status": "error",
+                            "gid": None,
+                            "error": str(exc),
+                            "error_display": "后端错误",
+                        }
+                    )
+                    await _handle_task_stop_or_error_sync(task_id, "后端错误")
+                    await cleanup_failed_task_artifacts(
+                        client=client,
+                        task_id=task_id,
+                        gid=gid,
+                        log_prefix="[Sync]",
+                    )
+                    await broadcast_task_update_to_subscribers(state, task_id)
+                    return
+
+                level = logger.warning if _is_transient_rpc_error(exc) else logger.error
+                level("[Sync] 获取 GID %s 状态失败，保留当前状态等待下轮重试: %s", gid, exc)
                 return
 
             aria2_status = status.get("status")

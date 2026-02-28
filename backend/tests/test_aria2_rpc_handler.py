@@ -9,7 +9,7 @@ from sqlmodel import col, select
 from app.aria2.client import Aria2Client
 from app.core.state import AppState
 from app.database import get_session
-from app.models import DownloadTask, TaskHistory, UserTaskSubscription
+from app.models import DownloadTask, TaskHistory, User, UserTaskSubscription, utc_now_str
 from app.services.hash import get_uri_hash
 from app.services.storage import get_task_download_dir
 from app.services.aria2_rpc_handler import (
@@ -638,6 +638,113 @@ class TestAria2RpcHandlerWithTasks:
             latest_task = await db.get(DownloadTask, task.id)
             assert latest_task is not None
             assert latest_task.gid is None
+
+    async def test_remove_recheck_new_subscriber_keeps_task_state(self, handler):
+        class InjectSubscriberLock:
+            def __init__(self, task_id: int, owner_id: int) -> None:
+                self.task_id = task_id
+                self.owner_id = owner_id
+
+            async def __aenter__(self):
+                async with get_session() as db:
+                    result = await db.exec(
+                        select(UserTaskSubscription).where(
+                            UserTaskSubscription.task_id == self.task_id,
+                            UserTaskSubscription.owner_id == self.owner_id,
+                            UserTaskSubscription.status == "pending",
+                        )
+                    )
+                    existing = result.first()
+                    if not existing:
+                        db.add(
+                            UserTaskSubscription(
+                                owner_id=self.owner_id,
+                                task_id=self.task_id,
+                                frozen_space=1,
+                                status="pending",
+                                created_at=utc_now_str(),
+                            )
+                        )
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return False
+
+        async with get_session() as db:
+            new_owner = User(
+                username="rpc-remove-recheck",
+                password_hash="x",
+                is_admin=False,
+                quota=1024 * 1024 * 1024,
+                created_at=utc_now_str(),
+            )
+            db.add(new_owner)
+            await db.flush()
+            assert new_owner.id is not None
+
+            task = DownloadTask(
+                uri_hash="hash-rpc-remove-recheck",
+                uri="https://example.com/rpc-remove-recheck.bin",
+                gid="gid-rpc-remove-recheck",
+                status="active",
+                name="rpc-remove-recheck.bin",
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler._cleanup_aria2_gid = AsyncMock()
+        handler._get_task_submit_lock = AsyncMock(return_value=InjectSubscriberLock(task.id, new_owner.id))
+
+        result = await handler.handle("aria2.remove", ["gid-rpc-remove-recheck"])
+        assert result == "gid-rpc-remove-recheck"
+
+        async with get_session() as db:
+            latest_task = await db.get(DownloadTask, task.id)
+            assert latest_task is not None
+            assert latest_task.status == "active"
+            assert latest_task.gid == "gid-rpc-remove-recheck"
+
+            pending_subs = (
+                await db.exec(
+                    select(UserTaskSubscription).where(
+                        UserTaskSubscription.task_id == task.id,
+                        UserTaskSubscription.status == "pending",
+                    )
+                )
+            ).all()
+            assert len(pending_subs) == 1
+            assert pending_subs[0].owner_id == new_owner.id
+
+        handler._cleanup_aria2_gid.assert_not_awaited()
+
+    async def test_remove_paused_task_cleans_artifacts(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-rpc-remove-paused",
+                uri="https://example.com/rpc-remove-paused.bin",
+                gid="gid-rpc-remove-paused",
+                status="paused",
+                name="rpc-remove-paused.bin",
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler._cleanup_aria2_gid = AsyncMock()
+        result = await handler.handle("aria2.remove", ["gid-rpc-remove-paused"])
+        assert result == "gid-rpc-remove-paused"
+        handler._cleanup_aria2_gid.assert_awaited_once_with("gid-rpc-remove-paused")
+
+        async with get_session() as db:
+            latest_task = await db.get(DownloadTask, task.id)
+            assert latest_task is not None
+            assert latest_task.status == "error"
+            assert latest_task.gid is None
+            assert latest_task.error_display == "已取消"
 
     async def test_pause_returns_gid_for_nonexistent(self, handler):
         result = await handler.handle("aria2.pause", ["nonexistent_gid"])

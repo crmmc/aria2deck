@@ -823,6 +823,60 @@ class TestCancelTaskWithData:
         assert not task_dir.exists()
 
     @patch("app.routers.tasks._get_client")
+    def test_cancel_paused_task_cleans_artifacts(
+        self, mock_get_client, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ):
+        mock_client = AsyncMock()
+        mock_client.force_remove.return_value = "OK"
+        mock_client.remove_download_result.return_value = "OK"
+        mock_get_client.return_value = mock_client
+
+        from app.db import execute, fetch_one, utc_now
+
+        execute(
+            """INSERT INTO download_tasks
+               (uri_hash, uri, gid, status, name, total_length, completed_length,
+                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                "cancel_paused_hash",
+                "http://example.com/paused.zip",
+                "gid-paused-1",
+                "paused",
+                "paused.zip",
+                1000000,
+                100,
+                0,
+                0,
+                0,
+                0,
+                utc_now(),
+                utc_now(),
+            ],
+        )
+        execute(
+            """INSERT INTO user_task_subscriptions
+               (owner_id, task_id, frozen_space, status, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            [test_user["id"], 1, 1000000, "pending", utc_now()],
+        )
+
+        response = authenticated_client.delete("/api/tasks/1")
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+
+        row = fetch_one(
+            "SELECT status, gid, error_display FROM download_tasks WHERE id = ?",
+            [1],
+        )
+        assert row is not None
+        assert row["status"] == "error"
+        assert row["gid"] is None
+        assert row["error_display"] == "已取消"
+        mock_client.force_remove.assert_awaited_once_with("gid-paused-1")
+        mock_client.remove_download_result.assert_awaited_once_with("gid-paused-1")
+
+    @patch("app.routers.tasks._get_client")
     def test_cancel_other_user_subscription(
         self, mock_get_client, authenticated_client: TestClient, test_user: dict, test_admin: dict, temp_db: str
     ):

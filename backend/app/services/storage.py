@@ -421,8 +421,11 @@ async def cleanup_task_download_dir(task_id: int) -> None:
         try:
             shutil.rmtree(task_dir)
             logger.info(f"Cleaned up task download directory: {task_dir}")
+        except FileNotFoundError:
+            logger.debug("Task directory already cleaned: %s", task_dir)
         except Exception as e:
             logger.error(f"Failed to clean up task directory {task_dir}: {e}")
+            raise RuntimeError(f"Failed to clean up task directory: {task_dir}") from e
 
 
 async def get_user_used_space_async(user_id: int) -> int:

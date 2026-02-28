@@ -17,7 +17,7 @@ from sqlmodel import select
 from app.database import get_session, reset_engine, init_db as init_sqlmodel_db, dispose_engine
 from app.db import init_db, execute
 from app.core.config import settings
-from app.aria2.sync import _cleanup_orphan_aria2_tasks, _repair_inconsistent_completed_tasks
+from app.aria2.sync import _cleanup_orphan_aria2_tasks, _repair_inconsistent_completed_tasks, sync_tasks
 from app.core.state import AppState
 from app.models import DownloadTask, TaskHistory, UserTaskSubscription, utc_now_str
 
@@ -496,3 +496,103 @@ class TestRepairInconsistentComplete:
             assert len(history_rows) == 1
             assert history_rows[0].result == "failed"
             assert history_rows[0].reason == "下载完成但文件未入库"
+
+
+@pytest.mark.asyncio
+class TestSyncTaskSelectionAndErrorHandling:
+    async def test_sync_tracks_waiting_and_paused_tasks(self, temp_db_sync):
+        async with get_session() as db:
+            waiting_task = DownloadTask(
+                uri_hash="sync_waiting_hash",
+                uri="https://example.com/waiting.bin",
+                gid="gid-sync-waiting",
+                status="waiting",
+                name="waiting.bin",
+                created_at=utc_now_str(),
+                updated_at=utc_now_str(),
+            )
+            paused_task = DownloadTask(
+                uri_hash="sync_paused_hash",
+                uri="https://example.com/paused.bin",
+                gid="gid-sync-paused",
+                status="paused",
+                name="paused.bin",
+                created_at=utc_now_str(),
+                updated_at=utc_now_str(),
+            )
+            db.add(waiting_task)
+            db.add(paused_task)
+
+        state = AppState()
+        mock_client = AsyncMock()
+        mock_client.tell_status.side_effect = [
+            {
+                "gid": "gid-sync-waiting",
+                "status": "waiting",
+                "totalLength": "0",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+                "uploadSpeed": "0",
+            },
+            {
+                "gid": "gid-sync-paused",
+                "status": "paused",
+                "totalLength": "0",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+                "uploadSpeed": "0",
+            },
+        ]
+
+        with patch("app.core.state.get_aria2_client", return_value=mock_client), \
+             patch("app.aria2.sync._repair_inconsistent_completed_tasks", new_callable=AsyncMock), \
+             patch("app.aria2.sync._cleanup_orphan_aria2_tasks", new_callable=AsyncMock), \
+             patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock), \
+             patch("app.aria2.sync.asyncio.sleep", new_callable=AsyncMock, side_effect=asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
+                await sync_tasks(state, interval=0.01)
+
+        called_gids = {call.args[0] for call in mock_client.tell_status.await_args_list}
+        assert called_gids == {"gid-sync-waiting", "gid-sync-paused"}
+
+    async def test_sync_transient_tell_status_error_keeps_task_active(self, temp_db_sync):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="sync_transient_error_hash",
+                uri="https://example.com/transient.bin",
+                gid="gid-sync-transient",
+                status="active",
+                name="transient.bin",
+                created_at=utc_now_str(),
+                updated_at=utc_now_str(),
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            task_id = task.id
+
+        state = AppState()
+        mock_client = AsyncMock()
+        mock_client.tell_status.side_effect = RuntimeError(
+            "Cannot connect to host localhost:6800 ssl:default [Connection refused]"
+        )
+
+        with patch("app.core.state.get_aria2_client", return_value=mock_client), \
+             patch("app.aria2.sync._repair_inconsistent_completed_tasks", new_callable=AsyncMock), \
+             patch("app.aria2.sync._cleanup_orphan_aria2_tasks", new_callable=AsyncMock), \
+             patch("app.aria2.sync.cleanup_failed_task_artifacts", new_callable=AsyncMock) as mock_cleanup, \
+             patch("app.routers.tasks.broadcast_task_update_to_subscribers", new_callable=AsyncMock) as mock_broadcast, \
+             patch("app.aria2.sync.asyncio.sleep", new_callable=AsyncMock, side_effect=asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
+                await sync_tasks(state, interval=0.01)
+
+        async with get_session() as db:
+            updated = await db.get(DownloadTask, task_id)
+            assert updated is not None
+            assert updated.status == "active"
+            assert updated.gid == "gid-sync-transient"
+            assert updated.error is None
+            assert updated.error_display is None
+
+        mock_cleanup.assert_not_awaited()
+        mock_broadcast.assert_not_awaited()
