@@ -18,6 +18,7 @@ from sqlalchemy import case, update
 from sqlmodel import select
 
 from app.aria2.client import Aria2Client
+from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
 from app.aria2.errors import parse_error_message
 from app.core.security import sanitize_string
 from app.core.state import AppState
@@ -139,11 +140,18 @@ async def sync_tasks(
                     task_id,
                     {
                         "status": "error",
+                        "gid": None,
                         "error": str(exc),
                         "error_display": "后端错误",
                     }
                 )
                 await _handle_task_stop_or_error_sync(task_id, "后端错误")
+                await cleanup_failed_task_artifacts(
+                    client=client,
+                    task_id=task_id,
+                    gid=gid,
+                    log_prefix="[Sync]",
+                )
                 await broadcast_task_update_to_subscribers(state, task_id)
                 return
 
@@ -161,7 +169,7 @@ async def sync_tasks(
                     )
                     await _cancel_task_sync(
                         client, state, task, status,
-                        f"已取消：大小超过系统限制"
+                        "已取消：大小超过系统限制"
                     )
                     return
 
@@ -307,11 +315,20 @@ async def sync_tasks(
                 if mapped_status == "error":
                     update_values["error"] = raw_error
                     update_values["error_display"] = error_display or "后端错误"
+                    update_values["gid"] = None
 
                 await db.execute(
                     update(DownloadTask)
                     .where(DownloadTask.id == task_id)
                     .values(**update_values)
+                )
+
+            if mapped_status == "error":
+                await cleanup_failed_task_artifacts(
+                    client=client,
+                    task_id=task_id,
+                    gid=gid,
+                    log_prefix="[Sync]",
                 )
 
             if completion_handler is not None:

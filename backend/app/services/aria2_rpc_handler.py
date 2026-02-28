@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlsplit
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select, func, col, update
 
+from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
 from app.core.config import settings
 from app.core.security import mask_url_credentials
 from app.core.state import AppState
@@ -955,27 +956,87 @@ class Aria2RpcHandler:
         except Exception:
             logger.warning("Failed to remove aria2 result %s during compensation", gid)
 
-    async def _mark_submit_failed(self, task_id: int, message: str) -> None:
+    async def _mark_submit_failed_state(
+        self,
+        task_id: int,
+        message: str,
+        *,
+        raw_error: str | None = None,
+        gid_hint: str | None = None,
+    ) -> tuple[str | None, str, str | None, int, list[tuple[int, str]]]:
+        """Persist failure state and return context for history/cleanup."""
+        gid_to_cleanup = gid_hint
+        task_name = "未知任务"
+        task_uri: str | None = None
+        task_total_length = 0
+        history_inputs: list[tuple[int, str]] = []
+
         async with get_session() as db:
             task = await db.get(DownloadTask, task_id)
             if task and task.status in ("queued", "active", "waiting"):
+                gid_to_cleanup = gid_to_cleanup or task.gid
+                task_name = task.name or task.uri or "未知任务"
+                task_uri = task.uri
+                task_total_length = task.total_length or 0
                 task.status = "error"
+                task.error = raw_error
                 task.error_display = message
+                task.gid = None
                 task.updated_at = utc_now_str()
                 db.add(task)
 
             result = await db.exec(
                 select(UserTaskSubscription).where(
-                    UserTaskSubscription.owner_id == self.user_id,
                     UserTaskSubscription.task_id == task_id,
                     UserTaskSubscription.status == "pending",
                 )
             )
-            sub = result.first()
-            if sub:
+            subscriptions = result.all()
+            for sub in subscriptions:
                 sub.status = "failed"
                 sub.error_display = message
+                sub.frozen_space = 0
+                history_inputs.append((sub.owner_id, sub.created_at))
                 db.add(sub)
+
+        return gid_to_cleanup, task_name, task_uri, task_total_length, history_inputs
+
+    async def _mark_submit_failed(
+        self,
+        task_id: int,
+        message: str,
+        *,
+        raw_error: str | None = None,
+        gid_hint: str | None = None,
+    ) -> None:
+        from app.services.history import add_task_history
+
+        gid_to_cleanup, task_name, task_uri, task_total_length, history_inputs = (
+            await self._mark_submit_failed_state(
+                task_id=task_id,
+                message=message,
+                raw_error=raw_error,
+                gid_hint=gid_hint,
+            )
+        )
+
+        for owner_id, created_at in history_inputs:
+            await add_task_history(
+                owner_id=owner_id,
+                task_name=task_name,
+                result="failed",
+                reason=message,
+                uri=task_uri,
+                total_length=task_total_length,
+                created_at=created_at,
+            )
+
+        await cleanup_failed_task_artifacts(
+            client=self.client,
+            task_id=task_id,
+            gid=gid_to_cleanup,
+            log_prefix="[RPC]",
+        )
     async def _check_quota_and_disk(self) -> None:
         """检查配额和磁盘空间，不足则抛异常"""
         disk_ok, disk_free = self._check_disk_space()
@@ -1029,7 +1090,11 @@ class Aria2RpcHandler:
                 try:
                     gid = await self.client.add_uri(uris, options)
                 except Exception as exc:
-                    await self._mark_submit_failed(task_id, str(exc))
+                    await self._mark_submit_failed(
+                        task_id,
+                        "添加下载任务失败",
+                        raw_error=str(exc),
+                    )
                     raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc))
 
                 try:
@@ -1042,9 +1107,14 @@ class Aria2RpcHandler:
                         db_task.name = task_name
                         db_task.status = "active"
                         db.add(db_task)
-                except Exception:
-                    await self._cleanup_aria2_gid(gid)
-                    raise
+                except Exception as exc:
+                    await self._mark_submit_failed(
+                        task_id,
+                        "添加下载任务失败",
+                        raw_error=str(exc),
+                        gid_hint=gid,
+                    )
+                    raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc))
 
                 return gid
     async def _handle_add_torrent(self, params: list) -> str:
@@ -1090,7 +1160,11 @@ class Aria2RpcHandler:
                 try:
                     gid = await self.client.add_torrent(torrent_data, uris, options)
                 except Exception as exc:
-                    await self._mark_submit_failed(task_id, str(exc))
+                    await self._mark_submit_failed(
+                        task_id,
+                        "添加种子任务失败",
+                        raw_error=str(exc),
+                    )
                     raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc))
 
                 try:
@@ -1120,9 +1194,14 @@ class Aria2RpcHandler:
                         db_task.name = name
                         db_task.status = "active"
                         db.add(db_task)
-                except Exception:
-                    await self._cleanup_aria2_gid(gid)
-                    raise
+                except Exception as exc:
+                    await self._mark_submit_failed(
+                        task_id,
+                        "添加种子任务失败",
+                        raw_error=str(exc),
+                        gid_hint=gid,
+                    )
+                    raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc))
 
                 return gid
     async def _handle_remove(self, params: list) -> str:

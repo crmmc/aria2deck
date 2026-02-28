@@ -19,6 +19,8 @@ from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 
+from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
+
 if TYPE_CHECKING:
     from app.core.state import AppState
 
@@ -444,6 +446,9 @@ async def handle_aria2_event(
                 else:
                     db_task.error_display = error_display
 
+            if event in ("stop", "error"):
+                db_task.gid = None
+
             if aria2_status:
                 db_task.name = (
                     aria2_status.get("bittorrent", {}).get("info", {}).get("name")
@@ -463,6 +468,12 @@ async def handle_aria2_event(
     # 5.1 处理 stop/error 事件 - 释放冻结空间并标记订阅失败
     if event in ("stop", "error"):
         await _handle_task_stop_or_error(task_id, error_display)
+        await cleanup_failed_task_artifacts(
+            client=client,
+            task_id=task_id,
+            gid=gid,
+            log_prefix="[WS]",
+        )
 
     # 6. 广播到所有订阅者
     await broadcast_task_update_to_subscribers(state, task_id)

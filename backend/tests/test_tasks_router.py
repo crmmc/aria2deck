@@ -157,6 +157,90 @@ class TestHelperFunctions:
         assert isinstance(free, int)
         assert free > 0
 
+    @pytest.mark.asyncio
+    async def test_fail_task_and_pending_subscriptions_cleans_everything(
+        self, temp_db: str, test_user: dict
+    ):
+        from pathlib import Path
+
+        from app.database import get_session
+        from app.db import execute, utc_now
+        from app.models import DownloadTask, TaskHistory, UserTaskSubscription
+        from app.routers.tasks import _fail_task_and_pending_subscriptions
+        from sqlmodel import select
+
+        task_id = execute(
+            """INSERT INTO download_tasks
+               (uri_hash, uri, gid, status, name, total_length, completed_length,
+                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                "fail_cleanup_hash",
+                "http://example.com/fail-cleanup.zip",
+                "gid-fail-cleanup",
+                "queued",
+                "fail-cleanup.zip",
+                1024,
+                0,
+                0,
+                0,
+                0,
+                0,
+                utc_now(),
+                utc_now(),
+            ],
+        )
+        execute(
+            """INSERT INTO user_task_subscriptions
+               (owner_id, task_id, frozen_space, status, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            [test_user["id"], task_id, 1024, "pending", utc_now()],
+        )
+
+        task_dir = Path(settings.download_dir) / "downloading" / str(task_id)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "partial.bin").write_text("partial")
+
+        mock_client = AsyncMock()
+        mock_client.force_remove.return_value = "gid-fail-cleanup"
+        mock_client.remove_download_result.return_value = "OK"
+
+        await _fail_task_and_pending_subscriptions(
+            task_id=task_id,
+            error_display="添加下载任务失败",
+            error="rpc unavailable",
+            client=mock_client,
+        )
+
+        async with get_session() as db:
+            task = await db.get(DownloadTask, task_id)
+            assert task is not None
+            assert task.status == "error"
+            assert task.error == "rpc unavailable"
+            assert task.error_display == "添加下载任务失败"
+            assert task.gid is None
+
+            result = await db.exec(
+                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+            )
+            sub = result.first()
+            assert sub is not None
+            assert sub.status == "failed"
+            assert sub.frozen_space == 0
+            assert sub.error_display == "添加下载任务失败"
+
+            history_result = await db.exec(
+                select(TaskHistory).where(TaskHistory.owner_id == test_user["id"])
+            )
+            history_rows = history_result.all()
+            assert len(history_rows) == 1
+            assert history_rows[0].result == "failed"
+            assert history_rows[0].reason == "添加下载任务失败"
+
+        mock_client.force_remove.assert_awaited_once_with("gid-fail-cleanup")
+        mock_client.remove_download_result.assert_awaited_once_with("gid-fail-cleanup")
+        assert not task_dir.exists()
+
 
 class TestCreateTask:
     """Tests for POST /api/tasks endpoint."""
@@ -874,8 +958,6 @@ class TestSubscriptionToCompleteTask:
     ):
         from app.db import execute, utc_now
         import os
-        from app.core.config import settings
-
         store_dir = os.path.join(settings.download_dir, "store", "ab", "abc123")
         os.makedirs(store_dir, exist_ok=True)
         test_file = os.path.join(store_dir, "complete_file.zip")
