@@ -213,6 +213,10 @@ class TestAria2RpcHandlerAddMethods:
         assert sent_options["max-connection-per-server"] == "4"
 
     async def test_add_uri_failure_marks_subscription_failed(self, handler):
+        from pathlib import Path
+
+        from app.core.config import settings
+
         handler.client.add_uri.side_effect = RuntimeError("rpc unavailable")
         uri = "https://example.com/fail.bin"
 
@@ -238,8 +242,25 @@ class TestAria2RpcHandlerAddMethods:
             ).first()
             assert sub is not None
             assert sub.status == "failed"
+            assert sub.frozen_space == 0
+
+            history = (
+                await db.exec(
+                    select(TaskHistory).where(TaskHistory.owner_id == handler.user_id)
+                )
+            ).all()
+            assert len(history) == 1
+            assert history[0].result == "failed"
+            assert history[0].reason == "添加下载任务失败"
+
+            task_dir = Path(settings.download_dir) / "downloading" / str(task.id)
+            assert not task_dir.exists()
 
     async def test_add_torrent_failure_marks_subscription_failed(self, handler):
+        from pathlib import Path
+
+        from app.core.config import settings
+
         handler.client.add_torrent.side_effect = RuntimeError("rpc unavailable")
         torrent_data = "d" * 100
 
@@ -268,6 +289,19 @@ class TestAria2RpcHandlerAddMethods:
             ).first()
             assert sub is not None
             assert sub.status == "failed"
+            assert sub.frozen_space == 0
+
+            history = (
+                await db.exec(
+                    select(TaskHistory).where(TaskHistory.owner_id == handler.user_id)
+                )
+            ).all()
+            assert len(history) == 1
+            assert history[0].result == "failed"
+            assert history[0].reason == "添加种子任务失败"
+
+            task_dir = Path(settings.download_dir) / "downloading" / str(task.id)
+            assert not task_dir.exists()
 
     async def test_add_torrent_uses_task_download_dir(self, handler):
         handler.client.add_torrent.return_value = "gid-dir-torrent"
