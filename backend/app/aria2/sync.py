@@ -374,8 +374,17 @@ async def sync_tasks(
             # Broadcast update
             await broadcast_task_update_to_subscribers(state, task_id)
 
-        # Process all tasks concurrently
-        await asyncio.gather(*[fetch_and_update(task) for task in tasks])
+        # Process all tasks concurrently, 单任务失败不影响其他任务
+        results = await asyncio.gather(
+            *[fetch_and_update(task) for task in tasks],
+            return_exceptions=True
+        )
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "sync_tasks: 任务更新失败 task_id=%s error=%s",
+                    tasks[i].id, result
+                )
 
         await _cleanup_orphan_aria2_tasks(
             client=client,

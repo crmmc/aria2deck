@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 @router.post("/login", response_model=UserOut)
 async def login(payload: LoginRequest, request: Request, response: Response) -> dict:
     # 获取客户端 IP
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = (request.client.host if request.client and request.client.host else "unknown")
     request_id = getattr(request.state, "request_id", "-")
 
     # 检查是否被限制

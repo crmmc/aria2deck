@@ -1,3 +1,5 @@
+import asyncio
+
 import aiohttp
 from typing import Any, cast
 
@@ -5,6 +7,7 @@ from typing import Any, cast
 class Aria2Client:
     # 类级别共享 Session，所有实例复用
     _session: aiohttp.ClientSession | None = None
+    _session_lock: asyncio.Lock = asyncio.Lock()
     _timeout = aiohttp.ClientTimeout(total=30)
 
     def __init__(self, rpc_url: str, secret: str = "") -> None:
@@ -14,9 +17,10 @@ class Aria2Client:
     @classmethod
     async def get_session(cls) -> aiohttp.ClientSession:
         """获取或创建共享的 aiohttp Session"""
-        if cls._session is None or cls._session.closed:
-            cls._session = aiohttp.ClientSession(timeout=cls._timeout)
-        return cls._session
+        async with cls._session_lock:
+            if cls._session is None or cls._session.closed:
+                cls._session = aiohttp.ClientSession(timeout=cls._timeout)
+            return cls._session
 
     @classmethod
     async def close_session(cls) -> None:

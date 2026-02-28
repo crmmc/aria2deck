@@ -58,7 +58,12 @@ async def get_user_by_session(session_id: str | None) -> User | None:
         session = result.first()
         if not session:
             return None
-        expires_at = datetime.fromisoformat(session.expires_at)
+        try:
+            expires_at = datetime.fromisoformat(session.expires_at)
+        except ValueError:
+            logger.warning("会话过期时间格式无效 session_id=%s", session_id)
+            await db.delete(session)
+            return None
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if expires_at < datetime.now(timezone.utc):

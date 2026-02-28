@@ -30,6 +30,9 @@ from app.aria2.failed_task_cleanup import get_representative_owner_id
 
 logger = logging.getLogger(__name__)
 
+# 追踪正在运行的事件处理任务
+_event_tasks: set[asyncio.Task[None]] = set()
+
 # 事件方法到内部事件名的映射
 EVENT_MAP = {
     "aria2.onDownloadStart": "start",
@@ -901,10 +904,12 @@ async def listen_aria2_events(state: AppState) -> None:
                                         if gid:
                                             event = EVENT_MAP[method]
                                             logger.debug(f"[WS] 收到事件: {method}, GID={gid}")
-                                            asyncio.create_task(
+                                            task = asyncio.create_task(
                                                 handle_aria2_event(state, gid, event),
                                                 name=f"aria2_event_{gid}_{event}"
                                             )
+                                            _event_tasks.add(task)
+                                            task.add_done_callback(_event_tasks.discard)
                             except Exception as exc:
                                 logger.warning(f"[WS] 解析消息失败: {exc}")
 
@@ -918,6 +923,9 @@ async def listen_aria2_events(state: AppState) -> None:
 
         except asyncio.CancelledError:
             logger.info("[WS] 监听器任务被取消，正在退出")
+            if _event_tasks:
+                logger.info(f"[WS] 等待 {len(_event_tasks)} 个事件处理任务完成")
+                await asyncio.gather(*_event_tasks, return_exceptions=True)
             raise
 
         except Exception as exc:

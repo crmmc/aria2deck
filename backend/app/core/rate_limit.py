@@ -72,9 +72,10 @@ class RateLimiter:
             self._requests[key] = [t for t in self._requests[key] if now - t < window]
             return max(0, max_req - len(self._requests[key]))
 
-    def clear_all(self) -> None:
+    async def clear_all(self) -> None:
         """清除所有记录"""
-        self._requests.clear()
+        async with self._lock:
+            self._requests.clear()
 
 
 # 向后兼容的别名

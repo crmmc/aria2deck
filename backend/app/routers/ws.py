@@ -19,7 +19,8 @@ HEARTBEAT_INTERVAL = 30
 @router.websocket("/ws/tasks")
 async def task_ws(websocket: WebSocket) -> None:
     client_ip = websocket.client.host if websocket.client else "unknown"
-    await websocket.accept()
+
+    # 先验证再 accept，防止恶意连接消耗资源
     session_id = websocket.cookies.get(settings.session_cookie_name)
     user = await get_user_by_session(session_id)
     if not user:
@@ -27,12 +28,14 @@ async def task_ws(websocket: WebSocket) -> None:
         await websocket.close(code=4401)
         return
 
-    state = websocket.app.state.app_state
     user_id = user.id
     if user_id is None:
         logger.warning("WebSocket 用户ID为空: path=/ws/tasks ip=%s", client_ip)
         await websocket.close(code=4401)
         return
+
+    await websocket.accept()
+    state = websocket.app.state.app_state
     logger.info("WebSocket 连接建立: path=/ws/tasks user_id=%s ip=%s", user_id, client_ip)
     await register_ws(state, user_id, websocket)
 

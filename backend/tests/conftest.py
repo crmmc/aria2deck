@@ -31,9 +31,10 @@ from app.aria2.client import Aria2Client
 @pytest.fixture(autouse=True)
 def reset_rate_limiter():
     """在每个测试前后清理限流器状态"""
-    api_limiter.clear_all()
+    import asyncio
+    asyncio.run(api_limiter.clear_all())
     yield
-    api_limiter.clear_all()
+    asyncio.run(api_limiter.clear_all())
 
 
 @pytest.fixture(scope="function")

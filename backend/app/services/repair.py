@@ -9,7 +9,7 @@ from sqlmodel import select
 
 from app.database import get_session
 from app.models import DownloadTask, StoredFile, utc_now_str
-from app.services.hash import calculate_content_hash
+from app.services.hash import calculate_content_hash_async
 from app.services.storage import get_store_dir
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ async def _get_existing_content_hashes() -> set[str]:
 
 async def _create_stored_file_for_path(path: Path, content_hash: str) -> bool:
     try:
-        actual_hash = calculate_content_hash(path)
+        actual_hash = await calculate_content_hash_async(path)
         if actual_hash != content_hash:
             logger.warning(
                 f"Content hash mismatch for {path}: "

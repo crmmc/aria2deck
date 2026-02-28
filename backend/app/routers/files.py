@@ -538,7 +538,9 @@ async def cancel_or_delete_pack_task(
                 logger.info("Cleaned up partial pack file: %s", task.output_path)
 
         async with get_session() as db:
-            result = await db.exec(select(PackTask).where(PackTask.id == task_id))
+            result = await db.exec(
+                select(PackTask).where(PackTask.id == task_id, PackTask.owner_id == user_id)
+            )
             db_task = result.first()
             if db_task:
                 await db.delete(db_task)
