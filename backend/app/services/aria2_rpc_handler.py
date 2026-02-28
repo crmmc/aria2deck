@@ -11,22 +11,62 @@ import hashlib
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Protocol, Sequence
+from urllib.parse import unquote, urlsplit
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select, func, col, update
 
-from app.aria2.client import Aria2Client
 from app.core.config import settings
+from app.core.security import mask_url_credentials
 from app.core.state import AppState
 from app.database import get_session
 from app.models import DownloadTask, TaskHistory, User, UserTaskSubscription, utc_now_str
 from app.routers.config import get_min_free_disk
 from app.services.hash import extract_info_hash_from_torrent_base64, get_uri_hash
-from app.services.storage import get_user_space_info
+from app.services.storage import cleanup_task_download_dir, get_user_space_info
 
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_STATUS_DOWNLOADS = "0"
+DEFAULT_STATUS_WAITING = "waiting"
+DEFAULT_STATUS_ERROR = "error"
+DEFAULT_STATUS_COMPLETE = "complete"
+DEFAULT_BOOL_FALSE = "false"
+DEFAULT_ERROR_CODE = "0"
+BT_INFO_HASH_LENGTH = 40
+SPECIAL_GID_PREFIXES = ("hist-", "task-")
+
+ALLOWED_STATUS_VALUES = {
+    "active",
+    "waiting",
+    "paused",
+    "error",
+    "complete",
+    "removed",
+}
+
+
+class RpcBackendClient(Protocol):
+    async def add_uri(self, uris: list[str], options: dict | None = None) -> str: ...
+    async def add_torrent(
+        self,
+        torrent: str,
+        uris: list[str] | None = None,
+        options: dict | None = None,
+    ) -> str: ...
+    async def tell_status(self, gid: str) -> dict: ...
+    async def tell_active(self) -> list[dict]: ...
+    async def tell_waiting(self, offset: int = 0, num: int = 1000) -> list[dict]: ...
+    async def remove_download_result(self, gid: str) -> str: ...
+    async def force_remove(self, gid: str) -> str: ...
+    async def get_global_stat(self) -> dict: ...
+    async def get_files(self, gid: str) -> list[dict]: ...
+    async def get_uris(self, gid: str) -> list[dict]: ...
+    async def get_peers(self, gid: str) -> list[dict]: ...
+    async def get_servers(self, gid: str) -> list[dict]: ...
+    async def get_version(self) -> dict: ...
 
 
 # JSON-RPC 2.0 错误码
@@ -103,14 +143,13 @@ class Aria2RpcHandler:
         "system.multicall",
     ]
 
-    def __init__(self, user_id: int, aria2_client: Aria2Client, app_state: AppState):
+    def __init__(self, user_id: int, aria2_client: RpcBackendClient, app_state: AppState):
         self.user_id = user_id
         self.client = aria2_client
         if app_state is None:
             raise RuntimeError("AppState is required for Aria2RpcHandler")
         self.app_state: AppState = app_state
         self._user_dir: str | None = None
-        self._user_incomplete_dir: str | None = None
 
     async def handle(self, method: str, params: list) -> Any:
         """路由到具体方法处理"""
@@ -154,14 +193,6 @@ class Aria2RpcHandler:
             user_dir.mkdir(parents=True, exist_ok=True)
             self._user_dir = str(user_dir)
         return self._user_dir
-    def _get_user_incomplete_dir(self) -> str:
-        """获取用户的 .incomplete 目录（下载中文件存放位置）"""
-        if self._user_incomplete_dir is None:
-            base = Path(settings.download_dir).resolve()
-            incomplete_dir = base / str(self.user_id) / ".incomplete"
-            incomplete_dir.mkdir(parents=True, exist_ok=True)
-            self._user_incomplete_dir = str(incomplete_dir)
-        return self._user_incomplete_dir
     async def _verify_task_owner(self, gid: str) -> tuple[DownloadTask, UserTaskSubscription] | None:
         """检查 gid 对应的任务是否属于当前用户
         Returns: (DownloadTask, UserTaskSubscription) 或 None
@@ -252,61 +283,304 @@ class Aria2RpcHandler:
             return safe_path
         return Path(safe_path).name
 
+    @staticmethod
+    def _extract_name_from_uri(uri: str) -> str:
+        if not uri:
+            return ""
+        parsed = urlsplit(uri)
+        if not parsed.path:
+            return ""
+        decoded_path = unquote(parsed.path)
+        return Path(decoded_path).name
+
+    def _build_status_files(
+        self,
+        task_name: str | None,
+        uri: str | None,
+        total_length: int,
+        completed_length: int,
+        fallback_name: str = "",
+    ) -> list[dict[str, Any]]:
+        file_data = self._new_file_payload()
+        candidate_name = (task_name or "").strip()
+        if not candidate_name and uri and not self._is_bittorrent_uri(uri):
+            candidate_name = self._extract_name_from_uri(uri)
+        if not candidate_name:
+            candidate_name = fallback_name
+        file_data["path"] = self._sanitize_file_path(candidate_name)
+        file_data["length"] = str(total_length)
+        file_data["completedLength"] = str(completed_length)
+        return [file_data]
+
+    @staticmethod
+    def _status_str(value: Any, default: str = DEFAULT_STATUS_DOWNLOADS) -> str:
+        if value is None:
+            return default
+        return str(value)
+
+    @staticmethod
+    def _status_bool(value: Any, default: str = DEFAULT_BOOL_FALSE) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "false"}:
+                return normalized
+        return default
+
+    @staticmethod
+    def _normalize_status_value(value: Any, default: str = DEFAULT_STATUS_WAITING) -> str:
+        status = str(value).strip().lower() if value is not None else default
+        if status in ALLOWED_STATUS_VALUES:
+            return status
+        return default
+
+    @staticmethod
+    def _new_file_payload() -> dict[str, Any]:
+        return {
+            "index": "1",
+            "path": "",
+            "length": "0",
+            "completedLength": "0",
+            "selected": "true",
+            "uris": [],
+        }
+
+    def _new_status_payload(self) -> dict[str, Any]:
+        return {
+            "gid": "",
+            "status": DEFAULT_STATUS_WAITING,
+            "totalLength": DEFAULT_STATUS_DOWNLOADS,
+            "completedLength": DEFAULT_STATUS_DOWNLOADS,
+            "uploadLength": DEFAULT_STATUS_DOWNLOADS,
+            "downloadSpeed": DEFAULT_STATUS_DOWNLOADS,
+            "uploadSpeed": DEFAULT_STATUS_DOWNLOADS,
+            "pieceLength": DEFAULT_STATUS_DOWNLOADS,
+            "numPieces": DEFAULT_STATUS_DOWNLOADS,
+            "connections": DEFAULT_STATUS_DOWNLOADS,
+            "errorCode": DEFAULT_ERROR_CODE,
+            "errorMessage": "",
+            "dir": "",
+            "files": [],
+            "infoHash": "",
+            "numSeeders": DEFAULT_STATUS_DOWNLOADS,
+            "seeder": DEFAULT_BOOL_FALSE,
+            "bittorrent": {"announceList": [], "comment": "", "creationDate": "0", "mode": "single", "info": {"name": ""}},
+        }
+
+    @staticmethod
+    def _extract_status_keys(params: list, index: int) -> list[str] | None:
+        if len(params) <= index:
+            return None
+        keys = params[index]
+        if keys is None:
+            return None
+        if not isinstance(keys, list):
+            raise RpcError(RpcErrorCode.INVALID_PARAMS, "keys must be an array")
+        normalized = [str(item) for item in keys if isinstance(item, str) and item.strip()]
+        if not normalized:
+            return None
+        return normalized
+
+    @staticmethod
+    def _apply_status_keys(status: dict, keys: list[str] | None) -> dict:
+        if not keys:
+            return status
+        return {key: status[key] for key in keys if key in status}
+
+    def _sanitize_files(self, files: Any) -> list[dict]:
+        if not isinstance(files, list):
+            return []
+
+        sanitized_files: list[dict] = []
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            file_data = self._new_file_payload()
+            file_data["index"] = self._status_str(item.get("index"), file_data["index"])
+            file_data["length"] = self._status_str(item.get("length"), file_data["length"])
+            file_data["completedLength"] = self._status_str(item.get("completedLength"), file_data["completedLength"])
+            file_data["selected"] = self._status_bool(item.get("selected"), file_data["selected"])
+            file_data["path"] = self._sanitize_file_path(self._status_str(item.get("path"), ""))
+            sanitized_files.append(file_data)
+        return sanitized_files
+
+    def _sanitize_bittorrent(self, bt_info: Any) -> dict:
+        sanitized = {"announceList": [], "comment": "", "creationDate": "0", "mode": "single", "info": {"name": ""}}
+        if not isinstance(bt_info, dict):
+            return sanitized
+
+        mode = bt_info.get("mode")
+        if isinstance(mode, str) and mode in {"single", "multi"}:
+            sanitized["mode"] = mode
+
+        comment = bt_info.get("comment")
+        if isinstance(comment, str):
+            sanitized["comment"] = comment
+
+        creation_date = bt_info.get("creationDate")
+        if creation_date is not None:
+            sanitized["creationDate"] = self._status_str(creation_date, "0")
+
+        info = bt_info.get("info")
+        if isinstance(info, dict):
+            name = info.get("name")
+            if isinstance(name, str):
+                sanitized["info"]["name"] = name
+
+        return sanitized
+
+    @staticmethod
+    def _new_peer_payload() -> dict[str, str]:
+        return {
+            "peerId": "masked-peer",
+            "ip": "0.0.0.0",
+            "port": "0",
+            "bitfield": "",
+            "amChoking": DEFAULT_BOOL_FALSE,
+            "peerChoking": DEFAULT_BOOL_FALSE,
+            "downloadSpeed": DEFAULT_STATUS_DOWNLOADS,
+            "uploadSpeed": DEFAULT_STATUS_DOWNLOADS,
+            "seeder": DEFAULT_BOOL_FALSE,
+        }
+
+    @staticmethod
+    def _new_server_payload() -> dict[str, str]:
+        return {
+            "uri": "",
+            "currentUri": "",
+            "downloadSpeed": DEFAULT_STATUS_DOWNLOADS,
+        }
+
+    def _sanitize_peers(self, peers: Any) -> list[dict]:
+        if not isinstance(peers, list):
+            return []
+        sanitized_peers: list[dict] = []
+        for item in peers:
+            if not isinstance(item, dict):
+                continue
+            peer = self._new_peer_payload()
+            peer["bitfield"] = self._status_str(item.get("bitfield"), "")
+            peer["amChoking"] = self._status_bool(item.get("amChoking"), DEFAULT_BOOL_FALSE)
+            peer["peerChoking"] = self._status_bool(item.get("peerChoking"), DEFAULT_BOOL_FALSE)
+            peer["downloadSpeed"] = self._status_str(item.get("downloadSpeed"), DEFAULT_STATUS_DOWNLOADS)
+            peer["uploadSpeed"] = self._status_str(item.get("uploadSpeed"), DEFAULT_STATUS_DOWNLOADS)
+            peer["seeder"] = self._status_bool(item.get("seeder"), DEFAULT_BOOL_FALSE)
+            sanitized_peers.append(peer)
+        return sanitized_peers
+
+    def _sanitize_servers(self, server_groups: Any) -> list[dict]:
+        if not isinstance(server_groups, list):
+            return []
+
+        sanitized_groups: list[dict] = []
+        for group in server_groups:
+            if not isinstance(group, dict):
+                continue
+            index = self._status_str(group.get("index"), "1")
+            servers = group.get("servers")
+            sanitized_servers: list[dict] = []
+            if isinstance(servers, list):
+                for server in servers:
+                    if not isinstance(server, dict):
+                        continue
+                    payload = self._new_server_payload()
+                    payload["downloadSpeed"] = self._status_str(server.get("downloadSpeed"), DEFAULT_STATUS_DOWNLOADS)
+                    sanitized_servers.append(payload)
+            sanitized_groups.append({"index": index, "servers": sanitized_servers})
+        return sanitized_groups
+
+    def _sanitize_uris(self, uris: Any) -> list[dict]:
+        if not isinstance(uris, list):
+            return []
+        sanitized_uris: list[dict] = []
+        for item in uris:
+            if not isinstance(item, dict):
+                continue
+            uri = mask_url_credentials(self._status_str(item.get("uri"), ""))
+            status = self._status_str(item.get("status"), "waiting")
+            if status not in {"used", "waiting"}:
+                status = "waiting"
+            sanitized_uris.append({"uri": uri, "status": status})
+        return sanitized_uris
+
+    def _sanitize_version(self, version_info: Any) -> dict:
+        if not isinstance(version_info, dict):
+            return {"version": "aria2deck-proxy", "enabledFeatures": []}
+
+        version = self._status_str(version_info.get("version"), "aria2deck-proxy")
+        features = version_info.get("enabledFeatures")
+        if isinstance(features, list):
+            enabled_features = [str(feature) for feature in features if isinstance(feature, str)]
+        else:
+            enabled_features = []
+        result: dict[str, Any] = {"version": version, "enabledFeatures": enabled_features}
+        for key in ("rpc_url", "secret", "sessionId"):
+            value = version_info.get(key)
+            if isinstance(value, str):
+                result[key] = value
+        return result
+
+    @staticmethod
+    def _build_bt_info_hash(uri_hash: str) -> str:
+        value = uri_hash.strip()
+        if len(value) != BT_INFO_HASH_LENGTH:
+            return ""
+        if not all(char in "0123456789abcdefABCDEF" for char in value):
+            return ""
+        return value.lower()
+
+    @staticmethod
+    def _is_bittorrent_uri(uri: str) -> bool:
+        return uri.startswith("magnet:") or uri.startswith("torrent:")
+
     def _sanitize_status(self, status: dict) -> dict:
         """对 tellStatus 返回的数据进行脱敏处理"""
-        result: dict[str, Any] = {}
+        result = self._new_status_payload()
 
-        allowed_top_level = [
-            "gid",
-            "status",
-            "totalLength",
-            "completedLength",
-            "uploadLength",
-            "downloadSpeed",
-            "uploadSpeed",
-            "errorCode",
-            "errorMessage",
-            "files",
-        ]
+        result["gid"] = self._status_str(status.get("gid"), "")
+        result["status"] = self._normalize_status_value(status.get("status"))
+        result["totalLength"] = self._status_str(status.get("totalLength"), DEFAULT_STATUS_DOWNLOADS)
+        result["completedLength"] = self._status_str(status.get("completedLength"), DEFAULT_STATUS_DOWNLOADS)
+        result["uploadLength"] = self._status_str(status.get("uploadLength"), DEFAULT_STATUS_DOWNLOADS)
+        result["downloadSpeed"] = self._status_str(status.get("downloadSpeed"), DEFAULT_STATUS_DOWNLOADS)
+        result["uploadSpeed"] = self._status_str(status.get("uploadSpeed"), DEFAULT_STATUS_DOWNLOADS)
+        result["pieceLength"] = self._status_str(status.get("pieceLength"), DEFAULT_STATUS_DOWNLOADS)
+        result["numPieces"] = self._status_str(status.get("numPieces"), DEFAULT_STATUS_DOWNLOADS)
+        result["connections"] = self._status_str(status.get("connections"), DEFAULT_STATUS_DOWNLOADS)
+        result["errorCode"] = self._status_str(status.get("errorCode"), DEFAULT_ERROR_CODE)
+        result["errorMessage"] = self._status_str(status.get("errorMessage"), "")
+        result["dir"] = ""
+        result["files"] = self._sanitize_files(status.get("files"))
+        result["infoHash"] = self._status_str(status.get("infoHash"), "")
+        result["numSeeders"] = self._status_str(status.get("numSeeders"), DEFAULT_STATUS_DOWNLOADS)
+        result["seeder"] = self._status_bool(status.get("seeder"), DEFAULT_BOOL_FALSE)
+        result["bittorrent"] = self._sanitize_bittorrent(status.get("bittorrent"))
 
-        for key in allowed_top_level:
-            if key in status:
-                result[key] = status[key]
+        bitfield = status.get("bitfield")
+        if isinstance(bitfield, str):
+            result["bitfield"] = bitfield
 
-        if "uploadLength" not in result:
-            result["uploadLength"] = "0"
+        followed_by = status.get("followedBy")
+        if isinstance(followed_by, list):
+            gids = [str(gid) for gid in followed_by if isinstance(gid, (str, int))]
+            result["followedBy"] = gids
 
-        if "files" in result and isinstance(result["files"], list):
-            sanitized_files = []
-            for f in result["files"]:
-                if not isinstance(f, dict):
-                    continue
-                sanitized_file = {}
-                if "index" in f:
-                    sanitized_file["index"] = f["index"]
-                if "length" in f:
-                    sanitized_file["length"] = f["length"]
-                if "completedLength" in f:
-                    sanitized_file["completedLength"] = f["completedLength"]
-                if "selected" in f:
-                    sanitized_file["selected"] = f["selected"]
-                if "path" in f:
-                    sanitized_file["path"] = self._sanitize_file_path(f["path"])
-                sanitized_file["uris"] = []
-                sanitized_files.append(sanitized_file)
-            result["files"] = sanitized_files
-        else:
-            result["files"] = []
+        following = status.get("following")
+        if following is not None:
+            result["following"] = self._status_str(following, "")
 
-        bt_info = status.get("bittorrent")
-        if isinstance(bt_info, dict):
-            sanitized_bt: dict[str, Any] = {"announceList": []}
-            info_dict = bt_info.get("info")
-            if isinstance(info_dict, dict):
-                name = info_dict.get("name")
-                if isinstance(name, str) and name:
-                    sanitized_bt["info"] = {"name": name}
-            result["bittorrent"] = sanitized_bt
+        belongs_to = status.get("belongsTo")
+        if belongs_to is not None:
+            result["belongsTo"] = self._status_str(belongs_to, "")
+
+        verified_length = status.get("verifiedLength")
+        if verified_length is not None:
+            result["verifiedLength"] = self._status_str(verified_length, DEFAULT_STATUS_DOWNLOADS)
+
+        verify_integrity_pending = status.get("verifyIntegrityPending")
+        if verify_integrity_pending is not None:
+            result["verifyIntegrityPending"] = self._status_bool(verify_integrity_pending)
 
         return result
 
@@ -330,28 +604,35 @@ class Aria2RpcHandler:
                 return None, int(suffix), None
         return gid, None, None
 
-    @staticmethod
-    def _build_status_from_history(history: TaskHistory) -> dict:
+    def _build_status_from_history(self, history: TaskHistory) -> dict:
         if history.result == "completed":
-            status = "complete"
+            status = DEFAULT_STATUS_COMPLETE
+            error_message = ""
+        elif history.result == "cancelled":
+            status = "removed"
             error_message = ""
         else:
-            status = "error"
+            status = DEFAULT_STATUS_ERROR
             error_message = history.reason or ""
 
         gid = f"hist-{history.id}" if history.id is not None else ""
-        return {
-            "gid": gid,
-            "status": status,
-            "totalLength": str(history.total_length or 0),
-            "completedLength": str(history.total_length or 0),
-            "uploadLength": "0",
-            "downloadSpeed": "0",
-            "uploadSpeed": "0",
-            "errorCode": "0",
-            "errorMessage": error_message,
-            "files": [],
-        }
+        total_length = history.total_length or 0
+        completed_length = total_length if status == DEFAULT_STATUS_COMPLETE else 0
+        result = self._new_status_payload()
+        result["gid"] = gid
+        result["status"] = status
+        result["totalLength"] = str(total_length)
+        result["completedLength"] = str(completed_length)
+        result["errorCode"] = "1" if status == DEFAULT_STATUS_ERROR else DEFAULT_ERROR_CODE
+        result["errorMessage"] = error_message
+        result["files"] = self._build_status_files(
+            task_name=history.task_name,
+            uri=history.uri,
+            total_length=total_length,
+            completed_length=completed_length,
+            fallback_name=gid,
+        )
+        return result
 
     async def _get_user_available_space(self) -> int:
         """获取用户实际可用空间"""
@@ -406,6 +687,167 @@ class Aria2RpcHandler:
             result.append(items_list[idx])
             idx -= 1
         return result
+
+    async def _get_task_pair_by_task_id(self, task_id: int) -> tuple[DownloadTask, UserTaskSubscription] | None:
+        async with get_session() as db:
+            stmt = (
+                select(DownloadTask, UserTaskSubscription)
+                .join(UserTaskSubscription, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
+                .where(
+                    DownloadTask.id == task_id,
+                    UserTaskSubscription.owner_id == self.user_id,
+                )
+                .order_by(col(UserTaskSubscription.id).desc())
+            )
+            result = await db.exec(stmt)
+            return result.first()
+
+    async def _get_history_status(self, history_id: int) -> dict | None:
+        async with get_session() as db:
+            history = await db.get(TaskHistory, history_id)
+        if history is None or history.owner_id != self.user_id:
+            return None
+        return self._build_status_from_history(history)
+
+    async def _get_special_gid_status(self, gid: str) -> dict | None:
+        _, task_id, history_id = self._parse_history_gid(gid)
+        if history_id is not None:
+            return await self._get_history_status(history_id)
+        if task_id is None:
+            return None
+        pair = await self._get_task_pair_by_task_id(task_id)
+        if pair is None:
+            return None
+        task, sub = pair
+        return self._build_status_from_db(task, sub)
+
+    async def _resolve_special_gid_status(self, gid: str) -> dict | None:
+        if not gid.startswith(SPECIAL_GID_PREFIXES):
+            return None
+        return await self._get_special_gid_status(gid)
+
+    async def _get_special_gid_source_uri(self, gid: str) -> str | None:
+        _, task_id, history_id = self._parse_history_gid(gid)
+        if history_id is not None:
+            async with get_session() as db:
+                history = await db.get(TaskHistory, history_id)
+            if history is None or history.owner_id != self.user_id:
+                return None
+            return history.uri
+
+        if task_id is None:
+            return None
+        pair = await self._get_task_pair_by_task_id(task_id)
+        if pair is None:
+            return None
+        task, _ = pair
+        return task.uri
+
+    async def _get_pending_task_pairs(self, task_statuses: list[str]) -> list[tuple[DownloadTask, UserTaskSubscription]]:
+        async with get_session() as db:
+            stmt = (
+                select(DownloadTask, UserTaskSubscription)
+                .join(UserTaskSubscription, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
+                .where(
+                    UserTaskSubscription.owner_id == self.user_id,
+                    UserTaskSubscription.status == "pending",
+                    col(DownloadTask.status).in_(task_statuses),
+                )
+                .order_by(col(UserTaskSubscription.id).desc())
+            )
+            result = await db.exec(stmt)
+            return result.all()
+
+    async def _get_pending_task_map(self, gids: set[str]) -> dict[str, DownloadTask]:
+        if not gids:
+            return {}
+
+        async with get_session() as db:
+            stmt = (
+                select(DownloadTask, UserTaskSubscription)
+                .join(UserTaskSubscription, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
+                .where(
+                    UserTaskSubscription.owner_id == self.user_id,
+                    UserTaskSubscription.status == "pending",
+                    col(DownloadTask.gid).in_(sorted(gids)),
+                )
+                .order_by(col(UserTaskSubscription.id).desc())
+            )
+            result = await db.exec(stmt)
+            pairs = result.all()
+
+        task_map: dict[str, DownloadTask] = {}
+        for task, _ in pairs:
+            if task.gid:
+                task_map[task.gid] = task
+        return task_map
+
+    @staticmethod
+    def _status_has_file_name(status: dict[str, Any]) -> bool:
+        files = status.get("files")
+        if not isinstance(files, list) or not files:
+            return False
+        for file_item in files:
+            if not isinstance(file_item, dict):
+                continue
+            path = file_item.get("path")
+            if isinstance(path, str) and path.strip():
+                return True
+        return False
+
+    @staticmethod
+    def _extract_gids_from_statuses(statuses: list[dict[str, Any]]) -> set[str]:
+        gids: set[str] = set()
+        for status in statuses:
+            gid = status.get("gid")
+            if isinstance(gid, str) and gid:
+                gids.add(gid)
+        return gids
+
+    def _enrich_status_files_from_task(self, status: dict[str, Any], task: DownloadTask | None) -> dict[str, Any]:
+        if task is None or self._status_has_file_name(status):
+            return status
+
+        total_length = self._to_int_scalar(status.get("totalLength"), task.total_length or 0)
+        completed_length = self._to_int_scalar(status.get("completedLength"), task.completed_length or 0)
+        enriched = dict(status)
+        enriched["files"] = self._build_status_files(
+            task_name=task.name,
+            uri=task.uri,
+            total_length=total_length,
+            completed_length=completed_length,
+            fallback_name=self._status_str(enriched.get("gid"), "task"),
+        )
+        if self._is_bittorrent_uri(task.uri):
+            bittorrent = enriched.get("bittorrent")
+            if not isinstance(bittorrent, dict):
+                bittorrent = self._new_status_payload()["bittorrent"]
+            else:
+                bittorrent = dict(bittorrent)
+            info = bittorrent.get("info")
+            if not isinstance(info, dict):
+                info = {}
+            else:
+                info = dict(info)
+            info["name"] = task.name or enriched["files"][0]["path"]
+            bittorrent["info"] = info
+            enriched["bittorrent"] = bittorrent
+        return enriched
+
+    def _enrich_statuses_with_task_map(
+        self,
+        statuses: list[dict[str, Any]],
+        task_map: dict[str, DownloadTask],
+    ) -> list[dict[str, Any]]:
+        enriched_statuses: list[dict[str, Any]] = []
+        for status in statuses:
+            gid_value = status.get("gid")
+            task = task_map.get(str(gid_value)) if gid_value is not None else None
+            enriched_statuses.append(self._enrich_status_files_from_task(status, task))
+        return enriched_statuses
+
+    def _apply_status_keys_to_list(self, statuses: list[dict], keys: list[str] | None) -> list[dict]:
+        return [self._apply_status_keys(item, keys) for item in statuses]
 
     async def _fetch_waiting_tasks(self, max_items: int = 10000, page_size: int = 1000) -> list[dict]:
         offset = 0
@@ -553,13 +995,13 @@ class Aria2RpcHandler:
         uris = params[0]
         if not uris:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "uris list is empty")
-        options = params[1] if len(params) > 1 and isinstance(params[1], dict) else {}
+        options = dict(params[1]) if len(params) > 1 and isinstance(params[1], dict) else {}
         # 获取用户空间锁
         from app.core.state import get_user_space_lock
+        from app.services.storage import get_task_download_dir
         user_lock = await get_user_space_lock(self.app_state, self.user_id)
         async with user_lock:
             await self._check_quota_and_disk()
-            options["dir"] = self._get_user_incomplete_dir()
             uri = uris[0] if uris else ""
             uri_hash = get_uri_hash(uri) or hashlib.sha256(uri.encode()).hexdigest()
             task_name = uri.split("/")[-1] or uri
@@ -573,6 +1015,7 @@ class Aria2RpcHandler:
 
             if task.gid and task.status in ("active", "queued", "waiting"):
                 return task.gid
+            options["dir"] = str(get_task_download_dir(task_id))
 
             task_lock = await self._get_task_submit_lock(task_id)
             async with task_lock:
@@ -613,12 +1056,12 @@ class Aria2RpcHandler:
         if len(torrent_data) > 10 * 1024 * 1024:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "Torrent data too large")
         uris = params[1] if len(params) > 1 and isinstance(params[1], list) else []
-        options = params[2] if len(params) > 2 and isinstance(params[2], dict) else {}
+        options = dict(params[2]) if len(params) > 2 and isinstance(params[2], dict) else {}
         from app.core.state import get_user_space_lock
+        from app.services.storage import get_task_download_dir
         user_lock = await get_user_space_lock(self.app_state, self.user_id)
         async with user_lock:
             await self._check_quota_and_disk()
-            options["dir"] = self._get_user_incomplete_dir()
             info_hash = extract_info_hash_from_torrent_base64(torrent_data)
             uri_hash = info_hash or hashlib.sha256(torrent_data.encode()).hexdigest()
             task_uri = f"torrent:{uri_hash}"
@@ -633,6 +1076,7 @@ class Aria2RpcHandler:
 
             if task.gid and task.status in ("active", "queued", "waiting"):
                 return task.gid
+            options["dir"] = str(get_task_download_dir(task_id))
 
             task_lock = await self._get_task_submit_lock(task_id)
             async with task_lock:
@@ -653,8 +1097,12 @@ class Aria2RpcHandler:
                     name = task_name
                     try:
                         status = await self.client.tell_status(gid)
-                        bt_info = status.get("bittorrent", {})
-                        name = bt_info.get("info", {}).get("name", "") or name
+                        if isinstance(status, dict):
+                            bt_info = status.get("bittorrent", {})
+                            if isinstance(bt_info, dict):
+                                info = bt_info.get("info", {})
+                                if isinstance(info, dict):
+                                    name = self._status_str(info.get("name"), "") or name
                     except Exception as exc:
                         logger.debug(
                             "Failed to fetch bittorrent metadata for gid=%s user_id=%s",
@@ -750,6 +1198,7 @@ class Aria2RpcHandler:
 
                 if db_task and db_task.gid and db_task.status in ("queued", "active", "error"):
                     await self._cleanup_aria2_gid(db_task.gid)
+                await cleanup_task_download_dir(task_id)
 
         return gid
     async def _handle_force_remove(self, params: list) -> str:
@@ -759,8 +1208,13 @@ class Aria2RpcHandler:
         """aria2.tellStatus(gid[, keys])"""
         if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
-        gid = params[0]
-        _ = params[1] if len(params) > 1 and isinstance(params[1], list) else None  # keys ignored
+        gid = str(params[0])
+        keys = self._extract_status_keys(params, 1)
+
+        special_status = await self._resolve_special_gid_status(gid)
+        if special_status is not None:
+            return self._apply_status_keys(special_status, keys)
+
         pair = await self._verify_task_owner(gid)
         if not pair:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
@@ -768,7 +1222,8 @@ class Aria2RpcHandler:
         # 尝试从 aria2 获取实时数据
         try:
             status = await self.client.tell_status(gid)
-            return self._sanitize_status(status)
+            response = self._sanitize_status(status)
+            response = self._enrich_status_files_from_task(response, task)
         except Exception as exc:
             # aria2 中已不存在（已完成/失败），从 DB 构造
             logger.debug(
@@ -777,33 +1232,54 @@ class Aria2RpcHandler:
                 self.user_id,
                 exc_info=exc,
             )
-            return self._build_status_from_db(task, sub)
+            response = self._build_status_from_db(task, sub)
+        return self._apply_status_keys(response, keys)
+
     def _build_status_from_db(self, task: DownloadTask, sub: UserTaskSubscription) -> dict:
         """从数据库记录构造 aria2 tellStatus 格式的响应"""
         # 状态映射
         status_map = {
-            "success": "complete",
-            "failed": "error",
+            "success": DEFAULT_STATUS_COMPLETE,
+            "failed": DEFAULT_STATUS_ERROR,
             "active": "active",
             "queued": "waiting",
             "waiting": "waiting",
+            "paused": "paused",
+            "complete": DEFAULT_STATUS_COMPLETE,
+            "error": DEFAULT_STATUS_ERROR,
+            "removed": "removed",
         }
-        aria2_status = status_map.get(sub.status, status_map.get(task.status, "error"))
-        return {
-            "gid": self._build_history_gid(task),
-            "status": aria2_status,
-            "totalLength": str(task.total_length or 0),
-            "completedLength": str(task.completed_length or 0),
-            "uploadLength": "0",
-            "downloadSpeed": "0",
-            "uploadSpeed": "0",
-            "errorCode": "0",
-            "errorMessage": task.error or task.error_display or "",
-            "files": [],
-        }
+        aria2_status = status_map.get(sub.status, status_map.get(task.status, DEFAULT_STATUS_ERROR))
+        total_length = task.total_length or 0
+        completed_length = task.completed_length or 0
+        error_message = task.error or task.error_display or ""
+        result = self._new_status_payload()
+        result["gid"] = self._build_history_gid(task)
+        result["status"] = aria2_status
+        result["totalLength"] = str(total_length)
+        result["completedLength"] = str(completed_length)
+        result["downloadSpeed"] = str(task.download_speed or 0)
+        result["uploadSpeed"] = str(task.upload_speed or 0)
+        result["connections"] = str(task.peak_connections or 0)
+        result["errorCode"] = "1" if aria2_status == DEFAULT_STATUS_ERROR else DEFAULT_ERROR_CODE
+        result["errorMessage"] = error_message if aria2_status == DEFAULT_STATUS_ERROR else ""
+        result["files"] = self._build_status_files(
+            task_name=task.name,
+            uri=task.uri,
+            total_length=total_length,
+            completed_length=completed_length,
+            fallback_name=result["gid"] or "task",
+        )
+
+        if self._is_bittorrent_uri(task.uri):
+            result["infoHash"] = self._build_bt_info_hash(task.uri_hash)
+            result["bittorrent"]["info"]["name"] = task.name or result["files"][0]["path"]
+
+        return result
+
     async def _handle_tell_active(self, params: list) -> list:
         """aria2.tellActive([keys])"""
-        _ = params[0] if params and isinstance(params[0], list) else None  # keys ignored
+        keys = self._extract_status_keys(params, 0)
         user_gids = await self._get_user_gids(sub_statuses=["pending"])
         if not user_gids:
             return []
@@ -815,12 +1291,22 @@ class Aria2RpcHandler:
                 self.user_id,
                 exc_info=exc,
             )
-            return []
-        return [self._sanitize_status(t) for t in all_active if t.get("gid") in user_gids]
+        else:
+            active_statuses = [self._sanitize_status(t) for t in all_active if t.get("gid") in user_gids]
+            if active_statuses:
+                status_gids = self._extract_gids_from_statuses(active_statuses)
+                task_map = await self._get_pending_task_map(status_gids)
+                enriched_statuses = self._enrich_statuses_with_task_map(active_statuses, task_map)
+                return self._apply_status_keys_to_list(enriched_statuses, keys)
+
+        fallback_pairs = await self._get_pending_task_pairs(["active"])
+        fallback_statuses = [self._build_status_from_db(task, sub) for task, sub in fallback_pairs]
+        return self._apply_status_keys_to_list(fallback_statuses, keys)
+
     async def _handle_tell_waiting(self, params: list) -> list:
         """aria2.tellWaiting(offset, num[, keys])"""
         offset, num = self._normalize_pagination(params)
-        _ = params[2] if len(params) > 2 and isinstance(params[2], list) else None  # keys ignored
+        keys = self._extract_status_keys(params, 2)
         user_gids = await self._get_user_gids(sub_statuses=["pending"])
         if not user_gids:
             return []
@@ -832,13 +1318,24 @@ class Aria2RpcHandler:
                 self.user_id,
                 exc_info=exc,
             )
-            return []
+        else:
+            filtered = [self._sanitize_status(t) for t in all_waiting if t.get("gid") in user_gids]
+            if filtered:
+                sliced = self._slice_with_offset(filtered, offset, num)
+                status_gids = self._extract_gids_from_statuses(sliced)
+                task_map = await self._get_pending_task_map(status_gids)
+                enriched_statuses = self._enrich_statuses_with_task_map(sliced, task_map)
+                return self._apply_status_keys_to_list(enriched_statuses, keys)
 
-        filtered = [self._sanitize_status(t) for t in all_waiting if t.get("gid") in user_gids]
-        return self._slice_with_offset(filtered, offset, num)
+        fallback_pairs = await self._get_pending_task_pairs(["queued", "waiting", "paused"])
+        fallback_statuses = [self._build_status_from_db(task, sub) for task, sub in fallback_pairs]
+        sliced_fallback = self._slice_with_offset(fallback_statuses, offset, num)
+        return self._apply_status_keys_to_list(sliced_fallback, keys)
+
     async def _handle_tell_stopped(self, params: list) -> list:
         """aria2.tellStopped(offset, num[, keys])"""
         offset, num = self._normalize_pagination(params)
+        keys = self._extract_status_keys(params, 2)
 
         async with get_session() as db:
             stmt = (
@@ -852,7 +1349,8 @@ class Aria2RpcHandler:
             rows = result.all()
 
         sliced_rows = self._slice_with_offset(rows, offset, num)
-        return [self._build_status_from_history(history) for history in sliced_rows]
+        stopped_statuses = [self._build_status_from_history(history) for history in sliced_rows]
+        return self._apply_status_keys_to_list(stopped_statuses, keys)
     async def _handle_get_global_stat(self, params: list) -> dict:
         """aria2.getGlobalStat()"""
         # 用户级别统计
@@ -911,17 +1409,18 @@ class Aria2RpcHandler:
         """aria2.getFiles(gid)"""
         if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
-        gid = params[0]
+        gid = str(params[0])
+        special_status = await self._resolve_special_gid_status(gid)
+        if gid.startswith(SPECIAL_GID_PREFIXES):
+            if special_status is None:
+                raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
+            return self._sanitize_files(special_status.get("files"))
         pair = await self._verify_task_owner(gid)
         if not pair:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
         try:
             files = await self.client.get_files(gid)
-            for f in files:
-                if "path" in f:
-                    f["path"] = self._sanitize_file_path(f["path"])
-                f["uris"] = []
-            return files
+            return self._sanitize_files(files)
         except Exception as exc:
             logger.warning(
                 "aria2.getFiles failed for gid=%s user_id=%s",
@@ -934,12 +1433,21 @@ class Aria2RpcHandler:
         """aria2.getUris(gid)"""
         if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
-        gid = params[0]
+        gid = str(params[0])
+        special_status = await self._resolve_special_gid_status(gid)
+        if gid.startswith(SPECIAL_GID_PREFIXES):
+            if special_status is None:
+                raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
+            source_uri = await self._get_special_gid_source_uri(gid)
+            if not source_uri:
+                return []
+            return self._sanitize_uris([{"uri": source_uri, "status": "used"}])
         pair = await self._verify_task_owner(gid)
         if not pair:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
         try:
-            return await self.client.get_uris(gid)
+            uris = await self.client.get_uris(gid)
+            return self._sanitize_uris(uris)
         except Exception as exc:
             logger.warning(
                 "aria2.getUris failed for gid=%s user_id=%s",
@@ -950,7 +1458,16 @@ class Aria2RpcHandler:
             return []
     async def _handle_get_version(self, params: list) -> dict:
         """aria2.getVersion()"""
-        return await self.client.get_version()
+        try:
+            version_info = await self.client.get_version()
+        except Exception as exc:
+            logger.warning(
+                "aria2.getVersion failed for user_id=%s",
+                self.user_id,
+                exc_info=exc,
+            )
+            version_info = {}
+        return self._sanitize_version(version_info)
     async def _handle_remove_download_result(self, params: list) -> str:
         """aria2.removeDownloadResult(gid) - 删除用户的 stopped 订阅（历史记录）"""
         if not params:
@@ -1053,9 +1570,51 @@ class Aria2RpcHandler:
     async def _handle_change_uri(self, params: list) -> list:
         return [0, 0]
     async def _handle_get_peers(self, params: list) -> list:
-        return []
+        if not params:
+            raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
+        gid = str(params[0])
+        special_status = await self._resolve_special_gid_status(gid)
+        if gid.startswith(SPECIAL_GID_PREFIXES):
+            if special_status is None:
+                raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
+            return []
+        pair = await self._verify_task_owner(gid)
+        if not pair:
+            raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
+        try:
+            peers = await self.client.get_peers(gid)
+            return self._sanitize_peers(peers)
+        except Exception as exc:
+            logger.warning(
+                "aria2.getPeers failed for gid=%s user_id=%s",
+                gid,
+                self.user_id,
+                exc_info=exc,
+            )
+            return []
     async def _handle_get_servers(self, params: list) -> list:
-        return []
+        if not params:
+            raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
+        gid = str(params[0])
+        special_status = await self._resolve_special_gid_status(gid)
+        if gid.startswith(SPECIAL_GID_PREFIXES):
+            if special_status is None:
+                raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
+            return []
+        pair = await self._verify_task_owner(gid)
+        if not pair:
+            raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
+        try:
+            server_groups = await self.client.get_servers(gid)
+            return self._sanitize_servers(server_groups)
+        except Exception as exc:
+            logger.warning(
+                "aria2.getServers failed for gid=%s user_id=%s",
+                gid,
+                self.user_id,
+                exc_info=exc,
+            )
+            return []
     async def _handle_shutdown(self, params: list) -> str:
         return "OK"
     async def _handle_force_shutdown(self, params: list) -> str:

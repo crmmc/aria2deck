@@ -11,6 +11,7 @@ from app.core.state import AppState
 from app.database import get_session
 from app.models import DownloadTask, TaskHistory, UserTaskSubscription
 from app.services.hash import get_uri_hash
+from app.services.storage import get_task_download_dir
 from app.services.aria2_rpc_handler import (
     Aria2RpcHandler,
     RpcError,
@@ -190,6 +191,27 @@ class TestAria2RpcHandlerAddMethods:
             assert refreshed_sub is not None
             assert refreshed_sub.status == "pending"
 
+    async def test_add_uri_uses_task_download_dir(self, handler):
+        handler.client.add_uri.return_value = "gid-dir-uri"
+        uri = "https://example.com/dir-uri.bin"
+
+        result = await handler.handle(
+            "aria2.addUri",
+            [[uri], {"max-connection-per-server": "4"}],
+        )
+        assert result == "gid-dir-uri"
+
+        async with get_session() as db:
+            task = (
+                await db.exec(select(DownloadTask).where(DownloadTask.gid == "gid-dir-uri"))
+            ).first()
+            assert task is not None
+            assert task.id is not None
+
+        sent_options = handler.client.add_uri.call_args.args[1]
+        assert sent_options["dir"] == str(get_task_download_dir(task.id))
+        assert sent_options["max-connection-per-server"] == "4"
+
     async def test_add_uri_failure_marks_subscription_failed(self, handler):
         handler.client.add_uri.side_effect = RuntimeError("rpc unavailable")
         uri = "https://example.com/fail.bin"
@@ -246,6 +268,27 @@ class TestAria2RpcHandlerAddMethods:
             ).first()
             assert sub is not None
             assert sub.status == "failed"
+
+    async def test_add_torrent_uses_task_download_dir(self, handler):
+        handler.client.add_torrent.return_value = "gid-dir-torrent"
+        torrent_data = "d" * 100
+
+        result = await handler.handle(
+            "aria2.addTorrent",
+            [torrent_data, [], {"seed-ratio": "0"}],
+        )
+        assert result == "gid-dir-torrent"
+
+        async with get_session() as db:
+            task = (
+                await db.exec(select(DownloadTask).where(DownloadTask.gid == "gid-dir-torrent"))
+            ).first()
+            assert task is not None
+            assert task.id is not None
+
+        sent_options = handler.client.add_torrent.call_args.args[2]
+        assert sent_options["dir"] == str(get_task_download_dir(task.id))
+        assert sent_options["seed-ratio"] == "0"
 
 
 @pytest.mark.asyncio
@@ -426,8 +469,8 @@ class TestAria2RpcHandlerSanitization:
         status = {"dir": "/some/path", "gid": "abc123", "connections": "12"}
         result = handler._sanitize_status(status)
         assert "gid" in result
-        assert "dir" not in result
-        assert "connections" not in result
+        assert result["dir"] == ""
+        assert result["connections"] == "12"
 
     async def test_sanitize_status_with_files(self, handler):
         status = {
@@ -487,11 +530,6 @@ class TestAria2RpcHandlerUserSpace:
         assert result is not None
         assert str(handler.user_id) in result
 
-    async def test_get_user_incomplete_dir(self, handler):
-        result = handler._get_user_incomplete_dir()
-        assert result is not None
-        assert ".incomplete" in result
-
     async def test_verify_task_owner_not_found(self, handler):
         result = await handler._verify_task_owner("nonexistent_gid")
         assert result is None
@@ -538,6 +576,31 @@ class TestAria2RpcHandlerWithTasks:
             await handler.handle("aria2.forceRemove", ["nonexistent_gid"])
         assert exc_info.value.code == RpcErrorCode.TASK_NOT_FOUND
 
+    async def test_remove_last_subscription_cleans_task_download_dir(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-remove-cleanup",
+                uri="https://example.com/remove-cleanup.bin",
+                gid="gid-remove-cleanup",
+                status="active",
+                name="remove-cleanup.bin",
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        task_dir = get_task_download_dir(task.id)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "partial.bin").write_text("x")
+
+        handler._cleanup_aria2_gid = AsyncMock()
+        result = await handler.handle("aria2.remove", ["gid-remove-cleanup"])
+
+        assert result == "gid-remove-cleanup"
+        assert not task_dir.exists()
+        handler._cleanup_aria2_gid.assert_awaited_once_with("gid-remove-cleanup")
+
     async def test_pause_returns_gid_for_nonexistent(self, handler):
         result = await handler.handle("aria2.pause", ["nonexistent_gid"])
         assert result == "nonexistent_gid"
@@ -550,6 +613,227 @@ class TestAria2RpcHandlerWithTasks:
             await handler.handle("aria2.tellStatus", ["nonexistent_gid"])
         assert exc_info.value.code == RpcErrorCode.TASK_NOT_FOUND
 
+    async def test_tell_status_history_gid(self, handler):
+        async with get_session() as db:
+            history = TaskHistory(
+                owner_id=handler.user_id,
+                task_name="hist-task",
+                uri="https://example.com/hist.iso",
+                total_length=1024,
+                result="completed",
+            )
+            db.add(history)
+            await db.flush()
+            assert history.id is not None
+
+        result = await handler.handle("aria2.tellStatus", [f"hist-{history.id}"])
+        assert result["gid"] == f"hist-{history.id}"
+        assert result["status"] == "complete"
+        assert result["totalLength"] == "1024"
+        assert result["completedLength"] == "1024"
+        assert result["files"][0]["path"] == "hist-task"
+
+    async def test_get_files_supports_history_gid(self, handler):
+        async with get_session() as db:
+            history = TaskHistory(
+                owner_id=handler.user_id,
+                task_name="hist-files.bin",
+                uri="https://example.com/hist-files.bin",
+                total_length=321,
+                result="failed",
+                reason="network error",
+            )
+            db.add(history)
+            await db.flush()
+            assert history.id is not None
+
+        result = await handler.handle("aria2.getFiles", [f"hist-{history.id}"])
+        assert len(result) == 1
+        assert result[0]["path"] == "hist-files.bin"
+        assert result[0]["length"] == "321"
+
+    async def test_get_uris_supports_history_gid(self, handler):
+        async with get_session() as db:
+            history = TaskHistory(
+                owner_id=handler.user_id,
+                task_name="hist-uris.bin",
+                uri="https://user:pass@example.com/hist-uris.bin",
+                total_length=1,
+                result="completed",
+            )
+            db.add(history)
+            await db.flush()
+            assert history.id is not None
+
+        result = await handler.handle("aria2.getUris", [f"hist-{history.id}"])
+        assert result == [{"uri": "https://***:***@example.com/hist-uris.bin", "status": "used"}]
+
+    async def test_get_peers_servers_support_history_gid(self, handler):
+        async with get_session() as db:
+            history = TaskHistory(
+                owner_id=handler.user_id,
+                task_name="hist-peers.bin",
+                uri="https://example.com/hist-peers.bin",
+                total_length=1,
+                result="cancelled",
+            )
+            db.add(history)
+            await db.flush()
+            assert history.id is not None
+
+        peers = await handler.handle("aria2.getPeers", [f"hist-{history.id}"])
+        servers = await handler.handle("aria2.getServers", [f"hist-{history.id}"])
+        assert peers == []
+        assert servers == []
+
+    async def test_tell_status_history_error_keeps_name_in_files(self, handler):
+        async with get_session() as db:
+            history = TaskHistory(
+                owner_id=handler.user_id,
+                task_name="ubuntu.iso",
+                uri="https://example.com/ubuntu.iso",
+                total_length=2048,
+                result="failed",
+                reason="连接超时",
+            )
+            db.add(history)
+            await db.flush()
+            assert history.id is not None
+
+        result = await handler.handle("aria2.tellStatus", [f"hist-{history.id}"])
+        assert result["status"] == "error"
+        assert result["errorMessage"] == "连接超时"
+        assert result["completedLength"] == "0"
+        assert result["files"][0]["path"] == "ubuntu.iso"
+        assert result["files"][0]["completedLength"] == "0"
+
+    async def test_tell_status_history_cancelled_maps_to_removed(self, handler):
+        async with get_session() as db:
+            history = TaskHistory(
+                owner_id=handler.user_id,
+                task_name="cancelled-task.iso",
+                uri="https://example.com/cancelled-task.iso",
+                total_length=4096,
+                result="cancelled",
+                reason="用户取消",
+            )
+            db.add(history)
+            await db.flush()
+            assert history.id is not None
+
+        result = await handler.handle("aria2.tellStatus", [f"hist-{history.id}"])
+        assert result["status"] == "removed"
+        assert result["errorCode"] == "0"
+        assert result["errorMessage"] == ""
+        assert result["completedLength"] == "0"
+        assert result["files"][0]["path"] == "cancelled-task.iso"
+
+    async def test_tell_status_db_fallback_uses_task_name(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-db-fallback-name",
+                uri="https://example.com/releases/archive.tar.gz",
+                gid="gid-db-fallback-name",
+                status="error",
+                name="archive.tar.gz",
+                total_length=4096,
+                completed_length=1024,
+                error_display="连接被拒绝",
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.tell_status.side_effect = RuntimeError("rpc unavailable")
+        result = await handler.handle("aria2.tellStatus", ["gid-db-fallback-name"])
+
+        assert result["status"] == "error"
+        assert result["errorMessage"] == "连接被拒绝"
+        assert result["files"][0]["path"] == "archive.tar.gz"
+
+    async def test_tell_status_db_fallback_uses_uri_basename_when_name_missing(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-db-fallback-uri",
+                uri="https://example.com/downloads/video.mp4?token=abc",
+                gid="gid-db-fallback-uri",
+                status="error",
+                name=None,
+                total_length=100,
+                completed_length=10,
+                error_display="后端错误",
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.tell_status.side_effect = RuntimeError("rpc unavailable")
+        result = await handler.handle("aria2.tellStatus", ["gid-db-fallback-uri"])
+
+        assert result["files"][0]["path"] == "video.mp4"
+
+    async def test_tell_status_success_without_files_uses_task_name(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-live-no-files",
+                uri="https://example.com/live/task.bin",
+                gid="gid-live-no-files",
+                status="active",
+                name="task.bin",
+                total_length=500,
+                completed_length=200,
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.tell_status.return_value = {
+            "gid": "gid-live-no-files",
+            "status": "active",
+            "totalLength": "500",
+            "completedLength": "200",
+            "downloadSpeed": "12",
+            "uploadSpeed": "0",
+        }
+
+        result = await handler.handle("aria2.tellStatus", ["gid-live-no-files"])
+        assert result["files"][0]["path"] == "task.bin"
+        assert result["files"][0]["completedLength"] == "200"
+
+    async def test_tell_status_preserves_multifile_when_one_file_has_name(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-live-multi",
+                uri="https://example.com/live/multi.zip",
+                gid="gid-live-multi",
+                status="active",
+                name="multi.zip",
+                total_length=1000,
+                completed_length=500,
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.tell_status.return_value = {
+            "gid": "gid-live-multi",
+            "status": "active",
+            "totalLength": "1000",
+            "completedLength": "500",
+            "files": [
+                {"path": "", "length": "300", "completedLength": "100"},
+                {"path": "/downloads/real-name.bin", "length": "700", "completedLength": "400"},
+            ],
+        }
+
+        result = await handler.handle("aria2.tellStatus", ["gid-live-multi"])
+        assert len(result["files"]) == 2
+        assert result["files"][1]["path"] == "real-name.bin"
+
     async def test_get_files_task_not_found(self, handler):
         with pytest.raises(RpcError) as exc_info:
             await handler.handle("aria2.getFiles", ["nonexistent_gid"])
@@ -559,6 +843,116 @@ class TestAria2RpcHandlerWithTasks:
         with pytest.raises(RpcError) as exc_info:
             await handler.handle("aria2.getUris", ["nonexistent_gid"])
         assert exc_info.value.code == RpcErrorCode.TASK_NOT_FOUND
+
+    async def test_get_uris_masks_credentials(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-uri-1",
+                uri="https://example.com/resource.bin",
+                gid="gid-uri-1",
+                status="active",
+                name="uri-test",
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.get_uris.return_value = [
+            {"uri": "https://user:pass@example.com/resource.bin", "status": "used"},
+            {"uri": "https://example.com/next.bin", "status": "unknown"},
+        ]
+
+        result = await handler.handle("aria2.getUris", ["gid-uri-1"])
+        assert len(result) == 2
+        assert result[0]["uri"] == "https://***:***@example.com/resource.bin"
+        assert result[0]["status"] == "used"
+        assert result[1]["status"] == "waiting"
+
+    async def test_get_version_returns_platform_shape(self, handler):
+        handler.client.get_version.return_value = {
+            "version": "1.37.0",
+            "enabledFeatures": ["BitTorrent", "AsyncDNS"],
+            "extra": "ignored",
+        }
+        result = await handler.handle("aria2.getVersion", [])
+        assert result == {"version": "1.37.0", "enabledFeatures": ["BitTorrent", "AsyncDNS"]}
+
+    async def test_get_version_fallback_when_backend_error(self, handler):
+        handler.client.get_version.side_effect = RuntimeError("backend down")
+        result = await handler.handle("aria2.getVersion", [])
+        assert result == {"version": "aria2deck-proxy", "enabledFeatures": []}
+
+    async def test_get_peers_masks_sensitive_fields(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-peer-1",
+                uri="magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678",
+                gid="gid-peer-1",
+                status="active",
+                name="peer-test",
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.get_peers.return_value = [
+            {
+                "peerId": "peer-raw",
+                "ip": "8.8.8.8",
+                "port": "6881",
+                "bitfield": "ffff",
+                "amChoking": "true",
+                "peerChoking": "false",
+                "downloadSpeed": "1200",
+                "uploadSpeed": "300",
+                "seeder": "true",
+            }
+        ]
+
+        result = await handler.handle("aria2.getPeers", ["gid-peer-1"])
+        assert len(result) == 1
+        assert result[0]["peerId"] == "masked-peer"
+        assert result[0]["ip"] == "0.0.0.0"
+        assert result[0]["port"] == "0"
+        assert result[0]["downloadSpeed"] == "1200"
+        assert result[0]["uploadSpeed"] == "300"
+
+    async def test_get_servers_masks_sensitive_fields(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-server-1",
+                uri="https://example.com/resource.bin",
+                gid="gid-server-1",
+                status="active",
+                name="server-test",
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.get_servers.return_value = [
+            {
+                "index": "1",
+                "servers": [
+                    {
+                        "uri": "https://example.com/resource.bin",
+                        "currentUri": "https://cdn.example.com/resource.bin",
+                        "downloadSpeed": "2048",
+                    }
+                ],
+            }
+        ]
+
+        result = await handler.handle("aria2.getServers", ["gid-server-1"])
+        assert len(result) == 1
+        assert result[0]["index"] == "1"
+        assert len(result[0]["servers"]) == 1
+        assert result[0]["servers"][0]["uri"] == ""
+        assert result[0]["servers"][0]["currentUri"] == ""
+        assert result[0]["servers"][0]["downloadSpeed"] == "2048"
 
 
 @pytest.mark.asyncio
@@ -613,6 +1007,67 @@ class TestAria2RpcHandlerTellMethods:
         assert len(result) == 1
         assert result[0]["gid"] == "u-1"
 
+    async def test_tell_active_enriches_files_when_backend_missing_files(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-active-enrich",
+                uri="https://example.com/active.bin",
+                gid="gid-active-enrich",
+                status="queued",
+                name="active.bin",
+                total_length=1000,
+                completed_length=333,
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.tell_active.return_value = [
+            {
+                "gid": "gid-active-enrich",
+                "status": "active",
+                "totalLength": "1000",
+                "completedLength": "333",
+            }
+        ]
+        handler._get_user_gids = AsyncMock(return_value={"gid-active-enrich"})
+
+        result = await handler.handle("aria2.tellActive", [])
+        assert len(result) == 1
+        assert result[0]["files"][0]["path"] == "active.bin"
+        assert result[0]["files"][0]["completedLength"] == "333"
+
+    async def test_tell_waiting_enriches_files_when_backend_missing_files(self, handler):
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-waiting-enrich",
+                uri="https://example.com/waiting.bin",
+                gid="gid-waiting-enrich",
+                status="active",
+                name="waiting.bin",
+                total_length=300,
+                completed_length=0,
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.tell_waiting.return_value = [
+            {
+                "gid": "gid-waiting-enrich",
+                "status": "waiting",
+                "totalLength": "300",
+                "completedLength": "0",
+            }
+        ]
+        handler._get_user_gids = AsyncMock(return_value={"gid-waiting-enrich"})
+
+        result = await handler.handle("aria2.tellWaiting", [0, 10])
+        assert len(result) == 1
+        assert result[0]["files"][0]["path"] == "waiting.bin"
+
     async def test_normalize_gid_collection_accepts_tuple_values(self, handler):
         gids = handler._normalize_gid_collection({("u-1",), ("u-2",)})
         assert gids == {"u-1", "u-2"}
@@ -631,6 +1086,8 @@ class TestAria2RpcHandlerTellMethods:
 
         result = await handler.handle("aria2.tellStopped", [-1, 2])
         assert [item["gid"] for item in result] == [f"hist-{h3.id}", f"hist-{h2.id}"]
+        assert [item["status"] for item in result] == ["error", "removed"]
+        assert [item["files"][0]["path"] for item in result] == ["h3", "h2"]
 
 
 @pytest.mark.asyncio
