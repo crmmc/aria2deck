@@ -259,16 +259,28 @@ async def move_to_store(
         existing = result.first()
 
         if existing:
-            # File already exists in store, delete the duplicate
-            logger.info(
-                f"File already in store: {content_hash}, deleting duplicate at {source_path}"
-            )
-            safe_delete_path(
-                base_dir=get_downloading_dir(),
-                target=source_path,
-                recursive=source_path.is_dir(),
-            )
-            return existing
+            # 校验旧文件是否存在
+            existing_path = Path(existing.real_path)
+            if not existing_path.exists():
+                # 旧记录的文件已丢失，删除旧记录，用新文件替代
+                logger.warning(
+                    f"Existing StoredFile record points to missing file: {existing.real_path}, "
+                    f"will replace with new file from {source_path}"
+                )
+                await db.delete(existing)
+                await db.commit()
+                # 继续后续流程，将新文件移入 store
+            else:
+                # File already exists in store, delete the duplicate
+                logger.info(
+                    f"File already in store: {content_hash}, deleting duplicate at {source_path}"
+                )
+                safe_delete_path(
+                    base_dir=get_downloading_dir(),
+                    target=source_path,
+                    recursive=source_path.is_dir(),
+                )
+                return existing
 
     # Calculate size
     if source_path.is_dir():
@@ -355,7 +367,26 @@ async def move_to_store(
             if existing:
                 return existing
 
-            # If still not found, re-raise the original error
+            # 非竞态错误：DB 写入失败但文件已移动，需要回滚文件移动
+            logger.error(f"DB write failed for StoredFile {content_hash}, rolling back file move")
+            try:
+                if store_path.exists():
+                    # 尝试移回原位置（如果原目录还在）
+                    source_parent = source_path.parent
+                    if source_parent.exists():
+                        shutil.move(str(store_path), str(source_path))
+                        logger.info(f"Rolled back file move: {store_path} -> {source_path}")
+                    else:
+                        # 原目录不存在，删除已移动的文件避免孤儿
+                        safe_delete_path(
+                            base_dir=get_store_dir(),
+                            target=store_path,
+                            recursive=store_path.is_dir(),
+                        )
+                        logger.warning(f"Deleted orphan file after DB failure: {store_path}")
+            except Exception as rollback_err:
+                logger.error(f"Failed to rollback file move: {rollback_err}")
+
             raise RuntimeError(f"Failed to create or find StoredFile: {content_hash}") from e
 
 

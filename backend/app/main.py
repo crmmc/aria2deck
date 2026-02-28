@@ -138,8 +138,12 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("孤儿文件清理失败")
 
-    asyncio.create_task(safe_startup_repair())
-    asyncio.create_task(safe_orphan_cleanup())
+    async def safe_startup_maintenance():
+        """串行执行启动维护任务：先修复再清理，避免竞态"""
+        await safe_startup_repair()
+        await safe_orphan_cleanup()
+
+    asyncio.create_task(safe_startup_maintenance())
 
     sync_task = asyncio.create_task(
         sync_tasks(app.state.app_state, settings.aria2_poll_interval)

@@ -12,6 +12,7 @@ import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select, func
 
 from app.auth import require_user
@@ -139,32 +140,38 @@ async def create_share(
                 status.HTTP_400_BAD_REQUEST,
                 f"每个文件最多 {MAX_ACTIVE_SHARES_PER_FILE} 个活跃分享"
             )
-        # 生成分享码（重试以避免冲突）
-        for _ in range(5):
+        # 生成分享码并创建（重试以处理并发冲突）
+        max_retries = 5
+        share: ShareLink | None = None
+        for attempt in range(max_retries):
             code = _generate_share_code()
-            existing = await db.exec(
-                select(ShareLink).where(ShareLink.share_code == code)
+            # 计算过期时间
+            expires_at = None
+            if req.expires_in:
+                expires_at = (utc_now() + timedelta(seconds=req.expires_in)).isoformat()
+            # 密码哈希
+            pwd_hash = hash_password(req.password) if req.password else None
+            share = ShareLink(
+                share_code=code,
+                owner_id=user.id,  # type: ignore[arg-type]
+                user_file_id=req.user_file_id,
+                password_hash=pwd_hash,
+                expires_at=expires_at,
+                max_downloads=req.max_downloads,
+                created_at=now_str,
             )
-            if not existing.first():
+            db.add(share)
+            try:
+                await db.flush()
                 break
-        else:
-            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "分享码生成失败，请重试")
-        # 计算过期时间
-        expires_at = None
-        if req.expires_in:
-            expires_at = (utc_now() + timedelta(seconds=req.expires_in)).isoformat()
-        # 密码哈希
-        pwd_hash = hash_password(req.password) if req.password else None
-        share = ShareLink(
-            share_code=code,
-            owner_id=user.id,  # type: ignore[arg-type]
-            user_file_id=req.user_file_id,
-            password_hash=pwd_hash,
-            expires_at=expires_at,
-            max_downloads=req.max_downloads,
-            created_at=now_str,
-        )
-        db.add(share)
+            except IntegrityError:
+                await db.rollback()
+                if attempt == max_retries - 1:
+                    raise HTTPException(
+                        status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        "分享码生成失败，请重试"
+                    )
+                continue
 
         # 获取文件信息用于响应
         file_name = user_file.display_name or "未命名"
@@ -174,6 +181,8 @@ async def create_share(
         )
         sf = stored.first()
         file_size = sf.size if sf else 0
+    if share is None:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "分享创建失败")
     logger.info(
         "创建分享 user_id=%s file_id=%s code=%s",
         user.id, req.user_file_id, code,
@@ -360,31 +369,43 @@ async def download_shared_file(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "\u8bf7\u6307\u5b9a\u5b50\u6587\u4ef6\u8def\u5f84")
         target = base_path
         filename = user_file.display_name or "download"
-    # 原子递增下载计数（含 max_downloads 竞态保护）
+    # 原子递增下载计数（含 max_downloads 和有效性竞态保护）
+    now = utc_now_str()
     async with get_session() as db:
+        # 构建有效性条件：status=active 且未过期
+        validity_conditions = [
+            ShareLink.id == share.id,  # type: ignore[arg-type]
+            ShareLink.status == "active",
+            or_(
+                ShareLink.expires_at.is_(None),  # type: ignore[union-attr]
+                ShareLink.expires_at > now,
+            ),
+        ]
         if share.max_downloads is not None:
             result = await db.execute(
                 ShareLink.__table__.update()  # type: ignore[attr-defined]
                 .where(
-                    ShareLink.id == share.id,  # type: ignore[arg-type]
+                    *validity_conditions,
                     ShareLink.download_count < share.max_downloads,
                 )
                 .values(
                     download_count=ShareLink.download_count + 1,
-                    last_accessed_at=utc_now_str(),
+                    last_accessed_at=now,
                 )
             )
             if result.rowcount == 0:  # type: ignore[union-attr]
-                raise HTTPException(status.HTTP_410_GONE, "下载次数已用完")
+                raise HTTPException(status.HTTP_410_GONE, "分享已失效或下载次数已用完")
         else:
-            await db.execute(
+            result = await db.execute(
                 ShareLink.__table__.update()  # type: ignore[attr-defined]
-                .where(ShareLink.id == share.id)  # type: ignore[arg-type]
+                .where(*validity_conditions)
                 .values(
                     download_count=ShareLink.download_count + 1,
-                    last_accessed_at=utc_now_str(),
+                    last_accessed_at=now,
                 )
             )
+            if result.rowcount == 0:  # type: ignore[union-attr]
+                raise HTTPException(status.HTTP_410_GONE, "分享已失效")
     return _range_file_response(request, target, filename)
 
 

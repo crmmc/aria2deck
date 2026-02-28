@@ -1,0 +1,15 @@
+{
+  "general": {
+    "enableNotifications": true
+  },
+  "ui": {
+    "autoThemeSwitching": false,
+    "inlineThinkingMode": "full",
+    "hideTips": true,
+    "footer": {
+      "hideContextPercentage": false
+    },
+    "showLineNumbers": false,
+    "showModelInfoInChat": true
+  }
+}

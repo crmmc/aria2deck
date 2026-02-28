@@ -4,7 +4,7 @@ import secrets
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import text
+from sqlalchemy import text, func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
@@ -243,6 +243,32 @@ async def delete_user(
                 detail="用户不存在"
             )
 
+        # 获取用户的所有文件引用 ID（需要在删除用户前处理）
+        user_files_result = await db.exec(select(UserFile).where(UserFile.owner_id == user_id))
+        user_file_ids = [uf.id for uf in user_files_result.all() if uf.id is not None]
+
+        # 删除用户文件引用（正确递减 ref_count 并清理物理文件）
+        # 必须在删除 User 之前处理，否则级联删除会跳过 ref_count 递减
+        from app.services.storage import delete_user_file_reference
+        failed_file_ids: list[int] = []
+        for user_file_id in user_file_ids:
+            try:
+                await delete_user_file_reference(user_file_id)
+            except Exception as e:
+                logger.error(
+                    "删除用户文件引用失败 user_file_id=%s error=%s",
+                    user_file_id, e
+                )
+                failed_file_ids.append(user_file_id)
+
+        if failed_file_ids:
+            logger.warning(
+                "部分用户文件引用删除失败 user_id=%s failed_ids=%s",
+                user_id, failed_file_ids
+            )
+
+    # 在同一事务中删除用户及其关联数据
+    async with get_session() as db:
         # 删除用户的所有会话
         sessions_result = await db.exec(select(SessionModel).where(SessionModel.user_id == user_id))
         for session in sessions_result.all():
@@ -258,22 +284,13 @@ async def delete_user(
         for pack_task in pack_tasks_result.all():
             await db.delete(pack_task)
 
-        # 获取用户的所有文件引用 ID
-        user_files_result = await db.exec(select(UserFile).where(UserFile.owner_id == user_id))
-        user_file_ids = [uf.id for uf in user_files_result.all() if uf.id is not None]
-
-    # 先删除用户文件引用（正确递减 ref_count 并清理物理文件）
-    # 必须在删除 User 之前处理，否则级联删除会跳过 ref_count 递减
-    from app.services.storage import delete_user_file_reference
-    for user_file_id in user_file_ids:
-        await delete_user_file_reference(user_file_id)
-
-    # 再删除用户
-    async with get_session() as db:
+        # 删除用户
         result = await db.exec(select(User).where(User.id == user_id))
         user = result.first()
         if user:
             await db.delete(user)
+
+        await db.commit()
 
     logger.info(
         "删除用户成功 actor_id=%s target_user_id=%s request_id=%s",
@@ -360,6 +377,17 @@ async def update_user(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="不能取消自己的管理员权限"
                 )
+            # 不能降级最后一个管理员
+            if user.is_admin and not payload.is_admin:
+                admin_count_result = await db.exec(
+                    select(func.count()).select_from(User).where(User.is_admin == True)  # noqa: E712
+                )
+                admin_count = admin_count_result.one()
+                if admin_count <= 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="不能降级最后一个管理员"
+                    )
             user.is_admin = payload.is_admin
 
         if payload.quota is not None:
