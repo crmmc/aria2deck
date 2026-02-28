@@ -3,6 +3,7 @@ import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app.core.config import settings
 from app.db import execute
@@ -278,6 +279,22 @@ class TestPackTaskOperations:
         data = detail.json()
         assert data["status"] == "cancelled"
         assert data["progress"] == 0
+
+    def test_delete_cancelled_pack_uses_cleanup_pack_output(self, authenticated_client: TestClient, test_user: dict):
+        now = datetime.now(timezone.utc).isoformat()
+        output_path = Path(settings.download_dir) / str(test_user["id"]) / "cancelled_partial.zip"
+        task_id = execute(
+            """INSERT INTO pack_tasks
+               (owner_id, folder_path, folder_size, reserved_space, output_path, status, progress, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [test_user["id"], "[]", 100, 0, str(output_path), "cancelled", 0, now, now],
+        )
+
+        with patch("app.routers.files.cleanup_pack_output", return_value=True) as mock_cleanup:
+            response = authenticated_client.delete(f"/api/files/pack/{task_id}")
+
+        assert response.status_code == 200
+        mock_cleanup.assert_called_once_with(output_path)
 
     def test_create_pack_task_nonexistent_file_ids(self, authenticated_client: TestClient):
         response = authenticated_client.post(

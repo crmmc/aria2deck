@@ -25,6 +25,7 @@ from app.core.config import settings
 from app.core.rate_limit import api_limiter
 from app.database import get_session
 from app.models import User, PackTask, UserFile, StoredFile, ShareLink
+from app.services.pack import cleanup_pack_output
 from app.services.storage import (
     delete_user_file_reference,
     get_user_space_info,
@@ -466,9 +467,7 @@ async def clear_finished_pack_tasks(
         for task in tasks:
             # failed/cancelled 任务可能有残留的半成品文件
             if task.status in ("failed", "cancelled") and task.output_path:
-                output = Path(task.output_path)
-                if output.exists():
-                    output.unlink()
+                cleanup_pack_output(Path(task.output_path))
             await db.delete(task)
             count += 1
 
@@ -534,13 +533,9 @@ async def cancel_or_delete_pack_task(
     if task_status in ("done", "failed", "cancelled"):
         # Clean up partial zip for failed/cancelled tasks
         if task_status in ("failed", "cancelled") and task.output_path:
-            output_file = Path(task.output_path)
-            if output_file.exists():
-                try:
-                    output_file.unlink()
-                    logger.info("Cleaned up partial pack file: %s", task.output_path)
-                except Exception as e:
-                    logger.warning("Failed to clean up pack file %s: %s", task.output_path, e)
+            cleaned = cleanup_pack_output(Path(task.output_path))
+            if cleaned:
+                logger.info("Cleaned up partial pack file: %s", task.output_path)
 
         async with get_session() as db:
             result = await db.exec(select(PackTask).where(PackTask.id == task_id))

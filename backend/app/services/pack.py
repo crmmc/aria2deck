@@ -34,6 +34,22 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def cleanup_pack_output(output_path: Path) -> bool:
+    """Safely delete pack output under download whitelist root."""
+    from app.services.storage import safe_delete_path
+
+    try:
+        return safe_delete_path(
+            base_dir=Path(settings.download_dir).resolve(),
+            target=output_path,
+            recursive=False,
+            allow_missing=True,
+        )
+    except Exception as exc:
+        logger.warning("Failed to clean up pack output %s: %s", output_path, exc)
+        return False
+
+
 @dataclass(slots=True)
 class _ArchiveItem:
     path: Path
@@ -236,8 +252,7 @@ class PackTaskManager:
                 await writer_task
 
             if cancel_event.is_set():
-                if output_path.exists():
-                    output_path.unlink()
+                cleanup_pack_output(output_path)
                 return
 
             output_size = output_path.stat().st_size if output_path.exists() else 0
@@ -246,7 +261,7 @@ class PackTaskManager:
             output_user_file_id: int | None = None
             if output_path.exists():
                 if not await cls._is_task_status(task_id, "packing"):
-                    output_path.unlink()
+                    cleanup_pack_output(output_path)
                     return
                 try:
                     from app.services.storage import register_pack_output
@@ -261,8 +276,7 @@ class PackTaskManager:
                         output_user_file_id = user_file.id
                 except Exception:
                     logger.exception("Failed to register pack output: task_id=%s", task_id)
-                    if output_path.exists():
-                        output_path.unlink()
+                    cleanup_pack_output(output_path)
                     await cls._update_task_error(task_id, "打包成功但注册文件失败，请重试")
                     return
 
@@ -300,8 +314,7 @@ class PackTaskManager:
                 else:
                     logger.warning("Pack task %s was cancelled during packing", task_id)
         except InterruptedError:
-            if output_path.exists():
-                output_path.unlink()
+            cleanup_pack_output(output_path)
         except asyncio.CancelledError:
             cancel_event.set()
             if writer_task is not None:
@@ -313,12 +326,10 @@ class PackTaskManager:
                         task_id,
                         exc_info=exc,
                     )
-            if output_path.exists():
-                output_path.unlink()
+            cleanup_pack_output(output_path)
             raise
         except Exception as exc:
-            if output_path.exists():
-                output_path.unlink()
+            cleanup_pack_output(output_path)
             await cls._update_task_error(task_id, str(exc))
         finally:
             async with _running_tasks_lock:

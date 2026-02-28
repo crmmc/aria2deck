@@ -7,7 +7,6 @@ Tests for:
 """
 import asyncio
 import os
-import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -359,10 +358,10 @@ class TestFileMoveRace:
     @pytest.mark.asyncio
     async def test_file_move_destination_exists(self, temp_db_storage):
         """Test handling when destination is created between check and move."""
-        from app.services.storage import move_to_store
+        from app.services.storage import move_to_store, get_downloading_dir
 
         # Create source file
-        source_dir = Path(temp_db_storage["temp_dir"]) / "source"
+        source_dir = get_downloading_dir() / "source"
         source_dir.mkdir(exist_ok=True)
         source_file = source_dir / "test.txt"
         source_file.write_text("test content")
@@ -391,11 +390,11 @@ class TestFileMoveRace:
     @pytest.mark.asyncio
     async def test_file_move_concurrent(self, temp_db_storage):
         """Test two processes moving to same destination."""
-        from app.services.storage import move_to_store
+        from app.services.storage import move_to_store, get_downloading_dir
 
         # Create two identical source files
-        source_dir1 = Path(temp_db_storage["temp_dir"]) / "source1"
-        source_dir2 = Path(temp_db_storage["temp_dir"]) / "source2"
+        source_dir1 = get_downloading_dir() / "source1"
+        source_dir2 = get_downloading_dir() / "source2"
         source_dir1.mkdir(exist_ok=True)
         source_dir2.mkdir(exist_ok=True)
 
@@ -555,11 +554,140 @@ class TestCleanupTaskDownloadDir:
         task_dir.mkdir(parents=True, exist_ok=True)
         (task_dir / "leftover.bin").write_text("x")
 
-        with patch("app.services.storage.shutil.rmtree", side_effect=PermissionError("denied")):
+        with patch("app.services.storage.safe_delete_path", side_effect=PermissionError("denied")):
             with pytest.raises(RuntimeError, match="Failed to clean up task directory"):
                 await cleanup_task_download_dir(task_id)
 
         assert task_dir.exists()
+
+
+class TestSafeDeletePath:
+    @pytest.mark.asyncio
+    async def test_safe_delete_path_deletes_file_within_base(self, temp_db_storage):
+        from app.services.storage import safe_delete_path
+
+        base = Path(temp_db_storage["download_dir"]) / "allowed"
+        base.mkdir(parents=True, exist_ok=True)
+        target = base / "file.txt"
+        target.write_text("ok")
+
+        deleted = safe_delete_path(base, target)
+
+        assert deleted is True
+        assert not target.exists()
+
+    @pytest.mark.asyncio
+    async def test_safe_delete_path_deletes_directory_within_base_recursive(self, temp_db_storage):
+        from app.services.storage import safe_delete_path
+
+        base = Path(temp_db_storage["download_dir"]) / "allowed"
+        base.mkdir(parents=True, exist_ok=True)
+        target = base / "dir1"
+        (target / "nested").mkdir(parents=True, exist_ok=True)
+        (target / "nested" / "a.txt").write_text("x")
+
+        deleted = safe_delete_path(base, target, recursive=True)
+
+        assert deleted is True
+        assert not target.exists()
+
+    @pytest.mark.asyncio
+    async def test_safe_delete_path_missing_allowed_returns_false(self, temp_db_storage):
+        from app.services.storage import safe_delete_path
+
+        base = Path(temp_db_storage["download_dir"]) / "allowed"
+        base.mkdir(parents=True, exist_ok=True)
+        target = base / "missing.txt"
+
+        deleted = safe_delete_path(base, target, allow_missing=True)
+
+        assert deleted is False
+
+    @pytest.mark.asyncio
+    async def test_safe_delete_path_missing_disallowed_raises(self, temp_db_storage):
+        from app.services.storage import safe_delete_path
+
+        base = Path(temp_db_storage["download_dir"]) / "allowed"
+        base.mkdir(parents=True, exist_ok=True)
+        target = base / "missing.txt"
+
+        with pytest.raises(FileNotFoundError):
+            safe_delete_path(base, target, allow_missing=False)
+
+    @pytest.mark.asyncio
+    async def test_safe_delete_path_rejects_traversal_relative(self, temp_db_storage):
+        from app.services.storage import safe_delete_path
+
+        base = Path(temp_db_storage["download_dir"]) / "allowed"
+        base.mkdir(parents=True, exist_ok=True)
+        outside = Path(temp_db_storage["temp_dir"]) / "outside.txt"
+        outside.write_text("outside")
+
+        with pytest.raises(ValueError):
+            safe_delete_path(base, Path("../outside.txt"))
+
+        assert outside.exists()
+
+    @pytest.mark.asyncio
+    async def test_safe_delete_path_rejects_absolute_outside_base(self, temp_db_storage):
+        from app.services.storage import safe_delete_path
+
+        base = Path(temp_db_storage["download_dir"]) / "allowed"
+        base.mkdir(parents=True, exist_ok=True)
+        outside = Path(temp_db_storage["temp_dir"]) / "outside_abs.txt"
+        outside.write_text("outside")
+
+        with pytest.raises(ValueError):
+            safe_delete_path(base, outside)
+
+        assert outside.exists()
+
+    @pytest.mark.asyncio
+    async def test_safe_delete_path_rejects_base_dir_itself_by_default(self, temp_db_storage):
+        from app.services.storage import safe_delete_path
+
+        base = Path(temp_db_storage["download_dir"]) / "allowed"
+        base.mkdir(parents=True, exist_ok=True)
+
+        with pytest.raises(ValueError):
+            safe_delete_path(base, base, recursive=True)
+
+        assert base.exists()
+
+    @pytest.mark.asyncio
+    async def test_safe_delete_path_symlink_deletes_link_only(self, temp_db_storage):
+        from app.services.storage import safe_delete_path
+
+        base = Path(temp_db_storage["download_dir"]) / "allowed"
+        base.mkdir(parents=True, exist_ok=True)
+        external = Path(temp_db_storage["temp_dir"]) / "external.txt"
+        external.write_text("external")
+        link = base / "link.txt"
+        os.symlink(external, link)
+
+        deleted = safe_delete_path(base, link)
+
+        assert deleted is True
+        assert not link.exists()
+        assert external.exists()
+
+    @pytest.mark.asyncio
+    async def test_safe_delete_path_concurrent_delete_idempotent(self, temp_db_storage):
+        from app.services.storage import safe_delete_path
+
+        base = Path(temp_db_storage["download_dir"]) / "allowed"
+        base.mkdir(parents=True, exist_ok=True)
+        target = base / "same.txt"
+        target.write_text("x")
+
+        async def delete_once():
+            return safe_delete_path(base, target, allow_missing=True)
+
+        results = await asyncio.gather(delete_once(), delete_once(), return_exceptions=True)
+
+        assert not any(isinstance(r, Exception) for r in results)
+        assert sum(1 for r in results if r is True) == 1
+        assert sum(1 for r in results if r is False) == 1
 
 
 class TestDeleteReferenceStateSync:
