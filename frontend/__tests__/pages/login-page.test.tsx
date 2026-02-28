@@ -107,7 +107,7 @@ describe("LoginPage", () => {
 
   test("submits login and shows error when credentials are invalid", async () => {
     mockApi.me.mockRejectedValue(new ApiError("unauthorized", 401, true));
-    mockApi.login.mockRejectedValue(new Error("invalid"));
+    mockApi.login.mockRejectedValue(new ApiError("unauthorized", 401, true));
 
     render(<LoginPage />);
 
@@ -123,6 +123,40 @@ describe("LoginPage", () => {
       expect(mockApi.login).toHaveBeenCalledWith("alice", "bad-password");
     });
     expect(await screen.findByText("用户名或密码无效")).toBeInTheDocument();
+  });
+
+  test("shows network error when login request cannot reach server", async () => {
+    mockApi.me.mockRejectedValue(new ApiError("unauthorized", 401, true));
+    mockApi.login.mockRejectedValue(new ApiError("network", 0, false, true));
+
+    render(<LoginPage />);
+
+    fireEvent.change(await screen.findByPlaceholderText("用户名"), {
+      target: { value: "alice" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("密码"), {
+      target: { value: "bad-password" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(await screen.findByText("网络连接失败，请检查地址或网络")).toBeInTheDocument();
+  });
+
+  test("shows backend error message for non-401 API errors", async () => {
+    mockApi.me.mockRejectedValue(new ApiError("unauthorized", 401, true));
+    mockApi.login.mockRejectedValue(new ApiError("服务暂时不可用", 503, false, false));
+
+    render(<LoginPage />);
+
+    fireEvent.change(await screen.findByPlaceholderText("用户名"), {
+      target: { value: "alice" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("密码"), {
+      target: { value: "bad-password" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(await screen.findByText("服务暂时不可用")).toBeInTheDocument();
   });
 
   test("redirects to tasks after successful login", async () => {
