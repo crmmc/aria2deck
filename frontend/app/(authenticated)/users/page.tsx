@@ -36,7 +36,6 @@ export default function UsersPage() {
 
   // 删除用户弹窗状态
   const [deletingUser, setDeletingUser] = useState<User | null>(null);
-  const [deleteFiles, setDeleteFiles] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -104,13 +103,12 @@ export default function UsersPage() {
 
   function openDeleteModal(user: User) {
     setDeletingUser(user);
-    setDeleteFiles(false);
   }
 
   async function handleDeleteUser() {
     if (!deletingUser) return;
     try {
-      await api.deleteUser(deletingUser.id, deleteFiles);
+      await api.deleteUser(deletingUser.id);
       setUsers((prev) => prev.filter((u) => u.id !== deletingUser.id));
       setDeletingUser(null);
       showToast("用户已删除", "success");
@@ -456,23 +454,8 @@ export default function UsersPage() {
               确定要删除用户 <strong>{deletingUser.username}</strong> 吗？
             </p>
             <p className="text-sm muted mb-4">
-              将删除该用户的所有下载任务记录和打包任务记录。
+              将删除该用户的所有下载任务记录、打包任务记录和文件引用。
             </p>
-            <div className="mb-5">
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={deleteFiles}
-                  onChange={(e) => setDeleteFiles(e.target.checked)}
-                />
-                <span className="text-base">同时删除用户下载目录</span>
-              </label>
-              {deleteFiles && (
-                <p className="text-sm text-danger mt-2">
-                  警告：此操作不可恢复，用户的所有下载文件将被永久删除。
-                </p>
-              )}
-            </div>
             <div className="flex gap-3 flex-end">
               <button
                 type="button"

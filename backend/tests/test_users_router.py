@@ -253,18 +253,7 @@ class TestCreateUserFirstUser:
 
 
 class TestDeleteUserWithFiles:
-    """Tests for delete user with file cleanup."""
-
-    def test_delete_user_with_delete_files_flag(
-        self, admin_client: TestClient, test_user: dict, user_download_dir
-    ):
-        """Delete user with delete_files=true removes download directory."""
-        with patch("app.services.storage.delete_user_file_reference", new_callable=AsyncMock):
-            response = admin_client.delete(
-                f"/api/users/{test_user['id']}?delete_files=true"
-            )
-        assert response.status_code == 200
-        assert response.json()["ok"] is True
+    """Tests for delete user with cleanup."""
 
     def test_delete_user_clears_sessions(
         self, admin_client: TestClient, test_user: dict, user_session: str
@@ -322,15 +311,6 @@ class TestUpdateUserIsAdmin:
         })
         assert response.status_code == 200
         assert response.json()["is_admin"] is False
-
-
-@pytest.fixture
-def user_download_dir(test_user: dict, temp_db: str):
-    """Create user download directory."""
-    from pathlib import Path
-    user_dir = Path(settings.download_dir) / str(test_user["id"])
-    user_dir.mkdir(parents=True, exist_ok=True)
-    return user_dir
 
 
 class TestFirstUserRateLimiting:

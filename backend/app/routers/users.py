@@ -2,21 +2,18 @@
 import logging
 import secrets
 from datetime import datetime, timezone
-from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from app.auth import clear_user_sessions, require_admin, require_user
-from app.core.config import settings
 from app.core.rate_limit import login_limiter
 from app.core.security import hash_password
 from app.database import get_session
 from app.models import User, Session as SessionModel, Task, PackTask, UserFile
 from app.schemas import RpcAccessStatus, RpcAccessToggle, UserCreate, UserOut, UserUpdate
-from app.services.storage import safe_delete_path
 
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -205,7 +202,6 @@ async def list_users(admin: User = Depends(require_admin)) -> list[dict]:
 async def delete_user(
     request: Request,
     user_id: int,
-    delete_files: bool = Query(False, description="是否删除用户下载目录"),
     admin: User = Depends(require_admin)
 ) -> dict:
     """删除用户（管理员）
@@ -214,7 +210,7 @@ async def delete_user(
     - 用户的所有会话
     - 用户的所有下载任务记录
     - 用户的所有打包任务记录
-    - 可选：用户的下载目录
+    - 用户的所有文件引用（正确递减 ref_count）
 
     注意: 不能删除自己
     """
@@ -279,22 +275,10 @@ async def delete_user(
         if user:
             await db.delete(user)
 
-    # 可选：删除用户下载目录
-    if delete_files:
-        base_download_dir = Path(settings.download_dir).resolve()
-        user_download_dir = base_download_dir / str(user_id)
-        safe_delete_path(
-            base_dir=base_download_dir,
-            target=user_download_dir,
-            recursive=True,
-            allow_missing=True,
-        )
-
     logger.info(
-        "删除用户成功 actor_id=%s target_user_id=%s delete_files=%s request_id=%s",
+        "删除用户成功 actor_id=%s target_user_id=%s request_id=%s",
         admin.id,
         user_id,
-        delete_files,
         request_id,
     )
 

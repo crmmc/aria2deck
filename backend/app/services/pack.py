@@ -173,7 +173,10 @@ class PackTaskManager:
         source_names: list[str] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> None:
-        user_dir = Path(settings.download_dir) / str(user_id)
+        from app.services.storage import get_downloading_dir
+
+        pack_dir = get_downloading_dir() / f"pack_{task_id}"
+        pack_dir.mkdir(parents=True, exist_ok=True)
         sources = [Path(p) for p in abs_paths]
         if not sources:
             await cls._update_task_error(task_id, "No valid source files")
@@ -189,11 +192,11 @@ class PackTaskManager:
         base_name = output_name or (sources[0].name if len(sources) == 1 else "archive")
 
         output_filename = f"{base_name}.{pack_format}"
-        output_path = user_dir / output_filename
+        output_path = pack_dir / output_filename
         counter = 1
         while output_path.exists():
             output_filename = f"{base_name}_{counter}.{pack_format}"
-            output_path = user_dir / output_filename
+            output_path = pack_dir / output_filename
             counter += 1
 
         async with get_session() as db:
@@ -334,6 +337,14 @@ class PackTaskManager:
         finally:
             async with _running_tasks_lock:
                 cls._running_tasks.pop(task_id, None)
+            # Clean up the temporary pack directory
+            from app.services.storage import safe_delete_path, get_downloading_dir
+            safe_delete_path(
+                base_dir=get_downloading_dir(),
+                target=pack_dir,
+                recursive=True,
+                allow_missing=True,
+            )
 
     @classmethod
     def _write_archive_sync(

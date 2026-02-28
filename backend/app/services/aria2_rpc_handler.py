@@ -152,7 +152,6 @@ class Aria2RpcHandler:
         if app_state is None:
             raise RuntimeError("AppState is required for Aria2RpcHandler")
         self.app_state: AppState = app_state
-        self._user_dir: str | None = None
 
     async def handle(self, method: str, params: list) -> Any:
         """路由到具体方法处理"""
@@ -187,15 +186,11 @@ class Aria2RpcHandler:
             result.append(char.lower())
 
         return "_handle_" + "".join(result)
-    # ========== 辅助方法 ==========
-    def _get_user_download_dir(self) -> str:
-        """获取用户下载目录"""
-        if self._user_dir is None:
-            base = Path(settings.download_dir).resolve()
-            user_dir = base / str(self.user_id)
-            user_dir.mkdir(parents=True, exist_ok=True)
-            self._user_dir = str(user_dir)
-        return self._user_dir
+    def _sanitize_file_path(self, path: str) -> str:
+        if not path:
+            return path
+        return Path(path).name
+
     async def _verify_task_owner(self, gid: str) -> tuple[DownloadTask, UserTaskSubscription] | None:
         """检查 gid 对应的任务是否属于当前用户
         Returns: (DownloadTask, UserTaskSubscription) 或 None
@@ -267,24 +262,6 @@ class Aria2RpcHandler:
             if gid:
                 gids.add(gid)
         return gids
-    def _sanitize_path(self, path: str) -> str:
-        """将服务器绝对路径转为用户相对路径"""
-        if not path:
-            return path
-        user_dir = Path(self._get_user_download_dir())
-        try:
-            abs_path = Path(path)
-            if abs_path.is_absolute() and str(abs_path).startswith(str(user_dir)):
-                return str(abs_path.relative_to(user_dir))
-        except (ValueError, RuntimeError):
-            pass
-        return path
-
-    def _sanitize_file_path(self, path: str) -> str:
-        safe_path = self._sanitize_path(path)
-        if not safe_path:
-            return safe_path
-        return Path(safe_path).name
 
     @staticmethod
     def _extract_name_from_uri(uri: str) -> str:

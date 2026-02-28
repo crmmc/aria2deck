@@ -215,8 +215,8 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  deleteUser: (id: number, deleteFiles: boolean = false) =>
-    request<{ ok: boolean }>(`/api/users/${id}?delete_files=${deleteFiles}`, { method: "DELETE" }),
+  deleteUser: (id: number) =>
+    request<{ ok: boolean }>(`/api/users/${id}`, { method: "DELETE" }),
 
   // Files (UserFile-based)
   listFiles: () => request<FileListResponse>("/api/files"),

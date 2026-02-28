@@ -639,32 +639,17 @@ describe("api methods", () => {
   });
 
   describe("api.deleteUser", () => {
-    it("deletes user without files", async () => {
+    it("deletes user", async () => {
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({ ok: true }),
       });
 
       const result = await api.deleteUser(123);
-      
+
       expect(result).toEqual({ ok: true });
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/users/123?delete_files=false"),
-        expect.objectContaining({ method: "DELETE" })
-      );
-    });
-
-    it("deletes user with files", async () => {
-      global.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ ok: true }),
-      });
-
-      const result = await api.deleteUser(123, true);
-      
-      expect(result).toEqual({ ok: true });
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/users/123?delete_files=true"),
+        expect.stringContaining("/api/users/123"),
         expect.objectContaining({ method: "DELETE" })
       );
     });

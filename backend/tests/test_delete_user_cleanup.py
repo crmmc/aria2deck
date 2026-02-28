@@ -2,13 +2,8 @@
 
 测试场景：
 1. 删除用户时同时删除其任务记录
-2. 删除用户时可选删除用户目录
-3. 删除用户时同时删除其打包任务记录
+2. 删除用户时同时删除其打包任务记录
 """
-import os
-import tempfile
-from pathlib import Path
-
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
@@ -101,110 +96,6 @@ class TestDeleteUserCleanup:
         # 确认打包任务被删除
         pack_task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [pack_task_id])
         assert pack_task is None
-
-    def test_delete_user_with_files(
-        self, client: TestClient, test_admin: dict, admin_session: str
-    ):
-        """测试删除用户时可选删除用户目录"""
-        # 创建测试用户
-        client.cookies.set(settings.session_cookie_name, admin_session)
-        response = client.post(
-            "/api/users",
-            json={
-                "username": "testuser_files",
-                "password": "password123",
-                "is_admin": False
-            }
-        )
-        assert response.status_code == 200
-        user_id = response.json()["id"]
-
-        # 创建用户目录和测试文件
-        user_dir = Path(settings.download_dir) / str(user_id)
-        user_dir.mkdir(parents=True, exist_ok=True)
-        test_file = user_dir / "test.txt"
-        test_file.write_text("test content")
-
-        # 确认目录存在
-        assert user_dir.exists()
-        assert test_file.exists()
-
-        # 删除用户但不删除文件
-        response = client.delete(f"/api/users/{user_id}?delete_files=false")
-        assert response.status_code == 200
-
-        # 确认目录仍然存在
-        assert user_dir.exists()
-
-        # 清理
-        import shutil
-        shutil.rmtree(user_dir, ignore_errors=True)
-
-    def test_delete_user_with_files_cleanup(
-        self, client: TestClient, test_admin: dict, admin_session: str
-    ):
-        """测试删除用户时同时删除用户目录"""
-        # 创建测试用户
-        client.cookies.set(settings.session_cookie_name, admin_session)
-        response = client.post(
-            "/api/users",
-            json={
-                "username": "testuser_cleanup",
-                "password": "password123",
-                "is_admin": False
-            }
-        )
-        assert response.status_code == 200
-        user_id = response.json()["id"]
-
-        # 创建用户目录和测试文件
-        user_dir = Path(settings.download_dir) / str(user_id)
-        user_dir.mkdir(parents=True, exist_ok=True)
-        test_file = user_dir / "test.txt"
-        test_file.write_text("test content")
-
-        # 确认目录存在
-        assert user_dir.exists()
-        assert test_file.exists()
-
-        # 删除用户并删除文件
-        response = client.delete(f"/api/users/{user_id}?delete_files=true")
-        assert response.status_code == 200
-
-        # 确认目录被删除
-        assert not user_dir.exists()
-
-    def test_delete_user_with_files_cleanup_rejects_traversal_symlink(
-        self, client: TestClient, test_admin: dict, admin_session: str
-    ):
-        """测试 delete_files=true 时仅删除用户目录 symlink 本身，不会越界删除目标目录"""
-        # 创建测试用户
-        client.cookies.set(settings.session_cookie_name, admin_session)
-        response = client.post(
-            "/api/users",
-            json={
-                "username": "testuser_symlink_cleanup",
-                "password": "password123",
-                "is_admin": False
-            }
-        )
-        assert response.status_code == 200
-        user_id = response.json()["id"]
-
-        external_dir = Path(tempfile.mkdtemp())
-        external_file = external_dir / "outside.txt"
-        external_file.write_text("outside")
-
-        user_dir_link = Path(settings.download_dir) / str(user_id)
-        os.symlink(external_dir, user_dir_link)
-        assert user_dir_link.is_symlink()
-
-        response = client.delete(f"/api/users/{user_id}?delete_files=true")
-        assert response.status_code == 200
-
-        assert not user_dir_link.exists()
-        assert external_dir.exists()
-        assert external_file.exists()
 
     def test_delete_user_multiple_tasks(
         self, client: TestClient, test_admin: dict, admin_session: str
