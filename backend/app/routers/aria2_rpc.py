@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from app.core.config import settings
 from app.core.rate_limit import rpc_limiter
 from app.core.state import get_aria2_client
 from app.database import get_session
@@ -149,6 +150,55 @@ def build_jsonrpc_error(code: int, message: str, request_id: str | int | None, d
     }
 
 
+def _extract_rpc_method(request_body: dict) -> str:
+    method = request_body.get("method")
+    if isinstance(method, str) and method:
+        return method
+    return "<invalid>"
+
+
+def _extract_response_error(response: dict) -> tuple[int | None, str]:
+    error = response.get("error")
+    if not isinstance(error, dict):
+        return None, ""
+
+    code = error.get("code")
+    message = error.get("message")
+    error_code = code if isinstance(code, int) else None
+    error_message = message if isinstance(message, str) else ""
+    return error_code, error_message
+
+
+def _log_rpc_method_response(
+    method: str,
+    rpc_id: str | int | None,
+    user_id: int | None,
+    request_id: str,
+    response: dict,
+) -> None:
+    error_code, error_message = _extract_response_error(response)
+    if error_code is None:
+        success_level = logging.INFO if settings.debug else logging.DEBUG
+        logger.log(
+            success_level,
+            "RPC方法响应成功 method=%s rpc_id=%s user_id=%s request_id=%s",
+            method,
+            rpc_id,
+            user_id,
+            request_id,
+        )
+        return
+
+    log_message = (
+        "RPC方法响应失败 method=%s rpc_id=%s user_id=%s request_id=%s "
+        "code=%s message=%s"
+    )
+    if error_code == RpcErrorCode.INTERNAL_ERROR:
+        logger.error(log_message, method, rpc_id, user_id, request_id, error_code, error_message or "<empty>")
+        return
+    logger.warning(log_message, method, rpc_id, user_id, request_id, error_code, error_message or "<empty>")
+
+
 def _decode_query_params(raw_params: str | None) -> list | None:
     if raw_params is None:
         return []
@@ -256,7 +306,6 @@ async def process_single_request(
 
     try:
         result = await handler.handle(method, params)
-        logger.debug("RPC方法调用成功 method=%s user_id=%s request_id=%s", method, handler.user_id, request_id)
         return build_jsonrpc_response(result, request_id)
     except RpcError as exc:
         logger.warning(
@@ -328,21 +377,55 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
                     request_id,
                 )
                 if auth_error is not None:
+                    _log_rpc_method_response(
+                        method=_extract_rpc_method(item),
+                        rpc_id=item_request_id,
+                        user_id=None,
+                        request_id=request_id,
+                        response=auth_error,
+                    )
                     responses.append(auth_error)
                     continue
                 if user is None or remaining_params is None:
-                    responses.append(build_jsonrpc_error(RpcErrorCode.INTERNAL_ERROR, "Internal server error", item_request_id))
+                    response = build_jsonrpc_error(
+                        RpcErrorCode.INTERNAL_ERROR,
+                        "Internal server error",
+                        item_request_id,
+                    )
+                    _log_rpc_method_response(
+                        method=_extract_rpc_method(item),
+                        rpc_id=item_request_id,
+                        user_id=None,
+                        request_id=request_id,
+                        response=response,
+                    )
+                    responses.append(response)
                     continue
 
                 handler = Aria2RpcHandler(user["id"], aria2_client, app_state)
                 response = await process_single_request(item, handler, remaining_params)
+                _log_rpc_method_response(
+                    method=_extract_rpc_method(item),
+                    rpc_id=item_request_id,
+                    user_id=user["id"],
+                    request_id=request_id,
+                    response=response,
+                )
                 responses.append(response)
             else:
-                responses.append(build_jsonrpc_error(
+                response = build_jsonrpc_error(
                     RpcErrorCode.INVALID_REQUEST,
                     "Invalid request in batch",
                     None
-                ))
+                )
+                _log_rpc_method_response(
+                    method="<invalid>",
+                    rpc_id=None,
+                    user_id=None,
+                    request_id=request_id,
+                    response=response,
+                )
+                responses.append(response)
         logger.info("RPC批量请求完成 count=%s request_id=%s", len(responses), request_id)
         return JSONResponse(content=responses, status_code=200)
 
@@ -353,10 +436,29 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
         request_id,
     )
     if auth_error is not None:
+        _log_rpc_method_response(
+            method=_extract_rpc_method(body),
+            rpc_id=body.get("id"),
+            user_id=None,
+            request_id=request_id,
+            response=auth_error,
+        )
         return JSONResponse(content=auth_error, status_code=200)
     if user is None or remaining_params is None:
+        response = build_jsonrpc_error(
+            RpcErrorCode.INTERNAL_ERROR,
+            "Internal server error",
+            body.get("id"),
+        )
+        _log_rpc_method_response(
+            method=_extract_rpc_method(body),
+            rpc_id=body.get("id"),
+            user_id=None,
+            request_id=request_id,
+            response=response,
+        )
         return JSONResponse(
-            content=build_jsonrpc_error(RpcErrorCode.INTERNAL_ERROR, "Internal server error", body.get("id")),
+            content=response,
             status_code=200,
         )
 
@@ -364,6 +466,13 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
     logger.info("RPC请求通过鉴权 user_id=%s ip=%s request_id=%s", user["id"], client_ip, request_id)
 
     response = await process_single_request(body, handler, remaining_params)
+    _log_rpc_method_response(
+        method=_extract_rpc_method(body),
+        rpc_id=body.get("id"),
+        user_id=user["id"],
+        request_id=request_id,
+        response=response,
+    )
     logger.info("RPC单请求完成 user_id=%s request_id=%s", user["id"], request_id)
     return JSONResponse(content=response, status_code=200)
 

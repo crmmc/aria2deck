@@ -79,6 +79,12 @@ class Aria2Client:
     async def get_uris(self, gid: str) -> list[dict]:
         return cast(list[dict], await self._call("aria2.getUris", [gid]))
 
+    async def get_peers(self, gid: str) -> list[dict]:
+        return cast(list[dict], await self._call("aria2.getPeers", [gid]))
+
+    async def get_servers(self, gid: str) -> list[dict]:
+        return cast(list[dict], await self._call("aria2.getServers", [gid]))
+
     async def tell_active(self) -> list[dict]:
         return cast(list[dict], await self._call("aria2.tellActive", []))
 

@@ -135,6 +135,22 @@ class TestAria2ClientAsync:
         assert result == [{"path": "/file.zip"}]
         client._call.assert_called_once_with("aria2.getFiles", ["gid123"])
 
+    async def test_get_peers(self):
+        client = Aria2Client("http://localhost:6800/jsonrpc", "secret")
+        client._call = AsyncMock(return_value=[{"peerId": "peer-1"}])
+
+        result = await client.get_peers("gid123")
+        assert result == [{"peerId": "peer-1"}]
+        client._call.assert_called_once_with("aria2.getPeers", ["gid123"])
+
+    async def test_get_servers(self):
+        client = Aria2Client("http://localhost:6800/jsonrpc", "secret")
+        client._call = AsyncMock(return_value=[{"index": "1"}])
+
+        result = await client.get_servers("gid123")
+        assert result == [{"index": "1"}]
+        client._call.assert_called_once_with("aria2.getServers", ["gid123"])
+
     async def test_tell_active(self):
         client = Aria2Client("http://localhost:6800/jsonrpc", "secret")
         client._call = AsyncMock(return_value=[{"gid": "gid1"}])

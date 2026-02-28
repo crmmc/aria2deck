@@ -3,6 +3,8 @@ import asyncio
 from collections import defaultdict
 from time import time
 
+from app.core.config import settings
+
 
 class RateLimiter:
     """统一的异步速率限制器，基于滑动窗口算法
@@ -120,4 +122,4 @@ class ApiRateLimiter(RateLimiter):
 # 预配置的限流器实例
 login_limiter = LoginRateLimiter()  # 5次/5分钟
 api_limiter = ApiRateLimiter()  # 动态参数
-rpc_limiter = RateLimiter(max_requests=100, window_seconds=60)  # 100次/分钟
+rpc_limiter = RateLimiter(max_requests=settings.rate_limit_rpc, window_seconds=60)  # 默认600次/分钟
