@@ -1244,10 +1244,6 @@ class Aria2RpcHandler:
 
                     db_task = await db.get(DownloadTask, task_id)
 
-                if db_task and db_task.gid and db_task.status in CANCELABLE_TASK_STATUSES:
-                    await self._cleanup_aria2_gid(db_task.gid)
-                await cleanup_task_download_dir(task_id)
-
                 async with get_session() as db:
                     latest_task = await db.get(DownloadTask, task_id)
                     if latest_task is not None and latest_task.status in CANCELABLE_TASK_STATUSES:
@@ -1256,6 +1252,16 @@ class Aria2RpcHandler:
                         latest_task.error_display = "已取消"
                         latest_task.updated_at = utc_now_str()
                         db.add(latest_task)
+
+                # Clean up via unified entry point
+                from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
+                await cleanup_failed_task_artifacts(
+                    client=self.client,
+                    task_id=task_id,
+                    gid=db_task.gid if db_task else None,
+                    log_prefix="[RPC]",
+                    skip_status_check=True,
+                )
 
         return gid
     async def _handle_force_remove(self, params: list) -> str:

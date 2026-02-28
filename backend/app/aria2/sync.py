@@ -547,8 +547,8 @@ async def _cancel_task_sync(
     error_message: str,
 ) -> None:
     """取消任务（sync 版本）"""
+    from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
     from app.routers.tasks import broadcast_task_update_to_subscribers
-    from app.services.storage import cleanup_task_download_dir
 
     gid = task.gid
     task_id = task.id
@@ -558,16 +558,6 @@ async def _cancel_task_sync(
     if not gid:
         logger.warning(f"[Sync] 取消任务缺少 gid，task_id={task_id}")
         return
-
-    # Stop aria2 task
-    try:
-        await client.force_remove(gid)
-    except Exception as exc:
-        logger.debug(f"[Sync] force_remove 失败 task_id={task_id} gid={gid} error={exc}")
-    try:
-        await client.remove_download_result(gid)
-    except Exception as exc:
-        logger.debug(f"[Sync] remove_download_result 失败 task_id={task_id} gid={gid} error={exc}")
 
     # Update task status
     async with get_session() as db:
@@ -625,8 +615,14 @@ async def _cancel_task_sync(
             created_at=sub.created_at,
         )
 
-    # Clean up download directory
-    await cleanup_task_download_dir(task_id)
+    # Clean up via unified entry point
+    await cleanup_failed_task_artifacts(
+        client=client,
+        task_id=task_id,
+        gid=gid,
+        log_prefix="[Sync]",
+        skip_status_check=True,
+    )
 
     # Broadcast update
     await broadcast_task_update_to_subscribers(state, task_id)
