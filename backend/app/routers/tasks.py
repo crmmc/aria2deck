@@ -57,6 +57,7 @@ router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 # Minimum space required for magnet links (1MB)
 MAGNET_MIN_SPACE = 1 * 1024 * 1024
+CANCELABLE_TASK_STATUSES = ("queued", "active", "waiting", "paused", "error")
 
 
 # ========== SSRF 防护 ==========
@@ -1359,20 +1360,6 @@ async def cancel_task(
         if isinstance(remaining_count, tuple):
             remaining_count = remaining_count[0]
 
-        # Step 2.1: If no remaining subscribers, mark task as cancelled (even if gid not set)
-        if remaining_count == 0:
-            await db.execute(
-                update(DownloadTask)
-                .where(
-                    DownloadTask.id == task.id,
-                    DownloadTask.status.in_(["queued", "active", "error"])
-                )
-                .values(
-                    status="error",
-                    error_display="已取消",
-                    updated_at=utc_now_str()
-                )
-            )
         # Transaction commits here
 
     # Write to history if this was an active task cancellation
@@ -1416,7 +1403,7 @@ async def cancel_task(
                 )
                 db_task = result.first()
 
-            if db_task and db_task.status in ("queued", "active", "error"):
+            if db_task and db_task.status in CANCELABLE_TASK_STATUSES:
                 client = _get_client(request)
                 await cleanup_failed_task_artifacts(
                     client=client,
@@ -1430,7 +1417,7 @@ async def cancel_task(
                         select(DownloadTask).where(DownloadTask.id == task.id)
                     )
                     db_task = result.first()
-                    if db_task:
+                    if db_task and db_task.status in CANCELABLE_TASK_STATUSES:
                         db_task.status = "error"
                         db_task.error_display = "已取消"
                         db_task.gid = None

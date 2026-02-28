@@ -545,6 +545,23 @@ class TestRefCountDecrementDeletesFile:
         assert not file_dir.exists(), "Physical file should be deleted"
 
 
+@pytest.mark.asyncio
+class TestCleanupTaskDownloadDir:
+    async def test_cleanup_task_download_dir_raises_on_delete_failure(self, temp_db_storage):
+        from app.services.storage import cleanup_task_download_dir, get_downloading_dir
+
+        task_id = 9527
+        task_dir = get_downloading_dir() / str(task_id)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "leftover.bin").write_text("x")
+
+        with patch("app.services.storage.shutil.rmtree", side_effect=PermissionError("denied")):
+            with pytest.raises(RuntimeError, match="Failed to clean up task directory"):
+                await cleanup_task_download_dir(task_id)
+
+        assert task_dir.exists()
+
+
 class TestDeleteReferenceStateSync:
     @pytest.mark.asyncio
     async def test_delete_last_reference_resets_task_and_subscription(self, temp_db_storage, test_user_storage):

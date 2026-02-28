@@ -47,6 +47,8 @@ ALLOWED_STATUS_VALUES = {
     "complete",
     "removed",
 }
+RUNNABLE_TASK_STATUSES = ("active", "queued", "waiting", "paused")
+CANCELABLE_TASK_STATUSES = ("queued", "active", "waiting", "paused", "error")
 
 
 class RpcBackendClient(Protocol):
@@ -1074,7 +1076,7 @@ class Aria2RpcHandler:
 
             await self._create_or_get_subscription(task_id)
 
-            if task.gid and task.status in ("active", "queued", "waiting"):
+            if task.gid and task.status in RUNNABLE_TASK_STATUSES:
                 return task.gid
             options["dir"] = str(get_task_download_dir(task_id))
 
@@ -1084,7 +1086,7 @@ class Aria2RpcHandler:
                     db_task = await db.get(DownloadTask, task_id)
                     if not db_task:
                         raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Task not found after add")
-                    if db_task.gid and db_task.status in ("active", "queued", "waiting"):
+                    if db_task.gid and db_task.status in RUNNABLE_TASK_STATUSES:
                         return db_task.gid
 
                 try:
@@ -1144,7 +1146,7 @@ class Aria2RpcHandler:
 
             await self._create_or_get_subscription(task_id)
 
-            if task.gid and task.status in ("active", "queued", "waiting"):
+            if task.gid and task.status in RUNNABLE_TASK_STATUSES:
                 return task.gid
             options["dir"] = str(get_task_download_dir(task_id))
 
@@ -1154,7 +1156,7 @@ class Aria2RpcHandler:
                     db_task = await db.get(DownloadTask, task_id)
                     if not db_task:
                         raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Task not found after add")
-                    if db_task.gid and db_task.status in ("active", "queued", "waiting"):
+                    if db_task.gid and db_task.status in RUNNABLE_TASK_STATUSES:
                         return db_task.gid
 
                 try:
@@ -1236,16 +1238,6 @@ class Aria2RpcHandler:
             )
             remaining_count = self._to_int_scalar(result.one(), default=0)
 
-            if remaining_count == 0:
-                await db.execute(
-                    update(DownloadTask)
-                    .where(
-                        col(DownloadTask.id) == task_id,
-                        col(DownloadTask.status).in_(["queued", "active", "error"]),
-                    )
-                    .values(status="error", error_display="已取消")
-                )
-
         # 写历史记录
         if is_active_cancel:
             from app.services.history import add_task_history
@@ -1275,14 +1267,16 @@ class Aria2RpcHandler:
 
                     db_task = await db.get(DownloadTask, task_id)
 
-                if db_task and db_task.gid and db_task.status in ("queued", "active", "error"):
+                if db_task and db_task.gid and db_task.status in CANCELABLE_TASK_STATUSES:
                     await self._cleanup_aria2_gid(db_task.gid)
                 await cleanup_task_download_dir(task_id)
 
                 async with get_session() as db:
                     latest_task = await db.get(DownloadTask, task_id)
-                    if latest_task is not None:
+                    if latest_task is not None and latest_task.status in CANCELABLE_TASK_STATUSES:
                         latest_task.gid = None
+                        latest_task.status = "error"
+                        latest_task.error_display = "已取消"
                         latest_task.updated_at = utc_now_str()
                         db.add(latest_task)
 
