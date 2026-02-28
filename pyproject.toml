@@ -24,6 +24,7 @@ dev = [
     "httpx>=0.27.0",
     "pytest-cov>=7.0.0",
     "pytest-timeout>=2.3.1",
+    "mypy>=1.19.1",
 ]
 
 [tool.pytest.ini_options]
@@ -33,3 +34,17 @@ timeout = 60
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+show_error_codes = true
+# 渐进式启用 strict，先从关键模块开始
+[[tool.mypy.overrides]]
+module = "app.aria2.*"
+disallow_untyped_defs = true
+check_untyped_defs = true
