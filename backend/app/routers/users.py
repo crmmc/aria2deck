@@ -1,7 +1,6 @@
 """用户管理接口模块"""
 import logging
 import secrets
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +16,7 @@ from app.core.security import hash_password
 from app.database import get_session
 from app.models import User, Session as SessionModel, Task, PackTask, UserFile
 from app.schemas import RpcAccessStatus, RpcAccessToggle, UserCreate, UserOut, UserUpdate
+from app.services.storage import safe_delete_path
 
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -281,9 +281,14 @@ async def delete_user(
 
     # 可选：删除用户下载目录
     if delete_files:
-        user_download_dir = Path(settings.download_dir) / str(user_id)
-        if user_download_dir.exists():
-            shutil.rmtree(user_download_dir, ignore_errors=True)
+        base_download_dir = Path(settings.download_dir).resolve()
+        user_download_dir = base_download_dir / str(user_id)
+        safe_delete_path(
+            base_dir=base_download_dir,
+            target=user_download_dir,
+            recursive=True,
+            allow_missing=True,
+        )
 
     logger.info(
         "删除用户成功 actor_id=%s target_user_id=%s delete_files=%s request_id=%s",

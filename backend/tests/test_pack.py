@@ -82,6 +82,19 @@ def _create_user_dir_file(user_id: int, user_dir: Path, dir_name: str) -> int:
     return uf_id
 
 
+def test_cleanup_pack_output_rejects_outside_download_dir(temp_db: str):
+    from app.services.pack import cleanup_pack_output
+
+    outside_dir = Path(tempfile.mkdtemp())
+    outside_file = outside_dir / "outside.zip"
+    outside_file.write_bytes(b"outside")
+
+    deleted = cleanup_pack_output(outside_file)
+
+    assert deleted is False
+    assert outside_file.exists()
+
+
 # ========== Fixtures ==========
 
 @pytest.fixture

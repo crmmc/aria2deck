@@ -9,6 +9,7 @@ Handles:
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -52,6 +53,164 @@ def get_task_download_dir(task_id: int) -> Path:
     task_dir = get_downloading_dir() / str(task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
     return task_dir
+
+
+def is_path_within_base(base_dir: Path, target: Path) -> bool:
+    """Check whether target path is within base directory."""
+    base_resolved = base_dir.resolve(strict=False)
+    target_abs = target if target.is_absolute() else base_resolved / target
+    normalized_target = target_abs.parent.resolve(strict=False) / target_abs.name
+
+    try:
+        normalized_target.relative_to(base_resolved)
+        return True
+    except ValueError:
+        return False
+
+
+def safe_delete_path(
+    base_dir: Path,
+    target: Path,
+    *,
+    recursive: bool = False,
+    allow_missing: bool = True,
+    allow_delete_base: bool = False,
+) -> bool:
+    """Safely delete a file/directory under a whitelisted base directory."""
+    target_raw = str(target).strip()
+    if not target_raw:
+        logger.warning(
+            "Refused delete: empty target path base_dir=%s target=%s recursive=%s reason=empty_target",
+            base_dir,
+            target,
+            recursive,
+        )
+        raise ValueError("Empty target path is not allowed")
+
+    base_resolved = base_dir.resolve(strict=False)
+    target_candidate = target if target.is_absolute() else base_resolved / target
+    target_abs = target_candidate.parent.resolve(strict=False) / target_candidate.name
+    target_resolved = target_abs.resolve(strict=False)
+
+    if not is_path_within_base(base_resolved, target_abs):
+        logger.warning(
+            "Refused delete: target outside base_dir=%s target=%s resolved_target=%s recursive=%s reason=outside_base",
+            base_resolved,
+            target_abs,
+            target_resolved,
+            recursive,
+        )
+        raise ValueError(f"Target path outside allowed base: {target_abs}")
+
+    fs_root = Path(target_abs.anchor).resolve(strict=False)
+    if target_abs == fs_root:
+        logger.warning(
+            "Refused delete: filesystem root base_dir=%s target=%s resolved_target=%s recursive=%s reason=filesystem_root",
+            base_resolved,
+            target_abs,
+            target_resolved,
+            recursive,
+        )
+        raise ValueError("Deleting filesystem root is not allowed")
+
+    if target_abs == base_resolved and not allow_delete_base:
+        logger.warning(
+            "Refused delete: base directory base_dir=%s target=%s resolved_target=%s recursive=%s reason=delete_base_forbidden",
+            base_resolved,
+            target_abs,
+            target_resolved,
+            recursive,
+        )
+        raise ValueError("Deleting base directory is not allowed")
+
+    exists_or_link = target_abs.exists() or target_abs.is_symlink()
+    if not exists_or_link:
+        if allow_missing:
+            logger.debug(
+                "Skip delete: target missing base_dir=%s target=%s resolved_target=%s recursive=%s reason=missing",
+                base_resolved,
+                target_abs,
+                target_resolved,
+                recursive,
+            )
+            return False
+        raise FileNotFoundError(target_abs)
+
+    if target_abs.is_symlink():
+        try:
+            target_abs.unlink()
+        except FileNotFoundError:
+            if allow_missing:
+                logger.debug(
+                    "Skip delete: symlink already missing base_dir=%s target=%s resolved_target=%s recursive=%s reason=missing_after_check",
+                    base_resolved,
+                    target_abs,
+                    target_resolved,
+                    recursive,
+                )
+                return False
+            raise
+        logger.info(
+            "Deleted symlink path base_dir=%s target=%s resolved_target=%s recursive=%s",
+            base_resolved,
+            target_abs,
+            target_resolved,
+            recursive,
+        )
+        return True
+
+    try:
+        target_resolved.relative_to(base_resolved)
+    except ValueError as exc:
+        logger.warning(
+            "Refused delete: resolved target outside base_dir=%s target=%s resolved_target=%s recursive=%s reason=resolved_outside_base",
+            base_resolved,
+            target_abs,
+            target_resolved,
+            recursive,
+        )
+        raise ValueError(f"Resolved target path outside allowed base: {target_resolved}") from exc
+
+    if target_abs.is_dir():
+        try:
+            if recursive:
+                shutil.rmtree(target_abs)
+            else:
+                target_abs.rmdir()
+        except FileNotFoundError:
+            if allow_missing:
+                logger.debug(
+                    "Skip delete: directory missing during delete base_dir=%s target=%s resolved_target=%s recursive=%s reason=missing_after_check",
+                    base_resolved,
+                    target_abs,
+                    target_resolved,
+                    recursive,
+                )
+                return False
+            raise
+    else:
+        try:
+            target_abs.unlink()
+        except FileNotFoundError:
+            if allow_missing:
+                logger.debug(
+                    "Skip delete: file missing during delete base_dir=%s target=%s resolved_target=%s recursive=%s reason=missing_after_check",
+                    base_resolved,
+                    target_abs,
+                    target_resolved,
+                    recursive,
+                )
+                return False
+            raise
+
+    logger.info(
+        "Deleted path base_dir=%s target=%s resolved_target=%s recursive=%s",
+        base_resolved,
+        target_abs,
+        target_resolved,
+        recursive,
+    )
+    return True
 
 
 def get_store_path_for_hash(content_hash: str) -> Path:
@@ -104,10 +263,11 @@ async def move_to_store(
             logger.info(
                 f"File already in store: {content_hash}, deleting duplicate at {source_path}"
             )
-            if source_path.is_dir():
-                shutil.rmtree(source_path)
-            else:
-                source_path.unlink()
+            safe_delete_path(
+                base_dir=get_downloading_dir(),
+                target=source_path,
+                recursive=source_path.is_dir(),
+            )
             return existing
 
     # Calculate size
@@ -127,10 +287,11 @@ async def move_to_store(
         if store_path.exists():
             # Race condition: another process created it
             logger.warning(f"Store path already exists: {store_path}")
-            if source_path.is_dir():
-                shutil.rmtree(source_path)
-            else:
-                source_path.unlink()
+            safe_delete_path(
+                base_dir=get_downloading_dir(),
+                target=source_path,
+                recursive=source_path.is_dir(),
+            )
         else:
             shutil.move(str(source_path), str(store_path))
             logger.info(f"Moved {source_path} to {store_path}")
@@ -138,21 +299,23 @@ async def move_to_store(
         # Handle race condition where path was created between check and move
         if "already exists" in str(e).lower() or store_path.exists():
             logger.warning(f"Race condition during move: {e}")
-            if source_path.exists():
-                if source_path.is_dir():
-                    shutil.rmtree(source_path)
-                else:
-                    source_path.unlink()
+            if source_path.exists() or source_path.is_symlink():
+                safe_delete_path(
+                    base_dir=get_downloading_dir(),
+                    target=source_path,
+                    recursive=source_path.is_dir(),
+                )
         else:
             raise
     except FileExistsError:
         # Another process created the destination
         logger.warning(f"FileExistsError during move to {store_path}")
-        if source_path.exists():
-            if source_path.is_dir():
-                shutil.rmtree(source_path)
-            else:
-                source_path.unlink()
+        if source_path.exists() or source_path.is_symlink():
+            safe_delete_path(
+                base_dir=get_downloading_dir(),
+                target=source_path,
+                recursive=source_path.is_dir(),
+            )
 
     # Create StoredFile record with race condition handling
     async with get_session() as db:
@@ -395,17 +558,19 @@ async def delete_user_file_reference(user_file_id: int) -> bool:
 
 
 async def _delete_stored_file_by_path(real_path: str) -> None:
-    """Delete physical file by path."""
+    """Delete physical file by path within store directory only."""
     path = Path(real_path)
-    if path.exists():
-        try:
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
-            logger.info(f"Deleted physical file: {path}")
-        except Exception as e:
-            logger.error(f"Failed to delete physical file {path}: {e}")
+    try:
+        deleted = safe_delete_path(
+            base_dir=get_store_dir(),
+            target=path,
+            recursive=path.is_dir(),
+            allow_missing=True,
+        )
+        if deleted:
+            logger.info("Deleted physical file: %s", path)
+    except Exception as e:
+        logger.error(f"Failed to delete physical file {path}: {e}")
 
 
 async def cleanup_task_download_dir(task_id: int) -> None:
@@ -417,15 +582,17 @@ async def cleanup_task_download_dir(task_id: int) -> None:
         task_id: The DownloadTask ID
     """
     task_dir = get_downloading_dir() / str(task_id)
-    if task_dir.exists():
-        try:
-            shutil.rmtree(task_dir)
-            logger.info(f"Cleaned up task download directory: {task_dir}")
-        except FileNotFoundError:
-            logger.debug("Task directory already cleaned: %s", task_dir)
-        except Exception as e:
-            logger.error(f"Failed to clean up task directory {task_dir}: {e}")
-            raise RuntimeError(f"Failed to clean up task directory: {task_dir}") from e
+    try:
+        safe_delete_path(
+            base_dir=get_downloading_dir(),
+            target=task_dir,
+            recursive=True,
+            allow_missing=True,
+        )
+        logger.info(f"Cleaned up task download directory: {task_dir}")
+    except Exception as e:
+        logger.error(f"Failed to clean up task directory {task_dir}: {e}")
+        raise RuntimeError(f"Failed to clean up task directory: {task_dir}") from e
 
 
 async def get_user_used_space_async(user_id: int) -> int:
