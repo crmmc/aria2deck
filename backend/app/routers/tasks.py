@@ -1416,18 +1416,15 @@ async def cancel_task(
                 )
                 db_task = result.first()
 
-            if db_task and db_task.gid and db_task.status in ("queued", "active", "error"):
+            if db_task and db_task.status in ("queued", "active", "error"):
                 client = _get_client(request)
-                try:
-                    await client.force_remove(db_task.gid)
-                except Exception as e:
-                    logger.warning("Failed to force remove task gid=%s: %s", db_task.gid, e)
-                try:
-                    await client.remove_download_result(db_task.gid)
-                except Exception as e:
-                    logger.warning("Failed to remove download result gid=%s: %s", db_task.gid, e)
+                await cleanup_failed_task_artifacts(
+                    client=client,
+                    task_id=task.id,
+                    gid=db_task.gid,
+                    log_prefix="[Tasks]",
+                )
 
-                # Mark task as cancelled
                 async with get_session() as db:
                     result = await db.exec(
                         select(DownloadTask).where(DownloadTask.id == task.id)
@@ -1436,12 +1433,9 @@ async def cancel_task(
                     if db_task:
                         db_task.status = "error"
                         db_task.error_display = "已取消"
+                        db_task.gid = None
                         db_task.updated_at = utc_now_str()
                         db.add(db_task)
-
-                # Clean up download directory
-                from app.services.storage import cleanup_task_download_dir
-                await cleanup_task_download_dir(task.id)
 
                 logger.info("取消任务成功 user_id=%s subscription_id=%s task_id=%s", user.id, subscription_id, task.id)
 

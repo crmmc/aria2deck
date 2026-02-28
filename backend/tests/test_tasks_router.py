@@ -777,6 +777,51 @@ class TestCancelTaskWithData:
         assert response.status_code == 200
         assert response.json()["ok"] is True
 
+    def test_cancel_pending_subscription_without_gid_cleans_task_dir(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ):
+        from pathlib import Path
+
+        from app.db import execute, utc_now
+
+        execute(
+            """INSERT INTO download_tasks
+               (uri_hash, uri, gid, status, name, total_length, completed_length,
+                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                "cancel_no_gid_hash",
+                "http://example.com/no-gid.zip",
+                None,
+                "queued",
+                "no-gid.zip",
+                1000000,
+                0,
+                0,
+                0,
+                0,
+                0,
+                utc_now(),
+                utc_now(),
+            ],
+        )
+
+        execute(
+            """INSERT INTO user_task_subscriptions
+               (owner_id, task_id, frozen_space, status, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            [test_user["id"], 1, 1000000, "pending", utc_now()],
+        )
+
+        task_dir = Path(settings.download_dir) / "downloading" / "1"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "partial.bin").write_text("x")
+
+        response = authenticated_client.delete("/api/tasks/1")
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert not task_dir.exists()
+
     @patch("app.routers.tasks._get_client")
     def test_cancel_other_user_subscription(
         self, mock_get_client, authenticated_client: TestClient, test_user: dict, test_admin: dict, temp_db: str

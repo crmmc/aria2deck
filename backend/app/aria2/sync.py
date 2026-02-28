@@ -440,7 +440,10 @@ async def _cleanup_orphan_aria2_tasks(
 
 async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
     """修复完成状态但未落库为用户文件/历史的脏任务。"""
+    from app.core.state import get_aria2_client
     from app.routers.tasks import broadcast_task_update_to_subscribers
+
+    client = get_aria2_client(state=state)
 
     async with get_session() as db:
         result = await db.exec(
@@ -477,6 +480,7 @@ async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
             logger.warning("Failed to parse timestamp for task_id=%s: %s", task_id, e)
 
         reason = "下载完成但文件未入库"
+        cleanup_gid = task.gid
         async with get_session() as db:
             result = await db.execute(
                 update(DownloadTask)
@@ -486,6 +490,7 @@ async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
                 )
                 .values(
                     status="error",
+                    gid=None,
                     error=reason,
                     error_display=reason,
                     updated_at=utc_now_str(),
@@ -495,6 +500,12 @@ async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
                 logger.info(f"[Sync] 任务 {task_id} 已被 listener 处理，跳过修复")
                 continue
         await _handle_task_stop_or_error_sync(task_id, reason)
+        await cleanup_failed_task_artifacts(
+            client=client,
+            task_id=task_id,
+            gid=cleanup_gid,
+            log_prefix="[Sync]",
+        )
         await broadcast_task_update_to_subscribers(state, task_id)
 
 
