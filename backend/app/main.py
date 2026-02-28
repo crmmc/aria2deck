@@ -158,15 +158,30 @@ def create_app() -> FastAPI:
     app.state.app_state = AppState()
     app.state.aria2_client = Aria2Client(settings.aria2_rpc_url, settings.aria2_rpc_secret)
 
+    def _build_request_target(request: Request) -> str:
+        path = request.url.path
+        query = request.url.query
+        if not query:
+            return path
+        return f"{path}?{query}"
+
+    def _should_audit_request(path: str) -> bool:
+        # 调试模式下记录所有 HTTP 请求，便于排查反代/RPC问题
+        if settings.debug:
+            return True
+        # 非调试模式仅记录 API 请求，避免静态资源日志过多
+        return path.startswith("/api")
+
     @app.middleware("http")
     async def request_audit_middleware(request: Request, call_next):
         path = request.url.path
-        if not path.startswith("/api"):
+        if not _should_audit_request(path):
             return await call_next(request)
 
         request_id = request.headers.get("X-Request-ID") or uuid4().hex
         request.state.request_id = request_id
         method = request.method
+        target = _build_request_target(request)
         client_ip = request.client.host if request.client else "unknown"
         start_time = time.perf_counter()
 
@@ -178,7 +193,7 @@ def create_app() -> FastAPI:
             logger.exception(
                 "[HTTP] %s %s -> 500 %.1fms request_id=%s user_id=%s ip=%s",
                 method,
-                path,
+                target,
                 duration_ms,
                 request_id,
                 user_id,
@@ -196,7 +211,7 @@ def create_app() -> FastAPI:
         )
         log_args = (
             method,
-            path,
+            target,
             status_code,
             duration_ms,
             request_id,
@@ -222,6 +237,7 @@ def create_app() -> FastAPI:
             "http://127.0.0.1:8080",
             "https://ariang.mayswind.net",
             "https://ariang.js.org",
+            "null",
         ],
         allow_credentials=True,
         allow_methods=["*"],
