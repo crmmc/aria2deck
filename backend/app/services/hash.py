@@ -254,6 +254,21 @@ def calculate_content_hash(path: Path) -> str:
         raise ValueError(f"Path does not exist or is not a file/directory: {path}")
 
 
+async def calculate_content_hash_async(path: Path) -> str:
+    """异步计算文件或目录的内容哈希。
+
+    使用 asyncio.to_thread 避免阻塞事件循环，适用于大文件。
+
+    Args:
+        path: Path to file or directory
+
+    Returns:
+        Lowercase hex SHA256 hash (64 chars)
+    """
+    import asyncio
+    return await asyncio.to_thread(calculate_content_hash, path)
+
+
 def get_uri_hash(uri: str, torrent_base64: str | None = None) -> str | None:
     """Get the appropriate hash for a URI based on its type.
 

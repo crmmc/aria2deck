@@ -120,7 +120,7 @@ class TestApiRateLimitIntegration:
         # 使用 mock 来模拟频率限制，并避免真实网络探测
         with patch('app.routers.tasks.api_limiter') as mock_limiter, \
              patch('app.routers.tasks.probe_url_with_get_fallback', new_callable=AsyncMock) as mock_probe, \
-             patch('app.routers.tasks.socket.getaddrinfo') as mock_getaddrinfo:
+             patch('app.core.security.socket.getaddrinfo') as mock_getaddrinfo:
             mock_probe.return_value = type("ProbeResult", (), {
                 "success": True,
                 "final_url": "https://example.com/file.zip",

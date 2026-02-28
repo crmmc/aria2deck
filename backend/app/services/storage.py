@@ -20,7 +20,7 @@ from sqlmodel import select
 from app.core.config import settings
 from app.database import get_session
 from app.models import DownloadTask, StoredFile, UserFile, UserTaskSubscription, utc_now_str
-from app.services.hash import calculate_content_hash
+from app.services.hash import calculate_content_hash_async
 
 logger = logging.getLogger(__name__)
 
@@ -248,8 +248,8 @@ async def move_to_store(
     if not source_path.exists():
         raise FileNotFoundError(f"Source path does not exist: {source_path}")
 
-    # Calculate content hash
-    content_hash = calculate_content_hash(source_path)
+    # Calculate content hash (异步，避免阻塞事件循环)
+    content_hash = await calculate_content_hash_async(source_path)
 
     # Check if already stored
     async with get_session() as db:

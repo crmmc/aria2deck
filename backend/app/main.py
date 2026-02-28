@@ -131,7 +131,15 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("启动修复任务失败")
 
+    async def safe_orphan_cleanup():
+        try:
+            from app.services.orphan_cleanup import cleanup_orphan_files
+            await cleanup_orphan_files()
+        except Exception:
+            logger.exception("孤儿文件清理失败")
+
     asyncio.create_task(safe_startup_repair())
+    asyncio.create_task(safe_orphan_cleanup())
 
     sync_task = asyncio.create_task(
         sync_tasks(app.state.app_state, settings.aria2_poll_interval)
@@ -151,6 +159,8 @@ async def lifespan(app: FastAPI):
         await listener_task
     except asyncio.CancelledError:
         logger.debug("listen_aria2_events 已取消")
+    # 关闭 aiohttp Session
+    await Aria2Client.close_session()
 
 
 def create_app() -> FastAPI:
@@ -228,17 +238,22 @@ def create_app() -> FastAPI:
 
         return response
 
+    # CORS 配置
+    cors_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "https://ariang.mayswind.net",
+        "https://ariang.js.org",
+    ]
+    # 仅在 debug 模式下允许 null origin（本地文件调试）
+    if settings.debug:
+        cors_origins.append("null")
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-            "http://localhost:8080",
-            "http://127.0.0.1:8080",
-            "https://ariang.mayswind.net",
-            "https://ariang.js.org",
-            "null",
-        ],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

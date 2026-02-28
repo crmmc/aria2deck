@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urlparse
 
 import aiohttp
-from app.core.security import mask_url_credentials
+from app.core.security import check_url_ssrf, mask_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,16 @@ async def probe_http_url(
             ) as response:
                 # Get final URL after redirects
                 final_url = str(response.url)
+
+                # SSRF 防护：检查重定向后的最终 URL
+                if final_url != url:
+                    ssrf_error = await check_url_ssrf(final_url)
+                    if ssrf_error:
+                        return ProbeResult(
+                            success=False,
+                            final_url=final_url,
+                            error=f"重定向目标不安全: {ssrf_error}",
+                        )
 
                 # Check for successful response
                 if response.status >= 400:

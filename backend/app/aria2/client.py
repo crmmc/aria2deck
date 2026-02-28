@@ -3,9 +3,27 @@ from typing import Any, cast
 
 
 class Aria2Client:
+    # 类级别共享 Session，所有实例复用
+    _session: aiohttp.ClientSession | None = None
+    _timeout = aiohttp.ClientTimeout(total=30)
+
     def __init__(self, rpc_url: str, secret: str = "") -> None:
         self._rpc_url = rpc_url
         self._secret = secret
+
+    @classmethod
+    async def get_session(cls) -> aiohttp.ClientSession:
+        """获取或创建共享的 aiohttp Session"""
+        if cls._session is None or cls._session.closed:
+            cls._session = aiohttp.ClientSession(timeout=cls._timeout)
+        return cls._session
+
+    @classmethod
+    async def close_session(cls) -> None:
+        """关闭共享 Session，应在应用关闭时调用"""
+        if cls._session is not None and not cls._session.closed:
+            await cls._session.close()
+            cls._session = None
 
     def _build_params(self, params: list) -> list:
         if self._secret:
@@ -19,13 +37,12 @@ class Aria2Client:
             "method": method,
             "params": self._build_params(params or []),
         }
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(self._rpc_url, json=payload) as resp:
-                data = await resp.json()
-                if "error" in data:
-                    raise RuntimeError(data["error"])
-                return data["result"]
+        session = await self.get_session()
+        async with session.post(self._rpc_url, json=payload) as resp:
+            data = await resp.json()
+            if "error" in data:
+                raise RuntimeError(data["error"])
+            return data["result"]
 
     async def add_uri(self, uris: list[str], options: dict | None = None) -> str:
         params: list[object] = [uris]

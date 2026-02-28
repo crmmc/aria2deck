@@ -24,6 +24,23 @@ def verify_password(password: str, encoded: str) -> bool:
     return hmac.compare_digest(stored, digest)
 
 
+# 预生成的 dummy hash，用于防止时序攻击
+# 当用户不存在时，仍然执行 PBKDF2 计算以保持响应时间一致
+_DUMMY_HASH = hash_password("dummy-password-for-timing-attack-prevention")
+
+
+def verify_password_constant_time(password: str, encoded: str | None) -> bool:
+    """常量时间密码验证，防止时序攻击。
+
+    当 encoded 为 None（用户不存在）时，仍执行 PBKDF2 计算。
+    """
+    if encoded is None:
+        # 用户不存在，执行 dummy 验证以保持时间一致
+        verify_password(password, _DUMMY_HASH)
+        return False
+    return verify_password(password, encoded)
+
+
 # ANSI 转义序列正则（匹配 ESC[ 开头的控制序列）
 _ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b[^[]')
 
@@ -99,3 +116,79 @@ def mask_url_credentials(url: str) -> str:
         # 解析失败时返回原 URL（可能是 magnet 等特殊协议）
         logger.debug(f"Failed to parse URL for sanitization: {e}")
         return url
+
+
+# ========== SSRF 防护 ==========
+import asyncio
+import ipaddress
+import socket
+
+
+def is_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """检查 IP 是否为私有/内网地址"""
+    return (
+        ip.is_private or
+        ip.is_loopback or
+        ip.is_link_local or
+        ip.is_reserved or
+        ip.is_multicast
+    )
+
+
+async def check_url_ssrf(url: str) -> str | None:
+    """检查 URL 是否存在 SSRF 风险。
+
+    Args:
+        url: 要检查的 URL
+
+    Returns:
+        如果安全返回 None，否则返回错误信息
+    """
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+
+        if scheme not in ('http', 'https', 'ftp'):
+            return None
+
+        if not hostname:
+            return "无效的下载链接"
+
+        blocked_hosts = {
+            'localhost', 'localhost.localdomain',
+            '127.0.0.1', '::1', '0.0.0.0', '::'
+        }
+        if hostname.lower() in blocked_hosts:
+            return "不允许下载本机地址"
+
+        # 检查是否为 IP 地址
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if is_private_ip(ip):
+                return "不允许下载内网地址"
+            return None
+        except ValueError:
+            pass
+
+        # 域名解析检查
+        try:
+            loop = asyncio.get_running_loop()
+            addr_infos = await loop.run_in_executor(
+                None, socket.getaddrinfo, hostname, None
+            )
+            for addr_info in addr_infos:
+                ip_str = addr_info[4][0]
+                try:
+                    ip = ipaddress.ip_address(ip_str)
+                    if is_private_ip(ip):
+                        return f"域名 {hostname} 解析到内网地址，禁止下载"
+                except ValueError:
+                    continue
+        except socket.gaierror:
+            return f"域名 {hostname} 无法解析"
+
+    except Exception as exc:
+        logger.warning("SSRF 校验异常 url=%s error=%s", mask_url_credentials(url), exc)
+
+    return None

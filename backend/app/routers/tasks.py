@@ -6,12 +6,9 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import shutil
-import socket
 from pathlib import Path
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
@@ -24,7 +21,7 @@ from app.aria2.client import Aria2Client
 from app.auth import require_user
 from app.core.config import settings
 from app.core.rate_limit import api_limiter
-from app.core.security import mask_url_credentials
+from app.core.security import check_url_ssrf, mask_url_credentials
 from app.core.state import AppState, get_aria2_client, get_user_space_lock
 from app.database import get_session
 from app.models import (
@@ -60,81 +57,11 @@ MAGNET_MIN_SPACE = 1 * 1024 * 1024
 CANCELABLE_TASK_STATUSES = ("queued", "active", "waiting", "paused", "error")
 
 
-# ========== SSRF 防护 ==========
-
-def _is_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """检查 IP 是否为私有/内网地址"""
-    return (
-        ip.is_private or
-        ip.is_loopback or
-        ip.is_link_local or
-        ip.is_reserved or
-        ip.is_multicast
-    )
-
-
 async def _check_url_safety(url: str) -> None:
-    """检查 URL 是否安全（SSRF 防护）"""
-    safe_url = mask_url_credentials(url)
-    try:
-        parsed = urlparse(url)
-        scheme = parsed.scheme.lower()
-        hostname = parsed.hostname
-
-        if scheme not in ('http', 'https', 'ftp'):
-            return
-
-        if not hostname:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="无效的下载链接"
-            )
-
-        blocked_hosts = {
-            'localhost', 'localhost.localdomain',
-            '127.0.0.1', '::1', '0.0.0.0', '::'
-        }
-        if hostname.lower() in blocked_hosts:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="不允许下载本机地址"
-            )
-
-        try:
-            ip = ipaddress.ip_address(hostname)
-            if _is_private_ip(ip):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="不允许下载内网地址"
-                )
-            return
-        except ValueError:
-            pass
-
-        try:
-            loop = asyncio.get_running_loop()
-            addr_infos = await loop.run_in_executor(None, socket.getaddrinfo, hostname, None)
-            for addr_info in addr_infos:
-                ip_str = addr_info[4][0]
-                try:
-                    ip = ipaddress.ip_address(ip_str)
-                    if _is_private_ip(ip):
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"域名 {hostname} 解析到内网地址，禁止下载"
-                        )
-                except ValueError:
-                    continue
-        except socket.gaierror:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"域名 {hostname} 无法解析"
-            )
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("SSRF 校验异常 url=%s error=%s", safe_url, exc)
+    """检查 URL 是否安全（SSRF 防护），不安全时抛出 HTTPException"""
+    error = await check_url_ssrf(url)
+    if error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error)
 
 
 # ========== Schemas ==========

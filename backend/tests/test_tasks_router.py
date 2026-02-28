@@ -19,28 +19,28 @@ class TestSSRFProtection:
     def test_is_private_ip_loopback(self):
         """Test loopback addresses are detected as private."""
         import ipaddress
-        from app.routers.tasks import _is_private_ip
+        from app.core.security import is_private_ip
 
-        assert _is_private_ip(ipaddress.ip_address("127.0.0.1")) is True
-        assert _is_private_ip(ipaddress.ip_address("::1")) is True
+        assert is_private_ip(ipaddress.ip_address("127.0.0.1")) is True
+        assert is_private_ip(ipaddress.ip_address("::1")) is True
 
     def test_is_private_ip_private_ranges(self):
         """Test private IP ranges are detected."""
         import ipaddress
-        from app.routers.tasks import _is_private_ip
+        from app.core.security import is_private_ip
 
         # Private ranges
-        assert _is_private_ip(ipaddress.ip_address("10.0.0.1")) is True
-        assert _is_private_ip(ipaddress.ip_address("172.16.0.1")) is True
-        assert _is_private_ip(ipaddress.ip_address("192.168.1.1")) is True
+        assert is_private_ip(ipaddress.ip_address("10.0.0.1")) is True
+        assert is_private_ip(ipaddress.ip_address("172.16.0.1")) is True
+        assert is_private_ip(ipaddress.ip_address("192.168.1.1")) is True
 
     def test_is_private_ip_public(self):
         """Test public IPs are not detected as private."""
         import ipaddress
-        from app.routers.tasks import _is_private_ip
+        from app.core.security import is_private_ip
 
-        assert _is_private_ip(ipaddress.ip_address("8.8.8.8")) is False
-        assert _is_private_ip(ipaddress.ip_address("1.1.1.1")) is False
+        assert is_private_ip(ipaddress.ip_address("8.8.8.8")) is False
+        assert is_private_ip(ipaddress.ip_address("1.1.1.1")) is False
 
     @pytest.mark.asyncio
     async def test_check_url_safety_localhost(self):
@@ -1021,7 +1021,7 @@ class TestDNSResolutionSSRF:
 
         mock_result = [(socket.AF_INET, socket.SOCK_STREAM, 0, '', ('192.168.1.100', 80))]
 
-        with patch("app.routers.tasks.socket.getaddrinfo", return_value=mock_result):
+        with patch("app.core.security.socket.getaddrinfo", return_value=mock_result):
             with pytest.raises(HTTPException) as exc_info:
                 await _check_url_safety("http://evil.example.com/file.zip")
             assert exc_info.value.status_code == 400
@@ -1033,7 +1033,7 @@ class TestDNSResolutionSSRF:
         from app.routers.tasks import _check_url_safety
         import socket
 
-        with patch("app.routers.tasks.socket.getaddrinfo", side_effect=socket.gaierror("DNS failed")):
+        with patch("app.core.security.socket.getaddrinfo", side_effect=socket.gaierror("DNS failed")):
             with pytest.raises(HTTPException) as exc_info:
                 await _check_url_safety("http://nonexistent.example.com/file.zip")
             assert exc_info.value.status_code == 400
@@ -1046,7 +1046,7 @@ class TestDNSResolutionSSRF:
 
         mock_result = [(socket.AF_INET, socket.SOCK_STREAM, 0, '', ('invalid_ip', 80))]
 
-        with patch("app.routers.tasks.socket.getaddrinfo", return_value=mock_result):
+        with patch("app.core.security.socket.getaddrinfo", return_value=mock_result):
             await _check_url_safety("http://example.com/file.zip")
 
 

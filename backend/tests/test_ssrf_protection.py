@@ -138,7 +138,7 @@ class TestSSRFProtection:
             "app.routers.tasks.probe_url_with_get_fallback",
             new_callable=AsyncMock,
         ) as mock_probe, patch(
-            "app.routers.tasks.socket.getaddrinfo"
+            "app.core.security.socket.getaddrinfo"
         ) as mock_getaddrinfo:
             mock_probe.return_value = type("ProbeResult", (), {
                 "success": True,
@@ -181,7 +181,7 @@ class TestSSRFProtection:
 
     def test_allow_ftp_public(self, authenticated_client):
         """测试 FTP 公网地址允许"""
-        with patch("app.routers.tasks.socket.getaddrinfo") as mock_getaddrinfo:
+        with patch("app.core.security.socket.getaddrinfo") as mock_getaddrinfo:
             mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
             response = authenticated_client.post(
                 "/api/tasks",
