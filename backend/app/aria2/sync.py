@@ -46,6 +46,7 @@ async def _get_representative_owner_id(task_id: int) -> int | None:
 ORPHAN_GRACE_SECONDS = 60.0
 ORPHAN_CLEANUP_BATCH = 50
 COMPLETE_REPAIR_GRACE_SECONDS = 30.0
+STALE_QUEUED_GRACE_SECONDS = 300.0  # 5 minutes grace for queued tasks without GID
 SYNC_TRACKED_TASK_STATUSES = ("queued", "active", "waiting", "paused")
 MISSING_GID_KEYWORDS = ("gid", "not found")
 TRANSIENT_RPC_ERROR_KEYWORDS = (
@@ -397,7 +398,93 @@ async def sync_tasks(
             max_actions=ORPHAN_CLEANUP_BATCH,
         )
 
+        await _cleanup_stale_queued_tasks(state=state)
+
         await asyncio.sleep(interval)
+
+
+async def _cleanup_stale_queued_tasks(
+    state: AppState,
+    grace_seconds: float = STALE_QUEUED_GRACE_SECONDS,
+) -> None:
+    """清理长时间停留在 queued 且无 GID 的僵尸任务。
+
+    场景：任务创建后、RPC 调用前进程崩溃，导致目录已创建但 aria2 从未开始下载。
+    """
+    from datetime import timedelta
+
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+    from app.services.storage import cleanup_task_download_dir
+
+    try:
+        threshold = datetime.now(timezone.utc) - timedelta(seconds=grace_seconds)
+        threshold_str = threshold.isoformat()  # Match utc_now_str() format
+
+        async with get_session() as db:
+            result = await db.exec(
+                select(DownloadTask).where(
+                    DownloadTask.status == "queued",
+                    DownloadTask.gid.is_(None),
+                    DownloadTask.updated_at < threshold_str,
+                )
+            )
+            stale_tasks = result.all()
+
+        if not stale_tasks:
+            return
+
+        for task in stale_tasks:
+            task_id = task.id
+            if task_id is None:
+                continue
+
+            # Check if task is currently being submitted (lock held)
+            async with state.lock:
+                submit_lock = state.task_submit_locks.get(task_id)
+                if submit_lock is not None and submit_lock.locked():
+                    # Task is being submitted right now, skip cleanup
+                    logger.debug(
+                        f"[CLEANUP] skipped [Sync] task_id={task_id} reason=submit_in_progress"
+                    )
+                    continue
+
+            owner_id = await _get_representative_owner_id(task_id)
+            logger.warning(
+                f"[CLEANUP] stale_queued [Sync] task_id={task_id} owner_id={owner_id} "
+                f"updated_at={task.updated_at} reason=no_gid_timeout"
+            )
+
+            # Mark as error
+            status_updated = False
+            async with get_session() as db:
+                db_task = await db.get(DownloadTask, task_id)
+                if db_task and db_task.status == "queued" and db_task.gid is None:
+                    db_task.status = "error"
+                    db_task.error = "任务提交超时，已自动清理"
+                    db_task.error_display = "提交超时"
+                    db_task.updated_at = utc_now_str()
+                    db.add(db_task)
+                    await db.commit()
+                    status_updated = True
+
+            if not status_updated:
+                # Task was modified by another process, skip cleanup
+                continue
+
+            # Cleanup directory (may be empty or not exist)
+            try:
+                await cleanup_task_download_dir(task_id)
+            except RuntimeError as exc:
+                logger.warning(
+                    f"[CLEANUP] fs_failed [Sync] task_id={task_id} owner_id={owner_id} "
+                    f"error={exc}"
+                )
+                # Continue to broadcast - task is already marked as error
+
+            await broadcast_task_update_to_subscribers(state, task_id)
+
+    except Exception as exc:
+        logger.warning(f"[Sync] 清理僵尸 queued 任务失败，跳过: {exc}")
 
 
 async def _cleanup_orphan_aria2_tasks(
