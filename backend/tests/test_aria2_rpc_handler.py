@@ -1,5 +1,6 @@
 """Tests for Aria2RpcHandler construction requirements."""
 import asyncio
+from datetime import datetime
 import pytest
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1225,9 +1226,15 @@ class TestAria2RpcHandlerTellMethods:
             assert h3.id is not None
 
         result = await handler.handle("aria2.tellStopped", [-1, 2])
+        expected_creation_dates = [
+            str(int(datetime.fromisoformat(h3.created_at).timestamp())),
+            str(int(datetime.fromisoformat(h2.created_at).timestamp())),
+        ]
         assert [item["gid"] for item in result] == [f"hist-{h3.id}", f"hist-{h2.id}"]
         assert [item["status"] for item in result] == ["error", "removed"]
         assert [item["files"][0]["path"] for item in result] == ["h3", "h2"]
+        assert [item["bittorrent"]["info"]["name"] for item in result] == ["h3", "h2"]
+        assert [item["bittorrent"]["creationDate"] for item in result] == expected_creation_dates
 
 
 @pytest.mark.asyncio

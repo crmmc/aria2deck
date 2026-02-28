@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import logging
 import shutil
@@ -612,6 +613,14 @@ class Aria2RpcHandler:
             completed_length=completed_length,
             fallback_name=gid,
         )
+        result["bittorrent"]["info"]["name"] = result["files"][0]["path"] if result["files"] else ""
+        try:
+            created_dt = datetime.fromisoformat(history.created_at)
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            result["bittorrent"]["creationDate"] = str(int(created_dt.timestamp()))
+        except (TypeError, ValueError):
+            result["bittorrent"]["creationDate"] = "0"
         return result
 
     async def _get_user_available_space(self) -> int:
