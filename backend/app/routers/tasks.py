@@ -356,6 +356,7 @@ async def _fail_task_and_pending_subscriptions(
         client=client,
         task_id=task_id,
         gid=gid_to_cleanup,
+        owner_id=owner_id,
         log_prefix="[Tasks]",
     )
 
@@ -1409,6 +1410,7 @@ async def cancel_task(
                     client=client,
                     task_id=task.id,
                     gid=db_task.gid,
+                    owner_id=user.id,
                     log_prefix="[Tasks]",
                     skip_status_check=True,  # Caller verified cancelable status
                 )

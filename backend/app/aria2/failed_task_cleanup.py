@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import logging
+from enum import Enum
 
 from sqlmodel import select
 
 from app.aria2.client import Aria2Client
 from app.database import get_session
 from app.models import DownloadTask
-from app.services.storage import cleanup_task_download_dir
+from app.services.storage import cleanup_task_download_dir, get_downloading_dir
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +17,20 @@ logger = logging.getLogger(__name__)
 FAILED_STATES = frozenset({"error", "removed"})
 
 
+class CleanupErrorType(str, Enum):
+    """Error classification for cleanup operations."""
+
+    RPC_FAILURE = "RPC_FAILURE"
+    FS_FAILURE = "FS_FAILURE"
+    STATUS_CONFLICT = "STATUS_CONFLICT"
+    NONE = "NONE"
+
+
 async def cleanup_failed_task_artifacts(
     client: Aria2Client,
     task_id: int,
     gid: str | None,
+    owner_id: int | None,
     *,
     log_prefix: str,
     skip_status_check: bool = False,
@@ -33,7 +44,8 @@ async def cleanup_failed_task_artifacts(
         client: Aria2 RPC client
         task_id: Database task ID
         gid: Aria2 GID (may be None for orphan tasks)
-        log_prefix: Prefix for log messages
+        owner_id: Owner user ID for logging (may be None for orphan tasks)
+        log_prefix: Prefix for log messages (caller context)
         skip_status_check: Skip DB status validation (for callers who already verified)
 
     Returns:
@@ -43,6 +55,8 @@ async def cleanup_failed_task_artifacts(
     Idempotency: Safe to call multiple times; missing files are skipped.
     Status check: Returns True immediately if task is not in failed state.
     """
+    path = str(get_downloading_dir() / str(task_id))
+
     # Status validation (unless caller already verified)
     if not skip_status_check:
         async with get_session() as db:
@@ -53,17 +67,26 @@ async def cleanup_failed_task_artifacts(
 
         if task is None:
             logger.debug(
-                "%s cleanup skipped task_id=%s reason=task_not_found",
+                "[CLEANUP] skipped %s task_id=%s owner_id=%s gid=%s "
+                "path=%s reason=task_not_found",
                 log_prefix,
                 task_id,
+                owner_id,
+                gid,
+                path,
             )
             return True  # Already cleaned or never existed
 
         if task.status not in FAILED_STATES:
             logger.debug(
-                "%s cleanup skipped task_id=%s reason=not_failed_state status=%s",
+                "[CLEANUP] skipped %s task_id=%s owner_id=%s gid=%s "
+                "path=%s error_type=%s status=%s",
                 log_prefix,
                 task_id,
+                owner_id,
+                gid,
+                path,
+                CleanupErrorType.STATUS_CONFLICT.value,
                 task.status,
             )
             return True  # Not a failed task, no cleanup needed
@@ -74,20 +97,28 @@ async def cleanup_failed_task_artifacts(
             await client.force_remove(gid)
         except Exception as exc:
             logger.warning(
-                "%s force_remove failed task_id=%s gid=%s error=%s",
+                "[CLEANUP] rpc_failed %s task_id=%s owner_id=%s gid=%s "
+                "path=%s error_type=%s op=force_remove error=%s",
                 log_prefix,
                 task_id,
+                owner_id,
                 gid,
+                path,
+                CleanupErrorType.RPC_FAILURE.value,
                 exc,
             )
         try:
             await client.remove_download_result(gid)
         except Exception as exc:
             logger.warning(
-                "%s remove_download_result failed task_id=%s gid=%s error=%s",
+                "[CLEANUP] rpc_failed %s task_id=%s owner_id=%s gid=%s "
+                "path=%s error_type=%s op=remove_download_result error=%s",
                 log_prefix,
                 task_id,
+                owner_id,
                 gid,
+                path,
+                CleanupErrorType.RPC_FAILURE.value,
                 exc,
             )
 
@@ -95,29 +126,39 @@ async def cleanup_failed_task_artifacts(
     try:
         await cleanup_task_download_dir(task_id)
         logger.info(
-            "%s cleanup completed task_id=%s gid=%s",
+            "[CLEANUP] completed %s task_id=%s owner_id=%s gid=%s path=%s result=success",
             log_prefix,
             task_id,
+            owner_id,
             gid,
+            path,
         )
         return True
     except RuntimeError as exc:
         # Boundary violation from safe_delete_path
         logger.warning(
-            "%s cleanup failed task_id=%s gid=%s error=%s",
+            "[CLEANUP] fs_failed %s task_id=%s owner_id=%s gid=%s "
+            "path=%s error_type=%s error=%s",
             log_prefix,
             task_id,
+            owner_id,
             gid,
+            path,
+            CleanupErrorType.FS_FAILURE.value,
             exc,
         )
         return False
     except Exception as exc:
         # Unexpected error
         logger.warning(
-            "%s cleanup failed task_id=%s gid=%s error=%s",
+            "[CLEANUP] fs_failed %s task_id=%s owner_id=%s gid=%s "
+            "path=%s error_type=%s error=%s",
             log_prefix,
             task_id,
+            owner_id,
             gid,
+            path,
+            CleanupErrorType.FS_FAILURE.value,
             exc,
         )
         return False
