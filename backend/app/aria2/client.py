@@ -43,7 +43,16 @@ class Aria2Client:
         }
         session = await self.get_session()
         async with session.post(self._rpc_url, json=payload) as resp:
-            data = await resp.json()
+            # 检查 HTTP 状态码
+            if resp.status >= 400:
+                text = await resp.text()
+                raise RuntimeError(f"aria2 RPC HTTP {resp.status}: {text[:200]}")
+            # 安全解析 JSON
+            try:
+                data = await resp.json()
+            except Exception as e:
+                text = await resp.text()
+                raise RuntimeError(f"aria2 RPC 返回非 JSON: {text[:200]}") from e
             if "error" in data:
                 raise RuntimeError(data["error"])
             return data["result"]

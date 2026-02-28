@@ -678,7 +678,7 @@ async def create_task(
                             existing_sub = sub
                     logger.info("恢复失败订阅 user_id=%s task_id=%s", user_id, task.id)
                     return _subscription_to_dict(existing_sub, task)
-        elif existing_sub.status in ("pending", "active"):
+        elif existing_sub.status == "pending":
             return _subscription_to_dict(existing_sub, task)
 
     # Handle based on task status
@@ -1033,7 +1033,7 @@ async def create_torrent_task(
                 task = db_task
                 is_new = True
             existing_sub = None
-        elif existing_sub.status in ("pending", "active", "failed"):
+        elif existing_sub.status in ("pending", "failed"):
             logger.info("重复订阅种子任务 user_id=%s task_id=%s", user.id, task.id)
             return _subscription_to_dict(existing_sub, task)
 
@@ -1218,13 +1218,13 @@ async def list_tasks(
             if status_filter == "active":
                 query = query.where(
                     UserTaskSubscription.status == "pending",
-                    DownloadTask.status.in_(["queued", "active"]),
+                    DownloadTask.status.in_(["queued", "active", "waiting", "paused"]),
                 )
             elif status_filter == "current":
                 # 当前任务：仅活跃（终态任务统一在历史页）
                 query = query.where(
                     UserTaskSubscription.status == "pending",
-                    DownloadTask.status.in_(["queued", "active"]),
+                    DownloadTask.status.in_(["queued", "active", "waiting", "paused"]),
                 )
             elif status_filter == "complete":
                 query = query.where(UserTaskSubscription.status == "success")

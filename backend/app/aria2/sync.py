@@ -36,6 +36,13 @@ COMPLETE_REPAIR_GRACE_SECONDS = 30.0
 STALE_QUEUED_GRACE_SECONDS = 300.0  # 5 minutes grace for queued tasks without GID
 SYNC_TRACKED_TASK_STATUSES = ("queued", "active", "waiting", "paused")
 MISSING_GID_KEYWORDS = ("gid", "not found")
+# 额外的 GID 不存在错误模式
+MISSING_GID_PATTERNS = (
+    "gid#",  # aria2 错误格式: "GID#xxx is not found"
+    "no such download",
+    "unknown gid",
+    "invalid gid",
+)
 TRANSIENT_RPC_ERROR_KEYWORDS = (
     "cannot connect to host",
     "connection refused",
@@ -95,7 +102,11 @@ def _exception_message(exc: Exception) -> str:
 
 def _is_missing_gid_error(exc: Exception) -> bool:
     message = _exception_message(exc)
-    return all(keyword in message for keyword in MISSING_GID_KEYWORDS)
+    # 原有检查：同时包含 "gid" 和 "not found"
+    if all(keyword in message for keyword in MISSING_GID_KEYWORDS):
+        return True
+    # 额外模式检查
+    return any(pattern in message for pattern in MISSING_GID_PATTERNS)
 
 
 def _is_transient_rpc_error(exc: Exception) -> bool:
@@ -750,6 +761,7 @@ async def _handle_task_stop_or_error_sync(
     task_uri = task.uri if task else None
     task_total_length = task.total_length if task else 0
 
+    updated_subs: list[UserTaskSubscription] = []
     async with get_session() as db:
         sub_result = await db.exec(
             select(UserTaskSubscription).where(
@@ -759,8 +771,9 @@ async def _handle_task_stop_or_error_sync(
         )
         subscriptions = sub_result.all()
 
+        # 只对实际更新成功的订阅写历史（防止与 listener.py 并发重复写）
         for sub in subscriptions:
-            await db.execute(
+            result = await db.execute(
                 update(UserTaskSubscription)
                 .where(
                     UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
@@ -772,8 +785,10 @@ async def _handle_task_stop_or_error_sync(
                     frozen_space=0,
                 )
             )
+            if result.rowcount > 0:  # type: ignore[union-attr]
+                updated_subs.append(sub)
 
-    for sub in subscriptions:
+    for sub in updated_subs:
         await add_task_history(
             owner_id=sub.owner_id,
             task_name=task_name,
@@ -784,8 +799,8 @@ async def _handle_task_stop_or_error_sync(
             created_at=sub.created_at,
         )
 
-    if subscriptions:
-        logger.info(f"[Sync] 任务 {task_id} 错误/停止，释放了 {len(subscriptions)} 个订阅的冻结空间")
+    if updated_subs:
+        logger.info(f"[Sync] 任务 {task_id} 错误/停止，释放了 {len(updated_subs)} 个订阅的冻结空间")
 
 
 # WebSocket helpers

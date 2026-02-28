@@ -12,7 +12,7 @@ from app.auth import clear_user_sessions, require_admin, require_user
 from app.core.rate_limit import login_limiter
 from app.core.security import hash_password
 from app.database import get_session
-from app.models import User, Session as SessionModel, Task, PackTask, UserFile
+from app.models import User, Session as SessionModel, Task, PackTask, UserFile, UserTaskSubscription, TaskHistory, ShareLink
 from app.schemas import RpcAccessStatus, RpcAccessToggle, UserCreate, UserOut, UserUpdate
 
 
@@ -53,8 +53,11 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
     client_ip = request.client.host if request.client else "unknown"
     request_id = getattr(request.state, "request_id", "-")
 
+    # 单次读取状态，避免 TOCTOU
+    has_users = await _has_any_user()
+
     # 首次创建用户时的 IP 限流（防止滥用）
-    if not await _has_any_user():
+    if not has_users:
         if await login_limiter.is_blocked(client_ip):
             logger.warning(
                 "创建首个用户被限流 username=%s ip=%s request_id=%s",
@@ -67,7 +70,7 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
                 detail="请求过于频繁，请稍后再试"
             )
 
-    if await _has_any_user():
+    if has_users:
         await require_admin(await require_user(request))
 
         async with get_session() as db:
@@ -283,6 +286,21 @@ async def delete_user(
         pack_tasks_result = await db.exec(select(PackTask).where(PackTask.owner_id == user_id))
         for pack_task in pack_tasks_result.all():
             await db.delete(pack_task)
+
+        # 删除用户的所有任务订阅
+        subs_result = await db.exec(select(UserTaskSubscription).where(UserTaskSubscription.owner_id == user_id))
+        for sub in subs_result.all():
+            await db.delete(sub)
+
+        # 删除用户的所有任务历史
+        history_result = await db.exec(select(TaskHistory).where(TaskHistory.owner_id == user_id))
+        for history in history_result.all():
+            await db.delete(history)
+
+        # 删除用户的所有分享链接
+        shares_result = await db.exec(select(ShareLink).where(ShareLink.owner_id == user_id))
+        for share in shares_result.all():
+            await db.delete(share)
 
         # 删除用户
         result = await db.exec(select(User).where(User.id == user_id))

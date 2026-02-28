@@ -739,6 +739,7 @@ async def _handle_task_stop_or_error(
     task_uri = task.uri if task else None
     task_total_length = task.total_length if task else 0
 
+    updated_subs: list[UserTaskSubscription] = []
     async with get_session() as db:
         # 获取所有 pending 状态的订阅
         sub_result = await db.exec(
@@ -750,8 +751,9 @@ async def _handle_task_stop_or_error(
         subscriptions = sub_result.all()
 
         # 更新所有订阅：释放冻结空间，标记为失败
+        # 只对实际更新成功的订阅写历史（防止与 sync.py 并发重复写）
         for sub in subscriptions:
-            await db.execute(
+            result = await db.execute(
                 update(UserTaskSubscription)
                 .where(
                     UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
@@ -763,9 +765,11 @@ async def _handle_task_stop_or_error(
                     error_display=message,
                 )
             )
+            if result.rowcount > 0:  # type: ignore[union-attr]
+                updated_subs.append(sub)
 
-    # 写入历史记录
-    for sub in subscriptions:
+    # 只对本次实际更新成功的订阅写历史
+    for sub in updated_subs:
         await add_task_history(
             owner_id=sub.owner_id,
             task_name=task_name,
@@ -776,7 +780,8 @@ async def _handle_task_stop_or_error(
             created_at=sub.created_at,
         )
 
-    logger.info(f"[WS] 任务 {task_id} 停止/错误，释放了 {len(subscriptions)} 个订阅的冻结空间")
+    if updated_subs:
+        logger.info(f"[WS] 任务 {task_id} 停止/错误，释放了 {len(updated_subs)} 个订阅的冻结空间")
 
 
 async def _cancel_task(

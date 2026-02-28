@@ -173,6 +173,7 @@ class PackTaskManager:
         source_names: list[str] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> None:
+        from app.core.config import settings
         from app.services.storage import get_downloading_dir
 
         pack_dir = get_downloading_dir() / f"pack_{task_id}"
@@ -182,7 +183,13 @@ class PackTaskManager:
             await cls._update_task_error(task_id, "No valid source files")
             return
 
+        # 白名单校验：只允许 download_dir 及其子目录下的文件
+        base_dir = Path(settings.download_dir).resolve()
         for source in sources:
+            resolved = source.resolve()
+            if not (resolved == base_dir or base_dir in resolved.parents):
+                await cls._update_task_error(task_id, f"路径不在允许范围内: {source.name}")
+                return
             if not source.exists():
                 await cls._update_task_error(task_id, f"Path does not exist: {source.name}")
                 return

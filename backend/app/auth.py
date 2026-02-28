@@ -80,14 +80,14 @@ async def require_user(request: Request) -> User:
     user = await get_user_by_session(session_id)
     if not user:
         request.state.auth_user_id = None
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录")
     request.state.auth_user_id = user.id
     return user
 
 
 async def require_admin(user: User = Depends(require_user)) -> User:
     if not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user
 
 

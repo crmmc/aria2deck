@@ -148,22 +148,26 @@ async def repair_task_associations() -> int:
             )
         )
         orphan_tasks = result.all()
-        
+
         if not orphan_tasks:
             logger.info("No orphan tasks to repair")
             return 0
-        
+
         logger.info(f"Found {len(orphan_tasks)} orphan tasks to repair")
-        
+
         sf_result = await db.exec(select(StoredFile))
-        sf_by_name = _build_stored_file_lookup(sf_result.all())
-        
+        all_stored_files = sf_result.all()
+        # 构建按 (name, size) 的精确匹配索引
+        sf_by_name_size = _build_stored_file_lookup_by_name_size(all_stored_files)
+
         repaired_count = 0
         for task in orphan_tasks:
             if not task.name:
                 continue
-            
-            matched_sf = sf_by_name.get(task.name.lower())
+
+            # 优先用 name + size 双重匹配，避免同名文件错绑
+            lookup_key = (task.name.lower(), task.total_length)
+            matched_sf = sf_by_name_size.get(lookup_key)
             if not matched_sf:
                 continue
             task.stored_file_id = matched_sf.id
@@ -179,12 +183,17 @@ async def repair_task_associations() -> int:
     return repaired_count
 
 
-def _build_stored_file_lookup(stored_files: Sequence[StoredFile]) -> dict[str, StoredFile]:
-    lookup: dict[str, StoredFile] = {}
+def _build_stored_file_lookup_by_name_size(
+    stored_files: Sequence[StoredFile],
+) -> dict[tuple[str, int], StoredFile]:
+    """构建按 (name, size) 的精确匹配索引，避免同名文件错绑"""
+    lookup: dict[tuple[str, int], StoredFile] = {}
     for sf in stored_files:
         name_key = sf.original_name.lower() if sf.original_name else ""
-        if name_key and name_key not in lookup:
-            lookup[name_key] = sf
+        if name_key:
+            key = (name_key, sf.size)
+            if key not in lookup:
+                lookup[key] = sf
     return lookup
 
 

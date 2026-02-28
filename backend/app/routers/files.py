@@ -163,7 +163,10 @@ def _validate_subpath(base_path: Path, subpath: str) -> Path:
 
 def _range_file_response(request: Request, file_path: Path, filename: str):
     """支持 Range 请求的文件下载响应（多线程下载/断点续传）"""
-    file_size = file_path.stat().st_size
+    try:
+        file_size = file_path.stat().st_size
+    except FileNotFoundError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
     encoded_name = quote(filename)
     if encoded_name != filename:
         disposition = f"attachment; filename*=utf-8''{encoded_name}"
@@ -211,15 +214,19 @@ def _range_file_response(request: Request, file_path: Path, filename: str):
     content_length = end - start + 1
 
     def iter_file():
-        with open(file_path, "rb") as f:
-            f.seek(start)
-            remaining = content_length
-            while remaining > 0:
-                chunk = f.read(min(65536, remaining))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
-                yield chunk
+        try:
+            with open(file_path, "rb") as f:
+                f.seek(start)
+                remaining = content_length
+                while remaining > 0:
+                    chunk = f.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+        except FileNotFoundError:
+            # 文件在流式传输过程中被删除，静默结束
+            return
 
     return StreamingResponse(
         iter_file(),
@@ -821,7 +828,16 @@ async def create_pack_task(
             # 所有历史产物的 UserFile 均已删除，允许重新打包
 
         info = await get_user_space_info(user_id, user.quota)
-        available = info["available"]
+        # 计算进行中打包任务的预留空间
+        async with get_session() as db:
+            pack_reserved_result = await db.exec(
+                select(func.coalesce(func.sum(PackTask.reserved_space), 0)).where(
+                    PackTask.owner_id == user_id,
+                    PackTask.status.in_(["pending", "packing"]),  # type: ignore[union-attr]
+                )
+            )
+            pack_reserved = pack_reserved_result.one()
+        available = info["available"] - pack_reserved
         if reserved_space > available:
             logger.warning(
                 "创建打包任务失败 user_id=%s reason=insufficient_space required=%s available=%s",

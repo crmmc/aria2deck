@@ -1,11 +1,31 @@
 """数据模型定义"""
-from pydantic import BaseModel, Field
+import re
+from pydantic import BaseModel, Field, field_validator
+
+
+# 用户名允许的字符：字母、数字、下划线、中文
+USERNAME_PATTERN = re.compile(r'^[\w\u4e00-\u9fff]+$')
+
+
+def _validate_username(v: str) -> str:
+    """校验用户名格式"""
+    v = v.strip()
+    if not v:
+        raise ValueError('用户名不能为空')
+    if not USERNAME_PATTERN.match(v):
+        raise ValueError('用户名只能包含字母、数字、下划线和中文')
+    return v
 
 
 class LoginRequest(BaseModel):
     """登录请求"""
     username: str = Field(min_length=1, max_length=50)
     password: str = Field(min_length=1, max_length=200)  # client_hash (hex string, 64 chars)
+
+    @field_validator('username')
+    @classmethod
+    def validate_username(cls, v: str) -> str:
+        return _validate_username(v)
 
 
 class UserCreate(BaseModel):
@@ -15,6 +35,11 @@ class UserCreate(BaseModel):
     is_admin: bool = False
     quota: int | None = Field(default=None, ge=0, le=10 * 1024 * 1024 * 1024 * 1024)  # 最大 10TB
 
+    @field_validator('username')
+    @classmethod
+    def validate_username(cls, v: str) -> str:
+        return _validate_username(v)
+
 
 class UserUpdate(BaseModel):
     """更新用户请求"""
@@ -22,6 +47,13 @@ class UserUpdate(BaseModel):
     password: str | None = Field(default=None, min_length=1, max_length=200)  # client_hash
     is_admin: bool | None = None
     quota: int | None = Field(default=None, ge=0, le=10 * 1024 * 1024 * 1024 * 1024)
+
+    @field_validator('username')
+    @classmethod
+    def validate_username(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        return _validate_username(v)
 
 
 class UserOut(BaseModel):

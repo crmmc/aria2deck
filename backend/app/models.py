@@ -3,6 +3,10 @@ from typing import Optional
 from sqlmodel import SQLModel, Field, Relationship, UniqueConstraint
 
 
+# PackTask 状态常量
+PACK_TASK_STATUSES = ("pending", "packing", "done", "error")
+
+
 def utc_now() -> datetime:
     """Return current UTC datetime."""
     return datetime.now(timezone.utc)
@@ -91,7 +95,7 @@ class PackTask(SQLModel, table=True):
     output_size: Optional[int] = None
     stored_file_id: Optional[int] = Field(default=None, foreign_key="stored_files.id")
     delete_source: bool = Field(default=False)
-    status: str = Field(default="pending")
+    status: str = Field(default="pending")  # pending/packing/done/error
     progress: int = Field(default=0)
     error_message: Optional[str] = None
     created_at: str

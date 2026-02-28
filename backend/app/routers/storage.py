@@ -241,7 +241,13 @@ async def bulk_delete_files(
                 )
                 leftover = remaining.first()
                 if leftover:
-                    # 仍有残留记录，强制删除
+                    # 检查是否还有引用
+                    if leftover.ref_count > 0:
+                        # 仍有引用，不能强制删除，否则会导致悬空 UserFile
+                        failed_ids.append(file_id)
+                        errors.append(f"文件 {file_id} 仍有 {leftover.ref_count} 个引用，无法删除")
+                        continue
+                    # ref_count 为 0 但记录仍存在，安全删除
                     store_path = get_store_path_for_hash(leftover.content_hash)
                     await db.delete(leftover)
                     await db.commit()

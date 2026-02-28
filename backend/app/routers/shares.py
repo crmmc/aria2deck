@@ -264,18 +264,32 @@ async def revoke_all_shares(user: User = Depends(require_user)) -> dict:
 
 # ========== 公开端点：分享访问 ==========
 async def _get_share_with_file(code: str) -> tuple[ShareLink, UserFile, StoredFile]:
-    """通过分享码获取分享 + 用户文件 + 存储文件"""
+    """通过分享码获取分享 + 用户文件 + 存储文件
+
+    区分错误：
+    - 分享不存在 -> 404
+    - 文件已删除 -> 410
+    """
     async with get_session() as db:
-        result = await db.exec(
-            select(ShareLink, UserFile, StoredFile)
-            .join(UserFile, ShareLink.user_file_id == UserFile.id)  # type: ignore[arg-type]
-            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)  # type: ignore[arg-type]
-            .where(ShareLink.share_code == code)
+        # 先查分享是否存在
+        share_result = await db.exec(
+            select(ShareLink).where(ShareLink.share_code == code)
         )
-        row = result.first()
-    if not row:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "分享不存在")
-    return row[0], row[1], row[2]
+        share = share_result.first()
+        if not share:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "分享不存在")
+
+        # 再查关联的文件
+        file_result = await db.exec(
+            select(UserFile, StoredFile)
+            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)  # type: ignore[arg-type]
+            .where(UserFile.id == share.user_file_id)
+        )
+        file_row = file_result.first()
+        if not file_row:
+            raise HTTPException(status.HTTP_410_GONE, "文件已删除")
+
+        return share, file_row[0], file_row[1]
 @router.get("/api/s/{code}")
 async def get_share_info(code: str, request: Request) -> ShareInfoOut:
     """获取分享元信息（无需登录）"""
