@@ -685,16 +685,6 @@ async def get_space(user: User = Depends(require_user)) -> dict:
     return space_info
 
 
-# ========== Legacy Pack Endpoints (kept for compatibility) ==========
-# Legacy helper - still used by download_pack_result
-
-def _get_user_dir(user_id: int) -> Path:
-    """获取用户目录的 Path 对象（兼容旧代码）"""
-    base = Path(settings.download_dir).resolve()
-    user_dir = base / str(user_id)
-    user_dir.mkdir(parents=True, exist_ok=True)
-    return user_dir
-
 
 def _pack_task_to_dict(task: PackTask) -> dict:
     """Convert PackTask model to dict"""

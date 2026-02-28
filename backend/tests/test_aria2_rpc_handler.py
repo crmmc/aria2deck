@@ -482,17 +482,21 @@ class TestAria2RpcHandlerHelpers:
 class TestAria2RpcHandlerSanitization:
     """Tests for path sanitization methods."""
 
-    async def test_sanitize_path_empty(self, handler):
-        result = handler._sanitize_path("")
+    async def test_sanitize_file_path_empty(self, handler):
+        result = handler._sanitize_file_path("")
         assert result == ""
 
-    async def test_sanitize_path_none(self, handler):
-        result = handler._sanitize_path(None)
+    async def test_sanitize_file_path_none(self, handler):
+        result = handler._sanitize_file_path(None)
         assert result is None
 
-    async def test_sanitize_path_relative(self, handler):
-        result = handler._sanitize_path("movie/file.mp4")
-        assert result == "movie/file.mp4"
+    async def test_sanitize_file_path_extracts_name(self, handler):
+        result = handler._sanitize_file_path("/some/deep/path/movie.mp4")
+        assert result == "movie.mp4"
+
+    async def test_sanitize_file_path_relative(self, handler):
+        result = handler._sanitize_file_path("movie/file.mp4")
+        assert result == "file.mp4"
 
     async def test_sanitize_status_empty(self, handler):
         result = handler._sanitize_status({})
@@ -558,11 +562,6 @@ class TestAria2RpcHandlerSanitization:
 @pytest.mark.asyncio
 class TestAria2RpcHandlerUserSpace:
     """Tests for user space calculation."""
-
-    async def test_get_user_download_dir(self, handler):
-        result = handler._get_user_download_dir()
-        assert result is not None
-        assert str(handler.user_id) in result
 
     async def test_verify_task_owner_not_found(self, handler):
         result = await handler._verify_task_owner("nonexistent_gid")
@@ -1485,7 +1484,3 @@ class TestAria2RpcHandlerUserSpaceExtended:
     async def test_get_user_available_space_with_user(self, handler, test_user, temp_db):
         result = await handler._get_user_available_space()
         assert result > 0
-
-    async def test_sanitize_path_absolute_outside_user_dir(self, handler):
-        result = handler._sanitize_path("/some/other/path/file.txt")
-        assert result == "/some/other/path/file.txt"
