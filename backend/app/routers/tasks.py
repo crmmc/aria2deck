@@ -1410,6 +1410,7 @@ async def cancel_task(
                     task_id=task.id,
                     gid=db_task.gid,
                     log_prefix="[Tasks]",
+                    skip_status_check=True,  # Caller verified cancelable status
                 )
 
                 async with get_session() as db:
