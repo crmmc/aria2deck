@@ -1014,6 +1014,7 @@ class Aria2RpcHandler:
             client=self.client,
             task_id=task_id,
             gid=gid_to_cleanup,
+            owner_id=self.user_id,
             log_prefix="[RPC]",
         )
     async def _check_quota_and_disk(self) -> None:
@@ -1259,6 +1260,7 @@ class Aria2RpcHandler:
                     client=self.client,
                     task_id=task_id,
                     gid=db_task.gid if db_task else None,
+                    owner_id=self.user_id,
                     log_prefix="[RPC]",
                     skip_status_check=True,
                 )
