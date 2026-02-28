@@ -634,6 +634,10 @@ class TestAria2RpcHandlerWithTasks:
         assert result == "gid-remove-cleanup"
         assert not task_dir.exists()
         handler._cleanup_aria2_gid.assert_awaited_once_with("gid-remove-cleanup")
+        async with get_session() as db:
+            latest_task = await db.get(DownloadTask, task.id)
+            assert latest_task is not None
+            assert latest_task.gid is None
 
     async def test_pause_returns_gid_for_nonexistent(self, handler):
         result = await handler.handle("aria2.pause", ["nonexistent_gid"])

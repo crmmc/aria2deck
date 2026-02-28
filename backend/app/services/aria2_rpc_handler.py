@@ -1279,6 +1279,13 @@ class Aria2RpcHandler:
                     await self._cleanup_aria2_gid(db_task.gid)
                 await cleanup_task_download_dir(task_id)
 
+                async with get_session() as db:
+                    latest_task = await db.get(DownloadTask, task_id)
+                    if latest_task is not None:
+                        latest_task.gid = None
+                        latest_task.updated_at = utc_now_str()
+                        db.add(latest_task)
+
         return gid
     async def _handle_force_remove(self, params: list) -> str:
         """aria2.forceRemove(gid) - 同 remove"""

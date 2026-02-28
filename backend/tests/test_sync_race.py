@@ -7,8 +7,8 @@ Tests for:
 import asyncio
 import os
 import tempfile
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import case, update
@@ -17,9 +17,9 @@ from sqlmodel import select
 from app.database import get_session, reset_engine, init_db as init_sqlmodel_db, dispose_engine
 from app.db import init_db, execute
 from app.core.config import settings
-from app.core.security import hash_password
-from app.aria2.sync import _cleanup_orphan_aria2_tasks
-from app.models import DownloadTask, utc_now_str
+from app.aria2.sync import _cleanup_orphan_aria2_tasks, _repair_inconsistent_completed_tasks
+from app.core.state import AppState
+from app.models import DownloadTask, TaskHistory, UserTaskSubscription, utc_now_str
 
 
 @pytest.fixture(scope="function")
@@ -404,3 +404,95 @@ class TestOrphanCleanup:
         client.force_remove.assert_awaited_once_with("orphan_active_1")
         client.remove_download_result.assert_awaited_once_with("orphan_active_1")
         assert "orphan_active_1" not in orphan_seen_at
+
+
+class TestRepairInconsistentComplete:
+    @pytest.mark.asyncio
+    async def test_repair_inconsistent_complete_cleans_artifacts(self, temp_db_sync):
+        user_id = execute(
+            """
+            INSERT INTO users (username, password_hash, is_admin, created_at, quota)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                "repair_user",
+                "x",
+                0,
+                datetime.now(timezone.utc).isoformat(),
+                100 * 1024 * 1024 * 1024,
+            ],
+        )
+
+        stale_updated_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+        task_id = execute(
+            """
+            INSERT INTO download_tasks
+            (uri_hash, uri, gid, status, name, total_length, completed_length,
+             download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "repair_inconsistent_hash",
+                "https://example.com/inconsistent.zip",
+                "gid-repair-inconsistent",
+                "complete",
+                "inconsistent.zip",
+                2048,
+                2048,
+                0,
+                0,
+                0,
+                0,
+                stale_updated_at,
+                stale_updated_at,
+            ],
+        )
+        execute(
+            """
+            INSERT INTO user_task_subscriptions (owner_id, task_id, frozen_space, status, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [user_id, task_id, 2048, "pending", stale_updated_at],
+        )
+
+        task_dir = os.path.join(settings.download_dir, "downloading", str(task_id))
+        os.makedirs(task_dir, exist_ok=True)
+        with open(os.path.join(task_dir, "partial.bin"), "w") as f:
+            f.write("partial")
+
+        state = AppState()
+        mock_client = AsyncMock()
+        with patch("app.core.state.get_aria2_client", return_value=mock_client):
+            with patch(
+                "app.routers.tasks.broadcast_task_update_to_subscribers",
+                new_callable=AsyncMock,
+            ) as mock_broadcast:
+                await _repair_inconsistent_completed_tasks(state)
+
+        mock_client.force_remove.assert_awaited_once_with("gid-repair-inconsistent")
+        mock_client.remove_download_result.assert_awaited_once_with("gid-repair-inconsistent")
+        mock_broadcast.assert_awaited_once_with(state, task_id)
+        assert not os.path.exists(task_dir)
+
+        async with get_session() as db:
+            task = await db.get(DownloadTask, task_id)
+            assert task is not None
+            assert task.status == "error"
+            assert task.gid is None
+            assert task.error_display == "下载完成但文件未入库"
+
+            sub = (
+                await db.exec(
+                    select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
+                )
+            ).first()
+            assert sub is not None
+            assert sub.status == "failed"
+            assert sub.frozen_space == 0
+
+            history_rows = (
+                await db.exec(select(TaskHistory).where(TaskHistory.owner_id == user_id))
+            ).all()
+            assert len(history_rows) == 1
+            assert history_rows[0].result == "failed"
+            assert history_rows[0].reason == "下载完成但文件未入库"
