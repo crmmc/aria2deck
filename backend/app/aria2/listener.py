@@ -14,12 +14,16 @@ import asyncio
 import logging
 import random
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 
 from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
+
+if TYPE_CHECKING:
+    from app.aria2.client import Aria2Client
+    from app.models import DownloadTask
 
 
 async def _get_representative_owner_id(task_id: int) -> int | None:
@@ -119,8 +123,6 @@ def _resolve_complete_source_path(
     external_candidates: list[Path] = []
 
     for file_item in files:
-        if not isinstance(file_item, dict):
-            continue
         raw_path = file_item.get("path")
         if not raw_path or not isinstance(raw_path, str):
             continue
@@ -294,15 +296,15 @@ async def handle_aria2_event(
 
             # 3.2 检查所有订阅者的空间
             async with get_session() as db:
-                result = await db.exec(
+                sub_result = await db.exec(
                     select(UserTaskSubscription, User)
-                    .join(User, UserTaskSubscription.owner_id == User.id)
+                    .join(User, UserTaskSubscription.owner_id == User.id)  # type: ignore[arg-type]
                     .where(
                         UserTaskSubscription.task_id == task_id,
                         UserTaskSubscription.status == "pending",
                     )
                 )
-                subscriptions = result.all()
+                subscriptions = sub_result.all()
 
             valid_subscribers = []
 
@@ -324,12 +326,12 @@ async def handle_aria2_event(
                         for attempt in range(MAX_RETRIES):
                             should_retry = False
                             async with get_session() as db:
-                                result = await db.exec(
+                                current_sub_result = await db.exec(
                                     select(UserTaskSubscription).where(
                                         UserTaskSubscription.id == sub.id
                                     )
                                 )
-                                current_sub = result.first()
+                                current_sub = current_sub_result.first()
                                 
                                 if not current_sub:
                                     logger.warning(
@@ -344,13 +346,13 @@ async def handle_aria2_event(
                                 update_result = await db.execute(
                                     update(UserTaskSubscription)
                                     .where(
-                                        UserTaskSubscription.id == sub.id,
-                                        UserTaskSubscription.frozen_space == current_sub.frozen_space,
+                                        UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
+                                        UserTaskSubscription.frozen_space == current_sub.frozen_space,  # type: ignore[arg-type]
                                     )
                                     .values(frozen_space=total_length)
                                 )
-                                
-                                if update_result.rowcount > 0:
+
+                                if update_result.rowcount > 0:  # type: ignore[attr-defined]
                                     update_success = True
                                     break
                                 
@@ -388,7 +390,7 @@ async def handle_aria2_event(
                         async with get_session() as db:
                             await db.execute(
                                 update(UserTaskSubscription)
-                                .where(UserTaskSubscription.id == sub.id)
+                                .where(UserTaskSubscription.id == sub.id)  # type: ignore[arg-type]
                                 .values(
                                     status="failed",
                                     error_display="用户配额空间不足",
@@ -406,9 +408,9 @@ async def handle_aria2_event(
                 return
 
     # 4. 更新数据库状态
-    new_status = task.status
-    error_msg = None
-    error_display = None
+    new_status: str | None = task.status
+    error_msg: str | None = None
+    error_display: str | None = None
 
     if event == "start":
         new_status = "active"
@@ -587,8 +589,8 @@ async def _handle_task_complete(
                 await db.execute(
                     update(DownloadTask)
                     .where(
-                        DownloadTask.id == task_id,
-                        DownloadTask.stored_file_id.is_(None)
+                        DownloadTask.id == task_id,  # type: ignore[arg-type]
+                        DownloadTask.stored_file_id.is_(None)  # type: ignore[union-attr]
                     )
                     .values(
                         status="complete",
@@ -606,13 +608,13 @@ async def _handle_task_complete(
                     return
 
             async with get_session() as db:
-                result = await db.exec(
+                sub_result = await db.exec(
                     select(UserTaskSubscription).where(
                         UserTaskSubscription.task_id == task_id,
                         UserTaskSubscription.status == "pending",
                     )
                 )
-                subscriptions = result.all()
+                subscriptions = sub_result.all()
 
             for sub in subscriptions:
                 should_record_history = False
@@ -625,8 +627,8 @@ async def _handle_task_complete(
                             await db.execute(
                                 update(UserTaskSubscription)
                                 .where(
-                                    UserTaskSubscription.id == sub.id,
-                                    UserTaskSubscription.status == "pending",
+                                    UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
+                                    UserTaskSubscription.status == "pending",  # type: ignore[arg-type]
                                 )
                                 .values(status="success", frozen_space=0)
                             )
@@ -638,13 +640,13 @@ async def _handle_task_complete(
                             if not current_sub or current_sub.status != "success":
                                 break
 
-                            result = await db.exec(
+                            file_result = await db.exec(
                                 select(UserFile).where(
                                     UserFile.owner_id == sub.owner_id,
                                     UserFile.stored_file_id == stored_file.id,
                                 )
                             )
-                            existing_ref = result.first()
+                            existing_ref = file_result.first()
 
                             if not existing_ref:
                                 user_file = UserFile(
@@ -657,7 +659,7 @@ async def _handle_task_complete(
 
                                 await db.execute(
                                     update(StoredFile)
-                                    .where(StoredFile.id == stored_file.id)
+                                    .where(StoredFile.id == stored_file.id)  # type: ignore[arg-type]
                                     .values(ref_count=StoredFile.ref_count + 1)
                                 )
                             user_file_created = True
@@ -678,7 +680,7 @@ async def _handle_task_complete(
                         async with get_session() as db:
                             await db.execute(
                                 update(UserTaskSubscription)
-                                .where(UserTaskSubscription.id == sub.id)
+                                .where(UserTaskSubscription.id == sub.id)  # type: ignore[arg-type]
                                 .values(status="failed", error_display="文件引用创建失败")
                             )
                     except Exception as final_err:
@@ -719,8 +721,8 @@ async def _handle_task_complete(
                 await db.execute(
                     update(DownloadTask)
                     .where(
-                        DownloadTask.id == task_id,
-                        DownloadTask.gid == completion_gid,
+                        DownloadTask.id == task_id,  # type: ignore[arg-type]
+                        DownloadTask.gid == completion_gid,  # type: ignore[arg-type]
                     )
                     .values(
                         gid=None,
@@ -757,21 +759,21 @@ async def _handle_task_stop_or_error(
 
     async with get_session() as db:
         # 获取所有 pending 状态的订阅
-        result = await db.exec(
+        sub_result = await db.exec(
             select(UserTaskSubscription).where(
                 UserTaskSubscription.task_id == task_id,
                 UserTaskSubscription.status == "pending",
             )
         )
-        subscriptions = result.all()
+        subscriptions = sub_result.all()
 
         # 更新所有订阅：释放冻结空间，标记为失败
         for sub in subscriptions:
             await db.execute(
                 update(UserTaskSubscription)
                 .where(
-                    UserTaskSubscription.id == sub.id,
-                    UserTaskSubscription.status == "pending",
+                    UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
+                    UserTaskSubscription.status == "pending",  # type: ignore[arg-type]
                 )
                 .values(
                     status="failed",
@@ -796,10 +798,10 @@ async def _handle_task_stop_or_error(
 
 
 async def _cancel_task(
-    client,
+    client: "Aria2Client",
     state: AppState,
-    task,
-    aria2_status: dict,
+    task: "DownloadTask",
+    aria2_status: dict[str, Any],
     error_message: str,
 ) -> None:
     """取消任务并通知所有订阅者"""
@@ -809,11 +811,13 @@ async def _cancel_task(
     from app.models import DownloadTask, UserTaskSubscription, utc_now_str
     from app.routers.tasks import broadcast_task_update_to_subscribers
 
+    assert task.id is not None, "Task must have an ID"
+    task_id = task.id
     gid = task.gid
 
     # Update task status
     async with get_session() as db:
-        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task.id))
+        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
         db_task = result.first()
         if db_task:
             db_task.status = "error"
@@ -833,13 +837,13 @@ async def _cancel_task(
 
     # Mark all pending subscriptions as failed and record history
     async with get_session() as db:
-        result = await db.exec(
+        sub_result = await db.exec(
             select(UserTaskSubscription).where(
-                UserTaskSubscription.task_id == task.id,
+                UserTaskSubscription.task_id == task_id,
                 UserTaskSubscription.status == "pending",
             )
         )
-        subscriptions = result.all()
+        subscriptions = sub_result.all()
 
         for sub in subscriptions:
             sub.status = "failed"
@@ -868,10 +872,10 @@ async def _cancel_task(
         )
 
     # Clean up via unified entry point
-    owner_id = await _get_representative_owner_id(task.id)
+    owner_id = await _get_representative_owner_id(task_id)
     await cleanup_failed_task_artifacts(
         client=client,
-        task_id=task.id,
+        task_id=task_id,
         gid=gid,
         owner_id=owner_id,
         log_prefix="[WS]",
@@ -879,7 +883,7 @@ async def _cancel_task(
     )
 
     # Broadcast update
-    await broadcast_task_update_to_subscribers(state, task.id)
+    await broadcast_task_update_to_subscribers(state, task_id)
 
 
 async def listen_aria2_events(state: AppState) -> None:

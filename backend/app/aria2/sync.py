@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
+from fastapi import WebSocket
 from sqlalchemy import case, update
 from sqlmodel import select
 
@@ -84,7 +85,7 @@ def _map_status(status: dict, task_id: int) -> dict:
     error_display = parse_error_message(raw_error) if raw_error else None
     error_display = sanitize_string(error_display) if error_display else None
 
-    def safe_int(val, default: int = 0) -> int:
+    def safe_int(val: str | int | None, default: int = 0) -> int:
         try:
             return int(val) if val is not None else default
         except (ValueError, TypeError):
@@ -158,8 +159,8 @@ async def sync_tasks(
         async with get_session() as db:
             result = await db.exec(
                 select(DownloadTask).where(
-                    DownloadTask.gid.isnot(None),
-                    DownloadTask.status.in_(SYNC_TRACKED_TASK_STATUSES),
+                    DownloadTask.gid.isnot(None),  # type: ignore[union-attr]
+                    DownloadTask.status.in_(SYNC_TRACKED_TASK_STATUSES),  # type: ignore[attr-defined]
                 )
             )
             tasks = result.all()
@@ -225,7 +226,7 @@ async def sync_tasks(
                 async with get_session() as db:
                     result = await db.exec(
                         select(UserTaskSubscription, User)
-                        .join(User, UserTaskSubscription.owner_id == User.id)
+                        .join(User, UserTaskSubscription.owner_id == User.id)  # type: ignore[arg-type]
                         .where(
                             UserTaskSubscription.task_id == task.id,
                             UserTaskSubscription.status == "pending",
@@ -254,8 +255,8 @@ async def sync_tasks(
                                 await db.execute(
                                     update(UserTaskSubscription)
                                     .where(
-                                        UserTaskSubscription.id == sub.id,
-                                        UserTaskSubscription.frozen_space < total_length  # Optimistic lock
+                                        UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
+                                        UserTaskSubscription.frozen_space < total_length  # type: ignore[arg-type]
                                     )
                                     .values(frozen_space=total_length)
                                 )
@@ -273,7 +274,7 @@ async def sync_tasks(
                             async with get_session() as db:
                                 await db.execute(
                                     update(UserTaskSubscription)
-                                    .where(UserTaskSubscription.id == sub.id)
+                                    .where(UserTaskSubscription.id == sub.id)  # type: ignore[arg-type]
                                     .values(
                                         status="failed",
                                         error_display="用户配额空间不足",
@@ -355,7 +356,7 @@ async def sync_tasks(
                         else_=DownloadTask.peak_download_speed
                     ),
                     peak_connections=case(
-                        (DownloadTask.peak_connections < current_connections, current_connections),
+                        (DownloadTask.peak_connections < current_connections, current_connections),  # type: ignore[arg-type]
                         else_=DownloadTask.peak_connections
                     ),
                 )
@@ -367,7 +368,7 @@ async def sync_tasks(
 
                 await db.execute(
                     update(DownloadTask)
-                    .where(DownloadTask.id == task_id)
+                    .where(DownloadTask.id == task_id)  # type: ignore[arg-type]
                     .values(**update_values)
                 )
 
@@ -424,7 +425,7 @@ async def _cleanup_stale_queued_tasks(
             result = await db.exec(
                 select(DownloadTask).where(
                     DownloadTask.status == "queued",
-                    DownloadTask.gid.is_(None),
+                    DownloadTask.gid.is_(None),  # type: ignore[union-attr]
                     DownloadTask.updated_at < threshold_str,
                 )
             )
@@ -585,7 +586,7 @@ async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
         result = await db.exec(
             select(DownloadTask).where(
                 DownloadTask.status == "complete",
-                DownloadTask.stored_file_id.is_(None),
+                DownloadTask.stored_file_id.is_(None),  # type: ignore[union-attr]
             )
         )
         tasks = result.all()
@@ -618,11 +619,11 @@ async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
         reason = "下载完成但文件未入库"
         cleanup_gid = task.gid
         async with get_session() as db:
-            result = await db.execute(
+            update_result = await db.execute(
                 update(DownloadTask)
                 .where(
-                    DownloadTask.id == task_id,
-                    DownloadTask.stored_file_id.is_(None),
+                    DownloadTask.id == task_id,  # type: ignore[arg-type]
+                    DownloadTask.stored_file_id.is_(None),  # type: ignore[union-attr]
                 )
                 .values(
                     status="error",
@@ -632,7 +633,7 @@ async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
                     updated_at=utc_now_str(),
                 )
             )
-            if result.rowcount == 0:
+            if update_result.rowcount == 0:  # type: ignore[attr-defined]
                 logger.info(f"[Sync] 任务 {task_id} 已被 listener 处理，跳过修复")
                 continue
         await _handle_task_stop_or_error_sync(task_id, reason)
@@ -688,13 +689,13 @@ async def _cancel_task_sync(
 
     # Mark all pending subscriptions as failed and record history
     async with get_session() as db:
-        result = await db.exec(
+        sub_result = await db.exec(
             select(UserTaskSubscription).where(
                 UserTaskSubscription.task_id == task_id,
                 UserTaskSubscription.status == "pending",
             )
         )
-        subscriptions = result.all()
+        subscriptions = sub_result.all()
 
         for sub in subscriptions:
             sub.status = "failed"
@@ -755,20 +756,20 @@ async def _handle_task_stop_or_error_sync(
     task_total_length = task.total_length if task else 0
 
     async with get_session() as db:
-        result = await db.exec(
+        sub_result = await db.exec(
             select(UserTaskSubscription).where(
                 UserTaskSubscription.task_id == task_id,
                 UserTaskSubscription.status == "pending",
             )
         )
-        subscriptions = result.all()
+        subscriptions = sub_result.all()
 
         for sub in subscriptions:
             await db.execute(
                 update(UserTaskSubscription)
                 .where(
-                    UserTaskSubscription.id == sub.id,
-                    UserTaskSubscription.status == "pending",
+                    UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
+                    UserTaskSubscription.status == "pending",  # type: ignore[arg-type]
                 )
                 .values(
                     status="failed",
@@ -794,19 +795,19 @@ async def _handle_task_stop_or_error_sync(
 
 # WebSocket helpers
 
-async def register_ws(state: AppState, user_id: int, ws) -> None:
+async def register_ws(state: AppState, user_id: int, ws: WebSocket) -> None:
     async with state.lock:
         state.ws_connections.setdefault(user_id, set()).add(ws)
 
 
-async def unregister_ws(state: AppState, user_id: int, ws) -> None:
+async def unregister_ws(state: AppState, user_id: int, ws: WebSocket) -> None:
     async with state.lock:
         sockets = state.ws_connections.get(user_id)
         if sockets:
             sockets.discard(ws)
 
 
-async def broadcast_notification(state: AppState, user_id: int, message: str, level: str = "info"):
+async def broadcast_notification(state: AppState, user_id: int, message: str, level: str = "info") -> None:
     async with state.lock:
         sockets = list(state.ws_connections.get(user_id, set()))
     
