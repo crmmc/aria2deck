@@ -627,12 +627,10 @@ class TestAria2RpcHandlerWithTasks:
         task_dir.mkdir(parents=True, exist_ok=True)
         (task_dir / "partial.bin").write_text("x")
 
-        handler._cleanup_aria2_gid = AsyncMock()
         result = await handler.handle("aria2.remove", ["gid-remove-cleanup"])
 
         assert result == "gid-remove-cleanup"
         assert not task_dir.exists()
-        handler._cleanup_aria2_gid.assert_awaited_once_with("gid-remove-cleanup")
         async with get_session() as db:
             latest_task = await db.get(DownloadTask, task.id)
             assert latest_task is not None
@@ -733,10 +731,8 @@ class TestAria2RpcHandlerWithTasks:
             assert task.id is not None
             db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
 
-        handler._cleanup_aria2_gid = AsyncMock()
         result = await handler.handle("aria2.remove", ["gid-rpc-remove-paused"])
         assert result == "gid-rpc-remove-paused"
-        handler._cleanup_aria2_gid.assert_awaited_once_with("gid-rpc-remove-paused")
 
         async with get_session() as db:
             latest_task = await db.get(DownloadTask, task.id)

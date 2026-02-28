@@ -782,22 +782,12 @@ async def _cancel_task(
     """取消任务并通知所有订阅者"""
     from sqlmodel import select
 
+    from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
     from app.database import get_session
     from app.models import DownloadTask, UserTaskSubscription, utc_now_str
     from app.routers.tasks import broadcast_task_update_to_subscribers
-    from app.services.storage import cleanup_task_download_dir
 
     gid = task.gid
-
-    # Stop aria2 task
-    try:
-        await client.force_remove(gid)
-    except Exception as exc:
-        logger.debug(f"[WS] force_remove 失败 task_id={task.id} gid={gid} error={exc}")
-    try:
-        await client.remove_download_result(gid)
-    except Exception as exc:
-        logger.debug(f"[WS] remove_download_result 失败 task_id={task.id} gid={gid} error={exc}")
 
     # Update task status
     async with get_session() as db:
@@ -855,8 +845,14 @@ async def _cancel_task(
             created_at=sub.created_at,
         )
 
-    # Clean up download directory
-    await cleanup_task_download_dir(task.id)
+    # Clean up via unified entry point
+    await cleanup_failed_task_artifacts(
+        client=client,
+        task_id=task.id,
+        gid=gid,
+        log_prefix="[WS]",
+        skip_status_check=True,
+    )
 
     # Broadcast update
     await broadcast_task_update_to_subscribers(state, task.id)
