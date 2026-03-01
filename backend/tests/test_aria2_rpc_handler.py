@@ -1464,6 +1464,168 @@ class TestAria2RpcHandlerGetSessionInfo:
 
 
 @pytest.mark.asyncio
+class TestAria2RpcHandlerTaskNameDisplay:
+    """Regression tests for tellActive/tellWaiting task name display issues."""
+
+    async def test_tell_active_missing_files_uses_task_name(self, handler):
+        """tellActive should use task.name when aria2 returns no files field."""
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-active-no-files",
+                uri="https://example.com/file.zip",
+                gid="gid-active-no-files",
+                status="active",
+                name="expected-task-name.zip",
+                total_length=5000,
+                completed_length=1500,
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.tell_active.return_value = [
+            {
+                "gid": "gid-active-no-files",
+                "status": "active",
+                "totalLength": "5000",
+                "completedLength": "1500",
+            }
+        ]
+        handler._get_user_gids = AsyncMock(return_value={"gid-active-no-files"})
+
+        result = await handler.handle("aria2.tellActive", [])
+        assert len(result) == 1
+        assert result[0]["files"][0]["path"] == "expected-task-name.zip"
+
+    async def test_tell_waiting_missing_files_uses_task_name(self, handler):
+        """tellWaiting should use task.name when aria2 returns no files field."""
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-waiting-no-files",
+                uri="https://example.com/document.pdf",
+                gid="gid-waiting-no-files",
+                status="waiting",
+                name="expected-document.pdf",
+                total_length=2000,
+                completed_length=0,
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.tell_waiting.return_value = [
+            {
+                "gid": "gid-waiting-no-files",
+                "status": "waiting",
+                "totalLength": "2000",
+                "completedLength": "0",
+            }
+        ]
+        handler._get_user_gids = AsyncMock(return_value={"gid-waiting-no-files"})
+
+        result = await handler.handle("aria2.tellWaiting", [0, 10])
+        assert len(result) == 1
+        assert result[0]["files"][0]["path"] == "expected-document.pdf"
+
+    async def test_tell_active_empty_files_array_uses_task_name(self, handler):
+        """tellActive should use task.name when aria2 returns empty files array."""
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-active-empty-files",
+                uri="https://example.com/archive.tar.gz",
+                gid="gid-active-empty-files",
+                status="active",
+                name="archive.tar.gz",
+                total_length=10000,
+                completed_length=3000,
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.tell_active.return_value = [
+            {
+                "gid": "gid-active-empty-files",
+                "status": "active",
+                "totalLength": "10000",
+                "completedLength": "3000",
+                "files": [],
+            }
+        ]
+        handler._get_user_gids = AsyncMock(return_value={"gid-active-empty-files"})
+
+        result = await handler.handle("aria2.tellActive", [])
+        assert len(result) == 1
+        assert result[0]["files"][0]["path"] == "archive.tar.gz"
+
+    async def test_tell_waiting_files_with_empty_path_uses_task_name(self, handler):
+        """tellWaiting should use task.name when files exist but path is empty."""
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-waiting-empty-path",
+                uri="https://example.com/video.mp4",
+                gid="gid-waiting-empty-path",
+                status="waiting",
+                name="video.mp4",
+                total_length=50000,
+                completed_length=0,
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.tell_waiting.return_value = [
+            {
+                "gid": "gid-waiting-empty-path",
+                "status": "waiting",
+                "totalLength": "50000",
+                "completedLength": "0",
+                "files": [{"path": "", "length": "50000"}],
+            }
+        ]
+        handler._get_user_gids = AsyncMock(return_value={"gid-waiting-empty-path"})
+
+        result = await handler.handle("aria2.tellWaiting", [0, 10])
+        assert len(result) == 1
+        assert result[0]["files"][0]["path"] == "video.mp4"
+
+    async def test_tell_active_fallback_to_uri_filename_when_task_name_missing(self, handler):
+        """tellActive should extract filename from URI when task.name is missing."""
+        async with get_session() as db:
+            task = DownloadTask(
+                uri_hash="hash-active-no-name",
+                uri="https://example.com/downloads/software.exe",
+                gid="gid-active-no-name",
+                status="active",
+                name="",
+                total_length=8000,
+                completed_length=2000,
+            )
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            db.add(UserTaskSubscription(owner_id=handler.user_id, task_id=task.id, status="pending"))
+
+        handler.client.tell_active.return_value = [
+            {
+                "gid": "gid-active-no-name",
+                "status": "active",
+                "totalLength": "8000",
+                "completedLength": "2000",
+            }
+        ]
+        handler._get_user_gids = AsyncMock(return_value={"gid-active-no-name"})
+
+        result = await handler.handle("aria2.tellActive", [])
+        assert len(result) == 1
+        assert result[0]["files"][0]["path"] == "software.exe"
+
+
+@pytest.mark.asyncio
 class TestAria2RpcHandlerUserSpaceExtended:
 
     async def test_get_user_available_space_no_user(self, handler, temp_db):
