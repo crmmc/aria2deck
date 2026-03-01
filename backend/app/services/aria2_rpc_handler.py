@@ -274,6 +274,19 @@ class Aria2RpcHandler:
         decoded_path = unquote(parsed.path)
         return Path(decoded_path).name
 
+    @staticmethod
+    def _extract_magnet_display_name(uri: str) -> str:
+        """从磁力链接提取显示名称（dn 参数或完整 URI）"""
+        if not uri or not uri.startswith("magnet:"):
+            return ""
+        # 尝试提取 dn 参数
+        import re
+        dn_match = re.search(r'[?&]dn=([^&]+)', uri)
+        if dn_match:
+            return unquote(dn_match.group(1))
+        # 没有 dn，返回完整磁力链接
+        return uri
+
     def _build_status_files(
         self,
         task_name: str | None,
@@ -794,19 +807,24 @@ class Aria2RpcHandler:
         return gids
 
     def _enrich_status_files_from_task(self, status: dict[str, Any], task: DownloadTask | None) -> dict[str, Any]:
-        if task is None or self._status_has_file_name(status):
+        if task is None:
             return status
 
-        total_length = self._to_int_scalar(status.get("totalLength"), task.total_length or 0)
-        completed_length = self._to_int_scalar(status.get("completedLength"), task.completed_length or 0)
         enriched = dict(status)
-        enriched["files"] = self._build_status_files(
-            task_name=task.name,
-            uri=task.uri,
-            total_length=total_length,
-            completed_length=completed_length,
-            fallback_name=self._status_str(enriched.get("gid"), "task"),
-        )
+
+        # 补充 files（如果需要）
+        if not self._status_has_file_name(status):
+            total_length = self._to_int_scalar(status.get("totalLength"), task.total_length or 0)
+            completed_length = self._to_int_scalar(status.get("completedLength"), task.completed_length or 0)
+            enriched["files"] = self._build_status_files(
+                task_name=task.name,
+                uri=task.uri,
+                total_length=total_length,
+                completed_length=completed_length,
+                fallback_name=self._status_str(enriched.get("gid"), "task"),
+            )
+
+        # 补充 bittorrent.info.name（对所有 BT 任务）
         if self._is_bittorrent_uri(task.uri):
             bittorrent = enriched.get("bittorrent")
             if not isinstance(bittorrent, dict):
@@ -818,9 +836,21 @@ class Aria2RpcHandler:
                 info = {}
             else:
                 info = dict(info)
-            info["name"] = task.name or enriched["files"][0]["path"]
+
+            # 优先用 task.name，但跳过 [METADATA] 占位符
+            if task.name and not task.name.startswith("[METADATA]"):
+                info["name"] = task.name
+            else:
+                # [METADATA] 占位符：从磁力链接提取显示名
+                magnet_name = self._extract_magnet_display_name(task.uri)
+                if magnet_name:
+                    info["name"] = magnet_name
+                elif enriched.get("files") and enriched["files"]:
+                    info["name"] = enriched["files"][0].get("path", "")
+
             bittorrent["info"] = info
             enriched["bittorrent"] = bittorrent
+
         return enriched
 
     def _enrich_statuses_with_task_map(
