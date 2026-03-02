@@ -1,207 +1,148 @@
 # Aria2Deck
 
-一个面向个人/小团队的多用户下载管理平台，基于 aria2，提供网页界面、用户隔离、任务共享与文件管理能力。
+多用户下载管理平台，基于 aria2，适合个人和小团队。
 
-如果你想要的是：
-- 不用一直盯着命令行
-- 多人共用一套下载服务
-- 下载完能统一在网页里管理文件
-
-那这个项目就是给你准备的。
+一套 Web 界面搞定：添加任务、管理文件、多人协作、分享下载。
 
 ---
 
-## 你能用它做什么
+## 功能亮点
 
-- 用网页添加下载任务（磁力、种子、HTTP/FTP）
-- 多用户登录，各自管理自己的任务和文件
-- 同一资源自动复用下载结果，省时间和空间
-- 下载完成后直接在网页里浏览、重命名、下载、删除
-- 支持多文件打包下载（ZIP/7z）
+**下载管理**
+- 支持磁力链接、种子文件、HTTP/FTP 链接，可批量添加
+- WebSocket 实时推送任务状态和下载速度
+- 任务完成/失败桌面通知提醒
+
+**多用户隔离**
+- 每个用户独立的任务列表和文件空间
+- 管理员可分配用户存储配额
+- 同一资源多人下载时自动复用，节省空间和带宽
+
+**文件管理**
+- 在线浏览、重命名、下载、删除已下载文件
+- 多文件打包下载（ZIP / TAR.ZST）
+- 存储空间用量实时展示
+
+**文件分享**
+- 生成分享链接，支持密码保护
+- 可设置过期时间或限制下载次数
+- 随时撤销分享
+
+**外部客户端接入**
+- 兼容 aria2 RPC 协议，可对接 AriaNg、Motrix 等客户端
+- 每用户独立 RPC Secret，互不干扰
+
+**系统管理**
+- 用户管理、系统配置、磁盘空间监控
+- 站点标题自定义
+- 孤立文件检测与清理
 
 ---
 
-## 快速开始（推荐：Docker）
+## 快速开始
 
-> 适合大多数用户，最省事。
-
-### 1) 准备环境
-
-请确保机器上有：
-- Docker
-- Docker Compose（`docker compose` 命令可用）
-
-### 2) 启动服务
+### Docker Compose（推荐）
 
 ```bash
+git clone https://github.com/crmmc/aria2deck.git
+cd aria2deck
 make docker-up
 ```
 
-如需自定义下载根目录（默认 `/app/backend/downloads`），请在启动容器时设置 `ARIA2C_DOWNLOAD_DIR`，并保证该路径在容器内可访问。
+浏览器打开 `http://localhost:8000`
 
-示例：
+默认账号：`admin` / `123456`，首次登录后请**立即修改密码**。
+
+### 独立 Docker 运行
 
 ```bash
 docker run -d \
   --name aria2deck \
   --network host \
   -e ARIA2C_DOWNLOAD_DIR=/Downloads/aria2deck \
-  -v /software/aria2deck/data:/app/backend/data \
+  -v /your/data:/app/backend/data \
   -v /Downloads/aria2deck:/Downloads/aria2deck \
-  --rm \
   ghcr.io/crmmc/aria2deck:<tag>
 ```
 
-### 3) 打开页面
-
-浏览器访问：
-
-```text
-http://localhost:8000
-```
-
-默认管理员账号：
-- 用户名：`admin`
-- 密码：`123456`
-
-首次登录后请**立即修改密码**。
+> `ARIA2C_DOWNLOAD_DIR` 自定义下载目录，需确保该路径在容器内可访问。
 
 ---
 
-## 本地运行（开发/调试）
+## 使用流程
 
-> 你想在本机直接改代码、看效果，就用这套。
-
-### 1) 安装依赖
-
-```bash
-make install
-```
-
-### 2) 配置环境变量
-
-```bash
-cp backend/env.example backend/.env
-cp frontend/env.local.example frontend/.env.local
-```
-
-可选：在 `backend/.env` 中设置下载根目录（未设置时默认 `/app/backend/downloads`）：
-
-```bash
-ARIA2C_DOWNLOAD_DIR=/Downloads/aria2deck
-```
-
-### 3) 构建前端
-
-```bash
-make build
-```
-
-### 4) 启动服务（开发推荐开三个终端）
-
-```bash
-# 终端 1：启动 aria2 测试后端
-make dev-aria2
-
-# 终端 2：启动后端开发模式（详细日志）
-make dev-back
-
-# 终端 3：启动前端开发环境
-make dev-front
-```
-
-`make dev-back` 会在每次启动时将 `admin` 密码重置为 `123456`，只改密码相关字段，不会清空数据库配置。
-
-默认访问地址：
-- 后端：`http://localhost:8000`
-- 前端：`http://localhost:3000`
+1. 管理员登录，修改默认密码
+2. 粘贴下载链接（或上传种子文件），创建任务
+3. 下载完成后，在文件页面浏览和管理
+4. 需要多人使用时，在用户管理创建新账号
+5. 需要分享文件时，生成分享链接发给对方
 
 ---
 
-## 新手使用流程（3 分钟版）
+## 环境变量
 
-1. 管理员登录后，先改默认密码。
-2. 进入任务页面，粘贴下载链接（或上传种子）创建任务。
-3. 下载完成后，到文件页面管理文件。
-4. 需要多人使用时，管理员在用户管理里创建账号。
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `ARIA2C_ARIA2_RPC_URL` | aria2 RPC 地址 | `http://localhost:6800/jsonrpc` |
+| `ARIA2C_ARIA2_RPC_SECRET` | aria2 RPC 密钥 | - |
+| `ARIA2C_DOWNLOAD_DIR` | 下载文件存放目录 | `/app/backend/downloads` |
+| `ARIA2C_DATABASE_PATH` | 数据库文件路径 | `./data/app.db` |
+| `ARIA2C_SESSION_TTL_SECONDS` | 登录会话有效期（秒） | `43200` |
+| `ARIA2C_ARIA2_POLL_INTERVAL` | aria2 状态轮询间隔（秒） | `2.0` |
+| `ARIA2DECK_SHARE_JWT_SECRET` | 分享链接签名密钥 | - |
+| `ARIA2C_EXTRA_CORS_ORIGINS` | 额外允许的 CORS 域名 | - |
 
 ---
 
-## 常用命令
+## 数据持久化
+
+Docker 部署时需要挂载两个目录：
+
+| 容器路径 | 说明 |
+|---------|------|
+| `/app/backend/data` | 数据库文件，**必须备份** |
+| `/app/backend/downloads` | 下载文件存放 |
+
+---
+
+## 安全建议
+
+- 修改默认管理员密码
+- 设置强随机的 `ARIA2C_ARIA2_RPC_SECRET` 和 `ARIA2DECK_SHARE_JWT_SECRET`
+- 生产环境请通过反向代理（Nginx 等）访问，不要直接暴露到公网
+- 定期备份 `data/` 目录
+
+---
+
+## 本地开发
 
 ```bash
 # 安装依赖
 make install
 
-# 构建前端静态资源
-make build
+# 配置环境变量
+cp backend/env.example backend/.env
 
-# 启动 aria2 测试后端（前台运行）
-make dev-aria2
-
-# 启动后端开发模式（详细日志，自动重置 admin 密码）
-make dev-back
-
-# 启动后端标准日志模式（兼容旧命令，不重置密码）
-make run
-
-# 启动前端开发环境
-make dev-front
-
-# 查看 Docker 日志
-make docker-logs
-
-# 停止 Docker 服务
-make docker-down
+# 三个终端分别启动
+make dev-aria2    # aria2 后端
+make dev-back     # API 后端（开发模式，自动重置 admin 密码为 123456）
+make dev-front    # 前端开发服务器（http://localhost:3000）
 ```
 
-> `make dev-front` 会先执行一次 `make build`，确保 `backend/static` 为最新前端产物。
-
 ---
 
-## 常见问题
+## 技术栈
 
-### 1) 页面打不开怎么办？
-
-先检查服务是否启动，再确认端口是否被占用。
-
-- 本地模式：确认 `make run` 没报错
-- Docker 模式：执行 `make docker-logs` 查看日志
-
-### 2) 提示连不上 aria2 怎么办？
-
-通常是 RPC 地址或密钥不一致：
-- 检查 `backend/.env` 里的 `ARIA2C_ARIA2_RPC_URL`
-- 检查 `ARIA2C_ARIA2_RPC_SECRET` 是否和 aria2 配置一致
-
-### 3) 为什么文件列表里看不到刚下载的内容？
-
-先看任务是否已完成；未完成的任务不会出现在最终文件列表。
-
-另外请确认下载路径一致：
-- 后端使用 `ARIA2C_DOWNLOAD_DIR`（默认 `/app/backend/downloads`）
-- aria2 写入路径必须与后端可访问路径一致（容器场景建议同路径挂载）
-
----
-
-## 安全建议（强烈建议）
-
-- 修改默认管理员密码
-- 使用强随机的 RPC Secret
-- 生产环境不要裸露在公网，至少加一层反向代理和访问控制
-- 定期备份 `backend/data/` 下的数据库文件
-
----
-
-## 目录说明（用户视角）
-
-- `backend/`：后端服务（API、认证、任务调度）
-- `frontend/`：网页前端
-- `backend/static/`：前端构建后的静态文件
-- `backend/data/`：数据库与运行数据（重要，记得备份）
+| 层 | 技术 |
+|----|------|
+| 后端 | FastAPI + SQLModel + aiohttp |
+| 前端 | Next.js 14 + TypeScript |
+| 数据库 | SQLite |
+| 下载引擎 | aria2 (JSON-RPC) |
+| 部署 | Docker |
 
 ---
 
 ## 许可协议
 
-本项目使用 `MIT License`。
+[MIT License](LICENSE)
