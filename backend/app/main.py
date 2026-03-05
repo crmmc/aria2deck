@@ -79,7 +79,20 @@ from app.database import (
     check_database_integrity,
     check_wal_integrity,
 )
-from app.routers import aria2_rpc, auth, config, files, history, shares, stats, storage, tasks, users, ws
+from app.routers import (
+    aria2_rpc,
+    auth,
+    config,
+    files,
+    health,
+    history,
+    shares,
+    stats,
+    storage,
+    tasks,
+    users,
+    ws,
+)
 from app.services.repair import run_startup_repair
 
 
@@ -278,6 +291,7 @@ def create_app() -> FastAPI:
     app.include_router(stats.router)
     app.include_router(config.router)
     app.include_router(storage.router)
+    app.include_router(health.router)
     app.include_router(ws.router)
     app.include_router(aria2_rpc.router)
     app.include_router(shares.router)
