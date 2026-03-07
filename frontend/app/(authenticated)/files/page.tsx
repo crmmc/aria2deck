@@ -299,7 +299,7 @@ export default function FilesPage() {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 500));
     }
     showToast(`已开始下载 ${selectedFiles.size} 个文件`, "success");
   };
@@ -519,7 +519,7 @@ export default function FilesPage() {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 500));
     }
     showToast(`已开始下载 ${selectedBrowseFiles.size} 个文件`, "success");
   };
