@@ -72,6 +72,7 @@ export type FileInfo = {
 
 export type FileListResponse = {
   files: FileInfo[];
+  total: number;
   space: SpaceInfo;
 };
 

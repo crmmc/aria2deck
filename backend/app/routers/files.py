@@ -78,6 +78,7 @@ class FileInfo(BaseModel):
 class FileListResponse(BaseModel):
     """文件列表响应"""
     files: list[FileInfo]
+    total: int
     space: dict  # {used, frozen, available}
 
 
@@ -269,28 +270,59 @@ async def _resolve_file_ids(user_id: int, file_ids: list[int]) -> list[tuple[str
 # ========== API Endpoints ==========
 
 @router.get("", response_model=FileListResponse)
-async def list_files(user: User = Depends(require_user)) -> FileListResponse:
-    """列出用户的所有文件引用
+async def list_files(
+    page: int = 1,
+    page_size: int = 10,
+    user: User = Depends(require_user),
+) -> FileListResponse:
+    """列出用户的文件引用（分页）
 
-    返回用户根目录下的所有文件/文件夹条目。
+    Args:
+        page: 页码，从 1 开始
+        page_size: 每页数量，允许 10/20/30/50/100
     """
     user_id = _require_user_id(user)
+
+    # 限流
+    if not await api_limiter.is_allowed(user_id, "list_files", limit=settings.rate_limit_list_files, window_seconds=60):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="请求过于频繁，请稍后再试"
+        )
+
+    # 参数校验
+    if page_size not in (10, 20, 30, 50, 100):
+        page_size = 10
+    if page < 1:
+        page = 1
+
+    offset = (page - 1) * page_size
+
     async with get_session() as db:
+        # 总数
+        total = await db.scalar(
+            select(func.count()).select_from(UserFile).where(UF.owner_id == user_id)
+        ) or 0
+
+        # 分页查询
         result = await db.exec(
             select(UserFile, StoredFile)
             .join(StoredFile, UF.stored_file_id == SF.id)
             .where(UF.owner_id == user_id)
             .order_by(UF.created_at.desc())
+            .offset(offset)
+            .limit(page_size)
         )
         rows = result.all()
 
     files = [FileInfo(**_user_file_to_dict(uf, sf)) for uf, sf in rows]
-    logger.debug("查询文件列表 user_id=%s count=%s", user_id, len(files))
+    logger.debug("查询文件列表 user_id=%s page=%s page_size=%s total=%s", user_id, page, page_size, total)
 
     space_info = await get_user_space_info(user_id, user.quota)
 
     return FileListResponse(
         files=files,
+        total=total,
         space={
             "used": space_info["used"],
             "frozen": space_info["frozen"],

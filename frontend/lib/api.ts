@@ -219,7 +219,8 @@ export const api = {
     request<{ ok: boolean }>(`/api/users/${id}`, { method: "DELETE" }),
 
   // Files (UserFile-based)
-  listFiles: () => request<FileListResponse>("/api/files"),
+  listFiles: (page = 1, pageSize = 10) =>
+    request<FileListResponse>(`/api/files?page=${page}&page_size=${pageSize}`),
   browseFile: (fileHash: string, path?: string) =>
     request<BrowseFileInfo[]>(
       `/api/files/${fileHash}/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`

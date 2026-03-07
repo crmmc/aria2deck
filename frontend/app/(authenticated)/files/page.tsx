@@ -72,6 +72,11 @@ export default function FilesPage() {
   const [packing, setPacking] = useState(false);
   const [packLoading, setPackLoading] = useState(false);
 
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [totalFiles, setTotalFiles] = useState(0);
+
 
   // Mobile detection
   const [isMobile, setIsMobile] = useState(false);
@@ -95,20 +100,21 @@ export default function FilesPage() {
     };
   }, [showSearchModal]);
 
-  const loadFiles = useCallback(async () => {
+  const loadFiles = useCallback(async (page?: number, size?: number) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await api.listFiles();
+      const response = await api.listFiles(page ?? currentPage, size ?? pageSize);
       setFiles(response.files);
       setSpace(response.space);
+      setTotalFiles(response.total);
       setSelectedFiles(new Set());
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [currentPage, pageSize]);
 
   useEffect(() => {
     loadFiles();
@@ -296,7 +302,6 @@ export default function FilesPage() {
       await new Promise((r) => setTimeout(r, 300));
     }
     showToast(`已开始下载 ${selectedFiles.size} 个文件`, "success");
-    setSelectedFiles(new Set());
   };
 
   const openPackDialog = async () => {
@@ -517,7 +522,6 @@ export default function FilesPage() {
       await new Promise((r) => setTimeout(r, 300));
     }
     showToast(`已开始下载 ${selectedBrowseFiles.size} 个文件`, "success");
-    setSelectedBrowseFiles(new Set());
   };
 
   const handlePackTaskComplete = useCallback(() => {
@@ -632,7 +636,6 @@ export default function FilesPage() {
             <>
               <span className="file-icon">📁</span>
               <span className="text-sm font-medium">根目录</span>
-              <span className="muted text-sm">({files.length} 项)</span>
             </>
           )}
         </div>
@@ -993,6 +996,7 @@ export default function FilesPage() {
             <p className="muted">暂无文件</p>
           </div>
         ) : (
+          <>
           <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
             {!isMobile && (
               <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px', paddingRight: '16px' }}>
@@ -1256,6 +1260,67 @@ export default function FilesPage() {
               </div>
             )}
           </div>
+          {/* Pagination */}
+          {/* Pagination */}
+          {(() => {
+            const totalPages = Math.max(1, Math.ceil(totalFiles / pageSize));
+            // 生成当前页附近的页码（最多显示 5 个）
+            const pages: number[] = [];
+            let start = Math.max(1, currentPage - 2);
+            const end = Math.min(totalPages, start + 4);
+            start = Math.max(1, end - 4);
+            for (let i = start; i <= end; i++) pages.push(i);
+            return (
+              <div className="flex items-center justify-end gap-2 py-3 px-2">
+                <select
+                  className="select-sm"
+                  value={pageSize}
+                  onChange={(e) => {
+                    const s = Number(e.target.value);
+                    setPageSize(s);
+                    setCurrentPage(1);
+                    loadFiles(1, s);
+                  }}
+                >
+                  {[10, 20, 30, 50, 100].map((n) => (
+                    <option key={n} value={n}>{n} 条/页</option>
+                  ))}
+                </select>
+                <span className="text-sm muted" style={{ marginLeft: 4 }}>
+                  共 {totalFiles} 项
+                </span>
+                <div className="flex items-center gap-0" style={{ marginLeft: 8 }}>
+                  <button
+                    className="button secondary btn-sm"
+                    style={{ borderRadius: '4px 0 0 4px' }}
+                    disabled={currentPage <= 1}
+                    onClick={() => { setCurrentPage(p => p - 1); loadFiles(currentPage - 1); }}
+                  >
+                    ‹
+                  </button>
+                  {pages.map((p) => (
+                    <button
+                      key={p}
+                      className={`button btn-sm ${p === currentPage ? 'primary' : 'secondary'}`}
+                      style={{ borderRadius: 0, minWidth: 32 }}
+                      onClick={() => { if (p !== currentPage) { setCurrentPage(p); loadFiles(p); } }}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                  <button
+                    className="button secondary btn-sm"
+                    style={{ borderRadius: '0 4px 4px 0' }}
+                    disabled={currentPage >= totalPages}
+                    onClick={() => { setCurrentPage(p => p + 1); loadFiles(currentPage + 1); }}
+                  >
+                    ›
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+          </>
         )
       )}
 

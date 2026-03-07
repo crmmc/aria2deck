@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     rate_limit_download_file: int = 300
     rate_limit_create_pack: int = 10
     rate_limit_aria2_test: int = 60
+    rate_limit_list_files: int = 30
     rate_limit_rpc: int = 600
 
     class Config:
