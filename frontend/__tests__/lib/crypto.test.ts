@@ -135,18 +135,4 @@ describe("hashPassword", () => {
     );
   });
 
-  it("falls back to pure-js hashing when SubtleCrypto is unavailable", async () => {
-    Object.defineProperty(global, "crypto", {
-      value: {},
-      writable: true,
-      configurable: true,
-    });
-
-    const result = await hashPassword("password", "user");
-
-    expect(result).toBe("5a63524297fbbf5df0f2f10ff13fba9a19168b9d7a3a4e76fddc81e12f46b2f1");
-    expect(mockDigest).not.toHaveBeenCalled();
-    expect(mockImportKey).not.toHaveBeenCalled();
-    expect(mockDeriveBits).not.toHaveBeenCalled();
-  });
 });

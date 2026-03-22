@@ -304,6 +304,7 @@ def create_app() -> FastAPI:
             return static_dir / name
 
         alias_map = {
+            "/": "tasks.html",
             "/login": "login.html",
             "/tasks": "tasks.html",
             "/tasks/detail": "tasks/detail.html",
