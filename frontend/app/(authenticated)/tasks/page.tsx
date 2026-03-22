@@ -212,6 +212,7 @@ export default function TasksPage() {
     return "all";
   });
   const [searchKeyword, setSearchKeyword] = useState("");
+  const [sortBy, setSortBy] = useState<string>("default");
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [isBatchAdding, setIsBatchAdding] = useState(false);
   const [batchUris, setBatchUris] = useState("");
@@ -683,8 +684,15 @@ export default function TasksPage() {
       );
     }
 
+    if (sortBy === "speed") {
+      filtered = [...filtered].sort((a, b) => b.download_speed - a.download_speed);
+    } else if (sortBy === "progress") {
+      const progress = (t: Task) => t.total_length > 0 ? t.completed_length / t.total_length : 0;
+      filtered = [...filtered].sort((a, b) => progress(b) - progress(a));
+    }
+
     return filtered;
-  }, [tasks, searchKeyword, filterStatus]);
+  }, [tasks, searchKeyword, filterStatus, sortBy]);
 
   const toggleSelectAll = useCallback(() => {
     if (selectedTasks.size === filteredTasks.length) {
@@ -778,6 +786,19 @@ export default function TasksPage() {
             >
               <option value="all">当前任务</option>
               <option value="active">进行中</option>
+            </select>
+          </div>
+
+          <div className="filter-group">
+            <span className="muted text-sm">排序:</span>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+              className="select"
+            >
+              <option value="default">默认</option>
+              <option value="speed">下载速度</option>
+              <option value="progress">下载进度</option>
             </select>
           </div>
 

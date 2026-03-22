@@ -274,7 +274,14 @@ export default function FilesPage() {
     try {
       await Promise.all(selectedList.map((f) => api.deleteFile(f.content_hash)));
       showToast(`已删除 ${selectedList.length} 个文件`, "success");
-      loadFiles();
+      // 删除后当前页可能已空，计算应回到哪一页
+      const remainingTotal = totalFiles - selectedList.length;
+      const maxPage = Math.max(1, Math.ceil(remainingTotal / pageSize));
+      const targetPage = Math.min(currentPage, maxPage);
+      if (targetPage !== currentPage) {
+        setCurrentPage(targetPage);
+      }
+      loadFiles(targetPage);
     } catch (err) {
       showToast(`删除失败: ${(err as Error).message}`, "error");
     } finally {
