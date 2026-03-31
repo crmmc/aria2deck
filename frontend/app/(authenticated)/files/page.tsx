@@ -296,19 +296,33 @@ export default function FilesPage() {
       showToast("当前选择包含文件夹，无法批量下载，请先打包后下载", "warning");
       return;
     }
-    for (const fileId of selectedFiles) {
-      const file = files.find(f => f.id === fileId);
-      if (!file) continue;
+
+    const selectedList = files.filter(f => selectedFiles.has(f.id));
+    showToast(`正在发送已选 ${selectedList.length} 个文件的下载请求，请稍候...`, "info");
+
+    for (let i = 0; i < selectedList.length; i++) {
+      const file = selectedList[i];
       const url = api.downloadFileUrl(file.content_hash);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      await new Promise((r) => setTimeout(r, 500));
+      
+      // 使用 iframe 触发下载，这种方式对第三方下载软件拦截更友好
+      const iframe = document.createElement("iframe");
+      iframe.style.display = "none";
+      iframe.src = url;
+      document.body.appendChild(iframe);
+      
+      // 5秒后移除 iframe
+      setTimeout(() => {
+        if (document.body.contains(iframe)) {
+          document.body.removeChild(iframe);
+        }
+      }, 5000);
+
+      if (i < selectedList.length - 1) {
+        // 增加间隔到 1.2 秒，确保下载软件有足够时间响应
+        await new Promise((r) => setTimeout(r, 1200));
+      }
     }
-    showToast(`已开始下载 ${selectedFiles.size} 个文件`, "success");
+    showToast(`已完成 ${selectedList.length} 个文件的下载触发`, "success");
   };
 
   const openPackDialog = async () => {
@@ -518,17 +532,30 @@ export default function FilesPage() {
       showToast("当前选择包含文件夹，无法批量下载，请仅选择文件", "warning");
       return;
     }
-    for (const path of selectedBrowseFiles) {
+
+    const selectedPaths = Array.from(selectedBrowseFiles);
+    showToast(`正在发送已选 ${selectedPaths.length} 个文件的下载请求...`, "info");
+
+    for (let i = 0; i < selectedPaths.length; i++) {
+      const path = selectedPaths[i];
       const url = api.downloadFileUrl(browseContext.fileHash, path);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      await new Promise((r) => setTimeout(r, 500));
+      
+      const iframe = document.createElement("iframe");
+      iframe.style.display = "none";
+      iframe.src = url;
+      document.body.appendChild(iframe);
+      
+      setTimeout(() => {
+        if (document.body.contains(iframe)) {
+          document.body.removeChild(iframe);
+        }
+      }, 5000);
+
+      if (i < selectedPaths.length - 1) {
+        await new Promise((r) => setTimeout(r, 1200));
+      }
     }
-    showToast(`已开始下载 ${selectedBrowseFiles.size} 个文件`, "success");
+    showToast(`已完成 ${selectedPaths.length} 个文件的下载触发`, "success");
   };
 
   const handlePackTaskComplete = useCallback(() => {
