@@ -946,7 +946,8 @@ export default function FilesPage() {
                                 display: 'grid',
                                 gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px',
                                 height: '100%',
-                                alignItems: 'flex-start'
+                                alignItems: 'flex-start',
+                                overflow: 'hidden'
                               }}
                             >
                               <div className="table-cell" style={{ paddingTop: '20px' }}>
@@ -957,21 +958,22 @@ export default function FilesPage() {
                                   className="checkbox-sm cursor-pointer"
                                 />
                               </div>
-                              <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all', paddingTop: '14px', paddingBottom: '14px' }}>
-                                <div className="flex items-center gap-2">
-                                  <span className="file-icon">
+                              <div className="table-cell" data-label="名称" style={{ paddingTop: '14px', paddingBottom: '14px', overflow: 'hidden' }}>
+                                <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+                                  <span className="file-icon" style={{ flexShrink: 0 }}>
                                     {item.is_directory ? "📁" : "📄"}
                                   </span>
                                   {item.is_directory ? (
                                     <button
                                       className="file-name-btn"
                                       onClick={() => navigateIntoSubfolder(item.name)}
-                                      style={{ wordBreak: 'break-all', textAlign: 'left' }}
+                                      title={item.name}
+                                      style={{ wordBreak: 'break-all', textAlign: 'left', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
                                     >
                                       {item.name}
                                     </button>
                                   ) : (
-                                    <span className="text-base" style={{ wordBreak: 'break-all' }}>{item.name}</span>
+                                    <span className="text-base" title={item.name} style={{ wordBreak: 'break-all', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{item.name}</span>
                                   )}
                                 </div>
                               </div>
@@ -1182,7 +1184,8 @@ export default function FilesPage() {
                                 display: 'grid',
                                 gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px',
                                 height: '100%',
-                                alignItems: 'flex-start'
+                                alignItems: 'flex-start',
+                                overflow: 'hidden'
                               }}
                             >
                               <div className="table-cell" style={{ paddingTop: '20px' }}>
@@ -1193,7 +1196,7 @@ export default function FilesPage() {
                                   className="checkbox-sm cursor-pointer"
                                 />
                               </div>
-                              <div className="table-cell" data-label="名称" style={{ wordBreak: 'break-all', paddingTop: '14px', paddingBottom: '14px' }}>
+                              <div className="table-cell" data-label="名称" style={{ paddingTop: '14px', paddingBottom: '14px', overflow: 'hidden' }}>
                                 {renaming === file.id ? (
                                   <div className="flex gap-2">
                                     <input
@@ -1221,20 +1224,21 @@ export default function FilesPage() {
                                     </button>
                                   </div>
                                 ) : (
-                                  <div className="flex items-center gap-2">
-                                    <span className="file-icon">
+                                  <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+                                    <span className="file-icon" style={{ flexShrink: 0 }}>
                                       {file.is_directory ? "📁" : "📄"}
                                     </span>
                                     {file.is_directory ? (
                                       <button
                                         className="file-name-btn"
                                         onClick={() => enterFolder(file)}
-                                        style={{ wordBreak: 'break-all', textAlign: 'left' }}
+                                        title={file.name}
+                                        style={{ wordBreak: 'break-all', textAlign: 'left', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
                                       >
                                         {file.name}
                                       </button>
                                     ) : (
-                                      <span className="text-base" style={{ wordBreak: 'break-all' }}>{file.name}</span>
+                                      <span className="text-base" title={file.name} style={{ wordBreak: 'break-all', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{file.name}</span>
                                     )}
                                   </div>
                                 )}
