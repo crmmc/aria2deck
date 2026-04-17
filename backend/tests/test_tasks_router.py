@@ -736,12 +736,12 @@ class TestListTasksWithData:
             [test_user["id"], 2, 0, "success", utc_now()]
         )
 
-        response = authenticated_client.get("/api/tasks?status=active")
+        response = authenticated_client.get("/api/tasks?status_filter=active")
         assert response.status_code == 200
         data = response.json()
-        assert len(data) >= 1
-        active_tasks = [t for t in data if t["status"] == "active"]
-        assert len(active_tasks) >= 1
+        assert len(data) == 1
+        assert data[0]["name"] == "active_file.zip"
+        assert data[0]["status"] == "active"
 
 
 class TestCancelTaskWithData:

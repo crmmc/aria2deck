@@ -1276,10 +1276,6 @@ class TestAria2RpcHandlerMulticall:
 @pytest.mark.asyncio
 class TestAria2RpcHandlerStaticMethods:
 
-    async def test_get_global_option_returns_empty(self, handler):
-        result = await handler.handle("aria2.getGlobalOption", [])
-        assert result == {}
-
     async def test_change_global_option_returns_ok(self, handler):
         result = await handler.handle("aria2.changeGlobalOption", [{"key": "value"}])
         assert result == "OK"

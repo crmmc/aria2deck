@@ -30,8 +30,8 @@ class TestStaleQueuedTasksCleanup:
         # Formats should be comparable
         assert "T" in threshold
         assert "T" in stored
-        assert "+" in threshold or "Z" in threshold  # Has timezone
-        assert "+" in stored or "Z" in stored
+        assert datetime.fromisoformat(threshold).tzinfo is not None
+        assert datetime.fromisoformat(stored).tzinfo is not None
 
     @pytest.mark.asyncio
     async def test_skip_task_with_active_submit_lock(self, mock_state):

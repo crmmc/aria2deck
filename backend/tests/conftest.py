@@ -20,7 +20,7 @@ os.environ["ARIA2C_DATABASE_PATH"] = _test_db
 os.environ["ARIA2C_DOWNLOAD_DIR"] = _test_download_dir
 
 from app.core.config import settings
-from app.core.rate_limit import api_limiter
+from app.core.rate_limit import api_limiter, login_limiter
 from app.core.security import hash_password
 from app.db import init_db, execute, fetch_one
 from app.database import reset_engine, init_db as init_sqlmodel_db, dispose_engine
@@ -33,8 +33,10 @@ def reset_rate_limiter():
     """在每个测试前后清理限流器状态"""
     import asyncio
     asyncio.run(api_limiter.clear_all())
+    asyncio.run(login_limiter.clear_all())
     yield
     asyncio.run(api_limiter.clear_all())
+    asyncio.run(login_limiter.clear_all())
 
 
 @pytest.fixture(scope="function")

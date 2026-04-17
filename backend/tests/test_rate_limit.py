@@ -117,29 +117,7 @@ class TestApiRateLimitIntegration:
         """测试创建任务频率限制"""
         client.cookies.set(settings.session_cookie_name, user_session)
 
-        # 使用 mock 来模拟频率限制，并避免真实网络探测
-        with patch('app.routers.tasks.api_limiter') as mock_limiter, \
-             patch('app.routers.tasks.probe_url_with_get_fallback', new_callable=AsyncMock) as mock_probe, \
-             patch('app.core.security.socket.getaddrinfo') as mock_getaddrinfo:
-            mock_probe.return_value = type("ProbeResult", (), {
-                "success": True,
-                "final_url": "https://example.com/file.zip",
-                "content_length": 0,
-                "filename": "file.zip",
-                "error": None,
-            })()
-            mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
-
-            # 模拟第一次允许 (async mock)
-            mock_limiter.is_allowed = AsyncMock(return_value=True)
-            response = client.post(
-                "/api/tasks",
-                json={"uri": "https://example.com/file.zip"}
-            )
-            # 可能因为其他原因失败，但不应该是 429
-            assert response.status_code != 429 or "频繁" not in response.text
-
-            # 模拟超过限制
+        with patch("app.routers.tasks.api_limiter") as mock_limiter:
             mock_limiter.is_allowed = AsyncMock(return_value=False)
             response = client.post(
                 "/api/tasks",

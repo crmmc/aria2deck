@@ -233,7 +233,11 @@ class TestAuthRouterEndpoints:
         )
 
         sessions_before = fetch_all("SELECT * FROM sessions WHERE user_id = ?", [test_user["id"]])
-        assert len(sessions_before) >= 2
+        assert {session["id"] for session in sessions_before} == {
+            "test_session_123",
+            "extra_session_1",
+            "extra_session_2",
+        }
 
         response = authenticated_client.post("/api/auth/change-password", json={
             "old_password": "oldpassword",
@@ -249,33 +253,46 @@ class TestLoginRateLimit:
 
     @pytest.mark.asyncio
     async def test_login_blocked_after_many_failures(self, client, temp_db: str, test_user: dict):
+        from app.core.security import hash_password
         from app.core.rate_limit import login_limiter
+        from app.db import execute
 
-        for _ in range(6):
-            await login_limiter.record_failure("test_ip_block")
+        execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            [hash_password("testpass"), test_user["id"]],
+        )
+        for _ in range(5):
+            await login_limiter.record_failure("testclient")
 
         response = client.post(
             "/api/auth/login",
-            json={"username": "testuser", "password": "wrong"},
-            headers={"X-Forwarded-For": "test_ip_block"}
+            json={"username": "testuser", "password": "testpass"},
         )
-        assert response.status_code in [401, 429]
+        assert response.status_code == 429
+        assert response.json()["detail"] == "登录尝试次数过多，请稍后再试"
 
 
 class TestChangePasswordRateLimit:
 
     @pytest.mark.asyncio
     async def test_change_password_rate_limited(self, authenticated_client, test_user: dict):
+        from app.core.security import hash_password
         from app.core.rate_limit import api_limiter
+        from app.db import execute
 
-        for _ in range(6):
+        execute(
+            "UPDATE users SET is_initial_password = 0, password_hash = ? WHERE id = ?",
+            [hash_password("oldpassword"), test_user["id"]],
+        )
+        for _ in range(5):
             await api_limiter.is_allowed(test_user["id"], "change_password", limit=5, window_seconds=300)
 
         response = authenticated_client.post("/api/auth/change-password", json={
-            "old_password": "old",
-            "new_password": "new"
+            "old_password": "oldpassword",
+            "new_password": "newpassword123"
         })
-        assert response.status_code in [400, 429]
+        assert response.status_code == 429
+        assert response.json()["detail"] == "操作过于频繁，请稍后再试"
 
 
 class TestLoginWithExistingSession:
