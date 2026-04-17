@@ -58,6 +58,18 @@ export type SystemConfig = {
   ws_reconnect_jitter: number;
   ws_reconnect_factor: number;
   site_title: string;
+  download_rate_limit: number;
+  download_max_connections: number;
+  download_per_user_connections: number;
+  download_per_file_connections: number;
+  rate_limit_login: number;
+  rate_limit_create_task: number;
+  rate_limit_create_torrent: number;
+  rate_limit_create_pack: number;
+  rate_limit_aria2_test: number;
+  rate_limit_list_files: number;
+  rate_limit_rpc: number;
+  rate_limit_change_password: number;
 };
 
 // User file reference (user's view of a stored file)

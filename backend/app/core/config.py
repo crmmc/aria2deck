@@ -26,16 +26,6 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(SHARE_JWT_SECRET_ENV, LEGACY_SHARE_JWT_SECRET_ENV),
     )
 
-    # Rate limits (times per minute)
-    rate_limit_login: int = 5
-    rate_limit_create_task: int = 60
-    rate_limit_create_torrent: int = 20
-    rate_limit_download_file: int = 300
-    rate_limit_create_pack: int = 10
-    rate_limit_aria2_test: int = 60
-    rate_limit_list_files: int = 30
-    rate_limit_rpc: int = 600
-
     class Config:
         env_prefix = "ARIA2C_"
 

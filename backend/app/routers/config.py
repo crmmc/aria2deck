@@ -14,7 +14,9 @@ from sqlmodel import select
 
 from app.auth import require_admin, require_user
 from app.core.config import settings
+from app.core.download_limiter import download_config
 from app.core.rate_limit import api_limiter
+from app.core.rate_limit_config import rate_limit_config
 from app.database import get_session
 from app.models import Config, User
 
@@ -45,6 +47,21 @@ class ConfigUpdate(BaseModel):
     ws_reconnect_jitter: float | None = Field(None, ge=0.0, le=1.0, description="抖动系数 (0-1)")
     ws_reconnect_factor: float | None = Field(None, ge=1.1, le=5.0, description="指数因子")
     site_title: str | None = Field(None, max_length=50, description="网站标题")
+    # 接口频率限制
+    download_rate_limit: int | None = Field(None, ge=0, le=10000, description="下载接口频率限制（次/分钟，0=不限制）")
+    # 下载并发限制
+    download_max_connections: int | None = Field(None, ge=0, le=10000, description="全局最大并发连接数（0=不限制）")
+    download_per_user_connections: int | None = Field(None, ge=0, le=1000, description="单用户最大并发连接数（0=不限制）")
+    download_per_file_connections: int | None = Field(None, ge=0, le=100, description="单文件最大并发连接数（0=不限制）")
+    # API 频率限制
+    rate_limit_login: int | None = Field(None, ge=1, le=100, description="登录限流（次/5分钟）")
+    rate_limit_create_task: int | None = Field(None, ge=1, le=10000, description="创建任务限流（次/分钟）")
+    rate_limit_create_torrent: int | None = Field(None, ge=1, le=10000, description="创建种子限流（次/分钟）")
+    rate_limit_create_pack: int | None = Field(None, ge=1, le=10000, description="创建打包限流（次/分钟）")
+    rate_limit_aria2_test: int | None = Field(None, ge=1, le=10000, description="aria2测试限流（次/分钟）")
+    rate_limit_list_files: int | None = Field(None, ge=1, le=10000, description="文件列表限流（次/分钟）")
+    rate_limit_rpc: int | None = Field(None, ge=1, le=10000, description="JSON-RPC限流（次/分钟）")
+    rate_limit_change_password: int | None = Field(None, ge=1, le=100, description="修改密码限流（次/5分钟）")
 
 
 class Aria2TestRequest(BaseModel):
@@ -235,6 +252,18 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),
         "ws_reconnect_factor": get_ws_reconnect_factor(),
         "site_title": get_site_title(),
+        "download_rate_limit": download_config.rate_limit,
+        "download_max_connections": download_config.max_connections,
+        "download_per_user_connections": download_config.per_user_connections,
+        "download_per_file_connections": download_config.per_file_connections,
+        "rate_limit_login": rate_limit_config.login,
+        "rate_limit_create_task": rate_limit_config.create_task,
+        "rate_limit_create_torrent": rate_limit_config.create_torrent,
+        "rate_limit_create_pack": rate_limit_config.create_pack,
+        "rate_limit_aria2_test": rate_limit_config.aria2_test,
+        "rate_limit_list_files": rate_limit_config.list_files,
+        "rate_limit_rpc": rate_limit_config.rpc,
+        "rate_limit_change_password": rate_limit_config.change_password,
     }
     logger.debug("获取系统配置 admin_id=%s", admin.id)
     return result
@@ -305,6 +334,41 @@ async def update_config(payload: ConfigUpdate, request: Request, admin: User = D
     if payload.site_title is not None:
         await set_config_value_async("site_title", payload.site_title)
         changed_keys.append("site_title")
+    # 下载频率限制 & 并发限制
+    _download_config_changed = False
+    if payload.download_rate_limit is not None:
+        await set_config_value_async("download_rate_limit", str(payload.download_rate_limit))
+        changed_keys.append("download_rate_limit")
+        _download_config_changed = True
+    if payload.download_max_connections is not None:
+        await set_config_value_async("download_max_connections", str(payload.download_max_connections))
+        changed_keys.append("download_max_connections")
+        _download_config_changed = True
+    if payload.download_per_user_connections is not None:
+        await set_config_value_async("download_per_user_connections", str(payload.download_per_user_connections))
+        changed_keys.append("download_per_user_connections")
+        _download_config_changed = True
+    if payload.download_per_file_connections is not None:
+        await set_config_value_async("download_per_file_connections", str(payload.download_per_file_connections))
+        changed_keys.append("download_per_file_connections")
+        _download_config_changed = True
+    if _download_config_changed:
+        await download_config.refresh()
+    # API 频率限制
+    _rate_limit_keys = [
+        "rate_limit_login", "rate_limit_create_task", "rate_limit_create_torrent",
+        "rate_limit_create_pack", "rate_limit_aria2_test", "rate_limit_list_files",
+        "rate_limit_rpc", "rate_limit_change_password",
+    ]
+    _rate_limit_changed = False
+    for rl_key in _rate_limit_keys:
+        val = getattr(payload, rl_key, None)
+        if val is not None:
+            await set_config_value_async(rl_key, str(val))
+            changed_keys.append(rl_key)
+            _rate_limit_changed = True
+    if _rate_limit_changed:
+        await rate_limit_config.refresh()
     # 如果 aria2 配置变更，刷新缓存
     if "aria2_rpc_url" in changed_keys or "aria2_rpc_secret" in changed_keys:
         from app.core.state import refresh_aria2_config
@@ -331,6 +395,18 @@ async def update_config(payload: ConfigUpdate, request: Request, admin: User = D
         "ws_reconnect_jitter": get_ws_reconnect_jitter(),
         "ws_reconnect_factor": get_ws_reconnect_factor(),
         "site_title": get_site_title(),
+        "download_rate_limit": download_config.rate_limit,
+        "download_max_connections": download_config.max_connections,
+        "download_per_user_connections": download_config.per_user_connections,
+        "download_per_file_connections": download_config.per_file_connections,
+        "rate_limit_login": rate_limit_config.login,
+        "rate_limit_create_task": rate_limit_config.create_task,
+        "rate_limit_create_torrent": rate_limit_config.create_torrent,
+        "rate_limit_create_pack": rate_limit_config.create_pack,
+        "rate_limit_aria2_test": rate_limit_config.aria2_test,
+        "rate_limit_list_files": rate_limit_config.list_files,
+        "rate_limit_rpc": rate_limit_config.rpc,
+        "rate_limit_change_password": rate_limit_config.change_password,
     }
 
 
@@ -389,7 +465,7 @@ async def test_aria2_connection(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录")
     admin_id_int = int(admin_id)
 
-    if not await api_limiter.is_allowed(admin_id_int, "aria2_test", limit=settings.rate_limit_aria2_test, window_seconds=60):
+    if not await api_limiter.is_allowed(admin_id_int, "aria2_test", limit=rate_limit_config.aria2_test, window_seconds=60):
         logger.warning("测试aria2连接被限流 admin_id=%s", admin.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

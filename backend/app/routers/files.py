@@ -22,7 +22,9 @@ from urllib.parse import quote
 
 from app.auth import require_user
 from app.core.config import settings
+from app.core.download_limiter import download_config, download_limiter
 from app.core.rate_limit import api_limiter
+from app.core.rate_limit_config import rate_limit_config
 from app.database import get_session
 from app.models import User, PackTask, UserFile, StoredFile, ShareLink
 from app.services.pack import cleanup_pack_output
@@ -242,6 +244,59 @@ def _range_file_response(request: Request, file_path: Path, filename: str):
     )
 
 
+def _tracked_response(
+    response: FileResponse | StreamingResponse,
+    user_id: int | None,
+    file_hash: str | None,
+) -> FileResponse | StreamingResponse:
+    """包装 response，在流结束/客户端断开时释放并发连接"""
+    if isinstance(response, StreamingResponse) and response.body_iterator is not None:
+        original_iter = response.body_iterator
+
+        async def _releasing_iter():
+            try:
+                async for chunk in original_iter:  # type: ignore[union-attr]
+                    yield chunk
+            finally:
+                await download_limiter.release(user_id, file_hash)
+
+        # 同步 generator 需要包装
+        import inspect
+        if inspect.isasyncgen(original_iter):
+            response.body_iterator = _releasing_iter()
+        else:
+            # 同步 generator → 包装为 async
+            sync_iter = original_iter
+
+            async def _sync_releasing_iter():
+                try:
+                    for chunk in sync_iter:  # type: ignore[union-attr]
+                        yield chunk
+                finally:
+                    await download_limiter.release(user_id, file_hash)
+
+            response.body_iterator = _sync_releasing_iter()
+    else:
+        # FileResponse — 用 BackgroundTask 释放
+        from starlette.background import BackgroundTask
+
+        async def _release():
+            await download_limiter.release(user_id, file_hash)
+
+        if response.background:
+            # 链式 background task
+            original_bg = response.background
+
+            async def _chained():
+                await original_bg()  # type: ignore[misc]
+                await _release()
+
+            response.background = BackgroundTask(_chained)
+        else:
+            response.background = BackgroundTask(_release)
+    return response
+
+
 async def _resolve_file_ids(user_id: int, file_ids: list[int]) -> list[tuple[str, int, str]]:
     """将 UserFile IDs 解析为 (绝对路径, 大小, 显示名) 列表，验证归属"""
     if not file_ids:
@@ -284,7 +339,7 @@ async def list_files(
     user_id = _require_user_id(user)
 
     # 限流
-    if not await api_limiter.is_allowed(user_id, "list_files", limit=settings.rate_limit_list_files, window_seconds=60):
+    if not await api_limiter.is_allowed(user_id, "list_files", limit=rate_limit_config.list_files, window_seconds=60):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="请求过于频繁，请稍后再试"
@@ -435,55 +490,76 @@ async def download_file(
         path: BT 文件夹内的相对路径（可选）
     """
     user_id = _require_user_id(user)
-    if not await api_limiter.is_allowed(user_id, "download_file", limit=settings.rate_limit_download_file, window_seconds=60):
+    # 频率限制（从内存配置读取）
+    if download_config.rate_limit > 0 and not await api_limiter.is_allowed(
+        user_id, "download_file", limit=download_config.rate_limit, window_seconds=60
+    ):
         logger.warning("下载文件被限流 user_id=%s file_hash=%s", user_id, file_hash)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="下载请求过于频繁，请稍后再试"
         )
-    # Get user file and stored file
-    row = await _get_user_file_by_hash(user_id, file_hash)
-    if not row:
-        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=not_found", user_id, file_hash)
+    # 并发连接限制（从内存配置读取）
+    acquired = await download_limiter.try_acquire(
+        global_limit=download_config.max_connections,
+        user_id=user_id,
+        per_user_limit=download_config.per_user_connections,
+        file_hash=file_hash,
+        per_file_limit=download_config.per_file_connections,
+    )
+    if not acquired:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="文件不存在"
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="下载连接数已达上限，请稍后再试"
         )
-    user_file, stored_file = row
-    base_path = Path(stored_file.real_path)
-    if not base_path.exists():
-        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=base_missing", user_id, file_hash)
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="文件不存在"
-        )
-    # Determine target file
-    if path:
-        if not stored_file.is_directory:
-            logger.warning("下载文件失败 user_id=%s file_hash=%s reason=path_on_non_dir", user_id, file_hash)
+    try:
+        # Get user file and stored file
+        row = await _get_user_file_by_hash(user_id, file_hash)
+        if not row:
+            logger.warning("下载文件失败 user_id=%s file_hash=%s reason=not_found", user_id, file_hash)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="文件不存在"
+            )
+        user_file, stored_file = row
+        base_path = Path(stored_file.real_path)
+        if not base_path.exists():
+            logger.warning("下载文件失败 user_id=%s file_hash=%s reason=base_missing", user_id, file_hash)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="文件不存在"
+            )
+        # Determine target file
+        if path:
+            if not stored_file.is_directory:
+                logger.warning("下载文件失败 user_id=%s file_hash=%s reason=path_on_non_dir", user_id, file_hash)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="此文件不是文件夹，不支持路径参数"
+                )
+            target_path = _validate_subpath(base_path, path)
+        else:
+            target_path = base_path
+        if not target_path.exists():
+            logger.warning("下载文件失败 user_id=%s file_hash=%s reason=target_missing", user_id, file_hash)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="文件不存在"
+            )
+        if target_path.is_dir():
+            logger.warning("下载文件失败 user_id=%s file_hash=%s reason=target_is_directory", user_id, file_hash)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="此文件不是文件夹，不支持路径参数"
+                detail="不能直接下载文件夹，请选择具体文件"
             )
-        target_path = _validate_subpath(base_path, path)
-    else:
-        target_path = base_path
-    if not target_path.exists():
-        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=target_missing", user_id, file_hash)
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="文件不存在"
-        )
-    if target_path.is_dir():
-        logger.warning("下载文件失败 user_id=%s file_hash=%s reason=target_is_directory", user_id, file_hash)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="不能直接下载文件夹，请选择具体文件"
-        )
-    # 确定下载文件名：整个文件用 display_name，子文件用实际文件名
-    download_name = target_path.name if path else user_file.display_name
-    logger.info("下载文件成功 user_id=%s file_hash=%s file=%s", user_id, file_hash, download_name)
-    return _range_file_response(request, target_path, download_name)
+        # 确定下载文件名：整个文件用 display_name，子文件用实际文件名
+        download_name = target_path.name if path else user_file.display_name
+        logger.info("下载文件成功 user_id=%s file_hash=%s file=%s", user_id, file_hash, download_name)
+        response = _range_file_response(request, target_path, download_name)
+        return _tracked_response(response, user_id, file_hash)
+    except Exception:
+        await download_limiter.release(user_id, file_hash)
+        raise
 
 
 @router.delete("/pack")
@@ -787,7 +863,7 @@ async def create_pack_task(
     """创建打包任务 - 基于 UserFile ID"""
     user_id = _require_user_id(user)
     # 频率限制
-    if not await api_limiter.is_allowed(user_id, "create_pack", limit=settings.rate_limit_create_pack, window_seconds=60):
+    if not await api_limiter.is_allowed(user_id, "create_pack", limit=rate_limit_config.create_pack, window_seconds=60):
         logger.warning("创建打包任务被限流 user_id=%s", user_id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

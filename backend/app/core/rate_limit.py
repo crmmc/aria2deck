@@ -3,8 +3,6 @@ import asyncio
 from collections import defaultdict
 from time import time
 
-from app.core.config import settings
-
 
 class RateLimiter:
     """统一的异步速率限制器，基于滑动窗口算法
@@ -38,14 +36,15 @@ class RateLimiter:
             self._requests[key].append(now)
             return True
 
-    async def is_blocked(self, key: str) -> bool:
+    async def is_blocked(self, key: str, limit: int | None = None) -> bool:
         """检查是否被阻止（不记录请求）"""
+        max_req = limit if limit is not None else self.max_requests
         async with self._lock:
             now = time()
             self._requests[key] = [
                 t for t in self._requests[key] if now - t < self.window_seconds
             ]
-            return len(self._requests[key]) >= self.max_requests
+            return len(self._requests[key]) >= max_req
 
     async def record(self, key: str) -> None:
         """记录一次请求"""
@@ -123,4 +122,4 @@ class ApiRateLimiter(RateLimiter):
 # 预配置的限流器实例
 login_limiter = LoginRateLimiter()  # 5次/5分钟
 api_limiter = ApiRateLimiter()  # 动态参数
-rpc_limiter = RateLimiter(max_requests=settings.rate_limit_rpc, window_seconds=60)  # 默认600次/分钟
+rpc_limiter = RateLimiter(max_requests=0, window_seconds=60)  # 动态参数，由 rate_limit_config 提供 limit

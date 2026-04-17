@@ -27,6 +27,20 @@ export default function SettingsPage() {
   const [wsReconnectJitter, setWsReconnectJitter] = useState(0.2);
   const [wsReconnectFactor, setWsReconnectFactor] = useState(2);
   const [siteTitle, setSiteTitle] = useState("");
+  // 下载频率限制 & 并发限制
+  const [downloadRateLimit, setDownloadRateLimit] = useState(300);
+  const [downloadMaxConnections, setDownloadMaxConnections] = useState(100);
+  const [downloadPerUserConnections, setDownloadPerUserConnections] = useState(16);
+  const [downloadPerFileConnections, setDownloadPerFileConnections] = useState(8);
+  // API 频率限制
+  const [rateLimitLogin, setRateLimitLogin] = useState(5);
+  const [rateLimitCreateTask, setRateLimitCreateTask] = useState(30);
+  const [rateLimitCreateTorrent, setRateLimitCreateTorrent] = useState(20);
+  const [rateLimitCreatePack, setRateLimitCreatePack] = useState(5);
+  const [rateLimitAria2Test, setRateLimitAria2Test] = useState(10);
+  const [rateLimitListFiles, setRateLimitListFiles] = useState(60);
+  const [rateLimitRpc, setRateLimitRpc] = useState(300);
+  const [rateLimitChangePassword, setRateLimitChangePassword] = useState(5);
   const [aria2Status, setAria2Status] = useState<{
     connected: boolean;
     version?: string;
@@ -88,6 +102,18 @@ export default function SettingsPage() {
       setWsReconnectJitter(cfg.ws_reconnect_jitter ?? 0.2);
       setWsReconnectFactor(cfg.ws_reconnect_factor ?? 2);
       setSiteTitle(cfg.site_title || "");
+      setDownloadRateLimit(cfg.download_rate_limit ?? 300);
+      setDownloadMaxConnections(cfg.download_max_connections ?? 100);
+      setDownloadPerUserConnections(cfg.download_per_user_connections ?? 16);
+      setDownloadPerFileConnections(cfg.download_per_file_connections ?? 8);
+      setRateLimitLogin(cfg.rate_limit_login ?? 5);
+      setRateLimitCreateTask(cfg.rate_limit_create_task ?? 30);
+      setRateLimitCreateTorrent(cfg.rate_limit_create_torrent ?? 20);
+      setRateLimitCreatePack(cfg.rate_limit_create_pack ?? 5);
+      setRateLimitAria2Test(cfg.rate_limit_aria2_test ?? 10);
+      setRateLimitListFiles(cfg.rate_limit_list_files ?? 60);
+      setRateLimitRpc(cfg.rate_limit_rpc ?? 300);
+      setRateLimitChangePassword(cfg.rate_limit_change_password ?? 5);
       setMachineStats(stats);
       setAria2Status(aria2Ver);
       setTestResult(null);
@@ -137,6 +163,18 @@ export default function SettingsPage() {
         ws_reconnect_jitter: wsReconnectJitter,
         ws_reconnect_factor: wsReconnectFactor,
         site_title: siteTitle || undefined,
+        download_rate_limit: downloadRateLimit,
+        download_max_connections: downloadMaxConnections,
+        download_per_user_connections: downloadPerUserConnections,
+        download_per_file_connections: downloadPerFileConnections,
+        rate_limit_login: rateLimitLogin,
+        rate_limit_create_task: rateLimitCreateTask,
+        rate_limit_create_torrent: rateLimitCreateTorrent,
+        rate_limit_create_pack: rateLimitCreatePack,
+        rate_limit_aria2_test: rateLimitAria2Test,
+        rate_limit_list_files: rateLimitListFiles,
+        rate_limit_rpc: rateLimitRpc,
+        rate_limit_change_password: rateLimitChangePassword,
       });
 
       await loadConfig(true);
@@ -525,6 +563,168 @@ export default function SettingsPage() {
               onChange={(e) => setWsReconnectFactor(parseInt(e.target.value) / 10)}
               className="w-full"
               style={{ maxWidth: 300 }}
+            />
+          </div>
+
+          <h2 className="section-title mt-7">接口频率限制</h2>
+          <p className="muted text-sm mb-4">限制用户在单位时间内的请求次数，修改后即时生效。</p>
+          <div className="mb-7">
+            <label className="form-label-lg">下载接口频率限制</label>
+            <p className="muted text-sm mb-3">每分钟最大请求次数（0 = 不限制）</p>
+            <input
+              type="number"
+              min="0"
+              max="10000"
+              value={downloadRateLimit}
+              onChange={(e) => setDownloadRateLimit(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">登录限流</label>
+            <p className="muted text-sm mb-3">每 5 分钟最大登录尝试次数</p>
+            <input
+              type="number"
+              min="1"
+              max="100"
+              value={rateLimitLogin}
+              onChange={(e) => setRateLimitLogin(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">创建任务限流</label>
+            <p className="muted text-sm mb-3">每分钟最大创建任务次数</p>
+            <input
+              type="number"
+              min="1"
+              max="10000"
+              value={rateLimitCreateTask}
+              onChange={(e) => setRateLimitCreateTask(Math.max(1, Math.min(10000, parseInt(e.target.value) || 1)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">创建种子限流</label>
+            <p className="muted text-sm mb-3">每分钟最大上传种子次数</p>
+            <input
+              type="number"
+              min="1"
+              max="10000"
+              value={rateLimitCreateTorrent}
+              onChange={(e) => setRateLimitCreateTorrent(Math.max(1, Math.min(10000, parseInt(e.target.value) || 1)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">创建打包限流</label>
+            <p className="muted text-sm mb-3">每分钟最大创建打包次数</p>
+            <input
+              type="number"
+              min="1"
+              max="10000"
+              value={rateLimitCreatePack}
+              onChange={(e) => setRateLimitCreatePack(Math.max(1, Math.min(10000, parseInt(e.target.value) || 1)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">aria2 测试限流</label>
+            <p className="muted text-sm mb-3">每分钟最大连接测试次数</p>
+            <input
+              type="number"
+              min="1"
+              max="10000"
+              value={rateLimitAria2Test}
+              onChange={(e) => setRateLimitAria2Test(Math.max(1, Math.min(10000, parseInt(e.target.value) || 1)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">文件列表限流</label>
+            <p className="muted text-sm mb-3">每分钟最大文件列表请求次数</p>
+            <input
+              type="number"
+              min="1"
+              max="10000"
+              value={rateLimitListFiles}
+              onChange={(e) => setRateLimitListFiles(Math.max(1, Math.min(10000, parseInt(e.target.value) || 1)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">JSON-RPC 限流</label>
+            <p className="muted text-sm mb-3">每分钟最大 RPC 请求次数</p>
+            <input
+              type="number"
+              min="1"
+              max="10000"
+              value={rateLimitRpc}
+              onChange={(e) => setRateLimitRpc(Math.max(1, Math.min(10000, parseInt(e.target.value) || 1)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">修改密码限流</label>
+            <p className="muted text-sm mb-3">每 5 分钟最大修改密码次数</p>
+            <input
+              type="number"
+              min="1"
+              max="100"
+              value={rateLimitChangePassword}
+              onChange={(e) => setRateLimitChangePassword(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+
+          <h2 className="section-title mt-7">下载并发限制</h2>
+          <p className="muted text-sm mb-4">限制同时进行的下载连接数，防止单个用户占满带宽。</p>
+          <div className="mb-7">
+            <label className="form-label-lg">全局最大并发连接数</label>
+            <p className="muted text-sm mb-3">所有用户的总并发下载连接数上限（0 = 不限制）</p>
+            <input
+              type="number"
+              min="0"
+              max="10000"
+              value={downloadMaxConnections}
+              onChange={(e) => setDownloadMaxConnections(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">单用户最大并发连接数</label>
+            <p className="muted text-sm mb-3">单个用户的并发下载连接数上限（0 = 不限制）</p>
+            <input
+              type="number"
+              min="0"
+              max="1000"
+              value={downloadPerUserConnections}
+              onChange={(e) => setDownloadPerUserConnections(Math.max(0, Math.min(1000, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">单文件最大并发连接数</label>
+            <p className="muted text-sm mb-3">同一用户对同一文件的并发下载连接数上限（0 = 不限制）</p>
+            <input
+              type="number"
+              min="0"
+              max="100"
+              value={downloadPerFileConnections}
+              onChange={(e) => setDownloadPerFileConnections(Math.max(0, Math.min(100, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
             />
           </div>
 

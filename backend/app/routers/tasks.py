@@ -21,6 +21,7 @@ from app.aria2.client import Aria2Client
 from app.auth import require_user
 from app.core.config import settings
 from app.core.rate_limit import api_limiter
+from app.core.rate_limit_config import rate_limit_config
 from app.core.security import check_url_ssrf, mask_url_credentials
 from app.core.state import AppState, get_aria2_client, get_user_space_lock
 from app.database import get_session
@@ -469,7 +470,7 @@ async def create_task(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户未登录")
 
     # Rate limit
-    if not await api_limiter.is_allowed(user_id, "create_task", limit=settings.rate_limit_create_task, window_seconds=60):
+    if not await api_limiter.is_allowed(user_id, "create_task", limit=rate_limit_config.create_task, window_seconds=60):
         logger.warning("创建任务被限流 user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -935,7 +936,7 @@ async def create_torrent_task(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户未登录")
 
     # Rate limit
-    if not await api_limiter.is_allowed(user_id, "create_torrent", limit=settings.rate_limit_create_torrent, window_seconds=60):
+    if not await api_limiter.is_allowed(user_id, "create_torrent", limit=rate_limit_config.create_torrent, window_seconds=60):
         logger.warning("创建种子任务被限流 user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

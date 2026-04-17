@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.rate_limit import rpc_limiter
+from app.core.rate_limit_config import rate_limit_config
 from app.core.state import get_aria2_client
 from app.database import get_session
 from app.models import User
@@ -332,7 +333,7 @@ async def process_single_request(
 async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONResponse:
     client_ip = request.client.host if request.client else "unknown"
     request_id = getattr(request.state, "request_id", "-")
-    if not await rpc_limiter.is_allowed(client_ip):
+    if not await rpc_limiter.is_allowed(client_ip, limit=rate_limit_config.rpc):
         logger.warning("RPC请求被限流 ip=%s request_id=%s", client_ip, request_id)
         return _build_rate_limit_response()
 
@@ -349,7 +350,7 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
             )
 
         for _ in range(max(0, len(body) - 1)):
-            if not await rpc_limiter.is_allowed(client_ip):
+            if not await rpc_limiter.is_allowed(client_ip, limit=rate_limit_config.rpc):
                 logger.warning("RPC批量请求被限流 ip=%s request_id=%s", client_ip, request_id)
                 return _build_rate_limit_response()
     elif not isinstance(body, dict):

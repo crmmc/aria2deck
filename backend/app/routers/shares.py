@@ -17,6 +17,7 @@ from sqlmodel import col, select, func
 
 from app.auth import require_user
 from app.core.config import settings
+from app.core.download_limiter import download_config, download_limiter
 from app.core.rate_limit import RateLimiter
 from app.core.security import hash_password, verify_password
 from app.database import get_session
@@ -28,7 +29,7 @@ from app.schemas import (
     ShareInfoOut,
     ShareLinkOut,
 )
-from app.routers.files import _validate_subpath, _range_file_response
+from app.routers.files import _validate_subpath, _range_file_response, _tracked_response
 
 router = APIRouter(tags=["shares"])
 logger = logging.getLogger(__name__)
@@ -365,62 +366,70 @@ async def download_shared_file(
 ):
     """\u4e0b\u8f7d\u5206\u4eab\u6587\u4ef6"""
     share, user_file, stored_file = await _check_share_access(code, token, request)
-    base_path = Path(stored_file.real_path)
-    if not base_path.exists():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "\u6587\u4ef6\u4e0d\u5b58\u5728")
-    # \u786e\u5b9a\u4e0b\u8f7d\u76ee\u6807
-    if subpath:
-        if not stored_file.is_directory:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "\u8be5\u6587\u4ef6\u4e0d\u662f\u76ee\u5f55")
-        target = _validate_subpath(base_path, subpath)
-        if not target.exists():
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "\u5b50\u6587\u4ef6\u4e0d\u5b58\u5728")
-        if target.is_dir():
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "\u4e0d\u80fd\u4e0b\u8f7d\u76ee\u5f55")
-        filename = target.name
-    else:
-        if stored_file.is_directory:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "\u8bf7\u6307\u5b9a\u5b50\u6587\u4ef6\u8def\u5f84")
-        target = base_path
-        filename = user_file.display_name or "download"
-    # 原子递增下载计数（含 max_downloads 和有效性竞态保护）
-    now = utc_now_str()
-    async with get_session() as db:
-        # 构建有效性条件：status=active 且未过期
-        validity_conditions = [
-            ShareLink.id == share.id,  # type: ignore[arg-type]
-            ShareLink.status == "active",
-            or_(
-                ShareLink.expires_at.is_(None),  # type: ignore[union-attr]
-                ShareLink.expires_at > now,
-            ),
-        ]
-        if share.max_downloads is not None:
-            result = await db.execute(
-                ShareLink.__table__.update()  # type: ignore[attr-defined]
-                .where(
-                    *validity_conditions,
-                    ShareLink.download_count < share.max_downloads,
-                )
-                .values(
-                    download_count=ShareLink.download_count + 1,
-                    last_accessed_at=now,
-                )
-            )
-            if result.rowcount == 0:  # type: ignore[union-attr]
-                raise HTTPException(status.HTTP_410_GONE, "分享已失效或下载次数已用完")
+    # 全局并发连接限制（匿名，不追踪用户级）
+    acquired = await download_limiter.try_acquire(global_limit=download_config.max_connections)
+    if not acquired:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "下载连接数已达上限，请稍后再试")
+    try:
+        base_path = Path(stored_file.real_path)
+        if not base_path.exists():
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "\u6587\u4ef6\u4e0d\u5b58\u5728")
+        # \u786e\u5b9a\u4e0b\u8f7d\u76ee\u6807
+        if subpath:
+            if not stored_file.is_directory:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "\u8be5\u6587\u4ef6\u4e0d\u662f\u76ee\u5f55")
+            target = _validate_subpath(base_path, subpath)
+            if not target.exists():
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "\u5b50\u6587\u4ef6\u4e0d\u5b58\u5728")
+            if target.is_dir():
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "\u4e0d\u80fd\u4e0b\u8f7d\u76ee\u5f55")
+            filename = target.name
         else:
-            result = await db.execute(
-                ShareLink.__table__.update()  # type: ignore[attr-defined]
-                .where(*validity_conditions)
-                .values(
-                    download_count=ShareLink.download_count + 1,
-                    last_accessed_at=now,
+            if stored_file.is_directory:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "\u8bf7\u6307\u5b9a\u5b50\u6587\u4ef6\u8def\u5f84")
+            target = base_path
+            filename = user_file.display_name or "download"
+        # 原子递增下载计数（含 max_downloads 和有效性竞态保护）
+        now = utc_now_str()
+        async with get_session() as db:
+            # 构建有效性条件：status=active 且未过期
+            validity_conditions = [
+                ShareLink.id == share.id,  # type: ignore[arg-type]
+                ShareLink.status == "active",
+                or_(
+                    ShareLink.expires_at.is_(None),  # type: ignore[union-attr]
+                    ShareLink.expires_at > now,
+                ),
+            ]
+            if share.max_downloads is not None:
+                result = await db.execute(
+                    ShareLink.__table__.update()  # type: ignore[attr-defined]
+                    .where(
+                        *validity_conditions,
+                        ShareLink.download_count < share.max_downloads,
+                    )
+                    .values(
+                        download_count=ShareLink.download_count + 1,
+                        last_accessed_at=now,
+                    )
                 )
-            )
-            if result.rowcount == 0:  # type: ignore[union-attr]
-                raise HTTPException(status.HTTP_410_GONE, "分享已失效")
-    return _range_file_response(request, target, filename)
+                if result.rowcount == 0:  # type: ignore[union-attr]
+                    raise HTTPException(status.HTTP_410_GONE, "分享已失效或下载次数已用完")
+            else:
+                result = await db.execute(
+                    ShareLink.__table__.update()  # type: ignore[attr-defined]
+                    .where(*validity_conditions)
+                    .values(
+                        download_count=ShareLink.download_count + 1,
+                        last_accessed_at=now,
+                    )
+                )
+                if result.rowcount == 0:  # type: ignore[union-attr]
+                    raise HTTPException(status.HTTP_410_GONE, "分享已失效")
+        return _tracked_response(_range_file_response(request, target, filename), None, None)
+    except Exception:
+        await download_limiter.release(None, None)
+        raise
 
 
 @router.get("/api/s/{code}/browse")

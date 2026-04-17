@@ -6,6 +6,7 @@ from sqlmodel import select
 from app.auth import clear_session, create_session, require_user, set_session_cookie
 from app.core.config import settings
 from app.core.rate_limit import api_limiter, login_limiter
+from app.core.rate_limit_config import rate_limit_config
 from app.core.security import hash_password, verify_password, verify_password_constant_time
 from app.database import get_session
 from app.models import User
@@ -22,7 +23,7 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
     request_id = getattr(request.state, "request_id", "-")
 
     # 检查是否被限制
-    if await login_limiter.is_blocked(client_ip):
+    if await login_limiter.is_blocked(client_ip, limit=rate_limit_config.login):
         logger.warning(
             "登录限流触发 username=%s ip=%s request_id=%s",
             payload.username,
@@ -119,7 +120,7 @@ async def change_password(
     user: User = Depends(require_user)
 ) -> dict:
     request_id = getattr(request.state, "request_id", "-")
-    if not await api_limiter.is_allowed(user.id, "change_password", limit=5, window_seconds=300):
+    if not await api_limiter.is_allowed(user.id, "change_password", limit=rate_limit_config.change_password, window_seconds=300):
         logger.warning(
             "修改密码限流触发 user_id=%s request_id=%s",
             user.id,

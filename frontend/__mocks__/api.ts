@@ -84,6 +84,18 @@ export const createMockSystemConfig = (overrides: Partial<SystemConfig> = {}): S
   ws_reconnect_jitter: 0.3,
   ws_reconnect_factor: 2,
   site_title: "Aria2 控制器",
+  download_rate_limit: 300,
+  download_max_connections: 100,
+  download_per_user_connections: 16,
+  download_per_file_connections: 8,
+  rate_limit_login: 5,
+  rate_limit_create_task: 30,
+  rate_limit_create_torrent: 20,
+  rate_limit_create_pack: 5,
+  rate_limit_aria2_test: 10,
+  rate_limit_list_files: 60,
+  rate_limit_rpc: 300,
+  rate_limit_change_password: 5,
   ...overrides,
 });
 

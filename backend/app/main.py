@@ -131,6 +131,14 @@ async def lifespan(app: FastAPI):
     from app.core.state import refresh_aria2_config
     await refresh_aria2_config(app.state.app_state)
 
+    # 加载下载配置到内存
+    from app.core.download_limiter import download_config
+    await download_config.load_from_db()
+
+    # 加载频率限制配置到内存
+    from app.core.rate_limit_config import rate_limit_config
+    await rate_limit_config.load_from_db()
+
     # Ensure default admin exists
     ensure_default_admin()
 
