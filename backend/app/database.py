@@ -151,16 +151,14 @@ async def init_default_config(session: AsyncSession) -> None:
         ("min_free_disk", "1073741824"),
         ("pack_format", "tar.zst"),
         ("pack_compression_level", "5"),
-        ("download_rate_limit", "300"),
-        ("download_max_connections", "100"),
-        ("download_per_user_connections", "16"),
-        ("download_per_file_connections", "8"),
     ]
+
+    from app.core.download_limiter import download_config
+    default_configs.extend(download_config.defaults().items())
 
     # 追加频率限制默认值（来自 RateLimitConfig 代码默认值）
     from app.core.rate_limit_config import rate_limit_config
-    for db_key, default_val in rate_limit_config.defaults().items():
-        default_configs.append((db_key, default_val))
+    default_configs.extend(rate_limit_config.defaults().items())
 
     for key, value in default_configs:
         result = await session.exec(select(Config).where(Config.key == key))

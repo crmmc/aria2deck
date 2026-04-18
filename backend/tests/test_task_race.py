@@ -426,11 +426,11 @@ class TestTorrentTaskSpaceCheck:
 
         payload = TorrentCreate(torrent="dummy_base64_payload")
 
-        with patch("app.routers.tasks.api_limiter") as mock_limiter, \
+        with patch("app.routers.tasks.ensure_authenticated_allowed", new_callable=AsyncMock) as mock_limiter, \
              patch("app.routers.tasks.extract_info_hash_from_torrent_base64", return_value=task.uri_hash), \
              patch("app.routers.tasks.get_user_space_info", new_callable=AsyncMock, side_effect=fake_space_info), \
              patch("app.routers.tasks._check_disk_space", return_value=(True, 10**12)):
-            mock_limiter.is_allowed = AsyncMock(return_value=True)
+            mock_limiter.return_value = None
 
             with pytest.raises(HTTPException) as exc_info:
                 await create_torrent_task(payload, request, user=user)
@@ -497,11 +497,11 @@ class TestTorrentTaskSpaceCheck:
 
         payload = TorrentCreate(torrent="dummy_base64_payload")
 
-        with patch("app.routers.tasks.api_limiter") as mock_limiter, \
+        with patch("app.routers.tasks.ensure_authenticated_allowed", new_callable=AsyncMock) as mock_limiter, \
              patch("app.routers.tasks.extract_info_hash_from_torrent_base64", return_value=task.uri_hash), \
              patch("app.routers.tasks.get_user_space_info", new_callable=AsyncMock, side_effect=fake_space_info), \
              patch("app.routers.tasks._check_disk_space", return_value=(True, 10**12)):
-            mock_limiter.is_allowed = AsyncMock(return_value=True)
+            mock_limiter.return_value = None
 
             response = await create_torrent_task(payload, request, user=user)
             assert response["frozen_space"] == task.total_length

@@ -7,9 +7,9 @@
 4. 时间窗口过后限制解除
 """
 import asyncio
-from time import sleep
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
@@ -117,8 +117,7 @@ class TestApiRateLimitIntegration:
         """测试创建任务频率限制"""
         client.cookies.set(settings.session_cookie_name, user_session)
 
-        with patch("app.routers.tasks.api_limiter") as mock_limiter:
-            mock_limiter.is_allowed = AsyncMock(return_value=False)
+        with patch("app.routers.tasks.ensure_authenticated_allowed", new=AsyncMock(side_effect=HTTPException(429, "操作过于频繁，请稍后再试"))):
             response = client.post(
                 "/api/tasks",
                 json={"uri": "https://example.com/file.zip"}
@@ -132,9 +131,7 @@ class TestApiRateLimitIntegration:
         """测试创建打包任务频率限制"""
         client.cookies.set(settings.session_cookie_name, user_session)
 
-        with patch('app.routers.files.api_limiter') as mock_limiter:
-            # 模拟超过限制 (async mock)
-            mock_limiter.is_allowed = AsyncMock(return_value=False)
+        with patch("app.routers.files.ensure_authenticated_allowed", new=AsyncMock(side_effect=HTTPException(429, "操作过于频繁，请稍后再试"))):
             response = client.post(
                 "/api/files/pack",
                 json={"file_ids": [1]}

@@ -20,7 +20,10 @@ os.environ["ARIA2C_DATABASE_PATH"] = _test_db
 os.environ["ARIA2C_DOWNLOAD_DIR"] = _test_download_dir
 
 from app.core.config import settings
-from app.core.rate_limit import api_limiter, login_limiter
+from app.core.download_limiter import download_config, download_limiter
+from app.core.rate_limit import api_limiter, login_limiter, rpc_limiter
+from app.core.rate_limit_config import rate_limit_config
+from app.core.request_rate_guard import scoped_rate_limiter
 from app.core.security import hash_password
 from app.db import init_db, execute, fetch_one
 from app.database import reset_engine, init_db as init_sqlmodel_db, dispose_engine
@@ -34,9 +37,15 @@ def reset_rate_limiter():
     import asyncio
     asyncio.run(api_limiter.clear_all())
     asyncio.run(login_limiter.clear_all())
+    asyncio.run(rpc_limiter.clear_all())
+    asyncio.run(scoped_rate_limiter.clear_all())
+    asyncio.run(download_limiter.clear_all())
     yield
     asyncio.run(api_limiter.clear_all())
     asyncio.run(login_limiter.clear_all())
+    asyncio.run(rpc_limiter.clear_all())
+    asyncio.run(scoped_rate_limiter.clear_all())
+    asyncio.run(download_limiter.clear_all())
 
 
 @pytest.fixture(scope="function")
@@ -56,6 +65,8 @@ def temp_db() -> Generator[str, None, None]:
 
     import asyncio
     asyncio.run(init_sqlmodel_db())
+    asyncio.run(download_config.load_from_db())
+    asyncio.run(rate_limit_config.load_from_db())
 
     yield db_path
 

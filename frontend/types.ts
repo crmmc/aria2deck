@@ -58,18 +58,25 @@ export type SystemConfig = {
   ws_reconnect_jitter: number;
   ws_reconnect_factor: number;
   site_title: string;
-  download_rate_limit: number;
-  download_max_connections: number;
-  download_per_user_connections: number;
-  download_per_file_connections: number;
-  rate_limit_login: number;
+  rate_limit_account_security: number;
+  rate_limit_authenticated_api: number;
+  rate_limit_public_api: number;
+  rate_limit_share_access: number;
+  rate_limit_authenticated_download: number;
+  rate_limit_anonymous_download: number;
   rate_limit_create_task: number;
   rate_limit_create_torrent: number;
   rate_limit_create_pack: number;
   rate_limit_aria2_test: number;
-  rate_limit_list_files: number;
   rate_limit_rpc: number;
-  rate_limit_change_password: number;
+  download_total_connections: number;
+  download_authenticated_reserved_connections: number;
+  download_authenticated_per_user_connections: number;
+  download_authenticated_per_file_connections: number;
+  download_anonymous_base_connections: number;
+  download_anonymous_borrow_connections: number;
+  download_anonymous_per_ip_connections: number;
+  download_anonymous_per_file_connections: number;
 };
 
 // User file reference (user's view of a stored file)

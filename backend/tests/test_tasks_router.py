@@ -2,6 +2,7 @@
 import base64
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
@@ -528,10 +529,10 @@ class TestClearHistory:
 class TestRateLimiting:
     """Tests for rate limiting on task endpoints."""
 
-    @patch("app.routers.tasks.api_limiter.is_allowed")
+    @patch("app.routers.tasks.ensure_authenticated_allowed")
     def test_create_task_rate_limited(self, mock_limiter, authenticated_client: TestClient):
         """Test rate limiting on task creation."""
-        mock_limiter.return_value = False
+        mock_limiter.side_effect = HTTPException(429, "操作过于频繁，请稍后再试")
 
         response = authenticated_client.post("/api/tasks", json={
             "uri": "http://example.com/file.zip"
@@ -539,10 +540,10 @@ class TestRateLimiting:
         assert response.status_code == 429
         assert "操作过于频繁" in response.json()["detail"]
 
-    @patch("app.routers.tasks.api_limiter.is_allowed")
+    @patch("app.routers.tasks.ensure_authenticated_allowed")
     def test_create_torrent_rate_limited(self, mock_limiter, authenticated_client: TestClient):
         """Test rate limiting on torrent creation."""
-        mock_limiter.return_value = False
+        mock_limiter.side_effect = HTTPException(429, "操作过于频繁，请稍后再试")
 
         response = authenticated_client.post("/api/tasks/torrent", json={
             "torrent": "abc123"

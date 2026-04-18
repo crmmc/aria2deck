@@ -244,14 +244,14 @@ class TestCancelDuringSubmit:
                 "quota": quota,
             }
 
-        with patch("app.routers.tasks.api_limiter") as mock_limiter, \
+        with patch("app.routers.tasks.ensure_authenticated_allowed", new_callable=AsyncMock) as mock_limiter, \
              patch("app.routers.tasks.probe_url_with_get_fallback", new_callable=AsyncMock, return_value=probe_result), \
              patch("app.core.security.socket.getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 0))]), \
              patch("app.routers.tasks.get_aria2_client", return_value=mock_client), \
              patch("app.routers.tasks._broadcast_task_update", new_callable=AsyncMock), \
              patch("app.services.storage.get_user_space_info", new_callable=AsyncMock, side_effect=fake_space_info), \
              patch("app.routers.tasks.asyncio.create_task", side_effect=capture_task):
-            mock_limiter.is_allowed = AsyncMock(return_value=True)
+            mock_limiter.return_value = None
 
             # Load user model
             async with get_session() as db:

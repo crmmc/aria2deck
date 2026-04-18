@@ -285,7 +285,7 @@ class TestChangePasswordRateLimit:
             [hash_password("oldpassword"), test_user["id"]],
         )
         for _ in range(5):
-            await api_limiter.is_allowed(test_user["id"], "change_password", limit=5, window_seconds=300)
+            await api_limiter.is_allowed(test_user["id"], "account_security", limit=5, window_seconds=300)
 
         response = authenticated_client.post("/api/auth/change-password", json={
             "old_password": "oldpassword",

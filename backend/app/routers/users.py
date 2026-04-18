@@ -9,8 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from app.auth import clear_user_sessions, require_admin, require_user
-from app.core.rate_limit import login_limiter
-from app.core.rate_limit_config import rate_limit_config
+from app.core.request_rate_guard import client_ip_from_request, ensure_account_security_allowed
 from app.core.security import hash_password
 from app.database import get_session
 from app.models import User, Session as SessionModel, Task, PackTask, UserFile, UserTaskSubscription, TaskHistory, ShareLink
@@ -51,7 +50,7 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
     首次调用（无用户时）无需认证，之后需要管理员权限。
     """
     # 获取客户端 IP 用于限流
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = client_ip_from_request(request)
     request_id = getattr(request.state, "request_id", "-")
 
     # 单次读取状态，避免 TOCTOU
@@ -59,17 +58,19 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
 
     # 首次创建用户时的 IP 限流（防止滥用）
     if not has_users:
-        if await login_limiter.is_blocked(client_ip, limit=rate_limit_config.login):
+        try:
+            await ensure_account_security_allowed(
+                client_ip,
+                detail="请求过于频繁，请稍后再试",
+            )
+        except HTTPException:
             logger.warning(
                 "创建首个用户被限流 username=%s ip=%s request_id=%s",
                 payload.username,
                 client_ip,
                 request_id,
             )
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="请求过于频繁，请稍后再试"
-            )
+            raise
 
     if has_users:
         await require_admin(await require_user(request))

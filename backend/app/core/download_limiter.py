@@ -1,122 +1,320 @@
-"""下载接口频率限制 + 三层并发连接限制"""
+"""下载并发配置与连接分配器。"""
 from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
+from enum import StrEnum
 
 logger = logging.getLogger(__name__)
 
-# ── 下载配置内存缓存 ──────────────────────────────────────────
+
+class DownloadRejectReason(StrEnum):
+    SYSTEM_TOTAL = "system_total"
+    AUTHENTICATED_PER_USER = "authenticated_per_user"
+    AUTHENTICATED_PER_FILE = "authenticated_per_file"
+    ANONYMOUS_POOL = "anonymous_pool"
+    ANONYMOUS_PER_IP = "anonymous_per_ip"
+    ANONYMOUS_PER_FILE = "anonymous_per_file"
+
+
+class DownloadIdentity(StrEnum):
+    AUTHENTICATED = "authenticated"
+    ANONYMOUS = "anonymous"
+
 
 class DownloadConfig:
-    """下载相关配置的内存缓存，更新时主动刷新"""
+    """下载并发配置的内存缓存。"""
+
+    _DB_KEY_MAP: dict[str, tuple[str, int, tuple[str, ...]]] = {
+        "download_total_connections": (
+            "total_connections",
+            100,
+            ("download_max_connections",),
+        ),
+        "download_authenticated_reserved_connections": (
+            "authenticated_reserved_connections",
+            60,
+            (),
+        ),
+        "download_authenticated_per_user_connections": (
+            "authenticated_per_user_connections",
+            16,
+            ("download_per_user_connections",),
+        ),
+        "download_authenticated_per_file_connections": (
+            "authenticated_per_file_connections",
+            8,
+            ("download_per_file_connections",),
+        ),
+        "download_anonymous_base_connections": (
+            "anonymous_base_connections",
+            20,
+            (),
+        ),
+        "download_anonymous_borrow_connections": (
+            "anonymous_borrow_connections",
+            20,
+            (),
+        ),
+        "download_anonymous_per_ip_connections": (
+            "anonymous_per_ip_connections",
+            4,
+            (),
+        ),
+        "download_anonymous_per_file_connections": (
+            "anonymous_per_file_connections",
+            2,
+            (),
+        ),
+    }
 
     def __init__(self) -> None:
-        self.rate_limit: int = 300           # 频率限制（次/分钟，0=不限制）
-        self.max_connections: int = 100      # 全局最大并发连接数（0=不限制）
-        self.per_user_connections: int = 16  # 单用户最大并发连接数（0=不限制）
-        self.per_file_connections: int = 8   # 单文件最大并发连接数（0=不限制）
+        self.total_connections: int = 100
+        self.authenticated_reserved_connections: int = 60
+        self.authenticated_per_user_connections: int = 16
+        self.authenticated_per_file_connections: int = 8
+        self.anonymous_base_connections: int = 20
+        self.anonymous_borrow_connections: int = 20
+        self.anonymous_per_ip_connections: int = 4
+        self.anonymous_per_file_connections: int = 2
 
     async def load_from_db(self) -> None:
-        """启动时从数据库加载配置"""
+        """启动时从数据库加载配置。"""
         from app.database import get_session
         from app.models import Config
         from sqlmodel import select
 
-        mapping = {
-            "download_rate_limit": ("rate_limit", int, 300),
-            "download_max_connections": ("max_connections", int, 100),
-            "download_per_user_connections": ("per_user_connections", int, 16),
-            "download_per_file_connections": ("per_file_connections", int, 8),
-        }
-
         async with get_session() as db:
-            for db_key, (attr, conv, default) in mapping.items():
-                result = await db.exec(select(Config).where(Config.key == db_key))
-                row = result.first()
-                try:
-                    setattr(self, attr, conv(row.value) if row else default)
-                except (ValueError, TypeError):
-                    setattr(self, attr, default)
+            for db_key, (attr, default, legacy_keys) in self._DB_KEY_MAP.items():
+                value = default
+                for candidate in (db_key, *legacy_keys):
+                    result = await db.exec(select(Config).where(Config.key == candidate))
+                    row = result.first()
+                    if row is None:
+                        continue
+                    try:
+                        value = int(row.value)
+                    except (TypeError, ValueError):
+                        value = default
+                    break
+                setattr(self, attr, value)
 
+        self.validate()
         logger.info(
-            "下载配置已加载 rate_limit=%s max_conn=%s per_user=%s per_file=%s",
-            self.rate_limit, self.max_connections,
-            self.per_user_connections, self.per_file_connections,
+            "下载并发配置已加载 total=%s auth_reserved=%s auth_per_user=%s "
+            "auth_per_file=%s anon_base=%s anon_borrow=%s anon_per_ip=%s anon_per_file=%s",
+            self.total_connections,
+            self.authenticated_reserved_connections,
+            self.authenticated_per_user_connections,
+            self.authenticated_per_file_connections,
+            self.anonymous_base_connections,
+            self.anonymous_borrow_connections,
+            self.anonymous_per_ip_connections,
+            self.anonymous_per_file_connections,
         )
 
     async def refresh(self) -> None:
-        """管理员更新配置后主动刷新"""
+        """管理员更新配置后主动刷新。"""
         await self.load_from_db()
+
+    def defaults(self) -> dict[str, str]:
+        """返回新配置键的默认值字符串。"""
+        return {
+            db_key: str(default)
+            for db_key, (_, default, _) in self._DB_KEY_MAP.items()
+        }
+
+    def anonymous_total_connections(self) -> int:
+        """匿名下载允许占用的总连接数。"""
+        return self.anonymous_base_connections + self.anonymous_borrow_connections
+
+    def validate(self) -> None:
+        """校验并发配置的关键约束。"""
+        if self.total_connections <= 0:
+            return
+
+        allocated = (
+            self.authenticated_reserved_connections
+            + self.anonymous_base_connections
+            + self.anonymous_borrow_connections
+        )
+        if allocated > self.total_connections:
+            raise ValueError("下载并发配置无效：保底与匿名配额总和不能超过系统总连接上限")
 
 
 download_config = DownloadConfig()
 
 
-# ── 并发连接追踪器 ────────────────────────────────────────────
+class DownloadLease:
+    """下载连接占用句柄。"""
 
-class DownloadLimiter:
-    """三层并发连接限制：全局 / 单用户 / 单文件"""
+    def __init__(
+        self,
+        manager: DownloadAccessManager,
+        identity: DownloadIdentity,
+        subject_key: str,
+        file_hash: str,
+    ) -> None:
+        self._manager = manager
+        self.identity = identity
+        self.subject_key = subject_key
+        self.file_hash = file_hash
+        self._released = False
+
+    async def release(self) -> None:
+        """释放当前下载连接占用。"""
+        if self._released:
+            return
+        self._released = True
+        await self._manager.release(self)
+
+
+@dataclass(slots=True)
+class DownloadAcquireResult:
+    """下载连接获取结果。"""
+
+    allowed: bool
+    reason: DownloadRejectReason | None = None
+    lease: DownloadLease | None = None
+
+    def detail(self) -> str:
+        """生成用户可见的拒绝提示。"""
+        mapping = {
+            DownloadRejectReason.SYSTEM_TOTAL: "下载连接数已达系统上限，请稍后再试",
+            DownloadRejectReason.AUTHENTICATED_PER_USER: "当前账号的下载连接数已达上限，请稍后再试",
+            DownloadRejectReason.AUTHENTICATED_PER_FILE: "当前文件的下载连接数已达上限，请稍后再试",
+            DownloadRejectReason.ANONYMOUS_POOL: "匿名下载连接数已达上限，请稍后再试",
+            DownloadRejectReason.ANONYMOUS_PER_IP: "当前来源的下载连接数已达上限，请稍后再试",
+            DownloadRejectReason.ANONYMOUS_PER_FILE: "当前文件的匿名下载连接数已达上限，请稍后再试",
+        }
+        return mapping.get(self.reason, "下载连接数已达上限，请稍后再试")
+
+
+class DownloadAccessManager:
+    """下载连接分配器。"""
 
     def __init__(self) -> None:
-        self._global_count: int = 0
-        self._user_counts: dict[int, int] = {}
-        self._user_file_counts: dict[str, int] = {}
-        self._lock: asyncio.Lock = asyncio.Lock()
+        self._authenticated_active = 0
+        self._anonymous_active = 0
+        self._authenticated_user_counts: dict[str, int] = {}
+        self._authenticated_user_file_counts: dict[str, int] = {}
+        self._anonymous_ip_counts: dict[str, int] = {}
+        self._anonymous_ip_file_counts: dict[str, int] = {}
+        self._lock = asyncio.Lock()
 
-    async def try_acquire(
-        self,
-        global_limit: int,
-        user_id: int | None = None,
-        per_user_limit: int = 0,
-        file_hash: str | None = None,
-        per_file_limit: int = 0,
-    ) -> bool:
-        """尝试获取连接许可，返回 True 表示成功"""
+    async def acquire_authenticated(self, user_id: int, file_hash: str) -> DownloadAcquireResult:
+        """获取已登录下载连接。"""
+        subject_key = str(user_id)
+        user_file_key = f"{subject_key}:{file_hash}"
         async with self._lock:
-            # 全局限制
-            if global_limit > 0 and self._global_count >= global_limit:
-                return False
-            # 单用户限制
-            if user_id is not None and per_user_limit > 0:
-                if self._user_counts.get(user_id, 0) >= per_user_limit:
-                    return False
-            # 单文件限制
-            uf_key: str | None = None
-            if user_id is not None and file_hash is not None and per_file_limit > 0:
-                uf_key = f"{user_id}:{file_hash}"
-                if self._user_file_counts.get(uf_key, 0) >= per_file_limit:
-                    return False
+            if self._total_limit_reached():
+                return DownloadAcquireResult(False, DownloadRejectReason.SYSTEM_TOTAL)
+            if self._limit_reached(
+                self._authenticated_user_counts,
+                subject_key,
+                download_config.authenticated_per_user_connections,
+            ):
+                return DownloadAcquireResult(False, DownloadRejectReason.AUTHENTICATED_PER_USER)
+            if self._limit_reached(
+                self._authenticated_user_file_counts,
+                user_file_key,
+                download_config.authenticated_per_file_connections,
+            ):
+                return DownloadAcquireResult(False, DownloadRejectReason.AUTHENTICATED_PER_FILE)
 
-            # 全部通过，递增计数
-            self._global_count += 1
-            if user_id is not None:
-                self._user_counts[user_id] = self._user_counts.get(user_id, 0) + 1
-            if uf_key is not None:
-                self._user_file_counts[uf_key] = self._user_file_counts.get(uf_key, 0) + 1
+            self._authenticated_active += 1
+            self._increment(self._authenticated_user_counts, subject_key)
+            self._increment(self._authenticated_user_file_counts, user_file_key)
+            lease = DownloadLease(self, DownloadIdentity.AUTHENTICATED, subject_key, file_hash)
+            return DownloadAcquireResult(True, lease=lease)
+
+    async def acquire_anonymous(self, client_ip: str, file_hash: str) -> DownloadAcquireResult:
+        """获取匿名下载连接。"""
+        ip_file_key = f"{client_ip}:{file_hash}"
+        async with self._lock:
+            if self._total_limit_reached():
+                return DownloadAcquireResult(False, DownloadRejectReason.SYSTEM_TOTAL)
+            if self._anonymous_pool_limit_reached():
+                return DownloadAcquireResult(False, DownloadRejectReason.ANONYMOUS_POOL)
+            if self._limit_reached(
+                self._anonymous_ip_counts,
+                client_ip,
+                download_config.anonymous_per_ip_connections,
+            ):
+                return DownloadAcquireResult(False, DownloadRejectReason.ANONYMOUS_PER_IP)
+            if self._limit_reached(
+                self._anonymous_ip_file_counts,
+                ip_file_key,
+                download_config.anonymous_per_file_connections,
+            ):
+                return DownloadAcquireResult(False, DownloadRejectReason.ANONYMOUS_PER_FILE)
+
+            self._anonymous_active += 1
+            self._increment(self._anonymous_ip_counts, client_ip)
+            self._increment(self._anonymous_ip_file_counts, ip_file_key)
+            lease = DownloadLease(self, DownloadIdentity.ANONYMOUS, client_ip, file_hash)
+            return DownloadAcquireResult(True, lease=lease)
+
+    async def release(self, lease: DownloadLease) -> None:
+        """释放下载连接。"""
+        async with self._lock:
+            if lease.identity == DownloadIdentity.AUTHENTICATED:
+                self._authenticated_active = max(0, self._authenticated_active - 1)
+                self._decrement(self._authenticated_user_counts, lease.subject_key)
+                self._decrement(
+                    self._authenticated_user_file_counts,
+                    f"{lease.subject_key}:{lease.file_hash}",
+                )
+                return
+
+            self._anonymous_active = max(0, self._anonymous_active - 1)
+            self._decrement(self._anonymous_ip_counts, lease.subject_key)
+            self._decrement(
+                self._anonymous_ip_file_counts,
+                f"{lease.subject_key}:{lease.file_hash}",
+            )
+
+    async def clear_all(self) -> None:
+        """清空所有计数（测试用）。"""
+        async with self._lock:
+            self._authenticated_active = 0
+            self._anonymous_active = 0
+            self._authenticated_user_counts.clear()
+            self._authenticated_user_file_counts.clear()
+            self._anonymous_ip_counts.clear()
+            self._anonymous_ip_file_counts.clear()
+
+    def _total_limit_reached(self) -> bool:
+        total_limit = download_config.total_connections
+        if total_limit <= 0:
+            return False
+        return self._total_active() >= total_limit
+
+    def _anonymous_pool_limit_reached(self) -> bool:
+        anonymous_limit = download_config.anonymous_total_connections()
+        if anonymous_limit <= 0:
             return True
+        return self._anonymous_active >= anonymous_limit
 
-    async def release(
-        self,
-        user_id: int | None = None,
-        file_hash: str | None = None,
-    ) -> None:
-        """释放连接许可"""
-        async with self._lock:
-            self._global_count = max(0, self._global_count - 1)
-            if user_id is not None:
-                cnt = self._user_counts.get(user_id, 0) - 1
-                if cnt <= 0:
-                    self._user_counts.pop(user_id, None)
-                else:
-                    self._user_counts[user_id] = cnt
-            if user_id is not None and file_hash is not None:
-                uf_key = f"{user_id}:{file_hash}"
-                cnt = self._user_file_counts.get(uf_key, 0) - 1
-                if cnt <= 0:
-                    self._user_file_counts.pop(uf_key, None)
-                else:
-                    self._user_file_counts[uf_key] = cnt
+    def _total_active(self) -> int:
+        return self._authenticated_active + self._anonymous_active
+
+    @staticmethod
+    def _limit_reached(counts: dict[str, int], key: str, limit: int) -> bool:
+        return limit > 0 and counts.get(key, 0) >= limit
+
+    @staticmethod
+    def _increment(counts: dict[str, int], key: str) -> None:
+        counts[key] = counts.get(key, 0) + 1
+
+    @staticmethod
+    def _decrement(counts: dict[str, int], key: str) -> None:
+        next_count = counts.get(key, 0) - 1
+        if next_count <= 0:
+            counts.pop(key, None)
+            return
+        counts[key] = next_count
 
 
-download_limiter = DownloadLimiter()
+download_limiter = DownloadAccessManager()

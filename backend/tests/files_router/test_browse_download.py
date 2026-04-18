@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
+from app.core.rate_limit_config import rate_limit_config
 from app.db import execute
 
 
@@ -66,6 +67,19 @@ class TestBrowseFile:
         assert response.status_code == 403
         assert response.json()["detail"] == "无权访问此路径"
 
+    def test_browse_uses_authenticated_api_limit(self, authenticated_client: TestClient, user_directory: dict):
+        original_limit = rate_limit_config.authenticated_api
+        rate_limit_config.authenticated_api = 1
+        try:
+            first = authenticated_client.get(f"/api/files/{user_directory['content_hash']}/browse")
+            second = authenticated_client.get(f"/api/files/{user_directory['content_hash']}/browse")
+        finally:
+            rate_limit_config.authenticated_api = original_limit
+
+        assert first.status_code == 200
+        assert second.status_code == 429
+        assert second.json()["detail"] == "请求过于频繁，请稍后再试"
+
 
 class TestDownloadFile:
     def test_download_file_not_found(self, authenticated_client: TestClient):
@@ -82,6 +96,32 @@ class TestDownloadFile:
         )
         assert response.status_code == 403
         assert response.json()["detail"] == "无权访问此路径"
+
+    def test_browse_and_download_use_separate_rate_limit_buckets(
+        self,
+        authenticated_client: TestClient,
+        user_file: dict,
+        user_directory: dict,
+    ):
+        original_api_limit = rate_limit_config.authenticated_api
+        original_download_limit = rate_limit_config.authenticated_download
+        rate_limit_config.authenticated_api = 1
+        rate_limit_config.authenticated_download = 1
+        try:
+            browse_first = authenticated_client.get(f"/api/files/{user_directory['content_hash']}/browse")
+            download_first = authenticated_client.get(f"/api/files/{user_file['content_hash']}/download")
+            browse_second = authenticated_client.get(f"/api/files/{user_directory['content_hash']}/browse")
+            download_second = authenticated_client.get(f"/api/files/{user_file['content_hash']}/download")
+        finally:
+            rate_limit_config.authenticated_api = original_api_limit
+            rate_limit_config.authenticated_download = original_download_limit
+
+        assert browse_first.status_code == 200
+        assert download_first.status_code == 200
+        assert browse_second.status_code == 429
+        assert browse_second.json()["detail"] == "请求过于频繁，请稍后再试"
+        assert download_second.status_code == 429
+        assert download_second.json()["detail"] == "下载请求过于频繁，请稍后再试"
 
 
 class TestBrowseDirectoryRealFiles:

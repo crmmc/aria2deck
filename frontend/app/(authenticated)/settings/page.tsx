@@ -27,20 +27,27 @@ export default function SettingsPage() {
   const [wsReconnectJitter, setWsReconnectJitter] = useState(0.2);
   const [wsReconnectFactor, setWsReconnectFactor] = useState(2);
   const [siteTitle, setSiteTitle] = useState("");
-  // 下载频率限制 & 并发限制
-  const [downloadRateLimit, setDownloadRateLimit] = useState(300);
-  const [downloadMaxConnections, setDownloadMaxConnections] = useState(100);
-  const [downloadPerUserConnections, setDownloadPerUserConnections] = useState(16);
-  const [downloadPerFileConnections, setDownloadPerFileConnections] = useState(8);
-  // API 频率限制
-  const [rateLimitLogin, setRateLimitLogin] = useState(5);
+  // 请求频率限制
+  const [rateLimitAccountSecurity, setRateLimitAccountSecurity] = useState(5);
+  const [rateLimitAuthenticatedApi, setRateLimitAuthenticatedApi] = useState(60);
+  const [rateLimitPublicApi, setRateLimitPublicApi] = useState(60);
+  const [rateLimitShareAccess, setRateLimitShareAccess] = useState(5);
+  const [rateLimitAuthenticatedDownload, setRateLimitAuthenticatedDownload] = useState(300);
+  const [rateLimitAnonymousDownload, setRateLimitAnonymousDownload] = useState(60);
   const [rateLimitCreateTask, setRateLimitCreateTask] = useState(30);
   const [rateLimitCreateTorrent, setRateLimitCreateTorrent] = useState(20);
   const [rateLimitCreatePack, setRateLimitCreatePack] = useState(5);
   const [rateLimitAria2Test, setRateLimitAria2Test] = useState(10);
-  const [rateLimitListFiles, setRateLimitListFiles] = useState(60);
   const [rateLimitRpc, setRateLimitRpc] = useState(300);
-  const [rateLimitChangePassword, setRateLimitChangePassword] = useState(5);
+  // 下载并发限制
+  const [downloadTotalConnections, setDownloadTotalConnections] = useState(100);
+  const [downloadAuthenticatedReservedConnections, setDownloadAuthenticatedReservedConnections] = useState(60);
+  const [downloadAuthenticatedPerUserConnections, setDownloadAuthenticatedPerUserConnections] = useState(16);
+  const [downloadAuthenticatedPerFileConnections, setDownloadAuthenticatedPerFileConnections] = useState(8);
+  const [downloadAnonymousBaseConnections, setDownloadAnonymousBaseConnections] = useState(20);
+  const [downloadAnonymousBorrowConnections, setDownloadAnonymousBorrowConnections] = useState(20);
+  const [downloadAnonymousPerIpConnections, setDownloadAnonymousPerIpConnections] = useState(4);
+  const [downloadAnonymousPerFileConnections, setDownloadAnonymousPerFileConnections] = useState(2);
   const [aria2Status, setAria2Status] = useState<{
     connected: boolean;
     version?: string;
@@ -102,18 +109,25 @@ export default function SettingsPage() {
       setWsReconnectJitter(cfg.ws_reconnect_jitter ?? 0.2);
       setWsReconnectFactor(cfg.ws_reconnect_factor ?? 2);
       setSiteTitle(cfg.site_title || "");
-      setDownloadRateLimit(cfg.download_rate_limit ?? 300);
-      setDownloadMaxConnections(cfg.download_max_connections ?? 100);
-      setDownloadPerUserConnections(cfg.download_per_user_connections ?? 16);
-      setDownloadPerFileConnections(cfg.download_per_file_connections ?? 8);
-      setRateLimitLogin(cfg.rate_limit_login ?? 5);
+      setRateLimitAccountSecurity(cfg.rate_limit_account_security ?? 5);
+      setRateLimitAuthenticatedApi(cfg.rate_limit_authenticated_api ?? 60);
+      setRateLimitPublicApi(cfg.rate_limit_public_api ?? 60);
+      setRateLimitShareAccess(cfg.rate_limit_share_access ?? 5);
+      setRateLimitAuthenticatedDownload(cfg.rate_limit_authenticated_download ?? 300);
+      setRateLimitAnonymousDownload(cfg.rate_limit_anonymous_download ?? 60);
       setRateLimitCreateTask(cfg.rate_limit_create_task ?? 30);
       setRateLimitCreateTorrent(cfg.rate_limit_create_torrent ?? 20);
       setRateLimitCreatePack(cfg.rate_limit_create_pack ?? 5);
       setRateLimitAria2Test(cfg.rate_limit_aria2_test ?? 10);
-      setRateLimitListFiles(cfg.rate_limit_list_files ?? 60);
       setRateLimitRpc(cfg.rate_limit_rpc ?? 300);
-      setRateLimitChangePassword(cfg.rate_limit_change_password ?? 5);
+      setDownloadTotalConnections(cfg.download_total_connections ?? 100);
+      setDownloadAuthenticatedReservedConnections(cfg.download_authenticated_reserved_connections ?? 60);
+      setDownloadAuthenticatedPerUserConnections(cfg.download_authenticated_per_user_connections ?? 16);
+      setDownloadAuthenticatedPerFileConnections(cfg.download_authenticated_per_file_connections ?? 8);
+      setDownloadAnonymousBaseConnections(cfg.download_anonymous_base_connections ?? 20);
+      setDownloadAnonymousBorrowConnections(cfg.download_anonymous_borrow_connections ?? 20);
+      setDownloadAnonymousPerIpConnections(cfg.download_anonymous_per_ip_connections ?? 4);
+      setDownloadAnonymousPerFileConnections(cfg.download_anonymous_per_file_connections ?? 2);
       setMachineStats(stats);
       setAria2Status(aria2Ver);
       setTestResult(null);
@@ -163,18 +177,25 @@ export default function SettingsPage() {
         ws_reconnect_jitter: wsReconnectJitter,
         ws_reconnect_factor: wsReconnectFactor,
         site_title: siteTitle || undefined,
-        download_rate_limit: downloadRateLimit,
-        download_max_connections: downloadMaxConnections,
-        download_per_user_connections: downloadPerUserConnections,
-        download_per_file_connections: downloadPerFileConnections,
-        rate_limit_login: rateLimitLogin,
+        rate_limit_account_security: rateLimitAccountSecurity,
+        rate_limit_authenticated_api: rateLimitAuthenticatedApi,
+        rate_limit_public_api: rateLimitPublicApi,
+        rate_limit_share_access: rateLimitShareAccess,
+        rate_limit_authenticated_download: rateLimitAuthenticatedDownload,
+        rate_limit_anonymous_download: rateLimitAnonymousDownload,
         rate_limit_create_task: rateLimitCreateTask,
         rate_limit_create_torrent: rateLimitCreateTorrent,
         rate_limit_create_pack: rateLimitCreatePack,
         rate_limit_aria2_test: rateLimitAria2Test,
-        rate_limit_list_files: rateLimitListFiles,
         rate_limit_rpc: rateLimitRpc,
-        rate_limit_change_password: rateLimitChangePassword,
+        download_total_connections: downloadTotalConnections,
+        download_authenticated_reserved_connections: downloadAuthenticatedReservedConnections,
+        download_authenticated_per_user_connections: downloadAuthenticatedPerUserConnections,
+        download_authenticated_per_file_connections: downloadAuthenticatedPerFileConnections,
+        download_anonymous_base_connections: downloadAnonymousBaseConnections,
+        download_anonymous_borrow_connections: downloadAnonymousBorrowConnections,
+        download_anonymous_per_ip_connections: downloadAnonymousPerIpConnections,
+        download_anonymous_per_file_connections: downloadAnonymousPerFileConnections,
       });
 
       await loadConfig(true);
@@ -569,27 +590,79 @@ export default function SettingsPage() {
           <h2 className="section-title mt-7">接口频率限制</h2>
           <p className="muted text-sm mb-4">限制用户在单位时间内的请求次数，修改后即时生效。</p>
           <div className="mb-7">
-            <label className="form-label-lg">下载接口频率限制</label>
-            <p className="muted text-sm mb-3">每分钟最大请求次数（0 = 不限制）</p>
+            <label className="form-label-lg">账户安全限流</label>
+            <p className="muted text-sm mb-3">每 5 分钟最大尝试次数（登录、首个用户创建、修改密码）</p>
             <input
               type="number"
-              min="0"
-              max="10000"
-              value={downloadRateLimit}
-              onChange={(e) => setDownloadRateLimit(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
+              min="1"
+              max="100"
+              value={rateLimitAccountSecurity}
+              onChange={(e) => setRateLimitAccountSecurity(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
               className="input"
               style={{ maxWidth: 200 }}
             />
           </div>
           <div className="mb-7">
-            <label className="form-label-lg">登录限流</label>
-            <p className="muted text-sm mb-3">每 5 分钟最大登录尝试次数</p>
+            <label className="form-label-lg">普通已登录 API 限流</label>
+            <p className="muted text-sm mb-3">每分钟最大查询请求次数（0 = 不限制）</p>
+            <input
+              type="number"
+              min="0"
+              max="10000"
+              value={rateLimitAuthenticatedApi}
+              onChange={(e) => setRateLimitAuthenticatedApi(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">普通匿名公开 API 限流</label>
+            <p className="muted text-sm mb-3">每分钟最大公开查询次数（0 = 不限制）</p>
+            <input
+              type="number"
+              min="0"
+              max="10000"
+              value={rateLimitPublicApi}
+              onChange={(e) => setRateLimitPublicApi(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">分享密码验证限流</label>
+            <p className="muted text-sm mb-3">每分钟最大密码验证次数</p>
             <input
               type="number"
               min="1"
-              max="100"
-              value={rateLimitLogin}
-              onChange={(e) => setRateLimitLogin(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+              max="10000"
+              value={rateLimitShareAccess}
+              onChange={(e) => setRateLimitShareAccess(Math.max(1, Math.min(10000, parseInt(e.target.value) || 1)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">已登录下载限流</label>
+            <p className="muted text-sm mb-3">每分钟最大请求次数（0 = 不限制）</p>
+            <input
+              type="number"
+              min="0"
+              max="10000"
+              value={rateLimitAuthenticatedDownload}
+              onChange={(e) => setRateLimitAuthenticatedDownload(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">匿名下载限流</label>
+            <p className="muted text-sm mb-3">每分钟最大匿名下载请求次数（0 = 不限制）</p>
+            <input
+              type="number"
+              min="0"
+              max="10000"
+              value={rateLimitAnonymousDownload}
+              onChange={(e) => setRateLimitAnonymousDownload(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
               className="input"
               style={{ maxWidth: 200 }}
             />
@@ -647,19 +720,6 @@ export default function SettingsPage() {
             />
           </div>
           <div className="mb-7">
-            <label className="form-label-lg">文件列表限流</label>
-            <p className="muted text-sm mb-3">每分钟最大文件列表请求次数</p>
-            <input
-              type="number"
-              min="1"
-              max="10000"
-              value={rateLimitListFiles}
-              onChange={(e) => setRateLimitListFiles(Math.max(1, Math.min(10000, parseInt(e.target.value) || 1)))}
-              className="input"
-              style={{ maxWidth: 200 }}
-            />
-          </div>
-          <div className="mb-7">
             <label className="form-label-lg">JSON-RPC 限流</label>
             <p className="muted text-sm mb-3">每分钟最大 RPC 请求次数</p>
             <input
@@ -672,57 +732,109 @@ export default function SettingsPage() {
               style={{ maxWidth: 200 }}
             />
           </div>
-          <div className="mb-7">
-            <label className="form-label-lg">修改密码限流</label>
-            <p className="muted text-sm mb-3">每 5 分钟最大修改密码次数</p>
-            <input
-              type="number"
-              min="1"
-              max="100"
-              value={rateLimitChangePassword}
-              onChange={(e) => setRateLimitChangePassword(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
-              className="input"
-              style={{ maxWidth: 200 }}
-            />
-          </div>
 
           <h2 className="section-title mt-7">下载并发限制</h2>
-          <p className="muted text-sm mb-4">限制同时进行的下载连接数，防止单个用户占满带宽。</p>
+          <p className="muted text-sm mb-4">控制已登录下载保底与匿名分享下载的可借用容量，保证已登录用户体验优先。</p>
           <div className="mb-7">
-            <label className="form-label-lg">全局最大并发连接数</label>
+            <label className="form-label-lg">系统总下载连接上限</label>
             <p className="muted text-sm mb-3">所有用户的总并发下载连接数上限（0 = 不限制）</p>
             <input
               type="number"
               min="0"
               max="10000"
-              value={downloadMaxConnections}
-              onChange={(e) => setDownloadMaxConnections(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
+              value={downloadTotalConnections}
+              onChange={(e) => setDownloadTotalConnections(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
               className="input"
               style={{ maxWidth: 200 }}
             />
           </div>
           <div className="mb-7">
-            <label className="form-label-lg">单用户最大并发连接数</label>
-            <p className="muted text-sm mb-3">单个用户的并发下载连接数上限（0 = 不限制）</p>
+            <label className="form-label-lg">已登录保底连接数</label>
+            <p className="muted text-sm mb-3">为已登录下载预留的最小可用连接数</p>
+            <input
+              type="number"
+              min="0"
+              max="10000"
+              value={downloadAuthenticatedReservedConnections}
+              onChange={(e) => setDownloadAuthenticatedReservedConnections(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">已登录单用户最大并发</label>
+            <p className="muted text-sm mb-3">单个已登录用户的并发下载连接数上限（0 = 不限制）</p>
             <input
               type="number"
               min="0"
               max="1000"
-              value={downloadPerUserConnections}
-              onChange={(e) => setDownloadPerUserConnections(Math.max(0, Math.min(1000, parseInt(e.target.value) || 0)))}
+              value={downloadAuthenticatedPerUserConnections}
+              onChange={(e) => setDownloadAuthenticatedPerUserConnections(Math.max(0, Math.min(1000, parseInt(e.target.value) || 0)))}
               className="input"
               style={{ maxWidth: 200 }}
             />
           </div>
           <div className="mb-7">
-            <label className="form-label-lg">单文件最大并发连接数</label>
-            <p className="muted text-sm mb-3">同一用户对同一文件的并发下载连接数上限（0 = 不限制）</p>
+            <label className="form-label-lg">已登录单文件最大并发</label>
+            <p className="muted text-sm mb-3">同一已登录用户对同一文件的并发下载连接数上限（0 = 不限制）</p>
             <input
               type="number"
               min="0"
               max="100"
-              value={downloadPerFileConnections}
-              onChange={(e) => setDownloadPerFileConnections(Math.max(0, Math.min(100, parseInt(e.target.value) || 0)))}
+              value={downloadAuthenticatedPerFileConnections}
+              onChange={(e) => setDownloadAuthenticatedPerFileConnections(Math.max(0, Math.min(100, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">匿名基础连接数</label>
+            <p className="muted text-sm mb-3">匿名分享下载默认可占用的连接数</p>
+            <input
+              type="number"
+              min="0"
+              max="10000"
+              value={downloadAnonymousBaseConnections}
+              onChange={(e) => setDownloadAnonymousBaseConnections(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">匿名可借用连接数</label>
+            <p className="muted text-sm mb-3">匿名分享在不影响已登录保底的前提下可额外借用的连接数</p>
+            <input
+              type="number"
+              min="0"
+              max="10000"
+              value={downloadAnonymousBorrowConnections}
+              onChange={(e) => setDownloadAnonymousBorrowConnections(Math.max(0, Math.min(10000, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">匿名单 IP 最大并发</label>
+            <p className="muted text-sm mb-3">单个匿名来源的并发下载连接数上限（0 = 不限制）</p>
+            <input
+              type="number"
+              min="0"
+              max="1000"
+              value={downloadAnonymousPerIpConnections}
+              onChange={(e) => setDownloadAnonymousPerIpConnections(Math.max(0, Math.min(1000, parseInt(e.target.value) || 0)))}
+              className="input"
+              style={{ maxWidth: 200 }}
+            />
+          </div>
+          <div className="mb-7">
+            <label className="form-label-lg">匿名单文件最大并发</label>
+            <p className="muted text-sm mb-3">同一匿名来源对同一文件的并发下载连接数上限（0 = 不限制）</p>
+            <input
+              type="number"
+              min="0"
+              max="100"
+              value={downloadAnonymousPerFileConnections}
+              onChange={(e) => setDownloadAnonymousPerFileConnections(Math.max(0, Math.min(100, parseInt(e.target.value) || 0)))}
               className="input"
               style={{ maxWidth: 200 }}
             />

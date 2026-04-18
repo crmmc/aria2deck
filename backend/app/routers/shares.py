@@ -17,8 +17,13 @@ from sqlmodel import col, select, func
 
 from app.auth import require_user
 from app.core.config import settings
-from app.core.download_limiter import download_config, download_limiter
-from app.core.rate_limit import RateLimiter
+from app.core.download_limiter import download_limiter
+from app.core.request_rate_guard import (
+    RateLimitScope,
+    client_ip_from_request,
+    ensure_public_allowed,
+    ensure_share_access_allowed,
+)
 from app.core.security import hash_password, verify_password
 from app.database import get_session
 from app.models import ShareLink, StoredFile, User, UserFile, utc_now, utc_now_str
@@ -33,11 +38,6 @@ from app.routers.files import _validate_subpath, _range_file_response, _tracked_
 
 router = APIRouter(tags=["shares"])
 logger = logging.getLogger(__name__)
-
-# 限流器
-_share_access_limiter = RateLimiter(max_requests=60, window_seconds=60)  # 每IP 60次/分
-_share_password_limiter = RateLimiter(max_requests=5, window_seconds=60)  # 每分享码 5次/分
-_share_download_limiter = RateLimiter(max_requests=30, window_seconds=60)  # 每IP 30次/分
 
 # 每文件最大活跃分享数
 MAX_ACTIVE_SHARES_PER_FILE = 10
@@ -294,9 +294,11 @@ async def _get_share_with_file(code: str) -> tuple[ShareLink, UserFile, StoredFi
 @router.get("/api/s/{code}")
 async def get_share_info(code: str, request: Request) -> ShareInfoOut:
     """获取分享元信息（无需登录）"""
-    client_ip = request.client.host if request.client else "unknown"
-    if not await _share_access_limiter.is_allowed(client_ip):
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "请求过于频繁")
+    await ensure_public_allowed(
+        client_ip_from_request(request),
+        RateLimitScope.PUBLIC_API,
+        detail="请求过于频繁",
+    )
     share, user_file, stored_file = await _get_share_with_file(code)
     is_expired = False
     if share.expires_at:
@@ -327,9 +329,11 @@ async def access_share(
     request: Request,
 ) -> ShareAccessResponse:
     """验证分享密码，返回短期 access_token"""
-    client_ip = request.client.host if request.client else "unknown"
-    if not await _share_password_limiter.is_allowed(f"{code}:{client_ip}"):
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "请求过于频繁")
+    await ensure_share_access_allowed(
+        client_ip_from_request(request),
+        code,
+        detail="请求过于频繁",
+    )
     share, _, _ = await _get_share_with_file(code)
     if not _is_share_active(share):
         raise HTTPException(status.HTTP_410_GONE, "分享已失效")
@@ -343,10 +347,7 @@ async def access_share(
 async def _check_share_access(
     code: str, token: str | None, request: Request,
 ) -> tuple[ShareLink, UserFile, StoredFile]:
-    """\u516c\u5f00\u7aef\u70b9\u901a\u7528\u8bbf\u95ee\u68c0\u67e5\uff1a\u9650\u6d41 + \u6709\u6548\u6027 + \u5bc6\u7801\u9a8c\u8bc1"""
-    client_ip = request.client.host if request.client else "unknown"
-    if not await _share_download_limiter.is_allowed(client_ip):
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "请求过于频繁")
+    """公开端点通用访问检查：有效性 + 密码验证。"""
     share, user_file, stored_file = await _get_share_with_file(code)
     if not _is_share_active(share):
         raise HTTPException(status.HTTP_410_GONE, "\u5206\u4eab\u5df2\u5931\u6548")
@@ -365,11 +366,18 @@ async def download_shared_file(
     subpath: str | None = Query(default=None),
 ):
     """\u4e0b\u8f7d\u5206\u4eab\u6587\u4ef6"""
+    client_ip = client_ip_from_request(request)
+    await ensure_public_allowed(
+        client_ip,
+        RateLimitScope.ANONYMOUS_DOWNLOAD,
+        detail="下载请求过于频繁，请稍后再试",
+    )
     share, user_file, stored_file = await _check_share_access(code, token, request)
-    # 全局并发连接限制（匿名，不追踪用户级）
-    acquired = await download_limiter.try_acquire(global_limit=download_config.max_connections)
-    if not acquired:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "下载连接数已达上限，请稍后再试")
+    acquire_result = await download_limiter.acquire_anonymous(client_ip, stored_file.content_hash)
+    if not acquire_result.allowed:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, acquire_result.detail())
+
+    lease = acquire_result.lease
     try:
         base_path = Path(stored_file.real_path)
         if not base_path.exists():
@@ -426,9 +434,10 @@ async def download_shared_file(
                 )
                 if result.rowcount == 0:  # type: ignore[union-attr]
                     raise HTTPException(status.HTTP_410_GONE, "分享已失效")
-        return _tracked_response(_range_file_response(request, target, filename), None, None)
+        return _tracked_response(_range_file_response(request, target, filename), lease)
     except Exception:
-        await download_limiter.release(None, None)
+        if lease is not None:
+            await lease.release()
         raise
 
 
@@ -440,6 +449,11 @@ async def browse_shared_directory(
     subpath: str = Query(default=""),
 ) -> list[dict]:
     """浏览分享的 BT 文件夹内容"""
+    await ensure_public_allowed(
+        client_ip_from_request(request),
+        RateLimitScope.PUBLIC_API,
+        detail="请求过于频繁",
+    )
     share, user_file, stored_file = await _check_share_access(code, token, request)
     if not stored_file.is_directory:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "该文件不是目录")
@@ -451,13 +465,14 @@ async def browse_shared_directory(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "路径不存在")
     if not target.is_dir():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "不是目录")
+    resolved_base = base_path.resolve()
     entries = []
     for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
         entries.append({
             "name": item.name,
             "is_dir": item.is_dir(),
             "size": item.stat().st_size if item.is_file() else 0,
-            "path": str(item.relative_to(base_path)),
+            "path": str(item.resolve().relative_to(resolved_base)),
         })
     # 更新最后访问时间
     async with get_session() as db:

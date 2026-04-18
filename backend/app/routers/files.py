@@ -22,9 +22,8 @@ from urllib.parse import quote
 
 from app.auth import require_user
 from app.core.config import settings
-from app.core.download_limiter import download_config, download_limiter
-from app.core.rate_limit import api_limiter
-from app.core.rate_limit_config import rate_limit_config
+from app.core.download_limiter import DownloadLease, download_limiter
+from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
 from app.database import get_session
 from app.models import User, PackTask, UserFile, StoredFile, ShareLink
 from app.services.pack import cleanup_pack_output
@@ -246,10 +245,12 @@ def _range_file_response(request: Request, file_path: Path, filename: str):
 
 def _tracked_response(
     response: FileResponse | StreamingResponse,
-    user_id: int | None,
-    file_hash: str | None,
+    lease: DownloadLease | None,
 ) -> FileResponse | StreamingResponse:
     """包装 response，在流结束/客户端断开时释放并发连接"""
+    if lease is None:
+        return response
+
     if isinstance(response, StreamingResponse) and response.body_iterator is not None:
         original_iter = response.body_iterator
 
@@ -258,7 +259,7 @@ def _tracked_response(
                 async for chunk in original_iter:  # type: ignore[union-attr]
                     yield chunk
             finally:
-                await download_limiter.release(user_id, file_hash)
+                await lease.release()
 
         # 同步 generator 需要包装
         import inspect
@@ -273,7 +274,7 @@ def _tracked_response(
                     for chunk in sync_iter:  # type: ignore[union-attr]
                         yield chunk
                 finally:
-                    await download_limiter.release(user_id, file_hash)
+                    await lease.release()
 
             response.body_iterator = _sync_releasing_iter()
     else:
@@ -281,7 +282,7 @@ def _tracked_response(
         from starlette.background import BackgroundTask
 
         async def _release():
-            await download_limiter.release(user_id, file_hash)
+            await lease.release()
 
         if response.background:
             # 链式 background task
@@ -339,11 +340,11 @@ async def list_files(
     user_id = _require_user_id(user)
 
     # 限流
-    if not await api_limiter.is_allowed(user_id, "list_files", limit=rate_limit_config.list_files, window_seconds=60):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="请求过于频繁，请稍后再试"
-        )
+    await ensure_authenticated_allowed(
+        user_id,
+        RateLimitScope.AUTHENTICATED_API,
+        detail="请求过于频繁，请稍后再试",
+    )
 
     # 参数校验
     if page_size not in (10, 20, 30, 50, 100):
@@ -400,6 +401,11 @@ async def browse_file(
     """
     # Get user file and stored file
     user_id = _require_user_id(user)
+    await ensure_authenticated_allowed(
+        user_id,
+        RateLimitScope.AUTHENTICATED_API,
+        detail="请求过于频繁，请稍后再试",
+    )
     row = await _get_user_file_by_hash(user_id, file_hash)
 
     if not row:
@@ -490,28 +496,19 @@ async def download_file(
         path: BT 文件夹内的相对路径（可选）
     """
     user_id = _require_user_id(user)
-    # 频率限制（从内存配置读取）
-    if download_config.rate_limit > 0 and not await api_limiter.is_allowed(
-        user_id, "download_file", limit=download_config.rate_limit, window_seconds=60
-    ):
-        logger.warning("下载文件被限流 user_id=%s file_hash=%s", user_id, file_hash)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="下载请求过于频繁，请稍后再试"
-        )
-    # 并发连接限制（从内存配置读取）
-    acquired = await download_limiter.try_acquire(
-        global_limit=download_config.max_connections,
-        user_id=user_id,
-        per_user_limit=download_config.per_user_connections,
-        file_hash=file_hash,
-        per_file_limit=download_config.per_file_connections,
+    await ensure_authenticated_allowed(
+        user_id,
+        RateLimitScope.AUTHENTICATED_DOWNLOAD,
+        detail="下载请求过于频繁，请稍后再试",
     )
-    if not acquired:
+    acquire_result = await download_limiter.acquire_authenticated(user_id, file_hash)
+    if not acquire_result.allowed:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="下载连接数已达上限，请稍后再试"
+            detail=acquire_result.detail(),
         )
+
+    lease = acquire_result.lease
     try:
         # Get user file and stored file
         row = await _get_user_file_by_hash(user_id, file_hash)
@@ -556,9 +553,10 @@ async def download_file(
         download_name = target_path.name if path else user_file.display_name
         logger.info("下载文件成功 user_id=%s file_hash=%s file=%s", user_id, file_hash, download_name)
         response = _range_file_response(request, target_path, download_name)
-        return _tracked_response(response, user_id, file_hash)
+        return _tracked_response(response, lease)
     except Exception:
-        await download_limiter.release(user_id, file_hash)
+        if lease is not None:
+            await lease.release()
         raise
 
 
@@ -797,6 +795,11 @@ async def rename_file(
 async def get_space(user: User = Depends(require_user)) -> dict:
     """获取用户空间信息"""
     user_id = _require_user_id(user)
+    await ensure_authenticated_allowed(
+        user_id,
+        RateLimitScope.AUTHENTICATED_API,
+        detail="请求过于频繁，请稍后再试",
+    )
     space_info = await get_user_space_info(user_id, user.quota)
     logger.debug("查询空间信息 user_id=%s", user_id)
     return space_info
@@ -834,6 +837,11 @@ async def calculate_paths_size(
 ) -> dict:
     """计算多个文件的总大小"""
     user_id = _require_user_id(user)
+    await ensure_authenticated_allowed(
+        user_id,
+        RateLimitScope.AUTHENTICATED_API,
+        detail="请求过于频繁，请稍后再试",
+    )
     resolved = await _resolve_file_ids(user_id, payload.file_ids)
     total_size = sum(size for _, size, _ in resolved)
     return {"total_size": total_size}
@@ -847,6 +855,11 @@ async def get_pack_available_space(
     from app.services.storage import get_user_space_info
 
     user_id = _require_user_id(user)
+    await ensure_authenticated_allowed(
+        user_id,
+        RateLimitScope.AUTHENTICATED_API,
+        detail="请求过于频繁，请稍后再试",
+    )
     info = await get_user_space_info(user_id, user.quota)
     return {
         "available": info["available"],
@@ -863,12 +876,15 @@ async def create_pack_task(
     """创建打包任务 - 基于 UserFile ID"""
     user_id = _require_user_id(user)
     # 频率限制
-    if not await api_limiter.is_allowed(user_id, "create_pack", limit=rate_limit_config.create_pack, window_seconds=60):
-        logger.warning("创建打包任务被限流 user_id=%s", user_id)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="操作过于频繁，请稍后再试"
+    try:
+        await ensure_authenticated_allowed(
+            user_id,
+            RateLimitScope.CREATE_PACK,
+            detail="操作过于频繁，请稍后再试",
         )
+    except HTTPException:
+        logger.warning("创建打包任务被限流 user_id=%s", user_id)
+        raise
 
     from app.services.pack import PackTaskManager
     from app.services.storage import get_user_space_info
@@ -1021,6 +1037,11 @@ async def create_pack_task(
 async def list_pack_tasks(user: User = Depends(require_user)) -> list[dict]:
     """列出用户的打包任务"""
     user_id = _require_user_id(user)
+    await ensure_authenticated_allowed(
+        user_id,
+        RateLimitScope.AUTHENTICATED_API,
+        detail="请求过于频繁，请稍后再试",
+    )
     async with get_session() as db:
         result = await db.exec(
             select(PackTask)
@@ -1036,6 +1057,11 @@ async def list_pack_tasks(user: User = Depends(require_user)) -> list[dict]:
 async def get_pack_task(task_id: int, user: User = Depends(require_user)) -> dict:
     """获取打包任务详情"""
     user_id = _require_user_id(user)
+    await ensure_authenticated_allowed(
+        user_id,
+        RateLimitScope.AUTHENTICATED_API,
+        detail="请求过于频繁，请稍后再试",
+    )
     async with get_session() as db:
         result = await db.exec(
             select(PackTask).where(PT.id == task_id, PT.owner_id == user_id)
@@ -1054,6 +1080,11 @@ async def get_pack_task(task_id: int, user: User = Depends(require_user)) -> dic
 async def get_quota(user: User = Depends(require_user)) -> dict:
     """获取用户空间配额信息（兼容旧接口）"""
     user_id = _require_user_id(user)
+    await ensure_authenticated_allowed(
+        user_id,
+        RateLimitScope.AUTHENTICATED_API,
+        detail="请求过于频繁，请稍后再试",
+    )
     space_info = await get_user_space_info(user_id, user.quota)
 
     # Calculate percentage

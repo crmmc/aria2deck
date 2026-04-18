@@ -30,6 +30,17 @@ class TestGetConfig:
         assert "ws_reconnect_max_delay" in data
         assert "ws_reconnect_jitter" in data
         assert "ws_reconnect_factor" in data
+        assert "rate_limit_account_security" in data
+        assert "rate_limit_authenticated_api" in data
+        assert "rate_limit_public_api" in data
+        assert "rate_limit_share_access" in data
+        assert "rate_limit_authenticated_download" in data
+        assert "rate_limit_anonymous_download" in data
+        assert "download_total_connections" in data
+        assert "download_authenticated_reserved_connections" in data
+        assert "download_anonymous_base_connections" in data
+        assert "rate_limit_login" not in data
+        assert "download_rate_limit" not in data
 
     def test_get_config_non_admin(self, authenticated_client: TestClient):
         response = authenticated_client.get("/api/config")
@@ -98,6 +109,56 @@ class TestUpdateConfig:
         extensions = response.json()["hidden_file_extensions"]
         assert ".txt" in extensions
         assert ".log" in extensions
+
+    def test_update_rate_limit_groups(self, admin_client: TestClient):
+        response = admin_client.put("/api/config", json={
+            "rate_limit_account_security": 6,
+            "rate_limit_authenticated_api": 90,
+            "rate_limit_public_api": 40,
+            "rate_limit_share_access": 3,
+            "rate_limit_authenticated_download": 240,
+            "rate_limit_anonymous_download": 30,
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["rate_limit_account_security"] == 6
+        assert data["rate_limit_authenticated_api"] == 90
+        assert data["rate_limit_public_api"] == 40
+        assert data["rate_limit_share_access"] == 3
+        assert data["rate_limit_authenticated_download"] == 240
+        assert data["rate_limit_anonymous_download"] == 30
+
+    def test_update_download_connection_pools(self, admin_client: TestClient):
+        response = admin_client.put("/api/config", json={
+            "download_total_connections": 80,
+            "download_authenticated_reserved_connections": 45,
+            "download_authenticated_per_user_connections": 12,
+            "download_authenticated_per_file_connections": 6,
+            "download_anonymous_base_connections": 15,
+            "download_anonymous_borrow_connections": 20,
+            "download_anonymous_per_ip_connections": 3,
+            "download_anonymous_per_file_connections": 1,
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["download_total_connections"] == 80
+        assert data["download_authenticated_reserved_connections"] == 45
+        assert data["download_authenticated_per_user_connections"] == 12
+        assert data["download_authenticated_per_file_connections"] == 6
+        assert data["download_anonymous_base_connections"] == 15
+        assert data["download_anonymous_borrow_connections"] == 20
+        assert data["download_anonymous_per_ip_connections"] == 3
+        assert data["download_anonymous_per_file_connections"] == 1
+
+    def test_update_download_connection_pools_rejects_invalid_allocation(self, admin_client: TestClient):
+        response = admin_client.put("/api/config", json={
+            "download_total_connections": 10,
+            "download_authenticated_reserved_connections": 6,
+            "download_anonymous_base_connections": 3,
+            "download_anonymous_borrow_connections": 2,
+        })
+        assert response.status_code == 400
+        assert "不能超过系统总连接上限" in response.json()["detail"]
 
     def test_update_config_non_admin(self, authenticated_client: TestClient):
         response = authenticated_client.put("/api/config", json={"max_task_size": 1024})

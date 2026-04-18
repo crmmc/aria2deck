@@ -5,8 +5,14 @@ from sqlmodel import select
 
 from app.auth import clear_session, create_session, require_user, set_session_cookie
 from app.core.config import settings
-from app.core.rate_limit import api_limiter, login_limiter
-from app.core.rate_limit_config import rate_limit_config
+from app.core.request_rate_guard import (
+    RateLimitScope,
+    clear_account_security_failures,
+    client_ip_from_request,
+    ensure_account_security_allowed,
+    ensure_authenticated_allowed,
+    record_account_security_failure,
+)
 from app.core.security import hash_password, verify_password, verify_password_constant_time
 from app.database import get_session
 from app.models import User
@@ -19,21 +25,23 @@ logger = logging.getLogger(__name__)
 @router.post("/login", response_model=UserOut)
 async def login(payload: LoginRequest, request: Request, response: Response) -> dict:
     # 获取客户端 IP
-    client_ip = (request.client.host if request.client and request.client.host else "unknown")
+    client_ip = client_ip_from_request(request)
     request_id = getattr(request.state, "request_id", "-")
 
     # 检查是否被限制
-    if await login_limiter.is_blocked(client_ip, limit=rate_limit_config.login):
+    try:
+        await ensure_account_security_allowed(
+            client_ip,
+            detail="登录尝试次数过多，请稍后再试",
+        )
+    except HTTPException:
         logger.warning(
             "登录限流触发 username=%s ip=%s request_id=%s",
             payload.username,
             client_ip,
             request_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="登录尝试次数过多，请稍后再试"
-        )
+        raise
 
     # 异步查询用户，避免阻塞事件循环
     async with get_session() as db:
@@ -44,7 +52,7 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
 
     if not verify_password_constant_time(payload.password, password_hash):
         # 记录失败尝试
-        await login_limiter.record_failure(client_ip)
+        await record_account_security_failure(client_ip)
         logger.warning(
             "登录失败 username=%s ip=%s request_id=%s",
             payload.username,
@@ -57,7 +65,7 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
     assert user is not None
 
     # 登录成功，清除失败记录
-    await login_limiter.clear(client_ip)
+    await clear_account_security_failures(client_ip)
 
     # 会话固定防护：清除请求中可能存在的旧 session
     old_session_id = request.cookies.get(settings.session_cookie_name)
@@ -120,16 +128,23 @@ async def change_password(
     user: User = Depends(require_user)
 ) -> dict:
     request_id = getattr(request.state, "request_id", "-")
-    if not await api_limiter.is_allowed(user.id, "change_password", limit=rate_limit_config.change_password, window_seconds=300):
+    user_id = user.id
+    if user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录")
+
+    try:
+        await ensure_authenticated_allowed(
+            int(user_id),
+            RateLimitScope.ACCOUNT_SECURITY,
+            detail="操作过于频繁，请稍后再试",
+        )
+    except HTTPException:
         logger.warning(
             "修改密码限流触发 user_id=%s request_id=%s",
             user.id,
             request_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="操作过于频繁，请稍后再试"
-        )
+        raise
 
     if not user.is_initial_password:
         # 验证旧密码
