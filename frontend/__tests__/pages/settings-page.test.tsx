@@ -225,23 +225,22 @@ describe("SettingsPage", () => {
     expect(lastCall?.aria2_rpc_secret).toBeUndefined();
   });
 
-  test("shows save error and blocks submit when max task size is invalid", async () => {
+  test.each([
+    {
+      index: 0,
+      message: "最大任务大小必须为正数",
+    },
+    {
+      index: 1,
+      message: "最小剩余磁盘空间必须为正数",
+    },
+  ])("shows save error and blocks submit when numeric field $index is invalid", async ({ index, message }) => {
     await renderWithInitialLoad();
     const numberInputs = screen.getAllByRole("spinbutton");
-    fireEvent.change(numberInputs[0], { target: { value: "" } });
+    fireEvent.change(numberInputs[index], { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
 
-    expect(await screen.findByText("最大任务大小必须为正数")).toBeInTheDocument();
-    expect(mockApi.updateConfig).not.toHaveBeenCalled();
-  });
-
-  test("shows save error and blocks submit when min free disk is invalid", async () => {
-    await renderWithInitialLoad();
-    const numberInputs = screen.getAllByRole("spinbutton");
-    fireEvent.change(numberInputs[1], { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
-
-    expect(await screen.findByText("最小剩余磁盘空间必须为正数")).toBeInTheDocument();
+    expect(await screen.findByText(message)).toBeInTheDocument();
     expect(mockApi.updateConfig).not.toHaveBeenCalled();
   });
 

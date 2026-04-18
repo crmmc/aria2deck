@@ -90,7 +90,20 @@ describe("ProfilePage", () => {
     expect(mockApi.getRpcAccess).toHaveBeenCalled();
   });
 
-  test("shows validation error when new passwords do not match", async () => {
+  test.each([
+    {
+      name: "new passwords do not match",
+      newPassword: "new-pass-1",
+      confirmPassword: "new-pass-2",
+      message: "两次输入的新密码不一致",
+    },
+    {
+      name: "new password is too short",
+      newPassword: "123",
+      confirmPassword: "123",
+      message: "新密码长度至少为 6 位",
+    },
+  ])("shows validation error when $name", async ({ newPassword, confirmPassword, message }) => {
     const { container } = render(<ProfilePage />);
 
     expect(await screen.findByText("用户设置")).toBeInTheDocument();
@@ -99,36 +112,15 @@ describe("ProfilePage", () => {
       target: { value: "old-pass" },
     });
     fireEvent.change(passwordInputs[1], {
-      target: { value: "new-pass-1" },
+      target: { value: newPassword },
     });
     fireEvent.change(passwordInputs[2], {
-      target: { value: "new-pass-2" },
+      target: { value: confirmPassword },
     });
     fireEvent.click(screen.getByRole("button", { name: "修改密码" }));
 
     await waitFor(() => {
-      expect(screen.getByText("两次输入的新密码不一致")).toBeInTheDocument();
-    });
-  });
-
-  test("shows validation error when new password is too short", async () => {
-    const { container } = render(<ProfilePage />);
-
-    expect(await screen.findByText("用户设置")).toBeInTheDocument();
-    const passwordInputs = container.querySelectorAll("input[type='password']");
-    fireEvent.change(passwordInputs[0], {
-      target: { value: "old-pass" },
-    });
-    fireEvent.change(passwordInputs[1], {
-      target: { value: "123" },
-    });
-    fireEvent.change(passwordInputs[2], {
-      target: { value: "123" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "修改密码" }));
-
-    await waitFor(() => {
-      expect(screen.getByText("新密码长度至少为 6 位")).toBeInTheDocument();
+      expect(screen.getByText(message)).toBeInTheDocument();
     });
   });
 

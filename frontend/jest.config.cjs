@@ -11,6 +11,7 @@ const config = {
   testEnvironment: 'jsdom',
   setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
   collectCoverageFrom: [
+    'app/(authenticated)/layout.tsx',
     'app/s/[code]/SharePageClient.tsx',
     'app/login/page.tsx',
     'app/(authenticated)/files/page.tsx',
@@ -21,7 +22,7 @@ const config = {
     'app/(authenticated)/storage/page.tsx',
     'app/(authenticated)/tasks/page.tsx',
     'app/(authenticated)/users/page.tsx',
-    'components/{CreateShareDialog,PackTaskCard,Toast}.tsx',
+    'components/{CreateShareDialog,PackTaskCard,PasswordWarningBanner,StatsWidget,Toast}.tsx',
     'hooks/useTaskWebSocket.ts',
     'lib/**/*.{ts,tsx}',
     '!**/*.d.ts',
