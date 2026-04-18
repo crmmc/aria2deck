@@ -297,32 +297,18 @@ export default function HistoryPage() {
         </div>
       </div>
 
-      <div className="card filter-toolbar">
-        <div className="filter-group">
-          <input
-            type="text"
-            placeholder="搜索任务..."
-            value={searchKeyword}
-            onChange={(e) => setSearchKeyword(e.target.value)}
-            className="search-input"
-          />
-        </div>
-
-        <div className="filter-group">
-          <span className="muted text-sm">筛选:</span>
-          <select
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-            className="select"
+      <div className="card filter-toolbar inline-filter-toolbar">
+        <div className="filter-group toolbar-actions-group">
+          <button
+            type="button"
+            className="button secondary btn-sm"
+            onClick={toggleSelectAll}
           >
-            <option value="all">全部</option>
-            <option value="completed">已完成</option>
-            <option value="cancelled">已取消</option>
-            <option value="failed">失败</option>
-          </select>
-        </div>
-
-        <div className="filter-group ml-auto">
+            {selectedRecords.size === filteredRecords.length &&
+            filteredRecords.length > 0
+              ? "取消全选"
+              : "全选"}
+          </button>
           {selectedRecords.size > 0 && (
             <>
               <span className="muted text-sm">
@@ -348,16 +334,30 @@ export default function HistoryPage() {
               清空历史
             </button>
           )}
-          <button
-            type="button"
-            className="button secondary btn-sm"
-            onClick={toggleSelectAll}
+        </div>
+
+        <div className="filter-group toolbar-select-group">
+          <span className="muted text-sm">筛选:</span>
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+            className="select"
           >
-            {selectedRecords.size === filteredRecords.length &&
-            filteredRecords.length > 0
-              ? "取消全选"
-              : "全选"}
-          </button>
+            <option value="all">全部</option>
+            <option value="completed">已完成</option>
+            <option value="cancelled">已取消</option>
+            <option value="failed">失败</option>
+          </select>
+        </div>
+
+        <div className="filter-group toolbar-search-group">
+          <input
+            type="text"
+            placeholder="搜索任务..."
+            value={searchKeyword}
+            onChange={(e) => setSearchKeyword(e.target.value)}
+            className="search-input"
+          />
         </div>
       </div>
 

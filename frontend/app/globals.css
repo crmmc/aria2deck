@@ -1952,6 +1952,33 @@ p {
   align-items: center;
 }
 
+.inline-filter-toolbar {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.inline-filter-toolbar .toolbar-actions-group {
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.inline-filter-toolbar .toolbar-select-group {
+  flex-shrink: 0;
+}
+
+.inline-filter-toolbar .toolbar-search-group {
+  margin-left: auto;
+  flex: 1 1 240px;
+  min-width: 220px;
+  justify-content: flex-end;
+}
+
+.inline-filter-toolbar .toolbar-search-group .search-input {
+  width: 100%;
+  max-width: 320px;
+}
+
 /* Sort Button */
 .sort-btn {
   padding: 6px 12px;
@@ -2806,6 +2833,29 @@ p {
   .filter-toolbar {
     padding: 12px;
     gap: 10px;
+  }
+
+  .inline-filter-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .inline-filter-toolbar .filter-group {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .inline-filter-toolbar .toolbar-actions-group {
+    justify-content: flex-start;
+  }
+
+  .inline-filter-toolbar .toolbar-search-group {
+    margin-left: 0;
+    min-width: 0;
+  }
+
+  .inline-filter-toolbar .toolbar-search-group .search-input {
+    max-width: none;
   }
 
   .filter-toolbar .search-sort-row {

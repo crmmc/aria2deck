@@ -766,43 +766,18 @@ export default function TasksPage() {
           {error ? <div className="form-error">{error}</div> : null}
         </div>
 
-        <div className="card filter-toolbar">
-          <div className="filter-group">
-            <input
-              type="text"
-              placeholder="搜索任务..."
-              value={searchKeyword}
-              onChange={(e) => setSearchKeyword(e.target.value)}
-              className="search-input"
-            />
-          </div>
-
-          <div className="filter-group">
-            <span className="muted text-sm">筛选:</span>
-            <select
-              value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value)}
-              className="select"
+        <div className="card filter-toolbar inline-filter-toolbar">
+          <div className="filter-group toolbar-actions-group">
+            <button
+              type="button"
+              className="button secondary btn-sm"
+              onClick={toggleSelectAll}
             >
-              <option value="all">当前任务</option>
-              <option value="active">进行中</option>
-            </select>
-          </div>
-
-          <div className="filter-group">
-            <span className="muted text-sm">排序:</span>
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
-              className="select"
-            >
-              <option value="default">默认</option>
-              <option value="speed">下载速度</option>
-              <option value="progress">下载进度</option>
-            </select>
-          </div>
-
-          <div className="filter-group ml-auto">
+              {selectedTasks.size === filteredTasks.length &&
+              filteredTasks.length > 0
+                ? "取消全选"
+                : "全选"}
+            </button>
             {selectedTasks.size > 0 && (
               <>
                 <span className="muted text-sm">
@@ -820,16 +795,41 @@ export default function TasksPage() {
                 )}
               </>
             )}
-            <button
-              type="button"
-              className="button secondary btn-sm"
-              onClick={toggleSelectAll}
+          </div>
+
+          <div className="filter-group toolbar-select-group">
+            <span className="muted text-sm">筛选:</span>
+            <select
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value)}
+              className="select"
             >
-              {selectedTasks.size === filteredTasks.length &&
-              filteredTasks.length > 0
-                ? "取消全选"
-                : "全选"}
-            </button>
+              <option value="all">当前任务</option>
+              <option value="active">进行中</option>
+            </select>
+          </div>
+
+          <div className="filter-group toolbar-select-group">
+            <span className="muted text-sm">排序:</span>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+              className="select"
+            >
+              <option value="default">默认</option>
+              <option value="speed">下载速度</option>
+              <option value="progress">下载进度</option>
+            </select>
+          </div>
+
+          <div className="filter-group toolbar-search-group">
+            <input
+              type="text"
+              placeholder="搜索任务..."
+              value={searchKeyword}
+              onChange={(e) => setSearchKeyword(e.target.value)}
+              className="search-input"
+            />
           </div>
         </div>
 
