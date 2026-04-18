@@ -2163,6 +2163,92 @@ p {
   word-break: break-word;
 }
 
+.settings-advanced-section {
+  margin-top: var(--space-7);
+  padding-top: var(--space-7);
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.settings-advanced-toggle {
+  width: 100%;
+  padding: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: opacity 0.2s ease;
+}
+
+.settings-advanced-toggle:hover {
+  opacity: 0.88;
+}
+
+.settings-advanced-toggle:focus-visible {
+  outline: none;
+  border-radius: 12px;
+  box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.12);
+}
+
+.settings-advanced-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settings-advanced-title {
+  color: var(--foreground);
+  font-size: var(--text-xl);
+  font-weight: 600;
+}
+
+.settings-advanced-description {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.settings-advanced-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  flex-shrink: 0;
+  padding-top: 6px;
+}
+
+.settings-advanced-state {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.settings-advanced-chevron {
+  font-size: 18px;
+  line-height: 1;
+  transition: transform 0.2s ease;
+}
+
+.settings-advanced-chevron-open {
+  transform: rotate(180deg);
+}
+
+.settings-advanced-panel {
+  padding-top: var(--space-6);
+}
+
+.settings-advanced-section-open .settings-advanced-panel {
+  animation: fadeIn 0.2s ease;
+}
+
+.settings-form-actions {
+  margin-top: var(--space-7);
+  flex-wrap: wrap;
+}
+
 /* Skeleton Loading */
 @keyframes shimmer {
   0% {
@@ -3150,6 +3236,23 @@ p {
 
   .toast-item {
     max-width: 100%;
+  }
+
+  .settings-advanced-toggle {
+    gap: 12px;
+  }
+
+  .settings-advanced-meta {
+    gap: 8px;
+    padding-top: 4px;
+  }
+
+  .settings-advanced-title {
+    font-size: var(--text-lg);
+  }
+
+  .settings-advanced-panel {
+    padding-top: 16px;
   }
 }
 

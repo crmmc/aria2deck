@@ -4,9 +4,18 @@ import { api } from "@/lib/api";
 
 const pushMock = jest.fn();
 const routerMock = { push: pushMock };
+const showToastMock = jest.fn();
 
 jest.mock("next/navigation", () => ({
   useRouter: () => routerMock,
+}));
+
+jest.mock("@/components/Toast", () => ({
+  __esModule: true,
+  useToast: () => ({
+    showToast: showToastMock,
+    showConfirm: jest.fn(),
+  }),
 }));
 
 jest.mock("@/lib/api", () => ({
@@ -174,9 +183,26 @@ describe("SettingsPage", () => {
 
     expect(screen.getByText("系统设置")).toBeInTheDocument();
     expect(screen.getByText("系统配置（仅管理员）")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /系统高级设置/ }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("接口频率限制")).not.toBeInTheDocument();
     expect(mockApi.getConfig).toHaveBeenCalled();
     expect(mockApi.getMachineStats).toHaveBeenCalled();
     expect(mockApi.getAria2Version).toHaveBeenCalled();
+  });
+
+  test("expands advanced settings on demand", async () => {
+    await renderWithInitialLoad();
+
+    const advancedToggle = screen.getByRole("button", { name: /系统高级设置/ });
+    fireEvent.click(advancedToggle);
+
+    expect(advancedToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("接口频率限制")).toBeInTheDocument();
+    expect(screen.getByText("下载并发限制")).toBeInTheDocument();
+    expect(screen.getByText("账户安全限流")).toBeInTheDocument();
+    expect(screen.getByText("系统总下载连接上限")).toBeInTheDocument();
   });
 
   test("redirects non-admin and does not render admin content", async () => {
@@ -204,6 +230,7 @@ describe("SettingsPage", () => {
     await waitFor(() => {
       expect(mockApi.updateConfig).toHaveBeenCalled();
     });
+    expect(showToastMock).toHaveBeenCalledWith("配置已保存", "success");
   });
 
   test("shows validation message when testing empty rpc url", async () => {
@@ -307,7 +334,7 @@ describe("SettingsPage", () => {
       fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
     });
 
-    expect(screen.queryByText("✓ 配置已保存")).not.toBeInTheDocument();
+    expect(showToastMock).not.toHaveBeenCalledWith("配置已保存", "success");
     expect(await screen.findByText("加载配置失败")).toBeInTheDocument();
   });
 });
