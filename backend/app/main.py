@@ -304,8 +304,9 @@ def create_app() -> FastAPI:
     app.include_router(aria2_rpc.router)
     app.include_router(shares.router)
 
-    # 静态导出时，Next.js 生成的是 /tasks.html 而不是 /tasks/index.html
-    # 这里通过中间件统一把无后缀路径映射到对应 HTML，避免直接刷新 404
+    # 静态导出时，Next.js 产物是 *.html 文件。
+    # 这里仅在生产静态托管层把无后缀页面路径映射到对应 HTML，
+    # 前端源码与开发态路由仍应统一使用无后缀 URL。
     static_dir = Path(__file__).parent.parent / "static"
     if static_dir.exists():
         def html_path(name: str) -> Path:

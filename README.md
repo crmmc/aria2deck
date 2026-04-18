@@ -51,6 +51,8 @@ make docker-up
 
 浏览器打开 `http://localhost:8000`
 
+容器部署时，对外 HTTP 服务由 FastAPI/Uvicorn 提供；前端会先静态导出，再由后端统一托管。
+
 默认账号：`admin` / `123456`，首次登录后请**立即修改密码**。
 
 ### 独立 Docker 运行
@@ -128,6 +130,9 @@ make dev-aria2    # aria2 后端
 make dev-back     # API 后端（开发模式，自动重置 admin 密码为 123456）
 make dev-front    # 前端开发服务器（http://localhost:3000）
 ```
+
+开发态页面路径统一使用无后缀路由，例如 `http://localhost:3000/tasks`、`/files`、`/settings`。
+生产态也保持相同的无后缀 URL；`.html` 仅是静态导出产物细节，不应出现在前端源码或手动访问路径中。
 
 ---
 

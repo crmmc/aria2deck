@@ -11,6 +11,7 @@ const config = {
   testEnvironment: 'jsdom',
   setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
   collectCoverageFrom: [
+    'app/page.tsx',
     'app/(authenticated)/layout.tsx',
     'app/s/[code]/SharePageClient.tsx',
     'app/login/page.tsx',
