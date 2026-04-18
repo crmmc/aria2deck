@@ -1,9 +1,12 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.db import fetch_one
+
+FIXED_MACHINE_FREE = 8 * 1024**3
 
 
 class TestListFiles:
@@ -45,8 +48,10 @@ class TestSpaceEndpoints:
         assert response.status_code == 401
 
     def test_get_quota(self, authenticated_client: TestClient):
-        quota_response = authenticated_client.get("/api/files/quota")
-        space_response = authenticated_client.get("/api/files/space")
+        disk_usage = SimpleNamespace(free=FIXED_MACHINE_FREE)
+        with patch("app.services.storage.shutil.disk_usage", return_value=disk_usage):
+            quota_response = authenticated_client.get("/api/files/quota")
+            space_response = authenticated_client.get("/api/files/space")
 
         assert quota_response.status_code == 200
         assert space_response.status_code == 200
