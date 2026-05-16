@@ -1,4 +1,5 @@
 """请求频率限制配置缓存。"""
+
 from __future__ import annotations
 
 import logging
@@ -65,13 +66,9 @@ class RateLimitConfig:
 
     async def load_from_db(self) -> None:
         """启动时从数据库加载配置。"""
-        from sqlalchemy import select
+        from app.repositories.settings import get_settings_row
 
-        from app.db.engine import transaction
-        from app.db.schema import app_settings
-
-        async with transaction() as conn:
-            row = (await conn.execute(select(app_settings))).mappings().first()
+        row = await get_settings_row()
 
         for db_key, (attr, default, _legacy_keys) in self._DB_KEY_MAP.items():
             value = row.get(db_key, default) if row else default
@@ -106,8 +103,7 @@ class RateLimitConfig:
     def defaults(self) -> dict[str, str]:
         """返回新配置键的默认值字符串。"""
         return {
-            db_key: str(default)
-            for db_key, (_, default, _) in self._DB_KEY_MAP.items()
+            db_key: str(default) for db_key, (_, default, _) in self._DB_KEY_MAP.items()
         }
 
     def limit_for(self, scope: str) -> int:

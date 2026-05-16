@@ -1,13 +1,19 @@
 """Tests for config router endpoints."""
+
 import pytest
 from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.core.config import settings
+from app.db.engine import transaction
+from app.db.schema import app_settings
 
 
 def test_tokens_use_v0_schema(authenticated_client: TestClient):
-    create_response = authenticated_client.post("/api/config/tokens", json={"name": "v0 token"})
+    create_response = authenticated_client.post(
+        "/api/config/tokens", json={"name": "v0 token"}
+    )
     assert create_response.status_code == 200
     token = create_response.json()
     assert token["name"] == "v0 token"
@@ -30,7 +36,6 @@ def admin_client(client: TestClient, admin_session: str) -> TestClient:
 
 
 class TestGetConfig:
-
     def test_get_config_admin(self, admin_client: TestClient):
         response = admin_client.get("/api/config")
         assert response.status_code == 200
@@ -68,14 +73,62 @@ class TestGetConfig:
 
 
 class TestUpdateConfig:
+    def test_update_persists_typed_app_settings_and_get_returns_values(
+        self, admin_client: TestClient
+    ):
+        payload = {
+            "max_task_size": 3 * 1024 * 1024 * 1024,
+            "min_free_disk": 512 * 1024 * 1024,
+            "hidden_file_extensions": [".Tmp", "log"],
+            "ws_reconnect_jitter": 0.35,
+            "ws_reconnect_factor": 2.5,
+        }
+
+        response = admin_client.put("/api/config", json=payload)
+        assert response.status_code == 200
+
+        import asyncio
+
+        async def fetch_settings_row() -> dict:
+            async with transaction() as conn:
+                row = (
+                    (
+                        await conn.execute(
+                            select(app_settings).where(app_settings.c.id == 1)
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+            return dict(row)
+
+        row = asyncio.run(fetch_settings_row())
+        assert row["max_task_size_bytes"] == payload["max_task_size"]
+        assert row["min_free_disk_bytes"] == payload["min_free_disk"]
+        assert row["hidden_file_extensions_json"] == '[".tmp", ".log"]'
+        assert row["ws_reconnect_jitter"] == "0.35"
+        assert row["ws_reconnect_factor"] == "2.5"
+
+        get_response = admin_client.get("/api/config")
+        assert get_response.status_code == 200
+        data = get_response.json()
+        assert data["max_task_size"] == payload["max_task_size"]
+        assert data["min_free_disk"] == payload["min_free_disk"]
+        assert data["hidden_file_extensions"] == [".tmp", ".log"]
+        assert data["ws_reconnect_jitter"] == 0.35
+        assert data["ws_reconnect_factor"] == 2.5
 
     def test_update_max_task_size(self, admin_client: TestClient):
-        response = admin_client.put("/api/config", json={"max_task_size": 5 * 1024 * 1024 * 1024})
+        response = admin_client.put(
+            "/api/config", json={"max_task_size": 5 * 1024 * 1024 * 1024}
+        )
         assert response.status_code == 200
         assert response.json()["max_task_size"] == 5 * 1024 * 1024 * 1024
 
     def test_update_min_free_disk(self, admin_client: TestClient):
-        response = admin_client.put("/api/config", json={"min_free_disk": 2 * 1024 * 1024 * 1024})
+        response = admin_client.put(
+            "/api/config", json={"min_free_disk": 2 * 1024 * 1024 * 1024}
+        )
         assert response.status_code == 200
         assert response.json()["min_free_disk"] == 2 * 1024 * 1024 * 1024
 
@@ -108,11 +161,14 @@ class TestUpdateConfig:
         assert response.json()["pack_compression_level"] == 0
 
     def test_update_ws_reconnect_params(self, admin_client: TestClient):
-        response = admin_client.put("/api/config", json={
-            "ws_reconnect_max_delay": 120.0,
-            "ws_reconnect_jitter": 0.5,
-            "ws_reconnect_factor": 3.0
-        })
+        response = admin_client.put(
+            "/api/config",
+            json={
+                "ws_reconnect_max_delay": 120.0,
+                "ws_reconnect_jitter": 0.5,
+                "ws_reconnect_factor": 3.0,
+            },
+        )
         assert response.status_code == 200
         data = response.json()
         assert data["ws_reconnect_max_delay"] == 120.0
@@ -120,21 +176,26 @@ class TestUpdateConfig:
         assert data["ws_reconnect_factor"] == 3.0
 
     def test_update_hidden_file_extensions(self, admin_client: TestClient):
-        response = admin_client.put("/api/config", json={"hidden_file_extensions": [".txt", "log"]})
+        response = admin_client.put(
+            "/api/config", json={"hidden_file_extensions": [".txt", "log"]}
+        )
         assert response.status_code == 200
         extensions = response.json()["hidden_file_extensions"]
         assert ".txt" in extensions
         assert ".log" in extensions
 
     def test_update_rate_limit_groups(self, admin_client: TestClient):
-        response = admin_client.put("/api/config", json={
-            "rate_limit_account_security": 6,
-            "rate_limit_authenticated_api": 90,
-            "rate_limit_public_api": 40,
-            "rate_limit_share_access": 3,
-            "rate_limit_authenticated_download": 240,
-            "rate_limit_anonymous_download": 30,
-        })
+        response = admin_client.put(
+            "/api/config",
+            json={
+                "rate_limit_account_security": 6,
+                "rate_limit_authenticated_api": 90,
+                "rate_limit_public_api": 40,
+                "rate_limit_share_access": 3,
+                "rate_limit_authenticated_download": 240,
+                "rate_limit_anonymous_download": 30,
+            },
+        )
         assert response.status_code == 200
         data = response.json()
         assert data["rate_limit_account_security"] == 6
@@ -145,16 +206,19 @@ class TestUpdateConfig:
         assert data["rate_limit_anonymous_download"] == 30
 
     def test_update_download_connection_pools(self, admin_client: TestClient):
-        response = admin_client.put("/api/config", json={
-            "download_total_connections": 80,
-            "download_authenticated_reserved_connections": 45,
-            "download_authenticated_per_user_connections": 12,
-            "download_authenticated_per_file_connections": 6,
-            "download_anonymous_base_connections": 15,
-            "download_anonymous_borrow_connections": 20,
-            "download_anonymous_per_ip_connections": 3,
-            "download_anonymous_per_file_connections": 1,
-        })
+        response = admin_client.put(
+            "/api/config",
+            json={
+                "download_total_connections": 80,
+                "download_authenticated_reserved_connections": 45,
+                "download_authenticated_per_user_connections": 12,
+                "download_authenticated_per_file_connections": 6,
+                "download_anonymous_base_connections": 15,
+                "download_anonymous_borrow_connections": 20,
+                "download_anonymous_per_ip_connections": 3,
+                "download_anonymous_per_file_connections": 1,
+            },
+        )
         assert response.status_code == 200
         data = response.json()
         assert data["download_total_connections"] == 80
@@ -166,13 +230,18 @@ class TestUpdateConfig:
         assert data["download_anonymous_per_ip_connections"] == 3
         assert data["download_anonymous_per_file_connections"] == 1
 
-    def test_update_download_connection_pools_rejects_invalid_allocation(self, admin_client: TestClient):
-        response = admin_client.put("/api/config", json={
-            "download_total_connections": 10,
-            "download_authenticated_reserved_connections": 6,
-            "download_anonymous_base_connections": 3,
-            "download_anonymous_borrow_connections": 2,
-        })
+    def test_update_download_connection_pools_rejects_invalid_allocation(
+        self, admin_client: TestClient
+    ):
+        response = admin_client.put(
+            "/api/config",
+            json={
+                "download_total_connections": 10,
+                "download_authenticated_reserved_connections": 6,
+                "download_anonymous_base_connections": 3,
+                "download_anonymous_borrow_connections": 2,
+            },
+        )
         assert response.status_code == 400
         assert "不能超过系统总连接上限" in response.json()["detail"]
 
@@ -186,12 +255,11 @@ class TestUpdateConfig:
 
 
 class TestAria2Version:
-
     def test_get_aria2_version_success(self, admin_client: TestClient):
         mock_client = AsyncMock()
         mock_client.get_version.return_value = {
             "version": "1.36.0",
-            "enabledFeatures": ["BitTorrent", "GZip"]
+            "enabledFeatures": ["BitTorrent", "GZip"],
         }
 
         with patch("app.aria2.client.Aria2Client", return_value=mock_client):
@@ -221,19 +289,21 @@ class TestAria2Version:
 
 
 class TestAria2Test:
-
     def test_test_aria2_connection_success(self, admin_client: TestClient):
         mock_client = AsyncMock()
         mock_client.get_version.return_value = {
             "version": "1.36.0",
-            "enabledFeatures": ["BitTorrent"]
+            "enabledFeatures": ["BitTorrent"],
         }
 
         with patch("app.aria2.client.Aria2Client", return_value=mock_client):
-            response = admin_client.post("/api/config/aria2/test", json={
-                "aria2_rpc_url": "http://localhost:6800/jsonrpc",
-                "aria2_rpc_secret": "test_secret"
-            })
+            response = admin_client.post(
+                "/api/config/aria2/test",
+                json={
+                    "aria2_rpc_url": "http://localhost:6800/jsonrpc",
+                    "aria2_rpc_secret": "test_secret",
+                },
+            )
 
         assert response.status_code == 200
         data = response.json()
@@ -245,36 +315,39 @@ class TestAria2Test:
         mock_client.get_version.side_effect = Exception("Connection refused")
 
         with patch("app.aria2.client.Aria2Client", return_value=mock_client):
-            response = admin_client.post("/api/config/aria2/test", json={
-                "aria2_rpc_url": "http://localhost:6800/jsonrpc"
-            })
+            response = admin_client.post(
+                "/api/config/aria2/test",
+                json={"aria2_rpc_url": "http://localhost:6800/jsonrpc"},
+            )
 
         assert response.status_code == 200
         data = response.json()
         assert data["connected"] is False
 
     def test_test_aria2_empty_url(self, admin_client: TestClient):
-        response = admin_client.post("/api/config/aria2/test", json={
-            "aria2_rpc_url": ""
-        })
+        response = admin_client.post(
+            "/api/config/aria2/test", json={"aria2_rpc_url": ""}
+        )
         assert response.status_code == 400
 
     def test_test_aria2_non_admin(self, authenticated_client: TestClient):
-        response = authenticated_client.post("/api/config/aria2/test", json={
-            "aria2_rpc_url": "http://localhost:6800/jsonrpc"
-        })
+        response = authenticated_client.post(
+            "/api/config/aria2/test",
+            json={"aria2_rpc_url": "http://localhost:6800/jsonrpc"},
+        )
         assert response.status_code == 403
 
 
 class TestTokens:
-
     def test_list_tokens_empty(self, authenticated_client: TestClient):
         response = authenticated_client.get("/api/config/tokens")
         assert response.status_code == 200
         assert response.json() == []
 
     def test_create_token(self, authenticated_client: TestClient):
-        response = authenticated_client.post("/api/config/tokens", json={"name": "Test Token"})
+        response = authenticated_client.post(
+            "/api/config/tokens", json={"name": "Test Token"}
+        )
         assert response.status_code == 200
         data = response.json()
         assert "id" in data
@@ -302,7 +375,9 @@ class TestTokens:
         assert "T" in tokens[0]["created_at"]
 
     def test_delete_token(self, authenticated_client: TestClient):
-        create_response = authenticated_client.post("/api/config/tokens", json={"name": "To Delete"})
+        create_response = authenticated_client.post(
+            "/api/config/tokens", json={"name": "To Delete"}
+        )
         token_id = create_response.json()["id"]
 
         response = authenticated_client.delete(f"/api/config/tokens/{token_id}")
@@ -316,10 +391,20 @@ class TestTokens:
         response = authenticated_client.delete("/api/config/tokens/99999")
         assert response.status_code == 404
 
-    def test_delete_other_user_token(self, client: TestClient, user_session: str, admin_session: str, test_admin: dict, test_user: dict, temp_db: str):
+    def test_delete_other_user_token(
+        self,
+        client: TestClient,
+        user_session: str,
+        admin_session: str,
+        test_admin: dict,
+        test_user: dict,
+        temp_db: str,
+    ):
         # Create token as admin
         client.cookies.set(settings.session_cookie_name, admin_session)
-        create_response = client.post("/api/config/tokens", json={"name": "Admin Token"})
+        create_response = client.post(
+            "/api/config/tokens", json={"name": "Admin Token"}
+        )
         token_id = create_response.json()["id"]
 
         # Try to delete as regular user
@@ -333,10 +418,10 @@ class TestTokens:
 
 
 class TestConfigHelperFunctions:
-
     def test_get_config_value_exception(self, temp_db: str):
         from app.routers.config import get_config_value, _config_cache
         import sqlite3
+
         _config_cache.clear()
 
         with patch.object(sqlite3, "connect", side_effect=Exception("DB error")):
@@ -345,7 +430,11 @@ class TestConfigHelperFunctions:
 
     @pytest.mark.asyncio
     async def test_get_config_value_async_cache_hit(self, temp_db: str):
-        from app.routers.config import get_config_value_async, _config_cache, _config_cache_lock
+        from app.routers.config import (
+            get_config_value_async,
+            _config_cache,
+            _config_cache_lock,
+        )
         from time import time
 
         async with _config_cache_lock:
@@ -356,7 +445,11 @@ class TestConfigHelperFunctions:
 
     @pytest.mark.asyncio
     async def test_set_config_value_async_update(self, temp_db: str):
-        from app.routers.config import set_config_value_async, get_config_value_async, _config_cache
+        from app.routers.config import (
+            set_config_value_async,
+            get_config_value_async,
+            _config_cache,
+        )
 
         _config_cache.clear()
         await set_config_value_async("site_title", "Initial Title")
@@ -370,7 +463,11 @@ class TestConfigHelperFunctions:
 
     @pytest.mark.asyncio
     async def test_set_config_value_async_create(self, temp_db: str):
-        from app.routers.config import set_config_value_async, get_config_value_async, _config_cache
+        from app.routers.config import (
+            set_config_value_async,
+            get_config_value_async,
+            _config_cache,
+        )
 
         _config_cache.clear()
         await set_config_value_async("unsupported_config_key", "new_value")

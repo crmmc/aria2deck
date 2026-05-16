@@ -1,4 +1,5 @@
 """下载并发配置与连接分配器。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -81,13 +82,9 @@ class DownloadConfig:
 
     async def load_from_db(self) -> None:
         """启动时从数据库加载配置。"""
-        from sqlalchemy import select
+        from app.repositories.settings import get_settings_row
 
-        from app.db.engine import transaction
-        from app.db.schema import app_settings
-
-        async with transaction() as conn:
-            row = (await conn.execute(select(app_settings))).mappings().first()
+        row = await get_settings_row()
 
         for db_key, (attr, default, _legacy_keys) in self._DB_KEY_MAP.items():
             value = row.get(db_key, default) if row else default
@@ -118,8 +115,7 @@ class DownloadConfig:
     def defaults(self) -> dict[str, str]:
         """返回新配置键的默认值字符串。"""
         return {
-            db_key: str(default)
-            for db_key, (_, default, _) in self._DB_KEY_MAP.items()
+            db_key: str(default) for db_key, (_, default, _) in self._DB_KEY_MAP.items()
         }
 
     def anonymous_total_connections(self) -> int:
@@ -137,7 +133,9 @@ class DownloadConfig:
             + self.anonymous_borrow_connections
         )
         if allocated > self.total_connections:
-            raise ValueError("下载并发配置无效：保底与匿名配额总和不能超过系统总连接上限")
+            raise ValueError(
+                "下载并发配置无效：保底与匿名配额总和不能超过系统总连接上限"
+            )
 
 
 download_config = DownloadConfig()
@@ -200,7 +198,9 @@ class DownloadAccessManager:
         self._anonymous_ip_file_counts: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
-    async def acquire_authenticated(self, user_id: int, file_hash: str) -> DownloadAcquireResult:
+    async def acquire_authenticated(
+        self, user_id: int, file_hash: str
+    ) -> DownloadAcquireResult:
         """获取已登录下载连接。"""
         subject_key = str(user_id)
         user_file_key = f"{subject_key}:{file_hash}"
@@ -212,21 +212,29 @@ class DownloadAccessManager:
                 subject_key,
                 download_config.authenticated_per_user_connections,
             ):
-                return DownloadAcquireResult(False, DownloadRejectReason.AUTHENTICATED_PER_USER)
+                return DownloadAcquireResult(
+                    False, DownloadRejectReason.AUTHENTICATED_PER_USER
+                )
             if self._limit_reached(
                 self._authenticated_user_file_counts,
                 user_file_key,
                 download_config.authenticated_per_file_connections,
             ):
-                return DownloadAcquireResult(False, DownloadRejectReason.AUTHENTICATED_PER_FILE)
+                return DownloadAcquireResult(
+                    False, DownloadRejectReason.AUTHENTICATED_PER_FILE
+                )
 
             self._authenticated_active += 1
             self._increment(self._authenticated_user_counts, subject_key)
             self._increment(self._authenticated_user_file_counts, user_file_key)
-            lease = DownloadLease(self, DownloadIdentity.AUTHENTICATED, subject_key, file_hash)
+            lease = DownloadLease(
+                self, DownloadIdentity.AUTHENTICATED, subject_key, file_hash
+            )
             return DownloadAcquireResult(True, lease=lease)
 
-    async def acquire_anonymous(self, client_ip: str, file_hash: str) -> DownloadAcquireResult:
+    async def acquire_anonymous(
+        self, client_ip: str, file_hash: str
+    ) -> DownloadAcquireResult:
         """获取匿名下载连接。"""
         ip_file_key = f"{client_ip}:{file_hash}"
         async with self._lock:
@@ -239,18 +247,24 @@ class DownloadAccessManager:
                 client_ip,
                 download_config.anonymous_per_ip_connections,
             ):
-                return DownloadAcquireResult(False, DownloadRejectReason.ANONYMOUS_PER_IP)
+                return DownloadAcquireResult(
+                    False, DownloadRejectReason.ANONYMOUS_PER_IP
+                )
             if self._limit_reached(
                 self._anonymous_ip_file_counts,
                 ip_file_key,
                 download_config.anonymous_per_file_connections,
             ):
-                return DownloadAcquireResult(False, DownloadRejectReason.ANONYMOUS_PER_FILE)
+                return DownloadAcquireResult(
+                    False, DownloadRejectReason.ANONYMOUS_PER_FILE
+                )
 
             self._anonymous_active += 1
             self._increment(self._anonymous_ip_counts, client_ip)
             self._increment(self._anonymous_ip_file_counts, ip_file_key)
-            lease = DownloadLease(self, DownloadIdentity.ANONYMOUS, client_ip, file_hash)
+            lease = DownloadLease(
+                self, DownloadIdentity.ANONYMOUS, client_ip, file_hash
+            )
             return DownloadAcquireResult(True, lease=lease)
 
     async def release(self, lease: DownloadLease) -> None:
