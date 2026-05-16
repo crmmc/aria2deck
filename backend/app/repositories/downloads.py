@@ -3,11 +3,16 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from sqlalchemy import func, insert, select, update
+from collections.abc import Iterable
+
+from sqlalchemy import case, delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.db.engine import transaction
-from app.db.schema import global_downloads, user_tasks
+from app.db.schema import global_downloads, user_storage_usage, user_tasks
+
+ACTIVE_USER_TASK_STATUSES = ("queued", "active", "waiting", "paused")
+TERMINAL_USER_TASK_STATUSES = ("completed", "failed", "cancelled")
 
 
 def now_ms() -> int:
@@ -72,6 +77,64 @@ async def get_user_task(user_id: int, global_download_id: int) -> dict[str, Any]
     return dict(row) if row else None
 
 
+def _user_task_download_select():
+    return select(
+        user_tasks.c.id,
+        user_tasks.c.user_id,
+        user_tasks.c.global_download_id,
+        user_tasks.c.status,
+        user_tasks.c.reserved_bytes,
+        user_tasks.c.display_name,
+        user_tasks.c.error_message,
+        user_tasks.c.created_at_ms,
+        user_tasks.c.updated_at_ms,
+        user_tasks.c.finished_at_ms,
+        global_downloads.c.resource_key,
+        global_downloads.c.resource_kind,
+        global_downloads.c.source_uri,
+        global_downloads.c.display_name.label("global_display_name"),
+        global_downloads.c.aria2_gid,
+        global_downloads.c.status.label("global_status"),
+        global_downloads.c.total_bytes,
+        global_downloads.c.completed_bytes,
+        global_downloads.c.error_code,
+        global_downloads.c.error_message.label("global_error_message"),
+        global_downloads.c.completed_at_ms,
+    ).select_from(
+        user_tasks.join(
+            global_downloads,
+            user_tasks.c.global_download_id == global_downloads.c.id,
+        )
+    )
+
+
+async def get_user_task_by_id(user_id: int, user_task_id: int) -> dict[str, Any] | None:
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                _user_task_download_select().where(
+                    user_tasks.c.id == user_task_id,
+                    user_tasks.c.user_id == user_id,
+                )
+            )
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+async def list_user_tasks(
+    user_id: int,
+    statuses: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    query = _user_task_download_select().where(user_tasks.c.user_id == user_id)
+    if statuses is not None:
+        query = query.where(user_tasks.c.status.in_(tuple(statuses)))
+    query = query.order_by(user_tasks.c.updated_at_ms.desc(), user_tasks.c.id.desc())
+
+    async with transaction() as conn:
+        rows = (await conn.execute(query)).mappings().all()
+    return [dict(row) for row in rows]
+
+
 async def create_user_task(values: dict[str, Any]) -> dict[str, Any]:
     timestamp = now_ms()
     row_values = {
@@ -134,6 +197,63 @@ async def update_user_task(task_id: int, values: dict[str, Any]) -> dict[str, An
     return dict(row) if row else None
 
 
+async def cancel_active_user_task(
+    user_id: int,
+    user_task_id: int,
+    *,
+    error_message: str,
+    finished_at_ms: int,
+) -> dict[str, Any] | None:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        task = (
+            await conn.execute(
+                select(user_tasks).where(
+                    user_tasks.c.id == user_task_id,
+                    user_tasks.c.user_id == user_id,
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                )
+            )
+        ).mappings().first()
+        if task is None:
+            return None
+
+        reserved_bytes = int(task["reserved_bytes"] or 0)
+        if reserved_bytes > 0:
+            reserved_expr = user_storage_usage.c.reserved_bytes - reserved_bytes
+            await conn.execute(
+                update(user_storage_usage)
+                .where(user_storage_usage.c.user_id == user_id)
+                .values(
+                    reserved_bytes=case(
+                        (reserved_expr < 0, 0),
+                        else_=reserved_expr,
+                    ),
+                    updated_at_ms=timestamp,
+                )
+            )
+
+        row = (
+            await conn.execute(
+                update(user_tasks)
+                .where(
+                    user_tasks.c.id == user_task_id,
+                    user_tasks.c.user_id == user_id,
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                )
+                .values(
+                    status="cancelled",
+                    reserved_bytes=0,
+                    error_message=error_message,
+                    finished_at_ms=finished_at_ms,
+                    updated_at_ms=timestamp,
+                )
+                .returning(user_tasks)
+            )
+        ).mappings().first()
+    return dict(row) if row else None
+
+
 async def count_active_user_tasks(global_download_id: int) -> int:
     async with transaction() as conn:
         count = (
@@ -142,8 +262,39 @@ async def count_active_user_tasks(global_download_id: int) -> int:
                 .select_from(user_tasks)
                 .where(
                     user_tasks.c.global_download_id == global_download_id,
-                    user_tasks.c.status.in_(("queued", "active", "waiting", "paused")),
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
                 )
             )
         ).scalar_one()
     return int(count)
+
+
+async def delete_terminal_user_task(user_id: int, user_task_id: int) -> bool:
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                delete(user_tasks)
+                .where(
+                    user_tasks.c.id == user_task_id,
+                    user_tasks.c.user_id == user_id,
+                    user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES),
+                )
+                .returning(user_tasks.c.id)
+            )
+        ).first()
+    return row is not None
+
+
+async def clear_terminal_user_tasks(user_id: int) -> int:
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                delete(user_tasks)
+                .where(
+                    user_tasks.c.user_id == user_id,
+                    user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES),
+                )
+                .returning(user_tasks.c.id)
+            )
+        ).all()
+    return len(rows)

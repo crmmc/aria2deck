@@ -34,7 +34,13 @@ from app.models import (
     UserTaskSubscription,
     utc_now_str,
 )
-from app.repositories.downloads import get_global_by_resource_key
+from app.repositories.downloads import (
+    ACTIVE_USER_TASK_STATUSES,
+    TERMINAL_USER_TASK_STATUSES,
+    clear_terminal_user_tasks,
+    get_global_by_resource_key,
+    list_user_tasks,
+)
 from app.routers.config import get_max_task_size, get_min_free_disk
 from app.services.hash import (
     extract_info_hash_from_magnet,
@@ -44,7 +50,7 @@ from app.services.hash import (
     is_magnet_link,
 )
 from app.services.http_probe import probe_url_with_get_fallback
-from app.services.download_service import create_user_download
+from app.services.download_service import cancel_user_task, create_user_download
 from app.services.storage import (
     create_user_file_reference,
     delete_user_file_reference,
@@ -126,6 +132,23 @@ def _v0_create_task_response(
         "updated_at": _ms_to_iso(task_row["updated_at_ms"]),
         "frozen_space": int(task_row["reserved_bytes"]),
     }
+
+
+def _v0_list_task_response(row: dict) -> dict:
+    global_download = {
+        "display_name": row.get("global_display_name"),
+        "source_uri": row.get("source_uri"),
+        "total_bytes": row.get("total_bytes"),
+        "completed_bytes": row.get("completed_bytes"),
+        "error_message": row.get("global_error_message"),
+    }
+    return _v0_create_task_response(
+        task_row=row,
+        global_download=global_download,
+        fallback_uri=str(row.get("source_uri") or ""),
+        fallback_name=row.get("display_name") or row.get("global_display_name"),
+        fallback_total_length=int(row.get("total_bytes") or 0),
+    )
 
 
 # ========== Schemas ==========
@@ -981,43 +1004,23 @@ async def list_tasks(
     user: User = Depends(require_user),
 ) -> list[dict]:
     """获取当前用户的任务订阅列表"""
-    async with get_session() as db:
-        query = (
-            select(UserTaskSubscription, DownloadTask)
-            .join(DownloadTask, UserTaskSubscription.task_id == DownloadTask.id)
-            .where(UserTaskSubscription.owner_id == user.id)
+    statuses: tuple[str, ...] | None = None
+    if status_filter in {"active", "current"}:
+        statuses = ACTIVE_USER_TASK_STATUSES
+    elif status_filter == "complete":
+        statuses = ("completed",)
+    elif status_filter == "error":
+        statuses = tuple(
+            status_value
+            for status_value in TERMINAL_USER_TASK_STATUSES
+            if status_value != "completed"
         )
 
-        if status_filter:
-            if status_filter == "active":
-                query = query.where(
-                    UserTaskSubscription.status == "pending",
-                    DownloadTask.status.in_(["queued", "active", "waiting", "paused"]),
-                )
-            elif status_filter == "current":
-                # 当前任务：仅活跃（终态任务统一在历史页）
-                query = query.where(
-                    UserTaskSubscription.status == "pending",
-                    DownloadTask.status.in_(["queued", "active", "waiting", "paused"]),
-                )
-            elif status_filter == "complete":
-                query = query.where(UserTaskSubscription.status == "success")
-            elif status_filter == "error":
-                query = query.where(
-                    (UserTaskSubscription.status == "failed") |
-                    (
-                        (UserTaskSubscription.status == "pending") &
-                        (DownloadTask.status == "error")
-                    )
-                )
-
-        query = query.order_by(UserTaskSubscription.id.desc())
-        result = await db.exec(query)
-        rows = result.all()
+    rows = await list_user_tasks(user.id, statuses)
 
     logger.debug("查询任务列表 user_id=%s status_filter=%s count=%s", user.id, status_filter, len(rows))
 
-    return [_subscription_to_dict(sub, task) for sub, task in rows]
+    return [_v0_list_task_response(row) for row in rows]
 
 
 @router.delete("/{subscription_id}")
@@ -1026,130 +1029,35 @@ async def cancel_task(
     request: Request,
     user: User = Depends(require_user),
 ) -> dict:
-    """取消任务订阅
-
-    如果是唯一订阅者，同时取消 aria2 任务。
-    """
-    row = await _get_subscription(subscription_id, user.id)
-    if not row:
-        logger.warning("取消任务失败 user_id=%s subscription_id=%s reason=not_found", user.id, subscription_id)
+    """取消当前用户的 v0 下载任务。"""
+    try:
+        await cancel_user_task(
+            user_id=user.id,
+            user_task_id=subscription_id,
+            quota_bytes=int(user.quota_bytes),
+            aria2_client=_get_client(request),
+        )
+    except LookupError:
+        logger.warning("取消任务失败 user_id=%s task_id=%s reason=not_found", user.id, subscription_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="任务不存在"
+            detail="任务不存在",
         )
+    except Exception as exc:
+        logger.warning("取消任务失败 user_id=%s task_id=%s error=%s", user.id, subscription_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="取消下载任务失败",
+        ) from exc
 
-    subscription, task = row
-
-    # Check if this is an active task cancellation (needs history)
-    is_active_cancel = subscription.status == "pending" and task.status in ("queued", "active")
-
-    # Atomic operation: delete subscription and count remaining pending subscribers
-    async with get_session() as db:
-        # Step 1: Delete current subscription
-        result = await db.exec(
-            select(UserTaskSubscription).where(UserTaskSubscription.id == subscription_id)
-        )
-        db_sub = result.first()
-        if db_sub:
-            await db.delete(db_sub)
-
-        # Step 2: Count remaining pending subscribers in the SAME transaction
-        result = await db.exec(
-            select(func.count(UserTaskSubscription.id)).where(
-                UserTaskSubscription.task_id == task.id,
-                UserTaskSubscription.status == "pending",
-            )
-        )
-        remaining_count = result.one()
-        if isinstance(remaining_count, tuple):
-            remaining_count = remaining_count[0]
-
-        # Transaction commits here
-
-    # Write to history if this was an active task cancellation
-    if is_active_cancel:
-        from app.services.history import add_task_history
-        await add_task_history(
-            owner_id=user.id,
-            task_name=_get_display_name(task),
-            result="cancelled",
-            reason="用户取消",
-            uri=task.uri,
-            total_length=task.total_length,
-            created_at=subscription.created_at,
-        )
-        logger.info("记录取消历史 user_id=%s subscription_id=%s task_id=%s", user.id, subscription_id, task.id)
-
-    # Step 3: Only cancel aria2 task if no remaining subscribers
-    if remaining_count == 0:
-        # Acquire task submit lock to prevent race with concurrent task submission
-        state = _get_state(request)
-        lock = await _get_task_submit_lock(state, task.id)
-        async with lock:
-            # Re-check pending subscribers to avoid cancelling a newly subscribed task
-            async with get_session() as db:
-                result = await db.exec(
-                    select(func.count(UserTaskSubscription.id)).where(
-                        UserTaskSubscription.task_id == task.id,
-                        UserTaskSubscription.status == "pending",
-                    )
-                )
-                still_pending = result.one()
-                if isinstance(still_pending, tuple):
-                    still_pending = still_pending[0]
-
-                if still_pending != 0:
-                    logger.info("取消任务跳过 aria2 终止 user_id=%s task_id=%s reason=new_subscriber", user.id, task.id)
-                    return {"ok": True}
-
-                result = await db.exec(
-                    select(DownloadTask).where(DownloadTask.id == task.id)
-                )
-                db_task = result.first()
-
-            if db_task and db_task.status in CANCELABLE_TASK_STATUSES:
-                client = _get_client(request)
-                await cleanup_failed_task_artifacts(
-                    client=client,
-                    task_id=task.id,
-                    gid=db_task.gid,
-                    owner_id=user.id,
-                    log_prefix="[Tasks]",
-                    skip_status_check=True,  # Caller verified cancelable status
-                )
-
-                async with get_session() as db:
-                    result = await db.exec(
-                        select(DownloadTask).where(DownloadTask.id == task.id)
-                    )
-                    db_task = result.first()
-                    if db_task and db_task.status in CANCELABLE_TASK_STATUSES:
-                        db_task.status = "error"
-                        db_task.error_display = "已取消"
-                        db_task.gid = None
-                        db_task.updated_at = utc_now_str()
-                        db.add(db_task)
-
-                logger.info("取消任务成功 user_id=%s subscription_id=%s task_id=%s", user.id, subscription_id, task.id)
-
+    logger.info("取消任务成功 user_id=%s task_id=%s", user.id, subscription_id)
     return {"ok": True}
 
 
 @router.delete("")
 async def clear_history(user: User = Depends(require_user)) -> dict:
     """清空当前用户的已完成/失败任务订阅"""
-    async with get_session() as db:
-        result = await db.exec(
-            select(UserTaskSubscription).where(
-                UserTaskSubscription.owner_id == user.id,
-                UserTaskSubscription.status.in_(["success", "failed"]),
-            )
-        )
-        subscriptions = result.all()
-
-        count = len(subscriptions)
-        for sub in subscriptions:
-            await db.delete(sub)
+    count = await clear_terminal_user_tasks(user.id)
 
     logger.info("清空任务记录成功 user_id=%s count=%s", user.id, count)
 

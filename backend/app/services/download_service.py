@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Mapping
 from typing import Any, Protocol
 
 from sqlalchemy.exc import IntegrityError
 
 from app.repositories.downloads import (
+    ACTIVE_USER_TASK_STATUSES,
+    cancel_active_user_task,
+    count_active_user_tasks,
     create_user_task,
+    get_user_task_by_id,
     get_or_create_global_download,
     get_user_task,
+    now_ms,
     update_global_download,
     update_user_task,
 )
@@ -19,6 +25,7 @@ from app.services.usage_service import release_reserved, reserve_bytes
 logger = logging.getLogger(__name__)
 RETRYABLE_DOWNLOAD_STATUSES = {"failed", "cancelled"}
 RETRYABLE_TASK_STATUSES = {"failed", "cancelled"}
+CANCELABLE_TASK_STATUSES = set(ACTIVE_USER_TASK_STATUSES)
 
 
 class Aria2SubmitClient(Protocol):
@@ -29,24 +36,41 @@ class Aria2SubmitClient(Protocol):
     async def force_remove(self, gid: str) -> str: ...
 
 
-_download_locks: dict[int, asyncio.Lock] = {}
-_download_locks_guard = asyncio.Lock()
-_user_task_locks: dict[tuple[int, int], asyncio.Lock] = {}
-_user_task_locks_guard = asyncio.Lock()
+_download_locks: dict[tuple[int, int], asyncio.Lock] = {}
+_download_locks_guard = threading.Lock()
+_lifecycle_locks: dict[tuple[int, int], asyncio.Lock] = {}
+_lifecycle_locks_guard = threading.Lock()
+_user_task_locks: dict[tuple[int, int, int], asyncio.Lock] = {}
+_user_task_locks_guard = threading.Lock()
+
+
+def _loop_id() -> int:
+    return id(asyncio.get_running_loop())
 
 
 async def _get_download_lock(download_id: int) -> asyncio.Lock:
-    async with _download_locks_guard:
-        lock = _download_locks.get(download_id)
+    key = (_loop_id(), download_id)
+    with _download_locks_guard:
+        lock = _download_locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
-            _download_locks[download_id] = lock
+            _download_locks[key] = lock
+        return lock
+
+
+async def _get_lifecycle_lock(download_id: int) -> asyncio.Lock:
+    key = (_loop_id(), download_id)
+    with _lifecycle_locks_guard:
+        lock = _lifecycle_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _lifecycle_locks[key] = lock
         return lock
 
 
 async def _get_user_task_lock(user_id: int, global_download_id: int) -> asyncio.Lock:
-    key = (user_id, global_download_id)
-    async with _user_task_locks_guard:
+    key = (_loop_id(), user_id, global_download_id)
+    with _user_task_locks_guard:
         lock = _user_task_locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
@@ -92,18 +116,17 @@ async def create_user_download(
             "total_bytes": max(0, int(total_bytes)),
         }
     )
-
-    existing_task = await get_user_task(user_id, global_download["id"])
-    if existing_task and existing_task["status"] not in RETRYABLE_TASK_STATUSES:
-        return existing_task
-
-    lock = await _get_user_task_lock(user_id, global_download["id"])
-    async with lock:
-        existing_task = await get_user_task(user_id, global_download["id"])
-        if existing_task and existing_task["status"] not in RETRYABLE_TASK_STATUSES:
-            return existing_task
-
-        if existing_task and global_download["status"] in RETRYABLE_DOWNLOAD_STATUSES:
+    global_values = {
+        "resource_key": resource_key,
+        "resource_kind": resource_kind,
+        "source_uri": uri,
+        "display_name": display_name,
+        "total_bytes": max(0, int(total_bytes)),
+    }
+    lifecycle_lock = await _get_lifecycle_lock(global_download["id"])
+    async with lifecycle_lock:
+        global_download = await get_or_create_global_download(global_values)
+        if global_download["status"] in RETRYABLE_DOWNLOAD_STATUSES:
             updated_global = await update_global_download(
                 global_download["id"],
                 {
@@ -118,72 +141,82 @@ async def create_user_download(
                 raise LookupError("global download not found")
             global_download = updated_global
 
-        reserved_bytes = max(0, int(total_bytes))
-        reservation_made = False
-        task: dict[str, Any] | None = existing_task
-        if reserved_bytes > 0:
-            await reserve_bytes(user_id, reserved_bytes, quota_bytes=quota_bytes)
-            reservation_made = True
+        existing_task = await get_user_task(user_id, global_download["id"])
+        if existing_task and existing_task["status"] not in RETRYABLE_TASK_STATUSES:
+            return existing_task
+
+        lock = await _get_user_task_lock(user_id, global_download["id"])
+        async with lock:
+            existing_task = await get_user_task(user_id, global_download["id"])
+            if existing_task and existing_task["status"] not in RETRYABLE_TASK_STATUSES:
+                return existing_task
+
+            reserved_bytes = max(0, int(total_bytes))
+            reservation_made = False
+            task: dict[str, Any] | None = existing_task
+            if reserved_bytes > 0:
+                await reserve_bytes(user_id, reserved_bytes, quota_bytes=quota_bytes)
+                reservation_made = True
+
+            try:
+                task_values = {
+                    "status": "queued",
+                    "reserved_bytes": reserved_bytes,
+                    "display_name": display_name,
+                    "error_message": None,
+                    "finished_at_ms": None,
+                }
+                if task:
+                    updated_task = await update_user_task(task["id"], task_values)
+                    if updated_task is None:
+                        raise LookupError("user task not found")
+                    task = updated_task
+                else:
+                    task = await create_user_task(
+                        {
+                            "user_id": user_id,
+                            "global_download_id": global_download["id"],
+                            **task_values,
+                        }
+                    )
+            except IntegrityError:
+                if reservation_made:
+                    await release_reserved(user_id, reserved_bytes, quota_bytes=quota_bytes)
+                existing_task = await get_user_task(user_id, global_download["id"])
+                if existing_task:
+                    return existing_task
+                raise
+            except Exception:
+                if reservation_made:
+                    await release_reserved(user_id, reserved_bytes, quota_bytes=quota_bytes)
+                raise
 
         try:
-            task_values = {
-                "status": "queued",
-                "reserved_bytes": reserved_bytes,
-                "display_name": display_name,
-                "error_message": None,
-                "finished_at_ms": None,
-            }
-            if task:
-                updated_task = await update_user_task(task["id"], task_values)
-                if updated_task is None:
-                    raise LookupError("user task not found")
+            global_download = await _ensure_download_submitted(
+                global_download=global_download,
+                uri=uri,
+                options=options,
+                aria2_client=aria2_client,
+            )
+        except Exception as exc:
+            await _release_task_reservation(
+                task=task, user_id=user_id, quota_bytes=quota_bytes
+            )
+            await update_user_task(
+                task["id"],
+                {
+                    "status": "failed",
+                    "error_message": str(exc),
+                },
+            )
+            raise
+
+        if global_download["status"] == "active":
+            updated_task = await update_user_task(task["id"], {"status": "active"})
+            if updated_task:
                 task = updated_task
-            else:
-                task = await create_user_task(
-                    {
-                        "user_id": user_id,
-                        "global_download_id": global_download["id"],
-                        **task_values,
-                    }
-                )
-        except IntegrityError:
-            if reservation_made:
-                await release_reserved(user_id, reserved_bytes, quota_bytes=quota_bytes)
-            existing_task = await get_user_task(user_id, global_download["id"])
-            if existing_task:
-                return existing_task
-            raise
-        except Exception:
-            if reservation_made:
-                await release_reserved(user_id, reserved_bytes, quota_bytes=quota_bytes)
-            raise
 
-    try:
-        global_download = await _ensure_download_submitted(
-            global_download=global_download,
-            uri=uri,
-            options=options,
-            aria2_client=aria2_client,
-        )
-    except Exception as exc:
-        await _release_task_reservation(
-            task=task, user_id=user_id, quota_bytes=quota_bytes
-        )
-        await update_user_task(
-            task["id"],
-            {
-                "status": "failed",
-                "error_message": str(exc),
-            },
-        )
-        raise
-
-    if global_download["status"] == "active":
-        updated_task = await update_user_task(task["id"], {"status": "active"})
-        if updated_task:
-            task = updated_task
-
-    return task
+        return task
 
 
 async def _ensure_download_submitted(
@@ -225,3 +258,56 @@ async def _ensure_download_submitted(
         except Exception:
             await _remove_submitted_gid(aria2_client, gid)
             raise
+
+
+async def cancel_user_task(
+    *,
+    user_id: int,
+    user_task_id: int,
+    quota_bytes: int,
+    aria2_client: Aria2SubmitClient,
+) -> dict[str, Any]:
+    task = await get_user_task_by_id(user_id, user_task_id)
+    if task is None:
+        raise LookupError("task not found")
+
+    if task["status"] not in CANCELABLE_TASK_STATUSES:
+        return task
+
+    lifecycle_lock = await _get_lifecycle_lock(task["global_download_id"])
+    async with lifecycle_lock:
+        task = await get_user_task_by_id(user_id, user_task_id)
+        if task is None:
+            raise LookupError("task not found")
+        if task["status"] not in CANCELABLE_TASK_STATUSES:
+            return task
+
+        active_count = await count_active_user_tasks(task["global_download_id"])
+        should_cancel_global = active_count <= 1
+        gid = task.get("aria2_gid")
+        if should_cancel_global and gid:
+            await aria2_client.force_remove(str(gid))
+
+        cancelled = await cancel_active_user_task(
+            user_id,
+            user_task_id,
+            error_message="用户取消",
+            finished_at_ms=now_ms(),
+        )
+        if cancelled is None:
+            latest = await get_user_task_by_id(user_id, user_task_id)
+            if latest is None:
+                raise LookupError("task not found")
+            return latest
+
+        if should_cancel_global:
+            await update_global_download(
+                task["global_download_id"],
+                {
+                    "status": "cancelled",
+                    "aria2_gid": None,
+                    "error_message": "用户取消",
+                },
+            )
+
+        return cancelled

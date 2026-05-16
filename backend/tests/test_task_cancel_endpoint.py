@@ -1,59 +1,175 @@
-"""Tests for task cancellation endpoint edge cases."""
-import pytest
-from sqlmodel import select
+"""Tests for v0 task cancellation endpoint."""
+from __future__ import annotations
 
-from app.database import get_session
-from app.models import DownloadTask, UserTaskSubscription, utc_now_str
+import asyncio
+from unittest.mock import AsyncMock, patch
+
+from fastapi.testclient import TestClient
+
+from app.repositories.downloads import get_global_by_resource_key, get_user_task
+from app.services.download_service import create_user_download
+from app.services.usage_service import get_usage
 
 
-class TestCancelTaskWithoutGid:
-    """Cancel queued task without gid should mark task as cancelled."""
+def _create_download_for_user(
+    *,
+    user: dict,
+    resource_key: str,
+    uri: str,
+    display_name: str,
+    total_bytes: int,
+    gid: str,
+) -> tuple[dict, AsyncMock]:
+    client = AsyncMock()
+    client.add_uri.return_value = gid
+    task = asyncio.run(
+        create_user_download(
+            user_id=user["id"],
+            quota_bytes=user["quota_bytes"],
+            uri=uri,
+            resource_key=resource_key,
+            resource_kind="http",
+            display_name=display_name,
+            total_bytes=total_bytes,
+            aria2_client=client,
+        )
+    )
+    return task, client
 
-    @pytest.mark.asyncio
-    async def test_cancel_task_without_gid_marks_error(self, authenticated_client, test_user):
-        # Create queued task without gid
-        async with get_session() as db:
-            task = DownloadTask(
-                uri_hash="cancel_no_gid_hash",
-                uri="https://example.com/no_gid.zip",
-                gid=None,
-                status="queued",
-                name="no_gid.zip",
-                total_length=0,
-                completed_length=0,
-                created_at=utc_now_str(),
-                updated_at=utc_now_str(),
-            )
-            db.add(task)
-            await db.commit()
-            await db.refresh(task)
 
-            subscription = UserTaskSubscription(
-                owner_id=test_user["id"],
-                task_id=task.id,
-                frozen_space=0,
-                status="pending",
-                created_at=utc_now_str(),
-            )
-            db.add(subscription)
-            await db.commit()
-            await db.refresh(subscription)
+class TestCancelTaskEndpoint:
+    def test_cancel_active_v0_task_marks_user_task_cancelled(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        task, _ = _create_download_for_user(
+            user=test_user,
+            resource_key="http:cancel-endpoint",
+            uri="https://example.com/cancel-endpoint.bin",
+            display_name="cancel-endpoint.bin",
+            total_bytes=700,
+            gid="gid-cancel-endpoint",
+        )
+        cancel_client = AsyncMock()
+        cancel_client.force_remove.return_value = "gid-cancel-endpoint"
 
-            sub_id = subscription.id
+        with patch("app.routers.tasks._get_client", return_value=cancel_client):
+            response = authenticated_client.delete(f"/api/tasks/{task['id']}")
 
-        response = authenticated_client.delete(f"/api/tasks/{sub_id}")
         assert response.status_code == 200
+        assert response.json() == {"ok": True}
 
-        async with get_session() as db:
-            result = await db.exec(
-                select(UserTaskSubscription).where(UserTaskSubscription.id == sub_id)
-            )
-            assert result.first() is None
+        global_download = asyncio.run(get_global_by_resource_key("http:cancel-endpoint"))
+        stored_task = asyncio.run(
+            get_user_task(test_user["id"], task["global_download_id"])
+        )
+        usage = asyncio.run(
+            get_usage(test_user["id"], quota_bytes=test_user["quota_bytes"])
+        )
 
-            result = await db.exec(
-                select(DownloadTask).where(DownloadTask.id == task.id)
+        assert stored_task is not None
+        assert stored_task["status"] == "cancelled"
+        assert stored_task["reserved_bytes"] == 0
+        assert stored_task["finished_at_ms"] is not None
+        assert usage["reserved_bytes"] == 0
+        assert global_download is not None
+        assert global_download["status"] == "cancelled"
+        assert global_download["aria2_gid"] is None
+        cancel_client.force_remove.assert_awaited_once_with("gid-cancel-endpoint")
+
+    def test_cancel_one_users_shared_task_keeps_global_download_active(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+        test_admin: dict,
+    ) -> None:
+        setup_client = AsyncMock()
+        setup_client.add_uri.return_value = "gid-shared-endpoint"
+        first = asyncio.run(
+            create_user_download(
+                user_id=test_user["id"],
+                quota_bytes=test_user["quota_bytes"],
+                uri="https://example.com/shared-endpoint.bin",
+                resource_key="http:shared-endpoint",
+                resource_kind="http",
+                display_name="shared-endpoint.bin",
+                total_bytes=900,
+                aria2_client=setup_client,
             )
-            db_task = result.first()
-            assert db_task is not None
-            assert db_task.status == "error"
-            assert db_task.error_display == "已取消"
+        )
+        second = asyncio.run(
+            create_user_download(
+                user_id=test_admin["id"],
+                quota_bytes=test_admin["quota_bytes"],
+                uri="https://example.com/shared-endpoint.bin",
+                resource_key="http:shared-endpoint",
+                resource_kind="http",
+                display_name="shared-endpoint.bin",
+                total_bytes=900,
+                aria2_client=setup_client,
+            )
+        )
+        cancel_client = AsyncMock()
+
+        with patch("app.routers.tasks._get_client", return_value=cancel_client):
+            response = authenticated_client.delete(f"/api/tasks/{first['id']}")
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+
+        global_download = asyncio.run(get_global_by_resource_key("http:shared-endpoint"))
+        first_task = asyncio.run(get_user_task(test_user["id"], first["global_download_id"]))
+        second_task = asyncio.run(
+            get_user_task(test_admin["id"], second["global_download_id"])
+        )
+
+        assert first_task is not None
+        assert first_task["status"] == "cancelled"
+        assert second_task is not None
+        assert second_task["status"] == "active"
+        assert global_download is not None
+        assert global_download["status"] == "active"
+        assert global_download["aria2_gid"] == "gid-shared-endpoint"
+        cancel_client.force_remove.assert_not_awaited()
+
+    def test_cancel_missing_v0_task_returns_404(
+        self,
+        authenticated_client: TestClient,
+    ) -> None:
+        response = authenticated_client.delete("/api/tasks/99999")
+
+        assert response.status_code == 404
+
+    def test_cancel_force_remove_failure_returns_502_and_keeps_retryable(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        task, _ = _create_download_for_user(
+            user=test_user,
+            resource_key="http:cancel-endpoint-failure",
+            uri="https://example.com/cancel-endpoint-failure.bin",
+            display_name="cancel-endpoint-failure.bin",
+            total_bytes=600,
+            gid="gid-cancel-endpoint-failure",
+        )
+        cancel_client = AsyncMock()
+        cancel_client.force_remove.side_effect = OSError("aria2 timeout")
+
+        with patch("app.routers.tasks._get_client", return_value=cancel_client):
+            response = authenticated_client.delete(f"/api/tasks/{task['id']}")
+
+        assert response.status_code == 502
+
+        stored_task = asyncio.run(
+            get_user_task(test_user["id"], task["global_download_id"])
+        )
+        usage = asyncio.run(
+            get_usage(test_user["id"], quota_bytes=test_user["quota_bytes"])
+        )
+
+        assert stored_task is not None
+        assert stored_task["status"] == "active"
+        assert stored_task["reserved_bytes"] == 600
+        assert usage["reserved_bytes"] == 600

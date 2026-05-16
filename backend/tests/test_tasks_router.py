@@ -579,6 +579,42 @@ class TestListTasks:
         assert response.status_code == 200
         assert response.json() == []
 
+    def test_list_tasks_returns_v0_user_tasks(
+        self, authenticated_client: TestClient, test_user: dict
+    ):
+        """Test listing v0 user_tasks created by the download service."""
+        import asyncio
+
+        from app.services.download_service import create_user_download
+
+        client = AsyncMock()
+        client.add_uri.return_value = "gid-list-v0"
+        task = asyncio.run(
+            create_user_download(
+                user_id=test_user["id"],
+                quota_bytes=test_user["quota_bytes"],
+                uri="https://example.com/list-v0.bin",
+                resource_key="http:list-v0",
+                resource_kind="http",
+                display_name="list-v0.bin",
+                total_bytes=1234,
+                aria2_client=client,
+            )
+        )
+
+        response = authenticated_client.get("/api/tasks")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["id"] == task["id"]
+        assert data[0]["task_id"] == task["global_download_id"]
+        assert data[0]["status"] == "active"
+        assert data[0]["name"] == "list-v0.bin"
+        assert data[0]["uri"] == "https://example.com/list-v0.bin"
+        assert data[0]["total_length"] == 1234
+        assert data[0]["frozen_space"] == 1234
+
     def test_list_tasks_with_status_filter(self, authenticated_client: TestClient):
         """Test listing tasks with status filter."""
         # Test various filters

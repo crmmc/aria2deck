@@ -1,92 +1,229 @@
-"""Tests for history router endpoints."""
-import pytest
-from datetime import datetime, timezone
-from fastapi.testclient import TestClient
+"""Tests for v0 history router endpoints."""
+from __future__ import annotations
 
-from app.db import execute
-from app.core.config import settings
+import asyncio
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import insert
+
+from app.db.engine import transaction
+from app.db.schema import global_downloads, user_tasks
+from tests.helpers_v0 import now_ms
+
+
+async def _create_user_task_row(
+    *,
+    user_id: int,
+    resource_key: str,
+    status: str,
+    name: str,
+    uri: str,
+    total_bytes: int = 1024,
+    reason: str | None = None,
+    created_at_ms: int | None = None,
+    finished_at_ms: int | None = None,
+) -> dict[str, Any]:
+    timestamp = now_ms()
+    if created_at_ms is None:
+        created_at_ms = timestamp
+    if finished_at_ms is None and status in {"completed", "failed", "cancelled"}:
+        finished_at_ms = timestamp + 1000
+
+    async with transaction() as conn:
+        download = (
+            await conn.execute(
+                insert(global_downloads)
+                .values(
+                    resource_key=resource_key,
+                    resource_kind="http",
+                    source_uri=uri,
+                    display_name=name,
+                    aria2_gid=None,
+                    status=status,
+                    total_bytes=total_bytes,
+                    completed_bytes=total_bytes if status == "completed" else 0,
+                    error_message=reason,
+                    created_at_ms=created_at_ms,
+                    updated_at_ms=finished_at_ms or created_at_ms,
+                    completed_at_ms=finished_at_ms if status == "completed" else None,
+                )
+                .returning(global_downloads)
+            )
+        ).mappings().one()
+        task = (
+            await conn.execute(
+                insert(user_tasks)
+                .values(
+                    user_id=user_id,
+                    global_download_id=download["id"],
+                    status=status,
+                    reserved_bytes=0,
+                    display_name=name,
+                    error_message=reason,
+                    created_at_ms=created_at_ms,
+                    updated_at_ms=finished_at_ms or created_at_ms,
+                    finished_at_ms=finished_at_ms,
+                )
+                .returning(user_tasks)
+            )
+        ).mappings().one()
+    return dict(task)
 
 
 @pytest.fixture
 def history_record(test_user: dict, temp_db: str) -> dict:
-    now = datetime.now(timezone.utc).isoformat()
-    record_id = execute(
-        """
-        INSERT INTO task_history (owner_id, task_name, uri, total_length, result, reason, created_at, finished_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [test_user["id"], "test_file.zip", "https://example.com/file.zip", 1024, "success", None, now, now]
+    return asyncio.run(
+        _create_user_task_row(
+            user_id=test_user["id"],
+            resource_key="http:history-record",
+            status="completed",
+            name="test_file.zip",
+            uri="https://example.com/file.zip",
+            total_bytes=1024,
+        )
     )
-    return {"id": record_id, "owner_id": test_user["id"], "task_name": "test_file.zip"}
 
 
 @pytest.fixture
 def other_user_history(test_admin: dict, temp_db: str) -> dict:
-    now = datetime.now(timezone.utc).isoformat()
-    record_id = execute(
-        """
-        INSERT INTO task_history (owner_id, task_name, uri, total_length, result, reason, created_at, finished_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [test_admin["id"], "admin_file.zip", "https://example.com/admin.zip", 2048, "success", None, now, now]
+    return asyncio.run(
+        _create_user_task_row(
+            user_id=test_admin["id"],
+            resource_key="http:admin-history-record",
+            status="completed",
+            name="admin_file.zip",
+            uri="https://example.com/admin.zip",
+            total_bytes=2048,
+        )
     )
-    return {"id": record_id, "owner_id": test_admin["id"], "task_name": "admin_file.zip"}
 
 
 class TestListHistory:
-
-    def test_list_history_empty(self, authenticated_client: TestClient):
+    def test_list_history_empty(self, authenticated_client: TestClient) -> None:
         response = authenticated_client.get("/api/history")
         assert response.status_code == 200
         assert response.json() == []
 
-    def test_list_history_with_records(self, authenticated_client: TestClient, history_record: dict):
+    def test_list_history_with_terminal_user_tasks(
+        self, authenticated_client: TestClient, history_record: dict
+    ) -> None:
         response = authenticated_client.get("/api/history")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
+        assert data[0]["id"] == history_record["id"]
         assert data[0]["task_name"] == "test_file.zip"
         assert data[0]["uri"] == "https://example.com/file.zip"
         assert data[0]["total_length"] == 1024
-        assert data[0]["result"] == "success"
+        assert data[0]["result"] == "completed"
+        assert isinstance(data[0]["created_at"], str)
+        assert isinstance(data[0]["finished_at"], str)
 
-    def test_list_history_user_isolation(self, authenticated_client: TestClient, other_user_history: dict):
+    def test_list_history_includes_failed_reason(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        asyncio.run(
+            _create_user_task_row(
+                user_id=test_user["id"],
+                resource_key="http:failed-history-record",
+                status="failed",
+                name="failed.zip",
+                uri="https://example.com/failed.zip",
+                reason="Connection timeout",
+            )
+        )
+
         response = authenticated_client.get("/api/history")
+
         assert response.status_code == 200
         data = response.json()
-        assert len(data) == 0
+        assert len(data) == 1
+        assert data[0]["result"] == "failed"
+        assert data[0]["reason"] == "Connection timeout"
 
-    def test_list_history_unauthorized(self, client: TestClient):
+    def test_list_history_ignores_active_user_tasks(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        asyncio.run(
+            _create_user_task_row(
+                user_id=test_user["id"],
+                resource_key="http:active-history-ignore",
+                status="active",
+                name="active.zip",
+                uri="https://example.com/active.zip",
+                finished_at_ms=None,
+            )
+        )
+
+        response = authenticated_client.get("/api/history")
+
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_list_history_user_isolation(
+        self, authenticated_client: TestClient, other_user_history: dict
+    ) -> None:
+        response = authenticated_client.get("/api/history")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_list_history_unauthorized(self, client: TestClient) -> None:
         response = client.get("/api/history")
         assert response.status_code == 401
 
 
 class TestDeleteSingleHistory:
-
-    def test_delete_history_success(self, authenticated_client: TestClient, history_record: dict):
+    def test_delete_history_success(
+        self, authenticated_client: TestClient, history_record: dict
+    ) -> None:
         response = authenticated_client.delete(f"/api/history/{history_record['id']}")
         assert response.status_code == 200
         assert response.json()["ok"] is True
 
         verify_response = authenticated_client.get("/api/history")
-        assert len(verify_response.json()) == 0
+        assert verify_response.json() == []
 
-    def test_delete_history_not_found(self, authenticated_client: TestClient):
+    def test_delete_history_not_found(self, authenticated_client: TestClient) -> None:
         response = authenticated_client.delete("/api/history/99999")
         assert response.status_code == 404
 
-    def test_delete_other_user_history(self, authenticated_client: TestClient, other_user_history: dict):
+    def test_delete_other_user_history(
+        self, authenticated_client: TestClient, other_user_history: dict
+    ) -> None:
         response = authenticated_client.delete(f"/api/history/{other_user_history['id']}")
         assert response.status_code == 404
 
-    def test_delete_history_unauthorized(self, client: TestClient, history_record: dict):
+    def test_delete_active_user_task_not_history(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        task = asyncio.run(
+            _create_user_task_row(
+                user_id=test_user["id"],
+                resource_key="http:active-delete-ignore",
+                status="active",
+                name="active.zip",
+                uri="https://example.com/active.zip",
+                finished_at_ms=None,
+            )
+        )
+
+        response = authenticated_client.delete(f"/api/history/{task['id']}")
+
+        assert response.status_code == 404
+
+    def test_delete_history_unauthorized(
+        self, client: TestClient, history_record: dict
+    ) -> None:
         response = client.delete(f"/api/history/{history_record['id']}")
         assert response.status_code == 401
 
 
 class TestClearHistory:
-
-    def test_clear_history_success(self, authenticated_client: TestClient, history_record: dict):
+    def test_clear_history_success(
+        self, authenticated_client: TestClient, history_record: dict
+    ) -> None:
         response = authenticated_client.delete("/api/history")
         assert response.status_code == 200
         data = response.json()
@@ -94,72 +231,73 @@ class TestClearHistory:
         assert data["count"] == 1
 
         verify_response = authenticated_client.get("/api/history")
-        assert len(verify_response.json()) == 0
+        assert verify_response.json() == []
 
-    def test_clear_history_empty(self, authenticated_client: TestClient):
+    def test_clear_history_empty(self, authenticated_client: TestClient) -> None:
         response = authenticated_client.delete("/api/history")
         assert response.status_code == 200
         data = response.json()
         assert data["ok"] is True
         assert data["count"] == 0
 
-    def test_clear_history_user_isolation(self, authenticated_client: TestClient, other_user_history: dict):
+    def test_clear_history_user_isolation(
+        self, authenticated_client: TestClient, other_user_history: dict
+    ) -> None:
         response = authenticated_client.delete("/api/history")
         assert response.status_code == 200
         assert response.json()["count"] == 0
 
-    def test_clear_history_unauthorized(self, client: TestClient):
+    def test_clear_history_unauthorized(self, client: TestClient) -> None:
         response = client.delete("/api/history")
         assert response.status_code == 401
 
-    def test_clear_history_multiple_records(self, authenticated_client: TestClient, test_user: dict, temp_db: str):
-        """Test clearing multiple history records - covers lines 74-78."""
-        now = datetime.now(timezone.utc).isoformat()
-        for i in range(5):
-            execute(
-                """
-                INSERT INTO task_history (owner_id, task_name, uri, total_length, result, reason, created_at, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [test_user["id"], f"file_{i}.zip", f"https://example.com/file_{i}.zip", 1024 * (i + 1), "success", None, now, now]
+    def test_clear_history_multiple_terminal_records(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        for index in range(5):
+            asyncio.run(
+                _create_user_task_row(
+                    user_id=test_user["id"],
+                    resource_key=f"http:clear-history-{index}",
+                    status="completed",
+                    name=f"file_{index}.zip",
+                    uri=f"https://example.com/file_{index}.zip",
+                    total_bytes=1024 * (index + 1),
+                )
             )
 
-        # Verify records exist
         list_response = authenticated_client.get("/api/history")
         assert len(list_response.json()) == 5
 
-        # Clear all
         response = authenticated_client.delete("/api/history")
         assert response.status_code == 200
         data = response.json()
         assert data["ok"] is True
         assert data["count"] == 5
 
-        # Verify all cleared
         verify_response = authenticated_client.get("/api/history")
-        assert len(verify_response.json()) == 0
+        assert verify_response.json() == []
 
 
 class TestHistoryListOrdering:
-    """Test history list ordering - covers line 24."""
-
-    def test_list_history_ordered_by_id_desc(self, authenticated_client: TestClient, test_user: dict, temp_db: str):
-        """Test that history records are returned in descending order by id."""
-        now = datetime.now(timezone.utc).isoformat()
-        for i in range(3):
-            execute(
-                """
-                INSERT INTO task_history (owner_id, task_name, uri, total_length, result, reason, created_at, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [test_user["id"], f"file_{i}.zip", f"https://example.com/file_{i}.zip", 1024, "success", None, now, now]
+    def test_list_history_ordered_by_id_desc(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        for index in range(3):
+            asyncio.run(
+                _create_user_task_row(
+                    user_id=test_user["id"],
+                    resource_key=f"http:ordered-history-{index}",
+                    status="completed",
+                    name=f"file_{index}.zip",
+                    uri=f"https://example.com/file_{index}.zip",
+                )
             )
 
         response = authenticated_client.get("/api/history")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 3
-        # Should be in descending order by id
         assert data[0]["task_name"] == "file_2.zip"
         assert data[1]["task_name"] == "file_1.zip"
         assert data[2]["task_name"] == "file_0.zip"

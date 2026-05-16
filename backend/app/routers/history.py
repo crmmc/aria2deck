@@ -3,43 +3,51 @@
 独立于活动任务，记录用户的下载历史。
 """
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlmodel import select
 
 from app.auth import require_user
-from app.database import get_session
-from app.models import TaskHistory, User
+from app.models import User
+from app.repositories.downloads import (
+    TERMINAL_USER_TASK_STATUSES,
+    clear_terminal_user_tasks,
+    delete_terminal_user_task,
+    list_user_tasks,
+)
 
 router = APIRouter(prefix="/api/history", tags=["history"])
 logger = logging.getLogger(__name__)
 
 
+def _ms_to_iso(timestamp_ms: int | None) -> str | None:
+    if timestamp_ms is None:
+        return None
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat()
+
+
 @router.get("")
 async def list_history(user: User = Depends(require_user)) -> list[dict]:
     """获取当前用户的任务历史"""
-    async with get_session() as db:
-        result = await db.exec(
-            select(TaskHistory)
-            .where(TaskHistory.owner_id == user.id)
-            .order_by(TaskHistory.id.desc())
-        )
-        records = result.all()
-
+    records = await list_user_tasks(user.id, TERMINAL_USER_TASK_STATUSES)
     logger.debug("查询历史记录 user_id=%s count=%s", user.id, len(records))
 
     return [
         {
-            "id": r.id,
-            "task_name": r.task_name,
-            "uri": r.uri,
-            "total_length": r.total_length,
-            "result": r.result,
-            "reason": r.reason,
-            "created_at": r.created_at,
-            "finished_at": r.finished_at,
+            "id": row["id"],
+            "task_name": row.get("display_name")
+            or row.get("global_display_name")
+            or "未知任务",
+            "uri": row.get("source_uri"),
+            "total_length": int(row.get("total_bytes") or 0),
+            "result": row["status"],
+            "reason": row.get("error_message") or row.get("global_error_message"),
+            "created_at": _ms_to_iso(row.get("created_at_ms")),
+            "finished_at": _ms_to_iso(
+                row.get("finished_at_ms") or row.get("completed_at_ms")
+            ),
         }
-        for r in records
+        for row in records
     ]
 
 
@@ -49,23 +57,13 @@ async def delete_history(
     user: User = Depends(require_user),
 ) -> dict:
     """删除单条历史记录"""
-    async with get_session() as db:
-        result = await db.exec(
-            select(TaskHistory).where(
-                TaskHistory.id == history_id,
-                TaskHistory.owner_id == user.id,
-            )
+    deleted = await delete_terminal_user_task(user.id, history_id)
+    if not deleted:
+        logger.warning("删除历史记录失败 user_id=%s history_id=%s reason=not_found", user.id, history_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="历史记录不存在",
         )
-        record = result.first()
-
-        if not record:
-            logger.warning("删除历史记录失败 user_id=%s history_id=%s reason=not_found", user.id, history_id)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="历史记录不存在"
-            )
-
-        await db.delete(record)
 
     logger.info("删除历史记录成功 user_id=%s history_id=%s", user.id, history_id)
 
@@ -75,15 +73,7 @@ async def delete_history(
 @router.delete("")
 async def clear_history(user: User = Depends(require_user)) -> dict:
     """清空当前用户的所有历史记录"""
-    async with get_session() as db:
-        result = await db.exec(
-            select(TaskHistory).where(TaskHistory.owner_id == user.id)
-        )
-        records = result.all()
-
-        count = len(records)
-        for r in records:
-            await db.delete(r)
+    count = await clear_terminal_user_tasks(user.id)
 
     logger.info("清空历史记录成功 user_id=%s count=%s", user.id, count)
 
