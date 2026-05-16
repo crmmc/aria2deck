@@ -16,17 +16,30 @@ from typing import Any, Protocol, Sequence
 from urllib.parse import unquote, urlsplit
 
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import select, func, col, update
+from sqlmodel import col, select
 
 from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
 from app.core.config import settings
 from app.core.security import mask_url_credentials
 from app.core.state import AppState
 from app.database import get_session
-from app.models import DownloadTask, TaskHistory, User, UserTaskSubscription, utc_now_str
+from app.models import DownloadTask, TaskHistory, UserTaskSubscription, utc_now_str
 from app.routers.config import get_min_free_disk
+from app.repositories import auth as auth_repo
+from app.repositories.downloads import (
+    ACTIVE_USER_TASK_STATUSES,
+    TERMINAL_USER_TASK_STATUSES,
+    delete_all_terminal_user_tasks,
+    delete_terminal_user_task,
+    delete_terminal_user_task_by_gid,
+    get_user_task_by_gid,
+    get_user_task_by_id,
+    list_user_tasks,
+)
+from app.services.download_service import cancel_user_task
 from app.services.hash import extract_info_hash_from_torrent_base64, get_uri_hash
-from app.services.storage import cleanup_task_download_dir, get_user_space_info
+from app.services import rpc_view_service
+from app.services.usage_service import get_usage
 
 
 logger = logging.getLogger(__name__)
@@ -192,37 +205,22 @@ class Aria2RpcHandler:
             return path
         return Path(path).name
 
-    async def _verify_task_owner(self, gid: str) -> tuple[DownloadTask, UserTaskSubscription] | None:
-        """检查 gid 对应的任务是否属于当前用户
-        Returns: (DownloadTask, UserTaskSubscription) 或 None
-        """
-        async with get_session() as db:
-            result = await db.exec(
-                select(DownloadTask, UserTaskSubscription)
-                .join(UserTaskSubscription, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
-                .where(
-                    DownloadTask.gid == gid,
-                    UserTaskSubscription.owner_id == self.user_id,
-                )
-            )
-            return result.first()
+    async def _verify_task_owner(self, gid: str) -> dict[str, Any] | None:
+        """Return the current user's v0 task row for an aria2 gid."""
+        return await get_user_task_by_gid(self.user_id, gid)
+
     async def _get_user_gids(self, sub_statuses: list[str] | None = None, task_statuses: list[str] | None = None) -> set[str]:
         """获取用户指定状态的任务 gid 集合"""
-        async with get_session() as db:
-            stmt = (
-                select(DownloadTask.gid)
-                .join(UserTaskSubscription, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
-                .where(
-                    UserTaskSubscription.owner_id == self.user_id,
-                    col(DownloadTask.gid).is_not(None),
-                )
-            )
-            if sub_statuses:
-                stmt = stmt.where(col(UserTaskSubscription.status).in_(sub_statuses))
-            if task_statuses:
-                stmt = stmt.where(col(DownloadTask.status).in_(task_statuses))
-            result = await db.exec(stmt)
-            return self._normalize_gid_collection(result.all())
+        rows = await list_user_tasks(self.user_id, sub_statuses)
+        gids: set[str] = set()
+        for row in rows:
+            gid = row.get("aria2_gid")
+            if not gid:
+                continue
+            if task_statuses and row.get("global_status") not in task_statuses:
+                continue
+            gids.add(str(gid))
+        return gids
 
     @staticmethod
     def _extract_scalar_value(value: Any) -> Any:
@@ -638,13 +636,21 @@ class Aria2RpcHandler:
 
     async def _get_user_available_space(self) -> int:
         """获取用户实际可用空间"""
-        async with get_session() as db:
-            result = await db.exec(select(User.quota).where(User.id == self.user_id))
-            user_quota = self._to_int_scalar(result.first(), default=0)
-        if user_quota <= 0:
+        user = await auth_repo.get_user_by_id(self.user_id)
+        if user is None:
             return 0
-        space_info = await get_user_space_info(self.user_id, user_quota)
-        return space_info["available"]
+        quota_bytes = int(user["quota_bytes"])
+        if quota_bytes <= 0:
+            return 0
+        usage = await get_usage(self.user_id, quota_bytes)
+        download_path = Path(settings.download_dir)
+        download_path.mkdir(parents=True, exist_ok=True)
+        disk_free = shutil.disk_usage(download_path).free
+        return min(int(usage["available_bytes"]), disk_free)
+
+    async def _get_user_quota(self) -> int:
+        user = await auth_repo.get_user_by_id(self.user_id)
+        return int(user["quota_bytes"]) if user else 0
     def _check_disk_space(self) -> tuple[bool, int]:
         """检查磁盘空间是否足够"""
         download_path = Path(settings.download_dir)
@@ -690,26 +696,11 @@ class Aria2RpcHandler:
             idx -= 1
         return result
 
-    async def _get_task_pair_by_task_id(self, task_id: int) -> tuple[DownloadTask, UserTaskSubscription] | None:
-        async with get_session() as db:
-            stmt = (
-                select(DownloadTask, UserTaskSubscription)
-                .join(UserTaskSubscription, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
-                .where(
-                    DownloadTask.id == task_id,
-                    UserTaskSubscription.owner_id == self.user_id,
-                )
-                .order_by(col(UserTaskSubscription.id).desc())
-            )
-            result = await db.exec(stmt)
-            return result.first()
+    async def _get_task_pair_by_task_id(self, task_id: int) -> dict[str, Any] | None:
+        return await get_user_task_by_id(self.user_id, task_id)
 
     async def _get_history_status(self, history_id: int) -> dict | None:
-        async with get_session() as db:
-            history = await db.get(TaskHistory, history_id)
-        if history is None or history.owner_id != self.user_id:
-            return None
-        return self._build_status_from_history(history)
+        return None
 
     async def _get_special_gid_status(self, gid: str) -> dict | None:
         _, task_id, history_id = self._parse_history_gid(gid)
@@ -717,11 +708,10 @@ class Aria2RpcHandler:
             return await self._get_history_status(history_id)
         if task_id is None:
             return None
-        pair = await self._get_task_pair_by_task_id(task_id)
-        if pair is None:
+        row = await self._get_task_pair_by_task_id(task_id)
+        if row is None:
             return None
-        task, sub = pair
-        return self._build_status_from_db(task, sub)
+        return rpc_view_service.status_from_task(row)
 
     async def _resolve_special_gid_status(self, gid: str) -> dict | None:
         if not gid.startswith(SPECIAL_GID_PREFIXES):
@@ -731,19 +721,14 @@ class Aria2RpcHandler:
     async def _get_special_gid_source_uri(self, gid: str) -> str | None:
         _, task_id, history_id = self._parse_history_gid(gid)
         if history_id is not None:
-            async with get_session() as db:
-                history = await db.get(TaskHistory, history_id)
-            if history is None or history.owner_id != self.user_id:
-                return None
-            return history.uri
+            return None
 
         if task_id is None:
             return None
-        pair = await self._get_task_pair_by_task_id(task_id)
-        if pair is None:
+        row = await self._get_task_pair_by_task_id(task_id)
+        if row is None:
             return None
-        task, _ = pair
-        return task.uri
+        return str(row.get("source_uri") or "")
 
     async def _get_pending_task_pairs(self, task_statuses: list[str]) -> list[tuple[DownloadTask, UserTaskSubscription]]:
         async with get_session() as db:
@@ -1227,83 +1212,16 @@ class Aria2RpcHandler:
         """aria2.remove(gid)"""
         if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
-        gid = params[0]
-        pair = await self._verify_task_owner(gid)
-        if not pair:
+        gid = str(params[0])
+        row = await self._verify_task_owner(gid)
+        if row is None or row["status"] not in ACTIVE_USER_TASK_STATUSES:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-        task, sub = pair
-        if sub.status != "pending":
-            raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-        is_active_cancel = task.status in ("queued", "active")
-        if sub.id is None:
-            raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Subscription id missing")
-        if task.id is None:
-            raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Task id missing")
-
-        task_id = task.id
-        remaining_count = 0
-        async with get_session() as db:
-            db_sub = await db.get(UserTaskSubscription, sub.id)
-            if db_sub:
-                await db.delete(db_sub)
-
-            result = await db.exec(
-                select(func.count()).select_from(UserTaskSubscription).where(
-                    UserTaskSubscription.task_id == task_id,
-                    UserTaskSubscription.status == "pending",
-                )
-            )
-            remaining_count = self._to_int_scalar(result.one(), default=0)
-
-        # 写历史记录
-        if is_active_cancel:
-            from app.services.history import add_task_history
-            await add_task_history(
-                owner_id=self.user_id,
-                task_name=task.name or task.uri or "",
-                result="cancelled",
-                reason="用户取消",
-                uri=task.uri,
-                total_length=task.total_length,
-                created_at=sub.created_at,
-            )
-
-        if remaining_count == 0:
-            lock = await self._get_task_submit_lock(task_id)
-            async with lock:
-                async with get_session() as db:
-                    result = await db.exec(
-                        select(func.count()).select_from(UserTaskSubscription).where(
-                            UserTaskSubscription.task_id == task_id,
-                            UserTaskSubscription.status == "pending",
-                        )
-                    )
-                    still_pending = self._to_int_scalar(result.one(), default=0)
-                    if still_pending != 0:
-                        return gid
-
-                    db_task = await db.get(DownloadTask, task_id)
-
-                async with get_session() as db:
-                    latest_task = await db.get(DownloadTask, task_id)
-                    if latest_task is not None and latest_task.status in CANCELABLE_TASK_STATUSES:
-                        latest_task.gid = None
-                        latest_task.status = "error"
-                        latest_task.error_display = "已取消"
-                        latest_task.updated_at = utc_now_str()
-                        db.add(latest_task)
-
-                # Clean up via unified entry point
-                from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
-                await cleanup_failed_task_artifacts(
-                    client=self.client,
-                    task_id=task_id,
-                    gid=db_task.gid if db_task else None,
-                    owner_id=self.user_id,
-                    log_prefix="[RPC]",
-                    skip_status_check=True,
-                )
-
+        await cancel_user_task(
+            user_id=self.user_id,
+            user_task_id=int(row["id"]),
+            quota_bytes=await self._get_user_quota(),
+            aria2_client=self.client,
+        )
         return gid
     async def _handle_force_remove(self, params: list) -> str:
         """aria2.forceRemove(gid) - 同 remove"""
@@ -1319,24 +1237,22 @@ class Aria2RpcHandler:
         if special_status is not None:
             return self._apply_status_keys(special_status, keys)
 
-        pair = await self._verify_task_owner(gid)
-        if not pair:
+        row = await self._verify_task_owner(gid)
+        if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-        task, sub = pair
-        # 尝试从 aria2 获取实时数据
+
+        live: dict[str, Any] = {}
         try:
             status = await self.client.tell_status(gid)
-            response = self._sanitize_status(status)
-            response = self._enrich_status_files_from_task(response, task)
+            live = self._sanitize_status(status)
         except Exception as exc:
-            # aria2 中已不存在（已完成/失败），从 DB 构造
             logger.debug(
                 "Fallback to DB status for gid=%s user_id=%s",
                 gid,
                 self.user_id,
                 exc_info=exc,
             )
-            response = self._build_status_from_db(task, sub)
+        response = rpc_view_service.status_from_task(row, live)
         return self._apply_status_keys(response, keys)
 
     def _build_status_from_db(self, task: DownloadTask, sub: UserTaskSubscription) -> dict:
@@ -1384,9 +1300,7 @@ class Aria2RpcHandler:
     async def _handle_tell_active(self, params: list) -> list:
         """aria2.tellActive([keys])"""
         keys = self._extract_status_keys(params, 0)
-        user_gids = await self._get_user_gids(sub_statuses=["pending"])
-        if not user_gids:
-            return []
+        live_by_gid: dict[str, dict[str, Any]] = {}
         try:
             all_active = await self.client.tell_active()
         except Exception as exc:
@@ -1396,99 +1310,38 @@ class Aria2RpcHandler:
                 exc_info=exc,
             )
         else:
-            active_statuses = [self._sanitize_status(t) for t in all_active if t.get("gid") in user_gids]
-            if active_statuses:
-                status_gids = self._extract_gids_from_statuses(active_statuses)
-                task_map = await self._get_pending_task_map(status_gids)
-                enriched_statuses = self._enrich_statuses_with_task_map(active_statuses, task_map)
-                return self._apply_status_keys_to_list(enriched_statuses, keys)
-
-        fallback_pairs = await self._get_pending_task_pairs(["active"])
-        fallback_statuses = [self._build_status_from_db(task, sub) for task, sub in fallback_pairs]
-        return self._apply_status_keys_to_list(fallback_statuses, keys)
+            live_by_gid = {
+                str(row["gid"]): self._sanitize_status(row)
+                for row in all_active
+                if row.get("gid")
+            }
+        statuses = await rpc_view_service.list_active_statuses(self.user_id, live_by_gid)
+        return self._apply_status_keys_to_list(statuses, keys)
 
     async def _handle_tell_waiting(self, params: list) -> list:
         """aria2.tellWaiting(offset, num[, keys])"""
         offset, num = self._normalize_pagination(params)
         keys = self._extract_status_keys(params, 2)
-        user_gids = await self._get_user_gids(sub_statuses=["pending"])
-        if not user_gids:
-            return []
-        try:
-            all_waiting = await self._fetch_waiting_tasks()
-        except Exception as exc:
-            logger.warning(
-                "aria2.tellWaiting failed for user_id=%s",
-                self.user_id,
-                exc_info=exc,
-            )
-        else:
-            filtered = [self._sanitize_status(t) for t in all_waiting if t.get("gid") in user_gids]
-            if filtered:
-                sliced = self._slice_with_offset(filtered, offset, num)
-                status_gids = self._extract_gids_from_statuses(sliced)
-                task_map = await self._get_pending_task_map(status_gids)
-                enriched_statuses = self._enrich_statuses_with_task_map(sliced, task_map)
-                return self._apply_status_keys_to_list(enriched_statuses, keys)
-
-        fallback_pairs = await self._get_pending_task_pairs(["queued", "waiting", "paused"])
-        fallback_statuses = [self._build_status_from_db(task, sub) for task, sub in fallback_pairs]
-        sliced_fallback = self._slice_with_offset(fallback_statuses, offset, num)
-        return self._apply_status_keys_to_list(sliced_fallback, keys)
+        statuses = await rpc_view_service.list_waiting_statuses(self.user_id)
+        sliced = self._slice_with_offset(statuses, offset, num)
+        return self._apply_status_keys_to_list(sliced, keys)
 
     async def _handle_tell_stopped(self, params: list) -> list:
         """aria2.tellStopped(offset, num[, keys])"""
         offset, num = self._normalize_pagination(params)
         keys = self._extract_status_keys(params, 2)
-
-        async with get_session() as db:
-            stmt = (
-                select(TaskHistory)
-                .where(
-                    TaskHistory.owner_id == self.user_id,
-                )
-                .order_by(col(TaskHistory.id).asc())
-            )
-            result = await db.exec(stmt)
-            rows = result.all()
-
-        sliced_rows = self._slice_with_offset(rows, offset, num)
-        stopped_statuses = [self._build_status_from_history(history) for history in sliced_rows]
-        return self._apply_status_keys_to_list(stopped_statuses, keys)
+        statuses = await rpc_view_service.list_stopped_statuses(self.user_id)
+        sliced = self._slice_with_offset(statuses, offset, num)
+        return self._apply_status_keys_to_list(sliced, keys)
     async def _handle_get_global_stat(self, params: list) -> dict:
         """aria2.getGlobalStat()"""
-        # 用户级别统计
-        async with get_session() as db:
-            # active: subscription pending + task active
-            r_active = await db.exec(
-                select(func.count()).select_from(UserTaskSubscription)
-                .join(DownloadTask, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
-                .where(
-                    UserTaskSubscription.owner_id == self.user_id,
-                    UserTaskSubscription.status == "pending",
-                    DownloadTask.status == "active",
-                )
-            )
-            num_active = self._to_int_scalar(r_active.one(), default=0)
-            # waiting: subscription pending + task queued/waiting
-            r_waiting = await db.exec(
-                select(func.count()).select_from(UserTaskSubscription)
-                .join(DownloadTask, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
-                .where(
-                    UserTaskSubscription.owner_id == self.user_id,
-                    UserTaskSubscription.status == "pending",
-                    col(DownloadTask.status).in_(["queued", "waiting"]),
-                )
-            )
-            num_waiting = self._to_int_scalar(r_waiting.one(), default=0)
-            # stopped
-            r_stopped = await db.exec(
-                select(func.count()).select_from(TaskHistory).where(
-                    TaskHistory.owner_id == self.user_id,
-                )
-            )
-            num_stopped = self._to_int_scalar(r_stopped.one(), default=0)
-        # 获取全局速度
+        active_rows = await list_user_tasks(self.user_id, ["active"])
+        waiting_rows = await list_user_tasks(self.user_id, ["queued", "waiting", "paused"])
+        stopped_rows = await list_user_tasks(self.user_id, TERMINAL_USER_TASK_STATUSES)
+        num_active = len(active_rows)
+        num_waiting = len(waiting_rows)
+        num_stopped = len(stopped_rows)
+
         try:
             global_stat = await self.client.get_global_stat()
             download_speed = global_stat.get("downloadSpeed", "0")
@@ -1519,12 +1372,14 @@ class Aria2RpcHandler:
             if special_status is None:
                 raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
             return self._sanitize_files(special_status.get("files"))
-        pair = await self._verify_task_owner(gid)
-        if not pair:
+        row = await self._verify_task_owner(gid)
+        if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
         try:
             files = await self.client.get_files(gid)
-            return self._sanitize_files(files)
+            sanitized = self._sanitize_files(files)
+            if sanitized and self._status_has_file_name({"files": sanitized}):
+                return sanitized
         except Exception as exc:
             logger.warning(
                 "aria2.getFiles failed for gid=%s user_id=%s",
@@ -1532,7 +1387,7 @@ class Aria2RpcHandler:
                 self.user_id,
                 exc_info=exc,
             )
-            return []
+        return self._sanitize_files(rpc_view_service.status_from_task(row).get("files"))
     async def _handle_get_uris(self, params: list) -> list:
         """aria2.getUris(gid)"""
         if not params:
@@ -1546,8 +1401,8 @@ class Aria2RpcHandler:
             if not source_uri:
                 return []
             return self._sanitize_uris([{"uri": source_uri, "status": "used"}])
-        pair = await self._verify_task_owner(gid)
-        if not pair:
+        row = await self._verify_task_owner(gid)
+        if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
         try:
             uris = await self.client.get_uris(gid)
@@ -1559,7 +1414,8 @@ class Aria2RpcHandler:
                 self.user_id,
                 exc_info=exc,
             )
-            return []
+            source_uri = row.get("source_uri")
+            return self._sanitize_uris([{"uri": source_uri, "status": "used"}]) if source_uri else []
     async def _handle_get_version(self, params: list) -> dict:
         """aria2.getVersion()"""
         try:
@@ -1580,72 +1436,19 @@ class Aria2RpcHandler:
         if not isinstance(gid_param, str):
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid must be a string")
         gid, task_id, history_id = self._parse_history_gid(gid_param)
-        async with get_session() as db:
-            if history_id is not None:
-                history = await db.get(TaskHistory, history_id)
-                if history is None or history.owner_id != self.user_id:
-                    raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid_param}")
-                await db.delete(history)
-                await db.commit()
-                return "OK"
-
-            stmt = (
-                select(UserTaskSubscription)
-                .join(DownloadTask, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
-                .where(
-                    UserTaskSubscription.owner_id == self.user_id,
-                    col(UserTaskSubscription.status).in_(["success", "failed"]),
-                    col(DownloadTask.status).in_(["complete", "error"]),
-                )
-            )
-            if task_id is not None:
-                stmt = stmt.where(DownloadTask.id == task_id)
-            else:
-                stmt = stmt.where(DownloadTask.gid == gid)
-
-            result = await db.exec(stmt)
-            sub = result.first()
-            if not sub:
-                raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid_param}")
-
-            task = await db.get(DownloadTask, sub.task_id)
-            await db.delete(sub)
-
-            if task is not None:
-                history_stmt = (
-                    select(TaskHistory)
-                    .where(
-                        TaskHistory.owner_id == self.user_id,
-                        TaskHistory.uri == task.uri,
-                    )
-                    .order_by(col(TaskHistory.id).desc())
-                )
-                history = (await db.exec(history_stmt)).first()
-                if history is not None:
-                    await db.delete(history)
-
-            await db.commit()
+        if history_id is not None:
+            raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid_param}")
+        deleted = (
+            await delete_terminal_user_task(self.user_id, task_id)
+            if task_id is not None
+            else await delete_terminal_user_task_by_gid(self.user_id, str(gid))
+        )
+        if not deleted:
+            raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid_param}")
         return "OK"
     async def _handle_purge_download_result(self, params: list) -> str:
         """aria2.purgeDownloadResult() - 删除用户所有 stopped 订阅"""
-        async with get_session() as db:
-            result = await db.exec(
-                select(UserTaskSubscription).where(
-                    UserTaskSubscription.owner_id == self.user_id,
-                    col(UserTaskSubscription.status).in_(["success", "failed"]),
-                )
-            )
-            subs = result.all()
-            for sub in subs:
-                await db.delete(sub)
-
-            history_result = await db.exec(
-                select(TaskHistory).where(TaskHistory.owner_id == self.user_id)
-            )
-            for history in history_result.all():
-                await db.delete(history)
-
-            await db.commit()
+        await delete_all_terminal_user_tasks(self.user_id)
         return "OK"
     # ========== 静默返回的方法（不支持但不报错） ==========
     async def _handle_pause(self, params: list) -> str:
@@ -1682,8 +1485,8 @@ class Aria2RpcHandler:
             if special_status is None:
                 raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
             return []
-        pair = await self._verify_task_owner(gid)
-        if not pair:
+        row = await self._verify_task_owner(gid)
+        if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
         try:
             peers = await self.client.get_peers(gid)
@@ -1705,8 +1508,8 @@ class Aria2RpcHandler:
             if special_status is None:
                 raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
             return []
-        pair = await self._verify_task_owner(gid)
-        if not pair:
+        row = await self._verify_task_owner(gid)
+        if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
         try:
             server_groups = await self.client.get_servers(gid)

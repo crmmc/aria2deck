@@ -121,6 +121,19 @@ async def get_user_task_by_id(user_id: int, user_task_id: int) -> dict[str, Any]
     return dict(row) if row else None
 
 
+async def get_user_task_by_gid(user_id: int, gid: str) -> dict[str, Any] | None:
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                _user_task_download_select().where(
+                    user_tasks.c.user_id == user_id,
+                    global_downloads.c.aria2_gid == gid,
+                )
+            )
+        ).mappings().first()
+    return dict(row) if row else None
+
+
 async def list_user_tasks(
     user_id: int,
     statuses: Iterable[str] | None = None,
@@ -133,6 +146,35 @@ async def list_user_tasks(
     async with transaction() as conn:
         rows = (await conn.execute(query)).mappings().all()
     return [dict(row) for row in rows]
+
+
+async def delete_all_terminal_user_tasks(user_id: int) -> int:
+    async with transaction() as conn:
+        result = await conn.execute(
+            delete(user_tasks).where(
+                user_tasks.c.user_id == user_id,
+                user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES),
+            )
+        )
+    return int(result.rowcount or 0)
+
+
+async def delete_terminal_user_task_by_gid(user_id: int, gid: str) -> bool:
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                delete(user_tasks)
+                .where(user_tasks.c.user_id == user_id)
+                .where(user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES))
+                .where(
+                    user_tasks.c.global_download_id.in_(
+                        select(global_downloads.c.id).where(global_downloads.c.aria2_gid == gid)
+                    )
+                )
+                .returning(user_tasks.c.id)
+            )
+        ).first()
+    return row is not None
 
 
 async def list_user_tasks_for_download(

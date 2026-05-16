@@ -1,25 +1,33 @@
 """Tests for aria2 RPC router."""
+import asyncio
 import base64
 import json
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 
-from app.db import execute
+from app.db.engine import transaction
+from app.db.schema import users
+from tests.helpers_v0 import create_user_v0, now_ms
 
 
 @pytest.fixture
 def rpc_user(temp_db: str) -> dict:
-    from app.core.security import hash_password
-    from datetime import datetime, timezone
-    user_id = execute(
-        """
-        INSERT INTO users (username, password_hash, is_admin, created_at, quota, rpc_secret)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        ["rpcuser", hash_password("testpass"), 0, datetime.now(timezone.utc).isoformat(),
-         100 * 1024 * 1024 * 1024, "test_rpc_secret_123"]
-    )
-    return {"id": user_id, "username": "rpcuser", "rpc_secret": "test_rpc_secret_123"}
+    async def create() -> dict:
+        user = await create_user_v0(username="rpcuser")
+        async with transaction() as conn:
+            await conn.execute(
+                update(users)
+                .where(users.c.id == user["id"])
+                .values(
+                    rpc_secret="test_rpc_secret_123",
+                    rpc_secret_created_at_ms=now_ms(),
+                    updated_at_ms=now_ms(),
+                )
+            )
+        return {**user, "rpc_secret": "test_rpc_secret_123"}
+
+    return asyncio.run(create())
 
 
 class TestRpcRateLimiter:
@@ -388,26 +396,11 @@ class TestGetUserByRpcSecret:
         user = await get_user_by_rpc_secret("nonexistent_secret")
         assert user is None
 
-    async def test_get_user_duplicate_secret_returns_none(self, temp_db: str):
-        from app.core.security import hash_password
-        from datetime import datetime, timezone
+    async def test_get_user_returns_quota_aliases(self, temp_db: str, rpc_user: dict):
         from app.routers.aria2_rpc import get_user_by_rpc_secret
 
-        duplicate_secret = "dup_secret_for_rpc_test"
-        execute(
-            """
-            INSERT INTO users (username, password_hash, is_admin, created_at, quota, rpc_secret)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            ["dup_user_1", hash_password("p1"), 0, datetime.now(timezone.utc).isoformat(), 10 * 1024**3, duplicate_secret],
-        )
-        execute(
-            """
-            INSERT INTO users (username, password_hash, is_admin, created_at, quota, rpc_secret)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            ["dup_user_2", hash_password("p2"), 0, datetime.now(timezone.utc).isoformat(), 10 * 1024**3, duplicate_secret],
-        )
+        user = await get_user_by_rpc_secret(rpc_user["rpc_secret"])
 
-        user = await get_user_by_rpc_secret(duplicate_secret)
-        assert user is None
+        assert user is not None
+        assert user["quota"] == rpc_user["quota_bytes"]
+        assert user["quota_bytes"] == rpc_user["quota_bytes"]
