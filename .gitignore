@@ -63,7 +63,8 @@ Thumbs.db
 AGENTS.md
 
 # Development docs (not for repo)
-docs/
+docs/*
+!docs/screenshots/
 PRD_Tracking/
 审查报告.md
 边界问题集.md
