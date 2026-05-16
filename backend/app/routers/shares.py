@@ -1,21 +1,19 @@
-"""文件分享接口
+"""文件分享接口"""
+from __future__ import annotations
 
-已认证端点：分享管理（CRUD + 批量失效）
-公开端点：分享访问（信息/密码验证/下载/浏览）
-"""
 import logging
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-
-from sqlalchemy import or_
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import col, select, func
 
-from app.auth import require_user
+from app.auth import AuthUser, require_user
 from app.core.config import settings
 from app.core.download_limiter import download_limiter
 from app.core.request_rate_guard import (
@@ -25,8 +23,16 @@ from app.core.request_rate_guard import (
     ensure_share_access_allowed,
 )
 from app.core.security import hash_password, verify_password
-from app.database import get_session
-from app.models import ShareLink, StoredFile, User, UserFile, utc_now, utc_now_str
+from app.db.engine import transaction
+from app.db.schema import share_links, stored_files, user_files
+from app.routers.files import (
+    _directory_entries,
+    _normalize_entry_parent,
+    _range_file_response,
+    _tracked_response,
+    _validate_subpath,
+    ms_to_iso,
+)
 from app.schemas import (
     CreateShareRequest,
     ShareAccessRequest,
@@ -34,293 +40,268 @@ from app.schemas import (
     ShareInfoOut,
     ShareLinkOut,
 )
-from app.routers.files import _validate_subpath, _range_file_response, _tracked_response
 
 router = APIRouter(tags=["shares"])
 logger = logging.getLogger(__name__)
 
-# 每文件最大活跃分享数
 MAX_ACTIVE_SHARES_PER_FILE = 10
-
-# JWT 配置
 SHARE_TOKEN_EXPIRE_MINUTES = 30
 
-def _is_share_active(share: ShareLink) -> bool:
-    """判断分享是否有效（状态 + 过期 + 次数）"""
-    if share.status != "active":
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _share_select():
+    return select(
+        share_links,
+        user_files.c.display_name.label("file_name"),
+        user_files.c.stored_file_id,
+        stored_files.c.content_hash,
+        stored_files.c.real_path,
+        stored_files.c.size_bytes,
+        stored_files.c.is_directory,
+    ).select_from(
+        share_links.join(user_files, share_links.c.user_file_id == user_files.c.id)
+        .join(stored_files, user_files.c.stored_file_id == stored_files.c.id)
+    )
+
+
+def _is_share_active(share: dict[str, Any]) -> bool:
+    if share["status"] != "active":
         return False
-    if share.expires_at:
-        try:
-            exp = datetime.fromisoformat(share.expires_at)
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            if exp <= utc_now():
-                return False
-        except ValueError:
-            return False
-    if share.max_downloads is not None and share.download_count >= share.max_downloads:
+    expires_at_ms = share["expires_at_ms"]
+    if expires_at_ms is not None and int(expires_at_ms) <= now_ms():
+        return False
+    max_downloads = share["max_downloads"]
+    if max_downloads is not None and int(share["download_count"]) >= int(max_downloads):
         return False
     return True
 
 
-def _share_to_out(share: ShareLink, file_name: str, file_size: int) -> ShareLinkOut:
+def _share_to_out(share: dict[str, Any], file_name: str, file_size: int) -> ShareLinkOut:
     return ShareLinkOut(
-        id=share.id,  # type: ignore[arg-type]
-        share_code=share.share_code,
+        id=int(share["id"]),
+        share_code=share["share_code"],
         file_name=file_name,
         file_size=file_size,
-        has_password=share.password_hash is not None,
-        expires_at=share.expires_at,
-        max_downloads=share.max_downloads,
-        download_count=share.download_count,
-        status=share.status,
-        created_at=share.created_at,
-        last_accessed_at=share.last_accessed_at,
+        has_password=share["password_hash"] is not None,
+        expires_at=ms_to_iso(share["expires_at_ms"]),
+        max_downloads=share["max_downloads"],
+        download_count=int(share["download_count"]),
+        status=share["status"],
+        created_at=ms_to_iso(share["created_at_ms"]) or "",
+        last_accessed_at=ms_to_iso(share["last_accessed_at_ms"]),
     )
 
 
 def _generate_share_code() -> str:
-    """生成 8 字符 URL-safe 短码"""
     return secrets.token_urlsafe(6)[:8]
 
 
 def _create_access_token(share_code: str) -> str:
-    """为有密码的分享签发短期 JWT"""
     payload = {
         "sub": share_code,
-        "exp": utc_now() + timedelta(minutes=SHARE_TOKEN_EXPIRE_MINUTES),
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=SHARE_TOKEN_EXPIRE_MINUTES),
         "type": "share_access",
     }
     return jwt.encode(payload, settings.secret_key, algorithm="HS256")
 
 
 def _verify_access_token(share_code: str, token: str) -> bool:
-    """验证分享访问 token"""
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=["HS256"])
-        return (
-            payload.get("sub") == share_code
-            and payload.get("type") == "share_access"
-        )
+        return payload.get("sub") == share_code and payload.get("type") == "share_access"
     except jwt.PyJWTError:
         return False
-# ========== 已认证端点：分享管理 ==========
+
+
+async def _get_owned_file(user_id: int, user_file_id: int) -> dict[str, Any] | None:
+    stmt = (
+        select(
+            user_files.c.id.label("user_file_id"),
+            user_files.c.display_name,
+            stored_files.c.size_bytes,
+        )
+        .select_from(user_files.join(stored_files, user_files.c.stored_file_id == stored_files.c.id))
+        .where(user_files.c.id == user_file_id, user_files.c.user_id == user_id)
+    )
+    async with transaction() as conn:
+        row = (await conn.execute(stmt)).mappings().first()
+    return dict(row) if row else None
+
+
 @router.post("/api/shares", status_code=status.HTTP_201_CREATED)
 async def create_share(
     req: CreateShareRequest,
-    user: User = Depends(require_user),
+    user: AuthUser = Depends(require_user),
 ) -> ShareLinkOut:
-    """创建文件分享链接"""
-    async with get_session() as db:
-        # 查找用户文件
-        result = await db.exec(
-            select(UserFile).where(
-                UserFile.id == req.user_file_id,
-                UserFile.owner_id == user.id,
+    user_file = await _get_owned_file(user.id, req.user_file_id)
+    if not user_file:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
+
+    timestamp = now_ms()
+    async with transaction() as conn:
+        active_count = (
+            await conn.execute(
+                select(func.count()).select_from(share_links).where(
+                    share_links.c.user_file_id == req.user_file_id,
+                    share_links.c.status == "active",
+                    (share_links.c.expires_at_ms.is_(None) | (share_links.c.expires_at_ms > timestamp)),
+                    (
+                        share_links.c.max_downloads.is_(None)
+                        | (share_links.c.download_count < share_links.c.max_downloads)
+                    ),
+                )
             )
-        )
-        user_file = result.first()
-        if not user_file:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
-        # 检查活跃分享数上限
-        now_str = utc_now_str()
-        active_count_result = await db.exec(
-            select(func.count()).select_from(ShareLink).where(
-                ShareLink.user_file_id == req.user_file_id,
-                ShareLink.status == "active",
-                or_(col(ShareLink.expires_at).is_(None), col(ShareLink.expires_at) > now_str),
-                or_(
-                    col(ShareLink.max_downloads).is_(None),
-                    col(ShareLink.download_count) < col(ShareLink.max_downloads),
-                ),
-            )
-        )
-        active_count = active_count_result.one()
-        if active_count >= MAX_ACTIVE_SHARES_PER_FILE:
+        ).scalar_one()
+        if int(active_count or 0) >= MAX_ACTIVE_SHARES_PER_FILE:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                f"每个文件最多 {MAX_ACTIVE_SHARES_PER_FILE} 个活跃分享"
+                f"每个文件最多 {MAX_ACTIVE_SHARES_PER_FILE} 个活跃分享",
             )
-        # 生成分享码并创建（重试以处理并发冲突）
-        max_retries = 5
-        share: ShareLink | None = None
-        for attempt in range(max_retries):
-            code = _generate_share_code()
-            # 计算过期时间
-            expires_at = None
-            if req.expires_in:
-                expires_at = (utc_now() + timedelta(seconds=req.expires_in)).isoformat()
-            # 密码哈希
-            pwd_hash = hash_password(req.password) if req.password else None
-            share = ShareLink(
-                share_code=code,
-                owner_id=user.id,  # type: ignore[arg-type]
-                user_file_id=req.user_file_id,
-                password_hash=pwd_hash,
-                expires_at=expires_at,
-                max_downloads=req.max_downloads,
-                created_at=now_str,
-            )
-            db.add(share)
+
+        share: dict[str, Any] | None = None
+        for attempt in range(5):
+            expires_at_ms = timestamp + req.expires_in * 1000 if req.expires_in else None
             try:
-                await db.flush()
+                share = (
+                    await conn.execute(
+                        insert(share_links)
+                        .values(
+                            share_code=_generate_share_code(),
+                            owner_id=user.id,
+                            user_file_id=req.user_file_id,
+                            password_hash=hash_password(req.password) if req.password else None,
+                            expires_at_ms=expires_at_ms,
+                            max_downloads=req.max_downloads,
+                            download_count=0,
+                            status="active",
+                            created_at_ms=timestamp,
+                        )
+                        .returning(share_links)
+                    )
+                ).mappings().one()
+                share = dict(share)
                 break
             except IntegrityError:
-                await db.rollback()
-                if attempt == max_retries - 1:
-                    raise HTTPException(
-                        status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        "分享码生成失败，请重试"
-                    )
-                continue
+                if attempt == 4:
+                    raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "分享码生成失败，请重试")
 
-        # 获取文件信息用于响应
-        file_name = user_file.display_name or "未命名"
-        # 获取文件大小需要查 StoredFile
-        stored = await db.exec(
-            select(StoredFile).where(StoredFile.id == user_file.stored_file_id)
-        )
-        sf = stored.first()
-        file_size = sf.size if sf else 0
     if share is None:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "分享创建失败")
-    logger.info(
-        "创建分享 user_id=%s file_id=%s code=%s",
-        user.id, req.user_file_id, code,
-    )
-    return _share_to_out(share, file_name, file_size)
+    logger.info("创建分享 user_id=%s file_id=%s code=%s", user.id, req.user_file_id, share["share_code"])
+    return _share_to_out(share, user_file["display_name"] or "未命名", int(user_file["size_bytes"] or 0))
+
+
 @router.get("/api/shares")
-async def list_shares(user: User = Depends(require_user)) -> list[ShareLinkOut]:
-    """列出当前用户的所有分享"""
-    async with get_session() as db:
-        result = await db.exec(
-            select(ShareLink, UserFile, StoredFile)
-            .join(UserFile, ShareLink.user_file_id == UserFile.id)  # type: ignore[arg-type]
-            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)  # type: ignore[arg-type]
-            .where(ShareLink.owner_id == user.id)
-            .order_by(col(ShareLink.id).desc())
-        )
-        rows = result.all()
+async def list_shares(user: AuthUser = Depends(require_user)) -> list[ShareLinkOut]:
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                _share_select()
+                .where(share_links.c.owner_id == user.id)
+                .order_by(share_links.c.id.desc())
+            )
+        ).mappings().all()
     return [
-        _share_to_out(share, uf.display_name or "未命名", sf.size)
-        for share, uf, sf in rows
+        _share_to_out(dict(row), row["file_name"] or "未命名", int(row["size_bytes"] or 0))
+        for row in rows
     ]
+
+
 @router.put("/api/shares/{share_id}/revoke")
 async def revoke_share(
     share_id: int,
-    user: User = Depends(require_user),
+    user: AuthUser = Depends(require_user),
 ) -> dict:
-    """失效单个分享"""
-    async with get_session() as db:
-        result = await db.exec(
-            select(ShareLink).where(
-                ShareLink.id == share_id,
-                ShareLink.owner_id == user.id,
+    async with transaction() as conn:
+        current = (
+            await conn.execute(
+                select(share_links.c.status).where(
+                    share_links.c.id == share_id,
+                    share_links.c.owner_id == user.id,
+                )
             )
-        )
-        share = result.first()
-        if not share:
+        ).first()
+        if not current:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "分享不存在")
-        if share.status == "revoked":
+        if current[0] == "revoked":
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "分享已失效")
-        share.status = "revoked"
+        await conn.execute(
+            update(share_links)
+            .where(share_links.c.id == share_id, share_links.c.owner_id == user.id)
+            .values(status="revoked")
+        )
     logger.info("失效分享 user_id=%s share_id=%s", user.id, share_id)
     return {"ok": True}
+
+
 @router.delete("/api/shares/{share_id}")
 async def delete_share(
     share_id: int,
-    user: User = Depends(require_user),
+    user: AuthUser = Depends(require_user),
 ) -> dict:
-    """删除分享记录"""
-    async with get_session() as db:
-        result = await db.exec(
-            select(ShareLink).where(
-                ShareLink.id == share_id,
-                ShareLink.owner_id == user.id,
-            )
+    async with transaction() as conn:
+        result = await conn.execute(
+            delete(share_links).where(share_links.c.id == share_id, share_links.c.owner_id == user.id)
         )
-        share = result.first()
-        if not share:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "分享不存在")
-        await db.delete(share)
+    if not result.rowcount:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "分享不存在")
     logger.info("删除分享 user_id=%s share_id=%s", user.id, share_id)
     return {"ok": True}
+
+
 @router.put("/api/shares/revoke-all")
-async def revoke_all_shares(user: User = Depends(require_user)) -> dict:
-    """一键失效当前用户的所有活跃分享"""
-    async with get_session() as db:
-        result = await db.exec(
-            select(ShareLink).where(
-                ShareLink.owner_id == user.id,
-                ShareLink.status == "active",
-            )
+async def revoke_all_shares(user: AuthUser = Depends(require_user)) -> dict:
+    async with transaction() as conn:
+        result = await conn.execute(
+            update(share_links)
+            .where(share_links.c.owner_id == user.id, share_links.c.status == "active")
+            .values(status="revoked")
         )
-        shares = result.all()
-        count = 0
-        for share in shares:
-            share.status = "revoked"
-            count += 1
+    count = int(result.rowcount or 0)
     logger.info("批量失效分享 user_id=%s count=%s", user.id, count)
     return {"ok": True, "count": count}
 
-# ========== 公开端点：分享访问 ==========
-async def _get_share_with_file(code: str) -> tuple[ShareLink, UserFile, StoredFile]:
-    """通过分享码获取分享 + 用户文件 + 存储文件
 
-    区分错误：
-    - 分享不存在 -> 404
-    - 文件已删除 -> 410
-    """
-    async with get_session() as db:
-        # 先查分享是否存在
-        share_result = await db.exec(
-            select(ShareLink).where(ShareLink.share_code == code)
-        )
-        share = share_result.first()
+async def _get_share_with_file(code: str) -> dict[str, Any]:
+    async with transaction() as conn:
+        share = (
+            await conn.execute(_share_select().where(share_links.c.share_code == code))
+        ).mappings().first()
         if not share:
+            existing = (
+                await conn.execute(select(share_links.c.id).where(share_links.c.share_code == code))
+            ).first()
+            if existing:
+                raise HTTPException(status.HTTP_410_GONE, "文件已删除")
             raise HTTPException(status.HTTP_404_NOT_FOUND, "分享不存在")
+    return dict(share)
 
-        # 再查关联的文件
-        file_result = await db.exec(
-            select(UserFile, StoredFile)
-            .join(StoredFile, UserFile.stored_file_id == StoredFile.id)  # type: ignore[arg-type]
-            .where(UserFile.id == share.user_file_id)
-        )
-        file_row = file_result.first()
-        if not file_row:
-            raise HTTPException(status.HTTP_410_GONE, "文件已删除")
 
-        return share, file_row[0], file_row[1]
 @router.get("/api/s/{code}")
 async def get_share_info(code: str, request: Request) -> ShareInfoOut:
-    """获取分享元信息（无需登录）"""
     await ensure_public_allowed(
         client_ip_from_request(request),
         RateLimitScope.PUBLIC_API,
         detail="请求过于频繁",
     )
-    share, user_file, stored_file = await _get_share_with_file(code)
-    is_expired = False
-    if share.expires_at:
-        try:
-            exp = datetime.fromisoformat(share.expires_at)
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            is_expired = exp <= utc_now()
-        except ValueError:
-            is_expired = True
-    is_exhausted = (
-        share.max_downloads is not None
-        and share.download_count >= share.max_downloads
-    )
+    row = await _get_share_with_file(code)
     return ShareInfoOut(
-        file_name=user_file.display_name or "未命名",
-        file_size=stored_file.size,
-        is_directory=stored_file.is_directory,
-        has_password=share.password_hash is not None,
-        is_expired=is_expired or share.status != "active",
-        is_exhausted=is_exhausted,
+        file_name=row["file_name"] or "未命名",
+        file_size=int(row["size_bytes"] or 0),
+        is_directory=bool(row["is_directory"]),
+        has_password=row["password_hash"] is not None,
+        is_expired=row["status"] != "active" or (
+            row["expires_at_ms"] is not None and int(row["expires_at_ms"]) <= now_ms()
+        ),
+        is_exhausted=(
+            row["max_downloads"] is not None
+            and int(row["download_count"]) >= int(row["max_downloads"])
+        ),
     )
+
 
 @router.post("/api/s/{code}/access")
 async def access_share(
@@ -328,34 +309,32 @@ async def access_share(
     req: ShareAccessRequest,
     request: Request,
 ) -> ShareAccessResponse:
-    """验证分享密码，返回短期 access_token"""
     await ensure_share_access_allowed(
         client_ip_from_request(request),
         code,
         detail="请求过于频繁",
     )
-    share, _, _ = await _get_share_with_file(code)
+    share = await _get_share_with_file(code)
     if not _is_share_active(share):
         raise HTTPException(status.HTTP_410_GONE, "分享已失效")
-    if not share.password_hash:
+    if not share["password_hash"]:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "该分享无需密码")
-    if not verify_password(req.password, share.password_hash):
+    if not verify_password(req.password, share["password_hash"]):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "密码错误")
-    token = _create_access_token(code)
-    return ShareAccessResponse(access_token=token)
+    return ShareAccessResponse(access_token=_create_access_token(code))
+
 
 async def _check_share_access(
-    code: str, token: str | None, request: Request,
-) -> tuple[ShareLink, UserFile, StoredFile]:
-    """公开端点通用访问检查：有效性 + 密码验证。"""
-    share, user_file, stored_file = await _get_share_with_file(code)
+    code: str,
+    token: str | None,
+    _request: Request,
+) -> dict[str, Any]:
+    share = await _get_share_with_file(code)
     if not _is_share_active(share):
-        raise HTTPException(status.HTTP_410_GONE, "\u5206\u4eab\u5df2\u5931\u6548")
-    # \u5bc6\u7801\u4fdd\u62a4\u7684\u5206\u4eab\u9700\u8981 token
-    if share.password_hash:
-        if not token or not _verify_access_token(code, token):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "\u9700\u8981\u5bc6\u7801\u9a8c\u8bc1")
-    return share, user_file, stored_file
+        raise HTTPException(status.HTTP_410_GONE, "分享已失效")
+    if share["password_hash"] and (not token or not _verify_access_token(code, token)):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "需要密码验证")
+    return share
 
 
 @router.get("/api/s/{code}/download")
@@ -365,75 +344,56 @@ async def download_shared_file(
     token: str | None = Query(default=None),
     subpath: str | None = Query(default=None),
 ):
-    """\u4e0b\u8f7d\u5206\u4eab\u6587\u4ef6"""
     client_ip = client_ip_from_request(request)
     await ensure_public_allowed(
         client_ip,
         RateLimitScope.ANONYMOUS_DOWNLOAD,
         detail="下载请求过于频繁，请稍后再试",
     )
-    share, user_file, stored_file = await _check_share_access(code, token, request)
-    acquire_result = await download_limiter.acquire_anonymous(client_ip, stored_file.content_hash)
+    share = await _check_share_access(code, token, request)
+    acquire_result = await download_limiter.acquire_anonymous(client_ip, share["content_hash"])
     if not acquire_result.allowed:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, acquire_result.detail())
 
     lease = acquire_result.lease
     try:
-        base_path = Path(stored_file.real_path)
+        base_path = Path(share["real_path"])
         if not base_path.exists():
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "\u6587\u4ef6\u4e0d\u5b58\u5728")
-        # \u786e\u5b9a\u4e0b\u8f7d\u76ee\u6807
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
         if subpath:
-            if not stored_file.is_directory:
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, "\u8be5\u6587\u4ef6\u4e0d\u662f\u76ee\u5f55")
+            if not share["is_directory"]:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "该文件不是目录")
             target = _validate_subpath(base_path, subpath)
             if not target.exists():
-                raise HTTPException(status.HTTP_404_NOT_FOUND, "\u5b50\u6587\u4ef6\u4e0d\u5b58\u5728")
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "子文件不存在")
             if target.is_dir():
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, "\u4e0d\u80fd\u4e0b\u8f7d\u76ee\u5f55")
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能下载目录")
             filename = target.name
         else:
-            if stored_file.is_directory:
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, "\u8bf7\u6307\u5b9a\u5b50\u6587\u4ef6\u8def\u5f84")
+            if share["is_directory"]:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "请指定子文件路径")
             target = base_path
-            filename = user_file.display_name or "download"
-        # 原子递增下载计数（含 max_downloads 和有效性竞态保护）
-        now = utc_now_str()
-        async with get_session() as db:
-            # 构建有效性条件：status=active 且未过期
-            validity_conditions = [
-                ShareLink.id == share.id,  # type: ignore[arg-type]
-                ShareLink.status == "active",
-                or_(
-                    ShareLink.expires_at.is_(None),  # type: ignore[union-attr]
-                    ShareLink.expires_at > now,
-                ),
+            filename = share["file_name"] or "download"
+
+        timestamp = now_ms()
+        async with transaction() as conn:
+            conditions = [
+                share_links.c.id == share["id"],
+                share_links.c.status == "active",
+                (share_links.c.expires_at_ms.is_(None) | (share_links.c.expires_at_ms > timestamp)),
             ]
-            if share.max_downloads is not None:
-                result = await db.execute(
-                    ShareLink.__table__.update()  # type: ignore[attr-defined]
-                    .where(
-                        *validity_conditions,
-                        ShareLink.download_count < share.max_downloads,
-                    )
-                    .values(
-                        download_count=ShareLink.download_count + 1,
-                        last_accessed_at=now,
-                    )
+            if share["max_downloads"] is not None:
+                conditions.append(share_links.c.download_count < share["max_downloads"])
+            result = await conn.execute(
+                update(share_links)
+                .where(*conditions)
+                .values(
+                    download_count=share_links.c.download_count + 1,
+                    last_accessed_at_ms=timestamp,
                 )
-                if result.rowcount == 0:  # type: ignore[union-attr]
-                    raise HTTPException(status.HTTP_410_GONE, "分享已失效或下载次数已用完")
-            else:
-                result = await db.execute(
-                    ShareLink.__table__.update()  # type: ignore[attr-defined]
-                    .where(*validity_conditions)
-                    .values(
-                        download_count=ShareLink.download_count + 1,
-                        last_accessed_at=now,
-                    )
-                )
-                if result.rowcount == 0:  # type: ignore[union-attr]
-                    raise HTTPException(status.HTTP_410_GONE, "分享已失效")
+            )
+            if result.rowcount == 0:
+                raise HTTPException(status.HTTP_410_GONE, "分享已失效或下载次数已用完")
         return _tracked_response(_range_file_response(request, target, filename), lease)
     except Exception:
         if lease is not None:
@@ -448,38 +408,22 @@ async def browse_shared_directory(
     token: str | None = Query(default=None),
     subpath: str = Query(default=""),
 ) -> list[dict]:
-    """浏览分享的 BT 文件夹内容"""
     await ensure_public_allowed(
         client_ip_from_request(request),
         RateLimitScope.PUBLIC_API,
         detail="请求过于频繁",
     )
-    share, user_file, stored_file = await _check_share_access(code, token, request)
-    if not stored_file.is_directory:
+    share = await _check_share_access(code, token, request)
+    if not share["is_directory"]:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "该文件不是目录")
-    base_path = Path(stored_file.real_path)
-    if not base_path.exists():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
-    target = _validate_subpath(base_path, subpath)
-    if not target.exists():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "路径不存在")
-    if not target.is_dir():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "不是目录")
-    resolved_base = base_path.resolve()
-    entries = []
-    for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-        entries.append({
-            "name": item.name,
-            "is_dir": item.is_dir(),
-            "size": item.stat().st_size if item.is_file() else 0,
-            "path": str(item.resolve().relative_to(resolved_base)),
-        })
-    # 更新最后访问时间
-    async with get_session() as db:
-        result = await db.exec(
-            select(ShareLink).where(ShareLink.id == share.id)  # type: ignore[arg-type]
+    entries = await _directory_entries(
+        int(share["stored_file_id"]),
+        _normalize_entry_parent(subpath),
+    )
+    async with transaction() as conn:
+        await conn.execute(
+            update(share_links)
+            .where(share_links.c.id == share["id"])
+            .values(last_accessed_at_ms=now_ms())
         )
-        db_share = result.first()
-        if db_share:
-            db_share.last_accessed_at = utc_now_str()
     return entries

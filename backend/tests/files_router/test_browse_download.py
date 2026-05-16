@@ -3,10 +3,13 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import insert
 
 from app.core.config import settings
 from app.core.rate_limit_config import rate_limit_config
-from app.db import execute
+from app.db.engine import transaction
+from app.db.schema import stored_file_entries, stored_files, user_files
+from app.services.storage_index import build_entries
 
 
 def _insert_owned_path(
@@ -18,17 +21,41 @@ def _insert_owned_path(
     size: int,
     display_name: str,
 ) -> None:
-    now = datetime.now(timezone.utc).isoformat()
-    stored_file_id = execute(
-        """INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        [content_hash, str(real_path), size, int(is_directory), 1, display_name, now],
-    )
-    execute(
-        """INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at)
-           VALUES (?, ?, ?, ?)""",
-        [test_user["id"], stored_file_id, display_name, now],
-    )
+    import asyncio
+
+    async def seed() -> None:
+        timestamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+        async with transaction() as conn:
+            stored = (
+                await conn.execute(
+                    insert(stored_files)
+                    .values(
+                        content_hash=content_hash,
+                        real_path=str(real_path),
+                        size_bytes=size,
+                        is_directory=1 if is_directory else 0,
+                        original_name=display_name,
+                        created_at_ms=timestamp,
+                    )
+                    .returning(stored_files)
+                )
+            ).mappings().one()
+            await conn.execute(
+                insert(user_files).values(
+                    user_id=test_user["id"],
+                    stored_file_id=stored["id"],
+                    display_name=display_name,
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                )
+            )
+            if is_directory and real_path.exists():
+                await conn.execute(
+                    insert(stored_file_entries),
+                    build_entries(stored["id"], real_path),
+                )
+
+    asyncio.run(seed())
 
 
 def _create_range_file(test_user: dict, content_hash: str, filename: str) -> bytes:
@@ -125,6 +152,98 @@ class TestDownloadFile:
 
 
 class TestBrowseDirectoryRealFiles:
+    def test_browse_directory_uses_stored_file_entries(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ):
+        import asyncio
+
+        async def seed_directory() -> dict:
+            root = Path(settings.download_dir) / "store" / "dirhash_entries"
+            root.mkdir(parents=True)
+            timestamp = 1_700_000_000_000
+            async with transaction() as conn:
+                stored = (
+                    await conn.execute(
+                        insert(stored_files)
+                        .values(
+                            content_hash="dirhash_entries",
+                            real_path=str(root),
+                            size_bytes=10,
+                            is_directory=1,
+                            original_name="dirhash_entries",
+                            created_at_ms=timestamp,
+                        )
+                        .returning(stored_files)
+                    )
+                ).mappings().one()
+                await conn.execute(
+                    insert(stored_file_entries),
+                    [
+                        {
+                            "stored_file_id": stored["id"],
+                            "relative_path": ".",
+                            "parent_path": "",
+                            "name": root.name,
+                            "size_bytes": 0,
+                            "is_dir": 1,
+                            "mtime_ms": timestamp,
+                            "sort_key": "0:dirhash_entries",
+                        },
+                        {
+                            "stored_file_id": stored["id"],
+                            "relative_path": "a.txt",
+                            "parent_path": "",
+                            "name": "a.txt",
+                            "size_bytes": 5,
+                            "is_dir": 0,
+                            "mtime_ms": timestamp,
+                            "sort_key": "1:a.txt",
+                        },
+                        {
+                            "stored_file_id": stored["id"],
+                            "relative_path": "nested",
+                            "parent_path": "",
+                            "name": "nested",
+                            "size_bytes": 0,
+                            "is_dir": 1,
+                            "mtime_ms": timestamp,
+                            "sort_key": "0:nested",
+                        },
+                        {
+                            "stored_file_id": stored["id"],
+                            "relative_path": "nested/b.txt",
+                            "parent_path": "nested",
+                            "name": "b.txt",
+                            "size_bytes": 5,
+                            "is_dir": 0,
+                            "mtime_ms": timestamp,
+                            "sort_key": "1:b.txt",
+                        },
+                    ],
+                )
+                user_file = (
+                    await conn.execute(
+                        insert(user_files)
+                        .values(
+                            user_id=test_user["id"],
+                            stored_file_id=stored["id"],
+                            display_name="dirhash_entries",
+                            created_at_ms=timestamp,
+                            updated_at_ms=timestamp,
+                        )
+                        .returning(user_files)
+                    )
+                ).mappings().one()
+            return {"id": user_file["id"], "hash": stored["content_hash"]}
+
+        completed_directory_user_file = asyncio.run(seed_directory())
+        response = authenticated_client.get(f"/api/files/{completed_directory_user_file['hash']}/browse")
+        assert response.status_code == 200
+        data = response.json()
+        names = {item["name"] for item in data}
+        assert "nested" in names
+        assert "a.txt" in names
+
     def test_browse_directory_base_not_exists(
         self, authenticated_client: TestClient, test_user: dict, temp_db: str
     ):
@@ -138,7 +257,8 @@ class TestBrowseDirectoryRealFiles:
         )
 
         response = authenticated_client.get("/api/files/browse_nonexistent_base/browse")
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.json() == []
 
     def test_browse_directory_subpath_not_exists(
         self, authenticated_client: TestClient, test_user: dict, temp_db: str

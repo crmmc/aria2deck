@@ -1,12 +1,78 @@
-from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import insert
 
-from app.core.config import settings
-from app.db import execute
+from app.db.engine import transaction
+from app.db.schema import pack_tasks, stored_files
+
+
+def _now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)
+
+
+def _insert_pack_task_v0(
+    *,
+    user_id: int,
+    status: str,
+    source_size_bytes: int = 100,
+    reserved_bytes: int = 0,
+    progress: int = 0,
+    output_stored_file_id: int | None = None,
+) -> int:
+    import asyncio
+
+    async def seed() -> int:
+        timestamp = _now_ms()
+        async with transaction() as conn:
+            row = (
+                await conn.execute(
+                    insert(pack_tasks)
+                    .values(
+                        user_id=user_id,
+                        source_user_file_ids_json="[]",
+                        source_size_bytes=source_size_bytes,
+                        reserved_bytes=reserved_bytes,
+                        output_stored_file_id=output_stored_file_id,
+                        status=status,
+                        progress=progress,
+                        created_at_ms=timestamp,
+                        updated_at_ms=timestamp,
+                    )
+                    .returning(pack_tasks.c.id)
+                )
+            ).one()
+        return int(row[0])
+
+    return asyncio.run(seed())
+
+
+def _insert_stored_file_v0(*, size_bytes: int = 123) -> int:
+    import asyncio
+
+    async def seed() -> int:
+        timestamp = _now_ms()
+        async with transaction() as conn:
+            row = (
+                await conn.execute(
+                    insert(stored_files)
+                    .values(
+                        content_hash=f"pack_output_{timestamp}",
+                        real_path=f"/tmp/pack_output_{timestamp}.zip",
+                        size_bytes=size_bytes,
+                        is_directory=0,
+                        original_name="packed.zip",
+                        created_at_ms=timestamp,
+                    )
+                    .returning(stored_files.c.id)
+                )
+            ).one()
+        return int(row[0])
+
+    return asyncio.run(seed())
 
 
 class TestPackListEndpoints:
@@ -26,6 +92,28 @@ class TestPackListEndpoints:
     def test_delete_pack_task_not_found(self, authenticated_client: TestClient):
         response = authenticated_client.delete("/api/files/pack/99999")
         assert response.status_code == 404
+
+    def test_completed_pack_task_response_keeps_frontend_shape(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ):
+        stored_file_id = _insert_stored_file_v0(size_bytes=321)
+        task_id = _insert_pack_task_v0(
+            user_id=test_user["id"],
+            status="completed",
+            source_size_bytes=100,
+            reserved_bytes=0,
+            progress=100,
+            output_stored_file_id=stored_file_id,
+        )
+
+        response = authenticated_client.get(f"/api/files/pack/{task_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "done"
+        assert data["output_size"] == 321
 
 
 class TestPackCalculateEndpoints:
@@ -63,12 +151,12 @@ class TestPackCalculateEndpoints:
 
 class TestPackTaskOperations:
     def test_cancel_pack_task_resets_progress(self, authenticated_client: TestClient, test_user: dict):
-        now = datetime.now(timezone.utc).isoformat()
-        task_id = execute(
-            """INSERT INTO pack_tasks
-               (owner_id, folder_path, folder_size, reserved_space, status, progress, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "[]", 100, 100, "pending", 88, now, now],
+        task_id = _insert_pack_task_v0(
+            user_id=test_user["id"],
+            status="pending",
+            source_size_bytes=100,
+            reserved_bytes=100,
+            progress=88,
         )
 
         with patch("app.services.pack.PackTaskManager.cancel_pack", new_callable=AsyncMock, return_value=True):
@@ -80,21 +168,19 @@ class TestPackTaskOperations:
         assert detail.json()["status"] == "cancelled"
         assert detail.json()["progress"] == 0
 
-    def test_delete_cancelled_pack_uses_cleanup_pack_output(self, authenticated_client: TestClient, test_user: dict):
-        now = datetime.now(timezone.utc).isoformat()
-        output_path = Path(settings.download_dir) / str(test_user["id"]) / "cancelled_partial.zip"
-        task_id = execute(
-            """INSERT INTO pack_tasks
-               (owner_id, folder_path, folder_size, reserved_space, output_path, status, progress, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "[]", 100, 0, str(output_path), "cancelled", 0, now, now],
+    def test_delete_cancelled_pack_removes_task(self, authenticated_client: TestClient, test_user: dict):
+        task_id = _insert_pack_task_v0(
+            user_id=test_user["id"],
+            status="cancelled",
+            source_size_bytes=100,
+            reserved_bytes=0,
+            progress=0,
         )
 
-        with patch("app.routers.files.cleanup_pack_output", return_value=True) as mock_cleanup:
-            response = authenticated_client.delete(f"/api/files/pack/{task_id}")
+        response = authenticated_client.delete(f"/api/files/pack/{task_id}")
 
         assert response.status_code == 200
-        mock_cleanup.assert_called_once_with(output_path)
+        assert authenticated_client.get(f"/api/files/pack/{task_id}").status_code == 404
 
 
 @pytest.mark.parametrize(

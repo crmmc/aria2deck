@@ -1,1061 +1,318 @@
-"""Test race condition handling in storage service.
+from __future__ import annotations
 
-Tests for:
-1. ref_count atomic operations (increment/decrement)
-2. File move race conditions
-3. StoredFile creation race conditions
-"""
 import asyncio
-import os
-import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlmodel import select
+from sqlalchemy import insert, select
 
-from app.database import get_session, reset_engine, init_db as init_sqlmodel_db, dispose_engine
-from app.db import init_db
+from app.auth import user_from_row
 from app.core.config import settings
-from app.models import DownloadTask, StoredFile, UserFile, User, UserTaskSubscription, utc_now_str
+from app.db.engine import transaction
+from app.db.schema import (
+    global_downloads,
+    pack_tasks,
+    stored_files,
+    user_tasks,
+    user_files,
+    user_storage_usage,
+)
+from app.routers.files import _delete_user_file_reference_v0
+from app.routers.storage import BulkDeleteRequest, bulk_delete_files
+from tests.helpers_v0 import create_user_v0, now_ms
 
 
-@pytest.fixture(scope="function")
-def temp_db_storage():
-    """Create a fresh temporary database for storage tests."""
-    temp_dir = tempfile.mkdtemp()
-    db_path = os.path.join(temp_dir, "test.db")
-    download_dir = os.path.join(temp_dir, "downloads")
-    store_dir = os.path.join(download_dir, "store")
-    os.makedirs(download_dir, exist_ok=True)
-    os.makedirs(store_dir, exist_ok=True)
-
-    original_db_path = settings.database_path
-    original_download_dir = settings.download_dir
-    settings.database_path = db_path
-    settings.download_dir = download_dir
-
-    reset_engine()
-    init_db()
-    asyncio.run(init_sqlmodel_db())
-
-    yield {
-        "db_path": db_path,
-        "download_dir": download_dir,
-        "store_dir": store_dir,
-        "temp_dir": temp_dir,
+async def _seed_shared_file(user_ids: list[int]) -> dict:
+    path = Path(settings.download_dir) / "store" / "shared.bin"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"shared")
+    timestamp = now_ms()
+    async with transaction() as conn:
+        stored = (
+            await conn.execute(
+                insert(stored_files)
+                .values(
+                    content_hash="shared_hash",
+                    real_path=str(path),
+                    size_bytes=6,
+                    is_directory=0,
+                    original_name="shared.bin",
+                    created_at_ms=timestamp,
+                )
+                .returning(stored_files)
+            )
+        ).mappings().one()
+        user_file_ids: list[int] = []
+        for user_id in user_ids:
+            row = (
+                await conn.execute(
+                    insert(user_files)
+                    .values(
+                        user_id=user_id,
+                        stored_file_id=stored["id"],
+                        display_name=f"shared-{user_id}.bin",
+                        created_at_ms=timestamp,
+                        updated_at_ms=timestamp,
+                    )
+                    .returning(user_files.c.id)
+                )
+            ).one()
+            user_file_ids.append(int(row[0]))
+    return {
+        "stored_file_id": stored["id"],
+        "path": path,
+        "user_file_ids": user_file_ids,
     }
-
-    asyncio.run(dispose_engine())
-    settings.database_path = original_db_path
-    settings.download_dir = original_download_dir
-    reset_engine()
-
-
-@pytest.fixture
-def test_user_storage(temp_db_storage):
-    """Create a test user for storage tests."""
-    from app.db import execute
-    from app.core.security import hash_password
-    from datetime import datetime, timezone
-
-    user_id = execute(
-        """
-        INSERT INTO users (username, password_hash, is_admin, created_at, quota)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        ["testuser", hash_password("testpass"), 0, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-    )
-    return {"id": user_id, "username": "testuser", "quota": 100 * 1024 * 1024 * 1024}
-
-
-@pytest.fixture
-def test_stored_file(temp_db_storage):
-    """Create a test stored file."""
-    async def _create():
-        async with get_session() as db:
-            stored_file = StoredFile(
-                content_hash="abc123def456",
-                real_path=os.path.join(temp_db_storage["store_dir"], "ab", "abc123def456"),
-                size=1024,
-                is_directory=False,
-                original_name="test.txt",
-                ref_count=0,
-                created_at=utc_now_str(),
-            )
-            db.add(stored_file)
-            await db.commit()
-            await db.refresh(stored_file)
-            return stored_file
-
-    return asyncio.run(_create())
-
-
-class TestRefCountConcurrentIncrement:
-    """Test concurrent increment of ref_count."""
-
-    @pytest.mark.asyncio
-    async def test_ref_count_concurrent_increment(self, temp_db_storage, test_user_storage, test_stored_file):
-        """Simulate concurrent calls to create_user_file_reference for the same stored file.
-
-        Multiple concurrent requests should result in correct ref_count.
-        """
-        from app.services.storage import create_user_file_reference
-
-        # Create multiple users
-        from app.db import execute
-        from app.core.security import hash_password
-        from datetime import datetime, timezone
-
-        user_ids = [test_user_storage["id"]]
-        for i in range(4):
-            user_id = execute(
-                """
-                INSERT INTO users (username, password_hash, is_admin, created_at, quota)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [f"user{i}", hash_password("pass"), 0, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-            )
-            user_ids.append(user_id)
-
-        stored_file_id = test_stored_file.id
-
-        # Run concurrent create_user_file_reference calls
-        async def create_ref(user_id):
-            return await create_user_file_reference(
-                user_id=user_id,
-                stored_file_id=stored_file_id,
-                display_name="test.txt",
-            )
-
-        results = await asyncio.gather(*[create_ref(uid) for uid in user_ids])
-
-        # All should succeed (different users)
-        successful = [r for r in results if r is not None]
-        assert len(successful) == 5, f"Expected 5 successful references, got {len(successful)}"
-
-        # Verify ref_count is correct
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            stored_file = result.first()
-            assert stored_file.ref_count == 5, f"Expected ref_count=5, got {stored_file.ref_count}"
-
-    @pytest.mark.asyncio
-    async def test_ref_count_duplicate_reference_rejected(self, temp_db_storage, test_user_storage, test_stored_file):
-        """Same user creating duplicate reference should be rejected."""
-        from app.services.storage import create_user_file_reference
-
-        stored_file_id = test_stored_file.id
-        user_id = test_user_storage["id"]
-
-        # First call should succeed
-        result1 = await create_user_file_reference(
-            user_id=user_id,
-            stored_file_id=stored_file_id,
-            display_name="test.txt",
-        )
-        assert result1 is not None
-
-        # Second call should return None (duplicate)
-        result2 = await create_user_file_reference(
-            user_id=user_id,
-            stored_file_id=stored_file_id,
-            display_name="test.txt",
-        )
-        assert result2 is None
-
-        # ref_count should be 1
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            stored_file = result.first()
-            assert stored_file.ref_count == 1
-
-
-class TestRefCountConcurrentDecrement:
-    """Test concurrent decrement of ref_count."""
-
-    @pytest.mark.asyncio
-    async def test_ref_count_concurrent_decrement(self, temp_db_storage, test_user_storage, test_stored_file):
-        """Simulate concurrent calls to delete_user_file_reference."""
-        from app.services.storage import create_user_file_reference, delete_user_file_reference
-        from app.db import execute
-        from app.core.security import hash_password
-        from datetime import datetime, timezone
-
-        # Create multiple users and references
-        user_ids = [test_user_storage["id"]]
-        for i in range(4):
-            user_id = execute(
-                """
-                INSERT INTO users (username, password_hash, is_admin, created_at, quota)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [f"deluser{i}", hash_password("pass"), 0, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-            )
-            user_ids.append(user_id)
-
-        stored_file_id = test_stored_file.id
-
-        # Create references for all users
-        user_file_ids = []
-        for uid in user_ids:
-            user_file = await create_user_file_reference(
-                user_id=uid,
-                stored_file_id=stored_file_id,
-                display_name="test.txt",
-            )
-            if user_file:
-                user_file_ids.append(user_file.id)
-
-        assert len(user_file_ids) == 5
-
-        # Verify ref_count is 5
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            stored_file = result.first()
-            assert stored_file.ref_count == 5
-
-        # Delete 3 references concurrently
-        async def delete_ref(user_file_id):
-            return await delete_user_file_reference(user_file_id)
-
-        results = await asyncio.gather(*[delete_ref(ufid) for ufid in user_file_ids[:3]])
-        assert all(results), "All deletions should succeed"
-
-        # Verify ref_count is 2
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            stored_file = result.first()
-            assert stored_file.ref_count == 2, f"Expected ref_count=2, got {stored_file.ref_count}"
-
-    @pytest.mark.asyncio
-    async def test_concurrent_delete_same_reference(self, temp_db_storage, test_user_storage, test_stored_file):
-        """Deleting the same UserFile concurrently should only decrement once."""
-        from app.services.storage import create_user_file_reference, delete_user_file_reference
-
-        stored_file_id = test_stored_file.id
-        user_id = test_user_storage["id"]
-
-        # Create a single user file reference
-        user_file = await create_user_file_reference(
-            user_id=user_id,
-            stored_file_id=stored_file_id,
-            display_name="test.txt",
-        )
-        assert user_file is not None
-
-        # Delete the same reference concurrently
-        results = await asyncio.gather(
-            delete_user_file_reference(user_file.id),
-            delete_user_file_reference(user_file.id),
-            return_exceptions=True,
-        )
-
-        # One should succeed, one should fail (already deleted)
-        success_count = sum(1 for r in results if r is True)
-        fail_count = sum(1 for r in results if r is False)
-        assert success_count == 1
-        assert fail_count == 1
-
-        # StoredFile should be deleted (ref_count <= 0)
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            stored_file = result.first()
-            assert stored_file is None
-
-
-class TestRefCountMixedOperations:
-    """Test concurrent increment and decrement operations."""
-
-    @pytest.mark.asyncio
-    async def test_ref_count_mixed_operations(self, temp_db_storage, test_user_storage, test_stored_file):
-        """Concurrent increment and decrement operations should maintain consistency."""
-        from app.services.storage import create_user_file_reference, delete_user_file_reference
-        from app.db import execute
-        from app.core.security import hash_password
-        from datetime import datetime, timezone
-
-        stored_file_id = test_stored_file.id
-
-        # Create initial references
-        initial_user_ids = []
-        for i in range(3):
-            user_id = execute(
-                """
-                INSERT INTO users (username, password_hash, is_admin, created_at, quota)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [f"mixuser{i}", hash_password("pass"), 0, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-            )
-            initial_user_ids.append(user_id)
-
-        initial_user_file_ids = []
-        for uid in initial_user_ids:
-            user_file = await create_user_file_reference(
-                user_id=uid,
-                stored_file_id=stored_file_id,
-                display_name="test.txt",
-            )
-            if user_file:
-                initial_user_file_ids.append(user_file.id)
-
-        # Create new users for increment
-        new_user_ids = []
-        for i in range(3):
-            user_id = execute(
-                """
-                INSERT INTO users (username, password_hash, is_admin, created_at, quota)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [f"newuser{i}", hash_password("pass"), 0, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-            )
-            new_user_ids.append(user_id)
-
-        # Run mixed operations concurrently
-        async def increment(user_id):
-            return await create_user_file_reference(
-                user_id=user_id,
-                stored_file_id=stored_file_id,
-                display_name="test.txt",
-            )
-
-        async def decrement(user_file_id):
-            return await delete_user_file_reference(user_file_id)
-
-        # 3 increments + 2 decrements = net +1
-        tasks = [
-            increment(new_user_ids[0]),
-            decrement(initial_user_file_ids[0]),
-            increment(new_user_ids[1]),
-            decrement(initial_user_file_ids[1]),
-            increment(new_user_ids[2]),
-        ]
-
-        await asyncio.gather(*tasks)
-
-        # Final ref_count should be 3 (initial) + 3 (new) - 2 (deleted) = 4
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            stored_file = result.first()
-            assert stored_file.ref_count == 4, f"Expected ref_count=4, got {stored_file.ref_count}"
-
-
-class TestFileMoveRace:
-    """Test file move race conditions."""
-
-    @pytest.mark.asyncio
-    async def test_file_move_destination_exists(self, temp_db_storage):
-        """Test handling when destination is created between check and move."""
-        from app.services.storage import move_to_store, get_downloading_dir
-
-        # Create source file
-        source_dir = get_downloading_dir() / "source"
-        source_dir.mkdir(exist_ok=True)
-        source_file = source_dir / "test.txt"
-        source_file.write_text("test content")
-
-        # Create destination before move (simulating race condition)
-        store_dir = Path(temp_db_storage["store_dir"])
-
-        # Calculate expected hash
-        from app.services.hash import calculate_content_hash
-        content_hash = calculate_content_hash(source_file)
-        dest_dir = store_dir / content_hash[:2] / content_hash
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
-        # Write different content to destination (simulating another process)
-        if dest_dir.is_dir():
-            (dest_dir / "test.txt").write_text("existing content")
-
-        # move_to_store should handle this gracefully
-        stored_file = await move_to_store(source_file, "test.txt")
-
-        assert stored_file is not None
-        assert stored_file.content_hash == content_hash
-        # Source should be deleted
-        assert not source_file.exists()
-
-    @pytest.mark.asyncio
-    async def test_file_move_concurrent(self, temp_db_storage):
-        """Test two processes moving to same destination."""
-        from app.services.storage import move_to_store, get_downloading_dir
-
-        # Create two identical source files
-        source_dir1 = get_downloading_dir() / "source1"
-        source_dir2 = get_downloading_dir() / "source2"
-        source_dir1.mkdir(exist_ok=True)
-        source_dir2.mkdir(exist_ok=True)
-
-        source_file1 = source_dir1 / "test.txt"
-        source_file2 = source_dir2 / "test.txt"
-        source_file1.write_text("identical content")
-        source_file2.write_text("identical content")
-
-        # Move both concurrently
-        results = await asyncio.gather(
-            move_to_store(source_file1, "test.txt"),
-            move_to_store(source_file2, "test.txt"),
-            return_exceptions=True,
-        )
-
-        # Both should succeed (one creates, one finds existing)
-        successful = [r for r in results if isinstance(r, StoredFile)]
-        assert len(successful) == 2, f"Expected 2 successful results, got {len(successful)}"
-
-        # Both should return the same StoredFile
-        assert successful[0].content_hash == successful[1].content_hash
-
-        # Both source files should be deleted
-        assert not source_file1.exists()
-        assert not source_file2.exists()
-
-        # Only one StoredFile record should exist
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.content_hash == successful[0].content_hash)
-            )
-            stored_files = result.all()
-            assert len(stored_files) == 1
-
-
-class TestStoredFileCreationRace:
-    """Test StoredFile creation race conditions."""
-
-    @pytest.mark.asyncio
-    async def test_stored_file_unique_constraint(self, temp_db_storage):
-        """Test that duplicate content_hash is handled correctly."""
-        from sqlalchemy.exc import IntegrityError
-        from sqlmodel.ext.asyncio.session import AsyncSession
-        from sqlalchemy.ext.asyncio import async_sessionmaker
-
-        content_hash = "unique_hash_123"
-
-        # Create first StoredFile
-        async with get_session() as db:
-            stored_file1 = StoredFile(
-                content_hash=content_hash,
-                real_path="/path/to/file1",
-                size=1024,
-                is_directory=False,
-                original_name="file1.txt",
-                ref_count=0,
-                created_at=utc_now_str(),
-            )
-            db.add(stored_file1)
-            await db.commit()
-
-        # Try to create second StoredFile with same content_hash
-        # Use manual session to test IntegrityError without auto-commit interference
-        from app.database import _get_session_maker
-        session_maker = _get_session_maker()
-
-        async with session_maker() as db:
-            stored_file2 = StoredFile(
-                content_hash=content_hash,
-                real_path="/path/to/file2",
-                size=2048,
-                is_directory=False,
-                original_name="file2.txt",
-                ref_count=0,
-                created_at=utc_now_str(),
-            )
-            db.add(stored_file2)
-
-            with pytest.raises(IntegrityError):
-                await db.commit()
-
-
-class TestRefCountDecrementDeletesFile:
-    """Test that file is deleted when ref_count reaches 0."""
-
-    @pytest.mark.asyncio
-    async def test_concurrent_ref_count_decrement_deletes_file(self, temp_db_storage, test_user_storage):
-        """When ref_count reaches 0, file is deleted."""
-        from app.services.storage import create_user_file_reference, delete_user_file_reference
-        from app.db import execute
-        from app.core.security import hash_password
-        from datetime import datetime, timezone
-
-        # Create physical file in store
-        store_dir = Path(temp_db_storage["store_dir"])
-        content_hash = "delete_test_hash_789"
-        file_dir = store_dir / content_hash[:2] / content_hash
-        file_dir.mkdir(parents=True, exist_ok=True)
-        test_file = file_dir / "test.txt"
-        test_file.write_text("content to be deleted")
-
-        # Create StoredFile record
-        async with get_session() as db:
-            stored_file = StoredFile(
-                content_hash=content_hash,
-                real_path=str(file_dir),
-                size=1024,
-                is_directory=True,
-                original_name="test.txt",
-                ref_count=0,
-                created_at=utc_now_str(),
-            )
-            db.add(stored_file)
-            await db.commit()
-            await db.refresh(stored_file)
-            stored_file_id = stored_file.id
-
-        # Create single user reference
-        user_file = await create_user_file_reference(
-            user_id=test_user_storage["id"],
-            stored_file_id=stored_file_id,
-            display_name="test.txt",
-        )
-        assert user_file is not None
-
-        # Verify ref_count is 1
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            sf = result.first()
-            assert sf.ref_count == 1
-
-        # Delete the reference (should trigger file deletion)
-        result = await delete_user_file_reference(user_file.id)
-        assert result is True
-
-        # Verify StoredFile record is deleted
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            sf = result.first()
-            assert sf is None, "StoredFile record should be deleted"
-
-        # Verify physical file is deleted
-        assert not file_dir.exists(), "Physical file should be deleted"
 
 
 @pytest.mark.asyncio
-class TestCleanupTaskDownloadDir:
-    async def test_cleanup_task_download_dir_raises_on_delete_failure(self, temp_db_storage):
-        from app.services.storage import cleanup_task_download_dir, get_downloading_dir
-
-        task_id = 9527
-        task_dir = get_downloading_dir() / str(task_id)
-        task_dir.mkdir(parents=True, exist_ok=True)
-        (task_dir / "leftover.bin").write_text("x")
-
-        with patch("app.services.storage.safe_delete_path", side_effect=PermissionError("denied")):
-            with pytest.raises(RuntimeError, match="Failed to clean up task directory"):
-                await cleanup_task_download_dir(task_id)
-
-        assert task_dir.exists()
-
-
-class TestSafeDeletePath:
-    @pytest.mark.asyncio
-    async def test_safe_delete_path_deletes_file_within_base(self, temp_db_storage):
-        from app.services.storage import safe_delete_path
-
-        base = Path(temp_db_storage["download_dir"]) / "allowed"
-        base.mkdir(parents=True, exist_ok=True)
-        target = base / "file.txt"
-        target.write_text("ok")
-
-        deleted = safe_delete_path(base, target)
-
-        assert deleted is True
-        assert not target.exists()
-
-    @pytest.mark.asyncio
-    async def test_safe_delete_path_deletes_directory_within_base_recursive(self, temp_db_storage):
-        from app.services.storage import safe_delete_path
-
-        base = Path(temp_db_storage["download_dir"]) / "allowed"
-        base.mkdir(parents=True, exist_ok=True)
-        target = base / "dir1"
-        (target / "nested").mkdir(parents=True, exist_ok=True)
-        (target / "nested" / "a.txt").write_text("x")
-
-        deleted = safe_delete_path(base, target, recursive=True)
-
-        assert deleted is True
-        assert not target.exists()
-
-    @pytest.mark.asyncio
-    async def test_safe_delete_path_missing_allowed_returns_false(self, temp_db_storage):
-        from app.services.storage import safe_delete_path
-
-        base = Path(temp_db_storage["download_dir"]) / "allowed"
-        base.mkdir(parents=True, exist_ok=True)
-        target = base / "missing.txt"
-
-        deleted = safe_delete_path(base, target, allow_missing=True)
-
-        assert deleted is False
-
-    @pytest.mark.asyncio
-    async def test_safe_delete_path_missing_disallowed_raises(self, temp_db_storage):
-        from app.services.storage import safe_delete_path
-
-        base = Path(temp_db_storage["download_dir"]) / "allowed"
-        base.mkdir(parents=True, exist_ok=True)
-        target = base / "missing.txt"
-
-        with pytest.raises(FileNotFoundError):
-            safe_delete_path(base, target, allow_missing=False)
-
-    @pytest.mark.asyncio
-    async def test_safe_delete_path_rejects_traversal_relative(self, temp_db_storage):
-        from app.services.storage import safe_delete_path
-
-        base = Path(temp_db_storage["download_dir"]) / "allowed"
-        base.mkdir(parents=True, exist_ok=True)
-        outside = Path(temp_db_storage["temp_dir"]) / "outside.txt"
-        outside.write_text("outside")
-
-        with pytest.raises(ValueError):
-            safe_delete_path(base, Path("../outside.txt"))
-
-        assert outside.exists()
-
-    @pytest.mark.asyncio
-    async def test_safe_delete_path_rejects_absolute_outside_base(self, temp_db_storage):
-        from app.services.storage import safe_delete_path
-
-        base = Path(temp_db_storage["download_dir"]) / "allowed"
-        base.mkdir(parents=True, exist_ok=True)
-        outside = Path(temp_db_storage["temp_dir"]) / "outside_abs.txt"
-        outside.write_text("outside")
-
-        with pytest.raises(ValueError):
-            safe_delete_path(base, outside)
-
-        assert outside.exists()
-
-    @pytest.mark.asyncio
-    async def test_safe_delete_path_rejects_base_dir_itself_by_default(self, temp_db_storage):
-        from app.services.storage import safe_delete_path
-
-        base = Path(temp_db_storage["download_dir"]) / "allowed"
-        base.mkdir(parents=True, exist_ok=True)
-
-        with pytest.raises(ValueError):
-            safe_delete_path(base, base, recursive=True)
-
-        assert base.exists()
-
-    @pytest.mark.asyncio
-    async def test_safe_delete_path_symlink_deletes_link_only(self, temp_db_storage):
-        from app.services.storage import safe_delete_path
-
-        base = Path(temp_db_storage["download_dir"]) / "allowed"
-        base.mkdir(parents=True, exist_ok=True)
-        external = Path(temp_db_storage["temp_dir"]) / "external.txt"
-        external.write_text("external")
-        link = base / "link.txt"
-        os.symlink(external, link)
-
-        deleted = safe_delete_path(base, link)
-
-        assert deleted is True
-        assert not link.exists()
-        assert external.exists()
-
-    @pytest.mark.asyncio
-    async def test_safe_delete_path_concurrent_delete_idempotent(self, temp_db_storage):
-        from app.services.storage import safe_delete_path
-
-        base = Path(temp_db_storage["download_dir"]) / "allowed"
-        base.mkdir(parents=True, exist_ok=True)
-        target = base / "same.txt"
-        target.write_text("x")
-
-        async def delete_once():
-            return safe_delete_path(base, target, allow_missing=True)
-
-        results = await asyncio.gather(delete_once(), delete_once(), return_exceptions=True)
-
-        assert not any(isinstance(r, Exception) for r in results)
-        assert sum(1 for r in results if r is True) == 1
-        assert sum(1 for r in results if r is False) == 1
-
-
-class TestDeleteReferenceStateSync:
-    @pytest.mark.asyncio
-    async def test_delete_last_reference_resets_task_and_subscription(self, temp_db_storage, test_user_storage):
-        from app.services.storage import delete_user_file_reference
-
-        user_id = test_user_storage["id"]
-        now = utc_now_str()
-
-        store_dir = Path(temp_db_storage["store_dir"])
-        content_hash = "sync_state_hash_001"
-        file_dir = store_dir / content_hash[:2]
-        file_dir.mkdir(parents=True, exist_ok=True)
-        file_path = file_dir / f"{content_hash}.bin"
-        file_path.write_bytes(b"sync")
-
-        async with get_session() as db:
-            stored_file = StoredFile(
-                content_hash=content_hash,
-                real_path=str(file_path),
-                size=4,
-                is_directory=False,
-                original_name="sync.bin",
-                ref_count=1,
-                created_at=now,
-            )
-            db.add(stored_file)
-            await db.commit()
-            await db.refresh(stored_file)
-
-            task = DownloadTask(
-                uri_hash="sync_task_hash_001",
-                uri="http://example.com/sync.bin",
-                status="complete",
-                name="sync.bin",
-                total_length=4,
-                completed_length=4,
-                stored_file_id=stored_file.id,
-                created_at=now,
-                updated_at=now,
-            )
-            db.add(task)
-            await db.commit()
-            await db.refresh(task)
-
-            sub = UserTaskSubscription(
-                owner_id=user_id,
-                task_id=task.id,
-                frozen_space=0,
-                status="success",
-                created_at=now,
-            )
-            user_file = UserFile(
-                owner_id=user_id,
-                stored_file_id=stored_file.id,
-                display_name="sync.bin",
-                created_at=now,
-            )
-            db.add(sub)
-            db.add(user_file)
-            await db.commit()
-            await db.refresh(sub)
-            await db.refresh(user_file)
-
-            sub_id = sub.id
-            task_id = task.id
-            user_file_id = user_file.id
-            stored_file_id = stored_file.id
-
-        assert user_file_id is not None
-        ok = await delete_user_file_reference(user_file_id)
-        assert ok is True
-
-        async with get_session() as db:
-            sf = (await db.exec(select(StoredFile).where(StoredFile.id == stored_file_id))).first()
-            assert sf is None
-
-            db_task = (await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))).first()
-            assert db_task is not None
-            assert db_task.status == "queued"
-            assert db_task.stored_file_id is None
-            assert db_task.gid is None
-
-            db_sub = (await db.exec(select(UserTaskSubscription).where(UserTaskSubscription.id == sub_id))).first()
-            assert db_sub is not None
-            assert db_sub.status == "failed"
-            assert db_sub.error_display == "文件已删除，请重新添加任务下载"
-
-    @pytest.mark.asyncio
-    async def test_ref_count_decrement_atomic(self, temp_db_storage, test_user_storage):
-        """Concurrent decrements don't corrupt ref_count."""
-        from app.services.storage import create_user_file_reference, delete_user_file_reference
-        from app.db import execute
-        from app.core.security import hash_password
-        from datetime import datetime, timezone
-
-        # Create physical file in store
-        store_dir = Path(temp_db_storage["store_dir"])
-        content_hash = "atomic_decrement_hash_456"
-        file_dir = store_dir / content_hash[:2] / content_hash
-        file_dir.mkdir(parents=True, exist_ok=True)
-        test_file = file_dir / "test.txt"
-        test_file.write_text("atomic test content")
-
-        # Create StoredFile record
-        async with get_session() as db:
-            stored_file = StoredFile(
-                content_hash=content_hash,
-                real_path=str(file_dir),
-                size=1024,
-                is_directory=True,
-                original_name="test.txt",
-                ref_count=0,
-                created_at=utc_now_str(),
-            )
-            db.add(stored_file)
-            await db.commit()
-            await db.refresh(stored_file)
-            stored_file_id = stored_file.id
-
-        # Create multiple users
-        user_ids = [test_user_storage["id"]]
-        for i in range(4):
-            user_id = execute(
-                """
-                INSERT INTO users (username, password_hash, is_admin, created_at, quota)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [f"atomicuser{i}", hash_password("pass"), 0, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-            )
-            user_ids.append(user_id)
-
-        # Create references for all users
-        user_file_ids = []
-        for uid in user_ids:
-            user_file = await create_user_file_reference(
-                user_id=uid,
-                stored_file_id=stored_file_id,
-                display_name="test.txt",
-            )
-            if user_file:
-                user_file_ids.append(user_file.id)
-
-        assert len(user_file_ids) == 5
-
-        # Verify ref_count is 5
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            sf = result.first()
-            assert sf.ref_count == 5
-
-        # Delete all references concurrently
-        results = await asyncio.gather(
-            *[delete_user_file_reference(ufid) for ufid in user_file_ids],
-            return_exceptions=True,
-        )
-
-        # All should succeed
-        exceptions = [r for r in results if isinstance(r, Exception)]
-        assert len(exceptions) == 0, f"Unexpected exceptions: {exceptions}"
-
-        # Verify StoredFile is deleted (ref_count reached 0)
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            sf = result.first()
-            assert sf is None, "StoredFile should be deleted when ref_count reaches 0"
-
-        # Verify physical file is deleted
-        assert not file_dir.exists(), "Physical file should be deleted"
-
-    @pytest.mark.asyncio
-    async def test_partial_decrement_keeps_file(self, temp_db_storage, test_user_storage):
-        """Partial decrements keep file when ref_count > 0."""
-        from app.services.storage import create_user_file_reference, delete_user_file_reference
-        from app.db import execute
-        from app.core.security import hash_password
-        from datetime import datetime, timezone
-
-        # Create physical file in store
-        store_dir = Path(temp_db_storage["store_dir"])
-        content_hash = "partial_decrement_hash_123"
-        file_dir = store_dir / content_hash[:2] / content_hash
-        file_dir.mkdir(parents=True, exist_ok=True)
-        test_file = file_dir / "test.txt"
-        test_file.write_text("partial test content")
-
-        # Create StoredFile record
-        async with get_session() as db:
-            stored_file = StoredFile(
-                content_hash=content_hash,
-                real_path=str(file_dir),
-                size=1024,
-                is_directory=True,
-                original_name="test.txt",
-                ref_count=0,
-                created_at=utc_now_str(),
-            )
-            db.add(stored_file)
-            await db.commit()
-            await db.refresh(stored_file)
-            stored_file_id = stored_file.id
-
-        # Create 3 users
-        user_ids = [test_user_storage["id"]]
-        for i in range(2):
-            user_id = execute(
-                """
-                INSERT INTO users (username, password_hash, is_admin, created_at, quota)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [f"partialuser{i}", hash_password("pass"), 0, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-            )
-            user_ids.append(user_id)
-
-        # Create references for all users
-        user_file_ids = []
-        for uid in user_ids:
-            user_file = await create_user_file_reference(
-                user_id=uid,
-                stored_file_id=stored_file_id,
-                display_name="test.txt",
-            )
-            if user_file:
-                user_file_ids.append(user_file.id)
-
-        assert len(user_file_ids) == 3
-
-        # Delete only 2 references
-        await delete_user_file_reference(user_file_ids[0])
-        await delete_user_file_reference(user_file_ids[1])
-
-        # Verify ref_count is 1
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            sf = result.first()
-            assert sf is not None, "StoredFile should still exist"
-            assert sf.ref_count == 1
-
-        # Verify physical file still exists
-        assert file_dir.exists(), "Physical file should still exist"
-
-
-class TestSameUserConcurrentReferenceCreation:
-    """Test same user creating references concurrently (IntegrityError path)."""
-
-    @pytest.mark.asyncio
-    async def test_same_user_concurrent_reference_creation(self, temp_db_storage, test_user_storage, test_stored_file):
-        """Same user creating reference concurrently should not corrupt ref_count.
-
-        This tests the IntegrityError path in create_user_file_reference.
-        When two concurrent requests from the same user try to create a reference,
-        one succeeds and one gets IntegrityError. The rollback should correctly
-        undo the ref_count increment without double-decrementing.
-        """
-        from app.services.storage import create_user_file_reference
-
-        stored_file_id = test_stored_file.id
-        user_id = test_user_storage["id"]
-
-        # Run concurrent create_user_file_reference calls for the SAME user
-        results = await asyncio.gather(
-            create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id),
-            create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id),
-            create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id),
-            return_exceptions=True,
-        )
-
-        # Only one should succeed, others should return None (not raise exception)
-        successful = [r for r in results if r is not None and not isinstance(r, Exception)]
-        none_results = [r for r in results if r is None]
-        exceptions = [r for r in results if isinstance(r, Exception)]
-
-        assert len(successful) == 1, f"Expected exactly 1 successful reference, got {len(successful)}"
-        assert len(none_results) == 2, f"Expected 2 None results, got {len(none_results)}"
-        assert len(exceptions) == 0, f"Unexpected exceptions: {exceptions}"
-
-        # CRITICAL: Verify ref_count is exactly 1 (not 0, not negative, not > 1)
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
-            )
-            stored_file = result.first()
-            assert stored_file is not None, "StoredFile should still exist"
-            assert stored_file.ref_count == 1, (
-                f"Expected ref_count=1, got {stored_file.ref_count}. "
-                "This indicates a bug in IntegrityError handling."
-            )
-
-        # Verify only one UserFile exists
-        async with get_session() as db:
-            result = await db.exec(
-                select(UserFile).where(
-                    UserFile.owner_id == user_id,
-                    UserFile.stored_file_id == stored_file_id,
+async def test_delete_user_file_keeps_shared_storage_until_last_reference(
+    temp_db: str,
+) -> None:
+    user_a = await create_user_v0(username="storage_ref_a")
+    user_b = await create_user_v0(username="storage_ref_b")
+    seeded = await _seed_shared_file([user_a["id"], user_b["id"]])
+
+    assert await _delete_user_file_reference_v0(
+        user_a["id"],
+        seeded["user_file_ids"][0],
+    )
+
+    async with transaction() as conn:
+        stored_after_first = (
+            await conn.execute(
+                select(stored_files).where(
+                    stored_files.c.id == seeded["stored_file_id"]
                 )
             )
-            user_files = result.all()
-            assert len(user_files) == 1, f"Expected 1 UserFile, got {len(user_files)}"
-
-    @pytest.mark.asyncio
-    async def test_same_user_concurrent_then_delete(self, temp_db_storage, test_user_storage):
-        """After concurrent creation race, deletion should work correctly."""
-        from app.services.storage import create_user_file_reference, delete_user_file_reference
-
-        # Create physical file in store
-        store_dir = Path(temp_db_storage["store_dir"])
-        content_hash = "same_user_race_hash_999"
-        file_dir = store_dir / content_hash[:2] / content_hash
-        file_dir.mkdir(parents=True, exist_ok=True)
-        test_file = file_dir / "test.txt"
-        test_file.write_text("race test content")
-
-        # Create StoredFile record
-        async with get_session() as db:
-            stored_file = StoredFile(
-                content_hash=content_hash,
-                real_path=str(file_dir),
-                size=1024,
-                is_directory=True,
-                original_name="test.txt",
-                ref_count=0,
-                created_at=utc_now_str(),
+        ).mappings().first()
+        refs_after_first = (
+            await conn.execute(
+                select(user_files).where(
+                    user_files.c.stored_file_id == seeded["stored_file_id"]
+                )
             )
-            db.add(stored_file)
-            await db.commit()
-            await db.refresh(stored_file)
-            stored_file_id = stored_file.id
+        ).mappings().all()
 
-        user_id = test_user_storage["id"]
+    assert stored_after_first is not None
+    assert len(refs_after_first) == 1
+    assert seeded["path"].exists()
 
-        # Concurrent creation (same user)
-        results = await asyncio.gather(
-            create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id),
-            create_user_file_reference(user_id=user_id, stored_file_id=stored_file_id),
-            return_exceptions=True,
+    assert await _delete_user_file_reference_v0(
+        user_b["id"],
+        seeded["user_file_ids"][1],
+    )
+
+    async with transaction() as conn:
+        stored_after_last = (
+            await conn.execute(
+                select(stored_files).where(
+                    stored_files.c.id == seeded["stored_file_id"]
+                )
+            )
+        ).mappings().first()
+
+    assert stored_after_last is None
+    assert not seeded["path"].exists()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_delete_same_user_file_deletes_once(temp_db: str) -> None:
+    user = await create_user_v0(username="storage_race_user")
+    seeded = await _seed_shared_file([user["id"]])
+
+    results = await asyncio.gather(
+        _delete_user_file_reference_v0(user["id"], seeded["user_file_ids"][0]),
+        _delete_user_file_reference_v0(user["id"], seeded["user_file_ids"][0]),
+    )
+
+    async with transaction() as conn:
+        refs = (
+            await conn.execute(
+                select(user_files).where(
+                    user_files.c.stored_file_id == seeded["stored_file_id"]
+                )
+            )
+        ).mappings().all()
+        stored = (
+            await conn.execute(
+                select(stored_files).where(
+                    stored_files.c.id == seeded["stored_file_id"]
+                )
+            )
+        ).mappings().first()
+
+    assert sorted(results) == [False, True]
+    assert refs == []
+    assert stored is None
+
+
+@pytest.mark.asyncio
+async def test_delete_last_reference_clears_download_and_pack_fk_and_usage(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="storage_fk_user")
+    seeded = await _seed_shared_file([user["id"]])
+    timestamp = now_ms()
+    async with transaction() as conn:
+        global_download = (
+            await conn.execute(
+                insert(global_downloads)
+                .values(
+                    resource_key="http:storage-fk",
+                    resource_kind="http",
+                    source_uri="https://example.com/file",
+                    status="completed",
+                    total_bytes=6,
+                    completed_bytes=6,
+                    completed_file_id=seeded["stored_file_id"],
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                    completed_at_ms=timestamp,
+                )
+                .returning(global_downloads)
+            )
+        ).mappings().one()
+        await conn.execute(
+            insert(user_tasks).values(
+                user_id=user["id"],
+                global_download_id=global_download["id"],
+                status="completed",
+                reserved_bytes=0,
+                display_name="shared.bin",
+                created_at_ms=timestamp,
+                updated_at_ms=timestamp,
+                finished_at_ms=timestamp,
+            )
+        )
+        await conn.execute(
+            insert(pack_tasks).values(
+                user_id=user["id"],
+                source_user_file_ids_json="[]",
+                source_size_bytes=6,
+                reserved_bytes=0,
+                output_stored_file_id=seeded["stored_file_id"],
+                delete_source=0,
+                status="completed",
+                progress=100,
+                created_at_ms=timestamp,
+                updated_at_ms=timestamp,
+                finished_at_ms=timestamp,
+            )
+        )
+        await conn.execute(
+            user_storage_usage.update()
+            .where(user_storage_usage.c.user_id == user["id"])
+            .values(used_bytes=6, updated_at_ms=timestamp)
         )
 
-        successful = [r for r in results if r is not None and not isinstance(r, Exception)]
-        assert len(successful) == 1
+    assert await _delete_user_file_reference_v0(
+        user["id"],
+        seeded["user_file_ids"][0],
+    )
 
-        user_file = successful[0]
-
-        # Verify ref_count is 1
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
+    async with transaction() as conn:
+        download = (
+            await conn.execute(select(global_downloads))
+        ).mappings().one()
+        user_task = (
+            await conn.execute(select(user_tasks))
+        ).mappings().one()
+        pack_file_id = (
+            await conn.execute(select(pack_tasks.c.output_stored_file_id))
+        ).scalar_one()
+        usage = (
+            await conn.execute(
+                select(user_storage_usage).where(
+                    user_storage_usage.c.user_id == user["id"]
+                )
             )
-            sf = result.first()
-            assert sf.ref_count == 1
+        ).mappings().one()
 
-        # Delete the reference
-        delete_result = await delete_user_file_reference(user_file.id)
-        assert delete_result is True
+    assert download["completed_file_id"] is None
+    assert download["status"] == "cancelled"
+    assert download["completed_bytes"] == 0
+    assert download["completed_at_ms"] is None
+    assert user_task["status"] == "cancelled"
+    assert pack_file_id is None
+    assert usage["used_bytes"] == 0
+    assert not seeded["path"].exists()
 
-        # Verify StoredFile is deleted (ref_count reached 0)
-        async with get_session() as db:
-            result = await db.exec(
-                select(StoredFile).where(StoredFile.id == stored_file_id)
+
+@pytest.mark.asyncio
+async def test_admin_bulk_delete_orphan_clears_download_and_pack_fks(
+    temp_db: str,
+) -> None:
+    admin = await create_user_v0(username="storage_admin", is_admin=True)
+    path = Path(settings.download_dir) / "store" / "admin-orphan.bin"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"orphan")
+    timestamp = now_ms()
+    async with transaction() as conn:
+        stored = (
+            await conn.execute(
+                insert(stored_files)
+                .values(
+                    content_hash="admin_orphan_hash",
+                    real_path=str(path),
+                    size_bytes=6,
+                    is_directory=0,
+                    original_name="admin-orphan.bin",
+                    created_at_ms=timestamp,
+                )
+                .returning(stored_files)
             )
-            sf = result.first()
-            assert sf is None, "StoredFile should be deleted when ref_count reaches 0"
+        ).mappings().one()
+        await conn.execute(
+            insert(global_downloads).values(
+                resource_key="http:admin-orphan",
+                resource_kind="http",
+                source_uri="https://example.com/orphan",
+                status="completed",
+                total_bytes=6,
+                completed_bytes=6,
+                completed_file_id=stored["id"],
+                created_at_ms=timestamp,
+                updated_at_ms=timestamp,
+                completed_at_ms=timestamp,
+            )
+        )
+        await conn.execute(
+            insert(pack_tasks).values(
+                user_id=admin["id"],
+                source_user_file_ids_json="[]",
+                source_size_bytes=6,
+                reserved_bytes=0,
+                output_stored_file_id=stored["id"],
+                delete_source=0,
+                status="completed",
+                progress=100,
+                created_at_ms=timestamp,
+                updated_at_ms=timestamp,
+                finished_at_ms=timestamp,
+            )
+        )
 
-        # Verify physical file is deleted
-        assert not file_dir.exists(), "Physical file should be deleted"
+    response = await bulk_delete_files(
+        BulkDeleteRequest(file_ids=[stored["id"]]),
+        admin=user_from_row(admin),
+    )
+
+    async with transaction() as conn:
+        stored_after_delete = (
+            await conn.execute(
+                select(stored_files).where(stored_files.c.id == stored["id"])
+            )
+        ).mappings().first()
+        download = (await conn.execute(select(global_downloads))).mappings().one()
+        pack_file_id = (
+            await conn.execute(select(pack_tasks.c.output_stored_file_id))
+        ).scalar_one()
+
+    assert response.deleted_count == 1
+    assert response.failed_ids == []
+    assert stored_after_delete is None
+    assert download["completed_file_id"] is None
+    assert download["status"] == "cancelled"
+    assert pack_file_id is None
+    assert not path.exists()

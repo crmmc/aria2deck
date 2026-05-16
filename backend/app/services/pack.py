@@ -11,14 +11,24 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Callable
+from typing import Any, Callable
 
 import zstandard as zstd
-from sqlmodel import select
+from sqlalchemy import case, func, insert, select, update
 
 from app.core.config import settings
-from app.database import get_session
-from app.models import PackTask, User
+from app.db.engine import transaction
+from app.db.schema import (
+    global_downloads,
+    pack_tasks,
+    stored_file_entries,
+    stored_files,
+    user_tasks,
+    user_files,
+    user_storage_usage,
+    users,
+)
+from app.services.usage_service import get_usage, release_reserved, reserve_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +38,15 @@ _running_tasks_lock = asyncio.Lock()
 SUPPORTED_FORMATS = ("zip", "tar.zst")
 _ZSTD_LEVEL_MAP = [1, 2, 3, 5, 7, 9, 12, 15, 18, 22]
 _CHUNK_SIZE = 1024 * 1024
+PACK_ACTIVE_STATUSES = ("pending", "packing")
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def now_ms() -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
 def cleanup_pack_output(output_path: Path) -> bool:
@@ -62,6 +77,223 @@ class _ArchiveItem:
 class _RunningPackJob:
     task: asyncio.Task[None]
     cancel_event: threading.Event
+
+
+async def _release_task_reservation(task: dict[str, Any]) -> None:
+    reserved = int(task["reserved_bytes"] or 0)
+    if reserved <= 0:
+        return
+    await release_reserved(int(task["user_id"]), reserved)
+
+
+async def _convert_reserved_to_used(
+    user_id: int,
+    *,
+    reserved_bytes: int,
+    used_bytes: int,
+) -> None:
+    if reserved_bytes <= 0 and used_bytes <= 0:
+        return
+    reserved_expr = user_storage_usage.c.reserved_bytes - max(0, reserved_bytes)
+    async with transaction() as conn:
+        await conn.execute(
+            update(user_storage_usage)
+            .where(user_storage_usage.c.user_id == user_id)
+            .values(
+                used_bytes=user_storage_usage.c.used_bytes + max(0, used_bytes),
+                reserved_bytes=case((reserved_expr < 0, 0), else_=reserved_expr),
+                updated_at_ms=now_ms(),
+            )
+        )
+
+
+async def _delete_user_file_reference_v0(
+    user_id: int,
+    user_file_id: int,
+    *,
+    adjust_usage: bool = True,
+) -> bool:
+    from app.services.storage import get_store_dir, safe_delete_path
+
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                select(user_files.c.stored_file_id, stored_files.c.real_path)
+                .select_from(user_files.join(stored_files, user_files.c.stored_file_id == stored_files.c.id))
+                .where(user_files.c.id == user_file_id, user_files.c.user_id == user_id)
+            )
+        ).mappings().first()
+        if row is None:
+            return False
+        deleted = await conn.execute(
+            user_files.delete().where(
+                user_files.c.id == user_file_id,
+                user_files.c.user_id == user_id,
+            )
+        )
+        if not deleted.rowcount:
+            return False
+        if adjust_usage:
+            stored_file = (
+                await conn.execute(
+                    select(stored_files.c.size_bytes).where(
+                        stored_files.c.id == row["stored_file_id"]
+                    )
+                )
+            ).first()
+            size_bytes = int(stored_file[0] if stored_file else 0)
+            used_expr = user_storage_usage.c.used_bytes - size_bytes
+            await conn.execute(
+                update(user_storage_usage)
+                .where(user_storage_usage.c.user_id == user_id)
+                .values(
+                    used_bytes=case((used_expr < 0, 0), else_=used_expr),
+                    updated_at_ms=now_ms(),
+                )
+            )
+        refs = (
+            await conn.execute(
+                select(func.count()).select_from(user_files).where(
+                    user_files.c.stored_file_id == row["stored_file_id"]
+                )
+            )
+        ).scalar_one()
+        if int(refs or 0) > 0:
+            return True
+        timestamp = now_ms()
+        affected_downloads = (
+            await conn.execute(
+                update(global_downloads)
+                .where(global_downloads.c.completed_file_id == row["stored_file_id"])
+                .values(
+                    status="cancelled",
+                    aria2_gid=None,
+                    completed_file_id=None,
+                    completed_bytes=0,
+                    completed_at_ms=None,
+                    error_code="stored_file_deleted",
+                    error_message="Stored file was deleted",
+                    updated_at_ms=timestamp,
+                )
+                .returning(global_downloads.c.id)
+            )
+        ).all()
+        affected_download_ids = [int(item[0]) for item in affected_downloads]
+        if affected_download_ids:
+            await conn.execute(
+                update(user_tasks)
+                .where(
+                    user_tasks.c.global_download_id.in_(affected_download_ids),
+                    user_tasks.c.status == "completed",
+                )
+                .values(
+                    status="cancelled",
+                    error_message="Stored file was deleted",
+                    updated_at_ms=timestamp,
+                    finished_at_ms=timestamp,
+                )
+            )
+        await conn.execute(
+            update(pack_tasks)
+            .where(pack_tasks.c.output_stored_file_id == row["stored_file_id"])
+            .values(output_stored_file_id=None, updated_at_ms=timestamp)
+        )
+        await conn.execute(
+            stored_file_entries.delete().where(
+                stored_file_entries.c.stored_file_id == row["stored_file_id"]
+            )
+        )
+        await conn.execute(
+            stored_files.delete().where(stored_files.c.id == row["stored_file_id"])
+        )
+        real_path = str(row["real_path"])
+
+    path = Path(real_path)
+    safe_delete_path(
+        base_dir=get_store_dir(),
+        target=path,
+        recursive=path.is_dir(),
+        allow_missing=True,
+    )
+    return True
+
+
+async def _register_pack_output_v0(
+    *,
+    output_path: Path,
+    original_name: str,
+    user_id: int,
+) -> tuple[int, int | None]:
+    from app.services.hash import calculate_content_hash_async
+    from app.services.storage import get_store_path_for_hash, safe_delete_path
+    from app.services.storage_index import build_entries
+
+    content_hash = await calculate_content_hash_async(output_path)
+    size_bytes = output_path.stat().st_size
+    target_path = get_store_path_for_hash(content_hash)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = now_ms()
+
+    if not target_path.exists():
+        shutil.move(str(output_path), str(target_path))
+    else:
+        safe_delete_path(
+            base_dir=output_path.parent,
+            target=output_path,
+            recursive=False,
+            allow_missing=True,
+        )
+
+    async with transaction() as conn:
+        stored = (
+            await conn.execute(
+                select(stored_files).where(stored_files.c.content_hash == content_hash)
+            )
+        ).mappings().first()
+        if stored is None:
+            stored = (
+                await conn.execute(
+                    insert(stored_files)
+                    .values(
+                        content_hash=content_hash,
+                        real_path=str(target_path),
+                        size_bytes=size_bytes,
+                        is_directory=0,
+                        original_name=original_name,
+                        created_at_ms=timestamp,
+                    )
+                    .returning(stored_files)
+                )
+            ).mappings().one()
+            entries = build_entries(int(stored["id"]), target_path)
+            if entries:
+                await conn.execute(insert(stored_file_entries), entries)
+
+        existing_ref = (
+            await conn.execute(
+                select(user_files.c.id).where(
+                    user_files.c.user_id == user_id,
+                    user_files.c.stored_file_id == stored["id"],
+                )
+            )
+        ).first()
+        if existing_ref:
+            return int(stored["id"]), None
+
+        user_file = (
+            await conn.execute(
+                insert(user_files)
+                .values(
+                    user_id=user_id,
+                    stored_file_id=stored["id"],
+                    display_name=original_name,
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                )
+                .returning(user_files.c.id)
+            )
+        ).first()
+    return int(stored["id"]), int(user_file[0]) if user_file else None
 
 
 class _ProgressTracker:
@@ -206,15 +438,20 @@ class PackTaskManager:
             output_path = pack_dir / output_filename
             counter += 1
 
-        async with get_session() as db:
-            task = await db.get(PackTask, task_id)
-            if not task or task.status != "pending":
+        async with transaction() as conn:
+            task = (
+                await conn.execute(
+                    select(pack_tasks).where(pack_tasks.c.id == task_id)
+                )
+            ).mappings().first()
+            if not task or task["status"] != "pending":
                 logger.info("Pack task %s status changed, skipping", task_id)
                 return
-            task.status = "packing"
-            task.output_path = str(output_path)
-            task.updated_at = utc_now()
-            db.add(task)
+            await conn.execute(
+                update(pack_tasks)
+                .where(pack_tasks.c.id == task_id, pack_tasks.c.status == "pending")
+                .values(status="packing", updated_at_ms=now_ms())
+            )
 
         items = cls._build_archive_items(sources, source_names)
         total_bytes = sum(item.size for item in items if not item.is_dir)
@@ -228,9 +465,11 @@ class PackTaskManager:
         async with _running_tasks_lock:
             cls._running_tasks[task_id] = _RunningPackJob(task=current_task, cancel_event=cancel_event)
 
-        async with get_session() as db:
-            task_state = await db.get(PackTask, task_id)
-            if not task_state or task_state.status != "packing":
+        async with transaction() as conn:
+            task_state = (
+                await conn.execute(select(pack_tasks.c.status).where(pack_tasks.c.id == task_id))
+            ).first()
+            if not task_state or task_state[0] != "packing":
                 cancel_event.set()
 
         writer_task: asyncio.Task[None] | None = None
@@ -248,6 +487,7 @@ class PackTaskManager:
             )
 
         last_progress = -1
+        extra_reserved = 0
         try:
             while writer_task is not None and not writer_task.done():
                 _processed, _total, progress = tracker.snapshot()
@@ -274,16 +514,11 @@ class PackTaskManager:
                     cleanup_pack_output(output_path)
                     return
                 try:
-                    from app.services.storage import register_pack_output
-
-                    stored_file, user_file = await register_pack_output(
+                    stored_file_id, output_user_file_id = await _register_pack_output_v0(
                         output_path=output_path,
                         original_name=output_filename,
                         user_id=user_id,
                     )
-                    stored_file_id = stored_file.id
-                    if user_file is not None and user_file.id is not None:
-                        output_user_file_id = user_file.id
                 except Exception:
                     logger.exception("Failed to register pack output: task_id=%s", task_id)
                     cleanup_pack_output(output_path)
@@ -291,42 +526,113 @@ class PackTaskManager:
                     return
 
             if output_user_file_id is not None and not await cls._is_task_status(task_id, "packing"):
-                from app.services.storage import delete_user_file_reference
-
                 try:
-                    await delete_user_file_reference(output_user_file_id)
+                    await _delete_user_file_reference_v0(
+                        user_id,
+                        output_user_file_id,
+                        adjust_usage=False,
+                    )
                 except Exception:
                     logger.warning("Failed to rollback output ref: user_file_id=%s", output_user_file_id)
                 return
 
-            if stored_file_id and delete_source and file_ids:
-                from app.services.storage import delete_user_file_reference
-
-                if not await cls._is_task_status(task_id, "packing"):
+            if output_user_file_id is not None and output_size > 0:
+                async with transaction() as conn:
+                    task_for_quota = (
+                        await conn.execute(
+                            select(pack_tasks.c.status, pack_tasks.c.reserved_bytes).where(
+                                pack_tasks.c.id == task_id
+                            )
+                        )
+                    ).mappings().first()
+                if not task_for_quota or task_for_quota["status"] != "packing":
+                    try:
+                        await _delete_user_file_reference_v0(
+                            user_id,
+                            output_user_file_id,
+                            adjust_usage=False,
+                        )
+                    except Exception:
+                        logger.warning("Failed to rollback output ref: user_file_id=%s", output_user_file_id)
                     return
 
-                for uf_id in file_ids:
+                extra_required = max(0, output_size - int(task_for_quota["reserved_bytes"] or 0))
+                if extra_required > 0:
                     try:
-                        await delete_user_file_reference(uf_id)
-                    except Exception:
-                        logger.warning("Failed to delete source ref: user_file_id=%s", uf_id)
+                        await reserve_bytes(user_id, extra_required)
+                    except ValueError:
+                        try:
+                            await _delete_user_file_reference_v0(
+                                user_id,
+                                output_user_file_id,
+                                adjust_usage=False,
+                            )
+                        except Exception:
+                            logger.warning("Failed to rollback output ref: user_file_id=%s", output_user_file_id)
+                        await cls._update_task_error(task_id, "空间不足。打包结果超过预留空间")
+                        return
+                    extra_reserved = extra_required
 
-            async with get_session() as db:
-                task = await db.get(PackTask, task_id)
-                if task and task.status == "packing":
-                    task.status = "done"
-                    task.progress = 100
-                    task.output_size = output_size
-                    task.stored_file_id = stored_file_id
-                    task.reserved_space = 0
-                    task.updated_at = utc_now()
-                    db.add(task)
+            completed_task: dict[str, Any] | None = None
+            async with transaction() as conn:
+                task = (
+                    await conn.execute(
+                        select(pack_tasks).where(pack_tasks.c.id == task_id)
+                    )
+                ).mappings().first()
+                if task and task["status"] == "packing":
+                    completed = await conn.execute(
+                        update(pack_tasks)
+                        .where(pack_tasks.c.id == task_id, pack_tasks.c.status == "packing")
+                        .values(
+                            status="completed",
+                            progress=100,
+                            output_stored_file_id=stored_file_id,
+                            reserved_bytes=0,
+                            updated_at_ms=now_ms(),
+                            finished_at_ms=now_ms(),
+                        )
+                        .returning(pack_tasks.c.id)
+                    )
+                    if completed.first() is not None:
+                        completed_task = dict(task)
+                    else:
+                        logger.warning("Pack task %s completion lost status race", task_id)
                 else:
                     logger.warning("Pack task %s was cancelled during packing", task_id)
+            if completed_task:
+                await _convert_reserved_to_used(
+                    user_id,
+                    reserved_bytes=int(completed_task["reserved_bytes"] or 0) + extra_reserved,
+                    used_bytes=output_size if output_user_file_id is not None else 0,
+                )
+                extra_reserved = 0
+                if stored_file_id and delete_source and file_ids:
+                    for uf_id in file_ids:
+                        try:
+                            await _delete_user_file_reference_v0(user_id, uf_id)
+                        except Exception:
+                            logger.warning("Failed to delete source ref: user_file_id=%s", uf_id)
+            elif output_user_file_id is not None:
+                if extra_reserved > 0:
+                    await release_reserved(user_id, extra_reserved)
+                    extra_reserved = 0
+                try:
+                    await _delete_user_file_reference_v0(
+                        user_id,
+                        output_user_file_id,
+                        adjust_usage=False,
+                    )
+                except Exception:
+                    logger.warning("Failed to rollback output ref: user_file_id=%s", output_user_file_id)
         except InterruptedError:
+            if extra_reserved > 0:
+                await release_reserved(user_id, extra_reserved)
             cleanup_pack_output(output_path)
         except asyncio.CancelledError:
             cancel_event.set()
+            if extra_reserved > 0:
+                await release_reserved(user_id, extra_reserved)
             if writer_task is not None:
                 try:
                     await writer_task
@@ -339,6 +645,8 @@ class PackTaskManager:
             cleanup_pack_output(output_path)
             raise
         except Exception as exc:
+            if extra_reserved > 0:
+                await release_reserved(user_id, extra_reserved)
             cleanup_pack_output(output_path)
             await cls._update_task_error(task_id, str(exc))
         finally:
@@ -565,12 +873,12 @@ class PackTaskManager:
 
     @classmethod
     async def _update_task_progress(cls, task_id: int, progress: int) -> None:
-        async with get_session() as db:
-            task = await db.get(PackTask, task_id)
-            if task and task.status == "packing":
-                task.progress = progress
-                task.updated_at = utc_now()
-                db.add(task)
+        async with transaction() as conn:
+            await conn.execute(
+                update(pack_tasks)
+                .where(pack_tasks.c.id == task_id, pack_tasks.c.status == "packing")
+                .values(progress=progress, updated_at_ms=now_ms())
+            )
 
     @classmethod
     async def cancel_pack(cls, task_id: int) -> bool:
@@ -583,20 +891,39 @@ class PackTaskManager:
 
     @classmethod
     async def _update_task_error(cls, task_id: int, error: str) -> None:
-        async with get_session() as db:
-            task = await db.get(PackTask, task_id)
-            if task and task.status in ("pending", "packing"):
-                task.status = "failed"
-                task.error_message = error
-                task.reserved_space = 0
-                task.updated_at = utc_now()
-                db.add(task)
+        async with transaction() as conn:
+            task = (
+                await conn.execute(
+                    select(pack_tasks).where(
+                        pack_tasks.c.id == task_id,
+                        pack_tasks.c.status.in_(PACK_ACTIVE_STATUSES),
+                    )
+                )
+            ).mappings().first()
+            if task:
+                await conn.execute(
+                    update(pack_tasks)
+                    .where(pack_tasks.c.id == task_id)
+                    .values(
+                        status="failed",
+                        error_message=error,
+                        reserved_bytes=0,
+                        updated_at_ms=now_ms(),
+                        finished_at_ms=now_ms(),
+                    )
+                )
+        if task:
+            await _release_task_reservation(dict(task))
 
     @classmethod
     async def _is_task_status(cls, task_id: int, expected_status: str) -> bool:
-        async with get_session() as db:
-            task = await db.get(PackTask, task_id)
-            return bool(task and task.status == expected_status)
+        async with transaction() as conn:
+            row = (
+                await conn.execute(
+                    select(pack_tasks.c.status).where(pack_tasks.c.id == task_id)
+                )
+            ).first()
+        return bool(row and row[0] == expected_status)
 
 
 def calculate_folder_size(path: Path) -> int:
@@ -611,14 +938,15 @@ def calculate_folder_size(path: Path) -> int:
 
 
 async def get_reserved_space() -> int:
-    async with get_session() as db:
-        result = await db.exec(select(PackTask.reserved_space, PackTask.status))
-        rows = result.all()
-        total = 0
-        for reserved_space, status in rows:
-            if status in ("pending", "packing"):
-                total += int(reserved_space or 0)
-        return total
+    async with transaction() as conn:
+        value = (
+            await conn.execute(
+                select(func.coalesce(func.sum(pack_tasks.c.reserved_bytes), 0)).where(
+                    pack_tasks.c.status.in_(PACK_ACTIVE_STATUSES)
+                )
+            )
+        ).scalar_one()
+    return int(value or 0)
 
 
 async def get_server_available_space() -> int:
@@ -630,13 +958,15 @@ async def get_server_available_space() -> int:
 
 
 async def get_user_available_space_for_pack(user_id: int) -> int:
-    from app.services.storage import get_user_space_info
-
     server_available = await get_server_available_space()
-    async with get_session() as db:
-        result = await db.exec(select(User).where(User.id == user_id))
-        user = result.first()
-    user_quota = user.quota if user else 0
-    user_space = await get_user_space_info(user_id, user_quota)
-    user_quota_remaining = max(0, user_space["quota"] - user_space["used"] - user_space["frozen"])
+    async with transaction() as conn:
+        row = (
+            await conn.execute(select(users.c.quota_bytes).where(users.c.id == user_id))
+        ).first()
+    user_quota = int(row[0]) if row else 0
+    user_space = await get_usage(user_id, user_quota)
+    user_quota_remaining = max(
+        0,
+        user_space["quota_bytes"] - user_space["used_bytes"] - user_space["reserved_bytes"],
+    )
     return min(server_available, user_quota_remaining)

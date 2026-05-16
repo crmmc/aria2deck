@@ -3,8 +3,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
-from app.db import fetch_one
+from app.db.engine import transaction
+from app.db.schema import user_files
 
 FIXED_MACHINE_FREE = 8 * 1024**3
 
@@ -94,11 +96,21 @@ class TestRenameFile:
         assert response.status_code == 200
         assert response.json() == {"ok": True}
 
-        renamed = fetch_one(
-            "SELECT display_name FROM user_files WHERE id = ?",
-            [user_file["id"]],
-        )
-        assert renamed["display_name"] == "new_name.txt"
+        import asyncio
+
+        async def fetch_name() -> str:
+            async with transaction() as conn:
+                return str(
+                    (
+                        await conn.execute(
+                            select(user_files.c.display_name).where(
+                                user_files.c.id == user_file["id"]
+                            )
+                        )
+                    ).scalar_one()
+                )
+
+        assert asyncio.run(fetch_name()) == "new_name.txt"
 
     def test_rename_file_not_found(self, authenticated_client: TestClient):
         response = authenticated_client.put(
@@ -131,11 +143,21 @@ class TestRenameFile:
         assert response.status_code == 200
         assert response.json() == {"ok": True}
 
-        renamed = fetch_one(
-            "SELECT display_name FROM user_files WHERE id = ?",
-            [user_file["id"]],
-        )
-        assert renamed["display_name"] == 'file<>:"|?*.txt'
+        import asyncio
+
+        async def fetch_name() -> str:
+            async with transaction() as conn:
+                return str(
+                    (
+                        await conn.execute(
+                            select(user_files.c.display_name).where(
+                                user_files.c.id == user_file["id"]
+                            )
+                        )
+                    ).scalar_one()
+                )
+
+        assert asyncio.run(fetch_name()) == 'file<>:"|?*.txt'
 
 
 @pytest.mark.parametrize(

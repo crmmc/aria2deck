@@ -1,10 +1,46 @@
 """Tests for file sharing feature."""
-from datetime import timedelta
+import asyncio
 
 from fastapi.testclient import TestClient
-from app.db import execute
-from app.models import utc_now, utc_now_str
+from sqlalchemy import insert
+
+from app.db.engine import transaction
+from app.db.schema import share_links
 from app.routers.shares import MAX_ACTIVE_SHARES_PER_FILE
+from tests.helpers_v0 import now_ms
+
+
+def _insert_share_v0(
+    *,
+    share_code: str,
+    owner_id: int,
+    user_file_id: int,
+    status: str = "active",
+    expires_at_ms: int | None = None,
+    max_downloads: int | None = None,
+    download_count: int = 0,
+) -> int:
+    async def seed() -> int:
+        async with transaction() as conn:
+            row = (
+                await conn.execute(
+                    insert(share_links)
+                    .values(
+                        share_code=share_code,
+                        owner_id=owner_id,
+                        user_file_id=user_file_id,
+                        expires_at_ms=expires_at_ms,
+                        max_downloads=max_downloads,
+                        download_count=download_count,
+                        status=status,
+                        created_at_ms=now_ms(),
+                    )
+                    .returning(share_links.c.id)
+                )
+            ).one()
+        return int(row[0])
+
+    return asyncio.run(seed())
 
 
 def _create_share(client: TestClient, user_file_id: int, **kwargs) -> dict:
@@ -47,24 +83,15 @@ class TestCreateShare:
 class TestShareManagement:
     def test_create_share_ignores_expired_and_exhausted_in_limit(self, authenticated_client, user_file, temp_db):
         # 先造 10 条“status=active 但实际失效”的分享（过期 + 次数耗尽）
-        expired_at = (utc_now() - timedelta(hours=1)).isoformat()
+        expired_at_ms = now_ms() - 60 * 60 * 1000
         for i in range(MAX_ACTIVE_SHARES_PER_FILE):
-            execute(
-                """
-                INSERT INTO share_links
-                (share_code, owner_id, user_file_id, expires_at, max_downloads, download_count, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    f"expired{i}",
-                    1,
-                    user_file["id"],
-                    expired_at,
-                    1,
-                    1,
-                    "active",
-                    utc_now_str(),
-                ],
+            _insert_share_v0(
+                share_code=f"expired{i}",
+                owner_id=1,
+                user_file_id=user_file["id"],
+                expires_at_ms=expired_at_ms,
+                max_downloads=1,
+                download_count=1,
             )
 
         # 应该还能创建，因为前面的都不算“活跃有效”
@@ -74,19 +101,10 @@ class TestShareManagement:
     def test_create_share_blocked_when_effective_active_reaches_limit(self, authenticated_client, user_file, temp_db):
         # 造满 10 条真正有效的 active 分享
         for i in range(MAX_ACTIVE_SHARES_PER_FILE):
-            execute(
-                """
-                INSERT INTO share_links
-                (share_code, owner_id, user_file_id, status, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [
-                    f"active{i}",
-                    1,
-                    user_file["id"],
-                    "active",
-                    utc_now_str(),
-                ],
+            _insert_share_v0(
+                share_code=f"active{i}",
+                owner_id=1,
+                user_file_id=user_file["id"],
             )
 
         resp = authenticated_client.post("/api/shares", json={"user_file_id": user_file["id"]})
@@ -183,6 +201,21 @@ class TestDeleteProtection:
         authenticated_client.put(f"/api/shares/{share['id']}/revoke")
         resp = authenticated_client.delete("/api/files/hash_testfile")
         assert resp.status_code == 200
+
+    def test_delete_allowed_after_share_downloads_exhausted(self, authenticated_client, user_file):
+        """File can be deleted after max-download share is exhausted."""
+        _insert_share_v0(
+            share_code="exhausted",
+            owner_id=1,
+            user_file_id=user_file["id"],
+            max_downloads=1,
+            download_count=1,
+        )
+
+        resp = authenticated_client.delete("/api/files/hash_testfile")
+
+        assert resp.status_code == 200
+
     def test_delete_allowed_no_shares(self, authenticated_client, user_file):
         """File without shares can be deleted normally."""
         resp = authenticated_client.delete("/api/files/hash_testfile")
