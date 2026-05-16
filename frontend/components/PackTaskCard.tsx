@@ -47,6 +47,8 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   }, [tasks, loadTasks]);
 
   const notifiedTaskIdsRef = useRef<Set<number>>(new Set());
+  const onTaskCompleteRef = useRef(onTaskComplete);
+  onTaskCompleteRef.current = onTaskComplete;
 
   useEffect(() => {
     const newlyDone = tasks.filter(
@@ -54,9 +56,9 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
     );
     if (newlyDone.length > 0) {
       newlyDone.forEach((t) => notifiedTaskIdsRef.current.add(t.id));
-      onTaskComplete?.();
+      onTaskCompleteRef.current?.();
     }
-  }, [tasks, onTaskComplete]);
+  }, [tasks]);
 
   useEffect(() => {
     return () => {

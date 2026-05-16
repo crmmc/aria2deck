@@ -9,7 +9,7 @@ interface Props {
 }
 
 export default function PasswordWarningBanner({ user }: Props) {
-  const router = useRouter();
+  const { push } = useRouter();
   const [dismissed, setDismissed] = useState(false);
 
   if (!user?.is_initial_password || dismissed) {
@@ -36,7 +36,7 @@ export default function PasswordWarningBanner({ user }: Props) {
         <div className="password-warning-footer">
           <button
             className="password-warning-action"
-            onClick={() => router.push("/profile")}
+            onClick={() => push("/profile")}
           >
             前往修改
           </button>

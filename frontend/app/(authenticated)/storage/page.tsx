@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/AuthContext";
 import { useToast } from "@/components/Toast";
+import { ModalOverlay } from "@/components/ModalOverlay";
 import { api } from "@/lib/api";
 import type { StoredFileInfo, FileUserInfo } from "@/types";
 
@@ -22,7 +23,7 @@ function formatSize(bytes: number): string {
 
 export default function StoragePage() {
   const { user } = useAuth();
-  const router = useRouter();
+  const { replace } = useRouter();
   const { showToast } = useToast();
 
   const [files, setFiles] = useState<StoredFileInfo[]>([]);
@@ -39,9 +40,9 @@ export default function StoragePage() {
 
   useEffect(() => {
     if (user && !user.is_admin) {
-      router.replace("/tasks");
+      replace("/tasks");
     }
-  }, [user, router]);
+  }, [user, replace]);
 
   const initialLoadDone = useRef(false);
 
@@ -215,7 +216,7 @@ export default function StoragePage() {
                       {f.ref_count}
                     </button>
                   </td>
-                  <td className="table-cell muted">
+                  <td className="table-cell muted" suppressHydrationWarning>
                     {new Date(f.created_at).toLocaleString()}
                   </td>
                   <td className="table-cell">
@@ -241,11 +242,10 @@ export default function StoragePage() {
       </div>
 
       {userModalFile && (
-        <div className="modal-overlay" onClick={() => setUserModalFile(null)}>
-          <div
-            className="modal-content max-w-400 animate-in"
-            onClick={(e) => e.stopPropagation()}
-          >
+        <ModalOverlay
+          onClose={() => setUserModalFile(null)}
+          contentClassName="modal-content max-w-400 animate-in"
+        >
             <h3 className="mb-4">引用用户</h3>
             <p className="muted mb-4">{userModalFile.original_name}</p>
             {userModalLoading ? (
@@ -270,8 +270,7 @@ export default function StoragePage() {
                 关闭
               </button>
             </div>
-          </div>
-        </div>
+        </ModalOverlay>
       )}
     </>
   );

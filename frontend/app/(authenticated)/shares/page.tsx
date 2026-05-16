@@ -71,6 +71,9 @@ const ShareCard = memo(function ShareCard({
     <div
       className="card cursor-pointer"
       onClick={handleCardClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCardClick(); } }}
     >
       <div className={`task-card-inner${isSelected ? " selected" : ""}`}>
         <div>
@@ -107,16 +110,16 @@ const ShareCard = memo(function ShareCard({
               {record.max_downloads != null && record.max_downloads > 0 ? ` / ${record.max_downloads}` : ""}
             </div>
             {record.expires_at && (
-              <div>
+              <div suppressHydrationWarning>
                 过期时间: {new Date(record.expires_at).toLocaleString()}
               </div>
             )}
           </div>
         </div>
 
-        <div className="task-card-footer" onClick={(e) => e.stopPropagation()}>
+        <div className="task-card-footer" role="presentation" onClick={(e) => e.stopPropagation()}>
           <div className="task-footer-left">
-            <span className="muted text-sm">
+            <span className="muted text-sm" suppressHydrationWarning>
               创建于 {new Date(record.created_at).toLocaleString()}
             </span>
           </div>

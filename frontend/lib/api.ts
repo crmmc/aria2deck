@@ -118,8 +118,10 @@ export const api = {
     request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   me: () => request<User>("/api/auth/me"),
   changePassword: async (oldPassword: string, newPassword: string, username: string) => {
-    const oldHash = await hashPassword(oldPassword, username);
-    const newHash = await hashPassword(newPassword, username);
+    const [oldHash, newHash] = await Promise.all([
+      hashPassword(oldPassword, username),
+      hashPassword(newPassword, username),
+    ]);
     return request<{ ok: boolean; message: string }>("/api/auth/change-password", {
       method: "POST",
       body: JSON.stringify({ old_password: oldHash, new_password: newHash }),

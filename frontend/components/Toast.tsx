@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { ModalOverlay } from "@/components/ModalOverlay";
 
 type ToastType = "success" | "error" | "info" | "warning";
 
@@ -114,8 +115,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             </div>
 
             {confirm && (
-              <div className="confirm-overlay" onClick={() => handleConfirm(false)}>
-                <div className="confirm-content" onClick={(e) => e.stopPropagation()}>
+              <ModalOverlay
+                onClose={() => handleConfirm(false)}
+                className="confirm-overlay"
+                contentClassName="confirm-content"
+              >
                   {confirm.title && (
                     <h3 className="confirm-title">{confirm.title}</h3>
                   )}
@@ -135,8 +139,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                       {confirm.confirmText || "确定"}
                     </button>
                   </div>
-                </div>
-              </div>
+              </ModalOverlay>
             )}
 
             <style>{`

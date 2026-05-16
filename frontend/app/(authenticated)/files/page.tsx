@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
+import { ModalOverlay } from "@/components/ModalOverlay";
 import PackTaskCard from "@/components/PackTaskCard";
 import CreateShareDialog from "@/components/CreateShareDialog";
 import type { FileInfo, BrowseFileInfo, SpaceInfo } from "@/types";
@@ -145,7 +146,7 @@ export default function FilesPage() {
 
   // Sorted files (folders first, then by sort field)
   const sortedFiles = useMemo(() => {
-    const sorted = [...files].sort((a, b) => {
+    return files.toSorted((a, b) => {
       // Folders always come first
       if (a.is_directory && !b.is_directory) return -1;
       if (!a.is_directory && b.is_directory) return 1;
@@ -161,12 +162,11 @@ export default function FilesPage() {
       }
       return sortOrder === "asc" ? cmp : -cmp;
     });
-    return sorted;
   }, [files, sortField, sortOrder]);
 
   // Sorted browse contents (inside folder)
   const sortedBrowseContents = useMemo(() => {
-    return [...browseContents].sort((a, b) => {
+    return browseContents.toSorted((a, b) => {
       // Directories always first
       if (a.is_directory && !b.is_directory) return -1;
       if (!a.is_directory && b.is_directory) return 1;
@@ -462,7 +462,7 @@ export default function FilesPage() {
     try {
       const contents = await api.browseFile(browseContext.fileHash, newPath.join("/"));
       setBrowseContents(contents);
-      setBrowseContext({ ...browseContext, path: newPath });
+      setBrowseContext(prev => prev ? { ...prev, path: newPath } : prev);
       setSelectedBrowseFiles(new Set());
     } catch (err) {
       showToast(`打开文件夹失败: ${(err as Error).message}`, "error");
@@ -482,7 +482,7 @@ export default function FilesPage() {
         newPath.length > 0 ? newPath.join("/") : undefined
       );
       setBrowseContents(contents);
-      setBrowseContext({ ...browseContext, path: newPath });
+      setBrowseContext(prev => prev ? { ...prev, path: newPath } : prev);
       setSelectedBrowseFiles(new Set());
     } catch (err) {
       showToast(`导航失败: ${(err as Error).message}`, "error");
@@ -653,7 +653,7 @@ export default function FilesPage() {
                 {browseContext!.fileName}
               </button>
               {browseContext!.path.map((segment, index) => (
-                <span key={index} className="path-segment-wrapper">
+                <span key={browseContext!.path.slice(0, index + 1).join("/")} className="path-segment-wrapper">
                   <span className="path-separator">/</span>
                   <button
                     type="button"
@@ -840,18 +840,18 @@ export default function FilesPage() {
                     className="checkbox-sm cursor-pointer"
                   />
                 </div>
-                <div
+                <button
                   className="table-cell text-left sortable-header"
                   onClick={() => handleSort("name")}
                 >
                   名称 <span className="sort-icon">{getSortIcon("name")}</span>
-                </div>
-                <div
+                </button>
+                <button
                   className="table-cell text-right sortable-header"
                   onClick={() => handleSort("size")}
                 >
                   大小 <span className="sort-icon">{getSortIcon("size")}</span>
-                </div>
+                </button>
                 <div className="table-cell text-right">操作</div>
               </div>
             )}
@@ -1044,24 +1044,24 @@ export default function FilesPage() {
                     className="checkbox-sm cursor-pointer"
                   />
                 </div>
-                <div
+                <button
                   className="table-cell text-left sortable-header"
                   onClick={() => handleSort("name")}
                 >
                   名称 <span className="sort-icon">{getSortIcon("name")}</span>
-                </div>
-                <div
+                </button>
+                <button
                   className="table-cell text-right sortable-header"
                   onClick={() => handleSort("size")}
                 >
                   大小 <span className="sort-icon">{getSortIcon("size")}</span>
-                </div>
-                <div
+                </button>
+                <button
                   className="table-cell text-right sortable-header"
                   onClick={() => handleSort("created_at")}
                 >
                   添加时间 <span className="sort-icon">{getSortIcon("created_at")}</span>
-                </div>
+                </button>
                 <div className="table-cell text-right">操作</div>
               </div>
             )}
@@ -1091,7 +1091,7 @@ export default function FilesPage() {
                                 if (e.key === "Enter") handleRename(file);
                                 if (e.key === "Escape") cancelRename();
                               }}
-                              autoFocus
+                              ref={(el) => el?.focus()}
                               onClick={(e) => e.stopPropagation()}
                             />
                             <button
@@ -1207,7 +1207,7 @@ export default function FilesPage() {
                                         if (e.key === "Enter") handleRename(file);
                                         if (e.key === "Escape") cancelRename();
                                       }}
-                                      autoFocus
+                                      ref={(el) => el?.focus()}
                                       onClick={(e) => e.stopPropagation()}
                                     />
                                     <button
@@ -1364,14 +1364,10 @@ export default function FilesPage() {
 
       {/* Search Modal */}
       {showSearchModal && mounted && createPortal(
-        <div
-          className="modal-overlay"
-          onClick={closeSearchModal}
+        <ModalOverlay
+          onClose={closeSearchModal}
+          contentClassName="search-modal"
         >
-          <div
-            className="search-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
             <div className="search-modal-header">
               <svg
                 width="20"
@@ -1421,7 +1417,10 @@ export default function FilesPage() {
                     <div
                       key={file.id}
                       className="search-result-item"
+                      role="button"
+                      tabIndex={0}
                       onClick={() => handleSearchResultClick(file)}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleSearchResultClick(file); } }}
                     >
                       <span className="file-icon">
                         {file.is_directory ? "📁" : "📄"}
@@ -1445,19 +1444,17 @@ export default function FilesPage() {
                   : "⌘F 打开搜索"}
               </span>
             </div>
-          </div>
-        </div>,
+        </ModalOverlay>,
         document.body
       )}
 
       {/* Pack Dialog */}
       {packDialogOpen && mounted && createPortal(
-        <div className="modal-overlay" onClick={() => !packing && setPackDialogOpen(false)}>
-          <div
-            className="batch-modal-content"
-            onClick={(e) => e.stopPropagation()}
-            style={{ maxWidth: "500px", width: "90%" }}
-          >
+        <ModalOverlay
+          onClose={() => !packing && setPackDialogOpen(false)}
+          contentClassName="batch-modal-content"
+          contentStyle={{ maxWidth: "500px", width: "90%" }}
+        >
             <div className="modal-header">
               <h2 className="m-0">打包</h2>
               <button
@@ -1498,10 +1495,11 @@ export default function FilesPage() {
                 </div>
 
                 <div className="mb-4">
-                  <label className="text-sm muted mb-1 block">
+                  <label className="text-sm muted mb-1 block" htmlFor="pack-output-name">
                     输出文件名 (可选)
                   </label>
                   <input
+                    id="pack-output-name"
                     type="text"
                     className="input"
                     placeholder="默认自动生成"
@@ -1545,8 +1543,7 @@ export default function FilesPage() {
                 </div>
               </div>
             )}
-          </div>
-        </div>,
+        </ModalOverlay>,
         document.body
       )}
       {/* Share Dialog */}

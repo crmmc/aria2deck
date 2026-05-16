@@ -9,7 +9,8 @@ export function Providers({ children }: { children: React.ReactNode }) {
     const el = document.getElementById("app-loading");
     if (el) {
       el.style.opacity = "0";
-      setTimeout(() => el.remove(), 300);
+      const timer = setTimeout(() => el.remove(), 300);
+      return () => clearTimeout(timer);
     }
   }, []);
 

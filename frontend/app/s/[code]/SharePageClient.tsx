@@ -196,7 +196,7 @@ export default function SharePageClient() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                autoFocus
+                ref={(el) => el?.focus()}
               />
             </div>
             {passwordError && (
@@ -269,7 +269,7 @@ export default function SharePageClient() {
                   <ul style={{ listStyle: "none", padding: 0, margin: 0, maxHeight: 360, overflowY: "auto" }}>
                     {dirItems.map((item, i) => (
                       <li
-                        key={i}
+                        key={item.path}
                         style={{
                           display: "flex",
                           justifyContent: "space-between",
@@ -287,7 +287,10 @@ export default function SharePageClient() {
                             overflow: "hidden",
                             cursor: item.is_dir ? "pointer" : "default",
                           }}
-                          onClick={() => item.is_dir && handleDirClick(item.path)}
+                          role={item.is_dir ? "button" : undefined}
+                          tabIndex={item.is_dir ? 0 : undefined}
+                          onClick={item.is_dir ? () => handleDirClick(item.path) : undefined}
+                          onKeyDown={item.is_dir ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleDirClick(item.path); } } : undefined}
                         >
                           <span style={{ fontSize: 16 }}>{item.is_dir ? "📁" : "📄"}</span>
                           <span

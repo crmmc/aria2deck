@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import type { Task } from "@/types";
 import { useToast } from "@/components/Toast";
+import { ModalOverlay } from "@/components/ModalOverlay";
 import StatsWidget from "@/components/StatsWidget";
 import { useTaskWebSocket } from "@/hooks/useTaskWebSocket";
 import {
@@ -73,7 +74,10 @@ const TaskCard = memo(function TaskCard({
   return (
     <div
       className={`card${task.uri ? " cursor-pointer" : ""}`}
-      onClick={handleCardClick}
+      onClick={task.uri ? handleCardClick : undefined}
+      role={task.uri ? "button" : undefined}
+      tabIndex={task.uri ? 0 : undefined}
+      onKeyDown={task.uri ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCardClick(); } } : undefined}
     >
       <div className={`task-card-inner${isSelected ? " selected" : ""}`}>
         <div>
@@ -121,6 +125,7 @@ const TaskCard = memo(function TaskCard({
 
         <div
           className="task-card-footer"
+          role="presentation"
           onClick={(e) => e.stopPropagation()}
         >
           <div className="task-footer-left">
@@ -611,10 +616,11 @@ export default function TasksPage() {
 
   const batchAddTasks = useCallback(async () => {
     if (isBatchAdding) return;
-    const uris = batchUris
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
+    const uris = batchUris.split("\n").reduce<string[]>((acc, line) => {
+      const trimmed = line.trim();
+      if (trimmed) acc.push(trimmed);
+      return acc;
+    }, []);
 
     if (uris.length === 0) {
       showToast("请输入至少一个链接", "warning");
@@ -627,16 +633,18 @@ export default function TasksPage() {
     let failCount = 0;
 
     try {
-      for (const uri of uris) {
-        try {
-          const task = await api.createTask(uri);
+      const results = await Promise.allSettled(
+        uris.map((uri) => api.createTask(uri))
+      );
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          const task = result.value;
           if (task.status === "active" || task.status === "queued") {
             setTasks((prev) => upsertTaskById(prev, task));
           }
           successCount++;
-        } catch (err) {
+        } else {
           failCount++;
-          console.error(`Failed to add ${uri}:`, err);
         }
       }
 
@@ -685,10 +693,10 @@ export default function TasksPage() {
     }
 
     if (sortBy === "speed") {
-      filtered = [...filtered].sort((a, b) => b.download_speed - a.download_speed);
+      filtered = filtered.toSorted((a, b) => b.download_speed - a.download_speed);
     } else if (sortBy === "progress") {
       const progress = (t: Task) => t.total_length > 0 ? t.completed_length / t.total_length : 0;
-      filtered = [...filtered].sort((a, b) => progress(b) - progress(a));
+      filtered = filtered.toSorted((a, b) => progress(b) - progress(a));
     }
 
     return filtered;
@@ -876,14 +884,10 @@ export default function TasksPage() {
       {mounted &&
         showBatchAddModal &&
         createPortal(
-          <div
-            className="modal-overlay"
-            onClick={() => setShowBatchAddModal(false)}
+          <ModalOverlay
+            onClose={() => setShowBatchAddModal(false)}
+            contentClassName="batch-modal-content"
           >
-            <div
-              className="batch-modal-content"
-              onClick={(e) => e.stopPropagation()}
-            >
               <div className="modal-header">
                 <h2 className="m-0">批量添加任务</h2>
                 <button
@@ -926,8 +930,7 @@ export default function TasksPage() {
                   {isBatchAdding ? "添加中..." : "添加任务"}
                 </button>
               </div>
-            </div>
-          </div>,
+          </ModalOverlay>,
           document.body
         )}
     </>

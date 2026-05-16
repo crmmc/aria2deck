@@ -255,8 +255,9 @@ export default function ProfilePage() {
           <form onSubmit={handleChangePassword} className="max-w-400">
             {!user?.is_initial_password && (
               <div className="mb-4">
-                <label className="form-label">当前密码</label>
+                <label className="form-label" htmlFor="profile-old-password">当前密码</label>
                 <input
+                  id="profile-old-password"
                   type="password"
                   className="input"
                   value={oldPassword}
@@ -266,8 +267,9 @@ export default function ProfilePage() {
               </div>
             )}
             <div className="mb-4">
-              <label className="form-label">新密码</label>
+              <label className="form-label" htmlFor="profile-new-password">新密码</label>
               <input
+                id="profile-new-password"
                 type="password"
                 className="input"
                 value={newPassword}
@@ -278,8 +280,9 @@ export default function ProfilePage() {
               <p className="muted text-sm mt-1">至少 6 位字符</p>
             </div>
             <div className="mb-6">
-              <label className="form-label">确认新密码</label>
+              <label className="form-label" htmlFor="profile-confirm-password">确认新密码</label>
               <input
+                id="profile-confirm-password"
                 type="password"
                 className="input"
                 value={confirmPassword}
@@ -309,8 +312,9 @@ export default function ProfilePage() {
             <div className="max-w-600">
               <div className="mb-6">
                 <div className="flex-between mb-2">
-                  <label className="font-semibold">启用通知</label>
+                  <label className="font-semibold" htmlFor="profile-notify-toggle">启用通知</label>
                   <button
+                    id="profile-notify-toggle"
                     type="button"
                     onClick={() => handleNotificationToggle(!notificationSettings.enabled)}
                     className={`toggle-switch ${notificationSettings.enabled ? "toggle-switch-on" : "toggle-switch-off"}`}
@@ -330,8 +334,9 @@ export default function ProfilePage() {
 
                   <div className="mb-4">
                     <div className="flex-between">
-                      <label className="text-base">下载完成时</label>
+                      <label className="text-base" htmlFor="profile-notify-complete">下载完成时</label>
                       <button
+                        id="profile-notify-complete"
                         type="button"
                         onClick={() => handleNotificationOptionChange("onComplete", !notificationSettings.onComplete)}
                         className={`toggle-switch toggle-switch-sm ${notificationSettings.onComplete ? "toggle-switch-on" : "toggle-switch-off"}`}
@@ -346,8 +351,9 @@ export default function ProfilePage() {
 
                   <div>
                     <div className="flex-between">
-                      <label className="text-base">下载失败时</label>
+                      <label className="text-base" htmlFor="profile-notify-error">下载失败时</label>
                       <button
+                        id="profile-notify-error"
                         type="button"
                         onClick={() => handleNotificationOptionChange("onError", !notificationSettings.onError)}
                         className={`toggle-switch toggle-switch-sm ${notificationSettings.onError ? "toggle-switch-on" : "toggle-switch-off"}`}
@@ -371,8 +377,9 @@ export default function ProfilePage() {
           <div className="max-w-600">
             <div className={`bg-black-02 rounded-lg p-4 ${rpcAccess?.enabled ? "mb-6" : ""}`}>
               <div className="flex-between mb-2">
-                <label className="font-semibold">允许外部 aria2 客户端连接</label>
+                <label className="font-semibold" htmlFor="profile-rpc-toggle">允许外部 aria2 客户端连接</label>
                 <button
+                  id="profile-rpc-toggle"
                   type="button"
                   onClick={() => handleRpcToggle(!rpcAccess?.enabled)}
                   disabled={rpcLoading}
@@ -391,7 +398,7 @@ export default function ProfilePage() {
               <div className="alert alert-info p-4">
                 <div className="mb-5">
                   <div className="flex-between mb-2">
-                    <label className="font-semibold text-base">RPC 密钥</label>
+                    <span className="font-semibold text-base">RPC 密钥</span>
                     <div className="flex gap-2">
                       <button
                         type="button"
@@ -416,7 +423,7 @@ export default function ProfilePage() {
 
                 <div>
                   <div className="flex-between mb-2">
-                    <label className="font-semibold text-base">RPC 地址</label>
+                    <span className="font-semibold text-base">RPC 地址</span>
                     <button
                       type="button"
                       className="button secondary btn-sm"

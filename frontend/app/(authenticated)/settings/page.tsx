@@ -47,7 +47,7 @@ function AdvancedSettingsSection({ children }: { children: React.ReactNode }) {
 }
 
 export default function SettingsPage() {
-  const router = useRouter();
+  const { push } = useRouter();
   const { showToast } = useToast();
   const mountedRef = useRef(true);
   const [loading, setLoading] = useState(true);
@@ -108,7 +108,7 @@ export default function SettingsPage() {
         const user = await api.me();
         if (!mountedRef.current) return;
         if (!user.is_admin) {
-          router.push("/tasks");
+          push("/tasks");
           return;
         }
         setIsAdmin(true);
@@ -123,7 +123,7 @@ export default function SettingsPage() {
     return () => {
       mountedRef.current = false;
     };
-  }, [router]);
+  }, [push]);
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -282,7 +282,7 @@ export default function SettingsPage() {
       return;
     }
 
-    setHiddenExtensions([...hiddenExtensions, withDot]);
+    setHiddenExtensions(prev => [...prev, withDot]);
     setExtensionInput("");
   }
 
@@ -300,7 +300,7 @@ export default function SettingsPage() {
   function addCommonExtension(ext: string) {
     const withDot = ext.startsWith(".") ? ext : "." + ext;
     if (!hiddenExtensions.includes(withDot)) {
-      setHiddenExtensions([...hiddenExtensions, withDot]);
+      setHiddenExtensions(prev => [...prev, withDot]);
     }
   }
 
@@ -367,9 +367,10 @@ export default function SettingsPage() {
           <h2 className="section-title">系统配置</h2>
 
           <div className="mb-6">
-            <label className="form-label-lg">网站标题</label>
+            <label className="form-label-lg" htmlFor="settings-site-title">网站标题</label>
             <p className="muted text-sm mb-2">自定义网站标题，显示在侧边栏和页面标题中。留空使用默认值。</p>
             <input
+              id="settings-site-title"
               className="input"
               type="text"
               value={siteTitle}
@@ -380,9 +381,10 @@ export default function SettingsPage() {
           </div>
 
           <div className="mb-6">
-            <label className="form-label-lg">最大任务大小 (GB)</label>
+            <label className="form-label-lg" htmlFor="settings-max-task-size">最大任务大小 (GB)</label>
             <p className="muted text-sm mb-2">超过此大小的任务将被拒绝。</p>
             <input
+              id="settings-max-task-size"
               className="input"
               type="number"
               step="any"
@@ -393,9 +395,10 @@ export default function SettingsPage() {
           </div>
 
           <div className="mb-7">
-            <label className="form-label-lg">最小剩余磁盘空间 (GB)</label>
+            <label className="form-label-lg" htmlFor="settings-min-disk-space">最小剩余磁盘空间 (GB)</label>
             <p className="muted text-sm mb-2">如果剩余空间低于此值，将停止接受新任务。</p>
             <input
+              id="settings-min-disk-space"
               className="input"
               type="number"
               step="any"
@@ -423,9 +426,10 @@ export default function SettingsPage() {
           </div>
 
           <div className="mb-6">
-            <label className="form-label-lg">aria2 RPC URL</label>
+            <label className="form-label-lg" htmlFor="settings-rpc-url">aria2 RPC URL</label>
             <p className="muted text-sm mb-2">aria2 JSON-RPC 接口地址，例如：http://localhost:6800/jsonrpc</p>
             <input
+              id="settings-rpc-url"
               className="input"
               type="text"
               value={aria2RpcUrl}
@@ -435,9 +439,10 @@ export default function SettingsPage() {
           </div>
 
           <div className="mb-4">
-            <label className="form-label-lg">aria2 RPC Secret</label>
+            <label className="form-label-lg" htmlFor="settings-rpc-secret">aria2 RPC Secret</label>
             <p className="muted text-sm mb-2">aria2 RPC 认证密钥（可选）。留空表示不使用认证。</p>
             <input
+              id="settings-rpc-secret"
               className="input"
               type="password"
               value={aria2RpcSecret}
@@ -477,13 +482,14 @@ export default function SettingsPage() {
           <h2 className="section-title">文件管理配置</h2>
 
           <div className="mb-7">
-            <label className="form-label-lg">隐藏文件后缀名</label>
+            <label className="form-label-lg" htmlFor="settings-hidden-extensions">隐藏文件后缀名</label>
             <p className="muted text-sm mb-2">
               在文件管理页面隐藏指定后缀名的文件。输入后缀名（如 aria2 或 .aria2）并按回车添加。
             </p>
 
             <div className="flex gap-2 mb-3">
               <input
+                id="settings-hidden-extensions"
                 className="input flex-1"
                 type="text"
                 value={extensionInput}
@@ -533,11 +539,12 @@ export default function SettingsPage() {
           <h2 className="section-title mt-7">打包设置</h2>
 
           <div className="mb-6">
-            <label className="form-label-lg">打包格式</label>
+            <label className="form-label-lg" htmlFor="settings-pack-format">打包格式</label>
             <p className="muted text-sm mb-3">选择文件夹打包的压缩格式。</p>
             <div className="flex gap-4">
               <label className="checkbox-label">
                 <input
+                  id="settings-pack-format"
                   type="radio"
                   name="packFormat"
                   value="zip"
@@ -560,13 +567,14 @@ export default function SettingsPage() {
           </div>
 
           <div className="mb-7">
-            <label className="form-label-lg">压缩等级: {packCompressionLevel}</label>
+            <label className="form-label-lg" htmlFor="settings-pack-compression-level">压缩等级: {packCompressionLevel}</label>
             <p className="muted text-sm mb-3">
               {packFormat === "zip"
                 ? "ZIP: 0 = 仅打包不压缩, 1 = 最快, 9 = 最慢/最小体积"
                 : "TAR+Zstandard: 0-9 会映射到 zstd 速度/压缩率档位"}
             </p>
             <input
+              id="settings-pack-compression-level"
               type="range"
               min="0"
               max="9"
@@ -581,9 +589,10 @@ export default function SettingsPage() {
           <p className="muted text-sm mb-4">配置后端与 aria2 WebSocket 连接断开后的重连策略。</p>
 
           <div className="mb-6">
-            <label className="form-label-lg">最大重连延迟: {wsReconnectMaxDelay} 秒</label>
+            <label className="form-label-lg" htmlFor="settings-ws-max-delay">最大重连延迟: {wsReconnectMaxDelay} 秒</label>
             <p className="muted text-sm mb-3">指数退避的最大等待时间（1-300 秒）</p>
             <input
+              id="settings-ws-max-delay"
               type="range"
               min="1"
               max="300"
@@ -595,9 +604,10 @@ export default function SettingsPage() {
           </div>
 
           <div className="mb-6">
-            <label className="form-label-lg">抖动系数: {(wsReconnectJitter * 100).toFixed(0)}%</label>
+            <label className="form-label-lg" htmlFor="settings-ws-jitter">抖动系数: {(wsReconnectJitter * 100).toFixed(0)}%</label>
             <p className="muted text-sm mb-3">重连延迟的随机波动范围（0-100%）</p>
             <input
+              id="settings-ws-jitter"
               type="range"
               min="0"
               max="100"
@@ -609,9 +619,10 @@ export default function SettingsPage() {
           </div>
 
           <div className="mb-7">
-            <label className="form-label-lg">指数因子: {wsReconnectFactor.toFixed(1)}</label>
+            <label className="form-label-lg" htmlFor="settings-ws-factor">指数因子: {wsReconnectFactor.toFixed(1)}</label>
             <p className="muted text-sm mb-3">每次重连延迟的倍增系数（1.1-10）</p>
             <input
+              id="settings-ws-factor"
               type="range"
               min="11"
               max="100"
@@ -626,9 +637,10 @@ export default function SettingsPage() {
             <h2 className="section-title">接口频率限制</h2>
             <p className="muted text-sm mb-4">限制用户在单位时间内的请求次数，修改后即时生效。</p>
             <div className="mb-7">
-              <label className="form-label-lg">账户安全限流</label>
+              <label className="form-label-lg" htmlFor="settings-rate-account-security">账户安全限流</label>
               <p className="muted text-sm mb-3">每 5 分钟最大尝试次数（登录、首个用户创建、修改密码）</p>
               <input
+                id="settings-rate-account-security"
                 type="number"
                 min="1"
                 max="100"
@@ -639,9 +651,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">普通已登录 API 限流</label>
+              <label className="form-label-lg" htmlFor="settings-rate-auth-api">普通已登录 API 限流</label>
               <p className="muted text-sm mb-3">每分钟最大查询请求次数（0 = 不限制）</p>
               <input
+                id="settings-rate-auth-api"
                 type="number"
                 min="0"
                 max="10000"
@@ -652,9 +665,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">普通匿名公开 API 限流</label>
+              <label className="form-label-lg" htmlFor="settings-rate-public-api">普通匿名公开 API 限流</label>
               <p className="muted text-sm mb-3">每分钟最大公开查询次数（0 = 不限制）</p>
               <input
+                id="settings-rate-public-api"
                 type="number"
                 min="0"
                 max="10000"
@@ -665,9 +679,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">分享密码验证限流</label>
+              <label className="form-label-lg" htmlFor="settings-rate-share-access">分享密码验证限流</label>
               <p className="muted text-sm mb-3">每分钟最大密码验证次数</p>
               <input
+                id="settings-rate-share-access"
                 type="number"
                 min="1"
                 max="10000"
@@ -678,9 +693,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">已登录下载限流</label>
+              <label className="form-label-lg" htmlFor="settings-rate-auth-download">已登录下载限流</label>
               <p className="muted text-sm mb-3">每分钟最大请求次数（0 = 不限制）</p>
               <input
+                id="settings-rate-auth-download"
                 type="number"
                 min="0"
                 max="10000"
@@ -691,9 +707,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">匿名下载限流</label>
+              <label className="form-label-lg" htmlFor="settings-rate-anon-download">匿名下载限流</label>
               <p className="muted text-sm mb-3">每分钟最大匿名下载请求次数（0 = 不限制）</p>
               <input
+                id="settings-rate-anon-download"
                 type="number"
                 min="0"
                 max="10000"
@@ -704,9 +721,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">创建任务限流</label>
+              <label className="form-label-lg" htmlFor="settings-rate-create-task">创建任务限流</label>
               <p className="muted text-sm mb-3">每分钟最大创建任务次数</p>
               <input
+                id="settings-rate-create-task"
                 type="number"
                 min="1"
                 max="10000"
@@ -717,9 +735,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">创建种子限流</label>
+              <label className="form-label-lg" htmlFor="settings-rate-create-torrent">创建种子限流</label>
               <p className="muted text-sm mb-3">每分钟最大上传种子次数</p>
               <input
+                id="settings-rate-create-torrent"
                 type="number"
                 min="1"
                 max="10000"
@@ -730,9 +749,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">创建打包限流</label>
+              <label className="form-label-lg" htmlFor="settings-rate-create-pack">创建打包限流</label>
               <p className="muted text-sm mb-3">每分钟最大创建打包次数</p>
               <input
+                id="settings-rate-create-pack"
                 type="number"
                 min="1"
                 max="10000"
@@ -743,9 +763,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">aria2 测试限流</label>
+              <label className="form-label-lg" htmlFor="settings-rate-aria2-test">aria2 测试限流</label>
               <p className="muted text-sm mb-3">每分钟最大连接测试次数</p>
               <input
+                id="settings-rate-aria2-test"
                 type="number"
                 min="1"
                 max="10000"
@@ -756,9 +777,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">JSON-RPC 限流</label>
+              <label className="form-label-lg" htmlFor="settings-rate-rpc">JSON-RPC 限流</label>
               <p className="muted text-sm mb-3">每分钟最大 RPC 请求次数</p>
               <input
+                id="settings-rate-rpc"
                 type="number"
                 min="1"
                 max="10000"
@@ -772,9 +794,10 @@ export default function SettingsPage() {
             <h2 className="section-title mt-7">下载并发限制</h2>
             <p className="muted text-sm mb-4">控制已登录下载保底与匿名分享下载的可借用容量，保证已登录用户体验优先。</p>
             <div className="mb-7">
-              <label className="form-label-lg">系统总下载连接上限</label>
+              <label className="form-label-lg" htmlFor="settings-conn-total">系统总下载连接上限</label>
               <p className="muted text-sm mb-3">所有用户的总并发下载连接数上限（0 = 不限制）</p>
               <input
+                id="settings-conn-total"
                 type="number"
                 min="0"
                 max="10000"
@@ -785,9 +808,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">已登录保底连接数</label>
+              <label className="form-label-lg" htmlFor="settings-conn-auth-reserved">已登录保底连接数</label>
               <p className="muted text-sm mb-3">为已登录下载预留的最小可用连接数</p>
               <input
+                id="settings-conn-auth-reserved"
                 type="number"
                 min="0"
                 max="10000"
@@ -798,9 +822,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">已登录单用户最大并发</label>
+              <label className="form-label-lg" htmlFor="settings-conn-user-max">已登录单用户最大并发</label>
               <p className="muted text-sm mb-3">单个已登录用户的并发下载连接数上限（0 = 不限制）</p>
               <input
+                id="settings-conn-user-max"
                 type="number"
                 min="0"
                 max="1000"
@@ -811,9 +836,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">已登录单文件最大并发</label>
+              <label className="form-label-lg" htmlFor="settings-conn-auth-per-file">已登录单文件最大并发</label>
               <p className="muted text-sm mb-3">同一已登录用户对同一文件的并发下载连接数上限（0 = 不限制）</p>
               <input
+                id="settings-conn-auth-per-file"
                 type="number"
                 min="0"
                 max="100"
@@ -824,9 +850,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">匿名基础连接数</label>
+              <label className="form-label-lg" htmlFor="settings-conn-anon-base">匿名基础连接数</label>
               <p className="muted text-sm mb-3">匿名分享下载默认可占用的连接数</p>
               <input
+                id="settings-conn-anon-base"
                 type="number"
                 min="0"
                 max="10000"
@@ -837,9 +864,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">匿名可借用连接数</label>
+              <label className="form-label-lg" htmlFor="settings-conn-anon-borrow">匿名可借用连接数</label>
               <p className="muted text-sm mb-3">匿名分享在不影响已登录保底的前提下可额外借用的连接数</p>
               <input
+                id="settings-conn-anon-borrow"
                 type="number"
                 min="0"
                 max="10000"
@@ -850,9 +878,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">匿名单 IP 最大并发</label>
+              <label className="form-label-lg" htmlFor="settings-conn-anon-per-ip">匿名单 IP 最大并发</label>
               <p className="muted text-sm mb-3">单个匿名来源的并发下载连接数上限（0 = 不限制）</p>
               <input
+                id="settings-conn-anon-per-ip"
                 type="number"
                 min="0"
                 max="1000"
@@ -863,9 +892,10 @@ export default function SettingsPage() {
               />
             </div>
             <div className="mb-7">
-              <label className="form-label-lg">匿名单文件最大并发</label>
+              <label className="form-label-lg" htmlFor="settings-conn-anon-per-file">匿名单文件最大并发</label>
               <p className="muted text-sm mb-3">同一匿名来源对同一文件的并发下载连接数上限（0 = 不限制）</p>
               <input
+                id="settings-conn-anon-per-file"
                 type="number"
                 min="0"
                 max="100"

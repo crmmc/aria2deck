@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { ModalOverlay } from "@/components/ModalOverlay";
 import { useToast } from "@/components/Toast";
 import type { User, UserUpdate } from "@/types";
 
@@ -17,7 +18,7 @@ type EditingUser = {
 };
 
 export default function UsersPage() {
-  const router = useRouter();
+  const { push } = useRouter();
   const { showToast } = useToast();
   const [users, setUsers] = useState<User[]>([]);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -45,7 +46,7 @@ export default function UsersPage() {
         if (!mounted) return null;
         setCurrentUser(me);
         if (!me.is_admin) {
-          router.push("/tasks");
+          push("/tasks");
           return null;
         }
         return api.listUsers();
@@ -67,7 +68,7 @@ export default function UsersPage() {
     return () => {
       mounted = false;
     };
-  }, [router]);
+  }, [push]);
 
   async function handleCreateUser(e: React.FormEvent) {
     e.preventDefault();
@@ -220,8 +221,9 @@ export default function UsersPage() {
           <form onSubmit={handleCreateUser} className="create-user-form">
             <div className="create-user-fields">
               <div className="create-user-field">
-                <label className="form-label">用户名</label>
+                <label className="form-label" htmlFor="user-create-username">用户名</label>
                 <input
+                  id="user-create-username"
                   className="input"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
@@ -229,8 +231,9 @@ export default function UsersPage() {
                 />
               </div>
               <div className="create-user-field">
-                <label className="form-label">密码</label>
+                <label className="form-label" htmlFor="user-create-password">密码</label>
                 <input
+                  id="user-create-password"
                   className="input"
                   type="password"
                   value={password}
@@ -240,9 +243,10 @@ export default function UsersPage() {
                 />
               </div>
               <div className="create-user-field">
-                <label className="form-label">存储配额</label>
+                <label className="form-label" htmlFor="user-create-quota">存储配额</label>
                 <div className="flex gap-2">
                   <input
+                    id="user-create-quota"
                     className="input flex-1"
                     type="number"
                     step="0.01"
@@ -331,56 +335,52 @@ export default function UsersPage() {
       </div>
 
       {editingUser && (
-        <div
-          className="modal-overlay"
-          onClick={() => setEditingUser(null)}
+        <ModalOverlay
+          onClose={() => setEditingUser(null)}
+          contentClassName="modal-content max-w-400 animate-in"
         >
-          <div
-            className="modal-content max-w-400 animate-in"
-            onClick={(e) => e.stopPropagation()}
-          >
             <h3 className="mb-5">编辑用户</h3>
             <form onSubmit={handleUpdateUser}>
               <div className="form-group">
-                <label className="form-label">用户名</label>
+                <label className="form-label" htmlFor="user-edit-username">用户名</label>
                 <input
+                  id="user-edit-username"
                   className="input"
                   value={editingUser.username}
                   onChange={(e) =>
-                    setEditingUser({ ...editingUser, username: e.target.value })
+                    setEditingUser(prev => prev ? { ...prev, username: e.target.value } : prev)
                   }
                   required
                 />
               </div>
               <div className="form-group">
-                <label className="form-label">
+                <label className="form-label" htmlFor="user-edit-password">
                   新密码 <span className="muted font-normal">(留空保持不变)</span>
                 </label>
                 <input
+                  id="user-edit-password"
                   className="input"
                   type="password"
                   value={editingUser.password}
                   onChange={(e) =>
-                    setEditingUser({ ...editingUser, password: e.target.value })
+                    setEditingUser(prev => prev ? { ...prev, password: e.target.value } : prev)
                   }
                   placeholder="••••••••"
                   autoComplete="new-password"
                 />
               </div>
               <div className="form-group">
-                <label className="form-label">存储配额</label>
+                <label className="form-label" htmlFor="user-edit-quota">存储配额</label>
                 <div className="flex gap-2">
                   <input
+                    id="user-edit-quota"
                     className="input flex-1"
                     type="number"
                     step="0.01"
                     min="0.01"
                     value={editingUser.quotaValue}
                     onChange={(e) =>
-                      setEditingUser({
-                        ...editingUser,
-                        quotaValue: e.target.value,
-                      })
+                      setEditingUser(prev => prev ? { ...prev, quotaValue: e.target.value } : prev)
                     }
                     required
                   />
@@ -388,10 +388,7 @@ export default function UsersPage() {
                     className="input"
                     value={editingUser.quotaUnit}
                     onChange={(e) =>
-                      setEditingUser({
-                        ...editingUser,
-                        quotaUnit: e.target.value,
-                      })
+                      setEditingUser(prev => prev ? { ...prev, quotaUnit: e.target.value } : prev)
                     }
                     style={{ width: 80 }}
                   >
@@ -407,10 +404,7 @@ export default function UsersPage() {
                     type="checkbox"
                     checked={editingUser.is_admin}
                     onChange={(e) =>
-                      setEditingUser({
-                        ...editingUser,
-                        is_admin: e.target.checked,
-                      })
+                      setEditingUser(prev => prev ? { ...prev, is_admin: e.target.checked } : prev)
                     }
                     disabled={editingUser.id === currentUser?.id}
                   />
@@ -436,19 +430,14 @@ export default function UsersPage() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
+          </ModalOverlay>
       )}
 
       {deletingUser && (
-        <div
-          className="modal-overlay"
-          onClick={() => setDeletingUser(null)}
+        <ModalOverlay
+          onClose={() => setDeletingUser(null)}
+          contentClassName="modal-content max-w-400 animate-in"
         >
-          <div
-            className="modal-content max-w-400 animate-in"
-            onClick={(e) => e.stopPropagation()}
-          >
             <h3 className="mb-4">删除用户</h3>
             <p className="mb-4">
               确定要删除用户 <strong>{deletingUser.username}</strong> 吗？
@@ -473,8 +462,7 @@ export default function UsersPage() {
                 删除
               </button>
             </div>
-          </div>
-        </div>
+        </ModalOverlay>
       )}
     </>
   );

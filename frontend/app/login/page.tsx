@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
 
 export default function LoginPage() {
-  const router = useRouter();
+  const { push } = useRouter();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -19,9 +19,9 @@ export default function LoginPage() {
         if (!mounted) return;
         if (user.is_initial_password) {
           // 需要修改密码，跳转到 profile 页面
-          router.push("/profile?initial_password=1");
+          push("/profile?initial_password=1");
         } else {
-          router.push("/tasks");
+          push("/tasks");
         }
       })
       .catch((err: unknown) => {
@@ -32,7 +32,7 @@ export default function LoginPage() {
     return () => {
       mounted = false;
     };
-  }, [router]);
+  }, [push]);
 
   useEffect(() => {
     let mounted = true;
@@ -99,7 +99,7 @@ export default function LoginPage() {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               required
-              autoFocus
+              ref={(el) => el?.focus()}
             />
           </div>
           <div className="mb-6">

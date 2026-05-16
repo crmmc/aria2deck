@@ -26,7 +26,7 @@ type AuthContextType = {
 const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
+  const { push } = useRouter();
   const pathname = usePathname();
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -69,7 +69,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // 获取网站标题（无需认证）
         api
           .getSiteInfo()
-          .then((info) => setSiteTitle(info.site_title))
+          .then((info) => {
+            setSiteTitle(info.site_title);
+            document.title = info.site_title;
+          })
           .catch((err: unknown) => {
             console.warn("加载站点标题失败", err);
           });
@@ -98,9 +101,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     // 只有确认是 401 未授权时才跳转登录页
     if (!loading && isUnauthorized && pathname !== "/login" && !pathname.startsWith("/s/")) {
-      router.push("/login");
+      push("/login");
     }
-  }, [loading, isUnauthorized, pathname, router]);
+  }, [loading, isUnauthorized, pathname, push]);
 
   // 监听 401 错误，自动跳转登录页
   useEffect(() => {
@@ -108,17 +111,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(null);
       setIsUnauthorized(true);
       if (pathname !== "/login" && !pathname.startsWith("/s/")) {
-        router.push("/login");
+        push("/login");
       }
     });
-  }, [pathname, router]);
-
-  // 动态更新页面标题
-  useEffect(() => {
-    if (siteTitle) {
-      document.title = siteTitle;
-    }
-  }, [siteTitle, pathname]);
+  }, [pathname, push]);
 
   const logout = useCallback(async () => {
     try {
@@ -128,8 +124,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     setUser(null);
     setIsUnauthorized(true);
-    router.push("/login");
-  }, [router]);
+    push("/login");
+  }, [push]);
 
   return (
     <AuthContext.Provider

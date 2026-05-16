@@ -57,7 +57,10 @@ const HistoryCard = memo(function HistoryCard({
   return (
     <div
       className={`card${record.uri ? " cursor-pointer" : ""}`}
-      onClick={handleCardClick}
+      onClick={record.uri ? handleCardClick : undefined}
+      role={record.uri ? "button" : undefined}
+      tabIndex={record.uri ? 0 : undefined}
+      onKeyDown={record.uri ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCardClick(); } } : undefined}
     >
       <div className={`task-card-inner${isSelected ? " selected" : ""}`}>
         <div>
@@ -97,9 +100,9 @@ const HistoryCard = memo(function HistoryCard({
           )}
         </div>
 
-        <div className="task-card-footer" onClick={(e) => e.stopPropagation()}>
+        <div className="task-card-footer" role="presentation" onClick={(e) => e.stopPropagation()}>
           <div className="task-footer-left">
-            <span className="muted text-sm">
+            <span className="muted text-sm" suppressHydrationWarning>
               {new Date(record.finished_at).toLocaleString()}
             </span>
           </div>

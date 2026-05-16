@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Suspense, useState, useEffect } from "react";
+import { Suspense, useState } from "react";
+import { ModalOverlay } from "@/components/ModalOverlay";
 import { useAuth } from "@/lib/AuthContext";
 import type { User } from "@/types";
 
@@ -189,10 +190,6 @@ function SidebarContent({ user }: SidebarProps) {
   const { logout, sidebarExpanded, setSidebarExpanded, siteTitle } = useAuth();
   const [showMoreMenu, setShowMoreMenu] = useState(false);
 
-  // Close more menu when navigating
-  useEffect(() => {
-    setShowMoreMenu(false);
-  }, [pathname]);
 
   const isActive = (href: string) => {
     if (!pathname) return false;
@@ -235,8 +232,11 @@ function SidebarContent({ user }: SidebarProps) {
 
       {/* More menu overlay */}
       {showMoreMenu && (
-        <div className="more-menu-overlay" onClick={() => setShowMoreMenu(false)}>
-          <div className="more-menu" onClick={(e) => e.stopPropagation()}>
+        <ModalOverlay
+          onClose={() => setShowMoreMenu(false)}
+          className="more-menu-overlay"
+          contentClassName="more-menu"
+        >
             <div className="more-menu-header">
               <h3 className="more-menu-title">更多</h3>
               <button
@@ -309,8 +309,7 @@ function SidebarContent({ user }: SidebarProps) {
               </span>
               退出登录
             </button>
-          </div>
-        </div>
+        </ModalOverlay>
       )}
 
       {/* Desktop sidebar - Hidden on Mobile via CSS */}

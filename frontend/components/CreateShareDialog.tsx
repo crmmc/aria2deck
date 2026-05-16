@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/Toast";
+import { ModalOverlay } from "@/components/ModalOverlay";
 import type { ShareLink } from "@/types";
 
 interface CreateShareDialogProps {
@@ -69,8 +70,10 @@ export default function CreateShareDialog({
   if (!mounted) return null;
 
   return createPortal(
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content max-w-400" onClick={(e) => e.stopPropagation()}>
+    <ModalOverlay
+      onClose={onClose}
+      contentClassName="modal-content max-w-400"
+    >
         <div className="modal-header">
           <h3 className="modal-title">创建分享</h3>
           <button type="button" className="modal-close-btn" onClick={onClose}>
@@ -82,9 +85,10 @@ export default function CreateShareDialog({
           {createdShare ? (
             <div>
               <div className="mb-3">
-                <label className="label">分享链接</label>
+                <label className="label" htmlFor="share-link">分享链接</label>
                 <div className="flex gap-2">
                   <input
+                    id="share-link"
                     type="text"
                     className="input flex-1"
                     value={shareUrl}
@@ -114,8 +118,9 @@ export default function CreateShareDialog({
           ) : (
             <div>
               <div className="mb-3">
-                <label className="label">有效期</label>
+                <label className="label" htmlFor="share-expires">有效期</label>
                 <select
+                  id="share-expires"
                   className="select"
                   style={{ width: "100%" }}
                   value={expiresIn}
@@ -129,8 +134,9 @@ export default function CreateShareDialog({
                 </select>
               </div>
               <div className="mb-3">
-                <label className="label">密码（可选）</label>
+                <label className="label" htmlFor="share-password">密码（可选）</label>
                 <input
+                  id="share-password"
                   type="text"
                   className="input"
                   style={{ width: "100%" }}
@@ -141,8 +147,9 @@ export default function CreateShareDialog({
                 />
               </div>
               <div className="mb-3">
-                <label className="label">下载次数限制（可选）</label>
+                <label className="label" htmlFor="share-max-downloads">下载次数限制（可选）</label>
                 <input
+                  id="share-max-downloads"
                   type="number"
                   className="input"
                   style={{ width: "100%" }}
@@ -175,8 +182,7 @@ export default function CreateShareDialog({
             </div>
           )}
         </div>
-      </div>
-    </div>,
+    </ModalOverlay>,
     document.body
   );
 }
