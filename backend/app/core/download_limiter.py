@@ -81,24 +81,21 @@ class DownloadConfig:
 
     async def load_from_db(self) -> None:
         """启动时从数据库加载配置。"""
-        from app.database import get_session
-        from app.models import Config
-        from sqlmodel import select
+        from sqlalchemy import select
 
-        async with get_session() as db:
-            for db_key, (attr, default, legacy_keys) in self._DB_KEY_MAP.items():
+        from app.db.engine import transaction
+        from app.db.schema import app_settings
+
+        async with transaction() as conn:
+            row = (await conn.execute(select(app_settings))).mappings().first()
+
+        for db_key, (attr, default, _legacy_keys) in self._DB_KEY_MAP.items():
+            value = row.get(db_key, default) if row else default
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
                 value = default
-                for candidate in (db_key, *legacy_keys):
-                    result = await db.exec(select(Config).where(Config.key == candidate))
-                    row = result.first()
-                    if row is None:
-                        continue
-                    try:
-                        value = int(row.value)
-                    except (TypeError, ValueError):
-                        value = default
-                    break
-                setattr(self, attr, value)
+            setattr(self, attr, value)
 
         self.validate()
         logger.info(

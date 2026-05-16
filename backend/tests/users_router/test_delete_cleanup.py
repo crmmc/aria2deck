@@ -1,72 +1,130 @@
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+from sqlalchemy import insert, select
 
-from app.db import execute, fetch_one
+from app.db.engine import transaction
+from app.db.schema import global_downloads, pack_tasks, sessions, user_files, user_tasks
+from tests.helpers_v0 import create_user_file_v0, now_ms
+
+
+async def fetch_one(stmt) -> dict | None:
+    async with transaction() as conn:
+        row = (await conn.execute(stmt)).mappings().first()
+    return dict(row) if row else None
+
+
+async def create_user_task(user_id: int) -> int:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        download = (
+            await conn.execute(
+                insert(global_downloads)
+                .values(
+                    resource_key="http:abc123",
+                    resource_kind="http",
+                    source_uri="http://example.com/file.zip",
+                    display_name="file.zip",
+                    aria2_gid="abc123",
+                    status="active",
+                    total_bytes=0,
+                    completed_bytes=0,
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                )
+                .returning(global_downloads)
+            )
+        ).mappings().one()
+        task = (
+            await conn.execute(
+                insert(user_tasks)
+                .values(
+                    user_id=user_id,
+                    global_download_id=download["id"],
+                    status="active",
+                    display_name="file.zip",
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                )
+                .returning(user_tasks)
+            )
+        ).mappings().one()
+    return int(task["id"])
+
+
+async def create_pack_task(user_id: int) -> int:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                insert(pack_tasks)
+                .values(
+                    user_id=user_id,
+                    source_user_file_ids_json="[]",
+                    source_size_bytes=1000,
+                    reserved_bytes=1000,
+                    output_name="test_folder.tar.zst",
+                    status="pending",
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                )
+                .returning(pack_tasks)
+            )
+        ).mappings().one()
+    return int(row["id"])
 
 
 class TestDeleteUserCleanup:
     def test_delete_user_clears_sessions(
         self, admin_client: TestClient, test_user: dict, user_session: str
     ):
-        with patch("app.services.storage.delete_user_file_reference", new_callable=AsyncMock):
-            response = admin_client.delete(f"/api/users/{test_user['id']}")
+        import asyncio
+
+        response = admin_client.delete(f"/api/users/{test_user['id']}")
         assert response.status_code == 200
-        assert fetch_one("SELECT * FROM sessions WHERE user_id = ?", [test_user["id"]]) is None
+        assert asyncio.run(fetch_one(select(sessions).where(sessions.c.user_id == test_user["id"]))) is None
 
     def test_delete_user_clears_tasks(
         self, admin_client: TestClient, test_user: dict, temp_db: str
     ):
-        from app.db import utc_now
+        import asyncio
 
-        execute(
-            """INSERT INTO tasks (owner_id, gid, uri, name, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "abc123", "http://example.com/file.zip", "file.zip", "active", utc_now(), utc_now()],
-        )
+        asyncio.run(create_user_task(test_user["id"]))
 
-        with patch("app.services.storage.delete_user_file_reference", new_callable=AsyncMock):
-            response = admin_client.delete(f"/api/users/{test_user['id']}")
+        response = admin_client.delete(f"/api/users/{test_user['id']}")
         assert response.status_code == 200
-        assert fetch_one("SELECT * FROM tasks WHERE owner_id = ?", [test_user["id"]]) is None
+        assert asyncio.run(fetch_one(select(user_tasks).where(user_tasks.c.user_id == test_user["id"]))) is None
 
     def test_delete_user_clears_pack_tasks(
         self, admin_client: TestClient, test_user: dict, temp_db: str
     ):
-        from app.db import utc_now
+        import asyncio
 
-        execute(
-            """INSERT INTO pack_tasks
-               (owner_id, folder_path, folder_size, reserved_space, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], "test_folder", 1000, 1000, "pending", utc_now(), utc_now()],
-        )
+        asyncio.run(create_pack_task(test_user["id"]))
 
-        with patch("app.services.storage.delete_user_file_reference", new_callable=AsyncMock):
-            response = admin_client.delete(f"/api/users/{test_user['id']}")
+        response = admin_client.delete(f"/api/users/{test_user['id']}")
         assert response.status_code == 200
-        assert fetch_one("SELECT * FROM pack_tasks WHERE owner_id = ?", [test_user["id"]]) is None
+        assert asyncio.run(fetch_one(select(pack_tasks).where(pack_tasks.c.user_id == test_user["id"]))) is None
 
     def test_delete_user_with_user_files(
         self, admin_client: TestClient, test_user: dict, temp_db: str
     ):
-        from app.db import utc_now
+        import asyncio
+        from pathlib import Path
 
-        execute(
-            """INSERT INTO stored_files (content_hash, real_path, size, ref_count, is_directory, original_name, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            ["abc123hash", "/store/abc123", 1000, 1, 0, "test_file.txt", utc_now()],
-        )
-        stored_file = fetch_one("SELECT id FROM stored_files WHERE content_hash = ?", ["abc123hash"])
-
-        execute(
-            """INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at)
-               VALUES (?, ?, ?, ?)""",
-            [test_user["id"], stored_file["id"], "test_file.txt", utc_now()],
+        asyncio.run(
+            create_user_file_v0(
+                user_id=test_user["id"],
+                real_path=Path("/store/abc123"),
+                content_hash="abc123hash",
+                display_name="test_file.txt",
+                size_bytes=1000,
+            )
         )
 
         with patch("app.services.storage.delete_user_file_reference", new_callable=AsyncMock) as mock_delete:
             response = admin_client.delete(f"/api/users/{test_user['id']}")
 
         assert response.status_code == 200
-        assert mock_delete.called
+        mock_delete.assert_not_called()
+        assert asyncio.run(fetch_one(select(user_files).where(user_files.c.user_id == test_user["id"]))) is None

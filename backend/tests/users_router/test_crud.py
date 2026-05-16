@@ -1,5 +1,3 @@
-from unittest.mock import AsyncMock, patch
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -102,8 +100,7 @@ class TestUpdateUser:
 
 class TestDeleteUser:
     def test_delete_user_admin(self, admin_client: TestClient, test_user: dict):
-        with patch("app.services.storage.delete_user_file_reference", new_callable=AsyncMock):
-            response = admin_client.delete(f"/api/users/{test_user['id']}")
+        response = admin_client.delete(f"/api/users/{test_user['id']}")
         assert response.status_code == 200
         assert response.json() == {"ok": True}
 

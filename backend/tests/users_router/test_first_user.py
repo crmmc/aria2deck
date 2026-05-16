@@ -60,8 +60,9 @@ class TestFirstUserFlow:
     @pytest.mark.asyncio
     async def test_first_user_creation_blocked_after_many_attempts(self, client: TestClient, temp_db: str):
         from app.core.rate_limit import login_limiter
+        from app.core.rate_limit_config import rate_limit_config
 
-        for _ in range(5):
+        for _ in range(rate_limit_config.account_security):
             await login_limiter.record_failure("testclient")
 
         response = client.post("/api/users", json={
@@ -88,3 +89,32 @@ class TestFirstUserFlow:
             "is_admin": False,
         })
         assert response2.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_first_user_repository_insert_is_atomic(self, temp_db: str):
+        import asyncio
+        from sqlalchemy import func, select
+
+        from app.core.security import hash_password
+        from app.db.engine import transaction
+        from app.db.schema import user_storage_usage, users
+        from app.repositories import auth as auth_repo
+
+        async def create_first(username: str):
+            return await auth_repo.create_first_user_if_none(
+                username=username,
+                password_hash=hash_password("password123"),
+                is_admin=True,
+                quota_bytes=107374182400,
+                is_initial_password=True,
+            )
+
+        results = await asyncio.gather(create_first("first_a"), create_first("first_b"))
+        created = [row for row in results if row is not None]
+
+        assert len(created) == 1
+        async with transaction() as conn:
+            user_count = (await conn.execute(select(func.count()).select_from(users))).scalar_one()
+            usage_count = (await conn.execute(select(func.count()).select_from(user_storage_usage))).scalar_one()
+        assert user_count == 1
+        assert usage_count == 1

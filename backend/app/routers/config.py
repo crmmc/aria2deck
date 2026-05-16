@@ -7,18 +7,19 @@ import secrets
 import string
 from datetime import datetime, timezone
 from time import time
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlmodel import select
+from sqlalchemy import select, update
 
 from app.auth import require_admin, require_user
-from app.core.config import settings
 from app.core.download_limiter import download_config
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
 from app.core.rate_limit_config import rate_limit_config
-from app.database import get_session
-from app.models import Config, User
+from app.db.engine import transaction
+from app.db.schema import app_settings
+from app.repositories import auth as auth_repo
 
 _config_cache: dict[str, tuple[str | None, float]] = {}
 _config_cache_lock = asyncio.Lock()  # 保护异步缓存访问
@@ -31,6 +32,93 @@ logger = logging.getLogger(__name__)
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+CONFIG_KEY_TO_COLUMN: dict[str, str] = {
+    "max_task_size": "max_task_size_bytes",
+    "min_free_disk": "min_free_disk_bytes",
+    "aria2_rpc_url": "aria2_rpc_url",
+    "aria2_rpc_secret": "aria2_rpc_secret",
+    "hidden_file_extensions": "hidden_file_extensions_json",
+    "pack_format": "pack_format",
+    "pack_compression_level": "pack_compression_level",
+    "ws_reconnect_max_delay": "ws_reconnect_max_delay",
+    "ws_reconnect_jitter": "ws_reconnect_jitter",
+    "ws_reconnect_factor": "ws_reconnect_factor",
+    "site_title": "site_title",
+    "rate_limit_account_security": "rate_limit_account_security",
+    "rate_limit_authenticated_api": "rate_limit_authenticated_api",
+    "rate_limit_public_api": "rate_limit_public_api",
+    "rate_limit_share_access": "rate_limit_share_access",
+    "rate_limit_authenticated_download": "rate_limit_authenticated_download",
+    "rate_limit_anonymous_download": "rate_limit_anonymous_download",
+    "rate_limit_create_task": "rate_limit_create_task",
+    "rate_limit_create_torrent": "rate_limit_create_torrent",
+    "rate_limit_create_pack": "rate_limit_create_pack",
+    "rate_limit_aria2_test": "rate_limit_aria2_test",
+    "rate_limit_rpc": "rate_limit_rpc",
+    "download_total_connections": "download_total_connections",
+    "download_authenticated_reserved_connections": "download_authenticated_reserved_connections",
+    "download_authenticated_per_user_connections": "download_authenticated_per_user_connections",
+    "download_authenticated_per_file_connections": "download_authenticated_per_file_connections",
+    "download_anonymous_base_connections": "download_anonymous_base_connections",
+    "download_anonymous_borrow_connections": "download_anonymous_borrow_connections",
+    "download_anonymous_per_ip_connections": "download_anonymous_per_ip_connections",
+    "download_anonymous_per_file_connections": "download_anonymous_per_file_connections",
+}
+
+INT_CONFIG_COLUMNS = {
+    "max_task_size_bytes",
+    "min_free_disk_bytes",
+    "pack_compression_level",
+    "ws_reconnect_max_delay",
+    "rate_limit_account_security",
+    "rate_limit_authenticated_api",
+    "rate_limit_public_api",
+    "rate_limit_share_access",
+    "rate_limit_authenticated_download",
+    "rate_limit_anonymous_download",
+    "rate_limit_create_task",
+    "rate_limit_create_torrent",
+    "rate_limit_create_pack",
+    "rate_limit_aria2_test",
+    "rate_limit_rpc",
+    "download_total_connections",
+    "download_authenticated_reserved_connections",
+    "download_authenticated_per_user_connections",
+    "download_authenticated_per_file_connections",
+    "download_anonymous_base_connections",
+    "download_anonymous_borrow_connections",
+    "download_anonymous_per_ip_connections",
+    "download_anonymous_per_file_connections",
+}
+
+
+def _column_for_config_key(key: str):
+    column_name = CONFIG_KEY_TO_COLUMN.get(key)
+    if column_name is None:
+        return None
+    return getattr(app_settings.c, column_name)
+
+
+def _serialize_config_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _coerce_config_value(column_name: str, value: str) -> Any:
+    if column_name in INT_CONFIG_COLUMNS:
+        if column_name == "ws_reconnect_max_delay":
+            return int(float(value))
+        return int(value)
+    return value
+
+
+def _ms_to_iso(timestamp_ms: int | None) -> str | None:
+    if timestamp_ms is None:
+        return None
+    return datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc).isoformat()
 
 
 class ConfigUpdate(BaseModel):
@@ -87,13 +175,17 @@ def get_config_value(key: str) -> str | None:
     # 使用同步方式读取（用于向后兼容）
     import sqlite3
     from app.core.config import settings
+    column_name = CONFIG_KEY_TO_COLUMN.get(key)
+    if column_name is None:
+        _config_cache[key] = (None, now)
+        return None
     try:
         conn = sqlite3.connect(settings.database_path)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute("SELECT value FROM config WHERE key = ?", [key])
+        cur.execute(f"SELECT {column_name} AS value FROM app_settings WHERE id = 1")
         row = cur.fetchone()
-        value = row["value"] if row else None
+        value = _serialize_config_value(row["value"]) if row else None
         cur.close()
         conn.close()
         _config_cache[key] = (value, now)
@@ -112,25 +204,34 @@ async def get_config_value_async(key: str) -> str | None:
             if now - ts < _CACHE_TTL:
                 return value
 
-    async with get_session() as db:
-        result = await db.exec(select(Config).where(Config.key == key))
-        config = result.first()
-        value = config.value if config else None
-        async with _config_cache_lock:
-            _config_cache[key] = (value, now)
-        return value
+    column = _column_for_config_key(key)
+    if column is None:
+        value = None
+    else:
+        async with transaction() as conn:
+            row = (await conn.execute(select(column).where(app_settings.c.id == 1))).first()
+        value = _serialize_config_value(row[0]) if row else None
+
+    async with _config_cache_lock:
+        _config_cache[key] = (value, now)
+    return value
 
 
 async def set_config_value_async(key: str, value: str) -> None:
     """设置单个配置值 - 异步版本"""
-    async with get_session() as db:
-        result = await db.exec(select(Config).where(Config.key == key))
-        config = result.first()
-        if config:
-            config.value = value
-            db.add(config)
-        else:
-            db.add(Config(key=key, value=value))
+    column = _column_for_config_key(key)
+    if column is None:
+        async with _config_cache_lock:
+            _config_cache[key] = (None, time())
+        return
+
+    coerced = _coerce_config_value(column.name, value)
+    async with transaction() as conn:
+        await conn.execute(
+            update(app_settings)
+            .where(app_settings.c.id == 1)
+            .values({column.name: coerced, "updated_at_ms": int(time() * 1000)})
+        )
     async with _config_cache_lock:
         _config_cache[key] = (value, time())
 
@@ -332,7 +433,7 @@ async def get_public_site_info() -> dict:
     }
 
 @router.get("")
-async def get_config(admin: User = Depends(require_admin)) -> dict:
+async def get_config(admin=Depends(require_admin)) -> dict:
     """获取系统配置（管理员）
 
     返回:
@@ -349,7 +450,7 @@ async def get_config(admin: User = Depends(require_admin)) -> dict:
 
 
 @router.put("")
-async def update_config(payload: ConfigUpdate, request: Request, admin: User = Depends(require_admin)) -> dict:
+async def update_config(payload: ConfigUpdate, request: Request, admin=Depends(require_admin)) -> dict:
     """更新系统配置（管理员）
 
     可更新字段:
@@ -471,7 +572,7 @@ async def update_config(payload: ConfigUpdate, request: Request, admin: User = D
 
 
 @router.get("/aria2/version")
-async def get_aria2_version(admin: User = Depends(require_admin)) -> dict:
+async def get_aria2_version(admin=Depends(require_admin)) -> dict:
     """获取当前连接的 aria2 版本信息（管理员）
 
     返回:
@@ -506,7 +607,7 @@ async def get_aria2_version(admin: User = Depends(require_admin)) -> dict:
 @router.post("/aria2/test")
 async def test_aria2_connection(
     payload: Aria2TestRequest,
-    admin: User = Depends(require_admin)
+    admin=Depends(require_admin)
 ) -> dict:
     """测试 aria2 连接（管理员）
 
@@ -587,7 +688,7 @@ def generate_api_token() -> str:
 
 
 @router.get("/tokens")
-async def list_tokens(user: User = Depends(require_user)) -> list[dict]:
+async def list_tokens(user=Depends(require_user)) -> list[dict]:
     """获取当前用户的 Token 列表
 
     返回:
@@ -597,28 +698,24 @@ async def list_tokens(user: User = Depends(require_user)) -> list[dict]:
     - created_at: 创建时间
     - last_used_at: 最后使用时间
     """
-    # api_tokens 表暂未迁移，使用原生 SQL
-    import sqlite3
-    from app.core.config import settings
-
-    conn = sqlite3.connect(settings.database_path)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, name, token, created_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC",
-        [user.id]
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    rows = await auth_repo.list_api_tokens(user.id)
     logger.debug("查询Token列表 user_id=%s count=%s", user.id, len(rows))
-    return [dict(row) for row in rows]
+    return [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "token": row["token"],
+            "created_at": _ms_to_iso(row["created_at_ms"]),
+            "last_used_at": _ms_to_iso(row["last_used_at_ms"]),
+        }
+        for row in rows
+    ]
 
 
 @router.post("/tokens")
 async def create_token(
     payload: TokenCreateRequest | None = None,
-    user: User = Depends(require_user)
+    user=Depends(require_user)
 ) -> dict:
     """生成新的 API Token
 
@@ -631,38 +728,20 @@ async def create_token(
     - token: Token 值
     - created_at: 创建时间
     """
-    import sqlite3
-    from app.core.config import settings
-
     token = generate_api_token()
     name = payload.name if payload else None
-    created_at = utc_now()
-
-    conn = sqlite3.connect(settings.database_path)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO api_tokens (user_id, token, name, created_at) VALUES (?, ?, ?, ?)",
-        [user.id, token, name, created_at]
-    )
-    conn.commit()
-
-    # 获取刚插入的记录
-    cur.execute(
-        "SELECT id, name, token, created_at FROM api_tokens WHERE token = ?",
-        [token]
-    )
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-
-    logger.info("创建API Token user_id=%s token_id=%s token_name=%s", user.id, row["id"] if row else None, name)
-
-    return dict(row)
+    row = await auth_repo.create_api_token(user.id, token, name)
+    logger.info("创建API Token user_id=%s token_id=%s token_name=%s", user.id, row["id"], name)
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "token": row["token"],
+        "created_at": _ms_to_iso(row["created_at_ms"]),
+    }
 
 
 @router.delete("/tokens/{token_id}")
-async def delete_token(token_id: int, user: User = Depends(require_user)) -> dict:
+async def delete_token(token_id: int, user=Depends(require_user)) -> dict:
     """删除 API Token
 
     路径参数:
@@ -671,42 +750,13 @@ async def delete_token(token_id: int, user: User = Depends(require_user)) -> dic
     返回:
     - ok: 是否删除成功
     """
-    import sqlite3
-    from app.core.config import settings
-
-    conn = sqlite3.connect(settings.database_path)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-
-    # 检查 Token 是否存在且属于当前用户
-    cur.execute(
-        "SELECT id, user_id FROM api_tokens WHERE id = ?",
-        [token_id]
-    )
-    row = cur.fetchone()
-
-    if not row:
-        cur.close()
-        conn.close()
-        logger.warning("删除Token失败 user_id=%s token_id=%s reason=not_found", user.id, token_id)
+    deleted = await auth_repo.delete_api_token(user.id, token_id)
+    if not deleted:
+        logger.warning("删除Token失败 user_id=%s token_id=%s reason=not_found_or_forbidden", user.id, token_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Token 不存在"
         )
-
-    if row["user_id"] != user.id:
-        cur.close()
-        conn.close()
-        logger.warning("删除Token失败 user_id=%s token_id=%s reason=forbidden", user.id, token_id)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="无权删除此 Token"
-        )
-
-    cur.execute("DELETE FROM api_tokens WHERE id = ?", [token_id])
-    conn.commit()
-    cur.close()
-    conn.close()
 
     logger.info("删除Token成功 user_id=%s token_id=%s", user.id, token_id)
 

@@ -1,8 +1,8 @@
 """Tests for auth module."""
+import asyncio
 import pytest
-from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
-from fastapi.testclient import TestClient
+from sqlalchemy import func, select, update
 
 from app.auth import (
     create_session,
@@ -12,7 +12,35 @@ from app.auth import (
     set_session_cookie,
 )
 from app.core.config import settings
-from app.db import execute, fetch_one
+from app.core.security import hash_password
+from app.db.engine import transaction
+from app.db.schema import sessions, users
+from tests.helpers_v0 import create_session_v0, now_ms
+
+
+async def fetch_session(session_id: str) -> dict | None:
+    async with transaction() as conn:
+        row = (await conn.execute(select(sessions).where(sessions.c.id == session_id))).mappings().first()
+    return dict(row) if row else None
+
+
+async def count_user_sessions(user_id: int) -> int:
+    async with transaction() as conn:
+        count = (
+            await conn.execute(select(func.count()).select_from(sessions).where(sessions.c.user_id == user_id))
+        ).scalar_one()
+    return int(count)
+
+
+async def list_user_sessions(user_id: int) -> list[dict]:
+    async with transaction() as conn:
+        rows = (await conn.execute(select(sessions).where(sessions.c.user_id == user_id))).mappings().all()
+    return [dict(row) for row in rows]
+
+
+async def update_user_row(user_id: int, **values) -> None:
+    async with transaction() as conn:
+        await conn.execute(update(users).where(users.c.id == user_id).values(**values, updated_at_ms=now_ms()))
 
 
 @pytest.mark.asyncio
@@ -23,7 +51,7 @@ class TestCreateSession:
         assert session_id is not None
         assert len(session_id) == 32
 
-        session = fetch_one("SELECT * FROM sessions WHERE id = ?", [session_id])
+        session = await fetch_session(session_id)
         assert session is not None
         assert session["user_id"] == test_user["id"]
 
@@ -33,11 +61,11 @@ class TestClearSession:
 
     async def test_clear_session(self, test_user: dict):
         session_id = await create_session(test_user["id"])
-        session = fetch_one("SELECT * FROM sessions WHERE id = ?", [session_id])
+        session = await fetch_session(session_id)
         assert session is not None
 
         await clear_session(session_id)
-        session = fetch_one("SELECT * FROM sessions WHERE id = ?", [session_id])
+        session = await fetch_session(session_id)
         assert session is None
 
     async def test_clear_nonexistent_session(self, temp_db: str):
@@ -55,8 +83,7 @@ class TestClearUserSessions:
         count = await clear_user_sessions(test_user["id"])
         assert count == 3
 
-        sessions = fetch_one("SELECT COUNT(*) as cnt FROM sessions WHERE user_id = ?", [test_user["id"]])
-        assert sessions["cnt"] == 0
+        assert await count_user_sessions(test_user["id"]) == 0
 
     async def test_clear_user_sessions_no_sessions(self, test_user: dict):
         count = await clear_user_sessions(test_user["id"])
@@ -82,24 +109,16 @@ class TestGetUserBySession:
         assert user is None
 
     async def test_get_user_by_session_expired(self, test_user: dict):
-        expired_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        execute(
-            "INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)",
-            ["expired_session", test_user["id"], expired_at]
-        )
+        await create_session_v0(test_user["id"], "expired_session", expires_at_ms=now_ms() - 60 * 60 * 1000)
 
         user = await get_user_by_session("expired_session")
         assert user is None
 
-        session = fetch_one("SELECT * FROM sessions WHERE id = ?", ["expired_session"])
+        session = await fetch_session("expired_session")
         assert session is None
 
     async def test_get_user_by_session_timezone_naive(self, test_user: dict):
-        future_at = (datetime.now() + timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%S")
-        execute(
-            "INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)",
-            ["naive_tz_session", test_user["id"], future_at]
-        )
+        await create_session_v0(test_user["id"], "naive_tz_session", expires_at_ms=now_ms() + 12 * 60 * 60 * 1000)
 
         user = await get_user_by_session("naive_tz_session")
         assert user is not None
@@ -125,13 +144,6 @@ class TestSetSessionCookie:
 class TestAuthRouterEndpoints:
 
     def test_login_success(self, client, test_user: dict):
-        from app.core.security import hash_password
-        from app.db import execute
-        execute(
-            "UPDATE users SET password_hash = ? WHERE id = ?",
-            [hash_password("testpass"), test_user["id"]]
-        )
-
         response = client.post("/api/auth/login", json={
             "username": "testuser",
             "password": "testpass"
@@ -175,8 +187,7 @@ class TestAuthRouterEndpoints:
         assert response.status_code == 401
 
     def test_change_password_initial(self, authenticated_client, test_user: dict):
-        from app.db import execute
-        execute("UPDATE users SET is_initial_password = 1 WHERE id = ?", [test_user["id"]])
+        asyncio.run(update_user_row(test_user["id"], is_initial_password=1))
 
         response = authenticated_client.post("/api/auth/change-password", json={
             "old_password": "anyvalue",
@@ -186,8 +197,7 @@ class TestAuthRouterEndpoints:
         assert response.json()["ok"] is True
 
     def test_change_password_wrong_old(self, authenticated_client, test_user: dict):
-        from app.db import execute
-        execute("UPDATE users SET is_initial_password = 0 WHERE id = ?", [test_user["id"]])
+        asyncio.run(update_user_row(test_user["id"], is_initial_password=0))
 
         response = authenticated_client.post("/api/auth/change-password", json={
             "old_password": "wrongpassword",
@@ -196,10 +206,13 @@ class TestAuthRouterEndpoints:
         assert response.status_code == 400
 
     def test_change_password_same_as_old(self, authenticated_client, test_user: dict):
-        from app.db import execute
-        from app.core.security import hash_password
-        execute("UPDATE users SET is_initial_password = 0, password_hash = ? WHERE id = ?",
-                [hash_password("samepassword"), test_user["id"]])
+        asyncio.run(
+            update_user_row(
+                test_user["id"],
+                is_initial_password=0,
+                password_hash=hash_password("samepassword"),
+            )
+        )
 
         response = authenticated_client.post("/api/auth/change-password", json={
             "old_password": "samepassword",
@@ -217,22 +230,17 @@ class TestAuthRouterEndpoints:
     def test_change_password_success_invalidates_sessions(
         self, authenticated_client, test_user: dict
     ):
-        from app.db import execute, fetch_all
-        from app.core.security import hash_password
-
-        execute("UPDATE users SET is_initial_password = 0, password_hash = ? WHERE id = ?",
-                [hash_password("oldpassword"), test_user["id"]])
-
-        execute(
-            "INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)",
-            ["extra_session_1", test_user["id"], "2099-01-01"]
+        asyncio.run(
+            update_user_row(
+                test_user["id"],
+                is_initial_password=0,
+                password_hash=hash_password("oldpassword"),
+            )
         )
-        execute(
-            "INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)",
-            ["extra_session_2", test_user["id"], "2099-01-01"]
-        )
+        asyncio.run(create_session_v0(test_user["id"], "extra_session_1"))
+        asyncio.run(create_session_v0(test_user["id"], "extra_session_2"))
 
-        sessions_before = fetch_all("SELECT * FROM sessions WHERE user_id = ?", [test_user["id"]])
+        sessions_before = asyncio.run(list_user_sessions(test_user["id"]))
         assert {session["id"] for session in sessions_before} == {
             "test_session_123",
             "extra_session_1",
@@ -245,7 +253,7 @@ class TestAuthRouterEndpoints:
         })
         assert response.status_code == 200
 
-        sessions_after = fetch_all("SELECT * FROM sessions WHERE user_id = ?", [test_user["id"]])
+        sessions_after = asyncio.run(list_user_sessions(test_user["id"]))
         assert len(sessions_after) == 1
 
 
@@ -253,15 +261,10 @@ class TestLoginRateLimit:
 
     @pytest.mark.asyncio
     async def test_login_blocked_after_many_failures(self, client, temp_db: str, test_user: dict):
-        from app.core.security import hash_password
         from app.core.rate_limit import login_limiter
-        from app.db import execute
+        from app.core.rate_limit_config import rate_limit_config
 
-        execute(
-            "UPDATE users SET password_hash = ? WHERE id = ?",
-            [hash_password("testpass"), test_user["id"]],
-        )
-        for _ in range(5):
+        for _ in range(rate_limit_config.account_security):
             await login_limiter.record_failure("testclient")
 
         response = client.post(
@@ -276,16 +279,17 @@ class TestChangePasswordRateLimit:
 
     @pytest.mark.asyncio
     async def test_change_password_rate_limited(self, authenticated_client, test_user: dict):
-        from app.core.security import hash_password
         from app.core.rate_limit import api_limiter
-        from app.db import execute
+        from app.core.rate_limit_config import rate_limit_config
 
-        execute(
-            "UPDATE users SET is_initial_password = 0, password_hash = ? WHERE id = ?",
-            [hash_password("oldpassword"), test_user["id"]],
+        await update_user_row(
+            test_user["id"],
+            is_initial_password=0,
+            password_hash=hash_password("oldpassword"),
         )
-        for _ in range(5):
-            await api_limiter.is_allowed(test_user["id"], "account_security", limit=5, window_seconds=300)
+        limit = rate_limit_config.account_security
+        for _ in range(limit):
+            await api_limiter.is_allowed(test_user["id"], "account_security", limit=limit, window_seconds=300)
 
         response = authenticated_client.post("/api/auth/change-password", json={
             "old_password": "oldpassword",
@@ -298,20 +302,8 @@ class TestChangePasswordRateLimit:
 class TestLoginWithExistingSession:
 
     def test_login_clears_old_session(self, client, test_user: dict, temp_db: str):
-        from app.core.security import hash_password
-        from app.db import fetch_one
-
-        execute(
-            "UPDATE users SET password_hash = ? WHERE id = ?",
-            [hash_password("testpass"), test_user["id"]]
-        )
-
         old_session_id = "old_session_to_clear"
-        expires_at = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
-        execute(
-            "INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)",
-            [old_session_id, test_user["id"], expires_at]
-        )
+        asyncio.run(create_session_v0(test_user["id"], old_session_id))
 
         client.cookies.set(settings.session_cookie_name, old_session_id)
 
@@ -321,7 +313,7 @@ class TestLoginWithExistingSession:
         })
         assert response.status_code == 200
 
-        old_session = fetch_one("SELECT * FROM sessions WHERE id = ?", [old_session_id])
+        old_session = asyncio.run(fetch_session(old_session_id))
         assert old_session is None
 
 

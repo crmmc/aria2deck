@@ -1,10 +1,26 @@
 """Tests for config router endpoints."""
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
-from app.db import execute
+
+
+def test_tokens_use_v0_schema(authenticated_client: TestClient):
+    create_response = authenticated_client.post("/api/config/tokens", json={"name": "v0 token"})
+    assert create_response.status_code == 200
+    token = create_response.json()
+    assert token["name"] == "v0 token"
+    assert token["token"].startswith("aria2_")
+    assert isinstance(token["created_at"], str)
+    assert "T" in token["created_at"]
+
+    list_response = authenticated_client.get("/api/config/tokens")
+    assert list_response.status_code == 200
+    rows = list_response.json()
+    assert len(rows) == 1
+    assert rows[0]["id"] == token["id"]
+    assert rows[0]["name"] == "v0 token"
 
 
 @pytest.fixture
@@ -265,6 +281,8 @@ class TestTokens:
         assert "token" in data
         assert data["name"] == "Test Token"
         assert data["token"].startswith("aria2_")
+        assert isinstance(data["created_at"], str)
+        assert "T" in data["created_at"]
 
     def test_create_token_without_name(self, authenticated_client: TestClient):
         response = authenticated_client.post("/api/config/tokens", json={})
@@ -280,6 +298,8 @@ class TestTokens:
         tokens = response.json()
         assert len(tokens) == 1
         assert tokens[0]["name"] == "My Token"
+        assert isinstance(tokens[0]["created_at"], str)
+        assert "T" in tokens[0]["created_at"]
 
     def test_delete_token(self, authenticated_client: TestClient):
         create_response = authenticated_client.post("/api/config/tokens", json={"name": "To Delete"})
@@ -305,7 +325,7 @@ class TestTokens:
         # Try to delete as regular user
         client.cookies.set(settings.session_cookie_name, user_session)
         response = client.delete(f"/api/config/tokens/{token_id}")
-        assert response.status_code == 403
+        assert response.status_code == 404
 
     def test_tokens_unauthorized(self, client: TestClient):
         response = client.get("/api/config/tokens")
@@ -339,21 +359,21 @@ class TestConfigHelperFunctions:
         from app.routers.config import set_config_value_async, get_config_value_async, _config_cache
 
         _config_cache.clear()
-        await set_config_value_async("test_update_key", "initial_value")
-        result1 = await get_config_value_async("test_update_key")
-        assert result1 == "initial_value"
+        await set_config_value_async("site_title", "Initial Title")
+        result1 = await get_config_value_async("site_title")
+        assert result1 == "Initial Title"
 
-        await set_config_value_async("test_update_key", "updated_value")
+        await set_config_value_async("site_title", "Updated Title")
         _config_cache.clear()
-        result2 = await get_config_value_async("test_update_key")
-        assert result2 == "updated_value"
+        result2 = await get_config_value_async("site_title")
+        assert result2 == "Updated Title"
 
     @pytest.mark.asyncio
     async def test_set_config_value_async_create(self, temp_db: str):
         from app.routers.config import set_config_value_async, get_config_value_async, _config_cache
 
         _config_cache.clear()
-        await set_config_value_async("new_config_key", "new_value")
+        await set_config_value_async("unsupported_config_key", "new_value")
         _config_cache.clear()
-        result = await get_config_value_async("new_config_key")
-        assert result == "new_value"
+        result = await get_config_value_async("unsupported_config_key")
+        assert result is None

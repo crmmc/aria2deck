@@ -1,35 +1,68 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 import logging
+import time
 from uuid import uuid4
 
 from fastapi import Depends, HTTPException, Request, Response, status
-from sqlmodel import select
 
 from app.core.config import settings
-from app.database import get_session
-from app.models import Session, User
+from app.repositories import auth as auth_repo
 
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass(slots=True)
+class AuthUser:
+    id: int
+    username: str
+    password_hash: str
+    is_admin: bool
+    quota: int
+    quota_bytes: int
+    rpc_secret: str | None
+    rpc_secret_created_at: str | None
+    rpc_secret_created_at_ms: int | None
+    is_initial_password: bool
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def ms_to_iso(timestamp_ms: int | None) -> str | None:
+    if timestamp_ms is None:
+        return None
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.gmtime(timestamp_ms / 1000))
+
+
+def user_from_row(row: dict) -> AuthUser:
+    quota_bytes = int(row["quota_bytes"])
+    return AuthUser(
+        id=int(row["id"]),
+        username=str(row["username"]),
+        password_hash=str(row["password_hash"]),
+        is_admin=bool(row["is_admin"]),
+        quota=quota_bytes,
+        quota_bytes=quota_bytes,
+        rpc_secret=row.get("rpc_secret"),
+        rpc_secret_created_at=ms_to_iso(row.get("rpc_secret_created_at_ms")),
+        rpc_secret_created_at_ms=row.get("rpc_secret_created_at_ms"),
+        is_initial_password=bool(row["is_initial_password"]),
+    )
+
+
 async def create_session(user_id: int) -> str:
     session_id = uuid4().hex
-    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=settings.session_ttl_seconds)).isoformat()
-    async with get_session() as db:
-        session = Session(id=session_id, user_id=user_id, expires_at=expires_at)
-        db.add(session)
+    expires_at_ms = now_ms() + settings.session_ttl_seconds * 1000
+    await auth_repo.create_session(session_id, user_id, expires_at_ms)
     return session_id
 
 
 async def clear_session(session_id: str) -> None:
-    async with get_session() as db:
-        result = await db.exec(select(Session).where(Session.id == session_id))
-        session = result.first()
-        if session:
-            await db.delete(session)
+    await auth_repo.delete_session(session_id)
 
 
 async def clear_user_sessions(user_id: int) -> int:
@@ -41,41 +74,23 @@ async def clear_user_sessions(user_id: int) -> int:
     Returns:
         被删除的 session 数量
     """
-    async with get_session() as db:
-        result = await db.exec(select(Session).where(Session.user_id == user_id))
-        sessions = result.all()
-        count = len(sessions)
-        for session in sessions:
-            await db.delete(session)
-        return count
+    return await auth_repo.delete_user_sessions(user_id)
 
 
-async def get_user_by_session(session_id: str | None) -> User | None:
+async def get_user_by_session(session_id: str | None) -> AuthUser | None:
     if not session_id:
         return None
-    async with get_session() as db:
-        result = await db.exec(select(Session).where(Session.id == session_id))
-        session = result.first()
-        if not session:
-            return None
-        try:
-            expires_at = datetime.fromisoformat(session.expires_at)
-        except ValueError:
-            logger.warning("会话过期时间格式无效 session_id=%s", session_id)
-            await db.delete(session)
-            return None
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < datetime.now(timezone.utc):
-            await db.delete(session)
-            logger.info("会话已过期并自动清理")
-            return None
-        result = await db.exec(select(User).where(User.id == session.user_id))
-        user = result.first()
-        return user
+    row = await auth_repo.get_session_user(session_id)
+    if not row:
+        return None
+    if int(row["session_expires_at_ms"]) < now_ms():
+        await auth_repo.delete_session(session_id)
+        logger.info("会话已过期并自动清理")
+        return None
+    return user_from_row(row)
 
 
-async def require_user(request: Request) -> User:
+async def require_user(request: Request) -> AuthUser:
     session_id = request.cookies.get(settings.session_cookie_name)
     user = await get_user_by_session(session_id)
     if not user:
@@ -85,7 +100,7 @@ async def require_user(request: Request) -> User:
     return user
 
 
-async def require_admin(user: User = Depends(require_user)) -> User:
+async def require_admin(user: AuthUser = Depends(require_user)) -> AuthUser:
     if not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user

@@ -1,9 +1,8 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlmodel import select
 
-from app.auth import clear_session, create_session, require_user, set_session_cookie
+from app.auth import AuthUser, clear_session, clear_user_sessions, create_session, require_user, set_session_cookie, user_from_row
 from app.core.config import settings
 from app.core.request_rate_guard import (
     RateLimitScope,
@@ -14,8 +13,7 @@ from app.core.request_rate_guard import (
     record_account_security_failure,
 )
 from app.core.security import hash_password, verify_password, verify_password_constant_time
-from app.database import get_session
-from app.models import User
+from app.repositories import auth as auth_repo
 from app.schemas import ChangePasswordRequest, LoginRequest, UserOut
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -43,12 +41,9 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
         )
         raise
 
-    # 异步查询用户，避免阻塞事件循环
-    async with get_session() as db:
-        result = await db.exec(select(User).where(User.username == payload.username))
-        user = result.first()
+    user_row = await auth_repo.get_user_by_username(payload.username)
 
-    password_hash = user.password_hash if user else None
+    password_hash = user_row["password_hash"] if user_row else None
 
     if not verify_password_constant_time(payload.password, password_hash):
         # 记录失败尝试
@@ -62,7 +57,8 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
 
     # 验证成功意味着 user 必定存在（verify_password_constant_time 在 user 为 None 时返回 False）
-    assert user is not None
+    assert user_row is not None
+    user = user_from_row(user_row)
 
     # 登录成功，清除失败记录
     await clear_account_security_failures(client_ip)
@@ -94,7 +90,7 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
 
 
 @router.post("/logout")
-async def logout(request: Request, response: Response, user: User = Depends(require_user)) -> dict:
+async def logout(request: Request, response: Response, user: AuthUser = Depends(require_user)) -> dict:
     session_id = request.cookies.get(settings.session_cookie_name)
     if session_id:
         await clear_session(session_id)
@@ -109,7 +105,7 @@ async def logout(request: Request, response: Response, user: User = Depends(requ
 
 
 @router.get("/me", response_model=UserOut)
-async def me(user: User = Depends(require_user)) -> dict:
+async def me(user: AuthUser = Depends(require_user)) -> dict:
     logger.debug("获取当前用户信息 user_id=%s", user.id)
     return {
         "id": user.id,
@@ -125,7 +121,7 @@ async def change_password(
     payload: ChangePasswordRequest,
     request: Request,
     response: Response,
-    user: User = Depends(require_user)
+    user: AuthUser = Depends(require_user)
 ) -> dict:
     request_id = getattr(request.state, "request_id", "-")
     user_id = user.id
@@ -166,30 +162,19 @@ async def change_password(
                 detail="新密码不能与旧密码相同"
             )
 
-    # 更新密码
-    async with get_session() as db:
-        # 重新查询 user，避免使用 detached ORM 对象
-        from sqlmodel import select
-        result = await db.exec(select(User).where(User.id == user.id))
-        db_user = result.first()
-        if not db_user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="用户不存在"
-            )
-        db_user.password_hash = hash_password(payload.new_password)
-        db_user.is_initial_password = False  # 清除初始密码标记
-        db.add(db_user)
-        await db.commit()
+    db_user = await auth_repo.update_user(
+        user.id,
+        password_hash=hash_password(payload.new_password),
+        is_initial_password=False,
+    )
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
 
-        # 使该用户的所有 session 失效
-        from sqlmodel import delete
-        from app.models import Session
-        # user.id 来自 require_user 依赖，保证非空
-        user_id = user.id
-        assert user_id is not None
-        await db.exec(delete(Session).where(Session.user_id == user_id))
-        await db.commit()
+    # 使该用户的所有 session 失效
+    await clear_user_sessions(user.id)
 
     # 创建新 session
     assert user.id is not None

@@ -1,15 +1,14 @@
 """Test fixtures and configuration for pytest."""
+# ruff: noqa: E402
 
 import os
-import sqlite3
 import tempfile
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Generator
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import insert, select
 
 # Patch settings before importing app modules
 _temp_dir = tempfile.mkdtemp()
@@ -24,11 +23,83 @@ from app.core.download_limiter import download_config, download_limiter
 from app.core.rate_limit import api_limiter, login_limiter, rpc_limiter
 from app.core.rate_limit_config import rate_limit_config
 from app.core.request_rate_guard import scoped_rate_limiter
-from app.core.security import hash_password
-from app.db import init_db, execute, fetch_one
-from app.database import reset_engine, init_db as init_sqlmodel_db, dispose_engine
+from app.db.bootstrap import bootstrap_database
+from app.db.engine import dispose_engine, reset_engine, transaction
+from app.db.schema import global_downloads, user_tasks
 from app.main import app
 from app.aria2.client import Aria2Client
+from tests.helpers_v0 import create_session_v0, create_user_file_v0, create_user_v0, now_ms
+
+
+async def create_failed_user_task_v0(
+    *,
+    user_id: int,
+    resource_key: str,
+    uri: str,
+    gid: str,
+    name: str,
+    total_bytes: int,
+    completed_bytes: int,
+    error_message: str,
+) -> dict:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        download = (
+            await conn.execute(
+                insert(global_downloads)
+                .values(
+                    resource_key=resource_key,
+                    resource_kind="torrent" if uri == "[torrent]" else "http",
+                    source_uri=uri,
+                    display_name=name,
+                    aria2_gid=gid,
+                    status="failed",
+                    total_bytes=total_bytes,
+                    completed_bytes=completed_bytes,
+                    error_message=error_message,
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                )
+                .returning(global_downloads)
+            )
+        ).mappings().one()
+        task = (
+            await conn.execute(
+                insert(user_tasks)
+                .values(
+                    user_id=user_id,
+                    global_download_id=download["id"],
+                    status="failed",
+                    display_name=name,
+                    error_message=error_message,
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                )
+                .returning(user_tasks)
+            )
+        ).mappings().one()
+        row = (
+            await conn.execute(
+                select(user_tasks, global_downloads)
+                .select_from(user_tasks.join(global_downloads, user_tasks.c.global_download_id == global_downloads.c.id))
+                .where(user_tasks.c.id == task["id"])
+            )
+        ).mappings().one()
+    result = dict(row)
+    result.update(
+        {
+            "id": task["id"],
+            "owner_id": user_id,
+            "gid": gid,
+            "uri": uri,
+            "status": "error",
+            "name": name,
+            "total_length": total_bytes,
+            "completed_length": completed_bytes,
+            "error": error_message,
+        }
+    )
+    return result
 
 
 @pytest.fixture(autouse=True)
@@ -60,11 +131,10 @@ def temp_db() -> Generator[str, None, None]:
     settings.database_path = db_path
     settings.download_dir = download_dir
 
-    reset_engine()
-    init_db()
-
     import asyncio
-    asyncio.run(init_sqlmodel_db())
+
+    reset_engine()
+    asyncio.run(bootstrap_database())
     asyncio.run(download_config.load_from_db())
     asyncio.run(rate_limit_config.load_from_db())
 
@@ -83,71 +153,49 @@ def temp_db() -> Generator[str, None, None]:
 
 @pytest.fixture
 def test_user(temp_db: str) -> dict:
-    """Create a test user and return user info."""
-    user_id = execute(
-        """
-        INSERT INTO users (username, password_hash, is_admin, created_at, quota)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        ["testuser", hash_password("testpass"), 0, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-    )
-    return {"id": user_id, "username": "testuser", "is_admin": 0, "quota": 100 * 1024 * 1024 * 1024}
+    import asyncio
+
+    return asyncio.run(create_user_v0(username="testuser", password="testpass", is_admin=False))
 
 
 @pytest.fixture
 def test_admin(temp_db: str) -> dict:
-    """Create a test admin user and return user info."""
-    user_id = execute(
-        """
-        INSERT INTO users (username, password_hash, is_admin, created_at, quota)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        ["admin", hash_password("adminpass"), 1, datetime.now(timezone.utc).isoformat(), 100 * 1024 * 1024 * 1024]
-    )
-    return {"id": user_id, "username": "admin", "is_admin": 1, "quota": 100 * 1024 * 1024 * 1024}
+    import asyncio
+
+    return asyncio.run(create_user_v0(username="admin", password="adminpass", is_admin=True))
 
 
 @pytest.fixture
 def user_file(test_user: dict, temp_db: str) -> dict:
-    """Create a StoredFile + UserFile for the test user and return info dict."""
-    real_path = os.path.join(settings.download_dir, str(test_user["id"]), "testfile.bin")
-    os.makedirs(os.path.dirname(real_path), exist_ok=True)
-    with open(real_path, "wb") as f:
-        f.write(b"x" * 1024)
+    import asyncio
+    from pathlib import Path
 
-    stored_id = execute(
-        "INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ["hash_testfile", real_path, 1024, 0, 1, "testfile.bin", datetime.now(timezone.utc).isoformat()],
+    real_path = Path(settings.download_dir) / "store" / "hash_testfile.bin"
+    real_path.parent.mkdir(parents=True, exist_ok=True)
+    real_path.write_bytes(b"x" * 1024)
+    return asyncio.run(
+        create_user_file_v0(
+            user_id=test_user["id"],
+            real_path=real_path,
+            content_hash="hash_testfile",
+            display_name="testfile.bin",
+            size_bytes=1024,
+        )
     )
-    uf_id = execute(
-        "INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at) VALUES (?, ?, ?, ?)",
-        [test_user["id"], stored_id, "testfile.bin", datetime.now(timezone.utc).isoformat()],
-    )
-    return {"id": uf_id, "stored_id": stored_id, "real_path": real_path, "size": 1024}
 
 
 @pytest.fixture
 def user_session(test_user: dict, temp_db: str) -> str:
-    """Create a session for the test user."""
-    session_id = "test_session_123"
-    expires_at = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
-    execute(
-        "INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)",
-        [session_id, test_user["id"], expires_at]
-    )
-    return session_id
+    import asyncio
+
+    return asyncio.run(create_session_v0(test_user["id"], "test_session_123"))
 
 
 @pytest.fixture
 def admin_session(test_admin: dict, temp_db: str) -> str:
-    """Create a session for the admin user."""
-    session_id = "admin_session_456"
-    expires_at = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
-    execute(
-        "INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)",
-        [session_id, test_admin["id"], expires_at]
-    )
-    return session_id
+    import asyncio
+
+    return asyncio.run(create_session_v0(test_admin["id"], "admin_session_456"))
 
 
 @pytest.fixture
@@ -186,52 +234,55 @@ def mock_aria2_client() -> AsyncMock:
 @pytest.fixture
 def failed_task(test_user: dict, temp_db: str) -> dict:
     """Create a failed task in the database."""
-    now = datetime.now(timezone.utc).isoformat()
-    task_id = execute(
-        """
-        INSERT INTO tasks (owner_id, gid, uri, status, name, total_length, completed_length,
-                          download_speed, upload_speed, error, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            test_user["id"], "old_gid_123", "https://example.com/file.zip", "error",
-            "file.zip", 1000000, 500000, 0, 0, "Connection timeout", now, now
-        ]
+    import asyncio
+
+    return asyncio.run(
+        create_failed_user_task_v0(
+            user_id=test_user["id"],
+            resource_key="http:old_gid_123",
+            uri="https://example.com/file.zip",
+            gid="old_gid_123",
+            name="file.zip",
+            total_bytes=1000000,
+            completed_bytes=500000,
+            error_message="Connection timeout",
+        )
     )
-    return fetch_one("SELECT * FROM tasks WHERE id = ?", [task_id])
 
 
 @pytest.fixture
 def torrent_task(test_user: dict, temp_db: str) -> dict:
     """Create a torrent task in the database."""
-    now = datetime.now(timezone.utc).isoformat()
-    task_id = execute(
-        """
-        INSERT INTO tasks (owner_id, gid, uri, status, name, total_length, completed_length,
-                          download_speed, upload_speed, error, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            test_user["id"], "torrent_gid_456", "[torrent]", "error",
-            "movie.mkv", 5000000000, 1000000000, 0, 0, "No seeds available", now, now
-        ]
+    import asyncio
+
+    return asyncio.run(
+        create_failed_user_task_v0(
+            user_id=test_user["id"],
+            resource_key="torrent:torrent_gid_456",
+            uri="[torrent]",
+            gid="torrent_gid_456",
+            name="movie.mkv",
+            total_bytes=5000000000,
+            completed_bytes=1000000000,
+            error_message="No seeds available",
+        )
     )
-    return fetch_one("SELECT * FROM tasks WHERE id = ?", [task_id])
 
 
 @pytest.fixture
 def other_user_task(test_admin: dict, temp_db: str) -> dict:
     """Create a task belonging to another user (admin)."""
-    now = datetime.now(timezone.utc).isoformat()
-    task_id = execute(
-        """
-        INSERT INTO tasks (owner_id, gid, uri, status, name, total_length, completed_length,
-                          download_speed, upload_speed, error, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            test_admin["id"], "admin_gid_789", "https://admin.com/file.zip", "error",
-            "admin_file.zip", 2000000, 0, 0, 0, "Failed", now, now
-        ]
+    import asyncio
+
+    return asyncio.run(
+        create_failed_user_task_v0(
+            user_id=test_admin["id"],
+            resource_key="http:admin_gid_789",
+            uri="https://admin.com/file.zip",
+            gid="admin_gid_789",
+            name="admin_file.zip",
+            total_bytes=2000000,
+            completed_bytes=0,
+            error_message="Failed",
+        )
     )
-    return fetch_one("SELECT * FROM tasks WHERE id = ?", [task_id])
