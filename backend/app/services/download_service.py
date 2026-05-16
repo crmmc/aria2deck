@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import threading
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Protocol
 
 from sqlalchemy.exc import IntegrityError
 
 from app.repositories.downloads import (
     ACTIVE_USER_TASK_STATUSES,
+    attach_completed_file_to_user,
     cancel_active_user_task,
+    complete_active_user_tasks_for_stored_file,
     count_active_user_tasks,
     create_user_task,
     get_user_task_by_id,
@@ -20,7 +24,18 @@ from app.repositories.downloads import (
     update_global_download,
     update_user_task,
 )
-from app.services.usage_service import release_reserved, reserve_bytes
+from app.repositories.files import (
+    create_stored_file_with_entries,
+    delete_stored_file,
+    get_stored_file_by_content_hash,
+)
+from app.services.hash import calculate_content_hash_async
+from app.services.storage import get_downloading_dir, get_store_path_for_hash, safe_delete_path
+from app.services.storage_index import build_entry_templates
+from app.services.usage_service import (
+    release_reserved,
+    reserve_bytes,
+)
 
 logger = logging.getLogger(__name__)
 RETRYABLE_DOWNLOAD_STATUSES = {"failed", "cancelled"}
@@ -42,6 +57,8 @@ _lifecycle_locks: dict[tuple[int, int], asyncio.Lock] = {}
 _lifecycle_locks_guard = threading.Lock()
 _user_task_locks: dict[tuple[int, int, int], asyncio.Lock] = {}
 _user_task_locks_guard = threading.Lock()
+_content_locks: dict[tuple[int, str], asyncio.Lock] = {}
+_content_locks_guard = threading.Lock()
 
 
 def _loop_id() -> int:
@@ -78,6 +95,16 @@ async def _get_user_task_lock(user_id: int, global_download_id: int) -> asyncio.
         return lock
 
 
+async def _get_content_lock(content_hash: str) -> asyncio.Lock:
+    key = (_loop_id(), content_hash)
+    with _content_locks_guard:
+        lock = _content_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _content_locks[key] = lock
+        return lock
+
+
 async def _release_task_reservation(
     *, task: dict[str, Any], user_id: int, quota_bytes: int
 ) -> None:
@@ -93,6 +120,134 @@ async def _remove_submitted_gid(aria2_client: Aria2SubmitClient, gid: str) -> No
         await aria2_client.force_remove(gid)
     except Exception:
         logger.exception("Failed to remove orphan aria2 download gid=%s", gid)
+
+
+def _path_size_bytes(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    if path.is_dir():
+        return sum(child.stat().st_size for child in path.rglob("*") if child.is_file())
+    return 0
+
+
+def _move_to_content_store(source_path: Path, content_hash: str) -> tuple[Path, bool]:
+    store_path = get_store_path_for_hash(content_hash)
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        source_path.rename(store_path)
+    except OSError:
+        if store_path.exists():
+            return store_path, False
+        raise
+    return store_path, True
+
+
+def _delete_download_source(source_path: Path, *, recursive: bool) -> None:
+    if not source_path.exists() and not source_path.is_symlink():
+        return
+    safe_delete_path(
+        base_dir=get_downloading_dir(),
+        target=source_path,
+        recursive=recursive,
+    )
+
+
+def _restore_moved_source(store_path: Path, source_path: Path) -> None:
+    if not store_path.exists() or source_path.exists():
+        return
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(store_path), str(source_path))
+
+
+async def complete_global_download(
+    *,
+    global_download_id: int,
+    source_path: Path,
+    original_name: str,
+) -> dict[str, Any]:
+    source_path = Path(source_path)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source path does not exist: {source_path}")
+
+    content_hash = await calculate_content_hash_async(source_path)
+    size_bytes = _path_size_bytes(source_path)
+    is_directory = source_path.is_dir()
+
+    lifecycle_lock = await _get_lifecycle_lock(global_download_id)
+    async with lifecycle_lock:
+        content_lock = await _get_content_lock(content_hash)
+        async with content_lock:
+            stored_file = await get_stored_file_by_content_hash(content_hash)
+            entries_created = 0
+            moved_source = False
+            created_stored_file = False
+            store_path = get_store_path_for_hash(content_hash)
+            if stored_file:
+                size_bytes = int(stored_file["size_bytes"])
+                store_path = Path(str(stored_file["real_path"]))
+                if not store_path.exists():
+                    store_path.parent.mkdir(parents=True, exist_ok=True)
+                    source_path.rename(store_path)
+                    moved_source = True
+            else:
+                if store_path.exists():
+                    entry_root = store_path
+                else:
+                    store_path, moved_source = _move_to_content_store(
+                        source_path, content_hash
+                    )
+                    entry_root = store_path
+
+                entry_templates = build_entry_templates(entry_root)
+                try:
+                    stored_file, entries_created = await create_stored_file_with_entries(
+                        {
+                            "content_hash": content_hash,
+                            "real_path": str(store_path),
+                            "size_bytes": size_bytes,
+                            "is_directory": 1 if is_directory else 0,
+                            "original_name": original_name,
+                        },
+                        entry_templates,
+                    )
+                    created_stored_file = True
+                except IntegrityError:
+                    existing = await get_stored_file_by_content_hash(content_hash)
+                    if existing is None:
+                        if moved_source:
+                            _restore_moved_source(store_path, source_path)
+                        raise
+                    stored_file = existing
+                    size_bytes = int(stored_file["size_bytes"])
+                except Exception:
+                    if moved_source:
+                        _restore_moved_source(store_path, source_path)
+                    raise
+
+        try:
+            completed_at_ms = now_ms()
+            user_files_created = await complete_active_user_tasks_for_stored_file(
+                global_download_id=global_download_id,
+                stored_file_id=int(stored_file["id"]),
+                size_bytes=size_bytes,
+                original_name=original_name,
+                completed_at_ms=completed_at_ms,
+            )
+        except Exception:
+            if created_stored_file:
+                await delete_stored_file(int(stored_file["id"]))
+            if moved_source:
+                _restore_moved_source(store_path, source_path)
+            raise
+
+        if not moved_source:
+            _delete_download_source(source_path, recursive=is_directory)
+
+        return {
+            "status": "completed",
+            "entries_created": entries_created,
+            "user_files_created": user_files_created,
+        }
 
 
 async def create_user_download(
@@ -140,6 +295,20 @@ async def create_user_download(
             if updated_global is None:
                 raise LookupError("global download not found")
             global_download = updated_global
+
+        completed_file_id = global_download.get("completed_file_id")
+        if global_download["status"] == "completed" and completed_file_id is not None:
+            return await attach_completed_file_to_user(
+                user_id=user_id,
+                quota_bytes=quota_bytes,
+                global_download_id=int(global_download["id"]),
+                stored_file_id=int(completed_file_id),
+                size_bytes=int(global_download["completed_bytes"] or total_bytes),
+                display_name=str(
+                    display_name or global_download.get("display_name") or uri
+                ),
+                finished_at_ms=int(global_download["completed_at_ms"] or now_ms()),
+            )
 
         existing_task = await get_user_task(user_id, global_download["id"])
         if existing_task and existing_task["status"] not in RETRYABLE_TASK_STATUSES:

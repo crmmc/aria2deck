@@ -9,7 +9,7 @@ from sqlalchemy import case, delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.db.engine import transaction
-from app.db.schema import global_downloads, user_storage_usage, user_tasks
+from app.db.schema import global_downloads, user_files, user_storage_usage, user_tasks
 
 ACTIVE_USER_TASK_STATUSES = ("queued", "active", "waiting", "paused")
 TERMINAL_USER_TASK_STATUSES = ("completed", "failed", "cancelled")
@@ -135,6 +135,22 @@ async def list_user_tasks(
     return [dict(row) for row in rows]
 
 
+async def list_user_tasks_for_download(
+    global_download_id: int,
+    statuses: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    query = _user_task_download_select().where(
+        user_tasks.c.global_download_id == global_download_id
+    )
+    if statuses is not None:
+        query = query.where(user_tasks.c.status.in_(tuple(statuses)))
+    query = query.order_by(user_tasks.c.updated_at_ms.desc(), user_tasks.c.id.desc())
+
+    async with transaction() as conn:
+        rows = (await conn.execute(query)).mappings().all()
+    return [dict(row) for row in rows]
+
+
 async def create_user_task(values: dict[str, Any]) -> dict[str, Any]:
     timestamp = now_ms()
     row_values = {
@@ -195,6 +211,209 @@ async def update_user_task(task_id: int, values: dict[str, Any]) -> dict[str, An
             )
         ).mappings().first()
     return dict(row) if row else None
+
+
+async def attach_completed_file_to_user(
+    *,
+    user_id: int,
+    quota_bytes: int,
+    global_download_id: int,
+    stored_file_id: int,
+    size_bytes: int,
+    display_name: str,
+    finished_at_ms: int,
+) -> dict[str, Any]:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        task = (
+            await conn.execute(
+                select(user_tasks).where(
+                    user_tasks.c.user_id == user_id,
+                    user_tasks.c.global_download_id == global_download_id,
+                )
+            )
+        ).mappings().first()
+
+        user_file = (
+            await conn.execute(
+                select(user_files.c.id).where(
+                    user_files.c.user_id == user_id,
+                    user_files.c.stored_file_id == stored_file_id,
+                )
+            )
+        ).first()
+        if user_file is None:
+            used_expr = user_storage_usage.c.used_bytes + size_bytes
+            within_quota = (
+                user_storage_usage.c.used_bytes
+                + user_storage_usage.c.reserved_bytes
+                + size_bytes
+                <= quota_bytes
+            )
+            usage = (
+                await conn.execute(
+                    update(user_storage_usage)
+                    .where(user_storage_usage.c.user_id == user_id)
+                    .where(within_quota)
+                    .values(used_bytes=used_expr, updated_at_ms=timestamp)
+                    .returning(user_storage_usage.c.user_id)
+                )
+            ).first()
+            if usage is None:
+                raise ValueError("quota exceeded")
+            await conn.execute(
+                insert(user_files).values(
+                    user_id=user_id,
+                    stored_file_id=stored_file_id,
+                    display_name=display_name,
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                )
+            )
+
+        reserved_bytes = int(task["reserved_bytes"] or 0) if task else 0
+        if reserved_bytes > 0:
+            reserved_expr = user_storage_usage.c.reserved_bytes - reserved_bytes
+            await conn.execute(
+                update(user_storage_usage)
+                .where(user_storage_usage.c.user_id == user_id)
+                .values(
+                    reserved_bytes=case((reserved_expr < 0, 0), else_=reserved_expr),
+                    updated_at_ms=timestamp,
+                )
+            )
+
+        task_values = {
+            "status": "completed",
+            "reserved_bytes": 0,
+            "display_name": display_name,
+            "error_message": None,
+            "updated_at_ms": timestamp,
+            "finished_at_ms": finished_at_ms,
+        }
+        if task:
+            row = (
+                await conn.execute(
+                    update(user_tasks)
+                    .where(user_tasks.c.id == task["id"])
+                    .values(**task_values)
+                    .returning(user_tasks)
+                )
+            ).mappings().one()
+        else:
+            row = (
+                await conn.execute(
+                    insert(user_tasks)
+                    .values(
+                        user_id=user_id,
+                        global_download_id=global_download_id,
+                        created_at_ms=timestamp,
+                        **task_values,
+                    )
+                    .returning(user_tasks)
+                )
+            ).mappings().one()
+    return dict(row)
+
+
+async def complete_active_user_tasks_for_stored_file(
+    *,
+    global_download_id: int,
+    stored_file_id: int,
+    size_bytes: int,
+    original_name: str,
+    completed_at_ms: int,
+) -> int:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        global_row = (
+            await conn.execute(
+                update(global_downloads)
+                .where(global_downloads.c.id == global_download_id)
+                .values(
+                    status="completed",
+                    completed_file_id=stored_file_id,
+                    completed_bytes=size_bytes,
+                    completed_at_ms=completed_at_ms,
+                    aria2_gid=None,
+                    error_code=None,
+                    error_message=None,
+                    updated_at_ms=timestamp,
+                )
+                .returning(global_downloads.c.id)
+            )
+        ).first()
+        if global_row is None:
+            raise LookupError("global download not found")
+
+        tasks = (
+            await conn.execute(
+                select(user_tasks).where(
+                    user_tasks.c.global_download_id == global_download_id,
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                )
+            )
+        ).mappings().all()
+
+        user_files_created = 0
+        for task in tasks:
+            user_id = int(task["user_id"])
+            display_name = str(task["display_name"] or original_name)
+            user_file = (
+                await conn.execute(
+                    select(user_files.c.id).where(
+                        user_files.c.user_id == user_id,
+                        user_files.c.stored_file_id == stored_file_id,
+                    )
+                )
+            ).first()
+            if user_file is None:
+                await conn.execute(
+                    insert(user_files).values(
+                        user_id=user_id,
+                        stored_file_id=stored_file_id,
+                        display_name=display_name,
+                        created_at_ms=timestamp,
+                        updated_at_ms=timestamp,
+                    )
+                )
+                await conn.execute(
+                    update(user_storage_usage)
+                    .where(user_storage_usage.c.user_id == user_id)
+                    .values(
+                        used_bytes=user_storage_usage.c.used_bytes + size_bytes,
+                        updated_at_ms=timestamp,
+                    )
+                )
+                user_files_created += 1
+
+            reserved_bytes = int(task["reserved_bytes"] or 0)
+            if reserved_bytes > 0:
+                reserved_expr = user_storage_usage.c.reserved_bytes - reserved_bytes
+                await conn.execute(
+                    update(user_storage_usage)
+                    .where(user_storage_usage.c.user_id == user_id)
+                    .values(
+                        reserved_bytes=case(
+                            (reserved_expr < 0, 0),
+                            else_=reserved_expr,
+                        ),
+                        updated_at_ms=timestamp,
+                    )
+                )
+
+            await conn.execute(
+                update(user_tasks)
+                .where(user_tasks.c.id == task["id"])
+                .values(
+                    status="completed",
+                    reserved_bytes=0,
+                    error_message=None,
+                    updated_at_ms=timestamp,
+                    finished_at_ms=completed_at_ms,
+                )
+            )
+    return user_files_created
 
 
 async def cancel_active_user_task(
