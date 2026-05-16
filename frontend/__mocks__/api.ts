@@ -188,7 +188,7 @@ export const mockApi = {
     { name: "file1.txt", size: 1024, is_directory: false },
     { name: "folder", size: 0, is_directory: true },
   ] as BrowseFileInfo[]),
-  downloadFileUrl: jest.fn().mockReturnValue("http://localhost:8000/api/files/1/download"),
+  downloadFileUrl: jest.fn().mockReturnValue("http://localhost:8001/api/files/1/download"),
   deleteFile: jest.fn().mockResolvedValue({ ok: true }),
   renameFile: jest.fn().mockResolvedValue({ ok: true }),
 
@@ -197,7 +197,7 @@ export const mockApi = {
   cancelPackTask: jest.fn().mockResolvedValue({ ok: true, message: "Cancelled" }),
   deletePackTask: jest.fn().mockResolvedValue({ ok: true, message: "Deleted" }),
   clearPackTasks: jest.fn().mockResolvedValue({ ok: true, count: 0 }),
-  downloadPackResult: jest.fn().mockReturnValue("http://localhost:8000/api/files/pack/1/download"),
+  downloadPackResult: jest.fn().mockReturnValue("http://localhost:8001/api/files/pack/1/download"),
 };
 
 // Mock authEvents
@@ -228,7 +228,7 @@ export class MockApiError extends Error {
 }
 
 // Mock taskWsUrl
-export const mockTaskWsUrl = jest.fn().mockReturnValue("ws://localhost:8000/ws/tasks");
+export const mockTaskWsUrl = jest.fn().mockReturnValue("ws://localhost:8001/ws/tasks");
 
 // ============================================
 // Browser API Mocks

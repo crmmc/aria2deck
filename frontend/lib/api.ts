@@ -27,7 +27,7 @@ function getApiBase(): string {
   if (typeof window !== "undefined") {
     return window.location.origin;
   }
-  return "http://localhost:8000";
+  return "";
 }
 
 // 401 错误事件，用于通知 AuthContext 会话过期

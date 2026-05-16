@@ -757,9 +757,9 @@ describe("taskWsUrl", () => {
   });
 
   it("converts http to ws", () => {
-    process.env.NEXT_PUBLIC_API_BASE = "http://localhost:8000";
+    process.env.NEXT_PUBLIC_API_BASE = "http://localhost:8001";
     const url = taskWsUrl();
-    expect(url).toBe("ws://localhost:8000/ws/tasks");
+    expect(url).toBe("ws://localhost:8001/ws/tasks");
   });
 
   it("converts https to wss", () => {

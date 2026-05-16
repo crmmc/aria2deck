@@ -49,7 +49,7 @@ cd aria2deck
 make docker-up
 ```
 
-浏览器打开 `http://localhost:8000`
+浏览器打开 `http://localhost:8001`
 
 容器部署时，对外 HTTP 服务由 FastAPI/Uvicorn 提供；前端会先静态导出，再由后端统一托管。
 

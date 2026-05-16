@@ -40,7 +40,7 @@ build:
 run:
 	@echo "Starting backend with standard logs..."
 	@echo "Hook Secret: $(DEV_HOOK_SECRET)"
-	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=false ARIA2C_DEV_RESET_ADMIN_PASSWORD=false ARIA2C_HOOK_SECRET=$(DEV_HOOK_SECRET) ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level info
+	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=false ARIA2C_DEV_RESET_ADMIN_PASSWORD=false ARIA2C_HOOK_SECRET=$(DEV_HOOK_SECRET) ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --log-level info
 
 # Frontend development mode
 # Use this when developing UI pages/components
@@ -49,8 +49,8 @@ dev-front:
 	@echo "Building frontend static artifacts before dev..."
 	@$(MAKE) build
 	@echo "Starting frontend dev server on http://localhost:3000 ..."
-	@echo "API requests will be sent to http://localhost:8000"
-	cd $(FRONTEND_DIR) && NEXT_PUBLIC_API_BASE=http://localhost:8000 $(BUN) run dev
+	@echo "API requests will be sent to http://localhost:8001"
+	cd $(FRONTEND_DIR) && NEXT_PUBLIC_API_BASE=http://localhost:8001 $(BUN) run dev
 
 # Backend development mode (verbose logs)
 # Difference from `run`: ARIA2C_DEBUG=true and uvicorn --log-level debug
@@ -61,7 +61,7 @@ dev-back:
 	@echo "ARIA2C_DEBUG=$(DEV_BACK_DEBUG)"
 	@echo "ARIA2C_DEV_RESET_ADMIN_PASSWORD=$(DEV_BACK_RESET_ADMIN_PASSWORD)"
 	@echo "Dev mode will reset admin password to default (123456) when ARIA2C_DEV_RESET_ADMIN_PASSWORD=true."
-	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=$(DEV_BACK_DEBUG) ARIA2C_DEV_RESET_ADMIN_PASSWORD=$(DEV_BACK_RESET_ADMIN_PASSWORD) ARIA2C_HOOK_SECRET=$(DEV_HOOK_SECRET) ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level debug
+	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=$(DEV_BACK_DEBUG) ARIA2C_DEV_RESET_ADMIN_PASSWORD=$(DEV_BACK_RESET_ADMIN_PASSWORD) ARIA2C_HOOK_SECRET=$(DEV_HOOK_SECRET) ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --log-level debug
 
 # Local aria2 backend for testing (foreground)
 # Keep this running in another terminal while using dev-back/dev-front

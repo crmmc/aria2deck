@@ -52,14 +52,16 @@ RUN mkdir -p /app/backend/data /app/backend/downloads
 ENV PYTHONPATH=/app/backend \
     PYTHONUNBUFFERED=1 \
     ARIA2C_DATABASE_PATH=/app/backend/data/app.db \
-    ARIA2C_DOWNLOAD_DIR=/app/backend/downloads
+    ARIA2C_DOWNLOAD_DIR=/app/backend/downloads \
+    ARIA2C_HOST=0.0.0.0 \
+    ARIA2C_PORT=8001
 
 # Expose port
-EXPOSE 8000
+EXPOSE 8001
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+    CMD curl -f http://localhost:${ARIA2C_PORT:-8001}/api/health || exit 1
 
 # Run application
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD uv run uvicorn app.main:app --host ${ARIA2C_HOST:-0.0.0.0} --port ${ARIA2C_PORT:-8001}

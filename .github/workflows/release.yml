@@ -156,7 +156,7 @@ jobs:
           mkdir -p data downloads
 
           # Start server
-          PYTHONPATH=. uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+          PYTHONPATH=. uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
           EOF
           chmod +x dist/aria2deck/start.sh
 

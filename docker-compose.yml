@@ -37,7 +37,7 @@ services:
       - ./data/app:/app/backend/data
       - ./data/downloads:/app/backend/downloads
     ports:
-      - "8000:8000"
+      - "8001:8001"
     logging:
       driver: json-file
       options:
