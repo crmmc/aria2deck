@@ -1,7 +1,21 @@
 """Tests for main.py application setup and lifespan."""
-import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
+
+import hashlib
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+
+def _client_password_hash(password: str, username: str) -> str:
+    salt = hashlib.sha256(username.lower().encode("utf-8")).digest()
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        10000,
+    )
+    return digest.hex()
 
 
 class TestSetupLogging:
@@ -12,8 +26,8 @@ class TestSetupLogging:
         import logging
         from app.main import setup_logging
 
+        setup_logging()
         root_logger = logging.getLogger()
-        initial_handlers = len(root_logger.handlers)
 
         with patch.dict("os.environ", {}, clear=False):
             with patch("os.environ.get", return_value="INFO"):
@@ -114,28 +128,157 @@ class TestLifespan:
     async def test_lifespan_initializes_database(self, temp_db):
         """Test lifespan initializes database tables."""
         from app.database import get_session
-        from sqlmodel import text
+        from sqlalchemy import text
 
         async with get_session() as db:
-            result = await db.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+            result = await db.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            )
             tables = [row[0] for row in result.fetchall()]
 
+        assert "schema_meta" in tables
+        assert "app_settings" in tables
         assert "users" in tables
         assert "sessions" in tables
 
     @pytest.mark.asyncio
-    async def test_lifespan_ensures_default_admin(self, temp_db, test_admin):
+    async def test_lifespan_ensures_default_admin(self, temp_db):
         """Test lifespan creates default admin user."""
-        from app.database import get_session
-        from sqlmodel import select
-        from app.models import User
+        from sqlalchemy import select
 
-        async with get_session() as db:
-            result = await db.exec(select(User).where(User.username == "admin"))
-            admin = result.first()
+        from app.db.engine import transaction
+        from app.db.schema import users
+        from app.main import ensure_default_admin_v0
+
+        await ensure_default_admin_v0()
+
+        async with transaction() as conn:
+            result = await conn.execute(
+                select(users).where(users.c.username == "admin")
+            )
+            admin = result.mappings().first()
 
         assert admin is not None
-        assert admin.is_admin is True
+        assert admin["is_admin"] == 1
+        assert admin["is_initial_password"] == 1
+
+    def test_app_startup_bootstraps_database_and_default_admin(self, tmp_path):
+        """Test real FastAPI lifespan creates v0 schema and default admin."""
+        import sqlite3
+
+        from fastapi.testclient import TestClient
+
+        from app.core.config import settings
+        from app.db.engine import reset_engine
+        from app.main import create_app
+
+        db_path = tmp_path / "startup.db"
+        download_dir = tmp_path / "downloads"
+        old_db_path = settings.database_path
+        old_download_dir = settings.download_dir
+        old_debug = settings.debug
+        settings.database_path = str(db_path)
+        settings.download_dir = str(download_dir)
+        settings.debug = True
+        reset_engine()
+        try:
+            with (
+                patch("app.main.sync_tasks", new=AsyncMock()),
+                patch("app.main.listen_aria2_events", new=AsyncMock()),
+                patch("app.main.run_startup_repair", new=AsyncMock()),
+                patch(
+                    "app.services.orphan_cleanup.cleanup_orphan_files", new=AsyncMock()
+                ),
+                TestClient(create_app()) as client,
+            ):
+                login_response = client.post(
+                    "/api/auth/login",
+                    json={
+                        "username": "admin",
+                        "password": _client_password_hash("123456", "admin"),
+                    },
+                )
+                assert login_response.status_code == 200
+
+            conn = sqlite3.connect(db_path)
+            try:
+                version = conn.execute(
+                    "SELECT version FROM schema_meta WHERE id = 1"
+                ).fetchone()[0]
+                admin = conn.execute(
+                    "SELECT is_admin, is_initial_password FROM users WHERE username = 'admin'"
+                ).fetchone()
+                settings_row = conn.execute(
+                    "SELECT id FROM app_settings WHERE id = 1"
+                ).fetchone()
+            finally:
+                conn.close()
+
+            assert version == 0
+            assert admin == (1, 1)
+            assert settings_row == (1,)
+        finally:
+            settings.database_path = old_db_path
+            settings.download_dir = old_download_dir
+            settings.debug = old_debug
+            reset_engine()
+
+    @pytest.mark.asyncio
+    async def test_dev_reset_admin_password_uses_frontend_hash(self, temp_db):
+        """Test dev reset keeps default admin compatible with frontend login hashing."""
+        from app.core.security import hash_password, verify_password
+        from app.main import ensure_default_admin_v0, reset_admin_password_for_dev_v0
+        from app.repositories.auth import get_user_by_username, update_user
+
+        await ensure_default_admin_v0()
+        admin = await get_user_by_username("admin")
+        assert admin is not None
+        await update_user(
+            admin["id"],
+            password_hash=hash_password("other-password"),
+            is_initial_password=False,
+        )
+
+        assert await reset_admin_password_for_dev_v0() is True
+
+        reset_admin = await get_user_by_username("admin")
+        assert reset_admin is not None
+        assert verify_password(
+            _client_password_hash("123456", "admin"), reset_admin["password_hash"]
+        )
+        assert reset_admin["is_initial_password"] == 1
+
+    def test_app_startup_rejects_legacy_schema(self, tmp_path):
+        """Test startup refuses a non-v0 legacy database."""
+        import sqlite3
+
+        from fastapi.testclient import TestClient
+
+        from app.core.config import settings
+        from app.db.engine import reset_engine
+        from app.main import create_app
+
+        db_path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL)"
+        )
+        conn.commit()
+        conn.close()
+
+        old_db_path = settings.database_path
+        old_download_dir = settings.download_dir
+        settings.database_path = str(db_path)
+        settings.download_dir = str(tmp_path / "downloads")
+        reset_engine()
+        try:
+            with pytest.raises(RuntimeError, match="Unsupported database schema"):
+                with TestClient(create_app()):
+                    pass
+        finally:
+            settings.database_path = old_db_path
+            settings.download_dir = old_download_dir
+            reset_engine()
 
 
 class TestAppState:

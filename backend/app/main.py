@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 import asyncio
 import logging
 import os
@@ -42,6 +44,7 @@ def setup_logging():
 
     # 文件 handler（日志目录：data/logs）
     from app.core.config import settings
+
     log_dir = Path(settings.database_path).parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "app.log"
@@ -71,14 +74,9 @@ from app.aria2.listener import listen_aria2_events
 from app.aria2.sync import sync_tasks
 from app.core.config import settings
 from app.core.state import AppState
-from app.db import ensure_default_admin, init_db, reset_admin_password_for_dev
-from app.database import (
-    init_db as init_sqlmodel_db,
-    get_session,
-    init_default_config,
-    check_database_integrity,
-    check_wal_integrity,
-)
+from app.db.bootstrap import bootstrap_database
+from app.db.engine import check_database_integrity, check_wal_integrity, dispose_engine
+from app.repositories.auth import create_user, get_user_by_username, update_user
 from app.routers import (
     aria2_rpc,
     auth,
@@ -96,6 +94,37 @@ from app.routers import (
 from app.services.repair import run_startup_repair
 
 
+async def ensure_default_admin_v0() -> None:
+    from app.core.security import derive_client_password_hash, hash_password
+
+    existing = await get_user_by_username("admin")
+    if existing:
+        return
+    client_hash = derive_client_password_hash("123456", "admin")
+    await create_user(
+        username="admin",
+        password_hash=hash_password(client_hash),
+        is_admin=True,
+        quota_bytes=100 * 1024 * 1024 * 1024,
+        is_initial_password=True,
+    )
+
+
+async def reset_admin_password_for_dev_v0() -> bool:
+    from app.core.security import derive_client_password_hash, hash_password
+
+    existing = await get_user_by_username("admin")
+    if not existing:
+        return False
+    client_hash = derive_client_password_hash("123456", str(existing["username"]))
+    await update_user(
+        existing["id"],
+        password_hash=hash_password(client_hash),
+        is_initial_password=True,
+    )
+    return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理器"""
@@ -103,48 +132,48 @@ async def lifespan(app: FastAPI):
     Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
     Path(settings.download_dir).mkdir(parents=True, exist_ok=True)
 
-    # Initialize database schema (using old init_db for backward compatibility)
-    init_db()
-
-    # Initialize SQLModel tables (creates tables if they don't exist)
-    await init_sqlmodel_db()
+    await bootstrap_database()
 
     # 数据库完整性检查
     db_ok = await check_database_integrity()
     if not db_ok:
-        raise RuntimeError("数据库完整性检查失败，请检查日志。可能需要从备份恢复数据库。")
+        raise RuntimeError(
+            "数据库完整性检查失败，请检查日志。可能需要从备份恢复数据库。"
+        )
 
     # WAL 完整性检查
     wal_ok = await check_wal_integrity()
     if not wal_ok:
-        logger.warning("WAL 文件检查发现问题，但不影响启动。建议检查磁盘空间和文件系统。")
-
-    # Initialize default config values
-    async with get_session() as session:
-        await init_default_config(session)
+        logger.warning(
+            "WAL 文件检查发现问题，但不影响启动。建议检查磁盘空间和文件系统。"
+        )
 
     # Check secret key safety
     from app.core.config import check_secret_key
+
     check_secret_key()
 
     # Refresh aria2 config cache from DB
     from app.core.state import refresh_aria2_config
+
     await refresh_aria2_config(app.state.app_state)
 
     # 加载下载配置到内存
     from app.core.download_limiter import download_config
+
     await download_config.load_from_db()
 
     # 加载频率限制配置到内存
     from app.core.rate_limit_config import rate_limit_config
+
     await rate_limit_config.load_from_db()
 
     # Ensure default admin exists
-    ensure_default_admin()
+    await ensure_default_admin_v0()
 
     # Development mode helper: reset admin password without clearing DB
     if settings.dev_reset_admin_password:
-        reset_admin_password_for_dev()
+        await reset_admin_password_for_dev_v0()
 
     async def safe_startup_repair():
         try:
@@ -155,6 +184,7 @@ async def lifespan(app: FastAPI):
     async def safe_orphan_cleanup():
         try:
             from app.services.orphan_cleanup import cleanup_orphan_files
+
             await cleanup_orphan_files()
         except Exception:
             logger.exception("孤儿文件清理失败")
@@ -169,9 +199,7 @@ async def lifespan(app: FastAPI):
     sync_task = asyncio.create_task(
         sync_tasks(app.state.app_state, settings.aria2_poll_interval)
     )
-    listener_task = asyncio.create_task(
-        listen_aria2_events(app.state.app_state)
-    )
+    listener_task = asyncio.create_task(listen_aria2_events(app.state.app_state))
     yield
     # Shutdown
     sync_task.cancel()
@@ -186,12 +214,15 @@ async def lifespan(app: FastAPI):
         logger.debug("listen_aria2_events 已取消")
     # 关闭 aiohttp Session
     await Aria2Client.close_session()
+    await dispose_engine()
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name, debug=settings.debug, lifespan=lifespan)
     app.state.app_state = AppState()
-    app.state.aria2_client = Aria2Client(settings.aria2_rpc_url, settings.aria2_rpc_secret)
+    app.state.aria2_client = Aria2Client(
+        settings.aria2_rpc_url, settings.aria2_rpc_secret
+    )
 
     def _build_request_target(request: Request) -> str:
         path = request.url.path
@@ -241,9 +272,7 @@ def create_app() -> FastAPI:
         response.headers["X-Request-ID"] = request_id
         user_id = getattr(request.state, "auth_user_id", None)
 
-        log_msg = (
-            "[HTTP] %s %s -> %s %.1fms request_id=%s user_id=%s ip=%s"
-        )
+        log_msg = "[HTTP] %s %s -> %s %.1fms request_id=%s user_id=%s ip=%s"
         log_args = (
             method,
             target,
@@ -309,6 +338,7 @@ def create_app() -> FastAPI:
     # 前端源码与开发态路由仍应统一使用无后缀 URL。
     static_dir = Path(__file__).parent.parent / "static"
     if static_dir.exists():
+
         def html_path(name: str) -> Path:
             return static_dir / name
 

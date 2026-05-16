@@ -5,6 +5,7 @@
 2. WAL checkpoint 正常执行
 3. 数据库连接超时配置生效
 """
+
 import pytest
 from pathlib import Path
 import tempfile
@@ -86,23 +87,25 @@ async def test_database_integrity_with_corrupted_db():
 @pytest.mark.asyncio
 async def test_init_default_config(temp_db: str):
     from app.database import init_default_config, get_session
+    from app.db.schema import app_settings
+    from sqlalchemy import select
 
     async with get_session() as session:
         await init_default_config(session)
 
     async with get_session() as session:
-        from sqlmodel import select
-        from app.models import Config
-
-        result = await session.exec(select(Config).where(Config.key == "max_task_size"))
-        config = result.first()
-        assert config is not None
-        assert config.value == "10737418240"
+        result = await session.execute(
+            select(app_settings.c.max_task_size_bytes).where(app_settings.c.id == 1)
+        )
+        max_task_size = result.scalar_one()
+        assert max_task_size == 10737418240
 
 
 @pytest.mark.asyncio
 async def test_init_default_config_idempotent(temp_db: str):
     from app.database import init_default_config, get_session
+    from app.db.schema import app_settings
+    from sqlalchemy import select
 
     async with get_session() as session:
         await init_default_config(session)
@@ -111,13 +114,11 @@ async def test_init_default_config_idempotent(temp_db: str):
         await init_default_config(session)
 
     async with get_session() as session:
-        from sqlmodel import select
-        from app.models import Config
-
-        result = await session.exec(select(Config).where(Config.key == "pack_format"))
-        config = result.first()
-        assert config is not None
-        assert config.value == "tar.zst"
+        result = await session.execute(
+            select(app_settings.c.pack_format).where(app_settings.c.id == 1)
+        )
+        pack_format = result.scalar_one()
+        assert pack_format == "tar.zst"
 
 
 @pytest.mark.asyncio
@@ -135,7 +136,7 @@ async def test_database_integrity_check_with_issues():
     mock_engine.connect.return_value.__aenter__.return_value = mock_conn
     mock_engine.connect.return_value.__aexit__.return_value = None
 
-    with patch("app.database._get_engine", return_value=mock_engine):
+    with patch("app.db.engine.get_engine", return_value=mock_engine):
         result = await check_database_integrity()
         assert result is False
 
@@ -155,7 +156,7 @@ async def test_wal_integrity_check_with_busy():
     mock_engine.connect.return_value.__aenter__.return_value = mock_conn
     mock_engine.connect.return_value.__aexit__.return_value = None
 
-    with patch("app.database._get_engine", return_value=mock_engine):
+    with patch("app.db.engine.get_engine", return_value=mock_engine):
         result = await check_wal_integrity()
         assert result is True
 
@@ -168,7 +169,7 @@ async def test_wal_integrity_check_exception():
     mock_engine = MagicMock()
     mock_engine.connect.side_effect = Exception("Connection failed")
 
-    with patch("app.database._get_engine", return_value=mock_engine):
+    with patch("app.db.engine.get_engine", return_value=mock_engine):
         result = await check_wal_integrity()
         assert result is False
 
@@ -176,20 +177,20 @@ async def test_wal_integrity_check_exception():
 @pytest.mark.asyncio
 async def test_init_default_config_adds_missing(temp_db: str):
     from app.database import init_default_config, get_session
-    from sqlmodel import select
-    from app.models import Config
+    from app.db.schema import app_settings
+    from sqlalchemy import select
 
     async with get_session() as session:
-        result = await session.exec(select(Config).where(Config.key == "max_task_size"))
-        existing = result.first()
-        if existing:
-            await session.delete(existing)
-            await session.commit()
+        result = await session.execute(
+            select(app_settings.c.id).where(app_settings.c.id == 1)
+        )
+        assert result.scalar_one() == 1
 
     async with get_session() as session:
         await init_default_config(session)
 
     async with get_session() as session:
-        result = await session.exec(select(Config).where(Config.key == "max_task_size"))
-        config = result.first()
-        assert config is not None
+        result = await session.execute(
+            select(app_settings.c.max_task_size_bytes).where(app_settings.c.id == 1)
+        )
+        assert result.scalar_one() == 10737418240

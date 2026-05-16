@@ -1,9 +1,12 @@
+import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import re
+import socket
 from urllib.parse import urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
@@ -14,6 +17,18 @@ def hash_password(password: str, salt: bytes | None = None) -> str:
         salt = os.urandom(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120000)
     return base64.b64encode(salt + digest).decode("utf-8")
+
+
+def derive_client_password_hash(password: str, username: str) -> str:
+    """Derive the frontend-compatible password hash sent to auth endpoints."""
+    salt = hashlib.sha256(username.lower().encode("utf-8")).digest()
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        10000,
+    )
+    return digest.hex()
 
 
 def verify_password(password: str, encoded: str) -> bool:
@@ -42,10 +57,10 @@ def verify_password_constant_time(password: str, encoded: str | None) -> bool:
 
 
 # ANSI 转义序列正则（匹配 ESC[ 开头的控制序列）
-_ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b[^[]')
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b[^[]")
 
 # 控制字符（除了 \t 和 \n，但包括 \r 以防止覆盖攻击）
-_CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0b-\x0d\x0e-\x1f\x7f]')
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x0d\x0e-\x1f\x7f]")
 
 
 def sanitize_string(s: str | None) -> str | None:
@@ -62,9 +77,9 @@ def sanitize_string(s: str | None) -> str | None:
     if s is None:
         return None
     # 先移除 ANSI 转义序列
-    s = _ANSI_ESCAPE_RE.sub('', s)
+    s = _ANSI_ESCAPE_RE.sub("", s)
     # 再移除其他控制字符
-    s = _CONTROL_CHARS_RE.sub('', s)
+    s = _CONTROL_CHARS_RE.sub("", s)
     return s
 
 
@@ -104,34 +119,30 @@ def mask_url_credentials(url: str) -> str:
             masked_netloc += f":{parsed.port}"
 
         # 重新组装 URL
-        return urlunparse((
-            parsed.scheme,
-            masked_netloc,
-            parsed.path,
-            parsed.params,
-            parsed.query,
-            parsed.fragment
-        ))
+        return urlunparse(
+            (
+                parsed.scheme,
+                masked_netloc,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
     except (ValueError, AttributeError) as e:
         # 解析失败时返回原 URL（可能是 magnet 等特殊协议）
         logger.debug(f"Failed to parse URL for sanitization: {e}")
         return url
 
 
-# ========== SSRF 防护 ==========
-import asyncio
-import ipaddress
-import socket
-
-
 def is_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """检查 IP 是否为私有/内网地址"""
     return (
-        ip.is_private or
-        ip.is_loopback or
-        ip.is_link_local or
-        ip.is_reserved or
-        ip.is_multicast
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
     )
 
 
@@ -149,15 +160,19 @@ async def check_url_ssrf(url: str) -> str | None:
         scheme = parsed.scheme.lower()
         hostname = parsed.hostname
 
-        if scheme not in ('http', 'https', 'ftp'):
+        if scheme not in ("http", "https", "ftp"):
             return None
 
         if not hostname:
             return "无效的下载链接"
 
         blocked_hosts = {
-            'localhost', 'localhost.localdomain',
-            '127.0.0.1', '::1', '0.0.0.0', '::'
+            "localhost",
+            "localhost.localdomain",
+            "127.0.0.1",
+            "::1",
+            "0.0.0.0",
+            "::",
         }
         if hostname.lower() in blocked_hosts:
             return "不允许下载本机地址"

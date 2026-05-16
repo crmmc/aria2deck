@@ -30,11 +30,19 @@ async def test_bootstrap_creates_v0_schema(isolated_db: Path):
     await bootstrap_database()
 
     async with get_engine().connect() as conn:
-        version = (await conn.execute(text("SELECT version FROM schema_meta WHERE id = 1"))).scalar_one()
-        users_exists = (
-            await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='users'"))
+        version = (
+            await conn.execute(text("SELECT version FROM schema_meta WHERE id = 1"))
         ).scalar_one()
-        settings_id = (await conn.execute(text("SELECT id FROM app_settings"))).scalar_one()
+        users_exists = (
+            await conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
+                )
+            )
+        ).scalar_one()
+        settings_id = (
+            await conn.execute(text("SELECT id FROM app_settings"))
+        ).scalar_one()
 
     assert version == SCHEMA_VERSION == 0
     assert users_exists == "users"
@@ -65,7 +73,9 @@ async def test_bootstrap_rejects_wrong_version(isolated_db: Path):
     conn.execute(
         "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at_ms INTEGER NOT NULL)"
     )
-    conn.execute("INSERT INTO schema_meta (id, version, created_at_ms) VALUES (1, 99, 1)")
+    conn.execute(
+        "INSERT INTO schema_meta (id, version, created_at_ms) VALUES (1, 99, 1)"
+    )
     conn.commit()
     conn.close()
 
@@ -113,7 +123,7 @@ async def test_foreign_keys_apply_to_each_session_connection(isolated_db: Path):
                 )
 
 
-def test_legacy_db_module_cli_usage_still_works():
+def test_legacy_db_module_cli_fails_loudly():
     backend_dir = Path(__file__).resolve().parents[1]
 
     result = subprocess.run(
@@ -125,4 +135,4 @@ def test_legacy_db_module_cli_usage_still_works():
     )
 
     assert result.returncode == 1
-    assert "Usage: python -m app.db reset-admin-password" in result.stdout
+    assert "app.db CLI was removed" in result.stderr
