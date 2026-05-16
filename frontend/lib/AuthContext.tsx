@@ -116,6 +116,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, [pathname, push]);
 
+  useEffect(() => {
+    if (siteTitle && siteTitle !== "aria2 控制器") {
+      document.title = siteTitle;
+    }
+  }, [pathname, siteTitle]);
+
   const logout = useCallback(async () => {
     try {
       await api.logout();
