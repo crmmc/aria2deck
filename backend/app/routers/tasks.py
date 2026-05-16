@@ -8,11 +8,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
-from sqlalchemy import func, update
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
@@ -32,6 +34,7 @@ from app.models import (
     UserTaskSubscription,
     utc_now_str,
 )
+from app.repositories.downloads import get_global_by_resource_key
 from app.routers.config import get_max_task_size, get_min_free_disk
 from app.services.hash import (
     extract_info_hash_from_magnet,
@@ -41,12 +44,14 @@ from app.services.hash import (
     is_magnet_link,
 )
 from app.services.http_probe import probe_url_with_get_fallback
+from app.services.download_service import create_user_download
 from app.services.storage import (
     create_user_file_reference,
     delete_user_file_reference,
     get_task_download_dir,
     get_user_space_info,
 )
+from app.services.usage_service import get_usage
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +67,65 @@ async def _check_url_safety(url: str) -> None:
     error = await check_url_ssrf(url)
     if error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error)
+
+
+def _has_url_credentials(url: str) -> bool:
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() not in {"http", "https", "ftp"}:
+        return False
+    return parsed.username is not None or parsed.password is not None
+
+
+def _ms_to_iso(timestamp_ms: int | None) -> str | None:
+    if timestamp_ms is None:
+        return None
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat()
+
+
+def _legacy_task_status(status_value: str) -> str:
+    return {
+        "completed": "complete",
+        "failed": "error",
+        "cancelled": "error",
+    }.get(status_value, status_value)
+
+
+def _v0_create_task_response(
+    *,
+    task_row: dict,
+    global_download: dict | None,
+    fallback_uri: str,
+    fallback_name: str | None,
+    fallback_total_length: int,
+) -> dict:
+    error_message = task_row.get("error_message") or (
+        global_download.get("error_message") if global_download else None
+    )
+    return {
+        "id": task_row["id"],
+        "task_id": task_row["global_download_id"],
+        "status": _legacy_task_status(str(task_row["status"])),
+        "name": task_row.get("display_name")
+        or (global_download.get("display_name") if global_download else None)
+        or fallback_name,
+        "uri": (global_download.get("source_uri") if global_download else None)
+        or fallback_uri,
+        "total_length": int(
+            (global_download.get("total_bytes") if global_download else None)
+            or fallback_total_length
+            or 0
+        ),
+        "completed_length": int(
+            (global_download.get("completed_bytes") if global_download else None) or 0
+        ),
+        "download_speed": 0,
+        "upload_speed": 0,
+        "error": error_message,
+        "error_display": error_message,
+        "created_at": _ms_to_iso(task_row["created_at_ms"]),
+        "updated_at": _ms_to_iso(task_row["updated_at_ms"]),
+        "frozen_space": int(task_row["reserved_bytes"]),
+    }
 
 
 # ========== Schemas ==========
@@ -481,6 +545,11 @@ async def create_task(
 
     # SSRF protection
     await _check_url_safety(payload.uri)
+    if _has_url_credentials(payload.uri):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="下载链接不支持用户名或密码",
+        )
 
     # Check disk space
     disk_ok, disk_free = _check_disk_space()
@@ -492,8 +561,8 @@ async def create_task(
         )
 
     # Get user space info
-    space_info = await get_user_space_info(user_id, user.quota)
-    available_space = space_info["available"]
+    usage_info = await get_usage(user_id, user.quota)
+    available_space = min(usage_info["available_bytes"], disk_free)
 
     # Determine URI type and get uri_hash
     uri = payload.uri
@@ -501,7 +570,6 @@ async def create_task(
     uri_hash: str | None = None
     name: str | None = None
     total_length: int = 0
-    frozen_space: int = 0
 
     if is_magnet_link(uri):
         # Magnet link: extract info_hash
@@ -520,9 +588,6 @@ async def create_task(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="可用空间不足，无法添加磁力链接"
             )
-
-        # Magnet links don't freeze space until size is known
-        frozen_space = 0
 
     elif is_http_url(uri):
         # HTTP(S): probe to get size and final URL
@@ -568,8 +633,6 @@ async def create_task(
                     detail=f"文件大小 {total_length / 1024**3:.2f} GB 超过可用空间 {available_space / 1024**3:.2f} GB"
                 )
 
-            frozen_space = total_length
-
     else:
         # Other protocols (ftp, etc.)
         uri_hash = get_uri_hash(uri)
@@ -581,349 +644,54 @@ async def create_task(
             detail="无法识别的下载链接类型"
         )
 
-    # Find or create task
-    task, is_new = await _find_or_create_task(
-        uri_hash=uri_hash,
-        uri=masked_uri,
-        name=name,
-        total_length=total_length,
-    )
-
-    # Check if user already subscribed
-    stale_user_file_id: int | None = None
-    async with get_session() as db:
-        result = await db.exec(
-            select(UserTaskSubscription).where(
-                UserTaskSubscription.owner_id == user_id,
-                UserTaskSubscription.task_id == task.id,
-            )
+    try:
+        task_row = await create_user_download(
+            user_id=user_id,
+            quota_bytes=user.quota,
+            uri=masked_uri,
+            resource_key=uri_hash,
+            resource_kind=(
+                "magnet"
+                if is_magnet_link(uri)
+                else "http"
+                if is_http_url(uri)
+                else "other"
+            ),
+            display_name=name,
+            total_bytes=total_length,
+            aria2_client=_get_client(request),
+            options=payload.options,
         )
-        existing_sub = result.first()
+    except ValueError as exc:
+        if str(exc) == "quota exceeded":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="空间不足",
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="任务状态已变化，请重试",
+        ) from exc
+    except RuntimeError as exc:
+        logger.warning("添加下载任务失败 user_id=%s error=%s", user.id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="添加下载任务失败",
+        ) from exc
 
-        has_valid_file = False
-        stale_user_file_id = None
-        if existing_sub and existing_sub.status == "success" and task.stored_file_id:
-            has_valid_file, stale_user_file_id = await _resolve_user_file_state(
-                user_id=user_id,
-                stored_file_id=task.stored_file_id,
-            )
-            if has_valid_file:
-                logger.info("重复订阅已完成任务 user_id=%s task_id=%s", user.id, task.id)
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="您已拥有此文件"
-                )
-
-    if existing_sub:
-        if stale_user_file_id is not None:
-            await delete_user_file_reference(stale_user_file_id)
-
-        if existing_sub.status == "success" and task.stored_file_id:
-            stored_file = await _get_existing_stored_file(task.stored_file_id)
-            if stored_file:
-                ref_ok = await _ensure_user_file_reference_if_possible(
-                    user_id=user_id,
-                    stored_file_id=task.stored_file_id,
-                )
-                if ref_ok:
-                    return _subscription_to_dict(existing_sub, task)
-
-            if existing_sub.id is not None:
-                await _delete_subscription(existing_sub.id)
-            db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
-            if db_task:
-                task = db_task
-                is_new = True
-            existing_sub = None
-
-        elif existing_sub.status == "failed" and task.stored_file_id:
-            stored_file = await _get_existing_stored_file(task.stored_file_id)
-            if not stored_file:
-                if existing_sub.id is not None:
-                    await _delete_subscription(existing_sub.id)
-                db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
-                if db_task:
-                    task = db_task
-                    is_new = True
-                existing_sub = None
-            else:
-                space_info = await get_user_space_info(user_id, user.quota)
-                if space_info["used"] + stored_file.size > user.quota:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="空间不足"
-                    )
-
-                ref_ok = await _ensure_user_file_reference_if_possible(
-                    user_id=user_id,
-                    stored_file_id=task.stored_file_id,
-                )
-                if not ref_ok:
-                    if existing_sub.id is not None:
-                        await _delete_subscription(existing_sub.id)
-                    db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
-                    if db_task:
-                        task = db_task
-                        is_new = True
-                    existing_sub = None
-                else:
-                    async with get_session() as db:
-                        result = await db.exec(
-                            select(UserTaskSubscription).where(
-                                UserTaskSubscription.id == existing_sub.id
-                            )
-                        )
-                        sub = result.first()
-                        if sub:
-                            sub.status = "success"
-                            await db.commit()
-                            await db.refresh(sub)
-                            existing_sub = sub
-                    logger.info("恢复失败订阅 user_id=%s task_id=%s", user_id, task.id)
-                    return _subscription_to_dict(existing_sub, task)
-        elif existing_sub.status == "pending":
-            return _subscription_to_dict(existing_sub, task)
-
-    # Handle based on task status
-    if task.status == "complete" and task.stored_file_id:
-        stored_file = await _get_existing_stored_file(task.stored_file_id)
-
-        if stored_file:
-            ref_ok = await _ensure_user_file_reference_if_possible(
-                user_id=user_id,
-                stored_file_id=task.stored_file_id,
-            )
-            if not ref_ok:
-                db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
-                if db_task:
-                    task = db_task
-                    is_new = True
-                logger.info("文件引用创建失败，重新下载 task_id=%s", task.id)
-            else:
-                async with get_session() as db:
-                    subscription = UserTaskSubscription(
-                        owner_id=user_id,
-                        task_id=task.id,
-                        frozen_space=0,
-                        status="success",
-                        created_at=utc_now_str(),
-                    )
-                    db.add(subscription)
-
-                    try:
-                        await db.commit()
-                        await db.refresh(subscription)
-                    except IntegrityError:
-                        await db.rollback()
-                        result = await db.exec(
-                            select(UserTaskSubscription).where(
-                                UserTaskSubscription.owner_id == user_id,
-                                UserTaskSubscription.task_id == task.id,
-                            )
-                        )
-                        subscription = result.first()
-                        if not subscription:
-                            raise
-
-                    return _subscription_to_dict(subscription, task)
-        else:
-            db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
-            if db_task:
-                task = db_task
-                is_new = True
-            logger.info("任务文件已删除，重新下载 task_id=%s", task.id)
-
-    elif task.status == "complete" and not task.stored_file_id:
-        db_task = await _reset_task_for_redownload(task.id) if task.id is not None else None
-        if db_task:
-            task = db_task
-            is_new = True
-        logger.info("任务状态异常(complete但无stored_file_id)，重新下载 task_id=%s", task.id)
-
-    elif task.status == "error":
-        if task.stored_file_id:
-            ref_ok = await _ensure_user_file_reference_if_possible(
-                user_id=user_id,
-                stored_file_id=task.stored_file_id,
-            )
-            if ref_ok:
-                async with get_session() as db:
-                    subscription = UserTaskSubscription(
-                        owner_id=user_id,
-                        task_id=task.id,
-                        frozen_space=0,
-                        status="success",
-                        created_at=utc_now_str(),
-                    )
-                    db.add(subscription)
-
-                    try:
-                        await db.commit()
-                        await db.refresh(subscription)
-                    except IntegrityError:
-                        await db.rollback()
-                        result = await db.exec(
-                            select(UserTaskSubscription).where(
-                                UserTaskSubscription.owner_id == user_id,
-                                UserTaskSubscription.task_id == task.id,
-                            )
-                        )
-                        subscription = result.first()
-                        if not subscription:
-                            raise
-
-                async with get_session() as db:
-                    result = await db.exec(
-                        select(DownloadTask).where(DownloadTask.id == task.id)
-                    )
-                    db_task = result.first()
-                    if db_task and db_task.status == "error":
-                        db_task.status = "complete"
-                        db_task.error = None
-                        db_task.error_display = None
-                        db_task.updated_at = utc_now_str()
-                        db.add(db_task)
-                        await db.commit()
-
-                return _subscription_to_dict(subscription, task)
-
-        async with get_session() as db:
-            result = await db.exec(
-                select(UserTaskSubscription).where(
-                    UserTaskSubscription.task_id == task.id,
-                    UserTaskSubscription.status == "pending",
-                )
-            )
-            pending_subs = result.all()
-
-            if not pending_subs:
-                result = await db.exec(
-                    select(DownloadTask).where(DownloadTask.id == task.id)
-                )
-                db_task = result.first()
-                if db_task:
-                    db_task.status = "queued"
-                    db_task.error = None
-                    db_task.error_display = None
-                    db_task.gid = None
-                    db_task.updated_at = utc_now_str()
-                    db.add(db_task)
-                    await db.commit()
-                    await db.refresh(db_task)
-                    task = db_task
-                    is_new = True
-
-    user_id = user.id
-    if user_id is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户未登录")
-
-    # Create subscription with space lock protection
-    # All subscriptions go through lock to prevent race conditions
-    state = _get_state(request)
-    user_lock = await get_user_space_lock(state, user_id)
-    async with user_lock:
-        # For existing tasks with known size, freeze space for new subscriber
-        # This handles the case where a magnet link's size became known after initial creation
-        if not is_new and frozen_space == 0 and task.total_length > 0:
-            frozen_space = task.total_length
-
-        if frozen_space > 0:
-            space_info = await get_user_space_info(user_id, user.quota)
-            if frozen_space > space_info["available"]:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=(
-                        f"文件大小 {frozen_space / 1024**3:.2f} GB 超过可用空间 "
-                        f"{space_info['available'] / 1024**3:.2f} GB"
-                    )
-                )
-
-        subscription = await _create_subscription(user, task, frozen_space)
-
-    logger.info(
-        "创建任务订阅成功 user_id=%s subscription_id=%s task_id=%s is_new_task=%s",
-        user.id,
-        subscription.id,
-        task.id,
-        is_new,
+    global_download = await get_global_by_resource_key(uri_hash)
+    return _v0_create_task_response(
+        task_row=task_row,
+        global_download=global_download,
+        fallback_uri=masked_uri,
+        fallback_name=name,
+        fallback_total_length=total_length,
     )
-
-    # If new task, submit to aria2
-    if is_new:
-        state = _get_state(request)
-        client = _get_client(request)
-
-        # Get task download directory
-        task_dir = get_task_download_dir(task.id)
-        options = dict(payload.options) if payload.options else {}
-        options["dir"] = str(task_dir)
-
-        async def _do_add():
-            lock = await _get_task_submit_lock(state, task.id)
-            async with lock:
-                should_cancel_without_subscribers = False
-                # Re-check task and subscriptions before submitting to aria2
-                async with get_session() as db:
-                    result = await db.exec(
-                        select(func.count(UserTaskSubscription.id)).where(
-                            UserTaskSubscription.task_id == task.id,
-                            UserTaskSubscription.status == "pending",
-                        )
-                    )
-                    pending_count = result.one()
-                    if isinstance(pending_count, tuple):
-                        pending_count = pending_count[0]
-
-                    result = await db.exec(
-                        select(DownloadTask).where(DownloadTask.id == task.id)
-                    )
-                    db_task = result.first()
-                    if not db_task:
-                        return
-
-                    if pending_count == 0:
-                        should_cancel_without_subscribers = True
-                    elif db_task.gid or db_task.status != "queued":
-                        # Already submitted or not in queued state
-                        return
-
-                if should_cancel_without_subscribers:
-                    await _fail_task_and_pending_subscriptions(
-                        task_id=task.id,
-                        error_display="已取消",
-                        client=client,
-                    )
-                    return
-
-                gid: str | None = None
-                try:
-                    gid = await client.add_uri([uri], options)
-                    async with get_session() as db:
-                        result = await db.exec(
-                            select(DownloadTask).where(DownloadTask.id == task.id)
-                        )
-                        db_task = result.first()
-                        if db_task:
-                            db_task.gid = gid
-                            db_task.status = "active"
-                            db_task.updated_at = utc_now_str()
-                            db.add(db_task)
-                except Exception as exc:
-                    logger.error(f"Failed to add task to aria2: {exc}")
-                    await _fail_task_and_pending_subscriptions(
-                        task_id=task.id,
-                        error_display="添加下载任务失败",
-                        client=client,
-                        error=str(exc),
-                        gid_hint=gid,
-                    )
-
-            # Broadcast update to all subscribers
-            await _broadcast_task_update(state, task.id)
-
-        asyncio.create_task(_do_add())
-
-    return _subscription_to_dict(subscription, task)
 
 
 @router.post("/torrent", status_code=status.HTTP_201_CREATED)

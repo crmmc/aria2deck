@@ -309,11 +309,17 @@ class TestCreateTask:
         assert response.status_code == 403
         assert "超过系统限制" in response.json()["detail"]
 
+    @patch("app.routers.tasks.create_user_download")
     @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks.get_user_space_info")
+    @patch("app.routers.tasks.get_usage")
     @patch("app.routers.tasks.get_max_task_size")
     def test_create_task_exceeds_user_quota(
-        self, mock_max_size, mock_space_info, mock_probe, authenticated_client: TestClient
+        self,
+        mock_max_size,
+        mock_usage,
+        mock_probe,
+        mock_create_download,
+        authenticated_client: TestClient,
     ):
         """Test task creation fails when file exceeds user quota."""
         mock_result = MagicMock()
@@ -325,11 +331,12 @@ class TestCreateTask:
 
         mock_max_size.return_value = 100 * 1024 * 1024 * 1024
 
-        mock_space_info.return_value = {
-            "used": 90 * 1024 * 1024 * 1024,
-            "frozen": 0,
-            "available": 10 * 1024 * 1024 * 1024,
-            "quota": 100 * 1024 * 1024 * 1024,
+        mock_usage.return_value = {
+            "user_id": 1,
+            "used_bytes": 90 * 1024 * 1024 * 1024,
+            "reserved_bytes": 0,
+            "available_bytes": 10 * 1024 * 1024 * 1024,
+            "quota_bytes": 100 * 1024 * 1024 * 1024,
         }
 
         response = authenticated_client.post("/api/tasks", json={
@@ -337,6 +344,7 @@ class TestCreateTask:
         })
         assert response.status_code == 403
         assert "超过可用空间" in response.json()["detail"]
+        mock_create_download.assert_not_awaited()
 
     @patch("app.routers.tasks._check_disk_space")
     def test_create_task_disk_full(self, mock_disk, authenticated_client: TestClient):
@@ -349,16 +357,17 @@ class TestCreateTask:
         assert response.status_code == 403
         assert "磁盘空间不足" in response.json()["detail"]
 
-    @patch("app.routers.tasks.get_user_space_info")
+    @patch("app.routers.tasks.get_usage")
     def test_create_magnet_task_insufficient_space(
-        self, mock_space_info, authenticated_client: TestClient
+        self, mock_usage, authenticated_client: TestClient
     ):
         """Test magnet task creation fails with insufficient space."""
-        mock_space_info.return_value = {
-            "used": 100 * 1024 * 1024 * 1024,
-            "frozen": 0,
-            "available": 100,  # Only 100 bytes available
-            "quota": 100 * 1024 * 1024 * 1024,
+        mock_usage.return_value = {
+            "user_id": 1,
+            "used_bytes": 100 * 1024 * 1024 * 1024,
+            "reserved_bytes": 0,
+            "available_bytes": 100,
+            "quota_bytes": 100 * 1024 * 1024 * 1024,
         }
 
         response = authenticated_client.post("/api/tasks", json={
@@ -367,24 +376,131 @@ class TestCreateTask:
         assert response.status_code == 403
         assert "可用空间不足" in response.json()["detail"]
 
+    def test_create_task_uses_v0_user_task(
+        self, authenticated_client: TestClient, mock_aria2_client, test_user: dict
+    ):
+        """Test successful task creation returns the v0 user task shape."""
+        import asyncio
+
+        from app.repositories.downloads import get_global_by_resource_key, get_user_task
+        from app.services.hash import get_uri_hash
+
+        with patch("app.routers.tasks.get_aria2_client", return_value=mock_aria2_client):
+            with patch("app.routers.tasks.probe_url_with_get_fallback") as probe:
+                probe.return_value.success = True
+                probe.return_value.final_url = "https://example.com/file.bin"
+                probe.return_value.filename = "file.bin"
+                probe.return_value.content_length = 1024
+                response = authenticated_client.post(
+                    "/api/tasks", json={"uri": "https://example.com/file.bin"}
+                )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["status"] in {"queued", "active"}
+        assert data["name"] == "file.bin"
+        assert data["total_length"] == 1024
+        assert isinstance(data["created_at"], str)
+        assert isinstance(data["updated_at"], str)
+
+        global_download = asyncio.run(
+            get_global_by_resource_key(get_uri_hash("https://example.com/file.bin"))
+        )
+        assert global_download is not None
+        task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
+        assert task is not None
+        assert data["id"] == task["id"]
+
     @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks._find_or_create_task")
-    @patch("app.routers.tasks._create_subscription")
-    @patch("app.routers.tasks.get_user_space_info")
+    def test_create_task_rejects_credentialed_url(
+        self, mock_probe, authenticated_client: TestClient
+    ):
+        """Credentialed URLs are rejected instead of being masked and submitted."""
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={"uri": "http://user:secret@example.com/file.zip"},
+        )
+
+        assert response.status_code == 400
+        assert "用户名或密码" in response.json()["detail"]
+        mock_probe.assert_not_called()
+
+    @patch("app.routers.tasks.create_user_download")
+    @patch("app.routers.tasks.probe_url_with_get_fallback")
+    @patch("app.routers.tasks.get_aria2_client")
+    @patch("app.routers.tasks._check_disk_space")
+    def test_create_task_service_quota_error_returns_403(
+        self,
+        mock_disk,
+        mock_get_client,
+        mock_probe,
+        mock_create_download,
+        authenticated_client: TestClient,
+        mock_aria2_client,
+    ):
+        """Atomic service quota rejection is returned as a user-facing 403."""
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_get_client.return_value = mock_aria2_client
+        mock_result = MagicMock()
+        mock_result.success = True
+        mock_result.final_url = "http://example.com/quota.zip"
+        mock_result.filename = "quota.zip"
+        mock_result.content_length = 1024
+        mock_probe.return_value = mock_result
+        mock_create_download.side_effect = ValueError("quota exceeded")
+
+        response = authenticated_client.post(
+            "/api/tasks", json={"uri": "http://example.com/quota.zip"}
+        )
+
+        assert response.status_code == 403
+        assert "空间不足" in response.json()["detail"]
+
+    @patch("app.routers.tasks.create_user_download")
+    @patch("app.routers.tasks.probe_url_with_get_fallback")
+    @patch("app.routers.tasks.get_aria2_client")
+    @patch("app.routers.tasks._check_disk_space")
+    def test_create_task_submit_error_returns_502(
+        self,
+        mock_disk,
+        mock_get_client,
+        mock_probe,
+        mock_create_download,
+        authenticated_client: TestClient,
+        mock_aria2_client,
+    ):
+        """aria2 submit failures are not exposed as unhandled 500 errors."""
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_get_client.return_value = mock_aria2_client
+        mock_result = MagicMock()
+        mock_result.success = True
+        mock_result.final_url = "http://example.com/rpc.zip"
+        mock_result.filename = "rpc.zip"
+        mock_result.content_length = 1024
+        mock_probe.return_value = mock_result
+        mock_create_download.side_effect = RuntimeError("aria2 unavailable")
+
+        response = authenticated_client.post(
+            "/api/tasks", json={"uri": "http://example.com/rpc.zip"}
+        )
+
+        assert response.status_code == 502
+        assert "添加下载任务失败" in response.json()["detail"]
+
+    @patch("app.routers.tasks.probe_url_with_get_fallback")
+    @patch("app.routers.tasks.get_aria2_client")
     @patch("app.routers.tasks._check_disk_space")
     def test_create_task_success(
         self,
         mock_disk,
-        mock_space_info,
-        mock_create_sub,
-        mock_find_task,
+        mock_get_client,
         mock_probe,
         authenticated_client: TestClient,
+        mock_aria2_client,
     ):
         """Test successful task creation."""
-        from app.models import DownloadTask, UserTaskSubscription
-
         mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_get_client.return_value = mock_aria2_client
 
         mock_result = MagicMock()
         mock_result.success = True
@@ -393,40 +509,18 @@ class TestCreateTask:
         mock_result.content_length = 100 * 1024 * 1024  # 100MB
         mock_probe.return_value = mock_result
 
-        mock_space_info.return_value = {
-            "used": 0,
-            "frozen": 0,
-            "available": 100 * 1024 * 1024 * 1024,
-            "quota": 100 * 1024 * 1024 * 1024,
-        }
-
-        task = DownloadTask(
-            id=1,
-            uri_hash="abc123",
-            uri="http://example.com/file.zip",
-            name="file.zip",
-            total_length=100 * 1024 * 1024,
-            status="queued",
-        )
-        mock_find_task.return_value = (task, True)
-
-        subscription = UserTaskSubscription(
-            id=1,
-            owner_id=1,
-            task_id=1,
-            frozen_space=100 * 1024 * 1024,
-            status="pending",
-            created_at="2024-01-01T00:00:00Z",
-        )
-        mock_create_sub.return_value = subscription
-
         response = authenticated_client.post("/api/tasks", json={
             "uri": "http://example.com/file.zip"
         })
         assert response.status_code == 201
         data = response.json()
         assert data["uri"] == "http://example.com/file.zip"
-        assert data["status"] == "queued"
+        assert data["status"] == "active"
+        assert data["name"] == "file.zip"
+        assert data["total_length"] == 100 * 1024 * 1024
+        mock_aria2_client.add_uri.assert_awaited_once_with(
+            ["http://example.com/file.zip"], {}
+        )
 
 
 class TestCreateTorrentTask:
