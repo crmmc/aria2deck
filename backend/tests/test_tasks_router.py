@@ -1,52 +1,58 @@
-"""Tests for tasks router endpoints."""
+"""Tests for v0 task router endpoints."""
+
+from __future__ import annotations
+
+import asyncio
 import base64
+import hashlib
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.core.config import settings
+from app.repositories.downloads import get_global_by_resource_key, get_user_task
+from app.services.download_service import create_user_download
+from app.services.hash import get_uri_hash
+from tests.helpers_v0 import create_global_download_v0, create_user_task_v0
 
 
-@pytest.fixture
-def auth_headers(authenticated_client: TestClient) -> dict:
-    """Get auth headers from authenticated client."""
-    return {}
+def _valid_torrent_payload() -> tuple[str, str]:
+    info_dict = b"d4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789e"
+    torrent = b"d8:announce25:http://tracker.example.com4:info" + info_dict + b"e"
+    return base64.b64encode(torrent).decode("ascii"), hashlib.sha1(
+        info_dict
+    ).hexdigest()
 
 
 class TestSSRFProtection:
-    """Tests for SSRF protection functions."""
-
-    def test_is_private_ip_loopback(self):
-        """Test loopback addresses are detected as private."""
+    def test_is_private_ip_loopback(self) -> None:
         import ipaddress
+
         from app.core.security import is_private_ip
 
         assert is_private_ip(ipaddress.ip_address("127.0.0.1")) is True
         assert is_private_ip(ipaddress.ip_address("::1")) is True
 
-    def test_is_private_ip_private_ranges(self):
-        """Test private IP ranges are detected."""
+    def test_is_private_ip_private_ranges(self) -> None:
         import ipaddress
+
         from app.core.security import is_private_ip
 
-        # Private ranges
         assert is_private_ip(ipaddress.ip_address("10.0.0.1")) is True
         assert is_private_ip(ipaddress.ip_address("172.16.0.1")) is True
         assert is_private_ip(ipaddress.ip_address("192.168.1.1")) is True
 
-    def test_is_private_ip_public(self):
-        """Test public IPs are not detected as private."""
+    def test_is_private_ip_public(self) -> None:
         import ipaddress
+
         from app.core.security import is_private_ip
 
         assert is_private_ip(ipaddress.ip_address("8.8.8.8")) is False
         assert is_private_ip(ipaddress.ip_address("1.1.1.1")) is False
 
     @pytest.mark.asyncio
-    async def test_check_url_safety_localhost(self):
-        """Test localhost URLs are blocked."""
-        from fastapi import HTTPException
+    async def test_check_url_safety_localhost(self) -> None:
         from app.routers.tasks import _check_url_safety
 
         with pytest.raises(HTTPException) as exc_info:
@@ -55,19 +61,7 @@ class TestSSRFProtection:
         assert "本机地址" in exc_info.value.detail
 
     @pytest.mark.asyncio
-    async def test_check_url_safety_127_0_0_1(self):
-        """Test 127.0.0.1 URLs are blocked."""
-        from fastapi import HTTPException
-        from app.routers.tasks import _check_url_safety
-
-        with pytest.raises(HTTPException) as exc_info:
-            await _check_url_safety("http://127.0.0.1/file.zip")
-        assert exc_info.value.status_code == 400
-
-    @pytest.mark.asyncio
-    async def test_check_url_safety_private_ip(self):
-        """Test private IP URLs are blocked."""
-        from fastapi import HTTPException
+    async def test_check_url_safety_private_ip(self) -> None:
         from app.routers.tasks import _check_url_safety
 
         with pytest.raises(HTTPException) as exc_info:
@@ -76,81 +70,60 @@ class TestSSRFProtection:
         assert "内网地址" in exc_info.value.detail
 
     @pytest.mark.asyncio
-    async def test_check_url_safety_public_url(self):
-        """Test public URLs are allowed."""
+    async def test_check_url_safety_public_url(self) -> None:
         from app.routers.tasks import _check_url_safety
 
-        # Should not raise
         await _check_url_safety("http://example.com/file.zip")
         await _check_url_safety("https://github.com/file.zip")
 
     @pytest.mark.asyncio
-    async def test_check_url_safety_magnet(self):
-        """Test magnet links bypass SSRF check."""
+    async def test_check_url_safety_magnet(self) -> None:
         from app.routers.tasks import _check_url_safety
 
-        # Should not raise (magnet is not http/https/ftp)
         await _check_url_safety("magnet:?xt=urn:btih:abc123")
 
     @pytest.mark.asyncio
-    async def test_check_url_safety_no_hostname(self):
-        """Test URLs without hostname are blocked."""
-        from fastapi import HTTPException
+    async def test_check_url_safety_no_hostname(self) -> None:
         from app.routers.tasks import _check_url_safety
 
         with pytest.raises(HTTPException) as exc_info:
             await _check_url_safety("http:///file.zip")
         assert exc_info.value.status_code == 400
 
+    @pytest.mark.asyncio
+    async def test_check_url_safety_dns_resolves_to_private(self) -> None:
+        import socket
+
+        from app.routers.tasks import _check_url_safety
+
+        mock_result = [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("192.168.1.100", 80))
+        ]
+
+        with patch("app.core.security.socket.getaddrinfo", return_value=mock_result):
+            with pytest.raises(HTTPException) as exc_info:
+                await _check_url_safety("http://evil.example.com/file.zip")
+        assert exc_info.value.status_code == 400
+        assert "内网地址" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_check_url_safety_dns_failure_rejected(self) -> None:
+        import socket
+
+        from app.routers.tasks import _check_url_safety
+
+        with patch(
+            "app.core.security.socket.getaddrinfo",
+            side_effect=socket.gaierror("DNS failed"),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await _check_url_safety("http://nonexistent.example.com/file.zip")
+        assert exc_info.value.status_code == 400
+        assert "无法解析" in exc_info.value.detail
+
 
 class TestHelperFunctions:
-    """Tests for helper functions."""
-
-    def test_get_display_name_with_name(self):
-        """Test display name with valid name."""
-        from app.routers.tasks import _get_display_name
-        from app.models import DownloadTask
-
-        task = DownloadTask(
-            id=1,
-            uri_hash="abc123",
-            uri="http://example.com/file.zip",
-            name="test_file.zip",
-            status="active",
-        )
-        assert _get_display_name(task) == "test_file.zip"
-
-    def test_get_display_name_metadata_prefix(self):
-        """Test display name with [METADATA] prefix falls back to magnet."""
-        from app.routers.tasks import _get_display_name
-        from app.models import DownloadTask
-
-        task = DownloadTask(
-            id=1,
-            uri_hash="abc123",
-            uri="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-            name="[METADATA]test",
-            status="active",
-        )
-        result = _get_display_name(task)
-        assert "magnet:?xt=urn:btih:" in result
-
-    def test_get_display_name_no_name(self):
-        """Test display name with no name."""
-        from app.routers.tasks import _get_display_name
-        from app.models import DownloadTask
-
-        task = DownloadTask(
-            id=1,
-            uri_hash="abc123",
-            uri="http://example.com/file.zip",
-            name=None,
-            status="active",
-        )
-        assert _get_display_name(task) == "未知文件"
-
-    def test_check_disk_space(self):
-        """Test disk space check function."""
+    def test_check_disk_space(self) -> None:
         from app.routers.tasks import _check_disk_space
 
         ok, free = _check_disk_space()
@@ -158,264 +131,58 @@ class TestHelperFunctions:
         assert isinstance(free, int)
         assert free > 0
 
-    @pytest.mark.asyncio
-    async def test_fail_task_and_pending_subscriptions_cleans_everything(
-        self, temp_db: str, test_user: dict
-    ):
-        from pathlib import Path
-
-        from app.database import get_session
-        from app.db import execute, utc_now
-        from app.models import DownloadTask, TaskHistory, UserTaskSubscription
-        from app.routers.tasks import _fail_task_and_pending_subscriptions
-        from sqlmodel import select
-
-        task_id = execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                "fail_cleanup_hash",
-                "http://example.com/fail-cleanup.zip",
-                "gid-fail-cleanup",
-                "queued",
-                "fail-cleanup.zip",
-                1024,
-                0,
-                0,
-                0,
-                0,
-                0,
-                utc_now(),
-                utc_now(),
-            ],
-        )
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], task_id, 1024, "pending", utc_now()],
-        )
-
-        task_dir = Path(settings.download_dir) / "downloading" / str(task_id)
-        task_dir.mkdir(parents=True, exist_ok=True)
-        (task_dir / "partial.bin").write_text("partial")
-
-        mock_client = AsyncMock()
-        mock_client.force_remove.return_value = "gid-fail-cleanup"
-        mock_client.remove_download_result.return_value = "OK"
-
-        await _fail_task_and_pending_subscriptions(
-            task_id=task_id,
-            error_display="添加下载任务失败",
-            error="rpc unavailable",
-            client=mock_client,
-        )
-
-        async with get_session() as db:
-            task = await db.get(DownloadTask, task_id)
-            assert task is not None
-            assert task.status == "error"
-            assert task.error == "rpc unavailable"
-            assert task.error_display == "添加下载任务失败"
-            assert task.gid is None
-
-            result = await db.exec(
-                select(UserTaskSubscription).where(UserTaskSubscription.task_id == task_id)
-            )
-            sub = result.first()
-            assert sub is not None
-            assert sub.status == "failed"
-            assert sub.frozen_space == 0
-            assert sub.error_display == "添加下载任务失败"
-
-            history_result = await db.exec(
-                select(TaskHistory).where(TaskHistory.owner_id == test_user["id"])
-            )
-            history_rows = history_result.all()
-            assert len(history_rows) == 1
-            assert history_rows[0].result == "failed"
-            assert history_rows[0].reason == "添加下载任务失败"
-
-        mock_client.force_remove.assert_awaited_once_with("gid-fail-cleanup")
-        mock_client.remove_download_result.assert_awaited_once_with("gid-fail-cleanup")
-        assert not task_dir.exists()
-
 
 class TestCreateTask:
-    """Tests for POST /api/tasks endpoint."""
+    def test_create_task_unauthorized(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/tasks", json={"uri": "http://example.com/file.zip"}
+        )
 
-    def test_create_task_unauthorized(self, client: TestClient, temp_db: str, test_user: dict):
-        """Test creating task without auth."""
-        response = client.post("/api/tasks", json={"uri": "http://example.com/file.zip"})
         assert response.status_code == 401
 
-    def test_create_task_ssrf_blocked(self, authenticated_client: TestClient):
-        """Test SSRF protection blocks localhost."""
-        response = authenticated_client.post("/api/tasks", json={
-            "uri": "http://localhost/file.zip"
-        })
+    def test_create_task_ssrf_blocked(self, authenticated_client: TestClient) -> None:
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={"uri": "http://localhost/file.zip"},
+        )
+
         assert response.status_code == 400
         assert "本机地址" in response.json()["detail"]
 
-    def test_create_task_ssrf_private_ip(self, authenticated_client: TestClient):
-        """Test SSRF protection blocks private IPs."""
-        response = authenticated_client.post("/api/tasks", json={
-            "uri": "http://192.168.1.1/file.zip"
-        })
-        assert response.status_code == 400
-        assert "内网地址" in response.json()["detail"]
+    def test_create_task_invalid_magnet(self, authenticated_client: TestClient) -> None:
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={"uri": "magnet:?invalid"},
+        )
 
-    def test_create_task_invalid_magnet(self, authenticated_client: TestClient):
-        """Test invalid magnet link is rejected."""
-        response = authenticated_client.post("/api/tasks", json={
-            "uri": "magnet:?invalid"
-        })
         assert response.status_code == 400
         assert "无效的磁力链接" in response.json()["detail"]
 
     @patch("app.routers.tasks.probe_url_with_get_fallback")
-    def test_create_task_probe_failure(self, mock_probe, authenticated_client: TestClient):
-        """Test task creation fails when probe fails."""
+    def test_create_task_probe_failure(
+        self,
+        mock_probe: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
         mock_result = MagicMock()
         mock_result.success = False
         mock_result.error = "Connection refused"
         mock_probe.return_value = mock_result
 
-        response = authenticated_client.post("/api/tasks", json={
-            "uri": "http://example.com/file.zip"
-        })
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={"uri": "http://example.com/file.zip"},
+        )
+
         assert response.status_code == 400
         assert "无法访问下载链接" in response.json()["detail"]
 
     @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks.get_max_task_size")
-    def test_create_task_exceeds_max_size(
-        self, mock_max_size, mock_probe, authenticated_client: TestClient
-    ):
-        """Test task creation fails when file exceeds max size."""
-        mock_result = MagicMock()
-        mock_result.success = True
-        mock_result.final_url = "http://example.com/file.zip"
-        mock_result.filename = "file.zip"
-        mock_result.content_length = 100 * 1024 * 1024 * 1024  # 100GB
-        mock_probe.return_value = mock_result
-        mock_max_size.return_value = 10 * 1024 * 1024 * 1024  # 10GB limit
-
-        response = authenticated_client.post("/api/tasks", json={
-            "uri": "http://example.com/file.zip"
-        })
-        assert response.status_code == 403
-        assert "超过系统限制" in response.json()["detail"]
-
-    @patch("app.routers.tasks.create_user_download")
-    @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks.get_usage")
-    @patch("app.routers.tasks.get_max_task_size")
-    def test_create_task_exceeds_user_quota(
-        self,
-        mock_max_size,
-        mock_usage,
-        mock_probe,
-        mock_create_download,
-        authenticated_client: TestClient,
-    ):
-        """Test task creation fails when file exceeds user quota."""
-        mock_result = MagicMock()
-        mock_result.success = True
-        mock_result.final_url = "http://example.com/file.zip"
-        mock_result.filename = "file.zip"
-        mock_result.content_length = 50 * 1024 * 1024 * 1024
-        mock_probe.return_value = mock_result
-
-        mock_max_size.return_value = 100 * 1024 * 1024 * 1024
-
-        mock_usage.return_value = {
-            "user_id": 1,
-            "used_bytes": 90 * 1024 * 1024 * 1024,
-            "reserved_bytes": 0,
-            "available_bytes": 10 * 1024 * 1024 * 1024,
-            "quota_bytes": 100 * 1024 * 1024 * 1024,
-        }
-
-        response = authenticated_client.post("/api/tasks", json={
-            "uri": "http://example.com/file.zip"
-        })
-        assert response.status_code == 403
-        assert "超过可用空间" in response.json()["detail"]
-        mock_create_download.assert_not_awaited()
-
-    @patch("app.routers.tasks._check_disk_space")
-    def test_create_task_disk_full(self, mock_disk, authenticated_client: TestClient):
-        """Test task creation fails when disk is full."""
-        mock_disk.return_value = (False, 100 * 1024 * 1024)  # 100MB free
-
-        response = authenticated_client.post("/api/tasks", json={
-            "uri": "http://example.com/file.zip"
-        })
-        assert response.status_code == 403
-        assert "磁盘空间不足" in response.json()["detail"]
-
-    @patch("app.routers.tasks.get_usage")
-    def test_create_magnet_task_insufficient_space(
-        self, mock_usage, authenticated_client: TestClient
-    ):
-        """Test magnet task creation fails with insufficient space."""
-        mock_usage.return_value = {
-            "user_id": 1,
-            "used_bytes": 100 * 1024 * 1024 * 1024,
-            "reserved_bytes": 0,
-            "available_bytes": 100,
-            "quota_bytes": 100 * 1024 * 1024 * 1024,
-        }
-
-        response = authenticated_client.post("/api/tasks", json={
-            "uri": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
-        })
-        assert response.status_code == 403
-        assert "可用空间不足" in response.json()["detail"]
-
-    def test_create_task_uses_v0_user_task(
-        self, authenticated_client: TestClient, mock_aria2_client, test_user: dict
-    ):
-        """Test successful task creation returns the v0 user task shape."""
-        import asyncio
-
-        from app.repositories.downloads import get_global_by_resource_key, get_user_task
-        from app.services.hash import get_uri_hash
-
-        with patch("app.routers.tasks.get_aria2_client", return_value=mock_aria2_client):
-            with patch("app.routers.tasks.probe_url_with_get_fallback") as probe:
-                probe.return_value.success = True
-                probe.return_value.final_url = "https://example.com/file.bin"
-                probe.return_value.filename = "file.bin"
-                probe.return_value.content_length = 1024
-                response = authenticated_client.post(
-                    "/api/tasks", json={"uri": "https://example.com/file.bin"}
-                )
-
-        assert response.status_code == 201
-        data = response.json()
-        assert data["status"] in {"queued", "active"}
-        assert data["name"] == "file.bin"
-        assert data["total_length"] == 1024
-        assert isinstance(data["created_at"], str)
-        assert isinstance(data["updated_at"], str)
-
-        global_download = asyncio.run(
-            get_global_by_resource_key(get_uri_hash("https://example.com/file.bin"))
-        )
-        assert global_download is not None
-        task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
-        assert task is not None
-        assert data["id"] == task["id"]
-
-    @patch("app.routers.tasks.probe_url_with_get_fallback")
     def test_create_task_rejects_credentialed_url(
-        self, mock_probe, authenticated_client: TestClient
-    ):
-        """Credentialed URLs are rejected instead of being masked and submitted."""
+        self,
+        mock_probe: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
         response = authenticated_client.post(
             "/api/tasks",
             json={"uri": "http://user:secret@example.com/file.zip"},
@@ -425,168 +192,327 @@ class TestCreateTask:
         assert "用户名或密码" in response.json()["detail"]
         mock_probe.assert_not_called()
 
-    @patch("app.routers.tasks.create_user_download")
-    @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks.get_aria2_client")
     @patch("app.routers.tasks._check_disk_space")
-    def test_create_task_service_quota_error_returns_403(
+    def test_create_task_disk_full(
         self,
-        mock_disk,
-        mock_get_client,
-        mock_probe,
-        mock_create_download,
+        mock_disk: MagicMock,
         authenticated_client: TestClient,
-        mock_aria2_client,
-    ):
-        """Atomic service quota rejection is returned as a user-facing 403."""
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
-        mock_get_client.return_value = mock_aria2_client
-        mock_result = MagicMock()
-        mock_result.success = True
-        mock_result.final_url = "http://example.com/quota.zip"
-        mock_result.filename = "quota.zip"
-        mock_result.content_length = 1024
-        mock_probe.return_value = mock_result
-        mock_create_download.side_effect = ValueError("quota exceeded")
+    ) -> None:
+        mock_disk.return_value = (False, 100 * 1024 * 1024)
 
         response = authenticated_client.post(
-            "/api/tasks", json={"uri": "http://example.com/quota.zip"}
+            "/api/tasks",
+            json={"uri": "http://example.com/file.zip"},
         )
 
         assert response.status_code == 403
-        assert "空间不足" in response.json()["detail"]
-
-    @patch("app.routers.tasks.create_user_download")
-    @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks.get_aria2_client")
-    @patch("app.routers.tasks._check_disk_space")
-    def test_create_task_submit_error_returns_502(
-        self,
-        mock_disk,
-        mock_get_client,
-        mock_probe,
-        mock_create_download,
-        authenticated_client: TestClient,
-        mock_aria2_client,
-    ):
-        """aria2 submit failures are not exposed as unhandled 500 errors."""
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
-        mock_get_client.return_value = mock_aria2_client
-        mock_result = MagicMock()
-        mock_result.success = True
-        mock_result.final_url = "http://example.com/rpc.zip"
-        mock_result.filename = "rpc.zip"
-        mock_result.content_length = 1024
-        mock_probe.return_value = mock_result
-        mock_create_download.side_effect = RuntimeError("aria2 unavailable")
-
-        response = authenticated_client.post(
-            "/api/tasks", json={"uri": "http://example.com/rpc.zip"}
-        )
-
-        assert response.status_code == 502
-        assert "添加下载任务失败" in response.json()["detail"]
+        assert "磁盘空间不足" in response.json()["detail"]
 
     @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks.get_aria2_client")
-    @patch("app.routers.tasks._check_disk_space")
-    def test_create_task_success(
+    @patch("app.routers.tasks.get_max_task_size")
+    def test_create_task_exceeds_max_size(
         self,
-        mock_disk,
-        mock_get_client,
-        mock_probe,
+        mock_max_size: MagicMock,
+        mock_probe: AsyncMock,
         authenticated_client: TestClient,
-        mock_aria2_client,
-    ):
-        """Test successful task creation."""
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
-        mock_get_client.return_value = mock_aria2_client
-
+    ) -> None:
         mock_result = MagicMock()
         mock_result.success = True
         mock_result.final_url = "http://example.com/file.zip"
         mock_result.filename = "file.zip"
-        mock_result.content_length = 100 * 1024 * 1024  # 100MB
+        mock_result.content_length = 100 * 1024 * 1024 * 1024
+        mock_probe.return_value = mock_result
+        mock_max_size.return_value = 10 * 1024 * 1024 * 1024
+
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={"uri": "http://example.com/file.zip"},
+        )
+
+        assert response.status_code == 403
+        assert "超过系统限制" in response.json()["detail"]
+
+    @patch("app.routers.tasks.create_user_download")
+    @patch("app.routers.tasks.probe_url_with_get_fallback")
+    @patch("app.routers.tasks.get_usage")
+    @patch("app.routers.tasks.get_max_task_size")
+    def test_create_task_exceeds_user_quota(
+        self,
+        mock_max_size: MagicMock,
+        mock_usage: AsyncMock,
+        mock_probe: AsyncMock,
+        mock_create_download: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
+        mock_result = MagicMock()
+        mock_result.success = True
+        mock_result.final_url = "http://example.com/file.zip"
+        mock_result.filename = "file.zip"
+        mock_result.content_length = 50 * 1024 * 1024 * 1024
+        mock_probe.return_value = mock_result
+        mock_max_size.return_value = 100 * 1024 * 1024 * 1024
+        mock_usage.return_value = {
+            "used_bytes": 0,
+            "reserved_bytes": 0,
+            "available_bytes": 10 * 1024 * 1024 * 1024,
+            "quota_bytes": 100 * 1024 * 1024 * 1024,
+        }
+
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={"uri": "http://example.com/file.zip"},
+        )
+
+        assert response.status_code == 403
+        assert "超过可用空间" in response.json()["detail"]
+        mock_create_download.assert_not_awaited()
+
+    @patch("app.routers.tasks.create_user_download")
+    @patch("app.routers.tasks.probe_url_with_get_fallback")
+    @patch("app.routers.tasks._get_client")
+    @patch("app.routers.tasks._check_disk_space")
+    def test_create_task_service_errors_are_mapped(
+        self,
+        mock_disk: MagicMock,
+        mock_get_client: MagicMock,
+        mock_probe: AsyncMock,
+        mock_create_download: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_get_client.return_value = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.success = True
+        mock_result.final_url = "http://example.com/error.zip"
+        mock_result.filename = "error.zip"
+        mock_result.content_length = 1024
         mock_probe.return_value = mock_result
 
-        response = authenticated_client.post("/api/tasks", json={
-            "uri": "http://example.com/file.zip"
-        })
+        for exc, expected_status in [
+            (ValueError("quota exceeded"), 403),
+            (ValueError("bad input"), 400),
+            (LookupError("stale"), 409),
+            (RuntimeError("aria2 unavailable"), 502),
+            (OSError("network down"), 502),
+        ]:
+            mock_create_download.reset_mock(side_effect=True)
+            mock_create_download.side_effect = exc
+            response = authenticated_client.post(
+                "/api/tasks",
+                json={"uri": "http://example.com/error.zip"},
+            )
+            assert response.status_code == expected_status
+
+    @patch("app.routers.tasks.probe_url_with_get_fallback")
+    @patch("app.routers.tasks._get_client")
+    @patch("app.routers.tasks._check_disk_space")
+    def test_create_task_success_creates_v0_user_task(
+        self,
+        mock_disk: MagicMock,
+        mock_get_client: MagicMock,
+        mock_probe: AsyncMock,
+        authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
+        test_user: dict,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_get_client.return_value = mock_aria2_client
+        mock_result = MagicMock()
+        mock_result.success = True
+        mock_result.final_url = "http://example.com/file.zip"
+        mock_result.filename = "file.zip"
+        mock_result.content_length = 100 * 1024 * 1024
+        mock_probe.return_value = mock_result
+
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={"uri": "http://example.com/file.zip"},
+        )
+
         assert response.status_code == 201
         data = response.json()
         assert data["uri"] == "http://example.com/file.zip"
         assert data["status"] == "active"
         assert data["name"] == "file.zip"
         assert data["total_length"] == 100 * 1024 * 1024
+        assert data["frozen_space"] == 100 * 1024 * 1024
+
+        global_download = asyncio.run(
+            get_global_by_resource_key(get_uri_hash("http://example.com/file.zip"))
+        )
+        assert global_download is not None
+        task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
+        assert task is not None
+        assert data["id"] == task["id"]
         mock_aria2_client.add_uri.assert_awaited_once_with(
-            ["http://example.com/file.zip"], {}
+            ["http://example.com/file.zip"],
+            {},
         )
 
 
 class TestCreateTorrentTask:
-    """Tests for POST /api/tasks/torrent endpoint."""
-
-    def test_create_torrent_unauthorized(self, client: TestClient, temp_db: str, test_user: dict):
-        """Test creating torrent task without auth."""
+    def test_create_torrent_unauthorized(self, client: TestClient) -> None:
         response = client.post("/api/tasks/torrent", json={"torrent": "abc123"})
+
         assert response.status_code == 401
 
-    def test_create_torrent_invalid_base64(self, authenticated_client: TestClient):
-        """Test invalid base64 torrent is rejected."""
-        response = authenticated_client.post("/api/tasks/torrent", json={
-            "torrent": "not-valid-base64!!!"
-        })
+    def test_create_torrent_invalid_base64(
+        self,
+        authenticated_client: TestClient,
+    ) -> None:
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={"torrent": "not-valid-base64!!!"},
+        )
+
         assert response.status_code == 400
         assert "无效的种子文件" in response.json()["detail"]
 
-    def test_create_torrent_too_large(self, authenticated_client: TestClient):
-        """Test torrent file size limit."""
-        # Create a large base64 string (> 14MB)
+    def test_create_torrent_too_large(self, authenticated_client: TestClient) -> None:
         large_torrent = base64.b64encode(b"x" * (15 * 1024 * 1024)).decode()
 
-        response = authenticated_client.post("/api/tasks/torrent", json={
-            "torrent": large_torrent
-        })
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={"torrent": large_torrent},
+        )
+
         assert response.status_code == 413
         assert "种子文件过大" in response.json()["detail"]
 
     @patch("app.routers.tasks._check_disk_space")
-    def test_create_torrent_disk_full(self, mock_disk, authenticated_client: TestClient):
-        """Test torrent creation fails when disk is full."""
+    def test_create_torrent_disk_full(
+        self,
+        mock_disk: MagicMock,
+        authenticated_client: TestClient,
+    ) -> None:
         mock_disk.return_value = (False, 100 * 1024 * 1024)
+        torrent_data, _ = _valid_torrent_payload()
 
-        # Valid but minimal torrent-like base64
-        torrent_data = base64.b64encode(b"d8:announce0:e").decode()
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={"torrent": torrent_data},
+        )
 
-        response = authenticated_client.post("/api/tasks/torrent", json={
-            "torrent": torrent_data
-        })
         assert response.status_code == 403
         assert "磁盘空间不足" in response.json()["detail"]
 
+    @patch("app.routers.tasks.get_usage")
+    @patch("app.routers.tasks._check_disk_space")
+    def test_create_torrent_insufficient_space(
+        self,
+        mock_disk: MagicMock,
+        mock_usage: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_usage.return_value = {
+            "used_bytes": 0,
+            "reserved_bytes": 0,
+            "available_bytes": 100,
+            "quota_bytes": 100 * 1024 * 1024 * 1024,
+        }
+        torrent_data, _ = _valid_torrent_payload()
+
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={"torrent": torrent_data},
+        )
+
+        assert response.status_code == 403
+        assert "可用空间不足" in response.json()["detail"]
+
+    @patch("app.routers.tasks.create_user_torrent_download")
+    @patch("app.routers.tasks.get_usage")
+    @patch("app.routers.tasks._check_disk_space")
+    def test_create_torrent_service_errors_are_mapped(
+        self,
+        mock_disk: MagicMock,
+        mock_usage: AsyncMock,
+        mock_create_torrent: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_usage.return_value = {
+            "used_bytes": 0,
+            "reserved_bytes": 0,
+            "available_bytes": 100 * 1024 * 1024 * 1024,
+            "quota_bytes": 100 * 1024 * 1024 * 1024,
+        }
+        torrent_data, _ = _valid_torrent_payload()
+
+        for exc, expected_status in [
+            (ValueError("quota exceeded"), 403),
+            (ValueError("bad input"), 400),
+            (LookupError("stale"), 409),
+            (RuntimeError("aria2 unavailable"), 502),
+            (OSError("network down"), 502),
+        ]:
+            mock_create_torrent.reset_mock(side_effect=True)
+            mock_create_torrent.side_effect = exc
+            response = authenticated_client.post(
+                "/api/tasks/torrent",
+                json={"torrent": torrent_data},
+            )
+            assert response.status_code == expected_status
+
+    @patch("app.routers.tasks._get_client")
+    @patch("app.routers.tasks._check_disk_space")
+    def test_create_torrent_success_creates_v0_task_and_calls_add_torrent(
+        self,
+        mock_disk: MagicMock,
+        mock_get_client: MagicMock,
+        authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
+        test_user: dict,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_aria2_client.add_torrent.return_value = "gid-torrent-api"
+        mock_get_client.return_value = mock_aria2_client
+        torrent_data, info_hash = _valid_torrent_payload()
+
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={"torrent": torrent_data, "options": {"dir": "/tmp/downloads"}},
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["uri"] == f"magnet:?xt=urn:btih:{info_hash}"
+        assert data["status"] == "active"
+        assert data["total_length"] == 0
+        assert data["frozen_space"] == 0
+
+        global_download = asyncio.run(get_global_by_resource_key(info_hash))
+        assert global_download is not None
+        assert global_download["resource_kind"] == "torrent"
+        assert global_download["source_uri"] == f"magnet:?xt=urn:btih:{info_hash}"
+        task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
+        assert task is not None
+        assert data["id"] == task["id"]
+        mock_aria2_client.add_torrent.assert_awaited_once_with(
+            torrent_data,
+            [],
+            {"dir": "/tmp/downloads"},
+        )
+
 
 class TestListTasks:
-    """Tests for GET /api/tasks endpoint."""
-
-    def test_list_tasks_unauthorized(self, client: TestClient, temp_db: str, test_user: dict):
-        """Test listing tasks without auth."""
+    def test_list_tasks_unauthorized(self, client: TestClient) -> None:
         response = client.get("/api/tasks")
+
         assert response.status_code == 401
 
-    def test_list_tasks_empty(self, authenticated_client: TestClient):
-        """Test listing tasks when none exist."""
+    def test_list_tasks_empty(self, authenticated_client: TestClient) -> None:
         response = authenticated_client.get("/api/tasks")
+
         assert response.status_code == 200
         assert response.json() == []
 
     def test_list_tasks_returns_v0_user_tasks(
-        self, authenticated_client: TestClient, test_user: dict
-    ):
-        """Test listing v0 user_tasks created by the download service."""
-        import asyncio
-
-        from app.services.download_service import create_user_download
-
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
         client = AsyncMock()
         client.add_uri.return_value = "gid-list-v0"
         task = asyncio.run(
@@ -615,760 +541,235 @@ class TestListTasks:
         assert data[0]["total_length"] == 1234
         assert data[0]["frozen_space"] == 1234
 
-    def test_list_tasks_with_status_filter(self, authenticated_client: TestClient):
-        """Test listing tasks with status filter."""
-        # Test various filters
-        for status_filter in ["active", "current", "complete", "error"]:
-            response = authenticated_client.get(f"/api/tasks?status_filter={status_filter}")
-            assert response.status_code == 200
-            assert isinstance(response.json(), list)
+    def test_list_tasks_status_filters(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        active_global = asyncio.run(
+            create_global_download_v0(
+                resource_key="http:filter-active",
+                resource_kind="http",
+                source_uri="https://example.com/active.bin",
+                status="active",
+                display_name="active.bin",
+                total_bytes=100,
+            )
+        )
+        completed_global = asyncio.run(
+            create_global_download_v0(
+                resource_key="http:filter-completed",
+                resource_kind="http",
+                source_uri="https://example.com/completed.bin",
+                status="completed",
+                display_name="completed.bin",
+                total_bytes=200,
+                completed_bytes=200,
+            )
+        )
+        failed_global = asyncio.run(
+            create_global_download_v0(
+                resource_key="http:filter-failed",
+                resource_kind="http",
+                source_uri="https://example.com/failed.bin",
+                status="failed",
+                display_name="failed.bin",
+                total_bytes=300,
+            )
+        )
+        asyncio.run(
+            create_user_task_v0(
+                user_id=test_user["id"],
+                global_download_id=active_global["id"],
+                status="active",
+                reserved_bytes=100,
+                display_name="active.bin",
+            )
+        )
+        asyncio.run(
+            create_user_task_v0(
+                user_id=test_user["id"],
+                global_download_id=completed_global["id"],
+                status="completed",
+                display_name="completed.bin",
+            )
+        )
+        asyncio.run(
+            create_user_task_v0(
+                user_id=test_user["id"],
+                global_download_id=failed_global["id"],
+                status="failed",
+                display_name="failed.bin",
+                error_message="failed",
+            )
+        )
+
+        active_response = authenticated_client.get("/api/tasks?status_filter=active")
+        complete_response = authenticated_client.get(
+            "/api/tasks?status_filter=complete"
+        )
+        error_response = authenticated_client.get("/api/tasks?status_filter=error")
+        current_response = authenticated_client.get("/api/tasks?status_filter=current")
+
+        assert [row["name"] for row in active_response.json()] == ["active.bin"]
+        assert [row["name"] for row in complete_response.json()] == ["completed.bin"]
+        assert [row["name"] for row in error_response.json()] == ["failed.bin"]
+        assert [row["name"] for row in current_response.json()] == ["active.bin"]
 
 
 class TestCancelTask:
-    """Tests for DELETE /api/tasks/{subscription_id} endpoint."""
-
-    def test_cancel_task_unauthorized(self, client: TestClient, temp_db: str, test_user: dict):
-        """Test canceling task without auth."""
+    def test_cancel_task_unauthorized(self, client: TestClient) -> None:
         response = client.delete("/api/tasks/1")
+
         assert response.status_code == 401
 
-    def test_cancel_task_not_found(self, authenticated_client: TestClient):
-        """Test canceling non-existent task."""
+    def test_cancel_task_not_found(self, authenticated_client: TestClient) -> None:
         response = authenticated_client.delete("/api/tasks/99999")
+
         assert response.status_code == 404
         assert "任务不存在" in response.json()["detail"]
 
+    def test_cancel_task_success(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        setup_client = AsyncMock()
+        setup_client.add_uri.return_value = "gid-cancel-basic"
+        task = asyncio.run(
+            create_user_download(
+                user_id=test_user["id"],
+                quota_bytes=test_user["quota_bytes"],
+                uri="https://example.com/cancel-basic.bin",
+                resource_key="http:cancel-basic",
+                resource_kind="http",
+                display_name="cancel-basic.bin",
+                total_bytes=500,
+                aria2_client=setup_client,
+            )
+        )
+        cancel_client = AsyncMock()
+        cancel_client.force_remove.return_value = "gid-cancel-basic"
+
+        with patch("app.routers.tasks._get_client", return_value=cancel_client):
+            response = authenticated_client.delete(f"/api/tasks/{task['id']}")
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+        stored_task = asyncio.run(
+            get_user_task(test_user["id"], task["global_download_id"])
+        )
+        assert stored_task is not None
+        assert stored_task["status"] == "cancelled"
+        assert stored_task["reserved_bytes"] == 0
+
 
 class TestClearHistory:
-    """Tests for DELETE /api/tasks endpoint."""
-
-    def test_clear_history_unauthorized(self, client: TestClient, temp_db: str, test_user: dict):
-        """Test clearing history without auth."""
+    def test_clear_history_unauthorized(self, client: TestClient) -> None:
         response = client.delete("/api/tasks")
+
         assert response.status_code == 401
 
-    def test_clear_history_empty(self, authenticated_client: TestClient):
-        """Test clearing history when none exist."""
+    def test_clear_history_empty(self, authenticated_client: TestClient) -> None:
         response = authenticated_client.delete("/api/tasks")
+
         assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is True
-        assert data["count"] == 0
+        assert response.json() == {"ok": True, "count": 0}
+
+    def test_clear_history_removes_terminal_v0_tasks(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        active_global = asyncio.run(
+            create_global_download_v0(
+                resource_key="http:clear-active",
+                source_uri="https://example.com/active.bin",
+                resource_kind="http",
+                status="active",
+                display_name="active.bin",
+            )
+        )
+        completed_global = asyncio.run(
+            create_global_download_v0(
+                resource_key="http:clear-completed",
+                source_uri="https://example.com/completed.bin",
+                resource_kind="http",
+                status="completed",
+                display_name="completed.bin",
+            )
+        )
+        failed_global = asyncio.run(
+            create_global_download_v0(
+                resource_key="http:clear-failed",
+                source_uri="https://example.com/failed.bin",
+                resource_kind="http",
+                status="failed",
+                display_name="failed.bin",
+            )
+        )
+        asyncio.run(
+            create_user_task_v0(
+                user_id=test_user["id"],
+                global_download_id=active_global["id"],
+                status="active",
+                display_name="active.bin",
+            )
+        )
+        asyncio.run(
+            create_user_task_v0(
+                user_id=test_user["id"],
+                global_download_id=completed_global["id"],
+                status="completed",
+                display_name="completed.bin",
+            )
+        )
+        asyncio.run(
+            create_user_task_v0(
+                user_id=test_user["id"],
+                global_download_id=failed_global["id"],
+                status="failed",
+                display_name="failed.bin",
+            )
+        )
+
+        response = authenticated_client.delete("/api/tasks")
+        remaining_response = authenticated_client.get("/api/tasks")
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": True, "count": 2}
+        assert [row["name"] for row in remaining_response.json()] == ["active.bin"]
 
 
 class TestRateLimiting:
-    """Tests for rate limiting on task endpoints."""
-
     @patch("app.routers.tasks.ensure_authenticated_allowed")
-    def test_create_task_rate_limited(self, mock_limiter, authenticated_client: TestClient):
-        """Test rate limiting on task creation."""
+    def test_create_task_rate_limited(
+        self,
+        mock_limiter: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
         mock_limiter.side_effect = HTTPException(429, "操作过于频繁，请稍后再试")
 
-        response = authenticated_client.post("/api/tasks", json={
-            "uri": "http://example.com/file.zip"
-        })
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={"uri": "http://example.com/file.zip"},
+        )
+
         assert response.status_code == 429
         assert "操作过于频繁" in response.json()["detail"]
 
     @patch("app.routers.tasks.ensure_authenticated_allowed")
-    def test_create_torrent_rate_limited(self, mock_limiter, authenticated_client: TestClient):
-        """Test rate limiting on torrent creation."""
+    def test_create_torrent_rate_limited(
+        self,
+        mock_limiter: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
         mock_limiter.side_effect = HTTPException(429, "操作过于频繁，请稍后再试")
 
-        response = authenticated_client.post("/api/tasks/torrent", json={
-            "torrent": "abc123"
-        })
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={"torrent": "abc123"},
+        )
+
         assert response.status_code == 429
         assert "操作过于频繁" in response.json()["detail"]
-
-
-class TestSubscriptionToDict:
-    """Tests for _subscription_to_dict helper."""
-
-    def test_subscription_to_dict_pending(self):
-        """Test subscription dict for pending status."""
-        from app.routers.tasks import _subscription_to_dict
-        from app.models import DownloadTask, UserTaskSubscription
-
-        task = DownloadTask(
-            id=1,
-            uri_hash="abc123",
-            uri="http://example.com/file.zip",
-            name="file.zip",
-            total_length=1000,
-            completed_length=500,
-            download_speed=100,
-            upload_speed=0,
-            status="active",
-        )
-        subscription = UserTaskSubscription(
-            id=1,
-            owner_id=1,
-            task_id=1,
-            frozen_space=1000,
-            status="pending",
-            created_at="2024-01-01T00:00:00Z",
-        )
-
-        result = _subscription_to_dict(subscription, task)
-
-        assert result["id"] == 1
-        assert result["name"] == "file.zip"
-        assert result["status"] == "active"
-        assert result["total_length"] == 1000
-        assert result["completed_length"] == 500
-        assert result["frozen_space"] == 1000
-        assert result["error"] is None
-
-    def test_subscription_to_dict_failed(self):
-        """Test subscription dict for failed status."""
-        from app.routers.tasks import _subscription_to_dict
-        from app.models import DownloadTask, UserTaskSubscription
-
-        task = DownloadTask(
-            id=1,
-            uri_hash="abc123",
-            uri="http://example.com/file.zip",
-            name="file.zip",
-            status="error",
-            error_display="Download failed",
-        )
-        subscription = UserTaskSubscription(
-            id=1,
-            owner_id=1,
-            task_id=1,
-            frozen_space=0,
-            status="failed",
-            error_display="用户空间不足",
-            created_at="2024-01-01T00:00:00Z",
-        )
-
-        result = _subscription_to_dict(subscription, task)
-
-        assert result["status"] == "error"
-        assert result["error"] == "用户空间不足"
-
-    def test_subscription_to_dict_success(self):
-        """Test subscription dict for success status."""
-        from app.routers.tasks import _subscription_to_dict
-        from app.models import DownloadTask, UserTaskSubscription
-
-        task = DownloadTask(
-            id=1,
-            uri_hash="abc123",
-            uri="http://example.com/file.zip",
-            name="file.zip",
-            status="complete",
-        )
-        subscription = UserTaskSubscription(
-            id=1,
-            owner_id=1,
-            task_id=1,
-            frozen_space=0,
-            status="success",
-            created_at="2024-01-01T00:00:00Z",
-        )
-
-        result = _subscription_to_dict(subscription, task)
-
-        assert result["status"] == "complete"
-        assert result["error"] is None
-
-    def test_subscription_to_dict_task_error(self):
-        """Test subscription dict when task has error but subscription is pending."""
-        from app.routers.tasks import _subscription_to_dict
-        from app.models import DownloadTask, UserTaskSubscription
-
-        task = DownloadTask(
-            id=1,
-            uri_hash="abc123",
-            uri="http://example.com/file.zip",
-            name="file.zip",
-            status="error",
-            error_display="Connection timeout",
-        )
-        subscription = UserTaskSubscription(
-            id=1,
-            owner_id=1,
-            task_id=1,
-            frozen_space=0,
-            status="pending",
-            created_at="2024-01-01T00:00:00Z",
-        )
-
-        result = _subscription_to_dict(subscription, task)
-
-        assert result["status"] == "error"
-        assert result["error"] == "Connection timeout"
-
-
-class TestListTasksWithData:
-
-    def test_list_tasks_with_subscriptions(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["list_hash1", "http://example.com/file1.zip", "gid1", "active", "file1.zip",
-             1000000, 500000, 100000, 0, 100000, 10, utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 1000000, "pending", utc_now()]
-        )
-
-        response = authenticated_client.get("/api/tasks")
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data) == 1
-        assert data[0]["name"] == "file1.zip"
-        assert data[0]["status"] == "active"
-
-    def test_list_tasks_filter_by_status(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["filter_hash1", "http://example.com/file1.zip", "gid1", "active", "active_file.zip",
-             1000000, 500000, 100000, 0, 100000, 10, utc_now(), utc_now()]
-        )
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["filter_hash2", "http://example.com/file2.zip", "gid2", "complete", "complete_file.zip",
-             2000000, 2000000, 0, 0, 200000, 20, utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 1000000, "pending", utc_now()]
-        )
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 2, 0, "success", utc_now()]
-        )
-
-        response = authenticated_client.get("/api/tasks?status_filter=active")
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data) == 1
-        assert data[0]["name"] == "active_file.zip"
-        assert data[0]["status"] == "active"
-
-
-class TestCancelTaskWithData:
-
-    @patch("app.routers.tasks._get_client")
-    def test_cancel_pending_subscription(
-        self, mock_get_client, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        mock_client = AsyncMock()
-        mock_client.force_remove.return_value = "gid1"
-        mock_client.remove_download_result.return_value = "OK"
-        mock_get_client.return_value = mock_client
-
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["cancel_hash1", "http://example.com/file.zip", "gid1", "active", "file.zip",
-             1000000, 500000, 100000, 0, 100000, 10, utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 1000000, "pending", utc_now()]
-        )
-
-        response = authenticated_client.delete("/api/tasks/1")
-        assert response.status_code == 200
-        assert response.json()["ok"] is True
-
-    def test_cancel_pending_subscription_without_gid_cleans_task_dir(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        from pathlib import Path
-
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                "cancel_no_gid_hash",
-                "http://example.com/no-gid.zip",
-                None,
-                "queued",
-                "no-gid.zip",
-                1000000,
-                0,
-                0,
-                0,
-                0,
-                0,
-                utc_now(),
-                utc_now(),
-            ],
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 1000000, "pending", utc_now()],
-        )
-
-        task_dir = Path(settings.download_dir) / "downloading" / "1"
-        task_dir.mkdir(parents=True, exist_ok=True)
-        (task_dir / "partial.bin").write_text("x")
-
-        response = authenticated_client.delete("/api/tasks/1")
-        assert response.status_code == 200
-        assert response.json()["ok"] is True
-        assert not task_dir.exists()
-
-    @patch("app.routers.tasks._get_client")
-    def test_cancel_paused_task_cleans_artifacts(
-        self, mock_get_client, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        mock_client = AsyncMock()
-        mock_client.force_remove.return_value = "OK"
-        mock_client.remove_download_result.return_value = "OK"
-        mock_get_client.return_value = mock_client
-
-        from app.db import execute, fetch_one, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                "cancel_paused_hash",
-                "http://example.com/paused.zip",
-                "gid-paused-1",
-                "paused",
-                "paused.zip",
-                1000000,
-                100,
-                0,
-                0,
-                0,
-                0,
-                utc_now(),
-                utc_now(),
-            ],
-        )
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 1000000, "pending", utc_now()],
-        )
-
-        response = authenticated_client.delete("/api/tasks/1")
-        assert response.status_code == 200
-        assert response.json()["ok"] is True
-
-        row = fetch_one(
-            "SELECT status, gid, error_display FROM download_tasks WHERE id = ?",
-            [1],
-        )
-        assert row is not None
-        assert row["status"] == "error"
-        assert row["gid"] is None
-        assert row["error_display"] == "已取消"
-        mock_client.force_remove.assert_awaited_once_with("gid-paused-1")
-        mock_client.remove_download_result.assert_awaited_once_with("gid-paused-1")
-
-    @patch("app.routers.tasks._get_client")
-    def test_cancel_other_user_subscription(
-        self, mock_get_client, authenticated_client: TestClient, test_user: dict, test_admin: dict, temp_db: str
-    ):
-        mock_client = AsyncMock()
-        mock_client.force_remove.return_value = "gid1"
-        mock_client.remove_download_result.return_value = "OK"
-        mock_get_client.return_value = mock_client
-
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["cancel_other_hash", "http://example.com/file.zip", "gid1", "active", "file.zip",
-             1000000, 500000, 100000, 0, 100000, 10, utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_admin["id"], 1, 1000000, "pending", utc_now()]
-        )
-
-        response = authenticated_client.delete("/api/tasks/1")
-        assert response.status_code == 404
-
-
-class TestClearHistoryWithData:
-
-    def test_clear_history_with_completed_tasks(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["clear_hash1", "http://example.com/file.zip", "gid1", "complete", "file.zip",
-             1000000, 1000000, 0, 0, 100000, 10, utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 0, "success", utc_now()]
-        )
-
-        response = authenticated_client.delete("/api/tasks")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is True
-        assert data["count"] >= 0
-
-    def test_clear_history_with_failed_tasks(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, error_display, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["clear_failed_hash", "http://example.com/failed.zip", "gid_fail", "error", "failed.zip",
-             1000000, 0, 0, 0, 0, 0, "Connection timeout", utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, error_display, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 0, "failed", "Connection timeout", utc_now()]
-        )
-
-        response = authenticated_client.delete("/api/tasks")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is True
-        assert data["count"] == 1
-
-    def test_clear_history_mixed_statuses(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["mixed_hash1", "http://example.com/active.zip", "gid_active", "active", "active.zip",
-             1000000, 500000, 100000, 0, 100000, 10, utc_now(), utc_now()]
-        )
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["mixed_hash2", "http://example.com/complete.zip", "gid_complete", "complete", "complete.zip",
-             2000000, 2000000, 0, 0, 200000, 20, utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 1000000, "pending", utc_now()]
-        )
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 2, 0, "success", utc_now()]
-        )
-
-        response = authenticated_client.delete("/api/tasks")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is True
-        assert data["count"] == 1
-
-        list_response = authenticated_client.get("/api/tasks")
-        assert list_response.status_code == 200
-        remaining = list_response.json()
-        assert len(remaining) == 1
-        assert remaining[0]["status"] == "active"
-
-
-class TestDNSResolutionSSRF:
-
-    @pytest.mark.asyncio
-    async def test_check_url_safety_dns_resolves_to_private(self):
-        from fastapi import HTTPException
-        from app.routers.tasks import _check_url_safety
-        import socket
-
-        mock_result = [(socket.AF_INET, socket.SOCK_STREAM, 0, '', ('192.168.1.100', 80))]
-
-        with patch("app.core.security.socket.getaddrinfo", return_value=mock_result):
-            with pytest.raises(HTTPException) as exc_info:
-                await _check_url_safety("http://evil.example.com/file.zip")
-            assert exc_info.value.status_code == 400
-            assert "内网地址" in exc_info.value.detail
-
-    @pytest.mark.asyncio
-    async def test_check_url_safety_dns_failure_rejected(self):
-        from fastapi import HTTPException
-        from app.routers.tasks import _check_url_safety
-        import socket
-
-        with patch("app.core.security.socket.getaddrinfo", side_effect=socket.gaierror("DNS failed")):
-            with pytest.raises(HTTPException) as exc_info:
-                await _check_url_safety("http://nonexistent.example.com/file.zip")
-            assert exc_info.value.status_code == 400
-            assert "无法解析" in exc_info.value.detail
-
-    @pytest.mark.asyncio
-    async def test_check_url_safety_invalid_ip_in_dns(self):
-        from app.routers.tasks import _check_url_safety
-        import socket
-
-        mock_result = [(socket.AF_INET, socket.SOCK_STREAM, 0, '', ('invalid_ip', 80))]
-
-        with patch("app.core.security.socket.getaddrinfo", return_value=mock_result):
-            await _check_url_safety("http://example.com/file.zip")
-
-
-class TestSubscriptionToCompleteTask:
-
-    def test_subscribe_to_already_complete_task_returns_success(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        from app.db import execute, utc_now
-        import os
-        store_dir = os.path.join(settings.download_dir, "store", "ab", "abc123")
-        os.makedirs(store_dir, exist_ok=True)
-        test_file = os.path.join(store_dir, "complete_file.zip")
-        with open(test_file, "wb") as f:
-            f.write(b"x" * 1000)
-
-        execute(
-            """INSERT INTO stored_files
-               (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            ["abc123", store_dir, 1000, 0, 1, "complete_file.zip", utc_now()]
-        )
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections,
-                stored_file_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["complete_task_hash", "http://example.com/complete.zip", "gid_complete", "complete",
-             "complete.zip", 1000, 1000, 0, 0, 100000, 10, 1, utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 0, "success", utc_now()]
-        )
-
-        response = authenticated_client.get("/api/tasks?status=success")
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data) == 1
-
-
-class TestTaskStatusFiltering:
-
-    def test_list_tasks_filter_by_active(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["filter_hash1", "http://example.com/active.zip", "gid_active", "active", "active.zip",
-             1000000, 500000, 100000, 0, 100000, 10, utc_now(), utc_now()]
-        )
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["filter_hash2", "http://example.com/complete.zip", "gid_complete", "complete", "complete.zip",
-             2000000, 2000000, 0, 0, 200000, 20, utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 1000000, "pending", utc_now()]
-        )
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 2, 0, "success", utc_now()]
-        )
-
-        response = authenticated_client.get("/api/tasks?status_filter=active")
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data) == 1
-        assert data[0]["status"] == "active"
-
-    def test_list_tasks_filter_by_complete(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["success_hash", "http://example.com/done.zip", "gid_done", "complete", "done.zip",
-             1000000, 1000000, 0, 0, 100000, 10, utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 0, "success", utc_now()]
-        )
-
-        response = authenticated_client.get("/api/tasks?status_filter=complete")
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data) == 1
-
-    def test_list_tasks_filter_by_error(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, error_display, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["failed_hash", "http://example.com/fail.zip", "gid_fail", "error", "fail.zip",
-             1000000, 0, 0, 0, 0, 0, "Connection failed", utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, error_display, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 0, "failed", "Connection failed", utc_now()]
-        )
-
-        response = authenticated_client.get("/api/tasks?status_filter=error")
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data) == 1
-
-    def test_list_tasks_filter_by_current(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ):
-        from app.db import execute, utc_now
-
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["current_hash1", "http://example.com/active.zip", "gid_active", "active", "active.zip",
-             1000000, 500000, 100000, 0, 100000, 10, utc_now(), utc_now()]
-        )
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, error_display, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["current_hash2", "http://example.com/error.zip", "gid_error", "error", "error.zip",
-             2000000, 0, 0, 0, 0, 0, "Failed", utc_now(), utc_now()]
-        )
-        execute(
-            """INSERT INTO download_tasks
-               (uri_hash, uri, gid, status, name, total_length, completed_length,
-                download_speed, upload_speed, peak_download_speed, peak_connections, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ["current_hash3", "http://example.com/complete.zip", "gid_complete", "complete", "complete.zip",
-             3000000, 3000000, 0, 0, 300000, 30, utc_now(), utc_now()]
-        )
-
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 1, 1000000, "pending", utc_now()]
-        )
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, error_display, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            [test_user["id"], 2, 0, "failed", "Failed", utc_now()]
-        )
-        execute(
-            """INSERT INTO user_task_subscriptions
-               (owner_id, task_id, frozen_space, status, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            [test_user["id"], 3, 0, "success", utc_now()]
-        )
-
-        response = authenticated_client.get("/api/tasks?status_filter=current")
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data) == 1

@@ -1,4 +1,5 @@
 """Tests for v0 task cancellation endpoint."""
+
 from __future__ import annotations
 
 import asyncio
@@ -60,7 +61,9 @@ class TestCancelTaskEndpoint:
         assert response.status_code == 200
         assert response.json() == {"ok": True}
 
-        global_download = asyncio.run(get_global_by_resource_key("http:cancel-endpoint"))
+        global_download = asyncio.run(
+            get_global_by_resource_key("http:cancel-endpoint")
+        )
         stored_task = asyncio.run(
             get_user_task(test_user["id"], task["global_download_id"])
         )
@@ -118,8 +121,12 @@ class TestCancelTaskEndpoint:
         assert response.status_code == 200
         assert response.json() == {"ok": True}
 
-        global_download = asyncio.run(get_global_by_resource_key("http:shared-endpoint"))
-        first_task = asyncio.run(get_user_task(test_user["id"], first["global_download_id"]))
+        global_download = asyncio.run(
+            get_global_by_resource_key("http:shared-endpoint")
+        )
+        first_task = asyncio.run(
+            get_user_task(test_user["id"], first["global_download_id"])
+        )
         second_task = asyncio.run(
             get_user_task(test_admin["id"], second["global_download_id"])
         )

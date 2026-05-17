@@ -7,9 +7,19 @@ import pytest
 
 import app.services.download_service as download_service
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
-from app.services.download_service import cancel_user_task, create_user_download
+from app.services.download_service import (
+    cancel_user_task,
+    create_user_download,
+    create_user_torrent_download,
+)
+from app.services.storage import get_store_path_for_hash
 from app.services.usage_service import get_usage
-from tests.helpers_v0 import create_user_v0
+from tests.helpers_v0 import (
+    create_global_download_v0,
+    create_user_file_v0,
+    create_user_task_v0,
+    create_user_v0,
+)
 
 
 @pytest.mark.asyncio
@@ -212,6 +222,288 @@ async def test_retry_failed_submit_reactivates_user_task(temp_db: str) -> None:
     assert task["reserved_bytes"] == 200
     assert usage["reserved_bytes"] == 200
     assert client.add_uri.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_create_torrent_download_submits_add_torrent_without_initial_reservation(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="torrent_submit", quota_bytes=1000)
+    client = AsyncMock()
+    client.add_torrent.return_value = "gid-torrent-submit"
+
+    task = await create_user_torrent_download(
+        user_id=user["id"],
+        quota_bytes=user["quota_bytes"],
+        torrent_data="base64-torrent",
+        resource_key="torrent:submit",
+        source_uri="magnet:?xt=urn:btih:torrent:submit",
+        display_name=None,
+        total_bytes=0,
+        aria2_client=client,
+        options={"dir": "/tmp/downloads"},
+    )
+    global_download = await get_global_by_resource_key("torrent:submit")
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+
+    assert task["status"] == "active"
+    assert task["reserved_bytes"] == 0
+    assert usage["reserved_bytes"] == 0
+    assert global_download is not None
+    assert global_download["resource_kind"] == "torrent"
+    assert global_download["source_uri"] == "magnet:?xt=urn:btih:torrent:submit"
+    assert global_download["aria2_gid"] == "gid-torrent-submit"
+    client.add_torrent.assert_awaited_once_with(
+        "base64-torrent",
+        [],
+        {"dir": "/tmp/downloads"},
+    )
+    client.add_uri.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_two_users_share_one_global_torrent_download(temp_db: str) -> None:
+    user_a = await create_user_v0(username="torrent_share_a")
+    user_b = await create_user_v0(username="torrent_share_b")
+    client = AsyncMock()
+    client.add_torrent.return_value = "gid-torrent-shared"
+
+    first = await create_user_torrent_download(
+        user_id=user_a["id"],
+        quota_bytes=user_a["quota_bytes"],
+        torrent_data="shared-torrent-data",
+        resource_key="torrent:shared",
+        source_uri="magnet:?xt=urn:btih:torrent:shared",
+        display_name=None,
+        total_bytes=0,
+        aria2_client=client,
+    )
+    second = await create_user_torrent_download(
+        user_id=user_b["id"],
+        quota_bytes=user_b["quota_bytes"],
+        torrent_data="shared-torrent-data",
+        resource_key="torrent:shared",
+        source_uri="magnet:?xt=urn:btih:torrent:shared",
+        display_name=None,
+        total_bytes=0,
+        aria2_client=client,
+    )
+
+    assert first["global_download_id"] == second["global_download_id"]
+    assert first["id"] != second["id"]
+    client.add_torrent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_existing_known_size_torrent_checks_new_user_quota(
+    temp_db: str,
+) -> None:
+    existing_owner = await create_user_v0(
+        username="torrent_known_existing_owner", quota_bytes=2000
+    )
+    new_owner = await create_user_v0(
+        username="torrent_known_new_owner", quota_bytes=100
+    )
+    global_download = await create_global_download_v0(
+        resource_key="torrent:known-size",
+        resource_kind="torrent",
+        source_uri="magnet:?xt=urn:btih:torrent:known-size",
+        status="active",
+        aria2_gid="gid-known-size",
+        display_name="known-size.torrent",
+        total_bytes=900,
+        completed_bytes=100,
+    )
+    await create_user_task_v0(
+        user_id=existing_owner["id"],
+        global_download_id=global_download["id"],
+        status="active",
+        reserved_bytes=900,
+        display_name="known-size.torrent",
+    )
+    client = AsyncMock()
+
+    with pytest.raises(ValueError, match="quota exceeded"):
+        await create_user_torrent_download(
+            user_id=new_owner["id"],
+            quota_bytes=new_owner["quota_bytes"],
+            torrent_data="known-size-torrent-data",
+            resource_key="torrent:known-size",
+            source_uri="magnet:?xt=urn:btih:torrent:known-size",
+            display_name=None,
+            total_bytes=0,
+            aria2_client=client,
+        )
+
+    task = await get_user_task(new_owner["id"], global_download["id"])
+    usage = await get_usage(new_owner["id"], quota_bytes=new_owner["quota_bytes"])
+    stored_global = await get_global_by_resource_key("torrent:known-size")
+
+    assert task is None
+    assert usage["reserved_bytes"] == 0
+    assert stored_global is not None
+    assert stored_global["total_bytes"] == 900
+    client.add_torrent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_add_torrent_failure_releases_reservation_and_marks_task_failed(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="torrent_submit_fail", quota_bytes=1000)
+    client = AsyncMock()
+    client.add_torrent.side_effect = RuntimeError("aria2 unavailable")
+
+    with pytest.raises(RuntimeError, match="aria2 unavailable"):
+        await create_user_torrent_download(
+            user_id=user["id"],
+            quota_bytes=user["quota_bytes"],
+            torrent_data="fail-torrent-data",
+            resource_key="torrent:fail",
+            source_uri="magnet:?xt=urn:btih:torrent:fail",
+            display_name="fail.torrent",
+            total_bytes=300,
+            aria2_client=client,
+        )
+
+    global_download = await get_global_by_resource_key("torrent:fail")
+    assert global_download is not None
+    task = await get_user_task(user["id"], global_download["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+
+    assert task is not None
+    assert task["status"] == "failed"
+    assert task["reserved_bytes"] == 0
+    assert usage["reserved_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_torrent_submit_persist_failure_removes_orphan_gid_and_releases_reservation(
+    temp_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = await create_user_v0(username="torrent_persist_fail", quota_bytes=1000)
+    client = AsyncMock()
+    client.add_torrent.return_value = "gid-torrent-orphan"
+
+    async def fail_global_update(download_id: int, values: dict):
+        if "aria2_gid" in values:
+            raise RuntimeError("db unavailable")
+        return await original_update_global_download(download_id, values)
+
+    original_update_global_download = download_service.update_global_download
+    monkeypatch.setattr(download_service, "update_global_download", fail_global_update)
+
+    with pytest.raises(RuntimeError, match="db unavailable"):
+        await create_user_torrent_download(
+            user_id=user["id"],
+            quota_bytes=user["quota_bytes"],
+            torrent_data="orphan-torrent-data",
+            resource_key="torrent:orphan",
+            source_uri="magnet:?xt=urn:btih:torrent:orphan",
+            display_name="orphan.torrent",
+            total_bytes=400,
+            aria2_client=client,
+        )
+
+    global_download = await get_global_by_resource_key("torrent:orphan")
+    assert global_download is not None
+    task = await get_user_task(user["id"], global_download["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+
+    client.force_remove.assert_awaited_once_with("gid-torrent-orphan")
+    assert global_download["aria2_gid"] is None
+    assert global_download["status"] == "queued"
+    assert task is not None
+    assert task["status"] == "failed"
+    assert task["reserved_bytes"] == 0
+    assert usage["reserved_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_torrent_submit_reactivates_user_task(temp_db: str) -> None:
+    user = await create_user_v0(username="torrent_retry_fail", quota_bytes=1000)
+    client = AsyncMock()
+    client.add_torrent.side_effect = [
+        RuntimeError("temporary torrent rpc failure"),
+        "gid-torrent-retry",
+    ]
+
+    with pytest.raises(RuntimeError, match="temporary torrent rpc failure"):
+        await create_user_torrent_download(
+            user_id=user["id"],
+            quota_bytes=user["quota_bytes"],
+            torrent_data="retry-torrent-data",
+            resource_key="torrent:retry",
+            source_uri="magnet:?xt=urn:btih:torrent:retry",
+            display_name="retry.torrent",
+            total_bytes=200,
+            aria2_client=client,
+        )
+
+    task = await create_user_torrent_download(
+        user_id=user["id"],
+        quota_bytes=user["quota_bytes"],
+        torrent_data="retry-torrent-data",
+        resource_key="torrent:retry",
+        source_uri="magnet:?xt=urn:btih:torrent:retry",
+        display_name="retry.torrent",
+        total_bytes=200,
+        aria2_client=client,
+    )
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+
+    assert task["status"] == "active"
+    assert task["reserved_bytes"] == 200
+    assert usage["reserved_bytes"] == 200
+    assert client.add_torrent.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_completed_torrent_download_attaches_completed_file_to_new_user(
+    temp_db: str,
+) -> None:
+    existing_owner = await create_user_v0(username="torrent_file_owner")
+    new_owner = await create_user_v0(
+        username="torrent_file_new_owner", quota_bytes=1000
+    )
+    store_path = get_store_path_for_hash("torrent_file_hash")
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    store_path.write_bytes(b"x" * 20)
+    user_file = await create_user_file_v0(
+        user_id=existing_owner["id"],
+        real_path=store_path,
+        content_hash="torrent_file_hash",
+        display_name="done.torrent",
+        size_bytes=20,
+    )
+    await create_global_download_v0(
+        resource_key="torrent:completed",
+        resource_kind="torrent",
+        source_uri="magnet:?xt=urn:btih:torrent:completed",
+        status="completed",
+        display_name="done.torrent",
+        total_bytes=20,
+        completed_bytes=20,
+        completed_file_id=user_file["stored_file_id"],
+    )
+    client = AsyncMock()
+
+    task = await create_user_torrent_download(
+        user_id=new_owner["id"],
+        quota_bytes=new_owner["quota_bytes"],
+        torrent_data="completed-torrent-data",
+        resource_key="torrent:completed",
+        source_uri="magnet:?xt=urn:btih:torrent:completed",
+        display_name="done.torrent",
+        total_bytes=0,
+        aria2_client=client,
+    )
+    usage = await get_usage(new_owner["id"], quota_bytes=new_owner["quota_bytes"])
+
+    assert task["status"] == "completed"
+    assert task["reserved_bytes"] == 0
+    assert usage["used_bytes"] == 20
+    client.add_torrent.assert_not_awaited()
 
 
 @pytest.mark.asyncio

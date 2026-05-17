@@ -4,7 +4,7 @@ import asyncio
 import logging
 import shutil
 import threading
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -30,7 +30,11 @@ from app.repositories.files import (
     get_stored_file_by_content_hash,
 )
 from app.services.hash import calculate_content_hash_async
-from app.services.storage import get_downloading_dir, get_store_path_for_hash, safe_delete_path
+from app.services.storage import (
+    get_downloading_dir,
+    get_store_path_for_hash,
+    safe_delete_path,
+)
 from app.services.storage_index import build_entry_templates
 from app.services.usage_service import (
     release_reserved,
@@ -46,6 +50,13 @@ CANCELABLE_TASK_STATUSES = set(ACTIVE_USER_TASK_STATUSES)
 class Aria2SubmitClient(Protocol):
     async def add_uri(
         self, uris: list[str], options: Mapping[str, Any] | None = None
+    ) -> str: ...
+
+    async def add_torrent(
+        self,
+        torrent: str,
+        uris: list[str] | None = None,
+        options: Mapping[str, Any] | None = None,
     ) -> str: ...
 
     async def force_remove(self, gid: str) -> str: ...
@@ -200,7 +211,10 @@ async def complete_global_download(
 
                 entry_templates = build_entry_templates(entry_root)
                 try:
-                    stored_file, entries_created = await create_stored_file_with_entries(
+                    (
+                        stored_file,
+                        entries_created,
+                    ) = await create_stored_file_with_entries(
                         {
                             "content_hash": content_hash,
                             "real_path": str(store_path),
@@ -262,22 +276,74 @@ async def create_user_download(
     aria2_client: Aria2SubmitClient,
     options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    global_download = await get_or_create_global_download(
-        {
-            "resource_key": resource_key,
-            "resource_kind": resource_kind,
-            "source_uri": uri,
-            "display_name": display_name,
-            "total_bytes": max(0, int(total_bytes)),
-        }
+    async def submit_download(submit_options: Mapping[str, Any] | None) -> str:
+        return await aria2_client.add_uri([uri], submit_options or {})
+
+    return await _create_user_download_with_submit(
+        user_id=user_id,
+        quota_bytes=quota_bytes,
+        source_uri=uri,
+        resource_key=resource_key,
+        resource_kind=resource_kind,
+        display_name=display_name,
+        total_bytes=total_bytes,
+        aria2_client=aria2_client,
+        options=options,
+        submit_download=submit_download,
     )
+
+
+async def create_user_torrent_download(
+    *,
+    user_id: int,
+    quota_bytes: int,
+    torrent_data: str,
+    resource_key: str,
+    source_uri: str,
+    display_name: str | None,
+    total_bytes: int,
+    aria2_client: Aria2SubmitClient,
+    options: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    async def submit_download(submit_options: Mapping[str, Any] | None) -> str:
+        return await aria2_client.add_torrent(torrent_data, [], submit_options or {})
+
+    return await _create_user_download_with_submit(
+        user_id=user_id,
+        quota_bytes=quota_bytes,
+        source_uri=source_uri,
+        resource_key=resource_key,
+        resource_kind="torrent",
+        display_name=display_name,
+        total_bytes=total_bytes,
+        aria2_client=aria2_client,
+        options=options,
+        submit_download=submit_download,
+    )
+
+
+async def _create_user_download_with_submit(
+    *,
+    user_id: int,
+    quota_bytes: int,
+    source_uri: str,
+    resource_key: str,
+    resource_kind: str,
+    display_name: str | None,
+    total_bytes: int,
+    aria2_client: Aria2SubmitClient,
+    options: Mapping[str, Any] | None,
+    submit_download: Callable[[Mapping[str, Any] | None], Awaitable[str]],
+) -> dict[str, Any]:
+    requested_total_bytes = max(0, int(total_bytes))
     global_values = {
         "resource_key": resource_key,
         "resource_kind": resource_kind,
-        "source_uri": uri,
+        "source_uri": source_uri,
         "display_name": display_name,
-        "total_bytes": max(0, int(total_bytes)),
+        "total_bytes": requested_total_bytes,
     }
+    global_download = await get_or_create_global_download(global_values)
     lifecycle_lock = await _get_lifecycle_lock(global_download["id"])
     async with lifecycle_lock:
         global_download = await get_or_create_global_download(global_values)
@@ -296,6 +362,10 @@ async def create_user_download(
                 raise LookupError("global download not found")
             global_download = updated_global
 
+        effective_total_bytes = max(
+            requested_total_bytes,
+            max(0, int(global_download.get("total_bytes") or 0)),
+        )
         completed_file_id = global_download.get("completed_file_id")
         if global_download["status"] == "completed" and completed_file_id is not None:
             return await attach_completed_file_to_user(
@@ -303,9 +373,11 @@ async def create_user_download(
                 quota_bytes=quota_bytes,
                 global_download_id=int(global_download["id"]),
                 stored_file_id=int(completed_file_id),
-                size_bytes=int(global_download["completed_bytes"] or total_bytes),
+                size_bytes=int(
+                    global_download["completed_bytes"] or effective_total_bytes
+                ),
                 display_name=str(
-                    display_name or global_download.get("display_name") or uri
+                    display_name or global_download.get("display_name") or source_uri
                 ),
                 finished_at_ms=int(global_download["completed_at_ms"] or now_ms()),
             )
@@ -320,7 +392,7 @@ async def create_user_download(
             if existing_task and existing_task["status"] not in RETRYABLE_TASK_STATUSES:
                 return existing_task
 
-            reserved_bytes = max(0, int(total_bytes))
+            reserved_bytes = effective_total_bytes
             reservation_made = False
             task: dict[str, Any] | None = existing_task
             if reserved_bytes > 0:
@@ -350,22 +422,26 @@ async def create_user_download(
                     )
             except IntegrityError:
                 if reservation_made:
-                    await release_reserved(user_id, reserved_bytes, quota_bytes=quota_bytes)
+                    await release_reserved(
+                        user_id, reserved_bytes, quota_bytes=quota_bytes
+                    )
                 existing_task = await get_user_task(user_id, global_download["id"])
                 if existing_task:
                     return existing_task
                 raise
             except Exception:
                 if reservation_made:
-                    await release_reserved(user_id, reserved_bytes, quota_bytes=quota_bytes)
+                    await release_reserved(
+                        user_id, reserved_bytes, quota_bytes=quota_bytes
+                    )
                 raise
 
         try:
             global_download = await _ensure_download_submitted(
                 global_download=global_download,
-                uri=uri,
                 options=options,
                 aria2_client=aria2_client,
+                submit_download=submit_download,
             )
         except Exception as exc:
             await _release_task_reservation(
@@ -391,9 +467,9 @@ async def create_user_download(
 async def _ensure_download_submitted(
     *,
     global_download: dict[str, Any],
-    uri: str,
     options: Mapping[str, Any] | None,
     aria2_client: Aria2SubmitClient,
+    submit_download: Callable[[Mapping[str, Any] | None], Awaitable[str]],
 ) -> dict[str, Any]:
     if global_download.get("aria2_gid") or global_download["status"] != "queued":
         return global_download
@@ -412,7 +488,7 @@ async def _ensure_download_submitted(
         if current.get("aria2_gid") or current["status"] != "queued":
             return current
 
-        gid = await aria2_client.add_uri([uri], options or {})
+        gid = await submit_download(options)
         try:
             updated = await update_global_download(
                 current["id"],
