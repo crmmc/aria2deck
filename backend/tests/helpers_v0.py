@@ -8,7 +8,16 @@ from sqlalchemy import insert, select
 
 from app.core.security import hash_password
 from app.db.engine import transaction
-from app.db.schema import sessions, stored_files, user_files, user_storage_usage, users
+from app.db.schema import (
+    global_downloads,
+    pack_tasks,
+    sessions,
+    stored_files,
+    user_files,
+    user_storage_usage,
+    user_tasks,
+    users,
+)
 
 
 def now_ms() -> int:
@@ -119,3 +128,106 @@ async def create_user_file_v0(
         "is_directory": bool(stored["is_directory"]),
         "real_path": stored["real_path"],
     }
+
+
+async def create_global_download_v0(
+    *,
+    resource_key: str,
+    source_uri: str = "magnet:?xt=urn:btih:test",
+    resource_kind: str = "magnet",
+    status: str = "queued",
+    aria2_gid: str | None = None,
+    display_name: str | None = None,
+    total_bytes: int = 0,
+    completed_bytes: int = 0,
+    completed_file_id: int | None = None,
+) -> dict[str, Any]:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                insert(global_downloads)
+                .values(
+                    resource_key=resource_key,
+                    resource_kind=resource_kind,
+                    source_uri=source_uri,
+                    display_name=display_name,
+                    aria2_gid=aria2_gid,
+                    status=status,
+                    total_bytes=total_bytes,
+                    completed_bytes=completed_bytes,
+                    completed_file_id=completed_file_id,
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                    completed_at_ms=timestamp if status == "completed" else None,
+                )
+                .returning(global_downloads)
+            )
+        ).mappings().one()
+    return dict(row)
+
+
+async def create_user_task_v0(
+    *,
+    user_id: int,
+    global_download_id: int,
+    status: str = "queued",
+    reserved_bytes: int = 0,
+    display_name: str | None = None,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                insert(user_tasks)
+                .values(
+                    user_id=user_id,
+                    global_download_id=global_download_id,
+                    status=status,
+                    reserved_bytes=reserved_bytes,
+                    display_name=display_name,
+                    error_message=error_message,
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                    finished_at_ms=timestamp if status in {"completed", "failed", "cancelled"} else None,
+                )
+                .returning(user_tasks)
+            )
+        ).mappings().one()
+    return dict(row)
+
+
+async def create_pack_task_v0(
+    *,
+    user_id: int,
+    source_user_file_ids: list[int],
+    source_size_bytes: int = 0,
+    reserved_bytes: int = 0,
+    status: str = "pending",
+    output_name: str | None = None,
+) -> dict[str, Any]:
+    import json
+
+    timestamp = now_ms()
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                insert(pack_tasks)
+                .values(
+                    user_id=user_id,
+                    source_user_file_ids_json=json.dumps(source_user_file_ids),
+                    source_size_bytes=source_size_bytes,
+                    reserved_bytes=reserved_bytes,
+                    output_name=output_name,
+                    delete_source=0,
+                    status=status,
+                    progress=0,
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                    finished_at_ms=timestamp if status in {"completed", "failed", "cancelled"} else None,
+                )
+                .returning(pack_tasks)
+            )
+        ).mappings().one()
+    return dict(row)
