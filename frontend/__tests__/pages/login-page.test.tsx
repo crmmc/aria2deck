@@ -90,6 +90,22 @@ describe("LoginPage", () => {
     expect(pushMock).not.toHaveBeenCalled();
   });
 
+  test("keeps password input focused while editing password", async () => {
+    mockApi.me.mockRejectedValue(new ApiError("unauthorized", 401, true));
+
+    render(<LoginPage />);
+
+    await screen.findByPlaceholderText("用户名");
+    const passwordInput = screen.getByPlaceholderText("密码");
+
+    passwordInput.focus();
+    fireEvent.change(passwordInput, {
+      target: { value: "a" },
+    });
+
+    expect(document.activeElement).toBe(passwordInput);
+  });
+
   test("logs warnings when auto-login or site info request fails unexpectedly", async () => {
     const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
     mockApi.me.mockRejectedValue(new Error("session check failed"));

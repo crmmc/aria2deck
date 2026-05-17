@@ -1,3 +1,4 @@
+import { readFileSync } from "fs";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import FilesPage from "@/app/(authenticated)/files/page";
 import { ToastProvider } from "@/components/Toast";
@@ -86,8 +87,16 @@ const subfolderItems: BrowseFileInfo[] = [
 function setupListFiles(files: FileInfo[] = [folderFile, regularFile]) {
   mockApi.listFiles.mockResolvedValue({
     files,
+    total: files.length,
     space: { used: 1024, frozen: 0, available: 9216 },
   } satisfies FileListResponse);
+}
+
+function injectGlobalStyles() {
+  const style = document.createElement("style");
+  style.textContent = readFileSync(`${process.cwd()}/app/globals.css`, "utf8");
+  document.head.appendChild(style);
+  return () => style.remove();
 }
 
 /** Render page and wait for initial file list to load */
@@ -125,6 +134,23 @@ afterEach(() => {
 });
 
 describe("Folder in-page browsing", () => {
+  test("desktop sortable headers render as flat table header controls", async () => {
+    const removeStyles = injectGlobalStyles();
+    try {
+      await renderAndWait();
+
+      const nameHeader = screen.getByRole("button", { name: /名称/ });
+      const sizeHeader = screen.getByRole("button", { name: /大小/ });
+
+      expect(window.getComputedStyle(nameHeader).display).toBe("flex");
+      expect(window.getComputedStyle(nameHeader).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+      expect(window.getComputedStyle(nameHeader).borderTopWidth).toBe("0px");
+      expect(window.getComputedStyle(sizeHeader).justifyContent).toBe("flex-end");
+    } finally {
+      removeStyles();
+    }
+  });
+
   test("clicking a folder shows folder contents with breadcrumb", async () => {
     await renderAndWait();
     await enterFolder();
@@ -293,6 +319,7 @@ describe("Folder in-page browsing", () => {
   test("root batch download with only files succeeds", async () => {
     mockApi.listFiles.mockResolvedValue({
       files: [regularFile],
+      total: 1,
       space: { used: 1024, frozen: 0, available: 9216 },
     } satisfies FileListResponse);
     mockApi.downloadFileUrl.mockImplementation(

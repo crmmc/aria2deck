@@ -1036,6 +1036,42 @@ p {
   padding: 12px 16px;
 }
 
+.file-table-wrapper .table-header {
+  align-items: center;
+}
+
+.file-table-wrapper .table-header .table-cell {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.file-table-wrapper .table-header .sortable-header {
+  appearance: none;
+  -webkit-appearance: none;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.file-table-wrapper .table-header .sortable-header.text-left {
+  justify-content: flex-start;
+}
+
+.file-table-wrapper .table-header .sortable-header.text-right {
+  justify-content: flex-end;
+}
+
 /* Progress Bar */
 .progress-container {
   height: 6px;

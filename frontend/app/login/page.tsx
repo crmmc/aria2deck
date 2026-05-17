@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
 
@@ -10,6 +10,11 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [siteTitle, setSiteTitle] = useState('aria2 控制器');
+  const usernameInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    usernameInputRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -99,7 +104,7 @@ export default function LoginPage() {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               required
-              ref={(el) => el?.focus()}
+              ref={usernameInputRef}
             />
           </div>
           <div className="mb-6">
