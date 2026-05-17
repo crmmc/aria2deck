@@ -1,0 +1,332 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+from sqlalchemy import select, update
+
+from app.aria2.sync import (
+    STALE_QUEUED_GRACE_SECONDS,
+    _cleanup_stale_queued_downloads_v0,
+    _fail_v0_download_and_cleanup,
+    _repair_inconsistent_completed_downloads_v0,
+    _update_v0_download_from_aria2,
+)
+from app.core.config import settings
+from app.core.state import AppState, get_task_complete_lock
+from app.db.engine import transaction
+from app.db.schema import global_downloads, user_tasks
+from app.repositories.downloads import now_ms
+from app.services.usage_service import get_usage, reserve_bytes
+from tests.helpers_v0 import (
+    create_global_download_v0,
+    create_user_file_v0,
+    create_user_task_v0,
+    create_user_v0,
+)
+
+
+async def _fetch_global(download_id: int) -> dict:
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    select(global_downloads).where(global_downloads.c.id == download_id)
+                )
+            )
+            .mappings()
+            .one()
+        )
+    return dict(row)
+
+
+async def _fetch_user_task(task_id: int) -> dict:
+    async with transaction() as conn:
+        row = (
+            (await conn.execute(select(user_tasks).where(user_tasks.c.id == task_id)))
+            .mappings()
+            .one()
+        )
+    return dict(row)
+
+
+@pytest.mark.asyncio
+async def test_stale_queued_download_without_gid_becomes_failed_after_grace_period(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_stale")
+    download = await create_global_download_v0(
+        resource_key="sync:stale",
+        status="queued",
+        aria2_gid=None,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="queued",
+    )
+    old_timestamp = now_ms() - int((STALE_QUEUED_GRACE_SECONDS + 1) * 1000)
+    async with transaction() as conn:
+        await conn.execute(
+            update(global_downloads)
+            .where(global_downloads.c.id == download["id"])
+            .values(updated_at_ms=old_timestamp)
+        )
+
+    await _cleanup_stale_queued_downloads_v0(AppState())
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+
+    assert updated["status"] == "failed"
+    assert updated["error_code"] == "submit_timeout"
+    assert updated_task["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_active_aria2_status_updates_global_bytes_and_active_user_task_status(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_active")
+    download = await create_global_download_v0(
+        resource_key="sync:active",
+        status="queued",
+        aria2_gid="gid-sync-active",
+        total_bytes=0,
+        completed_bytes=0,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="queued",
+    )
+    client = AsyncMock()
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-sync-active",
+            "status": "active",
+            "totalLength": "1000",
+            "completedLength": "250",
+            "downloadSpeed": "10",
+            "files": [{"path": "/tmp/sync-active.bin"}],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+
+    assert updated["status"] == "active"
+    assert updated["total_bytes"] == 1000
+    assert updated["completed_bytes"] == 250
+    assert updated_task["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_error_aria2_result_marks_active_user_tasks_failed(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_error", quota_bytes=1000)
+    await reserve_bytes(user["id"], 400, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="sync:error",
+        status="active",
+        aria2_gid="gid-sync-error",
+        total_bytes=400,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=400,
+    )
+    client = AsyncMock()
+    client.force_remove.return_value = "OK"
+    client.remove_download_result.return_value = "OK"
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-sync-error",
+            "status": "error",
+            "errorCode": "7",
+            "errorMessage": "network error",
+            "totalLength": "400",
+            "completedLength": "11",
+            "files": [],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+
+    assert updated["status"] == "failed"
+    assert updated["aria2_gid"] is None
+    assert updated["error_code"] == "7"
+    assert updated_task["status"] == "failed"
+    assert updated_task["reserved_bytes"] == 0
+    assert usage["reserved_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_active_aria2_status_does_not_overwrite_completed_download(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_terminal_guard", quota_bytes=1000)
+    stored_path = Path(settings.download_dir) / "store" / "sync-terminal.bin"
+    stored_path.parent.mkdir(parents=True, exist_ok=True)
+    stored_path.write_bytes(b"done")
+    user_file = await create_user_file_v0(
+        user_id=user["id"],
+        real_path=stored_path,
+        content_hash="sync-terminal-hash",
+        display_name="sync-terminal.bin",
+        size_bytes=4,
+    )
+    download = await create_global_download_v0(
+        resource_key="sync:terminal-guard",
+        status="completed",
+        aria2_gid="gid-sync-terminal",
+        total_bytes=4,
+        completed_bytes=4,
+        completed_file_id=user_file["stored_file_id"],
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="completed",
+    )
+    client = AsyncMock()
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-sync-terminal",
+            "status": "active",
+            "totalLength": "1000",
+            "completedLength": "250",
+            "files": [{"path": "/tmp/stale-active.bin"}],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+
+    assert updated["status"] == "completed"
+    assert updated["total_bytes"] == 4
+    assert updated["completed_bytes"] == 4
+    assert updated["completed_file_id"] == user_file["stored_file_id"]
+    assert updated_task["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_repair_inconsistent_completed_download_marks_failed_and_releases_reserved(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_repair_completed", quota_bytes=1000)
+    await reserve_bytes(user["id"], 200, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="sync:repair-completed",
+        status="completed",
+        aria2_gid="gid-repair-completed",
+        total_bytes=200,
+        completed_bytes=200,
+        completed_file_id=None,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=200,
+    )
+    old_timestamp = now_ms() - 31_000
+    async with transaction() as conn:
+        await conn.execute(
+            update(global_downloads)
+            .where(global_downloads.c.id == download["id"])
+            .values(updated_at_ms=old_timestamp)
+        )
+
+    await _repair_inconsistent_completed_downloads_v0()
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+
+    assert updated["status"] == "failed"
+    assert updated["error_code"] == "completion_not_indexed"
+    assert updated["completed_file_id"] is None
+    assert updated_task["status"] == "failed"
+    assert updated_task["reserved_bytes"] == 0
+    assert usage["reserved_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_failure_cleanup_waits_for_completion_lock(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_failure_lock", quota_bytes=1000)
+    await reserve_bytes(user["id"], 100, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="sync:failure-lock",
+        status="active",
+        aria2_gid="gid-sync-failure-lock",
+        total_bytes=100,
+        completed_bytes=10,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=100,
+    )
+    state = AppState()
+    completion_lock = await get_task_complete_lock(state, download["id"])
+    await completion_lock.acquire()
+    client = AsyncMock()
+    client.force_remove.return_value = "OK"
+    client.remove_download_result.return_value = "OK"
+
+    failure_task = asyncio.create_task(
+        _fail_v0_download_and_cleanup(
+            state=state,
+            client=client,
+            download_id=download["id"],
+            gid="gid-sync-failure-lock",
+            message="sync failure",
+            error_code="sync_failure",
+            log_prefix="[Test]",
+        )
+    )
+    try:
+        await asyncio.sleep(0.05)
+        in_flight = await _fetch_global(download["id"])
+        in_flight_task = await _fetch_user_task(task["id"])
+
+        assert in_flight["status"] == "active"
+        assert in_flight_task["status"] == "active"
+        client.force_remove.assert_not_awaited()
+    finally:
+        completion_lock.release()
+
+    await failure_task
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+
+    assert updated["status"] == "failed"
+    assert updated["error_code"] == "sync_failure"
+    assert updated_task["status"] == "failed"
+    assert usage["reserved_bytes"] == 0
+    client.force_remove.assert_awaited_once_with("gid-sync-failure-lock")

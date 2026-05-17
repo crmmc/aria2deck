@@ -1,95 +1,145 @@
-"""Tests for _cleanup_stale_queued_tasks function."""
+"""Tests for v0 stale queued download cleanup helpers."""
 
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from __future__ import annotations
+
+from asyncio import Lock
+from unittest.mock import AsyncMock
+
 import pytest
+from sqlalchemy import select, update
+
+from app.aria2.sync import (
+    STALE_QUEUED_GRACE_SECONDS,
+    _cleanup_stale_queued_downloads_v0,
+)
+from app.core.state import AppState
+from app.db.engine import transaction
+from app.db.schema import global_downloads, user_tasks
+from app.repositories.downloads import now_ms
+from tests.helpers_v0 import (
+    create_global_download_v0,
+    create_user_task_v0,
+    create_user_v0,
+)
 
 
-class TestStaleQueuedTasksCleanup:
-    """Test cases for stale queued tasks cleanup."""
+async def _fetch_global(download_id: int) -> dict:
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    select(global_downloads).where(global_downloads.c.id == download_id)
+                )
+            )
+            .mappings()
+            .one()
+        )
+    return dict(row)
 
-    @pytest.fixture
-    def mock_state(self):
-        """Create mock AppState."""
-        state = MagicMock()
-        state.lock = AsyncMock()
-        state.lock.__aenter__ = AsyncMock()
-        state.lock.__aexit__ = AsyncMock()
-        state.task_submit_locks = {}
-        return state
 
-    @pytest.mark.asyncio
-    async def test_time_comparison_format_consistency(self):
-        """Verify ISO format is used for time comparison."""
-        from app.models import utc_now_str
+async def _fetch_user_task(task_id: int) -> dict:
+    async with transaction() as conn:
+        row = (
+            (await conn.execute(select(user_tasks).where(user_tasks.c.id == task_id)))
+            .mappings()
+            .one()
+        )
+    return dict(row)
 
-        # Both should use isoformat for consistent comparison
-        threshold = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-        stored = utc_now_str()
 
-        # Formats should be comparable
-        assert "T" in threshold
-        assert "T" in stored
-        assert datetime.fromisoformat(threshold).tzinfo is not None
-        assert datetime.fromisoformat(stored).tzinfo is not None
+async def _age_download(download_id: int, *, seconds: float) -> None:
+    old_timestamp = now_ms() - int(seconds * 1000)
+    async with transaction() as conn:
+        await conn.execute(
+            update(global_downloads)
+            .where(global_downloads.c.id == download_id)
+            .values(updated_at_ms=old_timestamp)
+        )
 
-    @pytest.mark.asyncio
-    async def test_skip_task_with_active_submit_lock(self, mock_state):
-        """Tasks with active submit lock should be skipped."""
-        from asyncio import Lock
 
-        task_id = 123
-        active_lock = Lock()
-        await active_lock.acquire()  # Lock is held
+@pytest.mark.asyncio
+async def test_stale_queued_download_with_held_submit_lock_remains_queued(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="cleanup_lock")
+    download = await create_global_download_v0(
+        resource_key="cleanup:lock",
+        status="queued",
+        aria2_gid=None,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="queued",
+    )
+    await _age_download(download["id"], seconds=STALE_QUEUED_GRACE_SECONDS + 1)
 
-        mock_state.task_submit_locks = {task_id: active_lock}
+    submit_lock = Lock()
+    await submit_lock.acquire()
+    state = AppState()
+    state.task_submit_locks[download["id"]] = submit_lock
+    try:
+        await _cleanup_stale_queued_downloads_v0(state)
+    finally:
+        submit_lock.release()
 
-        # The cleanup should skip this task
-        assert active_lock.locked()
-        assert mock_state.task_submit_locks.get(task_id) is not None
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
 
-        active_lock.release()
+    assert updated["status"] == "queued"
+    assert updated_task["status"] == "queued"
 
-    @pytest.mark.asyncio
-    async def test_stale_threshold_calculation(self):
-        """Verify 5-minute grace period calculation."""
-        from app.aria2.sync import STALE_QUEUED_GRACE_SECONDS
 
-        assert STALE_QUEUED_GRACE_SECONDS == 300.0  # 5 minutes
+@pytest.mark.asyncio
+async def test_stale_queued_download_cleanup_broadcasts_after_failure(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="cleanup_broadcast")
+    download = await create_global_download_v0(
+        resource_key="cleanup:broadcast",
+        status="queued",
+        aria2_gid=None,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="queued",
+    )
+    await _age_download(download["id"], seconds=STALE_QUEUED_GRACE_SECONDS + 1)
+    state = AppState()
+    ws = AsyncMock()
+    state.ws_connections[user["id"]] = {ws}
 
-        now = datetime.now(timezone.utc)
-        threshold = now - timedelta(seconds=STALE_QUEUED_GRACE_SECONDS)
+    await _cleanup_stale_queued_downloads_v0(state)
 
-        # Task updated 6 minutes ago should be stale
-        old_task_time = (now - timedelta(minutes=6)).isoformat()
-        assert old_task_time < threshold.isoformat()
+    updated = await _fetch_global(download["id"])
+    assert updated["status"] == "failed"
+    ws.send_json.assert_awaited_once()
+    payload = ws.send_json.await_args.args[0]
+    assert payload["type"] == "task_update"
+    assert payload["task"]["id"] == task["id"]
+    assert payload["task"]["status"] == "error"
 
-        # Task updated 4 minutes ago should NOT be stale
-        recent_task_time = (now - timedelta(minutes=4)).isoformat()
-        assert recent_task_time > threshold.isoformat()
 
-    @pytest.mark.asyncio
-    async def test_status_update_before_cleanup(self):
-        """Status must be updated before directory cleanup."""
-        # This test verifies the order: update DB -> cleanup dir
-        # If DB update fails, cleanup should NOT happen
-        status_updated = False
-        cleanup_called = False
+@pytest.mark.asyncio
+async def test_recent_queued_download_without_gid_remains_queued(temp_db: str) -> None:
+    user = await create_user_v0(username="cleanup_recent")
+    download = await create_global_download_v0(
+        resource_key="cleanup:recent",
+        status="queued",
+        aria2_gid=None,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="queued",
+    )
+    await _age_download(download["id"], seconds=STALE_QUEUED_GRACE_SECONDS - 1)
 
-        async def mock_db_update():
-            nonlocal status_updated
-            status_updated = True
-            return True
+    await _cleanup_stale_queued_downloads_v0(AppState())
 
-        async def mock_cleanup():
-            nonlocal cleanup_called
-            # Cleanup should only happen after status update
-            assert status_updated, "Cleanup called before status update!"
-            cleanup_called = True
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
 
-        await mock_db_update()
-        if status_updated:
-            await mock_cleanup()
-
-        assert status_updated
-        assert cleanup_called
+    assert updated["status"] == "queued"
+    assert updated_task["status"] == "queued"

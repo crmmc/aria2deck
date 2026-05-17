@@ -1,31 +1,32 @@
-"""aria2 任务同步模块（共享下载架构）
+"""aria2 polling sync for the v0 shared download model."""
 
-轮询 aria2 状态，作为 WebSocket 事件监听的补充机制。
-主要功能：
-- 同步任务进度
-- 检测大小变化（HTTP 下载）
-- 清理孤立任务
-"""
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 from fastapi import WebSocket
-from sqlalchemy import case, update
-from sqlmodel import select
+from sqlalchemy import select, update
 
 from app.aria2.client import Aria2Client
-from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts, get_representative_owner_id
 from app.aria2.errors import parse_error_message
+from app.aria2.failed_task_cleanup import (
+    cleanup_failed_task_artifacts,
+    get_representative_owner_id,
+)
 from app.core.security import sanitize_string
 from app.core.state import AppState
-from app.database import get_session
-from app.models import DownloadTask, User, UserTaskSubscription, utc_now_str
+from app.db.engine import transaction
+from app.db.schema import global_downloads, user_tasks
+from app.repositories.downloads import (
+    ACTIVE_USER_TASK_STATUSES,
+    mark_global_download_failed,
+    now_ms,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +34,10 @@ logger = logging.getLogger(__name__)
 ORPHAN_GRACE_SECONDS = 60.0
 ORPHAN_CLEANUP_BATCH = 50
 COMPLETE_REPAIR_GRACE_SECONDS = 30.0
-STALE_QUEUED_GRACE_SECONDS = 300.0  # 5 minutes grace for queued tasks without GID
-SYNC_TRACKED_TASK_STATUSES = ("queued", "active", "waiting", "paused")
+STALE_QUEUED_GRACE_SECONDS = 300.0
 MISSING_GID_KEYWORDS = ("gid", "not found")
-# 额外的 GID 不存在错误模式
 MISSING_GID_PATTERNS = (
-    "gid#",  # aria2 错误格式: "GID#xxx is not found"
+    "gid#",
     "no such download",
     "unknown gid",
     "invalid gid",
@@ -50,49 +49,51 @@ TRANSIENT_RPC_ERROR_KEYWORDS = (
     "timed out",
 )
 
+ARIA2_TO_V0_STATUS = {
+    "active": "active",
+    "waiting": "waiting",
+    "paused": "paused",
+    "complete": "completed",
+    "error": "failed",
+    "removed": "failed",
+}
+V0_SYNC_TRACKED_STATUSES = ACTIVE_USER_TASK_STATUSES
+
 
 def _sanitize_path(file_path: str | None, task_id: int) -> str | None:
-    """将绝对路径转换为文件名"""
+    """Convert an absolute aria2 path to a safe display filename."""
     if not file_path:
         return None
 
     try:
         abs_path = Path(file_path)
         return abs_path.name if abs_path.name else file_path
-    except (ValueError, OSError) as e:
-        logger.debug(f"Failed to sanitize path for task {task_id}: {e}")
+    except (ValueError, OSError) as exc:
+        logger.debug("Failed to sanitize path for download %s: %s", task_id, exc)
         return file_path
 
 
-def _map_status(status: dict, task_id: int) -> dict:
-    """映射 aria2 状态到数据库字段"""
-    raw_name = (
-        status.get("bittorrent", {}).get("info", {}).get("name")
-        or status.get("files", [{}])[0].get("path")
-    )
+def _safe_int(value: str | int | None, default: int = 0) -> int:
+    try:
+        return int(value) if value is not None else default
+    except (ValueError, TypeError):
+        return default
 
-    sanitized_name = _sanitize_path(raw_name, task_id)
-    sanitized_name = sanitize_string(sanitized_name)
 
+def _map_v0_status(status: dict[str, Any], download_id: int) -> dict[str, Any]:
+    raw_name = status.get("bittorrent", {}).get("info", {}).get("name") or (
+        status.get("files") or [{}]
+    )[0].get("path")
+    raw_status = str(status.get("status") or "unknown")
     raw_error = status.get("errorMessage")
     error_display = parse_error_message(raw_error) if raw_error else None
-    error_display = sanitize_string(error_display) if error_display else None
-
-    def safe_int(val: str | int | None, default: int = 0) -> int:
-        try:
-            return int(val) if val is not None else default
-        except (ValueError, TypeError):
-            return default
-
     return {
-        "status": status.get("status", "unknown"),
-        "name": sanitized_name,
-        "total_length": safe_int(status.get("totalLength")),
-        "completed_length": safe_int(status.get("completedLength")),
-        "download_speed": safe_int(status.get("downloadSpeed")),
-        "upload_speed": safe_int(status.get("uploadSpeed")),
-        "error": raw_error,
-        "error_display": error_display,
+        "status": ARIA2_TO_V0_STATUS.get(raw_status, "active"),
+        "raw_status": raw_status,
+        "display_name": sanitize_string(_sanitize_path(raw_name, download_id)),
+        "total_bytes": _safe_int(status.get("totalLength")),
+        "completed_bytes": _safe_int(status.get("completedLength")),
+        "error_message": sanitize_string(error_display or raw_error),
     }
 
 
@@ -102,10 +103,8 @@ def _exception_message(exc: Exception) -> str:
 
 def _is_missing_gid_error(exc: Exception) -> bool:
     message = _exception_message(exc)
-    # 原有检查：同时包含 "gid" 和 "not found"
     if all(keyword in message for keyword in MISSING_GID_KEYWORDS):
         return True
-    # 额外模式检查
     return any(pattern in message for pattern in MISSING_GID_PATTERNS)
 
 
@@ -116,285 +115,330 @@ def _is_transient_rpc_error(exc: Exception) -> bool:
     return any(keyword in message for keyword in TRANSIENT_RPC_ERROR_KEYWORDS)
 
 
-async def _update_task(task_id: int, values: dict) -> None:
-    """更新任务字段"""
-    async with get_session() as db:
-        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-        task = result.first()
-        if task:
-            for key, value in values.items():
-                setattr(task, key, value)
-            task.updated_at = utc_now_str()
-            db.add(task)
+async def _list_v0_downloads() -> list[dict[str, Any]]:
+    async with transaction() as conn:
+        rows = (await conn.execute(select(global_downloads))).mappings().all()
+    return [dict(row) for row in rows]
+
+
+async def _list_v0_tracked_downloads() -> list[dict[str, Any]]:
+    async with transaction() as conn:
+        rows = (
+            (
+                await conn.execute(
+                    select(global_downloads).where(
+                        global_downloads.c.aria2_gid.is_not(None),
+                        global_downloads.c.status.in_(V0_SYNC_TRACKED_STATUSES),
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [dict(row) for row in rows]
+
+
+async def _broadcast_download_update(state: AppState, download_id: int) -> None:
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+
+    await broadcast_task_update_to_subscribers(state, download_id)
+
+
+async def _fail_v0_download_and_cleanup(
+    *,
+    state: AppState,
+    client: Aria2Client,
+    download_id: int,
+    gid: str | None,
+    message: str,
+    error_code: str | None,
+    log_prefix: str,
+) -> None:
+    from app.core.state import get_task_complete_lock
+
+    completion_lock = await get_task_complete_lock(state, download_id)
+    async with completion_lock:
+        owner_id = await get_representative_owner_id(download_id)
+        failed_download = await mark_global_download_failed(
+            download_id,
+            message=message,
+            error_code=error_code,
+            clear_gid=True,
+        )
+        if failed_download is None or failed_download["status"] != "failed":
+            return
+
+        await cleanup_failed_task_artifacts(
+            client=client,
+            task_id=download_id,
+            gid=gid,
+            owner_id=owner_id,
+            log_prefix=log_prefix,
+        )
+        await _broadcast_download_update(state, download_id)
+
+
+async def _guarded_update_global_download(
+    download_id: int,
+    values: dict[str, Any],
+) -> bool:
+    if not values:
+        return False
+
+    row_values = {**values}
+    row_values.setdefault("updated_at_ms", now_ms())
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                update(global_downloads)
+                .where(
+                    global_downloads.c.id == download_id,
+                    global_downloads.c.status.in_(V0_SYNC_TRACKED_STATUSES),
+                    global_downloads.c.completed_file_id.is_(None),
+                )
+                .values(**row_values)
+                .returning(global_downloads.c.id)
+            )
+        ).first()
+    return row is not None
+
+
+async def _update_active_user_task_status(
+    download_id: int,
+    status: str,
+) -> None:
+    async with transaction() as conn:
+        await conn.execute(
+            update(user_tasks)
+            .where(
+                user_tasks.c.global_download_id == download_id,
+                user_tasks.c.status.in_(V0_SYNC_TRACKED_STATUSES),
+            )
+            .values(status=status, updated_at_ms=now_ms())
+        )
+
+
+async def _update_v0_download_from_aria2(
+    *,
+    state: AppState,
+    client: Aria2Client,
+    download: dict[str, Any],
+    status: dict[str, Any],
+) -> None:
+    download_id = int(download["id"])
+    mapped = _map_v0_status(status, download_id)
+    gid = str(download.get("aria2_gid") or "")
+    followed_by = status.get("followedBy") or []
+
+    if mapped["raw_status"] == "complete" and followed_by:
+        new_gid = str(followed_by[0])
+        logger.info(
+            "[Sync] Metadata download complete, updating GID: %s -> %s", gid, new_gid
+        )
+        changed = await _guarded_update_global_download(
+            download_id,
+            {
+                "aria2_gid": new_gid,
+                "status": "active",
+            },
+        )
+        if not changed:
+            return
+
+        await _update_active_user_task_status(download_id, "active")
+        if gid != new_gid:
+            try:
+                await client.remove_download_result(gid)
+            except Exception as exc:
+                logger.debug(
+                    "[Sync] Failed to remove metadata result gid=%s error=%s", gid, exc
+                )
+        await _broadcast_download_update(state, download_id)
+        return
+
+    if mapped["raw_status"] == "complete":
+        from app.aria2.listener import handle_v0_download_complete
+
+        completed = await handle_v0_download_complete(
+            state=state,
+            client=client,
+            download=download,
+            aria2_status=status,
+            completion_gid=gid,
+            log_prefix="[Sync]",
+        )
+        if completed:
+            await _broadcast_download_update(state, download_id)
+        return
+
+    if mapped["status"] == "failed":
+        message = mapped["error_message"] or (
+            "外部取消（管理员/外部客户端）"
+            if mapped["raw_status"] == "removed"
+            else "后端错误"
+        )
+        logger.warning(
+            "[Sync] v0 download failed download_id=%s gid=%s error=%s",
+            download_id,
+            gid,
+            message,
+        )
+        await _fail_v0_download_and_cleanup(
+            state=state,
+            client=client,
+            download_id=download_id,
+            gid=gid,
+            message=message,
+            error_code=str(status.get("errorCode") or mapped["raw_status"]),
+            log_prefix="[Sync]",
+        )
+        return
+
+    timestamp = now_ms()
+    global_values: dict[str, Any] = {
+        "status": mapped["status"],
+        "total_bytes": mapped["total_bytes"],
+        "completed_bytes": mapped["completed_bytes"],
+        "updated_at_ms": timestamp,
+    }
+    if mapped["display_name"]:
+        global_values["display_name"] = mapped["display_name"]
+
+    changed = await _guarded_update_global_download(download_id, global_values)
+    if not changed:
+        return
+
+    await _update_active_user_task_status(download_id, mapped["status"])
+    await _broadcast_download_update(state, download_id)
+
+
+async def _repair_inconsistent_completed_downloads_v0() -> None:
+    threshold_ms = now_ms() - int(COMPLETE_REPAIR_GRACE_SECONDS * 1000)
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                select(global_downloads.c.id).where(
+                    global_downloads.c.status == "completed",
+                    global_downloads.c.completed_file_id.is_(None),
+                    global_downloads.c.updated_at_ms < threshold_ms,
+                )
+            )
+        ).all()
+
+    for row in rows:
+        download_id = int(row[0])
+        logger.warning(
+            "[Sync] Completed v0 download was not indexed, failing id=%s", download_id
+        )
+        await mark_global_download_failed(
+            download_id,
+            message="下载完成但文件未入库",
+            error_code="completion_not_indexed",
+        )
+
+
+async def _cleanup_stale_queued_downloads_v0(
+    state: AppState,
+    grace_seconds: float = STALE_QUEUED_GRACE_SECONDS,
+) -> None:
+    threshold_ms = now_ms() - int(grace_seconds * 1000)
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                select(global_downloads.c.id).where(
+                    global_downloads.c.status == "queued",
+                    global_downloads.c.aria2_gid.is_(None),
+                    global_downloads.c.updated_at_ms < threshold_ms,
+                )
+            )
+        ).all()
+
+    for row in rows:
+        download_id = int(row[0])
+        async with state.lock:
+            submit_lock = state.task_submit_locks.get(download_id)
+            locked = submit_lock is not None and submit_lock.locked()
+        if locked:
+            logger.debug(
+                "[Sync] skipped stale v0 queued download_id=%s reason=submit_in_progress",
+                download_id,
+            )
+            continue
+
+        logger.warning("[Sync] Cleaning stale v0 queued download_id=%s", download_id)
+        failed_download = await mark_global_download_failed(
+            download_id,
+            message="任务提交超时，已自动清理",
+            error_code="submit_timeout",
+        )
+        if failed_download is not None and failed_download["status"] == "failed":
+            await _broadcast_download_update(state, download_id)
 
 
 async def sync_tasks(
     state: AppState,
     interval: float,
 ) -> None:
-    """同步 aria2 任务状态到数据库
-
-    作为 WebSocket 事件监听的补充机制。
-    """
-    from app.core.state import get_aria2_client, get_user_space_lock
-    from app.routers.config import get_max_task_size
-    from app.routers.tasks import broadcast_task_update_to_subscribers
-    from app.services.storage import get_user_space_info
+    """Synchronize aria2 task state into v0 tables."""
+    from app.core.state import get_aria2_client
 
     orphan_seen_at: dict[str, float] = {}
 
     while True:
-        await _repair_inconsistent_completed_tasks(state)
+        await _repair_inconsistent_completed_downloads_v0()
         client = get_aria2_client(state=state)
 
-        async with get_session() as db:
-            result = await db.exec(select(DownloadTask))
-            tracked_tasks = result.all()
-        tracked_gids = {t.gid for t in tracked_tasks if t.gid}
+        tracked_downloads = await _list_v0_downloads()
+        tracked_gids = {
+            str(row["aria2_gid"]) for row in tracked_downloads if row.get("aria2_gid")
+        }
+        downloads = await _list_v0_tracked_downloads()
 
-        # Get all active tasks
-        async with get_session() as db:
-            result = await db.exec(
-                select(DownloadTask).where(
-                    DownloadTask.gid.isnot(None),  # type: ignore[union-attr]
-                    DownloadTask.status.in_(SYNC_TRACKED_TASK_STATUSES),  # type: ignore[attr-defined]
-                )
-            )
-            tasks = result.all()
-
-        async def fetch_and_update(task: DownloadTask) -> None:
-            gid = task.gid
+        async def fetch_and_update(download: dict[str, Any]) -> None:
+            gid = str(download.get("aria2_gid") or "")
             if not gid:
                 return
-            task_id = task.id
-            if task_id is None:
-                logger.warning(f"[Sync] 任务缺少 task_id，跳过 gid={gid}")
-                return
+            download_id = int(download["id"])
 
             try:
                 status = await client.tell_status(gid)
             except Exception as exc:
                 if _is_missing_gid_error(exc):
-                    logger.error(f"[Sync] GID {gid} 不存在，标记任务失败并清理: {exc}")
-                    await _update_task(
-                        task_id,
-                        {
-                            "status": "error",
-                            "gid": None,
-                            "error": str(exc),
-                            "error_display": "后端错误",
-                        }
+                    logger.error(
+                        "[Sync] GID %s missing, failing v0 download: %s", gid, exc
                     )
-                    await _handle_task_stop_or_error_sync(task_id, "后端错误")
-                    owner_id = await get_representative_owner_id(task_id)
-                    await cleanup_failed_task_artifacts(
+                    await _fail_v0_download_and_cleanup(
+                        state=state,
                         client=client,
-                        task_id=task_id,
+                        download_id=download_id,
                         gid=gid,
-                        owner_id=owner_id,
+                        message="后端错误",
+                        error_code="missing_gid",
                         log_prefix="[Sync]",
                     )
-                    await broadcast_task_update_to_subscribers(state, task_id)
                     return
 
                 level = logger.warning if _is_transient_rpc_error(exc) else logger.error
-                level("[Sync] 获取 GID %s 状态失败，保留当前状态等待下轮重试: %s", gid, exc)
+                level("[Sync] Failed to fetch GID %s status, retry later: %s", gid, exc)
                 return
 
-            aria2_status = status.get("status")
-            total_length = int(status.get("totalLength", 0))
+            await _update_v0_download_from_aria2(
+                state=state,
+                client=client,
+                download=download,
+                status=status,
+            )
 
-            # Check size when it becomes known or grows (e.g. BT metadata -> real payload)
-            if aria2_status == "active" and total_length > 0 and (task.total_length or 0) < total_length:
-                # Check system limit
-                max_task_size = get_max_task_size()
-                if total_length > max_task_size:
-                    logger.warning(
-                        f"[Sync] 任务 {task.id} 大小 {total_length / 1024**3:.2f} GB "
-                        f"超过系统限制，终止任务"
-                    )
-                    await _cancel_task_sync(
-                        client, state, task, status,
-                        "已取消：大小超过系统限制"
-                    )
-                    return
-
-                # Check all subscribers' space
-                async with get_session() as db:
-                    result = await db.exec(
-                        select(UserTaskSubscription, User)
-                        .join(User, UserTaskSubscription.owner_id == User.id)  # type: ignore[arg-type]
-                        .where(
-                            UserTaskSubscription.task_id == task.id,
-                            UserTaskSubscription.status == "pending",
-                        )
-                    )
-                    subscriptions = result.all()
-
-                valid_subscribers = []
-
-                for sub, user in subscriptions:
-                    if user.id is None:
-                        logger.warning(f"[Sync] 用户缺少 user_id，跳过订阅 sub_id={sub.id}")
-                        continue
-                    user_id = user.id
-                    user_lock = await get_user_space_lock(state, user_id)
-                    async with user_lock:
-                        space_info = await get_user_space_info(user_id, user.quota)
-                        # Each user's space is independent, use available directly
-                        effective_available = space_info["available"]
-
-                        required_extra = max(total_length - (sub.frozen_space or 0), 0)
-                        if required_extra <= effective_available:
-                            # Use optimistic locking: only update if frozen_space < total_length
-                            # This allows BT followedBy to update from metadata size to real size
-                            async with get_session() as db:
-                                await db.execute(
-                                    update(UserTaskSubscription)
-                                    .where(
-                                        UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
-                                        UserTaskSubscription.frozen_space < total_length  # type: ignore[arg-type]
-                                    )
-                                    .values(frozen_space=total_length)
-                                )
-                            async with get_session() as db:
-                                refreshed = await db.exec(
-                                    select(UserTaskSubscription).where(
-                                        UserTaskSubscription.id == sub.id
-                                    )
-                                )
-                                current = refreshed.first()
-                                if current and current.status == "pending" and current.frozen_space > 0:
-                                    valid_subscribers.append((sub, user))
-                        else:
-                            # Mark subscription as failed atomically
-                            async with get_session() as db:
-                                await db.execute(
-                                    update(UserTaskSubscription)
-                                    .where(UserTaskSubscription.id == sub.id)  # type: ignore[arg-type]
-                                    .values(
-                                        status="failed",
-                                        error_display="用户配额空间不足",
-                                        frozen_space=0
-                                    )
-                                )
-
-                if not valid_subscribers:
-                    logger.warning(f"[Sync] 任务 {task.id} 没有有效订阅者，取消任务")
-                    await _cancel_task_sync(
-                        client, state, task, status,
-                        "所有订阅者空间不足"
-                    )
-                    return
-
-            # Update task status with atomic peak value updates
-            mapped = _map_status(status, task_id)
-            mapped_status = mapped["status"]
-            raw_error = mapped.get("error")
-            error_display = mapped.get("error_display")
-            completion_handler = None
-            if mapped_status == "complete":
-                from app.aria2.listener import _handle_task_complete
-
-                completion_handler = _handle_task_complete
-
-            # Handle removed tasks as external cancellations
-            if mapped_status == "removed":
-                mapped_status = "error"
-                error_display = "外部取消（管理员/外部客户端）"
-                if raw_error is None:
-                    raw_error = "removed"
-
-            # Log and normalize error display
-            if mapped_status == "error":
-                if raw_error:
-                    logger.error(f"[Sync] 任务 {task_id} 错误: {raw_error}")
-                if not error_display:
-                    error_display = "后端错误"
-
-                # Avoid overriding user-initiated cancellation
-                if task.error_display == "已取消":
-                    error_display = "已取消"
-                    if raw_error is None:
-                        raw_error = task.error
-
-                await _handle_task_stop_or_error_sync(task_id, error_display)
-
-            # Handle magnet link metadata completion
-            if mapped_status == "complete":
-                followed_by = status.get("followedBy", [])
-                if followed_by:
-                    new_gid = followed_by[0]
-                    logger.info(f"[Sync] 磁力链接元数据完成，更新 GID: {task.gid} -> {new_gid}")
-                    await _update_task(task_id, {"gid": new_gid})
-                    if gid != new_gid:
-                        try:
-                            await client.remove_download_result(gid)
-                        except Exception as exc:
-                            logger.debug(f"[Sync] 清理 metadata 任务结果失败 gid={gid} error={exc}")
-                    return
-
-            # Track peak values using SQL CASE for atomic conditional update
-            current_speed = mapped["download_speed"]
-            current_connections = int(status.get("connections", 0))
-
-            async with get_session() as db:
-                update_values = dict(
-                    status=mapped_status,
-                    name=mapped["name"],
-                    total_length=mapped["total_length"],
-                    completed_length=mapped["completed_length"],
-                    download_speed=mapped["download_speed"],
-                    upload_speed=mapped["upload_speed"],
-                    updated_at=utc_now_str(),
-                    # Atomic peak value update: only update if new value is greater
-                    peak_download_speed=case(
-                        (DownloadTask.peak_download_speed < current_speed, current_speed),
-                        else_=DownloadTask.peak_download_speed
-                    ),
-                    peak_connections=case(
-                        (DownloadTask.peak_connections < current_connections, current_connections),  # type: ignore[arg-type]
-                        else_=DownloadTask.peak_connections
-                    ),
-                )
-
-                if mapped_status == "error":
-                    update_values["error"] = raw_error
-                    update_values["error_display"] = error_display or "后端错误"
-                    update_values["gid"] = None
-
-                await db.execute(
-                    update(DownloadTask)
-                    .where(DownloadTask.id == task_id)  # type: ignore[arg-type]
-                    .values(**update_values)
-                )
-
-            if mapped_status == "error":
-                owner_id = await get_representative_owner_id(task_id)
-                await cleanup_failed_task_artifacts(
-                    client=client,
-                    task_id=task_id,
-                    gid=gid,
-                    owner_id=owner_id,
-                    log_prefix="[Sync]",
-                )
-
-            if completion_handler is not None:
-                await completion_handler(state, task_id, status)
-
-            # Broadcast update
-            await broadcast_task_update_to_subscribers(state, task_id)
-
-        # Process all tasks concurrently, 单任务失败不影响其他任务
         results = await asyncio.gather(
-            *[fetch_and_update(task) for task in tasks],
-            return_exceptions=True
+            *[fetch_and_update(download) for download in downloads],
+            return_exceptions=True,
         )
-        for i, result in enumerate(results):
+        for index, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.warning(
-                    "sync_tasks: 任务更新失败 task_id=%s error=%s",
-                    tasks[i].id, result
+                    "sync_tasks: v0 download update failed download_id=%s error=%s",
+                    downloads[index]["id"],
+                    result,
                 )
 
         await _cleanup_orphan_aria2_tasks(
@@ -404,94 +448,9 @@ async def sync_tasks(
             grace_seconds=ORPHAN_GRACE_SECONDS,
             max_actions=ORPHAN_CLEANUP_BATCH,
         )
-
-        await _cleanup_stale_queued_tasks(state=state)
+        await _cleanup_stale_queued_downloads_v0(state=state)
 
         await asyncio.sleep(interval)
-
-
-async def _cleanup_stale_queued_tasks(
-    state: AppState,
-    grace_seconds: float = STALE_QUEUED_GRACE_SECONDS,
-) -> None:
-    """清理长时间停留在 queued 且无 GID 的僵尸任务。
-
-    场景：任务创建后、RPC 调用前进程崩溃，导致目录已创建但 aria2 从未开始下载。
-    """
-    from datetime import timedelta
-
-    from app.routers.tasks import broadcast_task_update_to_subscribers
-    from app.services.storage import cleanup_task_download_dir
-
-    try:
-        threshold = datetime.now(timezone.utc) - timedelta(seconds=grace_seconds)
-        threshold_str = threshold.isoformat()  # Match utc_now_str() format
-
-        async with get_session() as db:
-            result = await db.exec(
-                select(DownloadTask).where(
-                    DownloadTask.status == "queued",
-                    DownloadTask.gid.is_(None),  # type: ignore[union-attr]
-                    DownloadTask.updated_at < threshold_str,
-                )
-            )
-            stale_tasks = result.all()
-
-        if not stale_tasks:
-            return
-
-        for task in stale_tasks:
-            task_id = task.id
-            if task_id is None:
-                continue
-
-            # Check if task is currently being submitted (lock held)
-            async with state.lock:
-                submit_lock = state.task_submit_locks.get(task_id)
-                if submit_lock is not None and submit_lock.locked():
-                    # Task is being submitted right now, skip cleanup
-                    logger.debug(
-                        f"[CLEANUP] skipped [Sync] task_id={task_id} reason=submit_in_progress"
-                    )
-                    continue
-
-            owner_id = await get_representative_owner_id(task_id)
-            logger.warning(
-                f"[CLEANUP] stale_queued [Sync] task_id={task_id} owner_id={owner_id} "
-                f"updated_at={task.updated_at} reason=no_gid_timeout"
-            )
-
-            # Mark as error
-            status_updated = False
-            async with get_session() as db:
-                db_task = await db.get(DownloadTask, task_id)
-                if db_task and db_task.status == "queued" and db_task.gid is None:
-                    db_task.status = "error"
-                    db_task.error = "任务提交超时，已自动清理"
-                    db_task.error_display = "提交超时"
-                    db_task.updated_at = utc_now_str()
-                    db.add(db_task)
-                    await db.commit()
-                    status_updated = True
-
-            if not status_updated:
-                # Task was modified by another process, skip cleanup
-                continue
-
-            # Cleanup directory (may be empty or not exist)
-            try:
-                await cleanup_task_download_dir(task_id)
-            except RuntimeError as exc:
-                logger.warning(
-                    f"[CLEANUP] fs_failed [Sync] task_id={task_id} owner_id={owner_id} "
-                    f"error={exc}"
-                )
-                # Continue to broadcast - task is already marked as error
-
-            await broadcast_task_update_to_subscribers(state, task_id)
-
-    except Exception as exc:
-        logger.warning(f"[Sync] 清理僵尸 queued 任务失败，跳过: {exc}")
 
 
 async def _cleanup_orphan_aria2_tasks(
@@ -501,18 +460,20 @@ async def _cleanup_orphan_aria2_tasks(
     grace_seconds: float,
     max_actions: int,
 ) -> None:
-    """清理 aria2 中无主任务（数据库不存在的 GID）。"""
+    """Clean aria2 tasks whose GIDs no longer exist in the database."""
     try:
         active = await client.tell_active()
         waiting = await client.tell_waiting(0, 1000)
         stopped = await client.tell_stopped(0, 1000)
     except Exception as exc:
-        logger.warning(f"[Sync] 获取 aria2 全量任务失败，跳过孤立任务清理: {exc}")
+        logger.warning(
+            "[Sync] Failed to list aria2 tasks, skipping orphan cleanup: %s", exc
+        )
         return
 
     now = time.monotonic()
 
-    def _extract_gids(rows: list[dict]) -> list[str]:
+    def _extract_gids(rows: list[dict[str, Any]]) -> list[str]:
         gids: list[str] = []
         for row in rows:
             gid = row.get("gid")
@@ -537,11 +498,10 @@ async def _cleanup_orphan_aria2_tasks(
     for gid in current_orphan_gids:
         if gid not in orphan_seen_at:
             orphan_seen_at[gid] = now
-            logger.warning(f"[Sync] 发现 aria2 无主任务 gid={gid}")
+            logger.warning("[Sync] Found orphan aria2 task gid=%s", gid)
 
     actions = 0
 
-    # Stopped orphan tasks: safe to cleanup immediately.
     for gid in stopped_gids:
         if gid in tracked_gids:
             continue
@@ -551,11 +511,14 @@ async def _cleanup_orphan_aria2_tasks(
             await client.remove_download_result(gid)
             orphan_seen_at.pop(gid, None)
             actions += 1
-            logger.info(f"[Sync] 已清理无主 stopped 任务 gid={gid}")
+            logger.info("[Sync] Removed orphan stopped task gid=%s", gid)
         except Exception as exc:
-            logger.debug(f"[Sync] 清理无主 stopped 任务失败 gid={gid} error={exc}")
+            logger.debug(
+                "[Sync] Failed to remove orphan stopped result gid=%s error=%s",
+                gid,
+                exc,
+            )
 
-    # Active/waiting orphan tasks: cleanup only after grace period.
     for gid in [*active_gids, *waiting_gids]:
         if gid in tracked_gids:
             continue
@@ -569,241 +532,21 @@ async def _cleanup_orphan_aria2_tasks(
         try:
             await client.force_remove(gid)
         except Exception as exc:
-            logger.debug(f"[Sync] force_remove 无主任务失败 gid={gid} error={exc}")
+            logger.debug(
+                "[Sync] Failed to force remove orphan gid=%s error=%s", gid, exc
+            )
 
         try:
             await client.remove_download_result(gid)
         except Exception as exc:
-            logger.debug(f"[Sync] remove_download_result 无主任务失败 gid={gid} error={exc}")
+            logger.debug(
+                "[Sync] Failed to remove orphan result gid=%s error=%s", gid, exc
+            )
 
         orphan_seen_at.pop(gid, None)
         actions += 1
-        logger.warning(f"[Sync] 已清理无主运行任务 gid={gid}")
+        logger.warning("[Sync] Removed orphan running task gid=%s", gid)
 
-
-async def _repair_inconsistent_completed_tasks(state: AppState) -> None:
-    """修复完成状态但未落库为用户文件/历史的脏任务。"""
-    from app.core.state import get_aria2_client
-    from app.routers.tasks import broadcast_task_update_to_subscribers
-
-    client = get_aria2_client(state=state)
-
-    async with get_session() as db:
-        result = await db.exec(
-            select(DownloadTask).where(
-                DownloadTask.status == "complete",
-                DownloadTask.stored_file_id.is_(None),  # type: ignore[union-attr]
-            )
-        )
-        tasks = result.all()
-
-    if not tasks:
-        return
-
-    logger.warning(f"[Sync] 检测到 {len(tasks)} 个完成但未落库任务，开始修复")
-    now = datetime.now(timezone.utc)
-    for task in tasks:
-        task_id = task.id
-        if task_id is None:
-            continue
-
-        # Grace period: avoid racing with in-flight completion handler.
-        try:
-            updated_at = datetime.fromisoformat(task.updated_at)
-            if updated_at.tzinfo is None:
-                updated_at = updated_at.replace(tzinfo=timezone.utc)
-            age_seconds = (now - updated_at).total_seconds()
-            if age_seconds < COMPLETE_REPAIR_GRACE_SECONDS:
-                logger.debug(
-                    f"[Sync] 跳过最近完成任务修复 task_id={task_id} age={age_seconds:.1f}s"
-                )
-                continue
-        except (ValueError, TypeError) as e:
-            # Fallback to repair when timestamp parsing fails.
-            logger.warning("Failed to parse timestamp for task_id=%s: %s", task_id, e)
-
-        reason = "下载完成但文件未入库"
-        cleanup_gid = task.gid
-        async with get_session() as db:
-            update_result = await db.execute(
-                update(DownloadTask)
-                .where(
-                    DownloadTask.id == task_id,  # type: ignore[arg-type]
-                    DownloadTask.stored_file_id.is_(None),  # type: ignore[union-attr]
-                )
-                .values(
-                    status="error",
-                    gid=None,
-                    error=reason,
-                    error_display=reason,
-                    updated_at=utc_now_str(),
-                )
-            )
-            if update_result.rowcount == 0:  # type: ignore[attr-defined]
-                logger.info(f"[Sync] 任务 {task_id} 已被 listener 处理，跳过修复")
-                continue
-        await _handle_task_stop_or_error_sync(task_id, reason)
-        owner_id = await get_representative_owner_id(task_id)
-        await cleanup_failed_task_artifacts(
-            client=client,
-            task_id=task_id,
-            gid=cleanup_gid,
-            owner_id=owner_id,
-            log_prefix="[Sync]",
-        )
-        await broadcast_task_update_to_subscribers(state, task_id)
-
-
-async def _cancel_task_sync(
-    client: Aria2Client,
-    state: AppState,
-    task: DownloadTask,
-    aria2_status: dict,
-    error_message: str,
-) -> None:
-    """取消任务（sync 版本）"""
-    from app.routers.tasks import broadcast_task_update_to_subscribers
-
-    gid = task.gid
-    task_id = task.id
-    if task_id is None:
-        logger.warning(f"[Sync] 取消任务缺少 task_id，跳过 gid={gid}")
-        return
-    if not gid:
-        logger.warning(f"[Sync] 取消任务缺少 gid，task_id={task_id}")
-        return
-
-    # Update task status
-    async with get_session() as db:
-        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-        db_task = result.first()
-        if db_task:
-            db_task.status = "error"
-            db_task.gid = None
-            db_task.error_display = error_message
-            db_task.download_speed = 0
-            db_task.upload_speed = 0
-            db_task.updated_at = utc_now_str()
-            if aria2_status:
-                db_task.name = (
-                    aria2_status.get("bittorrent", {}).get("info", {}).get("name")
-                    or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
-                    or db_task.name
-                )
-                db_task.total_length = int(aria2_status.get("totalLength", 0))
-            db.add(db_task)
-
-    # Mark all pending subscriptions as failed and record history
-    async with get_session() as db:
-        sub_result = await db.exec(
-            select(UserTaskSubscription).where(
-                UserTaskSubscription.task_id == task_id,
-                UserTaskSubscription.status == "pending",
-            )
-        )
-        subscriptions = sub_result.all()
-
-        for sub in subscriptions:
-            sub.status = "failed"
-            sub.error_display = error_message
-            sub.frozen_space = 0
-            db.add(sub)
-
-    # Record history for each failed subscription
-    from app.services.history import add_task_history
-    task_name = (
-        aria2_status.get("bittorrent", {}).get("info", {}).get("name")
-        or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
-        or task.name
-        or "未知任务"
-    ) if aria2_status else (task.name or "未知任务")
-
-    for sub in subscriptions:
-        await add_task_history(
-            owner_id=sub.owner_id,
-            task_name=task_name,
-            result="failed",
-            reason=error_message,
-            uri=task.uri,
-            total_length=int(aria2_status.get("totalLength", 0)) if aria2_status else task.total_length,
-            created_at=sub.created_at,
-        )
-
-    # Clean up via unified entry point
-    owner_id = await get_representative_owner_id(task_id)
-    await cleanup_failed_task_artifacts(
-        client=client,
-        task_id=task_id,
-        gid=gid,
-        owner_id=owner_id,
-        log_prefix="[Sync]",
-        skip_status_check=True,
-    )
-
-    # Broadcast update
-    await broadcast_task_update_to_subscribers(state, task_id)
-
-
-async def _handle_task_stop_or_error_sync(
-    task_id: int,
-    error_display: str | None,
-) -> None:
-    """同步路径处理任务停止/错误：释放冻结空间、标记订阅失败、写入历史记录。"""
-    from app.services.history import add_task_history
-
-    message = error_display or "后端错误"
-
-    async with get_session() as db:
-        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-        task = result.first()
-
-    task_name = (task.name or "未知任务") if task else "未知任务"
-    task_uri = task.uri if task else None
-    task_total_length = task.total_length if task else 0
-
-    updated_subs: list[UserTaskSubscription] = []
-    async with get_session() as db:
-        sub_result = await db.exec(
-            select(UserTaskSubscription).where(
-                UserTaskSubscription.task_id == task_id,
-                UserTaskSubscription.status == "pending",
-            )
-        )
-        subscriptions = sub_result.all()
-
-        # 只对实际更新成功的订阅写历史（防止与 listener.py 并发重复写）
-        for sub in subscriptions:
-            result = await db.execute(
-                update(UserTaskSubscription)
-                .where(
-                    UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
-                    UserTaskSubscription.status == "pending",  # type: ignore[arg-type]
-                )
-                .values(
-                    status="failed",
-                    error_display=message,
-                    frozen_space=0,
-                )
-            )
-            if result.rowcount > 0:  # type: ignore[union-attr]
-                updated_subs.append(sub)
-
-    for sub in updated_subs:
-        await add_task_history(
-            owner_id=sub.owner_id,
-            task_name=task_name,
-            result="failed",
-            reason=message,
-            uri=task_uri,
-            total_length=task_total_length,
-            created_at=sub.created_at,
-        )
-
-    if updated_subs:
-        logger.info(f"[Sync] 任务 {task_id} 错误/停止，释放了 {len(updated_subs)} 个订阅的冻结空间")
-
-
-# WebSocket helpers
 
 async def register_ws(state: AppState, user_id: int, ws: WebSocket) -> None:
     async with state.lock:
@@ -817,20 +560,27 @@ async def unregister_ws(state: AppState, user_id: int, ws: WebSocket) -> None:
             sockets.discard(ws)
 
 
-async def broadcast_notification(state: AppState, user_id: int, message: str, level: str = "info") -> None:
+async def broadcast_notification(
+    state: AppState,
+    user_id: int,
+    message: str,
+    level: str = "info",
+) -> None:
     async with state.lock:
         sockets = list(state.ws_connections.get(user_id, set()))
-    
+
     notification = {"type": "notification", "message": message, "level": level}
     failed_sockets = []
-    
+
     for ws in sockets:
         try:
             await ws.send_json(notification)
         except Exception as exc:
-            logger.debug(f"[Sync] 通知发送失败 user_id={user_id} error={exc}")
+            logger.debug(
+                "[Sync] Notification send failed user_id=%s error=%s", user_id, exc
+            )
             failed_sockets.append(ws)
-    
+
     if failed_sockets:
         async with state.lock:
             user_sockets = state.ws_connections.get(user_id)

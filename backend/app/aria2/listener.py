@@ -1,13 +1,5 @@
-"""aria2 WebSocket 事件监听器（共享下载架构）
+"""aria2 WebSocket event listener for the v0 shared download model."""
 
-通过 WebSocket 连接 aria2，订阅事件通知，实现毫秒级响应。
-与轮询机制 (sync_tasks) 并行运行，事件驱动为主、轮询为辅。
-
-关键特性：
-- 自动重连：指数退避 + 抖动算法 (1s -> 60s max, +/- 20% jitter)
-- 共享下载：处理多用户订阅同一任务的场景
-- 空间检查：磁力链接解析后检查订阅者空间
-"""
 from __future__ import annotations
 
 import asyncio
@@ -18,22 +10,31 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
+from sqlalchemy import update
 
-from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
+from app.aria2.failed_task_cleanup import (
+    cleanup_failed_task_artifacts,
+    get_representative_owner_id,
+)
+from app.db.engine import transaction
+from app.db.schema import global_downloads, user_tasks
+from app.repositories.downloads import (
+    ACTIVE_USER_TASK_STATUSES,
+    get_global_download_by_gid,
+    mark_global_download_failed,
+    now_ms,
+    update_global_download,
+)
+from app.services.download_service import complete_global_download
 
 if TYPE_CHECKING:
     from app.aria2.client import Aria2Client
     from app.core.state import AppState
-    from app.models import DownloadTask
-
-from app.aria2.failed_task_cleanup import get_representative_owner_id
 
 logger = logging.getLogger(__name__)
 
-# 追踪正在运行的事件处理任务
 _event_tasks: set[asyncio.Task[None]] = set()
 
-# 事件方法到内部事件名的映射
 EVENT_MAP = {
     "aria2.onDownloadStart": "start",
     "aria2.onDownloadPause": "pause",
@@ -43,19 +44,15 @@ EVENT_MAP = {
     "aria2.onBtDownloadComplete": "bt_complete",
 }
 
-# 重连参数默认值
 RECONNECT_BASE_DELAY = 1.0
 COMPLETE_SOURCE_RETRY_COUNT = 5
 COMPLETE_SOURCE_RETRY_INTERVAL = 1.0
 
 
 def _http_to_ws_url(http_url: str) -> str:
-    """将 HTTP RPC URL 转换为 WebSocket URL"""
+    """Convert an HTTP RPC URL to a WebSocket URL."""
     parsed = urlparse(http_url)
-    if parsed.scheme == "https":
-        ws_scheme = "wss"
-    else:
-        ws_scheme = "ws"
+    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
     return urlunparse((ws_scheme, parsed.netloc, parsed.path, "", "", ""))
 
 
@@ -65,7 +62,7 @@ def _calculate_backoff(
     jitter: float | None = None,
     factor: float | None = None,
 ) -> float:
-    """计算指数退避延迟，带抖动"""
+    """Calculate exponential reconnect backoff with jitter."""
     from app.routers.config import (
         get_ws_reconnect_factor,
         get_ws_reconnect_jitter,
@@ -79,28 +76,28 @@ def _calculate_backoff(
     if factor is None:
         factor = get_ws_reconnect_factor()
 
-    base_delay = min(RECONNECT_BASE_DELAY * (factor ** attempt), max_delay)
+    base_delay = min(RECONNECT_BASE_DELAY * (factor**attempt), max_delay)
     jitter_offset = base_delay * jitter * (2 * random.random() - 1)
     return base_delay + jitter_offset
 
 
 def _list_task_dir_entries(task_dir: Path) -> list[Path]:
-    """列出任务目录内的真实载荷条目，忽略 aria2 控制文件。"""
+    """List payload entries in a task directory, ignoring aria2 control files."""
     if not task_dir.exists() or not task_dir.is_dir():
         return []
     try:
         return [p for p in task_dir.iterdir() if not p.name.endswith(".aria2")]
-    except OSError as e:
-        logger.error(f"Failed to list task directory {task_dir}: {e}")
+    except OSError as exc:
+        logger.error("Failed to list task directory %s: %s", task_dir, exc)
         return []
 
 
 def _resolve_complete_source_path(
     task_dir: Path,
-    files: list[dict],
+    files: list[dict[str, Any]],
     task_name: str | None,
 ) -> Path | None:
-    """从 aria2 files 列表 + task 目录推断应入库的源路径。"""
+    """Infer the completed payload path from aria2 files plus task directory."""
     task_candidates: list[Path] = []
     external_candidates: list[Path] = []
 
@@ -117,9 +114,13 @@ def _resolve_complete_source_path(
             else:
                 task_candidates.append(task_dir)
             continue
-        except (OSError, ValueError) as e:
-            logger.debug(f"Failed to resolve path {file_path} relative to {task_dir}: {e}")
-            pass
+        except (OSError, ValueError) as exc:
+            logger.debug(
+                "Failed to resolve path %s relative to %s: %s",
+                file_path,
+                task_dir,
+                exc,
+            )
 
         external_candidates.append(file_path)
 
@@ -132,7 +133,6 @@ def _resolve_complete_source_path(
         if candidate.exists():
             existing_task_candidates.append(candidate)
 
-    # BT 根目录包含多个顶层条目时，移动整个 task 目录，避免丢文件。
     if len(existing_task_candidates) > 1 and task_dir.exists():
         return task_dir
     if len(existing_task_candidates) == 1:
@@ -159,11 +159,11 @@ def _resolve_complete_source_path(
 async def _resolve_complete_source_with_retry(
     completion_gid: str | None,
     task_dir: Path,
-    files: list[dict],
+    files: list[dict[str, Any]],
     task_name: str | None,
-    state: "AppState | None" = None,
+    state: AppState | None = None,
 ) -> Path | None:
-    """在完成事件短时间路径抖动时进行重试，降低误判失败概率。"""
+    """Retry source resolution briefly while aria2 flushes final paths."""
     from app.core.state import get_aria2_client
 
     latest_files = files
@@ -186,9 +186,216 @@ async def _resolve_complete_source_with_retry(
             if isinstance(refreshed_files, list):
                 latest_files = refreshed_files
         except Exception as exc:
-            logger.debug(f"[WS] 刷新完成任务状态失败 gid={completion_gid} error={exc}")
+            logger.debug(
+                "[WS] Failed to refresh complete status gid=%s error=%s",
+                completion_gid,
+                exc,
+            )
 
     return None
+
+
+def _safe_int(value: str | int | None, default: int = 0) -> int:
+    try:
+        return int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _extract_display_name(
+    aria2_status: dict[str, Any],
+    fallback: str | None,
+) -> str | None:
+    raw_name = aria2_status.get("bittorrent", {}).get("info", {}).get("name") or (
+        aria2_status.get("files") or [{}]
+    )[0].get("path")
+    if isinstance(raw_name, str) and raw_name:
+        return Path(raw_name).name or raw_name
+    return fallback
+
+
+def _progress_values(
+    aria2_status: dict[str, Any],
+    display_name_fallback: str | None,
+) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    if aria2_status:
+        values["total_bytes"] = _safe_int(aria2_status.get("totalLength"))
+        values["completed_bytes"] = _safe_int(aria2_status.get("completedLength"))
+        display_name = _extract_display_name(aria2_status, display_name_fallback)
+        if display_name:
+            values["display_name"] = display_name
+    return values
+
+
+async def _resolve_download_for_gid(
+    gid: str,
+    aria2_status: dict[str, Any],
+) -> dict[str, Any] | None:
+    download = await get_global_download_by_gid(gid)
+    if download is not None:
+        return download
+
+    following_gid = aria2_status.get("followingGid") if aria2_status else None
+    if not following_gid:
+        return None
+
+    download = await get_global_download_by_gid(str(following_gid))
+    if download is None:
+        return None
+
+    logger.info("[WS] Updating followed download GID: %s -> %s", following_gid, gid)
+    updated = await _guarded_update_global_download(
+        int(download["id"]), {"aria2_gid": gid}
+    )
+    return updated or download
+
+
+async def _guarded_update_global_download(
+    download_id: int,
+    values: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not values:
+        return None
+
+    timestamp = now_ms()
+    row_values = {**values, "updated_at_ms": timestamp}
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    update(global_downloads)
+                    .where(
+                        global_downloads.c.id == download_id,
+                        global_downloads.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                        global_downloads.c.completed_file_id.is_(None),
+                    )
+                    .values(**row_values)
+                    .returning(global_downloads)
+                )
+            )
+            .mappings()
+            .first()
+        )
+    return dict(row) if row else None
+
+
+async def _update_download_and_active_user_tasks(
+    *,
+    download_id: int,
+    global_values: dict[str, Any],
+    user_status: str | None = None,
+) -> bool:
+    updated = await _guarded_update_global_download(download_id, global_values)
+    if updated is None:
+        return False
+
+    timestamp = now_ms()
+    async with transaction() as conn:
+        if user_status is not None:
+            await conn.execute(
+                update(user_tasks)
+                .where(
+                    user_tasks.c.global_download_id == download_id,
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                )
+                .values(status=user_status, updated_at_ms=timestamp)
+            )
+    return True
+
+
+async def _remove_download_result_best_effort(
+    client: Aria2Client,
+    gid: str,
+    log_prefix: str,
+) -> None:
+    try:
+        await client.remove_download_result(gid)
+    except Exception as exc:
+        logger.debug(
+            "%s Failed to remove aria2 result gid=%s error=%s", log_prefix, gid, exc
+        )
+
+
+async def handle_v0_download_complete(
+    *,
+    state: AppState,
+    client: Aria2Client,
+    download: dict[str, Any],
+    aria2_status: dict[str, Any],
+    completion_gid: str | None,
+    log_prefix: str = "[WS]",
+) -> bool:
+    """Index a completed v0 download and attach it to active user tasks."""
+    from app.core.state import get_task_complete_lock
+    from app.services.storage import get_downloading_dir
+
+    download_id = int(download["id"])
+    lock = await get_task_complete_lock(state, download_id)
+    async with lock:
+        current = await update_global_download(download_id, {})
+        if current is None:
+            logger.debug(
+                "%s Download disappeared before completion id=%s",
+                log_prefix,
+                download_id,
+            )
+            return False
+        if current.get("completed_file_id") is not None:
+            logger.debug("%s Download already completed id=%s", log_prefix, download_id)
+            return True
+        if current.get("status") not in ACTIVE_USER_TASK_STATUSES:
+            logger.debug(
+                "%s Skip completion for terminal download id=%s status=%s",
+                log_prefix,
+                download_id,
+                current.get("status"),
+            )
+            return False
+
+        files = aria2_status.get("files", [])
+        if not isinstance(files, list):
+            files = []
+
+        task_name = _extract_display_name(
+            aria2_status,
+            str(current.get("display_name") or current.get("source_uri") or ""),
+        )
+        task_dir = get_downloading_dir() / str(download_id)
+        source_path = await _resolve_complete_source_with_retry(
+            completion_gid=completion_gid,
+            task_dir=task_dir,
+            files=files,
+            task_name=task_name,
+            state=state,
+        )
+        if source_path is None:
+            logger.error(
+                "%s Download completed but source path was not found id=%s gid=%s dir=%s files=%s",
+                log_prefix,
+                download_id,
+                completion_gid,
+                task_dir,
+                len(files),
+            )
+            return False
+
+        original_name = task_name or source_path.name
+        result = await complete_global_download(
+            global_download_id=download_id,
+            source_path=source_path,
+            original_name=original_name,
+        )
+        logger.info(
+            "%s Completed v0 download id=%s user_files_created=%s",
+            log_prefix,
+            download_id,
+            result["user_files_created"],
+        )
+
+    if completion_gid:
+        await _remove_download_result_best_effort(client, completion_gid, log_prefix)
+    return True
 
 
 async def handle_aria2_event(
@@ -196,704 +403,124 @@ async def handle_aria2_event(
     gid: str,
     event: str,
 ) -> None:
-    """处理 aria2 事件
-
-    1. 获取 aria2 状态
-    2. 查找任务（支持 followingGid）
-    3. 空间检查（start 事件，检查所有订阅者）
-    4. 更新数据库
-    5. 处理完成事件（创建 StoredFile 和 UserFile）
-    6. 广播到所有订阅者
-    """
-    from sqlalchemy import update
-    from sqlmodel import select
-
+    """Handle a single aria2 event against v0 global_downloads/user_tasks."""
     from app.aria2.errors import parse_error_message
-    from app.core.state import get_aria2_client, get_user_space_lock
-    from app.database import get_session
-    from app.models import (
-        DownloadTask,
-        User,
-        UserTaskSubscription,
-        utc_now_str,
-    )
-    from app.routers.config import get_max_task_size
+    from app.core.state import get_aria2_client, get_task_complete_lock
     from app.routers.tasks import broadcast_task_update_to_subscribers
-    from app.services.storage import get_user_space_info
 
     client = get_aria2_client(state=state)
-
-    # 1. 获取 aria2 状态
     try:
         aria2_status = await client.tell_status(gid)
     except Exception as exc:
-        logger.warning(f"获取 GID {gid} 状态失败: {exc}")
+        logger.warning("[WS] Failed to fetch aria2 status gid=%s error=%s", gid, exc)
         aria2_status = {}
 
-    # 2. 查找任务
-    async with get_session() as db:
-        result = await db.exec(select(DownloadTask).where(DownloadTask.gid == gid))
-        task = result.first()
-
-    # 2.1 通过 followingGid 查找（磁力链接转换场景）
-    gid_updated = False
-    if not task and aria2_status:
-        following_gid = aria2_status.get("followingGid")
-        if following_gid:
-            logger.info(f"[WS] GID {gid} 未找到，尝试通过 followingGid {following_gid} 查找")
-            async with get_session() as db:
-                result = await db.exec(select(DownloadTask).where(DownloadTask.gid == following_gid))
-                task = result.first()
-                if task:
-                    logger.info(f"[WS] 找到原任务 {task.id}，更新 GID: {following_gid} -> {gid}")
-                    task.gid = gid
-                    gid_updated = True
-                    db.add(task)
-
-    if not task:
-        logger.debug(f"[WS] 未找到 GID {gid} 对应的任务，忽略事件")
+    download = await _resolve_download_for_gid(gid, aria2_status)
+    if download is None:
+        logger.debug("[WS] No v0 download found for gid=%s event=%s", gid, event)
         return
 
-    task_id = task.id
-    if task_id is None:
-        logger.warning(f"[WS] 任务缺少 task_id，忽略事件 gid={gid} event={event}")
-        return
-
-    # 3. 空间检查（仅 start 事件，检查所有订阅者）
-    if event == "start" and aria2_status:
-        total_length = int(aria2_status.get("totalLength", 0))
-        if total_length > 0:
-            # 3.1 检查系统最大任务限制
-            max_task_size = get_max_task_size()
-            if total_length > max_task_size:
-                logger.warning(
-                    f"[WS] 任务 {task_id} 大小 {total_length / 1024**3:.2f} GB "
-                    f"超过系统限制 {max_task_size / 1024**3:.2f} GB，终止任务"
-                )
-                await _cancel_task(
-                    client, state, task, aria2_status,
-                    f"已取消：大小 {total_length / 1024**3:.2f} GB 超过系统限制"
-                )
-                return
-
-            # 3.2 检查所有订阅者的空间
-            async with get_session() as db:
-                sub_result = await db.exec(
-                    select(UserTaskSubscription, User)
-                    .join(User, UserTaskSubscription.owner_id == User.id)  # type: ignore[arg-type]
-                    .where(
-                        UserTaskSubscription.task_id == task_id,
-                        UserTaskSubscription.status == "pending",
-                    )
-                )
-                subscriptions = sub_result.all()
-
-            valid_subscribers = []
-
-            for sub, user in subscriptions:
-                if user.id is None:
-                    logger.warning(f"[WS] 用户缺少 user_id，跳过订阅 sub_id={sub.id}")
-                    continue
-                user_id = user.id
-                user_lock = await get_user_space_lock(state, user_id)
-                async with user_lock:
-                    space_info = await get_user_space_info(user_id, user.quota)
-                    effective_available = space_info["available"]
-
-                    required_extra = max(total_length - (sub.frozen_space or 0), 0)
-                    if required_extra <= effective_available:
-                        MAX_RETRIES = 3
-                        update_success = False
-                        
-                        for attempt in range(MAX_RETRIES):
-                            should_retry = False
-                            async with get_session() as db:
-                                current_sub_result = await db.exec(
-                                    select(UserTaskSubscription).where(
-                                        UserTaskSubscription.id == sub.id
-                                    )
-                                )
-                                current_sub = current_sub_result.first()
-                                
-                                if not current_sub:
-                                    logger.warning(
-                                        f"[WS] 订阅 {sub.id} 在重试时已被删除"
-                                    )
-                                    break
-                                
-                                if current_sub.frozen_space >= total_length:
-                                    update_success = True
-                                    break
-                                
-                                update_result = await db.execute(
-                                    update(UserTaskSubscription)
-                                    .where(
-                                        UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
-                                        UserTaskSubscription.frozen_space == current_sub.frozen_space,  # type: ignore[arg-type]
-                                    )
-                                    .values(frozen_space=total_length)
-                                )
-
-                                if update_result.rowcount > 0:  # type: ignore[attr-defined]
-                                    update_success = True
-                                    break
-                                
-                                if attempt < MAX_RETRIES - 1:
-                                    should_retry = True
-                            
-                            if should_retry:
-                                backoff_ms = 10 * (attempt + 1)
-                                logger.debug(
-                                    f"[WS] 订阅 {sub.id} frozen_space 更新冲突，"
-                                    f"重试 {attempt + 1}/{MAX_RETRIES}，等待 {backoff_ms}ms"
-                                )
-                                await asyncio.sleep(backoff_ms / 1000.0)
-                        
-                        if not update_success:
-                            logger.warning(
-                                f"[WS] 订阅 {sub.id} frozen_space 更新失败，"
-                                f"已重试 {MAX_RETRIES} 次"
-                            )
-                        
-                        async with get_session() as db:
-                            refreshed = await db.exec(
-                                select(UserTaskSubscription).where(
-                                    UserTaskSubscription.id == sub.id
-                                )
-                            )
-                            current = refreshed.first()
-                            if current and current.status == "pending" and current.frozen_space > 0:
-                                valid_subscribers.append((sub, user))
-                    else:
-                        # Mark subscription as failed atomically
-                        logger.warning(
-                            f"[WS] 用户 {user.id} 空间不足，标记订阅 {sub.id} 失败"
-                        )
-                        async with get_session() as db:
-                            await db.execute(
-                                update(UserTaskSubscription)
-                                .where(UserTaskSubscription.id == sub.id)  # type: ignore[arg-type]
-                                .values(
-                                    status="failed",
-                                    error_display="用户配额空间不足",
-                                    frozen_space=0
-                                )
-                            )
-
-            # If no valid subscribers, cancel the task
-            if not valid_subscribers:
-                logger.warning(f"[WS] 任务 {task_id} 没有有效订阅者，取消任务")
-                await _cancel_task(
-                    client, state, task, aria2_status,
-                    "所有订阅者空间不足"
-                )
-                return
-
-    # 4. 更新数据库状态
-    new_status: str | None = task.status
-    error_msg: str | None = None
-    error_display: str | None = None
+    download_id = int(download["id"])
+    display_name_fallback = download.get("display_name") or download.get("source_uri")
+    progress_values = _progress_values(aria2_status, display_name_fallback)
 
     if event == "start":
-        new_status = "active"
+        await _update_download_and_active_user_tasks(
+            download_id=download_id,
+            global_values={"status": "active", **progress_values},
+            user_status="active",
+        )
     elif event == "pause":
-        new_status = "paused"
-    elif event == "stop":
-        new_status = "error"
-        error_display = "外部取消（管理员/外部客户端）"
-        logger.info(f"[WS] 任务 {task_id} 外部取消")
-    elif event == "complete":
-        # 检查是否是磁力链接元数据下载完成
-        followed_by = aria2_status.get("followedBy", [])
+        await _update_download_and_active_user_tasks(
+            download_id=download_id,
+            global_values={"status": "paused", **progress_values},
+            user_status="paused",
+        )
+    elif event in {"complete", "bt_complete"}:
+        followed_by = aria2_status.get("followedBy") or []
         if followed_by:
-            new_gid = followed_by[0]
-            logger.info(f"[WS] 磁力链接元数据下载完成，更新 GID: {gid} -> {new_gid}")
-            async with get_session() as db:
-                result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-                db_task = result.first()
-                if db_task:
-                    db_task.gid = new_gid
-                    db_task.updated_at = utc_now_str()
-                    db.add(db_task)
+            new_gid = str(followed_by[0])
+            logger.info(
+                "[WS] Metadata download complete, updating GID: %s -> %s", gid, new_gid
+            )
+            await _update_download_and_active_user_tasks(
+                download_id=download_id,
+                global_values={
+                    "aria2_gid": new_gid,
+                    "status": "active",
+                    **progress_values,
+                },
+                user_status="active",
+            )
             if gid != new_gid:
-                try:
-                    await client.remove_download_result(gid)
-                except Exception as exc:
-                    logger.debug(f"[WS] 清理 metadata 任务结果失败 gid={gid} error={exc}")
-            return
+                await _remove_download_result_best_effort(client, gid, "[WS]")
         else:
-            new_status = None
-    elif event == "bt_complete":
-        new_status = None
-    elif event == "error":
-        new_status = "error"
-        raw_error = aria2_status.get("errorMessage", "后端错误")
-        error_msg = raw_error
-        error_display = parse_error_message(raw_error)
-        logger.error(f"[WS] 任务 {task_id} 错误: {raw_error}")
+            completion_gid = str(download.get("aria2_gid") or gid)
+            await handle_v0_download_complete(
+                state=state,
+                client=client,
+                download=download,
+                aria2_status=aria2_status,
+                completion_gid=completion_gid,
+                log_prefix="[WS]",
+            )
+    elif event in {"stop", "error"}:
+        if event == "stop":
+            message = "外部取消（管理员/外部客户端）"
+            error_code = "removed"
+        else:
+            raw_error = str(aria2_status.get("errorMessage") or "后端错误")
+            message = parse_error_message(raw_error)
+            error_code = str(aria2_status.get("errorCode") or "error")
 
-    # Update task in database
-    async with get_session() as db:
-        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-        db_task = result.first()
-        if db_task:
-            if new_status is not None:
-                db_task.status = new_status
-            db_task.updated_at = utc_now_str()
+        if progress_values:
+            await _guarded_update_global_download(download_id, progress_values)
 
-            if gid_updated:
-                db_task.gid = gid
-            if error_msg:
-                db_task.error = error_msg
-            if error_display:
-                if event == "stop" and db_task.error_display == "已取消":
-                    pass
-                else:
-                    db_task.error_display = error_display
-
-            if event in ("stop", "error"):
-                db_task.gid = None
-
-            if aria2_status:
-                db_task.name = (
-                    aria2_status.get("bittorrent", {}).get("info", {}).get("name")
-                    or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
-                    or db_task.name
+        completion_lock = await get_task_complete_lock(state, download_id)
+        async with completion_lock:
+            owner_id = await get_representative_owner_id(download_id)
+            failed_download = await mark_global_download_failed(
+                download_id,
+                message=message,
+                error_code=error_code,
+                clear_gid=True,
+            )
+            if failed_download is not None and failed_download["status"] == "failed":
+                await cleanup_failed_task_artifacts(
+                    client=client,
+                    task_id=download_id,
+                    gid=gid,
+                    owner_id=owner_id,
+                    log_prefix="[WS]",
                 )
-                db_task.total_length = int(aria2_status.get("totalLength", 0))
-                db_task.completed_length = int(aria2_status.get("completedLength", 0))
-                db_task.download_speed = int(aria2_status.get("downloadSpeed", 0))
-                db_task.upload_speed = int(aria2_status.get("uploadSpeed", 0))
+    else:
+        logger.debug("[WS] Ignoring unsupported aria2 event=%s gid=%s", event, gid)
+        return
 
-            db.add(db_task)
-
-    if event in ("complete", "bt_complete"):
-        await _handle_task_complete(state, task_id, aria2_status)
-
-    # 5.1 处理 stop/error 事件 - 释放冻结空间并标记订阅失败
-    if event in ("stop", "error"):
-        await _handle_task_stop_or_error(task_id, error_display)
-        owner_id = await get_representative_owner_id(task_id)
-        await cleanup_failed_task_artifacts(
-            client=client,
-            task_id=task_id,
-            gid=gid,
-            owner_id=owner_id,
-            log_prefix="[WS]",
-        )
-
-    # 6. 广播到所有订阅者
-    await broadcast_task_update_to_subscribers(state, task_id)
-    logger.debug(f"[WS] 事件处理完成: GID={gid}, event={event}, status={new_status}")
-
-
-async def _handle_task_complete(
-    state: AppState,
-    task_id: int,
-    aria2_status: dict,
-) -> None:
-    """处理任务完成事件
-
-    1. 移动文件到 store
-    2. 创建 StoredFile 记录
-    3. 为所有成功的订阅者创建 UserFile 引用
-    4. 释放冻结空间
-    """
-    from sqlalchemy import update
-    from sqlmodel import select
-
-    from app.database import get_session
-    from app.models import DownloadTask, UserTaskSubscription, UserFile, StoredFile, utc_now_str
-    from app.core.state import get_aria2_client, get_task_complete_lock
-    from app.services.history import add_task_history
-    from app.services.storage import (
-        cleanup_task_download_dir,
-        get_downloading_dir,
-        move_to_store,
+    await broadcast_task_update_to_subscribers(state, download_id)
+    logger.debug(
+        "[WS] Event handled gid=%s event=%s download_id=%s", gid, event, download_id
     )
-
-    lock = await get_task_complete_lock(state, task_id)
-    async with lock:
-        async with get_session() as db:
-            result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-            task = result.first()
-
-        if not task:
-            return
-
-        aria2_status_value = aria2_status.get("status")
-        should_process_complete = (
-            task.status == "complete"
-            or aria2_status_value == "complete"
-        )
-        if not should_process_complete:
-            logger.debug(
-                "[WS] Skip complete handler for task %s: task.status=%s aria2.status=%s",
-                task_id,
-                task.status,
-                aria2_status_value,
-            )
-            return
-
-        if task.stored_file_id is not None:
-            logger.debug(f"[WS] Task {task_id} already processed (stored_file_id={task.stored_file_id}), skipping")
-            return
-
-        completion_gid = task.gid
-
-        files = aria2_status.get("files", [])
-        if not isinstance(files, list):
-            files = []
-        task_dir = get_downloading_dir() / str(task_id)
-        source_path = await _resolve_complete_source_with_retry(
-            completion_gid=completion_gid,
-            task_dir=task_dir,
-            files=files,
-            task_name=task.name,
-            state=state,
-        )
-        if source_path is None:
-            logger.error(
-                f"[WS] 任务 {task_id} 完成但无法定位源文件 task_dir={task_dir} "
-                f"files_count={len(files)} gid={completion_gid}"
-            )
-            return
-
-        original_name = task.name or source_path.name
-
-        try:
-            stored_file = await move_to_store(source_path, original_name)
-            if stored_file.id is None:
-                logger.error(f"[WS] StoredFile 缺少 id，task_id={task_id}")
-                return
-
-            async with get_session() as db:
-                await db.execute(
-                    update(DownloadTask)
-                    .where(
-                        DownloadTask.id == task_id,  # type: ignore[arg-type]
-                        DownloadTask.stored_file_id.is_(None)  # type: ignore[union-attr]
-                    )
-                    .values(
-                        status="complete",
-                        stored_file_id=stored_file.id,
-                        completed_at=utc_now_str()
-                    )
-                )
-
-            async with get_session() as db:
-                verify_result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-                verify_task = verify_result.first()
-                if not verify_task or verify_task.stored_file_id != stored_file.id:
-                    logger.info(f"[WS] Task {task_id} already processed by another handler")
-                    await cleanup_task_download_dir(task_id)
-                    return
-
-            async with get_session() as db:
-                sub_result = await db.exec(
-                    select(UserTaskSubscription).where(
-                        UserTaskSubscription.task_id == task_id,
-                        UserTaskSubscription.status == "pending",
-                    )
-                )
-                subscriptions = sub_result.all()
-
-            for sub in subscriptions:
-                should_record_history = False
-                MAX_RETRIES = 3
-                user_file_created = False
-
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        async with get_session() as db:
-                            await db.execute(
-                                update(UserTaskSubscription)
-                                .where(
-                                    UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
-                                    UserTaskSubscription.status == "pending",  # type: ignore[arg-type]
-                                )
-                                .values(status="success", frozen_space=0)
-                            )
-
-                            sub_result = await db.exec(
-                                select(UserTaskSubscription).where(UserTaskSubscription.id == sub.id)
-                            )
-                            current_sub = sub_result.first()
-                            if not current_sub or current_sub.status != "success":
-                                break
-
-                            file_result = await db.exec(
-                                select(UserFile).where(
-                                    UserFile.owner_id == sub.owner_id,
-                                    UserFile.stored_file_id == stored_file.id,
-                                )
-                            )
-                            existing_ref = file_result.first()
-
-                            if not existing_ref:
-                                user_file = UserFile(
-                                    owner_id=sub.owner_id,
-                                    stored_file_id=stored_file.id,
-                                    display_name=original_name,
-                                    created_at=utc_now_str(),
-                                )
-                                db.add(user_file)
-
-                                await db.execute(
-                                    update(StoredFile)
-                                    .where(StoredFile.id == stored_file.id)  # type: ignore[arg-type]
-                                    .values(ref_count=StoredFile.ref_count + 1)
-                                )
-                            user_file_created = True
-                            should_record_history = True
-                            break
-                    except Exception as e:
-                        logger.warning(
-                            f"[WS] UserFile creation attempt {attempt + 1}/{MAX_RETRIES} failed for sub {sub.id}: {e}"
-                        )
-                        if attempt < MAX_RETRIES - 1:
-                            await asyncio.sleep(0.01 * (attempt + 1))
-
-                if not user_file_created:
-                    logger.error(
-                        f"[WS] Failed to create UserFile after {MAX_RETRIES} attempts for sub_id={sub.id}"
-                    )
-                    try:
-                        async with get_session() as db:
-                            await db.execute(
-                                update(UserTaskSubscription)
-                                .where(UserTaskSubscription.id == sub.id)  # type: ignore[arg-type]
-                                .values(status="failed", error_display="文件引用创建失败")
-                            )
-                    except Exception as final_err:
-                        logger.error(
-                            f"[WS] Failed to mark subscription {sub.id} as failed: {final_err}"
-                        )
-                    continue
-
-                if not should_record_history:
-                    continue
-
-                await add_task_history(
-                    owner_id=sub.owner_id,
-                    task_name=original_name,
-                    result="completed",
-                    reason="下载完成",
-                    uri=task.uri,
-                    total_length=task.total_length,
-                    created_at=sub.created_at,
-                )
-
-            logger.info(f"[WS] 任务 {task_id} 完成，创建了 {len(subscriptions)} 个用户文件引用")
-
-        except Exception as e:
-            logger.error(f"[WS] 处理任务 {task_id} 完成事件失败: {e}")
-            return
-
-        await cleanup_task_download_dir(task_id)
-
-        if completion_gid:
-            try:
-                client = get_aria2_client(state=state)
-                await client.remove_download_result(completion_gid)
-            except Exception as exc:
-                logger.debug(f"[WS] 清理完成任务记录失败 gid={completion_gid} error={exc}")
-
-            async with get_session() as db:
-                await db.execute(
-                    update(DownloadTask)
-                    .where(
-                        DownloadTask.id == task_id,  # type: ignore[arg-type]
-                        DownloadTask.gid == completion_gid,  # type: ignore[arg-type]
-                    )
-                    .values(
-                        gid=None,
-                        updated_at=utc_now_str(),
-                    )
-                )
-
-
-async def _handle_task_stop_or_error(
-    task_id: int,
-    error_display: str | None,
-) -> None:
-    """处理任务停止或错误事件
-
-    释放所有订阅者的冻结空间并标记订阅为失败，写入历史记录。
-    """
-    from sqlalchemy import update
-    from sqlmodel import select
-
-    from app.database import get_session
-    from app.models import DownloadTask, UserTaskSubscription
-    from app.services.history import add_task_history
-
-    message = error_display or "后端错误"
-
-    # 获取任务信息（用于历史记录）
-    async with get_session() as db:
-        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-        task = result.first()
-
-    task_name = (task.name or "未知任务") if task else "未知任务"
-    task_uri = task.uri if task else None
-    task_total_length = task.total_length if task else 0
-
-    updated_subs: list[UserTaskSubscription] = []
-    async with get_session() as db:
-        # 获取所有 pending 状态的订阅
-        sub_result = await db.exec(
-            select(UserTaskSubscription).where(
-                UserTaskSubscription.task_id == task_id,
-                UserTaskSubscription.status == "pending",
-            )
-        )
-        subscriptions = sub_result.all()
-
-        # 更新所有订阅：释放冻结空间，标记为失败
-        # 只对实际更新成功的订阅写历史（防止与 sync.py 并发重复写）
-        for sub in subscriptions:
-            result = await db.execute(
-                update(UserTaskSubscription)
-                .where(
-                    UserTaskSubscription.id == sub.id,  # type: ignore[arg-type]
-                    UserTaskSubscription.status == "pending",  # type: ignore[arg-type]
-                )
-                .values(
-                    status="failed",
-                    frozen_space=0,
-                    error_display=message,
-                )
-            )
-            if result.rowcount > 0:  # type: ignore[union-attr]
-                updated_subs.append(sub)
-
-    # 只对本次实际更新成功的订阅写历史
-    for sub in updated_subs:
-        await add_task_history(
-            owner_id=sub.owner_id,
-            task_name=task_name,
-            result="failed",
-            reason=message,
-            uri=task_uri,
-            total_length=task_total_length,
-            created_at=sub.created_at,
-        )
-
-    if updated_subs:
-        logger.info(f"[WS] 任务 {task_id} 停止/错误，释放了 {len(updated_subs)} 个订阅的冻结空间")
-
-
-async def _cancel_task(
-    client: "Aria2Client",
-    state: AppState,
-    task: "DownloadTask",
-    aria2_status: dict[str, Any],
-    error_message: str,
-) -> None:
-    """取消任务并通知所有订阅者"""
-    from sqlmodel import select
-
-    from app.database import get_session
-    from app.models import DownloadTask, UserTaskSubscription, utc_now_str
-    from app.routers.tasks import broadcast_task_update_to_subscribers
-
-    assert task.id is not None, "Task must have an ID"
-    task_id = task.id
-    gid = task.gid
-
-    # Update task status
-    async with get_session() as db:
-        result = await db.exec(select(DownloadTask).where(DownloadTask.id == task_id))
-        db_task = result.first()
-        if db_task:
-            db_task.status = "error"
-            db_task.gid = None
-            db_task.error_display = error_message
-            db_task.download_speed = 0
-            db_task.upload_speed = 0
-            db_task.updated_at = utc_now_str()
-            if aria2_status:
-                db_task.name = (
-                    aria2_status.get("bittorrent", {}).get("info", {}).get("name")
-                    or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
-                    or db_task.name
-                )
-                db_task.total_length = int(aria2_status.get("totalLength", 0))
-            db.add(db_task)
-
-    # Mark all pending subscriptions as failed and record history
-    async with get_session() as db:
-        sub_result = await db.exec(
-            select(UserTaskSubscription).where(
-                UserTaskSubscription.task_id == task_id,
-                UserTaskSubscription.status == "pending",
-            )
-        )
-        subscriptions = sub_result.all()
-
-        for sub in subscriptions:
-            sub.status = "failed"
-            sub.error_display = error_message
-            sub.frozen_space = 0
-            db.add(sub)
-
-    # Record history for each failed subscription
-    from app.services.history import add_task_history
-    task_name = (
-        aria2_status.get("bittorrent", {}).get("info", {}).get("name")
-        or aria2_status.get("files", [{}])[0].get("path", "").split("/")[-1]
-        or task.name
-        or "未知任务"
-    ) if aria2_status else (task.name or "未知任务")
-
-    for sub in subscriptions:
-        await add_task_history(
-            owner_id=sub.owner_id,
-            task_name=task_name,
-            result="failed",
-            reason=error_message,
-            uri=task.uri,
-            total_length=int(aria2_status.get("totalLength", 0)) if aria2_status else task.total_length,
-            created_at=sub.created_at,
-        )
-
-    # Clean up via unified entry point
-    owner_id = await get_representative_owner_id(task_id)
-    await cleanup_failed_task_artifacts(
-        client=client,
-        task_id=task_id,
-        gid=gid,
-        owner_id=owner_id,
-        log_prefix="[WS]",
-        skip_status_check=True,
-    )
-
-    # Broadcast update
-    await broadcast_task_update_to_subscribers(state, task_id)
 
 
 async def listen_aria2_events(state: AppState) -> None:
-    """aria2 WebSocket 事件监听器主循环"""
+    """aria2 WebSocket event listener main loop."""
     from app.core.config import settings
     from app.routers.config import get_config_value
 
     reconnect_attempt = 0
 
     while True:
-        rpc_url = get_config_value("aria2_rpc_url")
-        if not rpc_url:
-            rpc_url = settings.aria2_rpc_url
-
+        rpc_url = get_config_value("aria2_rpc_url") or settings.aria2_rpc_url
         ws_url = _http_to_ws_url(rpc_url)
 
         try:
             timeout = aiohttp.ClientTimeout(connect=10, sock_connect=10, sock_read=None)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                logger.info(f"[WS] 正在连接 aria2 WebSocket: {ws_url}")
+                logger.info("[WS] Connecting to aria2 WebSocket: %s", ws_url)
 
                 async with session.ws_connect(ws_url) as ws:
-                    logger.info("[WS] 已连接 aria2 WebSocket")
+                    logger.info("[WS] Connected to aria2 WebSocket")
                     reconnect_attempt = 0
 
                     async for msg in ws:
@@ -908,40 +535,46 @@ async def listen_aria2_events(state: AppState) -> None:
                                         gid = params[0].get("gid")
                                         if gid:
                                             event = EVENT_MAP[method]
-                                            logger.debug(f"[WS] 收到事件: {method}, GID={gid}")
+                                            logger.debug(
+                                                "[WS] Received event: %s gid=%s",
+                                                method,
+                                                gid,
+                                            )
                                             task = asyncio.create_task(
                                                 handle_aria2_event(state, gid, event),
-                                                name=f"aria2_event_{gid}_{event}"
+                                                name=f"aria2_event_{gid}_{event}",
                                             )
                                             _event_tasks.add(task)
                                             task.add_done_callback(_event_tasks.discard)
                             except Exception as exc:
-                                logger.warning(f"[WS] 解析消息失败: {exc}")
+                                logger.warning("[WS] Failed to parse message: %s", exc)
 
                         elif msg.type == aiohttp.WSMsgType.ERROR:
-                            logger.error(f"[WS] WebSocket 错误: {ws.exception()}")
+                            logger.error("[WS] WebSocket error: %s", ws.exception())
                             break
 
                         elif msg.type == aiohttp.WSMsgType.CLOSED:
-                            logger.warning("[WS] WebSocket 连接已关闭")
+                            logger.warning("[WS] WebSocket closed")
                             break
 
         except asyncio.CancelledError:
-            logger.info("[WS] 监听器任务被取消，正在退出")
+            logger.info("[WS] Listener cancelled, exiting")
             if _event_tasks:
-                logger.info(f"[WS] 等待 {len(_event_tasks)} 个事件处理任务完成")
+                logger.info("[WS] Waiting for %s event tasks", len(_event_tasks))
                 await asyncio.gather(*_event_tasks, return_exceptions=True)
             raise
 
         except Exception as exc:
-            logger.warning(f"[WS] 连接失败: {exc}")
+            logger.warning("[WS] Connection failed: %s", exc)
 
         delay = _calculate_backoff(reconnect_attempt)
         reconnect_attempt += 1
-        logger.info(f"[WS] {delay:.1f} 秒后重连 (尝试 #{reconnect_attempt})")
+        logger.info(
+            "[WS] Reconnecting in %.1fs (attempt #%s)", delay, reconnect_attempt
+        )
 
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
-            logger.info("[WS] 监听器任务被取消，正在退出")
+            logger.info("[WS] Listener cancelled, exiting")
             raise

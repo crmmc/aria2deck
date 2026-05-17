@@ -5,7 +5,6 @@
 2. 指数退避算法
 3. 事件映射
 """
-import pytest
 
 from app.aria2.listener import (
     _http_to_ws_url,
@@ -25,52 +24,82 @@ class TestHttpToWsUrl:
     """测试 HTTP URL 转 WebSocket URL"""
 
     def test_http_to_ws(self):
-        assert _http_to_ws_url("http://localhost:6800/jsonrpc") == "ws://localhost:6800/jsonrpc"
+        assert (
+            _http_to_ws_url("http://localhost:6800/jsonrpc")
+            == "ws://localhost:6800/jsonrpc"
+        )
 
     def test_https_to_wss(self):
-        assert _http_to_ws_url("https://aria2.example.com/jsonrpc") == "wss://aria2.example.com/jsonrpc"
+        assert (
+            _http_to_ws_url("https://aria2.example.com/jsonrpc")
+            == "wss://aria2.example.com/jsonrpc"
+        )
 
     def test_with_port(self):
-        assert _http_to_ws_url("http://192.168.1.100:6800/jsonrpc") == "ws://192.168.1.100:6800/jsonrpc"
+        assert (
+            _http_to_ws_url("http://192.168.1.100:6800/jsonrpc")
+            == "ws://192.168.1.100:6800/jsonrpc"
+        )
 
     def test_with_custom_port(self):
-        assert _http_to_ws_url("http://localhost:8080/jsonrpc") == "ws://localhost:8080/jsonrpc"
+        assert (
+            _http_to_ws_url("http://localhost:8080/jsonrpc")
+            == "ws://localhost:8080/jsonrpc"
+        )
 
     def test_https_with_port(self):
-        assert _http_to_ws_url("https://aria2.example.com:443/jsonrpc") == "wss://aria2.example.com:443/jsonrpc"
+        assert (
+            _http_to_ws_url("https://aria2.example.com:443/jsonrpc")
+            == "wss://aria2.example.com:443/jsonrpc"
+        )
 
 
 class TestCalculateBackoff:
     """测试指数退避算法"""
 
     def test_first_attempt(self):
-        delay = _calculate_backoff(0, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR)
+        delay = _calculate_backoff(
+            0, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR
+        )
         # 1s +/- 20% = 0.8s ~ 1.2s
         assert 0.8 <= delay <= 1.2
 
     def test_second_attempt(self):
-        delay = _calculate_backoff(1, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR)
+        delay = _calculate_backoff(
+            1, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR
+        )
         # 2s +/- 20% = 1.6s ~ 2.4s
         assert 1.6 <= delay <= 2.4
 
     def test_third_attempt(self):
-        delay = _calculate_backoff(2, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR)
+        delay = _calculate_backoff(
+            2, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR
+        )
         # 4s +/- 20% = 3.2s ~ 4.8s
         assert 3.2 <= delay <= 4.8
 
     def test_fourth_attempt(self):
-        delay = _calculate_backoff(3, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR)
+        delay = _calculate_backoff(
+            3, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR
+        )
         # 8s +/- 20% = 6.4s ~ 9.6s
         assert 6.4 <= delay <= 9.6
 
     def test_max_delay(self):
-        delay = _calculate_backoff(100, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR)
+        delay = _calculate_backoff(
+            100,
+            max_delay=DEFAULT_MAX_DELAY,
+            jitter=DEFAULT_JITTER,
+            factor=DEFAULT_FACTOR,
+        )
         # 不超过 60s + jitter
         assert delay <= DEFAULT_MAX_DELAY * (1 + DEFAULT_JITTER)
 
     def test_max_delay_reached_at_attempt_6(self):
         # 2^6 * 1 = 64 > 60, should cap at 60
-        delay = _calculate_backoff(6, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR)
+        delay = _calculate_backoff(
+            6, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR
+        )
         # 60s +/- 20% = 48s ~ 72s
         assert 48 <= delay <= 72
 
@@ -80,21 +109,31 @@ class TestCalculateBackoff:
         avg_delays = []
         for attempt in range(5):
             total = sum(
-                _calculate_backoff(attempt, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR)
+                _calculate_backoff(
+                    attempt,
+                    max_delay=DEFAULT_MAX_DELAY,
+                    jitter=DEFAULT_JITTER,
+                    factor=DEFAULT_FACTOR,
+                )
                 for _ in range(samples)
             )
             avg_delays.append(total / samples)
 
         # 验证每次大约翻倍（考虑抖动，使用宽松的阈值）
         for i in range(1, 4):
-            ratio = avg_delays[i] / avg_delays[i-1]
+            ratio = avg_delays[i] / avg_delays[i - 1]
             # 考虑抖动，比例应该在 1.5 ~ 2.5 之间
             assert 1.5 <= ratio <= 2.5, f"attempt {i}: ratio={ratio}"
 
     def test_jitter_randomness(self):
         """验证抖动的随机性"""
         delays = [
-            _calculate_backoff(0, max_delay=DEFAULT_MAX_DELAY, jitter=DEFAULT_JITTER, factor=DEFAULT_FACTOR)
+            _calculate_backoff(
+                0,
+                max_delay=DEFAULT_MAX_DELAY,
+                jitter=DEFAULT_JITTER,
+                factor=DEFAULT_FACTOR,
+            )
             for _ in range(100)
         ]
         # 应该有多个不同的值
@@ -116,7 +155,9 @@ class TestCalculateBackoff:
 
     def test_zero_jitter(self):
         """测试零抖动"""
-        delays = [_calculate_backoff(0, max_delay=60, jitter=0, factor=2.0) for _ in range(10)]
+        delays = [
+            _calculate_backoff(0, max_delay=60, jitter=0, factor=2.0) for _ in range(10)
+        ]
         # 所有值应该相同
         assert all(d == 1.0 for d in delays)
 
@@ -149,7 +190,6 @@ class TestConstants:
 
 
 class TestListenerHelpers:
-
     def test_calculate_backoff_negative_attempt(self):
         delay = _calculate_backoff(-1, max_delay=60, jitter=0, factor=2.0)
         assert delay >= 0

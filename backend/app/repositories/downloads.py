@@ -12,6 +12,8 @@ from app.db.engine import transaction
 from app.db.schema import global_downloads, user_files, user_storage_usage, user_tasks
 
 ACTIVE_USER_TASK_STATUSES = ("queued", "active", "waiting", "paused")
+ACTIVE_GLOBAL_DOWNLOAD_STATUSES = ACTIVE_USER_TASK_STATUSES
+FAILABLE_GLOBAL_DOWNLOAD_STATUSES = (*ACTIVE_GLOBAL_DOWNLOAD_STATUSES, "completed")
 TERMINAL_USER_TASK_STATUSES = ("completed", "failed", "cancelled")
 
 
@@ -22,12 +24,30 @@ def now_ms() -> int:
 async def get_global_by_resource_key(resource_key: str) -> dict[str, Any] | None:
     async with transaction() as conn:
         row = (
-            await conn.execute(
-                select(global_downloads).where(
-                    global_downloads.c.resource_key == resource_key
+            (
+                await conn.execute(
+                    select(global_downloads).where(
+                        global_downloads.c.resource_key == resource_key
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
+    return dict(row) if row else None
+
+
+async def get_global_download_by_gid(gid: str) -> dict[str, Any] | None:
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    select(global_downloads).where(global_downloads.c.aria2_gid == gid)
+                )
+            )
+            .mappings()
+            .first()
+        )
     return dict(row) if row else None
 
 
@@ -43,10 +63,16 @@ async def create_global_download(values: dict[str, Any]) -> dict[str, Any]:
     }
     async with transaction() as conn:
         row = (
-            await conn.execute(
-                insert(global_downloads).values(**row_values).returning(global_downloads)
+            (
+                await conn.execute(
+                    insert(global_downloads)
+                    .values(**row_values)
+                    .returning(global_downloads)
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     return dict(row)
 
 
@@ -67,13 +93,17 @@ async def get_or_create_global_download(values: dict[str, Any]) -> dict[str, Any
 async def get_user_task(user_id: int, global_download_id: int) -> dict[str, Any] | None:
     async with transaction() as conn:
         row = (
-            await conn.execute(
-                select(user_tasks).where(
-                    user_tasks.c.user_id == user_id,
-                    user_tasks.c.global_download_id == global_download_id,
+            (
+                await conn.execute(
+                    select(user_tasks).where(
+                        user_tasks.c.user_id == user_id,
+                        user_tasks.c.global_download_id == global_download_id,
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
     return dict(row) if row else None
 
 
@@ -111,26 +141,34 @@ def _user_task_download_select():
 async def get_user_task_by_id(user_id: int, user_task_id: int) -> dict[str, Any] | None:
     async with transaction() as conn:
         row = (
-            await conn.execute(
-                _user_task_download_select().where(
-                    user_tasks.c.id == user_task_id,
-                    user_tasks.c.user_id == user_id,
+            (
+                await conn.execute(
+                    _user_task_download_select().where(
+                        user_tasks.c.id == user_task_id,
+                        user_tasks.c.user_id == user_id,
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
     return dict(row) if row else None
 
 
 async def get_user_task_by_gid(user_id: int, gid: str) -> dict[str, Any] | None:
     async with transaction() as conn:
         row = (
-            await conn.execute(
-                _user_task_download_select().where(
-                    user_tasks.c.user_id == user_id,
-                    global_downloads.c.aria2_gid == gid,
+            (
+                await conn.execute(
+                    _user_task_download_select().where(
+                        user_tasks.c.user_id == user_id,
+                        global_downloads.c.aria2_gid == gid,
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
     return dict(row) if row else None
 
 
@@ -168,7 +206,9 @@ async def delete_terminal_user_task_by_gid(user_id: int, gid: str) -> bool:
                 .where(user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES))
                 .where(
                     user_tasks.c.global_download_id.in_(
-                        select(global_downloads.c.id).where(global_downloads.c.aria2_gid == gid)
+                        select(global_downloads.c.id).where(
+                            global_downloads.c.aria2_gid == gid
+                        )
                     )
                 )
                 .returning(user_tasks.c.id)
@@ -204,8 +244,14 @@ async def create_user_task(values: dict[str, Any]) -> dict[str, Any]:
     }
     async with transaction() as conn:
         row = (
-            await conn.execute(insert(user_tasks).values(**row_values).returning(user_tasks))
-        ).mappings().one()
+            (
+                await conn.execute(
+                    insert(user_tasks).values(**row_values).returning(user_tasks)
+                )
+            )
+            .mappings()
+            .one()
+        )
     return dict(row)
 
 
@@ -215,43 +261,65 @@ async def update_global_download(
     if not values:
         async with transaction() as conn:
             row = (
-                await conn.execute(
-                    select(global_downloads).where(global_downloads.c.id == download_id)
+                (
+                    await conn.execute(
+                        select(global_downloads).where(
+                            global_downloads.c.id == download_id
+                        )
+                    )
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
         return dict(row) if row else None
 
     row_values = {**values, "updated_at_ms": now_ms()}
     async with transaction() as conn:
         row = (
-            await conn.execute(
-                update(global_downloads)
-                .where(global_downloads.c.id == download_id)
-                .values(**row_values)
-                .returning(global_downloads)
+            (
+                await conn.execute(
+                    update(global_downloads)
+                    .where(global_downloads.c.id == download_id)
+                    .values(**row_values)
+                    .returning(global_downloads)
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
     return dict(row) if row else None
 
 
-async def update_user_task(task_id: int, values: dict[str, Any]) -> dict[str, Any] | None:
+async def update_user_task(
+    task_id: int, values: dict[str, Any]
+) -> dict[str, Any] | None:
     if not values:
         async with transaction() as conn:
             row = (
-                await conn.execute(select(user_tasks).where(user_tasks.c.id == task_id))
-            ).mappings().first()
+                (
+                    await conn.execute(
+                        select(user_tasks).where(user_tasks.c.id == task_id)
+                    )
+                )
+                .mappings()
+                .first()
+            )
         return dict(row) if row else None
 
     row_values = {**values, "updated_at_ms": now_ms()}
     async with transaction() as conn:
         row = (
-            await conn.execute(
-                update(user_tasks)
-                .where(user_tasks.c.id == task_id)
-                .values(**row_values)
-                .returning(user_tasks)
+            (
+                await conn.execute(
+                    update(user_tasks)
+                    .where(user_tasks.c.id == task_id)
+                    .values(**row_values)
+                    .returning(user_tasks)
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
     return dict(row) if row else None
 
 
@@ -268,13 +336,17 @@ async def attach_completed_file_to_user(
     timestamp = now_ms()
     async with transaction() as conn:
         task = (
-            await conn.execute(
-                select(user_tasks).where(
-                    user_tasks.c.user_id == user_id,
-                    user_tasks.c.global_download_id == global_download_id,
+            (
+                await conn.execute(
+                    select(user_tasks).where(
+                        user_tasks.c.user_id == user_id,
+                        user_tasks.c.global_download_id == global_download_id,
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
 
         user_file = (
             await conn.execute(
@@ -335,26 +407,34 @@ async def attach_completed_file_to_user(
         }
         if task:
             row = (
-                await conn.execute(
-                    update(user_tasks)
-                    .where(user_tasks.c.id == task["id"])
-                    .values(**task_values)
-                    .returning(user_tasks)
+                (
+                    await conn.execute(
+                        update(user_tasks)
+                        .where(user_tasks.c.id == task["id"])
+                        .values(**task_values)
+                        .returning(user_tasks)
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
         else:
             row = (
-                await conn.execute(
-                    insert(user_tasks)
-                    .values(
-                        user_id=user_id,
-                        global_download_id=global_download_id,
-                        created_at_ms=timestamp,
-                        **task_values,
+                (
+                    await conn.execute(
+                        insert(user_tasks)
+                        .values(
+                            user_id=user_id,
+                            global_download_id=global_download_id,
+                            created_at_ms=timestamp,
+                            **task_values,
+                        )
+                        .returning(user_tasks)
                     )
-                    .returning(user_tasks)
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
     return dict(row)
 
 
@@ -371,7 +451,11 @@ async def complete_active_user_tasks_for_stored_file(
         global_row = (
             await conn.execute(
                 update(global_downloads)
-                .where(global_downloads.c.id == global_download_id)
+                .where(
+                    global_downloads.c.id == global_download_id,
+                    global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
+                    global_downloads.c.completed_file_id.is_(None),
+                )
                 .values(
                     status="completed",
                     completed_file_id=stored_file_id,
@@ -386,16 +470,20 @@ async def complete_active_user_tasks_for_stored_file(
             )
         ).first()
         if global_row is None:
-            raise LookupError("global download not found")
+            raise LookupError("global download is not active")
 
         tasks = (
-            await conn.execute(
-                select(user_tasks).where(
-                    user_tasks.c.global_download_id == global_download_id,
-                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            (
+                await conn.execute(
+                    select(user_tasks).where(
+                        user_tasks.c.global_download_id == global_download_id,
+                        user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                    )
                 )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
 
         user_files_created = 0
         for task in tasks:
@@ -458,6 +546,100 @@ async def complete_active_user_tasks_for_stored_file(
     return user_files_created
 
 
+async def mark_global_download_failed(
+    download_id: int,
+    *,
+    message: str,
+    error_code: str | None = None,
+    clear_gid: bool = True,
+) -> dict[str, Any] | None:
+    timestamp = now_ms()
+    global_values: dict[str, Any] = {
+        "status": "failed",
+        "error_code": error_code,
+        "error_message": message,
+        "updated_at_ms": timestamp,
+    }
+    if clear_gid:
+        global_values["aria2_gid"] = None
+
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    update(global_downloads)
+                    .where(
+                        global_downloads.c.id == download_id,
+                        global_downloads.c.status.in_(
+                            FAILABLE_GLOBAL_DOWNLOAD_STATUSES
+                        ),
+                        global_downloads.c.completed_file_id.is_(None),
+                    )
+                    .values(**global_values)
+                    .returning(global_downloads)
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            current = (
+                (
+                    await conn.execute(
+                        select(global_downloads).where(
+                            global_downloads.c.id == download_id
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            return dict(current) if current else None
+
+        active_tasks = (
+            (
+                await conn.execute(
+                    select(user_tasks).where(
+                        user_tasks.c.global_download_id == download_id,
+                        user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+        for task in active_tasks:
+            reserved_bytes = int(task["reserved_bytes"] or 0)
+            if reserved_bytes <= 0:
+                continue
+            reserved_expr = user_storage_usage.c.reserved_bytes - reserved_bytes
+            await conn.execute(
+                update(user_storage_usage)
+                .where(user_storage_usage.c.user_id == task["user_id"])
+                .values(
+                    reserved_bytes=case((reserved_expr < 0, 0), else_=reserved_expr),
+                    updated_at_ms=timestamp,
+                )
+            )
+
+        await conn.execute(
+            update(user_tasks)
+            .where(
+                user_tasks.c.global_download_id == download_id,
+                user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            )
+            .values(
+                status="failed",
+                reserved_bytes=0,
+                error_message=message,
+                updated_at_ms=timestamp,
+                finished_at_ms=timestamp,
+            )
+        )
+    return dict(row)
+
+
 async def cancel_active_user_task(
     user_id: int,
     user_task_id: int,
@@ -468,14 +650,18 @@ async def cancel_active_user_task(
     timestamp = now_ms()
     async with transaction() as conn:
         task = (
-            await conn.execute(
-                select(user_tasks).where(
-                    user_tasks.c.id == user_task_id,
-                    user_tasks.c.user_id == user_id,
-                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            (
+                await conn.execute(
+                    select(user_tasks).where(
+                        user_tasks.c.id == user_task_id,
+                        user_tasks.c.user_id == user_id,
+                        user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if task is None:
             return None
 
@@ -495,23 +681,27 @@ async def cancel_active_user_task(
             )
 
         row = (
-            await conn.execute(
-                update(user_tasks)
-                .where(
-                    user_tasks.c.id == user_task_id,
-                    user_tasks.c.user_id == user_id,
-                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            (
+                await conn.execute(
+                    update(user_tasks)
+                    .where(
+                        user_tasks.c.id == user_task_id,
+                        user_tasks.c.user_id == user_id,
+                        user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                    )
+                    .values(
+                        status="cancelled",
+                        reserved_bytes=0,
+                        error_message=error_message,
+                        finished_at_ms=finished_at_ms,
+                        updated_at_ms=timestamp,
+                    )
+                    .returning(user_tasks)
                 )
-                .values(
-                    status="cancelled",
-                    reserved_bytes=0,
-                    error_message=error_message,
-                    finished_at_ms=finished_at_ms,
-                    updated_at_ms=timestamp,
-                )
-                .returning(user_tasks)
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
     return dict(row) if row else None
 
 
