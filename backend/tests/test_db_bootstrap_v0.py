@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import insert, text
 from sqlalchemy.exc import IntegrityError
 
@@ -15,14 +17,18 @@ from app.db.engine import dispose_engine, get_engine, reset_engine, session_scop
 from app.db.schema import sessions
 
 
-@pytest.fixture
-def isolated_db(tmp_path: Path):
+@pytest_asyncio.fixture
+async def isolated_db(tmp_path: Path) -> AsyncGenerator[Path, None]:
     original_db = settings.database_path
+    await dispose_engine()
+    reset_engine()
     settings.database_path = str(tmp_path / "app.db")
-    reset_engine()
-    yield Path(settings.database_path)
-    reset_engine()
-    settings.database_path = original_db
+    try:
+        yield Path(settings.database_path)
+    finally:
+        await dispose_engine()
+        reset_engine()
+        settings.database_path = original_db
 
 
 @pytest.mark.asyncio
