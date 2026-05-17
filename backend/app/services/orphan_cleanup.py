@@ -3,12 +3,13 @@
 在应用启动时清理 store 目录中没有对应数据库记录的物理文件。
 这些孤儿文件可能由于进程在数据库事务提交后、物理文件删除前崩溃而产生。
 """
+
 import logging
 
-from sqlmodel import select
+from sqlalchemy import select
 
-from app.database import get_session
-from app.models import StoredFile
+from app.db.engine import transaction
+from app.db.schema import stored_files
 from app.services.storage import get_store_dir, safe_delete_path
 
 logger = logging.getLogger(__name__)
@@ -28,9 +29,9 @@ async def cleanup_orphan_files() -> int:
         return 0
 
     # 获取数据库中所有 StoredFile 的 real_path
-    async with get_session() as db:
-        result = await db.exec(select(StoredFile.real_path))
-        db_paths = set(result.all())
+    async with transaction() as conn:
+        result = await conn.execute(select(stored_files.c.real_path))
+        db_paths = {str(row[0]) for row in result.all()}
 
     # 扫描 store 目录：结构为 /store/{prefix}/{content_hash}
     # 只删除 hash 级别的目录/文件，不删除 prefix 目录
