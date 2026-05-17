@@ -5,7 +5,6 @@
 2. ANSI 转义序列被正确移除
 3. URL 凭证被正确脱敏
 """
-import pytest
 
 from app.core.security import sanitize_string, mask_url_credentials
 

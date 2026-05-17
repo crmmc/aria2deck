@@ -1,4 +1,5 @@
 """Tests for hash utility functions."""
+
 import base64
 import hashlib
 import pytest
@@ -8,7 +9,6 @@ from app.services.hash import (
     extract_info_hash_from_magnet,
     extract_info_hash_from_torrent,
     extract_info_hash_from_torrent_base64,
-    _extract_info_dict_bytes,
     _find_bencode_end,
     calculate_url_hash,
     calculate_file_content_hash,
@@ -80,9 +80,11 @@ class TestExtractInfoHashFromTorrent:
         """Test extraction from valid torrent data"""
         # Create a minimal valid torrent structure
         # d8:announce...4:infod4:name4:test12:piece lengthi16384e6:pieces20:...ee
-        info_dict = b"d4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789e"
+        info_dict = (
+            b"d4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789e"
+        )
         torrent = b"d8:announce25:http://tracker.example.com4:info" + info_dict + b"e"
-        
+
         result = extract_info_hash_from_torrent(torrent)
         expected = hashlib.sha1(info_dict).hexdigest().lower()
         assert result == expected
@@ -109,10 +111,12 @@ class TestExtractInfoHashFromTorrentBase64:
 
     def test_valid_base64_torrent(self):
         """Test extraction from base64-encoded torrent"""
-        info_dict = b"d4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789e"
+        info_dict = (
+            b"d4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789e"
+        )
         torrent = b"d8:announce25:http://tracker.example.com4:info" + info_dict + b"e"
         torrent_b64 = base64.b64encode(torrent).decode("ascii")
-        
+
         result = extract_info_hash_from_torrent_base64(torrent_b64)
         expected = hashlib.sha1(info_dict).hexdigest().lower()
         assert result == expected
@@ -252,7 +256,7 @@ class TestCalculateFileContentHash:
         file_path = tmp_path / "test.txt"
         content = b"Hello, World!"
         file_path.write_bytes(content)
-        
+
         result = calculate_file_content_hash(file_path)
         expected = hashlib.sha256(content).hexdigest().lower()
         assert result == expected
@@ -261,7 +265,7 @@ class TestCalculateFileContentHash:
         """Test hash of empty file"""
         file_path = tmp_path / "empty.txt"
         file_path.write_bytes(b"")
-        
+
         result = calculate_file_content_hash(file_path)
         expected = hashlib.sha256(b"").hexdigest().lower()
         assert result == expected
@@ -272,7 +276,7 @@ class TestCalculateFileContentHash:
         # Create file larger than 8192 bytes (chunk size)
         content = b"x" * 20000
         file_path.write_bytes(content)
-        
+
         result = calculate_file_content_hash(file_path)
         expected = hashlib.sha256(content).hexdigest().lower()
         assert result == expected
@@ -284,7 +288,7 @@ class TestCalculateFileContentHash:
         content = b"Same content"
         file1.write_bytes(content)
         file2.write_bytes(content)
-        
+
         result1 = calculate_file_content_hash(file1)
         result2 = calculate_file_content_hash(file2)
         assert result1 == result2
@@ -299,7 +303,7 @@ class TestCalculateDirectoryContentHash:
         dir_path.mkdir()
         (dir_path / "file1.txt").write_bytes(b"content1")
         (dir_path / "file2.txt").write_bytes(b"content2")
-        
+
         result = calculate_directory_content_hash(dir_path)
         assert len(result) == 64
 
@@ -307,7 +311,7 @@ class TestCalculateDirectoryContentHash:
         """Test hash of empty directory"""
         dir_path = tmp_path / "emptydir"
         dir_path.mkdir()
-        
+
         result = calculate_directory_content_hash(dir_path)
         # Empty directory should produce hash of empty input
         expected = hashlib.sha256(b"").hexdigest().lower()
@@ -321,7 +325,7 @@ class TestCalculateDirectoryContentHash:
         subdir.mkdir()
         (dir_path / "file1.txt").write_bytes(b"content1")
         (subdir / "file2.txt").write_bytes(b"content2")
-        
+
         result = calculate_directory_content_hash(dir_path)
         assert len(result) == 64
 
@@ -333,7 +337,7 @@ class TestCalculateDirectoryContentHash:
         dir2.mkdir()
         (dir1 / "file.txt").write_bytes(b"content")
         (dir2 / "file.txt").write_bytes(b"content")
-        
+
         result1 = calculate_directory_content_hash(dir1)
         result2 = calculate_directory_content_hash(dir2)
         assert result1 == result2
@@ -346,7 +350,7 @@ class TestCalculateDirectoryContentHash:
         dir2.mkdir()
         (dir1 / "file.txt").write_bytes(b"content1")
         (dir2 / "file.txt").write_bytes(b"content2")
-        
+
         result1 = calculate_directory_content_hash(dir1)
         result2 = calculate_directory_content_hash(dir2)
         assert result1 != result2
@@ -359,7 +363,7 @@ class TestCalculateContentHash:
         """Test hash of file"""
         file_path = tmp_path / "test.txt"
         file_path.write_bytes(b"content")
-        
+
         result = calculate_content_hash(file_path)
         expected = calculate_file_content_hash(file_path)
         assert result == expected
@@ -369,7 +373,7 @@ class TestCalculateContentHash:
         dir_path = tmp_path / "testdir"
         dir_path.mkdir()
         (dir_path / "file.txt").write_bytes(b"content")
-        
+
         result = calculate_content_hash(dir_path)
         expected = calculate_directory_content_hash(dir_path)
         assert result == expected
@@ -377,7 +381,7 @@ class TestCalculateContentHash:
     def test_nonexistent_path(self, tmp_path: Path):
         """Test nonexistent path raises ValueError"""
         nonexistent = tmp_path / "nonexistent"
-        
+
         with pytest.raises(ValueError, match="does not exist"):
             calculate_content_hash(nonexistent)
 
@@ -414,10 +418,12 @@ class TestGetUriHash:
 
     def test_torrent_with_base64(self):
         """Test hash extraction from torrent with base64 data"""
-        info_dict = b"d4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789e"
+        info_dict = (
+            b"d4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789e"
+        )
         torrent = b"d8:announce25:http://tracker.example.com4:info" + info_dict + b"e"
         torrent_b64 = base64.b64encode(torrent).decode("ascii")
-        
+
         result = get_uri_hash("[torrent]", torrent_b64)
         expected = hashlib.sha1(info_dict).hexdigest().lower()
         assert result == expected

@@ -5,7 +5,6 @@
 2. 未知错误码返回默认格式
 3. 错误消息模式匹配
 """
-import pytest
 
 from app.aria2.errors import get_error_message, parse_error_message, ERROR_CODE_MAP
 
@@ -85,5 +84,5 @@ class TestErrorCodeMapCoverage:
         """测试所有映射都是中文描述"""
         for code, desc in ERROR_CODE_MAP.items():
             # 检查是否包含中文字符
-            has_chinese = any('\u4e00' <= c <= '\u9fff' for c in desc)
+            has_chinese = any("\u4e00" <= c <= "\u9fff" for c in desc)
             assert has_chinese, f"错误码 {code} 的描述 '{desc}' 不包含中文"

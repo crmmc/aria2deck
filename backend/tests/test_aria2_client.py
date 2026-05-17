@@ -1,13 +1,12 @@
 """Tests for aria2 client."""
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-import aiohttp
+from unittest.mock import AsyncMock
 
 from app.aria2.client import Aria2Client
 
 
 class TestAria2Client:
-
     def test_init(self):
         client = Aria2Client("http://localhost:6800/jsonrpc", "secret123")
         assert client._rpc_url == "http://localhost:6800/jsonrpc"
@@ -30,27 +29,26 @@ class TestAria2Client:
 
 @pytest.mark.asyncio
 class TestAria2ClientAsync:
-
     async def test_add_uri(self):
         client = Aria2Client("http://localhost:6800/jsonrpc", "secret")
         client._call = AsyncMock(return_value="gid123")
 
         result = await client.add_uri(["http://example.com/file.zip"])
         assert result == "gid123"
-        client._call.assert_called_once_with("aria2.addUri", [["http://example.com/file.zip"]])
+        client._call.assert_called_once_with(
+            "aria2.addUri", [["http://example.com/file.zip"]]
+        )
 
     async def test_add_uri_with_options(self):
         client = Aria2Client("http://localhost:6800/jsonrpc", "secret")
         client._call = AsyncMock(return_value="gid123")
 
         result = await client.add_uri(
-            ["http://example.com/file.zip"],
-            {"dir": "/downloads"}
+            ["http://example.com/file.zip"], {"dir": "/downloads"}
         )
         assert result == "gid123"
         client._call.assert_called_once_with(
-            "aria2.addUri",
-            [["http://example.com/file.zip"], {"dir": "/downloads"}]
+            "aria2.addUri", [["http://example.com/file.zip"], {"dir": "/downloads"}]
         )
 
     async def test_add_torrent(self):
@@ -60,8 +58,7 @@ class TestAria2ClientAsync:
         result = await client.add_torrent("base64_torrent_data")
         assert result == "gid456"
         client._call.assert_called_once_with(
-            "aria2.addTorrent",
-            ["base64_torrent_data", []]
+            "aria2.addTorrent", ["base64_torrent_data", []]
         )
 
     async def test_add_torrent_with_options(self):
@@ -69,14 +66,12 @@ class TestAria2ClientAsync:
         client._call = AsyncMock(return_value="gid456")
 
         result = await client.add_torrent(
-            "base64_torrent_data",
-            ["http://webseed.com"],
-            {"dir": "/downloads"}
+            "base64_torrent_data", ["http://webseed.com"], {"dir": "/downloads"}
         )
         assert result == "gid456"
         client._call.assert_called_once_with(
             "aria2.addTorrent",
-            ["base64_torrent_data", ["http://webseed.com"], {"dir": "/downloads"}]
+            ["base64_torrent_data", ["http://webseed.com"], {"dir": "/downloads"}],
         )
 
     async def test_tell_status(self):
@@ -197,4 +192,6 @@ class TestAria2ClientAsync:
 
         result = await client.change_position("gid123", 5, "POS_SET")
         assert result == 5
-        client._call.assert_called_once_with("aria2.changePosition", ["gid123", 5, "POS_SET"])
+        client._call.assert_called_once_with(
+            "aria2.changePosition", ["gid123", 5, "POS_SET"]
+        )
