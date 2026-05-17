@@ -4,7 +4,13 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.core.config import settings
 
@@ -37,7 +43,9 @@ def get_engine() -> AsyncEngine:
 def get_session_maker() -> async_sessionmaker[AsyncSession]:
     global _session_maker
     if _session_maker is None:
-        _session_maker = async_sessionmaker(get_engine(), class_=AsyncSession, expire_on_commit=False)
+        _session_maker = async_sessionmaker(
+            get_engine(), class_=AsyncSession, expire_on_commit=False
+        )
     return _session_maker
 
 

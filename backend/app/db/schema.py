@@ -15,8 +15,24 @@ from sqlalchemy import (
 
 SCHEMA_VERSION = 0
 
-GLOBAL_DOWNLOAD_STATUSES = ("queued", "active", "waiting", "paused", "completed", "failed", "cancelled")
-USER_TASK_STATUSES = ("queued", "active", "waiting", "paused", "completed", "failed", "cancelled")
+GLOBAL_DOWNLOAD_STATUSES = (
+    "queued",
+    "active",
+    "waiting",
+    "paused",
+    "completed",
+    "failed",
+    "cancelled",
+)
+USER_TASK_STATUSES = (
+    "queued",
+    "active",
+    "waiting",
+    "paused",
+    "completed",
+    "failed",
+    "cancelled",
+)
 PACK_TASK_STATUSES = ("pending", "packing", "completed", "failed", "cancelled")
 SHARE_STATUSES = ("active", "revoked")
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
@@ -53,14 +69,18 @@ users = Table(
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
     CheckConstraint("is_admin IN (0, 1)", name="ck_users_is_admin_bool"),
-    CheckConstraint("is_initial_password IN (0, 1)", name="ck_users_initial_password_bool"),
+    CheckConstraint(
+        "is_initial_password IN (0, 1)", name="ck_users_initial_password_bool"
+    ),
 )
 
 sessions = Table(
     "sessions",
     metadata,
     Column("id", String(64), primary_key=True),
-    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    ),
     Column("expires_at_ms", Integer, nullable=False),
     Column("created_at_ms", Integer, nullable=False),
     Index("ix_sessions_user_id", "user_id"),
@@ -71,7 +91,9 @@ api_tokens = Table(
     "api_tokens",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    ),
     Column("token", String(128), nullable=False, unique=True),
     Column("name", String(200)),
     Column("created_at_ms", Integer, nullable=False),
@@ -149,8 +171,13 @@ global_downloads = Table(
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
     Column("completed_at_ms", Integer),
-    CheckConstraint(_in_check("resource_kind", RESOURCE_KINDS), name="ck_global_downloads_resource_kind"),
-    CheckConstraint(_in_check("status", GLOBAL_DOWNLOAD_STATUSES), name="ck_global_downloads_status"),
+    CheckConstraint(
+        _in_check("resource_kind", RESOURCE_KINDS),
+        name="ck_global_downloads_resource_kind",
+    ),
+    CheckConstraint(
+        _in_check("status", GLOBAL_DOWNLOAD_STATUSES), name="ck_global_downloads_status"
+    ),
     Index("ix_global_downloads_status_gid", "status", "aria2_gid"),
     Index("ix_global_downloads_completed_file_id", "completed_file_id"),
 )
@@ -159,8 +186,15 @@ user_tasks = Table(
     "user_tasks",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-    Column("global_download_id", Integer, ForeignKey("global_downloads.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    ),
+    Column(
+        "global_download_id",
+        Integer,
+        ForeignKey("global_downloads.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
     Column("status", String(16), nullable=False),
     Column("reserved_bytes", Integer, nullable=False, server_default="0"),
     Column("display_name", Text),
@@ -168,8 +202,12 @@ user_tasks = Table(
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
     Column("finished_at_ms", Integer),
-    UniqueConstraint("user_id", "global_download_id", name="uq_user_tasks_user_download"),
-    CheckConstraint(_in_check("status", USER_TASK_STATUSES), name="ck_user_tasks_status"),
+    UniqueConstraint(
+        "user_id", "global_download_id", name="uq_user_tasks_user_download"
+    ),
+    CheckConstraint(
+        _in_check("status", USER_TASK_STATUSES), name="ck_user_tasks_status"
+    ),
     Index("ix_user_tasks_user_status_updated", "user_id", "status", "updated_at_ms"),
     Index("ix_user_tasks_download_status", "global_download_id", "status"),
     Index("ix_user_tasks_user_finished", "user_id", "finished_at_ms"),
@@ -179,7 +217,12 @@ stored_file_entries = Table(
     "stored_file_entries",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("stored_file_id", Integer, ForeignKey("stored_files.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "stored_file_id",
+        Integer,
+        ForeignKey("stored_files.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
     Column("relative_path", Text, nullable=False),
     Column("parent_path", Text, nullable=False),
     Column("name", Text, nullable=False),
@@ -187,7 +230,9 @@ stored_file_entries = Table(
     Column("is_dir", Integer, nullable=False, server_default="0"),
     Column("mtime_ms", Integer),
     Column("sort_key", Text),
-    UniqueConstraint("stored_file_id", "relative_path", name="uq_stored_file_entries_path"),
+    UniqueConstraint(
+        "stored_file_id", "relative_path", name="uq_stored_file_entries_path"
+    ),
     CheckConstraint("is_dir IN (0, 1)", name="ck_stored_file_entries_is_dir_bool"),
     Index("ix_stored_file_entries_parent", "stored_file_id", "parent_path"),
     Index("ix_stored_file_entries_dir_name", "stored_file_id", "is_dir", "name"),
@@ -197,8 +242,15 @@ user_files = Table(
     "user_files",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-    Column("stored_file_id", Integer, ForeignKey("stored_files.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    ),
+    Column(
+        "stored_file_id",
+        Integer,
+        ForeignKey("stored_files.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
     Column("display_name", Text, nullable=False),
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
@@ -212,8 +264,15 @@ share_links = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("share_code", String(32), nullable=False, unique=True),
-    Column("owner_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-    Column("user_file_id", Integer, ForeignKey("user_files.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "owner_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    ),
+    Column(
+        "user_file_id",
+        Integer,
+        ForeignKey("user_files.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
     Column("password_hash", Text),
     Column("expires_at_ms", Integer),
     Column("max_downloads", Integer),
@@ -230,7 +289,9 @@ pack_tasks = Table(
     "pack_tasks",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    ),
     Column("source_user_file_ids_json", Text, nullable=False),
     Column("source_size_bytes", Integer, nullable=False),
     Column("reserved_bytes", Integer, nullable=False),
@@ -244,7 +305,9 @@ pack_tasks = Table(
     Column("updated_at_ms", Integer, nullable=False),
     Column("finished_at_ms", Integer),
     CheckConstraint("delete_source IN (0, 1)", name="ck_pack_tasks_delete_source_bool"),
-    CheckConstraint(_in_check("status", PACK_TASK_STATUSES), name="ck_pack_tasks_status"),
+    CheckConstraint(
+        _in_check("status", PACK_TASK_STATUSES), name="ck_pack_tasks_status"
+    ),
     Index("ix_pack_tasks_user_status_created", "user_id", "status", "created_at_ms"),
     Index("ix_pack_tasks_output_stored_file_id", "output_stored_file_id"),
 )
@@ -252,7 +315,9 @@ pack_tasks = Table(
 user_storage_usage = Table(
     "user_storage_usage",
     metadata,
-    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    ),
     Column("used_bytes", Integer, nullable=False, server_default="0"),
     Column("reserved_bytes", Integer, nullable=False, server_default="0"),
     Column("updated_at_ms", Integer, nullable=False),

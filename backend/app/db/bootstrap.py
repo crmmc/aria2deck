@@ -53,7 +53,9 @@ def default_app_settings(timestamp_ms: int) -> dict:
 
 async def _table_names() -> set[str]:
     async with get_engine().connect() as conn:
-        return set(await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names()))
+        return set(
+            await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names())
+        )
 
 
 async def validate_schema_version() -> None:
@@ -68,12 +70,20 @@ async def validate_schema_version() -> None:
         )
 
     async with get_engine().connect() as conn:
-        row = (await conn.execute(select(schema_meta.c.version).where(schema_meta.c.id == 1))).first()
+        row = (
+            await conn.execute(
+                select(schema_meta.c.version).where(schema_meta.c.id == 1)
+            )
+        ).first()
     if row is None:
-        raise RuntimeError("Unsupported database schema: schema_meta row is missing; expected version 0.")
+        raise RuntimeError(
+            "Unsupported database schema: schema_meta row is missing; expected version 0."
+        )
     version = int(row[0])
     if version != SCHEMA_VERSION:
-        raise RuntimeError(f"Unsupported database schema: expected version 0, got {version}. Rebuild the database.")
+        raise RuntimeError(
+            f"Unsupported database schema: expected version 0, got {version}. Rebuild the database."
+        )
 
 
 async def bootstrap_database() -> None:
@@ -87,5 +97,11 @@ async def bootstrap_database() -> None:
     async with get_engine().begin() as conn:
         await conn.execute(text("PRAGMA foreign_keys=ON"))
         await conn.run_sync(metadata.create_all)
-        await conn.execute(insert(schema_meta).values(id=1, version=SCHEMA_VERSION, created_at_ms=timestamp_ms))
-        await conn.execute(insert(app_settings).values(default_app_settings(timestamp_ms)))
+        await conn.execute(
+            insert(schema_meta).values(
+                id=1, version=SCHEMA_VERSION, created_at_ms=timestamp_ms
+            )
+        )
+        await conn.execute(
+            insert(app_settings).values(default_app_settings(timestamp_ms))
+        )
