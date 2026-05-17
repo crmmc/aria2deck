@@ -2,13 +2,13 @@
 
 独立于活动任务，记录用户的下载历史。
 """
+
 import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.auth import require_user
-from app.models import User
+from app.auth import AuthUser, require_user
 from app.repositories.downloads import (
     TERMINAL_USER_TASK_STATUSES,
     clear_terminal_user_tasks,
@@ -27,7 +27,7 @@ def _ms_to_iso(timestamp_ms: int | None) -> str | None:
 
 
 @router.get("")
-async def list_history(user: User = Depends(require_user)) -> list[dict]:
+async def list_history(user: AuthUser = Depends(require_user)) -> list[dict]:
     """获取当前用户的任务历史"""
     records = await list_user_tasks(user.id, TERMINAL_USER_TASK_STATUSES)
     logger.debug("查询历史记录 user_id=%s count=%s", user.id, len(records))
@@ -54,12 +54,16 @@ async def list_history(user: User = Depends(require_user)) -> list[dict]:
 @router.delete("/{history_id}")
 async def delete_history(
     history_id: int,
-    user: User = Depends(require_user),
+    user: AuthUser = Depends(require_user),
 ) -> dict:
     """删除单条历史记录"""
     deleted = await delete_terminal_user_task(user.id, history_id)
     if not deleted:
-        logger.warning("删除历史记录失败 user_id=%s history_id=%s reason=not_found", user.id, history_id)
+        logger.warning(
+            "删除历史记录失败 user_id=%s history_id=%s reason=not_found",
+            user.id,
+            history_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="历史记录不存在",
@@ -71,7 +75,7 @@ async def delete_history(
 
 
 @router.delete("")
-async def clear_history(user: User = Depends(require_user)) -> dict:
+async def clear_history(user: AuthUser = Depends(require_user)) -> dict:
     """清空当前用户的所有历史记录"""
     count = await clear_terminal_user_tasks(user.id)
 

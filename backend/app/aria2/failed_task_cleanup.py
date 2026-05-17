@@ -1,20 +1,22 @@
 """Cleanup helpers for failed download tasks."""
+
 from __future__ import annotations
 
 import logging
 from enum import Enum
 
-from sqlmodel import select
+from sqlalchemy import select
 
 from app.aria2.client import Aria2Client
-from app.database import get_session
-from app.models import DownloadTask, UserTaskSubscription
+from app.db.engine import transaction
+from app.db.schema import global_downloads, user_tasks
 from app.services.storage import cleanup_task_download_dir, get_downloading_dir
 
 logger = logging.getLogger(__name__)
 
 # Valid failed states that trigger cleanup
-FAILED_STATES = frozenset({"error", "removed"})
+FAILED_STATES = frozenset({"failed", "cancelled"})
+ACTIVE_USER_TASK_STATUSES = ("queued", "active", "waiting", "paused")
 
 
 class CleanupErrorType(str, Enum):
@@ -27,18 +29,19 @@ class CleanupErrorType(str, Enum):
 
 
 async def get_representative_owner_id(task_id: int) -> int | None:
-    """Get owner_id from first pending subscription for logging."""
-    async with get_session() as db:
-        result = await db.exec(
-            select(UserTaskSubscription.owner_id)
-            .where(
-                UserTaskSubscription.task_id == task_id,
-                UserTaskSubscription.status == "pending",
+    """Get an active owner_id for a global download for logging."""
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                select(user_tasks.c.user_id)
+                .where(
+                    user_tasks.c.global_download_id == task_id,
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                )
+                .limit(1)
             )
-            .limit(1)
-        )
-        row = result.first()
-        return row if row else None
+        ).first()
+    return int(row[0]) if row else None
 
 
 async def cleanup_failed_task_artifacts(
@@ -74,13 +77,16 @@ async def cleanup_failed_task_artifacts(
 
     # Status validation (unless caller already verified)
     if not skip_status_check:
-        async with get_session() as db:
-            result = await db.exec(
-                select(DownloadTask).where(DownloadTask.id == task_id)
-            )
-            task = result.first()
+        async with transaction() as conn:
+            row = (
+                await conn.execute(
+                    select(global_downloads.c.status).where(
+                        global_downloads.c.id == task_id
+                    )
+                )
+            ).first()
 
-        if task is None:
+        if row is None:
             logger.debug(
                 "[CLEANUP] skipped %s task_id=%s owner_id=%s gid=%s "
                 "path=%s reason=task_not_found",
@@ -92,7 +98,8 @@ async def cleanup_failed_task_artifacts(
             )
             return True  # Already cleaned or never existed
 
-        if task.status not in FAILED_STATES:
+        status = row[0]
+        if status not in FAILED_STATES:
             logger.debug(
                 "[CLEANUP] skipped %s task_id=%s owner_id=%s gid=%s "
                 "path=%s error_type=%s status=%s",
@@ -102,7 +109,7 @@ async def cleanup_failed_task_artifacts(
                 gid,
                 path,
                 CleanupErrorType.STATUS_CONFLICT.value,
-                task.status,
+                status,
             )
             return True  # Not a failed task, no cleanup needed
 
