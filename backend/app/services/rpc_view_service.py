@@ -36,12 +36,16 @@ def _has_file_name(files: Any) -> bool:
     if not isinstance(files, list):
         return False
     return any(
-        isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"].strip()
+        isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and item["path"].strip()
         for item in files
     )
 
 
-def _files_from_task(row: dict[str, Any], total_bytes: int, completed_bytes: int) -> list[dict[str, str]]:
+def _files_from_task(
+    row: dict[str, Any], total_bytes: int, completed_bytes: int
+) -> list[dict[str, str]]:
     return [
         {
             "index": "1",
@@ -54,7 +58,9 @@ def _files_from_task(row: dict[str, Any], total_bytes: int, completed_bytes: int
     ]
 
 
-def status_from_task(row: dict[str, Any], live: dict[str, Any] | None = None) -> dict[str, Any]:
+def status_from_task(
+    row: dict[str, Any], live: dict[str, Any] | None = None
+) -> dict[str, Any]:
     live = live or {}
     gid = row.get("aria2_gid") or f"task-{row['id']}"
     status = _aria2_status(str(row["status"]))
@@ -64,7 +70,11 @@ def status_from_task(row: dict[str, Any], live: dict[str, Any] | None = None) ->
         completed_bytes = total_bytes
     error_message = row.get("error_message") or row.get("global_error_message") or ""
     live_files = live.get("files")
-    files = live_files if _has_file_name(live_files) else _files_from_task(row, total_bytes, completed_bytes)
+    files = (
+        live_files
+        if _has_file_name(live_files)
+        else _files_from_task(row, total_bytes, completed_bytes)
+    )
     return {
         "gid": gid,
         "status": status,
@@ -85,7 +95,13 @@ def status_from_task(row: dict[str, Any], live: dict[str, Any] | None = None) ->
         "seeder": str(live.get("seeder", "false")),
         "bittorrent": live.get(
             "bittorrent",
-            {"announceList": [], "comment": "", "creationDate": "0", "mode": "single", "info": {"name": _display_name(row)}},
+            {
+                "announceList": [],
+                "comment": "",
+                "creationDate": "0",
+                "mode": "single",
+                "info": {"name": _display_name(row)},
+            },
         ),
     }
 
@@ -96,7 +112,10 @@ async def list_active_statuses(
 ) -> list[dict[str, Any]]:
     rows = await list_user_tasks(user_id, ["active"])
     live_by_gid = live_by_gid or {}
-    return [status_from_task(row, live_by_gid.get(str(row.get("aria2_gid")))) for row in rows]
+    return [
+        status_from_task(row, live_by_gid.get(str(row.get("aria2_gid"))))
+        for row in rows
+    ]
 
 
 async def list_waiting_statuses(user_id: int) -> list[dict[str, Any]]:

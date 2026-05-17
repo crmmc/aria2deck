@@ -3,11 +3,11 @@
 为外部 aria2 兼容客户端（如 AriaNg、Motrix）提供 RPC 方法实现。
 实现用户隔离、数据脱敏、配额检查等安全机制。
 
-基于共享下载架构（DownloadTask + UserTaskSubscription）。
+基于 v0 shared download tables（global_downloads + user_tasks）。
 """
+
 from __future__ import annotations
-import asyncio
-from datetime import datetime, timezone
+
 import hashlib
 import logging
 import shutil
@@ -15,15 +15,9 @@ from pathlib import Path
 from typing import Any, Protocol, Sequence
 from urllib.parse import unquote, urlsplit
 
-from sqlalchemy.exc import IntegrityError
-from sqlmodel import col, select
-
-from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts
 from app.core.config import settings
 from app.core.security import mask_url_credentials
 from app.core.state import AppState
-from app.database import get_session
-from app.models import DownloadTask, TaskHistory, UserTaskSubscription, utc_now_str
 from app.routers.config import get_min_free_disk
 from app.repositories import auth as auth_repo
 from app.repositories.downloads import (
@@ -32,13 +26,18 @@ from app.repositories.downloads import (
     delete_all_terminal_user_tasks,
     delete_terminal_user_task,
     delete_terminal_user_task_by_gid,
+    get_global_by_resource_key,
     get_user_task_by_gid,
     get_user_task_by_id,
     list_user_tasks,
 )
-from app.services.download_service import cancel_user_task
-from app.services.hash import extract_info_hash_from_torrent_base64, get_uri_hash
 from app.services import rpc_view_service
+from app.services.download_service import (
+    cancel_user_task,
+    create_user_download,
+    create_user_torrent_download,
+)
+from app.services.hash import extract_info_hash_from_torrent_base64, get_uri_hash
 from app.services.usage_service import get_usage
 
 
@@ -47,10 +46,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_STATUS_DOWNLOADS = "0"
 DEFAULT_STATUS_WAITING = "waiting"
 DEFAULT_STATUS_ERROR = "error"
-DEFAULT_STATUS_COMPLETE = "complete"
 DEFAULT_BOOL_FALSE = "false"
 DEFAULT_ERROR_CODE = "0"
-BT_INFO_HASH_LENGTH = 40
 SPECIAL_GID_PREFIXES = ("hist-", "task-")
 
 ALLOWED_STATUS_VALUES = {
@@ -61,8 +58,6 @@ ALLOWED_STATUS_VALUES = {
     "complete",
     "removed",
 }
-RUNNABLE_TASK_STATUSES = ("active", "queued", "waiting", "paused")
-CANCELABLE_TASK_STATUSES = ("queued", "active", "waiting", "paused", "error")
 
 
 class RpcBackendClient(Protocol):
@@ -160,7 +155,9 @@ class Aria2RpcHandler:
         "system.multicall",
     ]
 
-    def __init__(self, user_id: int, aria2_client: RpcBackendClient, app_state: AppState):
+    def __init__(
+        self, user_id: int, aria2_client: RpcBackendClient, app_state: AppState
+    ):
         self.user_id = user_id
         self.client = aria2_client
         if app_state is None:
@@ -173,10 +170,7 @@ class Aria2RpcHandler:
         handler = getattr(self, handler_name, None)
 
         if handler is None:
-            raise RpcError(
-                RpcErrorCode.METHOD_NOT_FOUND,
-                f"Method not found: {method}"
-            )
+            raise RpcError(RpcErrorCode.METHOD_NOT_FOUND, f"Method not found: {method}")
 
         return await handler(params)
 
@@ -200,6 +194,7 @@ class Aria2RpcHandler:
             result.append(char.lower())
 
         return "_handle_" + "".join(result)
+
     def _sanitize_file_path(self, path: str) -> str:
         if not path:
             return path
@@ -209,7 +204,11 @@ class Aria2RpcHandler:
         """Return the current user's v0 task row for an aria2 gid."""
         return await get_user_task_by_gid(self.user_id, gid)
 
-    async def _get_user_gids(self, sub_statuses: list[str] | None = None, task_statuses: list[str] | None = None) -> set[str]:
+    async def _get_user_gids(
+        self,
+        sub_statuses: list[str] | None = None,
+        task_statuses: list[str] | None = None,
+    ) -> set[str]:
         """获取用户指定状态的任务 gid 集合"""
         rows = await list_user_tasks(self.user_id, sub_statuses)
         gids: set[str] = set()
@@ -273,38 +272,6 @@ class Aria2RpcHandler:
         return Path(decoded_path).name
 
     @staticmethod
-    def _extract_magnet_display_name(uri: str) -> str:
-        """从磁力链接提取显示名称（dn 参数或完整 URI）"""
-        if not uri or not uri.startswith("magnet:"):
-            return ""
-        # 尝试提取 dn 参数
-        import re
-        dn_match = re.search(r'[?&]dn=([^&]+)', uri)
-        if dn_match:
-            return unquote(dn_match.group(1))
-        # 没有 dn，返回完整磁力链接
-        return uri
-
-    def _build_status_files(
-        self,
-        task_name: str | None,
-        uri: str | None,
-        total_length: int,
-        completed_length: int,
-        fallback_name: str = "",
-    ) -> list[dict[str, Any]]:
-        file_data = self._new_file_payload()
-        candidate_name = (task_name or "").strip()
-        if not candidate_name and uri and not self._is_bittorrent_uri(uri):
-            candidate_name = self._extract_name_from_uri(uri)
-        if not candidate_name:
-            candidate_name = fallback_name
-        file_data["path"] = self._sanitize_file_path(candidate_name)
-        file_data["length"] = str(total_length)
-        file_data["completedLength"] = str(completed_length)
-        return [file_data]
-
-    @staticmethod
     def _status_str(value: Any, default: str = DEFAULT_STATUS_DOWNLOADS) -> str:
         if value is None:
             return default
@@ -321,7 +288,9 @@ class Aria2RpcHandler:
         return default
 
     @staticmethod
-    def _normalize_status_value(value: Any, default: str = DEFAULT_STATUS_WAITING) -> str:
+    def _normalize_status_value(
+        value: Any, default: str = DEFAULT_STATUS_WAITING
+    ) -> str:
         status = str(value).strip().lower() if value is not None else default
         if status in ALLOWED_STATUS_VALUES:
             return status
@@ -357,7 +326,13 @@ class Aria2RpcHandler:
             "infoHash": "",
             "numSeeders": DEFAULT_STATUS_DOWNLOADS,
             "seeder": DEFAULT_BOOL_FALSE,
-            "bittorrent": {"announceList": [], "comment": "", "creationDate": "0", "mode": "single", "info": {"name": ""}},
+            "bittorrent": {
+                "announceList": [],
+                "comment": "",
+                "creationDate": "0",
+                "mode": "single",
+                "info": {"name": ""},
+            },
         }
 
     @staticmethod
@@ -369,7 +344,9 @@ class Aria2RpcHandler:
             return None
         if not isinstance(keys, list):
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "keys must be an array")
-        normalized = [str(item) for item in keys if isinstance(item, str) and item.strip()]
+        normalized = [
+            str(item) for item in keys if isinstance(item, str) and item.strip()
+        ]
         if not normalized:
             return None
         return normalized
@@ -390,15 +367,29 @@ class Aria2RpcHandler:
                 continue
             file_data = self._new_file_payload()
             file_data["index"] = self._status_str(item.get("index"), file_data["index"])
-            file_data["length"] = self._status_str(item.get("length"), file_data["length"])
-            file_data["completedLength"] = self._status_str(item.get("completedLength"), file_data["completedLength"])
-            file_data["selected"] = self._status_bool(item.get("selected"), file_data["selected"])
-            file_data["path"] = self._sanitize_file_path(self._status_str(item.get("path"), ""))
+            file_data["length"] = self._status_str(
+                item.get("length"), file_data["length"]
+            )
+            file_data["completedLength"] = self._status_str(
+                item.get("completedLength"), file_data["completedLength"]
+            )
+            file_data["selected"] = self._status_bool(
+                item.get("selected"), file_data["selected"]
+            )
+            file_data["path"] = self._sanitize_file_path(
+                self._status_str(item.get("path"), "")
+            )
             sanitized_files.append(file_data)
         return sanitized_files
 
     def _sanitize_bittorrent(self, bt_info: Any) -> dict:
-        sanitized = {"announceList": [], "comment": "", "creationDate": "0", "mode": "single", "info": {"name": ""}}
+        sanitized = {
+            "announceList": [],
+            "comment": "",
+            "creationDate": "0",
+            "mode": "single",
+            "info": {"name": ""},
+        }
         if not isinstance(bt_info, dict):
             return sanitized
 
@@ -453,10 +444,18 @@ class Aria2RpcHandler:
                 continue
             peer = self._new_peer_payload()
             peer["bitfield"] = self._status_str(item.get("bitfield"), "")
-            peer["amChoking"] = self._status_bool(item.get("amChoking"), DEFAULT_BOOL_FALSE)
-            peer["peerChoking"] = self._status_bool(item.get("peerChoking"), DEFAULT_BOOL_FALSE)
-            peer["downloadSpeed"] = self._status_str(item.get("downloadSpeed"), DEFAULT_STATUS_DOWNLOADS)
-            peer["uploadSpeed"] = self._status_str(item.get("uploadSpeed"), DEFAULT_STATUS_DOWNLOADS)
+            peer["amChoking"] = self._status_bool(
+                item.get("amChoking"), DEFAULT_BOOL_FALSE
+            )
+            peer["peerChoking"] = self._status_bool(
+                item.get("peerChoking"), DEFAULT_BOOL_FALSE
+            )
+            peer["downloadSpeed"] = self._status_str(
+                item.get("downloadSpeed"), DEFAULT_STATUS_DOWNLOADS
+            )
+            peer["uploadSpeed"] = self._status_str(
+                item.get("uploadSpeed"), DEFAULT_STATUS_DOWNLOADS
+            )
             peer["seeder"] = self._status_bool(item.get("seeder"), DEFAULT_BOOL_FALSE)
             sanitized_peers.append(peer)
         return sanitized_peers
@@ -477,7 +476,9 @@ class Aria2RpcHandler:
                     if not isinstance(server, dict):
                         continue
                     payload = self._new_server_payload()
-                    payload["downloadSpeed"] = self._status_str(server.get("downloadSpeed"), DEFAULT_STATUS_DOWNLOADS)
+                    payload["downloadSpeed"] = self._status_str(
+                        server.get("downloadSpeed"), DEFAULT_STATUS_DOWNLOADS
+                    )
                     sanitized_servers.append(payload)
             sanitized_groups.append({"index": index, "servers": sanitized_servers})
         return sanitized_groups
@@ -503,24 +504,20 @@ class Aria2RpcHandler:
         version = self._status_str(version_info.get("version"), "aria2deck-proxy")
         features = version_info.get("enabledFeatures")
         if isinstance(features, list):
-            enabled_features = [str(feature) for feature in features if isinstance(feature, str)]
+            enabled_features = [
+                str(feature) for feature in features if isinstance(feature, str)
+            ]
         else:
             enabled_features = []
-        result: dict[str, Any] = {"version": version, "enabledFeatures": enabled_features}
+        result: dict[str, Any] = {
+            "version": version,
+            "enabledFeatures": enabled_features,
+        }
         for key in ("rpc_url", "secret", "sessionId"):
             value = version_info.get(key)
             if isinstance(value, str):
                 result[key] = value
         return result
-
-    @staticmethod
-    def _build_bt_info_hash(uri_hash: str) -> str:
-        value = uri_hash.strip()
-        if len(value) != BT_INFO_HASH_LENGTH:
-            return ""
-        if not all(char in "0123456789abcdefABCDEF" for char in value):
-            return ""
-        return value.lower()
 
     @staticmethod
     def _is_bittorrent_uri(uri: str) -> bool:
@@ -532,20 +529,40 @@ class Aria2RpcHandler:
 
         result["gid"] = self._status_str(status.get("gid"), "")
         result["status"] = self._normalize_status_value(status.get("status"))
-        result["totalLength"] = self._status_str(status.get("totalLength"), DEFAULT_STATUS_DOWNLOADS)
-        result["completedLength"] = self._status_str(status.get("completedLength"), DEFAULT_STATUS_DOWNLOADS)
-        result["uploadLength"] = self._status_str(status.get("uploadLength"), DEFAULT_STATUS_DOWNLOADS)
-        result["downloadSpeed"] = self._status_str(status.get("downloadSpeed"), DEFAULT_STATUS_DOWNLOADS)
-        result["uploadSpeed"] = self._status_str(status.get("uploadSpeed"), DEFAULT_STATUS_DOWNLOADS)
-        result["pieceLength"] = self._status_str(status.get("pieceLength"), DEFAULT_STATUS_DOWNLOADS)
-        result["numPieces"] = self._status_str(status.get("numPieces"), DEFAULT_STATUS_DOWNLOADS)
-        result["connections"] = self._status_str(status.get("connections"), DEFAULT_STATUS_DOWNLOADS)
-        result["errorCode"] = self._status_str(status.get("errorCode"), DEFAULT_ERROR_CODE)
+        result["totalLength"] = self._status_str(
+            status.get("totalLength"), DEFAULT_STATUS_DOWNLOADS
+        )
+        result["completedLength"] = self._status_str(
+            status.get("completedLength"), DEFAULT_STATUS_DOWNLOADS
+        )
+        result["uploadLength"] = self._status_str(
+            status.get("uploadLength"), DEFAULT_STATUS_DOWNLOADS
+        )
+        result["downloadSpeed"] = self._status_str(
+            status.get("downloadSpeed"), DEFAULT_STATUS_DOWNLOADS
+        )
+        result["uploadSpeed"] = self._status_str(
+            status.get("uploadSpeed"), DEFAULT_STATUS_DOWNLOADS
+        )
+        result["pieceLength"] = self._status_str(
+            status.get("pieceLength"), DEFAULT_STATUS_DOWNLOADS
+        )
+        result["numPieces"] = self._status_str(
+            status.get("numPieces"), DEFAULT_STATUS_DOWNLOADS
+        )
+        result["connections"] = self._status_str(
+            status.get("connections"), DEFAULT_STATUS_DOWNLOADS
+        )
+        result["errorCode"] = self._status_str(
+            status.get("errorCode"), DEFAULT_ERROR_CODE
+        )
         result["errorMessage"] = self._status_str(status.get("errorMessage"), "")
         result["dir"] = ""
         result["files"] = self._sanitize_files(status.get("files"))
         result["infoHash"] = self._status_str(status.get("infoHash"), "")
-        result["numSeeders"] = self._status_str(status.get("numSeeders"), DEFAULT_STATUS_DOWNLOADS)
+        result["numSeeders"] = self._status_str(
+            status.get("numSeeders"), DEFAULT_STATUS_DOWNLOADS
+        )
         result["seeder"] = self._status_bool(status.get("seeder"), DEFAULT_BOOL_FALSE)
         result["bittorrent"] = self._sanitize_bittorrent(status.get("bittorrent"))
 
@@ -568,21 +585,17 @@ class Aria2RpcHandler:
 
         verified_length = status.get("verifiedLength")
         if verified_length is not None:
-            result["verifiedLength"] = self._status_str(verified_length, DEFAULT_STATUS_DOWNLOADS)
+            result["verifiedLength"] = self._status_str(
+                verified_length, DEFAULT_STATUS_DOWNLOADS
+            )
 
         verify_integrity_pending = status.get("verifyIntegrityPending")
         if verify_integrity_pending is not None:
-            result["verifyIntegrityPending"] = self._status_bool(verify_integrity_pending)
+            result["verifyIntegrityPending"] = self._status_bool(
+                verify_integrity_pending
+            )
 
         return result
-
-    @staticmethod
-    def _build_history_gid(task: DownloadTask) -> str:
-        if task.gid:
-            return task.gid
-        if task.id is not None:
-            return f"task-{task.id}"
-        return ""
 
     @staticmethod
     def _parse_history_gid(gid: str) -> tuple[str | None, int | None, int | None]:
@@ -595,44 +608,6 @@ class Aria2RpcHandler:
             if suffix.isdigit():
                 return None, int(suffix), None
         return gid, None, None
-
-    def _build_status_from_history(self, history: TaskHistory) -> dict:
-        if history.result == "completed":
-            status = DEFAULT_STATUS_COMPLETE
-            error_message = ""
-        elif history.result == "cancelled":
-            status = "removed"
-            error_message = ""
-        else:
-            status = DEFAULT_STATUS_ERROR
-            error_message = history.reason or ""
-
-        gid = f"hist-{history.id}" if history.id is not None else ""
-        total_length = history.total_length or 0
-        completed_length = total_length if status == DEFAULT_STATUS_COMPLETE else 0
-        result = self._new_status_payload()
-        result["gid"] = gid
-        result["status"] = status
-        result["totalLength"] = str(total_length)
-        result["completedLength"] = str(completed_length)
-        result["errorCode"] = "1" if status == DEFAULT_STATUS_ERROR else DEFAULT_ERROR_CODE
-        result["errorMessage"] = error_message
-        result["files"] = self._build_status_files(
-            task_name=history.task_name,
-            uri=history.uri,
-            total_length=total_length,
-            completed_length=completed_length,
-            fallback_name=gid,
-        )
-        result["bittorrent"]["info"]["name"] = result["files"][0]["path"] if result["files"] else ""
-        try:
-            created_dt = datetime.fromisoformat(history.created_at)
-            if created_dt.tzinfo is None:
-                created_dt = created_dt.replace(tzinfo=timezone.utc)
-            result["bittorrent"]["creationDate"] = str(int(created_dt.timestamp()))
-        except (TypeError, ValueError):
-            result["bittorrent"]["creationDate"] = "0"
-        return result
 
     async def _get_user_available_space(self) -> int:
         """获取用户实际可用空间"""
@@ -651,6 +626,7 @@ class Aria2RpcHandler:
     async def _get_user_quota(self) -> int:
         user = await auth_repo.get_user_by_id(self.user_id)
         return int(user["quota_bytes"]) if user else 0
+
     def _check_disk_space(self) -> tuple[bool, int]:
         """检查磁盘空间是否足够"""
         download_path = Path(settings.download_dir)
@@ -659,20 +635,14 @@ class Aria2RpcHandler:
         min_free = get_min_free_disk()
         return disk.free > min_free, disk.free
 
-    async def _get_task_submit_lock(self, task_id: int) -> asyncio.Lock:
-        async with self.app_state.lock:
-            lock = self.app_state.task_submit_locks.get(task_id)
-            if lock is None:
-                lock = asyncio.Lock()
-                self.app_state.task_submit_locks[task_id] = lock
-            return lock
-
     @staticmethod
     def _normalize_pagination(params: list, default_num: int = 1000) -> tuple[int, int]:
         offset = params[0] if params else 0
         num = params[1] if len(params) > 1 else default_num
         if type(offset) is not int or type(num) is not int:
-            raise RpcError(RpcErrorCode.INVALID_PARAMS, "offset and num must be integers")
+            raise RpcError(
+                RpcErrorCode.INVALID_PARAMS, "offset and num must be integers"
+            )
         if num < 0:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "num must be non-negative")
         return offset, num
@@ -683,7 +653,7 @@ class Aria2RpcHandler:
         if num == 0:
             return []
         if offset >= 0:
-            return items_list[offset: offset + num]
+            return items_list[offset : offset + num]
 
         start = len(items_list) + offset
         if start < 0:
@@ -730,45 +700,6 @@ class Aria2RpcHandler:
             return None
         return str(row.get("source_uri") or "")
 
-    async def _get_pending_task_pairs(self, task_statuses: list[str]) -> list[tuple[DownloadTask, UserTaskSubscription]]:
-        async with get_session() as db:
-            stmt = (
-                select(DownloadTask, UserTaskSubscription)
-                .join(UserTaskSubscription, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
-                .where(
-                    UserTaskSubscription.owner_id == self.user_id,
-                    UserTaskSubscription.status == "pending",
-                    col(DownloadTask.status).in_(task_statuses),
-                )
-                .order_by(col(UserTaskSubscription.id).desc())
-            )
-            result = await db.exec(stmt)
-            return result.all()
-
-    async def _get_pending_task_map(self, gids: set[str]) -> dict[str, DownloadTask]:
-        if not gids:
-            return {}
-
-        async with get_session() as db:
-            stmt = (
-                select(DownloadTask, UserTaskSubscription)
-                .join(UserTaskSubscription, UserTaskSubscription.task_id == DownloadTask.id)  # type: ignore[arg-type]
-                .where(
-                    UserTaskSubscription.owner_id == self.user_id,
-                    UserTaskSubscription.status == "pending",
-                    col(DownloadTask.gid).in_(sorted(gids)),
-                )
-                .order_by(col(UserTaskSubscription.id).desc())
-            )
-            result = await db.exec(stmt)
-            pairs = result.all()
-
-        task_map: dict[str, DownloadTask] = {}
-        for task, _ in pairs:
-            if task.gid:
-                task_map[task.gid] = task
-        return task_map
-
     @staticmethod
     def _status_has_file_name(status: dict[str, Any]) -> bool:
         files = status.get("files")
@@ -791,69 +722,14 @@ class Aria2RpcHandler:
                 gids.add(gid)
         return gids
 
-    def _enrich_status_files_from_task(self, status: dict[str, Any], task: DownloadTask | None) -> dict[str, Any]:
-        if task is None:
-            return status
-
-        enriched = dict(status)
-
-        # 补充 files（如果需要）
-        if not self._status_has_file_name(status):
-            total_length = self._to_int_scalar(status.get("totalLength"), task.total_length or 0)
-            completed_length = self._to_int_scalar(status.get("completedLength"), task.completed_length or 0)
-            enriched["files"] = self._build_status_files(
-                task_name=task.name,
-                uri=task.uri,
-                total_length=total_length,
-                completed_length=completed_length,
-                fallback_name=self._status_str(enriched.get("gid"), "task"),
-            )
-
-        # 补充 bittorrent.info.name（对所有 BT 任务）
-        if self._is_bittorrent_uri(task.uri):
-            bittorrent = enriched.get("bittorrent")
-            if not isinstance(bittorrent, dict):
-                bittorrent = self._new_status_payload()["bittorrent"]
-            else:
-                bittorrent = dict(bittorrent)
-            info = bittorrent.get("info")
-            if not isinstance(info, dict):
-                info = {}
-            else:
-                info = dict(info)
-
-            # 优先用 task.name，但跳过 [METADATA] 占位符
-            if task.name and not task.name.startswith("[METADATA]"):
-                info["name"] = task.name
-            else:
-                # [METADATA] 占位符：从磁力链接提取显示名
-                magnet_name = self._extract_magnet_display_name(task.uri)
-                if magnet_name:
-                    info["name"] = magnet_name
-                elif enriched.get("files") and enriched["files"]:
-                    info["name"] = enriched["files"][0].get("path", "")
-
-            bittorrent["info"] = info
-            enriched["bittorrent"] = bittorrent
-
-        return enriched
-
-    def _enrich_statuses_with_task_map(
-        self,
-        statuses: list[dict[str, Any]],
-        task_map: dict[str, DownloadTask],
-    ) -> list[dict[str, Any]]:
-        enriched_statuses: list[dict[str, Any]] = []
-        for status in statuses:
-            gid_value = status.get("gid")
-            task = task_map.get(str(gid_value)) if gid_value is not None else None
-            enriched_statuses.append(self._enrich_status_files_from_task(status, task))
-        return enriched_statuses
-
-    def _apply_status_keys_to_list(self, statuses: list[dict], keys: list[str] | None) -> list[dict]:
+    def _apply_status_keys_to_list(
+        self, statuses: list[dict], keys: list[str] | None
+    ) -> list[dict]:
         return [self._apply_status_keys(item, keys) for item in statuses]
 
-    async def _fetch_waiting_tasks(self, max_items: int = 10000, page_size: int = 1000) -> list[dict]:
+    async def _fetch_waiting_tasks(
+        self, max_items: int = 10000, page_size: int = 1000
+    ) -> list[dict]:
         offset = 0
         all_waiting: list[dict] = []
         while offset < max_items:
@@ -875,183 +751,52 @@ class Aria2RpcHandler:
             return params[1:]
         return params
 
-    async def _find_or_create_task(
-        self,
-        uri_hash: str,
-        uri: str,
-        name: str,
-    ) -> tuple[DownloadTask, bool]:
-        async with get_session() as db:
-            result = await db.exec(select(DownloadTask).where(DownloadTask.uri_hash == uri_hash))
-            existing = result.first()
-            if existing:
-                return existing, False
-
-            task = DownloadTask(
-                uri_hash=uri_hash,
-                uri=uri,
-                name=name,
-                status="queued",
-            )
-            db.add(task)
-            try:
-                await db.commit()
-                await db.refresh(task)
-                return task, True
-            except IntegrityError:
-                await db.rollback()
-                result = await db.exec(select(DownloadTask).where(DownloadTask.uri_hash == uri_hash))
-                existing = result.first()
-                if existing:
-                    return existing, False
-                raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Failed to create task")
-
-    async def _create_or_get_subscription(self, task_id: int) -> UserTaskSubscription:
-        async with get_session() as db:
-            result = await db.exec(
-                select(UserTaskSubscription).where(
-                    UserTaskSubscription.owner_id == self.user_id,
-                    UserTaskSubscription.task_id == task_id,
-                )
-            )
-            existing = result.first()
-            if existing:
-                if existing.status != "pending":
-                    existing.status = "pending"
-                    existing.error_display = None
-                    db.add(existing)
-                    await db.commit()
-                    await db.refresh(existing)
-                return existing
-
-            sub = UserTaskSubscription(owner_id=self.user_id, task_id=task_id, status="pending")
-            db.add(sub)
-            try:
-                await db.commit()
-                await db.refresh(sub)
-                return sub
-            except IntegrityError:
-                await db.rollback()
-                result = await db.exec(
-                    select(UserTaskSubscription).where(
-                        UserTaskSubscription.owner_id == self.user_id,
-                        UserTaskSubscription.task_id == task_id,
-                    )
-                )
-                existing = result.first()
-                if existing:
-                    if existing.status != "pending":
-                        existing.status = "pending"
-                        existing.error_display = None
-                        db.add(existing)
-                        await db.commit()
-                        await db.refresh(existing)
-                    return existing
-                raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Failed to create subscription")
-
-    async def _cleanup_aria2_gid(self, gid: str) -> None:
-        try:
-            await self.client.force_remove(gid)
-        except Exception:
-            logger.warning("Failed to force remove aria2 task %s during compensation", gid)
-        try:
-            await self.client.remove_download_result(gid)
-        except Exception:
-            logger.warning("Failed to remove aria2 result %s during compensation", gid)
-
-    async def _mark_submit_failed_state(
-        self,
-        task_id: int,
-        message: str,
-        *,
-        raw_error: str | None = None,
-        gid_hint: str | None = None,
-    ) -> tuple[str | None, str, str | None, int, list[tuple[int, str]]]:
-        """Persist failure state and return context for history/cleanup."""
-        gid_to_cleanup = gid_hint
-        task_name = "未知任务"
-        task_uri: str | None = None
-        task_total_length = 0
-        history_inputs: list[tuple[int, str]] = []
-
-        async with get_session() as db:
-            task = await db.get(DownloadTask, task_id)
-            if task and task.status in ("queued", "active", "waiting"):
-                gid_to_cleanup = gid_to_cleanup or task.gid
-                task_name = task.name or task.uri or "未知任务"
-                task_uri = task.uri
-                task_total_length = task.total_length or 0
-                task.status = "error"
-                task.error = raw_error
-                task.error_display = message
-                task.gid = None
-                task.updated_at = utc_now_str()
-                db.add(task)
-
-            result = await db.exec(
-                select(UserTaskSubscription).where(
-                    UserTaskSubscription.task_id == task_id,
-                    UserTaskSubscription.status == "pending",
-                )
-            )
-            subscriptions = result.all()
-            for sub in subscriptions:
-                sub.status = "failed"
-                sub.error_display = message
-                sub.frozen_space = 0
-                history_inputs.append((sub.owner_id, sub.created_at))
-                db.add(sub)
-
-        return gid_to_cleanup, task_name, task_uri, task_total_length, history_inputs
-
-    async def _mark_submit_failed(
-        self,
-        task_id: int,
-        message: str,
-        *,
-        raw_error: str | None = None,
-        gid_hint: str | None = None,
-    ) -> None:
-        from app.services.history import add_task_history
-
-        gid_to_cleanup, task_name, task_uri, task_total_length, history_inputs = (
-            await self._mark_submit_failed_state(
-                task_id=task_id,
-                message=message,
-                raw_error=raw_error,
-                gid_hint=gid_hint,
-            )
-        )
-
-        for owner_id, created_at in history_inputs:
-            await add_task_history(
-                owner_id=owner_id,
-                task_name=task_name,
-                result="failed",
-                reason=message,
-                uri=task_uri,
-                total_length=task_total_length,
-                created_at=created_at,
-            )
-
-        await cleanup_failed_task_artifacts(
-            client=self.client,
-            task_id=task_id,
-            gid=gid_to_cleanup,
-            owner_id=self.user_id,
-            log_prefix="[RPC]",
-        )
     async def _check_quota_and_disk(self) -> None:
         """检查配额和磁盘空间，不足则抛异常"""
         disk_ok, disk_free = self._check_disk_space()
         if not disk_ok:
             raise RpcError(
                 RpcErrorCode.QUOTA_EXCEEDED,
-                f"Disk space not enough, free: {disk_free / 1024 / 1024 / 1024:.2f} GB"
+                f"Disk space not enough, free: {disk_free / 1024 / 1024 / 1024:.2f} GB",
             )
         user_available = await self._get_user_available_space()
         if user_available <= 0:
             raise RpcError(RpcErrorCode.QUOTA_EXCEEDED, "Your quota has been exceeded")
+
+    @staticmethod
+    def _resource_kind_for_uri(uri: str) -> str:
+        lower = uri.lower()
+        if lower.startswith("magnet:"):
+            return "magnet"
+        if lower.startswith(("http://", "https://")):
+            return "http"
+        return "other"
+
+    async def _gid_for_created_task(
+        self,
+        task: dict[str, Any],
+        resource_key: str,
+    ) -> str:
+        global_download = await get_global_by_resource_key(resource_key)
+        if global_download and global_download.get("aria2_gid"):
+            return str(global_download["aria2_gid"])
+        return f"task-{task['id']}"
+
+    @staticmethod
+    def _raise_create_download_error(exc: Exception) -> None:
+        if isinstance(exc, RpcError):
+            raise exc
+        if isinstance(exc, ValueError):
+            message = str(exc)
+            if message == "quota exceeded":
+                raise RpcError(
+                    RpcErrorCode.QUOTA_EXCEEDED, "Your quota has been exceeded"
+                ) from exc
+            raise RpcError(RpcErrorCode.INVALID_PARAMS, message) from exc
+        if isinstance(exc, LookupError):
+            raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc)) from exc
+        raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc)) from exc
+
     # ========== 完整实现的方法 ==========
     async def _handle_add_uri(self, params: list) -> str:
         """aria2.addUri(uris[, options[, position]])"""
@@ -1060,67 +805,33 @@ class Aria2RpcHandler:
         uris = params[0]
         if not uris:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "uris list is empty")
-        options = dict(params[1]) if len(params) > 1 and isinstance(params[1], dict) else {}
-        # 获取用户空间锁
-        from app.core.state import get_user_space_lock
-        from app.services.storage import get_task_download_dir
-        user_lock = await get_user_space_lock(self.app_state, self.user_id)
-        async with user_lock:
-            await self._check_quota_and_disk()
-            uri = uris[0] if uris else ""
-            uri_hash = get_uri_hash(uri) or hashlib.sha256(uri.encode()).hexdigest()
-            task_name = uri.split("/")[-1] or uri
+        options = (
+            dict(params[1]) if len(params) > 1 and isinstance(params[1], dict) else {}
+        )
+        await self._check_quota_and_disk()
+        submit_uris = [str(item) for item in uris]
+        uri = submit_uris[0]
+        resource_key = get_uri_hash(uri) or hashlib.sha256(uri.encode()).hexdigest()
+        task_name = self._extract_name_from_uri(uri) or uri
 
-            task, _ = await self._find_or_create_task(uri_hash=uri_hash, uri=uri, name=task_name)
-            task_id = task.id
-            if task_id is None:
-                raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Task id missing")
+        try:
+            task = await create_user_download(
+                user_id=self.user_id,
+                quota_bytes=await self._get_user_quota(),
+                uri=uri,
+                resource_key=resource_key,
+                resource_kind=self._resource_kind_for_uri(uri),
+                display_name=task_name,
+                total_bytes=0,
+                aria2_client=self.client,
+                options=options,
+                submit_uris=submit_uris,
+            )
+        except Exception as exc:
+            self._raise_create_download_error(exc)
 
-            await self._create_or_get_subscription(task_id)
+        return await self._gid_for_created_task(task, resource_key)
 
-            if task.gid and task.status in RUNNABLE_TASK_STATUSES:
-                return task.gid
-            options["dir"] = str(get_task_download_dir(task_id))
-
-            task_lock = await self._get_task_submit_lock(task_id)
-            async with task_lock:
-                async with get_session() as db:
-                    db_task = await db.get(DownloadTask, task_id)
-                    if not db_task:
-                        raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Task not found after add")
-                    if db_task.gid and db_task.status in RUNNABLE_TASK_STATUSES:
-                        return db_task.gid
-
-                try:
-                    gid = await self.client.add_uri(uris, options)
-                except Exception as exc:
-                    await self._mark_submit_failed(
-                        task_id,
-                        "添加下载任务失败",
-                        raw_error=str(exc),
-                    )
-                    raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc))
-
-                try:
-                    async with get_session() as db:
-                        db_task = await db.get(DownloadTask, task_id)
-                        if not db_task:
-                            raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Task not found after add")
-                        db_task.gid = gid
-                        db_task.uri = uri
-                        db_task.name = task_name
-                        db_task.status = "active"
-                        db.add(db_task)
-                except Exception as exc:
-                    await self._mark_submit_failed(
-                        task_id,
-                        "添加下载任务失败",
-                        raw_error=str(exc),
-                        gid_hint=gid,
-                    )
-                    raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc))
-
-                return gid
     async def _handle_add_torrent(self, params: list) -> str:
         """aria2.addTorrent(torrent[, uris[, options[, position]]])"""
         if not params or not isinstance(params[0], str):
@@ -1129,85 +840,38 @@ class Aria2RpcHandler:
         # 限制 torrent 文件大小（10MB）
         if len(torrent_data) > 10 * 1024 * 1024:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "Torrent data too large")
-        uris = params[1] if len(params) > 1 and isinstance(params[1], list) else []
-        options = dict(params[2]) if len(params) > 2 and isinstance(params[2], dict) else {}
-        from app.core.state import get_user_space_lock
-        from app.services.storage import get_task_download_dir
-        user_lock = await get_user_space_lock(self.app_state, self.user_id)
-        async with user_lock:
-            await self._check_quota_and_disk()
-            info_hash = extract_info_hash_from_torrent_base64(torrent_data)
-            uri_hash = info_hash or hashlib.sha256(torrent_data.encode()).hexdigest()
-            task_uri = f"torrent:{uri_hash}"
-            task_name = f"torrent-{uri_hash[:12]}"
+        options = (
+            dict(params[2]) if len(params) > 2 and isinstance(params[2], dict) else {}
+        )
+        webseed_uris = (
+            [str(item) for item in params[1]]
+            if len(params) > 1 and isinstance(params[1], list)
+            else []
+        )
+        await self._check_quota_and_disk()
+        info_hash = extract_info_hash_from_torrent_base64(torrent_data)
+        resource_key = info_hash or hashlib.sha256(torrent_data.encode()).hexdigest()
+        task_uri = f"magnet:?xt=urn:btih:{resource_key}"
+        task_name = f"torrent-{resource_key[:12]}"
 
-            task, _ = await self._find_or_create_task(uri_hash=uri_hash, uri=task_uri, name=task_name)
-            task_id = task.id
-            if task_id is None:
-                raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Task id missing")
+        try:
+            task = await create_user_torrent_download(
+                user_id=self.user_id,
+                quota_bytes=await self._get_user_quota(),
+                torrent_data=torrent_data,
+                resource_key=resource_key,
+                source_uri=task_uri,
+                display_name=task_name,
+                total_bytes=0,
+                aria2_client=self.client,
+                options=options,
+                uris=webseed_uris,
+            )
+        except Exception as exc:
+            self._raise_create_download_error(exc)
 
-            await self._create_or_get_subscription(task_id)
+        return await self._gid_for_created_task(task, resource_key)
 
-            if task.gid and task.status in RUNNABLE_TASK_STATUSES:
-                return task.gid
-            options["dir"] = str(get_task_download_dir(task_id))
-
-            task_lock = await self._get_task_submit_lock(task_id)
-            async with task_lock:
-                async with get_session() as db:
-                    db_task = await db.get(DownloadTask, task_id)
-                    if not db_task:
-                        raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Task not found after add")
-                    if db_task.gid and db_task.status in RUNNABLE_TASK_STATUSES:
-                        return db_task.gid
-
-                try:
-                    gid = await self.client.add_torrent(torrent_data, uris, options)
-                except Exception as exc:
-                    await self._mark_submit_failed(
-                        task_id,
-                        "添加种子任务失败",
-                        raw_error=str(exc),
-                    )
-                    raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc))
-
-                try:
-                    name = task_name
-                    try:
-                        status = await self.client.tell_status(gid)
-                        if isinstance(status, dict):
-                            bt_info = status.get("bittorrent", {})
-                            if isinstance(bt_info, dict):
-                                info = bt_info.get("info", {})
-                                if isinstance(info, dict):
-                                    name = self._status_str(info.get("name"), "") or name
-                    except Exception as exc:
-                        logger.debug(
-                            "Failed to fetch bittorrent metadata for gid=%s user_id=%s",
-                            gid,
-                            self.user_id,
-                            exc_info=exc,
-                        )
-
-                    async with get_session() as db:
-                        db_task = await db.get(DownloadTask, task_id)
-                        if not db_task:
-                            raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Task not found after add")
-                        db_task.gid = gid
-                        db_task.uri = task_uri
-                        db_task.name = name
-                        db_task.status = "active"
-                        db.add(db_task)
-                except Exception as exc:
-                    await self._mark_submit_failed(
-                        task_id,
-                        "添加种子任务失败",
-                        raw_error=str(exc),
-                        gid_hint=gid,
-                    )
-                    raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc))
-
-                return gid
     async def _handle_remove(self, params: list) -> str:
         """aria2.remove(gid)"""
         if not params:
@@ -1223,9 +887,11 @@ class Aria2RpcHandler:
             aria2_client=self.client,
         )
         return gid
+
     async def _handle_force_remove(self, params: list) -> str:
         """aria2.forceRemove(gid) - 同 remove"""
         return await self._handle_remove(params)
+
     async def _handle_tell_status(self, params: list) -> dict:
         """aria2.tellStatus(gid[, keys])"""
         if not params:
@@ -1255,48 +921,6 @@ class Aria2RpcHandler:
         response = rpc_view_service.status_from_task(row, live)
         return self._apply_status_keys(response, keys)
 
-    def _build_status_from_db(self, task: DownloadTask, sub: UserTaskSubscription) -> dict:
-        """从数据库记录构造 aria2 tellStatus 格式的响应"""
-        # 状态映射
-        status_map = {
-            "success": DEFAULT_STATUS_COMPLETE,
-            "failed": DEFAULT_STATUS_ERROR,
-            "active": "active",
-            "queued": "waiting",
-            "waiting": "waiting",
-            "paused": "paused",
-            "complete": DEFAULT_STATUS_COMPLETE,
-            "error": DEFAULT_STATUS_ERROR,
-            "removed": "removed",
-        }
-        aria2_status = status_map.get(sub.status, status_map.get(task.status, DEFAULT_STATUS_ERROR))
-        total_length = task.total_length or 0
-        completed_length = task.completed_length or 0
-        error_message = task.error or task.error_display or ""
-        result = self._new_status_payload()
-        result["gid"] = self._build_history_gid(task)
-        result["status"] = aria2_status
-        result["totalLength"] = str(total_length)
-        result["completedLength"] = str(completed_length)
-        result["downloadSpeed"] = str(task.download_speed or 0)
-        result["uploadSpeed"] = str(task.upload_speed or 0)
-        result["connections"] = str(task.peak_connections or 0)
-        result["errorCode"] = "1" if aria2_status == DEFAULT_STATUS_ERROR else DEFAULT_ERROR_CODE
-        result["errorMessage"] = error_message if aria2_status == DEFAULT_STATUS_ERROR else ""
-        result["files"] = self._build_status_files(
-            task_name=task.name,
-            uri=task.uri,
-            total_length=total_length,
-            completed_length=completed_length,
-            fallback_name=result["gid"] or "task",
-        )
-
-        if self._is_bittorrent_uri(task.uri):
-            result["infoHash"] = self._build_bt_info_hash(task.uri_hash)
-            result["bittorrent"]["info"]["name"] = task.name or result["files"][0]["path"]
-
-        return result
-
     async def _handle_tell_active(self, params: list) -> list:
         """aria2.tellActive([keys])"""
         keys = self._extract_status_keys(params, 0)
@@ -1315,7 +939,9 @@ class Aria2RpcHandler:
                 for row in all_active
                 if row.get("gid")
             }
-        statuses = await rpc_view_service.list_active_statuses(self.user_id, live_by_gid)
+        statuses = await rpc_view_service.list_active_statuses(
+            self.user_id, live_by_gid
+        )
         return self._apply_status_keys_to_list(statuses, keys)
 
     async def _handle_tell_waiting(self, params: list) -> list:
@@ -1333,10 +959,13 @@ class Aria2RpcHandler:
         statuses = await rpc_view_service.list_stopped_statuses(self.user_id)
         sliced = self._slice_with_offset(statuses, offset, num)
         return self._apply_status_keys_to_list(sliced, keys)
+
     async def _handle_get_global_stat(self, params: list) -> dict:
         """aria2.getGlobalStat()"""
         active_rows = await list_user_tasks(self.user_id, ["active"])
-        waiting_rows = await list_user_tasks(self.user_id, ["queued", "waiting", "paused"])
+        waiting_rows = await list_user_tasks(
+            self.user_id, ["queued", "waiting", "paused"]
+        )
         stopped_rows = await list_user_tasks(self.user_id, TERMINAL_USER_TASK_STATUSES)
         num_active = len(active_rows)
         num_waiting = len(waiting_rows)
@@ -1362,6 +991,7 @@ class Aria2RpcHandler:
             "numStopped": str(num_stopped),
             "numStoppedTotal": str(num_stopped),
         }
+
     async def _handle_get_files(self, params: list) -> list:
         """aria2.getFiles(gid)"""
         if not params:
@@ -1388,6 +1018,7 @@ class Aria2RpcHandler:
                 exc_info=exc,
             )
         return self._sanitize_files(rpc_view_service.status_from_task(row).get("files"))
+
     async def _handle_get_uris(self, params: list) -> list:
         """aria2.getUris(gid)"""
         if not params:
@@ -1415,7 +1046,12 @@ class Aria2RpcHandler:
                 exc_info=exc,
             )
             source_uri = row.get("source_uri")
-            return self._sanitize_uris([{"uri": source_uri, "status": "used"}]) if source_uri else []
+            return (
+                self._sanitize_uris([{"uri": source_uri, "status": "used"}])
+                if source_uri
+                else []
+            )
+
     async def _handle_get_version(self, params: list) -> dict:
         """aria2.getVersion()"""
         try:
@@ -1428,6 +1064,7 @@ class Aria2RpcHandler:
             )
             version_info = {}
         return self._sanitize_version(version_info)
+
     async def _handle_remove_download_result(self, params: list) -> str:
         """aria2.removeDownloadResult(gid) - 删除用户的 stopped 订阅（历史记录）"""
         if not params:
@@ -1446,36 +1083,50 @@ class Aria2RpcHandler:
         if not deleted:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid_param}")
         return "OK"
+
     async def _handle_purge_download_result(self, params: list) -> str:
         """aria2.purgeDownloadResult() - 删除用户所有 stopped 订阅"""
         await delete_all_terminal_user_tasks(self.user_id)
         return "OK"
+
     # ========== 静默返回的方法（不支持但不报错） ==========
     async def _handle_pause(self, params: list) -> str:
         """aria2.pause - 不支持，静默返回 gid"""
         return params[0] if params else "0"
+
     async def _handle_force_pause(self, params: list) -> str:
         return params[0] if params else "0"
+
     async def _handle_unpause(self, params: list) -> str:
         return params[0] if params else "0"
+
     async def _handle_pause_all(self, params: list) -> str:
         return "OK"
+
     async def _handle_force_pause_all(self, params: list) -> str:
         return "OK"
+
     async def _handle_unpause_all(self, params: list) -> str:
         return "OK"
+
     async def _handle_get_option(self, params: list) -> dict:
         return {}
+
     async def _handle_change_option(self, params: list) -> str:
         return "OK"
+
     async def _handle_get_global_option(self, params: list) -> dict:
         return {}
+
     async def _handle_change_global_option(self, params: list) -> str:
         return "OK"
+
     async def _handle_change_position(self, params: list) -> int:
         return 0
+
     async def _handle_change_uri(self, params: list) -> list:
         return [0, 0]
+
     async def _handle_get_peers(self, params: list) -> list:
         if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
@@ -1499,6 +1150,7 @@ class Aria2RpcHandler:
                 exc_info=exc,
             )
             return []
+
     async def _handle_get_servers(self, params: list) -> list:
         if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
@@ -1522,18 +1174,24 @@ class Aria2RpcHandler:
                 exc_info=exc,
             )
             return []
+
     async def _handle_shutdown(self, params: list) -> str:
         return "OK"
+
     async def _handle_force_shutdown(self, params: list) -> str:
         return "OK"
+
     async def _handle_save_session(self, params: list) -> str:
         return "OK"
+
     async def _handle_get_session_info(self, params: list) -> dict:
         return {"sessionId": "aria2deck-proxy-session"}
+
     # ========== system 方法 ==========
     async def _handle_system_list_methods(self, params: list) -> list:
         """system.listMethods()"""
         return self.SUPPORTED_METHODS
+
     async def _handle_system_multicall(self, params: list) -> list:
         """system.multicall(methods)"""
         if not params or not isinstance(params[0], list):
@@ -1542,7 +1200,12 @@ class Aria2RpcHandler:
         results = []
         for call in methods:
             if not isinstance(call, dict):
-                results.append({"faultCode": RpcErrorCode.INVALID_PARAMS, "faultString": "Invalid method call"})
+                results.append(
+                    {
+                        "faultCode": RpcErrorCode.INVALID_PARAMS,
+                        "faultString": "Invalid method call",
+                    }
+                )
                 continue
             method_name = call.get("methodName", "")
             method_params = self._strip_rpc_token(call.get("params", []))
@@ -1552,5 +1215,7 @@ class Aria2RpcHandler:
             except RpcError as e:
                 results.append({"faultCode": e.code, "faultString": e.message})
             except Exception as e:
-                results.append({"faultCode": RpcErrorCode.INTERNAL_ERROR, "faultString": str(e)})
+                results.append(
+                    {"faultCode": RpcErrorCode.INTERNAL_ERROR, "faultString": str(e)}
+                )
         return results

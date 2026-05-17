@@ -275,9 +275,10 @@ async def create_user_download(
     total_bytes: int,
     aria2_client: Aria2SubmitClient,
     options: Mapping[str, Any] | None = None,
+    submit_uris: list[str] | None = None,
 ) -> dict[str, Any]:
     async def submit_download(submit_options: Mapping[str, Any] | None) -> str:
-        return await aria2_client.add_uri([uri], submit_options or {})
+        return await aria2_client.add_uri(submit_uris or [uri], submit_options or {})
 
     return await _create_user_download_with_submit(
         user_id=user_id,
@@ -304,9 +305,14 @@ async def create_user_torrent_download(
     total_bytes: int,
     aria2_client: Aria2SubmitClient,
     options: Mapping[str, Any] | None = None,
+    uris: list[str] | None = None,
 ) -> dict[str, Any]:
     async def submit_download(submit_options: Mapping[str, Any] | None) -> str:
-        return await aria2_client.add_torrent(torrent_data, [], submit_options or {})
+        return await aria2_client.add_torrent(
+            torrent_data,
+            uris or [],
+            submit_options or {},
+        )
 
     return await _create_user_download_with_submit(
         user_id=user_id,

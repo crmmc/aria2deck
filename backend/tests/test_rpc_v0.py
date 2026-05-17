@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core.state import AppState
+from app.repositories.downloads import list_user_tasks
 from app.services.aria2_rpc_handler import Aria2RpcHandler
 from app.services.download_service import create_user_download
 from tests.helpers_v0 import create_user_v0
@@ -48,3 +50,63 @@ async def test_rpc_purge_download_result_deletes_terminal_user_task(
     result = await handler.handle("aria2.purgeDownloadResult", [])
 
     assert result == "OK"
+
+
+@pytest.mark.asyncio
+async def test_rpc_add_uri_creates_v0_task_and_returns_gid(temp_db: str) -> None:
+    user = await create_user_v0(username="rpc_add_uri")
+    client = AsyncMock()
+    client.add_uri.return_value = "gid-rpc-add-uri"
+    handler = Aria2RpcHandler(user["id"], client, AppState())
+
+    result = await handler.handle(
+        "aria2.addUri",
+        [
+            [
+                "https://example.com/add.bin",
+                "https://mirror.example.com/add.bin",
+            ],
+            {"out": "add.bin"},
+        ],
+    )
+
+    rows = await list_user_tasks(user["id"])
+    assert result == "gid-rpc-add-uri"
+    assert len(rows) == 1
+    assert rows[0]["aria2_gid"] == "gid-rpc-add-uri"
+    assert rows[0]["status"] == "active"
+    assert rows[0]["source_uri"] == "https://example.com/add.bin"
+    client.add_uri.assert_awaited_once_with(
+        [
+            "https://example.com/add.bin",
+            "https://mirror.example.com/add.bin",
+        ],
+        {"out": "add.bin"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_rpc_add_torrent_creates_v0_task_and_returns_gid(temp_db: str) -> None:
+    user = await create_user_v0(username="rpc_add_torrent")
+    client = AsyncMock()
+    client.add_torrent.return_value = "gid-rpc-add-torrent"
+    handler = Aria2RpcHandler(user["id"], client, AppState())
+    torrent_data = base64.b64encode(b"d4:infod4:name4:testee").decode()
+
+    result = await handler.handle(
+        "aria2.addTorrent",
+        [torrent_data, ["https://example.com/seed"], {"out": "seed.torrent"}],
+    )
+
+    rows = await list_user_tasks(user["id"])
+    assert result == "gid-rpc-add-torrent"
+    assert len(rows) == 1
+    assert rows[0]["aria2_gid"] == "gid-rpc-add-torrent"
+    assert rows[0]["status"] == "active"
+    assert rows[0]["resource_kind"] == "torrent"
+    assert str(rows[0]["source_uri"]).startswith("magnet:?xt=urn:btih:")
+    client.add_torrent.assert_awaited_once_with(
+        torrent_data,
+        ["https://example.com/seed"],
+        {"out": "seed.torrent"},
+    )
