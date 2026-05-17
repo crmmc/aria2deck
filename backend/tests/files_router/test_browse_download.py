@@ -27,19 +27,23 @@ def _insert_owned_path(
         timestamp = int(datetime.now(timezone.utc).timestamp() * 1000)
         async with transaction() as conn:
             stored = (
-                await conn.execute(
-                    insert(stored_files)
-                    .values(
-                        content_hash=content_hash,
-                        real_path=str(real_path),
-                        size_bytes=size,
-                        is_directory=1 if is_directory else 0,
-                        original_name=display_name,
-                        created_at_ms=timestamp,
+                (
+                    await conn.execute(
+                        insert(stored_files)
+                        .values(
+                            content_hash=content_hash,
+                            real_path=str(real_path),
+                            size_bytes=size,
+                            is_directory=1 if is_directory else 0,
+                            original_name=display_name,
+                            created_at_ms=timestamp,
+                        )
+                        .returning(stored_files)
                     )
-                    .returning(stored_files)
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             await conn.execute(
                 insert(user_files).values(
                     user_id=test_user["id"],
@@ -79,27 +83,41 @@ class TestBrowseFile:
         response = authenticated_client.get("/api/files/nonexistent_hash/browse")
         assert response.status_code == 404
 
-    def test_browse_file_not_directory(self, authenticated_client: TestClient, user_file: dict):
-        response = authenticated_client.get(f"/api/files/{user_file['content_hash']}/browse")
+    def test_browse_file_not_directory(
+        self, authenticated_client: TestClient, user_file: dict
+    ):
+        response = authenticated_client.get(
+            f"/api/files/{user_file['content_hash']}/browse"
+        )
         assert response.status_code == 400
 
-    def test_browse_file_unauthorized(self, client: TestClient, temp_db: str, user_directory: dict):
+    def test_browse_file_unauthorized(
+        self, client: TestClient, temp_db: str, user_directory: dict
+    ):
         response = client.get(f"/api/files/{user_directory['content_hash']}/browse")
         assert response.status_code == 401
 
-    def test_browse_directory_path_traversal(self, authenticated_client: TestClient, user_directory: dict):
+    def test_browse_directory_path_traversal(
+        self, authenticated_client: TestClient, user_directory: dict
+    ):
         response = authenticated_client.get(
             f"/api/files/{user_directory['content_hash']}/browse?path=../../../etc"
         )
         assert response.status_code == 403
         assert response.json()["detail"] == "无权访问此路径"
 
-    def test_browse_uses_authenticated_api_limit(self, authenticated_client: TestClient, user_directory: dict):
+    def test_browse_uses_authenticated_api_limit(
+        self, authenticated_client: TestClient, user_directory: dict
+    ):
         original_limit = rate_limit_config.authenticated_api
         rate_limit_config.authenticated_api = 1
         try:
-            first = authenticated_client.get(f"/api/files/{user_directory['content_hash']}/browse")
-            second = authenticated_client.get(f"/api/files/{user_directory['content_hash']}/browse")
+            first = authenticated_client.get(
+                f"/api/files/{user_directory['content_hash']}/browse"
+            )
+            second = authenticated_client.get(
+                f"/api/files/{user_directory['content_hash']}/browse"
+            )
         finally:
             rate_limit_config.authenticated_api = original_limit
 
@@ -113,11 +131,15 @@ class TestDownloadFile:
         response = authenticated_client.get("/api/files/nonexistent_hash/download")
         assert response.status_code == 404
 
-    def test_download_file_unauthorized(self, client: TestClient, temp_db: str, user_file: dict):
+    def test_download_file_unauthorized(
+        self, client: TestClient, temp_db: str, user_file: dict
+    ):
         response = client.get(f"/api/files/{user_file['content_hash']}/download")
         assert response.status_code == 401
 
-    def test_download_file_path_traversal(self, authenticated_client: TestClient, user_directory: dict):
+    def test_download_file_path_traversal(
+        self, authenticated_client: TestClient, user_directory: dict
+    ):
         response = authenticated_client.get(
             f"/api/files/{user_directory['content_hash']}/download?path=../../../etc/passwd"
         )
@@ -135,10 +157,18 @@ class TestDownloadFile:
         rate_limit_config.authenticated_api = 1
         rate_limit_config.authenticated_download = 1
         try:
-            browse_first = authenticated_client.get(f"/api/files/{user_directory['content_hash']}/browse")
-            download_first = authenticated_client.get(f"/api/files/{user_file['content_hash']}/download")
-            browse_second = authenticated_client.get(f"/api/files/{user_directory['content_hash']}/browse")
-            download_second = authenticated_client.get(f"/api/files/{user_file['content_hash']}/download")
+            browse_first = authenticated_client.get(
+                f"/api/files/{user_directory['content_hash']}/browse"
+            )
+            download_first = authenticated_client.get(
+                f"/api/files/{user_file['content_hash']}/download"
+            )
+            browse_second = authenticated_client.get(
+                f"/api/files/{user_directory['content_hash']}/browse"
+            )
+            download_second = authenticated_client.get(
+                f"/api/files/{user_file['content_hash']}/download"
+            )
         finally:
             rate_limit_config.authenticated_api = original_api_limit
             rate_limit_config.authenticated_download = original_download_limit
@@ -163,19 +193,23 @@ class TestBrowseDirectoryRealFiles:
             timestamp = 1_700_000_000_000
             async with transaction() as conn:
                 stored = (
-                    await conn.execute(
-                        insert(stored_files)
-                        .values(
-                            content_hash="dirhash_entries",
-                            real_path=str(root),
-                            size_bytes=10,
-                            is_directory=1,
-                            original_name="dirhash_entries",
-                            created_at_ms=timestamp,
+                    (
+                        await conn.execute(
+                            insert(stored_files)
+                            .values(
+                                content_hash="dirhash_entries",
+                                real_path=str(root),
+                                size_bytes=10,
+                                is_directory=1,
+                                original_name="dirhash_entries",
+                                created_at_ms=timestamp,
+                            )
+                            .returning(stored_files)
                         )
-                        .returning(stored_files)
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 await conn.execute(
                     insert(stored_file_entries),
                     [
@@ -222,22 +256,28 @@ class TestBrowseDirectoryRealFiles:
                     ],
                 )
                 user_file = (
-                    await conn.execute(
-                        insert(user_files)
-                        .values(
-                            user_id=test_user["id"],
-                            stored_file_id=stored["id"],
-                            display_name="dirhash_entries",
-                            created_at_ms=timestamp,
-                            updated_at_ms=timestamp,
+                    (
+                        await conn.execute(
+                            insert(user_files)
+                            .values(
+                                user_id=test_user["id"],
+                                stored_file_id=stored["id"],
+                                display_name="dirhash_entries",
+                                created_at_ms=timestamp,
+                                updated_at_ms=timestamp,
+                            )
+                            .returning(user_files)
                         )
-                        .returning(user_files)
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
             return {"id": user_file["id"], "hash": stored["content_hash"]}
 
         completed_directory_user_file = asyncio.run(seed_directory())
-        response = authenticated_client.get(f"/api/files/{completed_directory_user_file['hash']}/browse")
+        response = authenticated_client.get(
+            f"/api/files/{completed_directory_user_file['hash']}/browse"
+        )
         assert response.status_code == 200
         data = response.json()
         names = {item["name"] for item in data}
@@ -274,7 +314,9 @@ class TestBrowseDirectoryRealFiles:
             display_name="browse_test_dir",
         )
 
-        response = authenticated_client.get("/api/files/browse_subpath_test/browse?path=nonexistent")
+        response = authenticated_client.get(
+            "/api/files/browse_subpath_test/browse?path=nonexistent"
+        )
         assert response.status_code == 404
         assert response.json()["detail"] == "路径不存在"
 
@@ -293,7 +335,9 @@ class TestBrowseDirectoryRealFiles:
             display_name="browse_file_test",
         )
 
-        response = authenticated_client.get("/api/files/browse_file_test/browse?path=file.txt")
+        response = authenticated_client.get(
+            "/api/files/browse_file_test/browse?path=file.txt"
+        )
         assert response.status_code == 400
         assert response.json()["detail"] == "路径不是文件夹"
 
@@ -332,7 +376,9 @@ class TestDownloadFileRealFiles:
             display_name="file.txt",
         )
 
-        response = authenticated_client.get("/api/files/download_nonexistent_base/download")
+        response = authenticated_client.get(
+            "/api/files/download_nonexistent_base/download"
+        )
         assert response.status_code == 404
 
     def test_download_file_path_on_non_directory(
@@ -350,17 +396,59 @@ class TestDownloadFileRealFiles:
             display_name="test_single_file.txt",
         )
 
-        response = authenticated_client.get("/api/files/single_file_hash/download?path=subpath")
+        response = authenticated_client.get(
+            "/api/files/single_file_hash/download?path=subpath"
+        )
         assert response.status_code == 400
 
 
 @pytest.mark.parametrize(
-    ("content_hash", "filename", "range_header", "status", "content_range", "content_length", "expected"),
+    (
+        "content_hash",
+        "filename",
+        "range_header",
+        "status",
+        "content_range",
+        "content_length",
+        "expected",
+    ),
     [
-        ("range_test_start_end", "range_test_start_end.bin", "bytes=0-9", 206, "bytes 0-9/100", "10", bytes(range(10))),
-        ("range_test_start_only", "range_test_start_only.bin", "bytes=90-", 206, "bytes 90-99/100", "10", bytes(range(90, 100))),
-        ("range_test_suffix", "range_test_suffix.bin", "bytes=-20", 206, "bytes 80-99/100", "20", bytes(range(80, 100))),
-        ("range_test_exceed", "range_test_exceed.bin", "bytes=90-200", 206, "bytes 90-99/100", "10", bytes(range(90, 100))),
+        (
+            "range_test_start_end",
+            "range_test_start_end.bin",
+            "bytes=0-9",
+            206,
+            "bytes 0-9/100",
+            "10",
+            bytes(range(10)),
+        ),
+        (
+            "range_test_start_only",
+            "range_test_start_only.bin",
+            "bytes=90-",
+            206,
+            "bytes 90-99/100",
+            "10",
+            bytes(range(90, 100)),
+        ),
+        (
+            "range_test_suffix",
+            "range_test_suffix.bin",
+            "bytes=-20",
+            206,
+            "bytes 80-99/100",
+            "20",
+            bytes(range(80, 100)),
+        ),
+        (
+            "range_test_exceed",
+            "range_test_exceed.bin",
+            "bytes=90-200",
+            206,
+            "bytes 90-99/100",
+            "10",
+            bytes(range(90, 100)),
+        ),
     ],
     ids=["start-end", "start-only", "suffix", "end-exceeds-size"],
 )

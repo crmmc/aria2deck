@@ -1,4 +1,5 @@
 """存储文件管理路由（管理员专用）"""
+
 from __future__ import annotations
 
 import asyncio
@@ -95,8 +96,14 @@ async def list_stored_files(
         .subquery()
     )
     stmt = (
-        select(stored_files, func.coalesce(ref_counts.c.ref_count, 0).label("ref_count"))
-        .select_from(stored_files.outerjoin(ref_counts, stored_files.c.id == ref_counts.c.stored_file_id))
+        select(
+            stored_files, func.coalesce(ref_counts.c.ref_count, 0).label("ref_count")
+        )
+        .select_from(
+            stored_files.outerjoin(
+                ref_counts, stored_files.c.id == ref_counts.c.stored_file_id
+            )
+        )
         .order_by(stored_files.c.created_at_ms.desc())
     )
     if search:
@@ -131,23 +138,33 @@ async def get_file_users(
 ) -> FileUsersResponse:
     del admin
     async with transaction() as conn:
-        exists = (await conn.execute(select(stored_files.c.id).where(stored_files.c.id == file_id))).first()
+        exists = (
+            await conn.execute(
+                select(stored_files.c.id).where(stored_files.c.id == file_id)
+            )
+        ).first()
         if not exists:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"存储文件不存在: {file_id}",
             )
         rows = (
-            await conn.execute(
-                select(
-                    user_files.c.user_id,
-                    users.c.username,
-                    user_files.c.display_name,
+            (
+                await conn.execute(
+                    select(
+                        user_files.c.user_id,
+                        users.c.username,
+                        user_files.c.display_name,
+                    )
+                    .select_from(
+                        user_files.join(users, user_files.c.user_id == users.c.id)
+                    )
+                    .where(user_files.c.stored_file_id == file_id)
                 )
-                .select_from(user_files.join(users, user_files.c.user_id == users.c.id))
-                .where(user_files.c.stored_file_id == file_id)
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
 
     return FileUsersResponse(
         file_id=file_id,
@@ -176,15 +193,23 @@ async def bulk_delete_files(
         try:
             async with transaction() as conn:
                 stored_file = (
-                    await conn.execute(select(stored_files).where(stored_files.c.id == file_id))
-                ).mappings().first()
+                    (
+                        await conn.execute(
+                            select(stored_files).where(stored_files.c.id == file_id)
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
                 if not stored_file:
                     failed_ids.append(file_id)
                     errors.append(f"文件不存在: {file_id}")
                     continue
                 ref_count = (
                     await conn.execute(
-                        select(func.count()).select_from(user_files).where(user_files.c.stored_file_id == file_id)
+                        select(func.count())
+                        .select_from(user_files)
+                        .where(user_files.c.stored_file_id == file_id)
                     )
                 ).scalar_one()
                 if int(ref_count or 0) > 0:
@@ -229,8 +254,14 @@ async def bulk_delete_files(
                     .where(pack_tasks.c.output_stored_file_id == file_id)
                     .values(output_stored_file_id=None, updated_at_ms=timestamp)
                 )
-                await conn.execute(delete(stored_file_entries).where(stored_file_entries.c.stored_file_id == file_id))
-                await conn.execute(delete(stored_files).where(stored_files.c.id == file_id))
+                await conn.execute(
+                    delete(stored_file_entries).where(
+                        stored_file_entries.c.stored_file_id == file_id
+                    )
+                )
+                await conn.execute(
+                    delete(stored_files).where(stored_files.c.id == file_id)
+                )
                 real_path = stored_file["real_path"]
 
             path = Path(real_path)

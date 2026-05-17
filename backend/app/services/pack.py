@@ -117,12 +117,23 @@ async def _delete_user_file_reference_v0(
 
     async with transaction() as conn:
         row = (
-            await conn.execute(
-                select(user_files.c.stored_file_id, stored_files.c.real_path)
-                .select_from(user_files.join(stored_files, user_files.c.stored_file_id == stored_files.c.id))
-                .where(user_files.c.id == user_file_id, user_files.c.user_id == user_id)
+            (
+                await conn.execute(
+                    select(user_files.c.stored_file_id, stored_files.c.real_path)
+                    .select_from(
+                        user_files.join(
+                            stored_files,
+                            user_files.c.stored_file_id == stored_files.c.id,
+                        )
+                    )
+                    .where(
+                        user_files.c.id == user_file_id, user_files.c.user_id == user_id
+                    )
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if row is None:
             return False
         deleted = await conn.execute(
@@ -153,9 +164,9 @@ async def _delete_user_file_reference_v0(
             )
         refs = (
             await conn.execute(
-                select(func.count()).select_from(user_files).where(
-                    user_files.c.stored_file_id == row["stored_file_id"]
-                )
+                select(func.count())
+                .select_from(user_files)
+                .where(user_files.c.stored_file_id == row["stored_file_id"])
             )
         ).scalar_one()
         if int(refs or 0) > 0:
@@ -246,25 +257,35 @@ async def _register_pack_output_v0(
 
     async with transaction() as conn:
         stored = (
-            await conn.execute(
-                select(stored_files).where(stored_files.c.content_hash == content_hash)
+            (
+                await conn.execute(
+                    select(stored_files).where(
+                        stored_files.c.content_hash == content_hash
+                    )
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if stored is None:
             stored = (
-                await conn.execute(
-                    insert(stored_files)
-                    .values(
-                        content_hash=content_hash,
-                        real_path=str(target_path),
-                        size_bytes=size_bytes,
-                        is_directory=0,
-                        original_name=original_name,
-                        created_at_ms=timestamp,
+                (
+                    await conn.execute(
+                        insert(stored_files)
+                        .values(
+                            content_hash=content_hash,
+                            real_path=str(target_path),
+                            size_bytes=size_bytes,
+                            is_directory=0,
+                            original_name=original_name,
+                            created_at_ms=timestamp,
+                        )
+                        .returning(stored_files)
                     )
-                    .returning(stored_files)
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             entries = build_entries(int(stored["id"]), target_path)
             if entries:
                 await conn.execute(insert(stored_file_entries), entries)
@@ -420,10 +441,14 @@ class PackTaskManager:
         for source in sources:
             resolved = source.resolve()
             if not (resolved == base_dir or base_dir in resolved.parents):
-                await cls._update_task_error(task_id, f"路径不在允许范围内: {source.name}")
+                await cls._update_task_error(
+                    task_id, f"路径不在允许范围内: {source.name}"
+                )
                 return
             if not source.exists():
-                await cls._update_task_error(task_id, f"Path does not exist: {source.name}")
+                await cls._update_task_error(
+                    task_id, f"Path does not exist: {source.name}"
+                )
                 return
 
         pack_format = cls.get_pack_format()
@@ -440,10 +465,14 @@ class PackTaskManager:
 
         async with transaction() as conn:
             task = (
-                await conn.execute(
-                    select(pack_tasks).where(pack_tasks.c.id == task_id)
+                (
+                    await conn.execute(
+                        select(pack_tasks).where(pack_tasks.c.id == task_id)
+                    )
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
             if not task or task["status"] != "pending":
                 logger.info("Pack task %s status changed, skipping", task_id)
                 return
@@ -463,11 +492,15 @@ class PackTaskManager:
             return
 
         async with _running_tasks_lock:
-            cls._running_tasks[task_id] = _RunningPackJob(task=current_task, cancel_event=cancel_event)
+            cls._running_tasks[task_id] = _RunningPackJob(
+                task=current_task, cancel_event=cancel_event
+            )
 
         async with transaction() as conn:
             task_state = (
-                await conn.execute(select(pack_tasks.c.status).where(pack_tasks.c.id == task_id))
+                await conn.execute(
+                    select(pack_tasks.c.status).where(pack_tasks.c.id == task_id)
+                )
             ).first()
             if not task_state or task_state[0] != "packing":
                 cancel_event.set()
@@ -514,18 +547,27 @@ class PackTaskManager:
                     cleanup_pack_output(output_path)
                     return
                 try:
-                    stored_file_id, output_user_file_id = await _register_pack_output_v0(
+                    (
+                        stored_file_id,
+                        output_user_file_id,
+                    ) = await _register_pack_output_v0(
                         output_path=output_path,
                         original_name=output_filename,
                         user_id=user_id,
                     )
                 except Exception:
-                    logger.exception("Failed to register pack output: task_id=%s", task_id)
+                    logger.exception(
+                        "Failed to register pack output: task_id=%s", task_id
+                    )
                     cleanup_pack_output(output_path)
-                    await cls._update_task_error(task_id, "打包成功但注册文件失败，请重试")
+                    await cls._update_task_error(
+                        task_id, "打包成功但注册文件失败，请重试"
+                    )
                     return
 
-            if output_user_file_id is not None and not await cls._is_task_status(task_id, "packing"):
+            if output_user_file_id is not None and not await cls._is_task_status(
+                task_id, "packing"
+            ):
                 try:
                     await _delete_user_file_reference_v0(
                         user_id,
@@ -533,18 +575,25 @@ class PackTaskManager:
                         adjust_usage=False,
                     )
                 except Exception:
-                    logger.warning("Failed to rollback output ref: user_file_id=%s", output_user_file_id)
+                    logger.warning(
+                        "Failed to rollback output ref: user_file_id=%s",
+                        output_user_file_id,
+                    )
                 return
 
             if output_user_file_id is not None and output_size > 0:
                 async with transaction() as conn:
                     task_for_quota = (
-                        await conn.execute(
-                            select(pack_tasks.c.status, pack_tasks.c.reserved_bytes).where(
-                                pack_tasks.c.id == task_id
+                        (
+                            await conn.execute(
+                                select(
+                                    pack_tasks.c.status, pack_tasks.c.reserved_bytes
+                                ).where(pack_tasks.c.id == task_id)
                             )
                         )
-                    ).mappings().first()
+                        .mappings()
+                        .first()
+                    )
                 if not task_for_quota or task_for_quota["status"] != "packing":
                     try:
                         await _delete_user_file_reference_v0(
@@ -553,10 +602,15 @@ class PackTaskManager:
                             adjust_usage=False,
                         )
                     except Exception:
-                        logger.warning("Failed to rollback output ref: user_file_id=%s", output_user_file_id)
+                        logger.warning(
+                            "Failed to rollback output ref: user_file_id=%s",
+                            output_user_file_id,
+                        )
                     return
 
-                extra_required = max(0, output_size - int(task_for_quota["reserved_bytes"] or 0))
+                extra_required = max(
+                    0, output_size - int(task_for_quota["reserved_bytes"] or 0)
+                )
                 if extra_required > 0:
                     try:
                         await reserve_bytes(user_id, extra_required)
@@ -568,22 +622,33 @@ class PackTaskManager:
                                 adjust_usage=False,
                             )
                         except Exception:
-                            logger.warning("Failed to rollback output ref: user_file_id=%s", output_user_file_id)
-                        await cls._update_task_error(task_id, "空间不足。打包结果超过预留空间")
+                            logger.warning(
+                                "Failed to rollback output ref: user_file_id=%s",
+                                output_user_file_id,
+                            )
+                        await cls._update_task_error(
+                            task_id, "空间不足。打包结果超过预留空间"
+                        )
                         return
                     extra_reserved = extra_required
 
             completed_task: dict[str, Any] | None = None
             async with transaction() as conn:
                 task = (
-                    await conn.execute(
-                        select(pack_tasks).where(pack_tasks.c.id == task_id)
+                    (
+                        await conn.execute(
+                            select(pack_tasks).where(pack_tasks.c.id == task_id)
+                        )
                     )
-                ).mappings().first()
+                    .mappings()
+                    .first()
+                )
                 if task and task["status"] == "packing":
                     completed = await conn.execute(
                         update(pack_tasks)
-                        .where(pack_tasks.c.id == task_id, pack_tasks.c.status == "packing")
+                        .where(
+                            pack_tasks.c.id == task_id, pack_tasks.c.status == "packing"
+                        )
                         .values(
                             status="completed",
                             progress=100,
@@ -597,13 +662,16 @@ class PackTaskManager:
                     if completed.first() is not None:
                         completed_task = dict(task)
                     else:
-                        logger.warning("Pack task %s completion lost status race", task_id)
+                        logger.warning(
+                            "Pack task %s completion lost status race", task_id
+                        )
                 else:
                     logger.warning("Pack task %s was cancelled during packing", task_id)
             if completed_task:
                 await _convert_reserved_to_used(
                     user_id,
-                    reserved_bytes=int(completed_task["reserved_bytes"] or 0) + extra_reserved,
+                    reserved_bytes=int(completed_task["reserved_bytes"] or 0)
+                    + extra_reserved,
                     used_bytes=output_size if output_user_file_id is not None else 0,
                 )
                 extra_reserved = 0
@@ -612,7 +680,9 @@ class PackTaskManager:
                         try:
                             await _delete_user_file_reference_v0(user_id, uf_id)
                         except Exception:
-                            logger.warning("Failed to delete source ref: user_file_id=%s", uf_id)
+                            logger.warning(
+                                "Failed to delete source ref: user_file_id=%s", uf_id
+                            )
             elif output_user_file_id is not None:
                 if extra_reserved > 0:
                     await release_reserved(user_id, extra_reserved)
@@ -624,7 +694,10 @@ class PackTaskManager:
                         adjust_usage=False,
                     )
                 except Exception:
-                    logger.warning("Failed to rollback output ref: user_file_id=%s", output_user_file_id)
+                    logger.warning(
+                        "Failed to rollback output ref: user_file_id=%s",
+                        output_user_file_id,
+                    )
         except InterruptedError:
             if extra_reserved > 0:
                 await release_reserved(user_id, extra_reserved)
@@ -654,6 +727,7 @@ class PackTaskManager:
                 cls._running_tasks.pop(task_id, None)
             # Clean up the temporary pack directory
             from app.services.storage import safe_delete_path, get_downloading_dir
+
             safe_delete_path(
                 base_dir=get_downloading_dir(),
                 target=pack_dir,
@@ -672,9 +746,13 @@ class PackTaskManager:
         cancel_event: threading.Event,
     ) -> None:
         if pack_format == "zip":
-            cls._write_zip_sync(output_path, compression_level, items, tracker, cancel_event)
+            cls._write_zip_sync(
+                output_path, compression_level, items, tracker, cancel_event
+            )
             return
-        cls._write_tar_zst_sync(output_path, compression_level, items, tracker, cancel_event)
+        cls._write_tar_zst_sync(
+            output_path, compression_level, items, tracker, cancel_event
+        )
 
     @classmethod
     def _write_zip_sync(
@@ -700,7 +778,10 @@ class PackTaskManager:
                     archive.writestr(item.arcname.rstrip("/") + "/", b"")
                     continue
 
-                with item.path.open("rb") as source, archive.open(item.arcname, "w") as target:
+                with (
+                    item.path.open("rb") as source,
+                    archive.open(item.arcname, "w") as target,
+                ):
                     while True:
                         if cancel_event.is_set():
                             raise InterruptedError("pack cancelled")
@@ -763,16 +844,28 @@ class PackTaskManager:
         items: list[_ArchiveItem] = []
         used_roots: set[str] = set()
         for source, raw_name in zip(sources, source_names):
-            source_for_pack = cls._unwrap_hash_directory(source, raw_name) if source.is_dir() else source
+            source_for_pack = (
+                cls._unwrap_hash_directory(source, raw_name)
+                if source.is_dir()
+                else source
+            )
             root = cls._safe_archive_name(raw_name, source_for_pack.name)
             root = cls._deduplicate_root_name(root, used_roots)
 
             if source_for_pack.is_dir():
-                items.extend(cls._collect_directory_items(source_for_pack, prefix=root, include_root=True))
+                items.extend(
+                    cls._collect_directory_items(
+                        source_for_pack, prefix=root, include_root=True
+                    )
+                )
                 continue
 
             size = source_for_pack.stat().st_size
-            items.append(_ArchiveItem(path=source_for_pack, arcname=root, is_dir=False, size=size))
+            items.append(
+                _ArchiveItem(
+                    path=source_for_pack, arcname=root, is_dir=False, size=size
+                )
+            )
 
         return items
 
@@ -785,7 +878,9 @@ class PackTaskManager:
     ) -> list[_ArchiveItem]:
         items: list[_ArchiveItem] = []
         if include_root and prefix:
-            items.append(_ArchiveItem(path=directory, arcname=prefix + "/", is_dir=True, size=0))
+            items.append(
+                _ArchiveItem(path=directory, arcname=prefix + "/", is_dir=True, size=0)
+            )
 
         for root, dir_names, file_names in os.walk(directory):
             root_path = Path(root)
@@ -801,7 +896,9 @@ class PackTaskManager:
             for dirname in dir_names:
                 dir_path = root_path / dirname
                 arcname = cls._join_arcname(prefix, rel_root, dirname, is_dir=True)
-                items.append(_ArchiveItem(path=dir_path, arcname=arcname, is_dir=True, size=0))
+                items.append(
+                    _ArchiveItem(path=dir_path, arcname=arcname, is_dir=True, size=0)
+                )
 
             for filename in file_names:
                 file_path = root_path / filename
@@ -809,7 +906,11 @@ class PackTaskManager:
                     continue
                 size = file_path.stat().st_size
                 arcname = cls._join_arcname(prefix, rel_root, filename, is_dir=False)
-                items.append(_ArchiveItem(path=file_path, arcname=arcname, is_dir=False, size=size))
+                items.append(
+                    _ArchiveItem(
+                        path=file_path, arcname=arcname, is_dir=False, size=size
+                    )
+                )
 
         return items
 
@@ -893,13 +994,17 @@ class PackTaskManager:
     async def _update_task_error(cls, task_id: int, error: str) -> None:
         async with transaction() as conn:
             task = (
-                await conn.execute(
-                    select(pack_tasks).where(
-                        pack_tasks.c.id == task_id,
-                        pack_tasks.c.status.in_(PACK_ACTIVE_STATUSES),
+                (
+                    await conn.execute(
+                        select(pack_tasks).where(
+                            pack_tasks.c.id == task_id,
+                            pack_tasks.c.status.in_(PACK_ACTIVE_STATUSES),
+                        )
                     )
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
             if task:
                 await conn.execute(
                     update(pack_tasks)
@@ -967,6 +1072,8 @@ async def get_user_available_space_for_pack(user_id: int) -> int:
     user_space = await get_usage(user_id, user_quota)
     user_quota_remaining = max(
         0,
-        user_space["quota_bytes"] - user_space["used_bytes"] - user_space["reserved_bytes"],
+        user_space["quota_bytes"]
+        - user_space["used_bytes"]
+        - user_space["reserved_bytes"],
     )
     return min(server_available, user_quota_remaining)

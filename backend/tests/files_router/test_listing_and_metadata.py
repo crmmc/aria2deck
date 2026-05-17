@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,7 +19,9 @@ class TestListFiles:
         assert data["files"] == []
         assert set(data["space"]) == {"used", "frozen", "available"}
 
-    def test_list_files_with_file(self, authenticated_client: TestClient, user_file: dict):
+    def test_list_files_with_file(
+        self, authenticated_client: TestClient, user_file: dict
+    ):
         response = authenticated_client.get("/api/files")
         assert response.status_code == 200
         data = response.json()
@@ -72,23 +74,46 @@ class TestSpaceEndpoints:
 
 
 class TestDeleteFile:
-    def test_delete_file_success(self, authenticated_client: TestClient, user_file: dict):
-        with patch("app.services.storage.delete_user_file_reference", new_callable=AsyncMock, return_value=True):
-            response = authenticated_client.delete(f"/api/files/{user_file['content_hash']}")
+    def test_delete_file_success(
+        self, authenticated_client: TestClient, user_file: dict
+    ):
+        response = authenticated_client.delete(
+            f"/api/files/{user_file['content_hash']}"
+        )
+
         assert response.status_code == 200
         assert response.json() == {"ok": True}
+
+        import asyncio
+
+        async def file_exists() -> bool:
+            async with transaction() as conn:
+                row = (
+                    await conn.execute(
+                        select(user_files.c.id).where(
+                            user_files.c.id == user_file["id"]
+                        )
+                    )
+                ).first()
+            return row is not None
+
+        assert asyncio.run(file_exists()) is False
 
     def test_delete_file_not_found(self, authenticated_client: TestClient):
         response = authenticated_client.delete("/api/files/nonexistent_hash")
         assert response.status_code == 404
 
-    def test_delete_file_unauthorized(self, client: TestClient, temp_db: str, user_file: dict):
+    def test_delete_file_unauthorized(
+        self, client: TestClient, temp_db: str, user_file: dict
+    ):
         response = client.delete(f"/api/files/{user_file['content_hash']}")
         assert response.status_code == 401
 
 
 class TestRenameFile:
-    def test_rename_file_success(self, authenticated_client: TestClient, user_file: dict):
+    def test_rename_file_success(
+        self, authenticated_client: TestClient, user_file: dict
+    ):
         response = authenticated_client.put(
             f"/api/files/{user_file['content_hash']}/rename",
             json={"name": "new_name.txt"},
@@ -119,14 +144,18 @@ class TestRenameFile:
         )
         assert response.status_code == 404
 
-    def test_rename_file_empty_name(self, authenticated_client: TestClient, user_file: dict):
+    def test_rename_file_empty_name(
+        self, authenticated_client: TestClient, user_file: dict
+    ):
         response = authenticated_client.put(
             f"/api/files/{user_file['content_hash']}/rename",
             json={"name": ""},
         )
         assert response.status_code == 422
 
-    def test_rename_file_unauthorized(self, client: TestClient, temp_db: str, user_file: dict):
+    def test_rename_file_unauthorized(
+        self, client: TestClient, temp_db: str, user_file: dict
+    ):
         response = client.put(
             f"/api/files/{user_file['content_hash']}/rename",
             json={"name": "new_name.txt"},
@@ -138,7 +167,7 @@ class TestRenameFile:
     ):
         response = authenticated_client.put(
             f"/api/files/{user_file['content_hash']}/rename",
-            json={"name": "file<>:\"|?*.txt"},
+            json={"name": 'file<>:"|?*.txt'},
         )
         assert response.status_code == 200
         assert response.json() == {"ok": True}

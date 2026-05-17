@@ -27,23 +27,27 @@ async def _insert_pack_task(
     timestamp = now_ms()
     async with transaction() as conn:
         row = (
-            await conn.execute(
-                insert(pack_tasks)
-                .values(
-                    user_id=user_id,
-                    source_user_file_ids_json=str(source_ids),
-                    source_size_bytes=source_size_bytes,
-                    reserved_bytes=reserved_bytes,
-                    output_name=output_name,
-                    delete_source=0,
-                    status=status,
-                    progress=progress,
-                    created_at_ms=timestamp,
-                    updated_at_ms=timestamp,
+            (
+                await conn.execute(
+                    insert(pack_tasks)
+                    .values(
+                        user_id=user_id,
+                        source_user_file_ids_json=str(source_ids),
+                        source_size_bytes=source_size_bytes,
+                        reserved_bytes=reserved_bytes,
+                        output_name=output_name,
+                        delete_source=0,
+                        status=status,
+                        progress=progress,
+                        created_at_ms=timestamp,
+                        updated_at_ms=timestamp,
+                    )
+                    .returning(pack_tasks)
                 )
-                .returning(pack_tasks)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     return dict(row)
 
 
@@ -84,7 +88,9 @@ def test_calculate_folder_size_recurses_files(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_update_task_error_marks_failed_and_releases_reserved(temp_db: str) -> None:
+async def test_update_task_error_marks_failed_and_releases_reserved(
+    temp_db: str,
+) -> None:
     user = await create_user_v0(username="pack_error", quota_bytes=1000)
     async with transaction() as conn:
         await conn.execute(
@@ -104,15 +110,25 @@ async def test_update_task_error_marks_failed_and_releases_reserved(temp_db: str
 
     async with transaction() as conn:
         stored_task = (
-            await conn.execute(select(pack_tasks).where(pack_tasks.c.id == task["id"]))
-        ).mappings().one()
-        usage = (
-            await conn.execute(
-                select(user_storage_usage).where(
-                    user_storage_usage.c.user_id == user["id"]
+            (
+                await conn.execute(
+                    select(pack_tasks).where(pack_tasks.c.id == task["id"])
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
+        usage = (
+            (
+                await conn.execute(
+                    select(user_storage_usage).where(
+                        user_storage_usage.c.user_id == user["id"]
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
 
     assert stored_task["status"] == "failed"
     assert stored_task["reserved_bytes"] == 0
@@ -160,24 +176,38 @@ async def test_pack_task_writes_archive_and_registers_output(temp_db: str) -> No
 
     async with transaction() as conn:
         stored_task = (
-            await conn.execute(select(pack_tasks).where(pack_tasks.c.id == task["id"]))
-        ).mappings().one()
+            (
+                await conn.execute(
+                    select(pack_tasks).where(pack_tasks.c.id == task["id"])
+                )
+            )
+            .mappings()
+            .one()
+        )
         output_ref = (
-            await conn.execute(
-                select(user_files).where(
-                    user_files.c.user_id == user["id"],
-                    user_files.c.stored_file_id
-                    == stored_task["output_stored_file_id"],
+            (
+                await conn.execute(
+                    select(user_files).where(
+                        user_files.c.user_id == user["id"],
+                        user_files.c.stored_file_id
+                        == stored_task["output_stored_file_id"],
+                    )
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         usage = (
-            await conn.execute(
-                select(user_storage_usage).where(
-                    user_storage_usage.c.user_id == user["id"]
+            (
+                await conn.execute(
+                    select(user_storage_usage).where(
+                        user_storage_usage.c.user_id == user["id"]
+                    )
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     assert stored_task["status"] == "completed"
     assert stored_task["progress"] == 100
@@ -244,12 +274,16 @@ async def test_pack_completion_does_not_charge_used_bytes_for_existing_output_re
 
     async with transaction() as conn:
         usage = (
-            await conn.execute(
-                select(user_storage_usage).where(
-                    user_storage_usage.c.user_id == user["id"]
+            (
+                await conn.execute(
+                    select(user_storage_usage).where(
+                        user_storage_usage.c.user_id == user["id"]
+                    )
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     assert usage["reserved_bytes"] == 0
     assert usage["used_bytes"] == 13
@@ -326,28 +360,46 @@ async def test_pack_completion_rolls_back_new_output_ref_when_final_update_loses
 
     async with transaction() as conn:
         stored_task = (
-            await conn.execute(select(pack_tasks).where(pack_tasks.c.id == task["id"]))
-        ).mappings().one()
+            (
+                await conn.execute(
+                    select(pack_tasks).where(pack_tasks.c.id == task["id"])
+                )
+            )
+            .mappings()
+            .one()
+        )
         output_refs = (
-            await conn.execute(
-                select(user_files).where(
-                    user_files.c.user_id == user["id"],
-                    user_files.c.display_name.like("cancel-race-packed.%"),
+            (
+                await conn.execute(
+                    select(user_files).where(
+                        user_files.c.user_id == user["id"],
+                        user_files.c.display_name.like("cancel-race-packed.%"),
+                    )
                 )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         source_after_race = (
-            await conn.execute(
-                select(user_files).where(user_files.c.id == source_ref["id"])
-            )
-        ).mappings().first()
-        usage = (
-            await conn.execute(
-                select(user_storage_usage).where(
-                    user_storage_usage.c.user_id == user["id"]
+            (
+                await conn.execute(
+                    select(user_files).where(user_files.c.id == source_ref["id"])
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .first()
+        )
+        usage = (
+            (
+                await conn.execute(
+                    select(user_storage_usage).where(
+                        user_storage_usage.c.user_id == user["id"]
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
 
     assert stored_task["status"] == "cancelled"
     assert stored_task["output_stored_file_id"] is None
@@ -399,23 +451,37 @@ async def test_pack_completion_fails_when_archive_exceeds_reserved_quota(
 
     async with transaction() as conn:
         stored_task = (
-            await conn.execute(select(pack_tasks).where(pack_tasks.c.id == task["id"]))
-        ).mappings().one()
+            (
+                await conn.execute(
+                    select(pack_tasks).where(pack_tasks.c.id == task["id"])
+                )
+            )
+            .mappings()
+            .one()
+        )
         output_refs = (
-            await conn.execute(
-                select(user_files).where(
-                    user_files.c.user_id == user["id"],
-                    user_files.c.display_name.like("quota-packed.%"),
+            (
+                await conn.execute(
+                    select(user_files).where(
+                        user_files.c.user_id == user["id"],
+                        user_files.c.display_name.like("quota-packed.%"),
+                    )
                 )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         usage = (
-            await conn.execute(
-                select(user_storage_usage).where(
-                    user_storage_usage.c.user_id == user["id"]
+            (
+                await conn.execute(
+                    select(user_storage_usage).where(
+                        user_storage_usage.c.user_id == user["id"]
+                    )
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     assert stored_task["status"] == "failed"
     assert output_refs == []
@@ -455,12 +521,16 @@ async def test_pack_completion_converts_reserved_to_used_without_release_window(
         output_name="atomic-packed",
     )
 
-    def write_fixed_archive(output_path: Path, *_args: object, **_kwargs: object) -> None:
+    def write_fixed_archive(
+        output_path: Path, *_args: object, **_kwargs: object
+    ) -> None:
         output_path.write_bytes(b"12345")
 
     original_release_reserved = pack_service.release_reserved
 
-    async def racing_release_reserved(user_id: int, amount: int, **kwargs: object) -> dict[str, int]:
+    async def racing_release_reserved(
+        user_id: int, amount: int, **kwargs: object
+    ) -> dict[str, int]:
         result = await original_release_reserved(user_id, amount, **kwargs)
         await pack_service.reserve_bytes(user_id, 10, quota_bytes=quota_bytes)
         return result
@@ -480,12 +550,16 @@ async def test_pack_completion_converts_reserved_to_used_without_release_window(
 
     async with transaction() as conn:
         usage = (
-            await conn.execute(
-                select(user_storage_usage).where(
-                    user_storage_usage.c.user_id == user["id"]
+            (
+                await conn.execute(
+                    select(user_storage_usage).where(
+                        user_storage_usage.c.user_id == user["id"]
+                    )
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     assert usage["used_bytes"] + usage["reserved_bytes"] <= quota_bytes
     assert usage["used_bytes"] == 10

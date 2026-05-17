@@ -29,19 +29,23 @@ async def _seed_shared_file(user_ids: list[int]) -> dict:
     timestamp = now_ms()
     async with transaction() as conn:
         stored = (
-            await conn.execute(
-                insert(stored_files)
-                .values(
-                    content_hash="shared_hash",
-                    real_path=str(path),
-                    size_bytes=6,
-                    is_directory=0,
-                    original_name="shared.bin",
-                    created_at_ms=timestamp,
+            (
+                await conn.execute(
+                    insert(stored_files)
+                    .values(
+                        content_hash="shared_hash",
+                        real_path=str(path),
+                        size_bytes=6,
+                        is_directory=0,
+                        original_name="shared.bin",
+                        created_at_ms=timestamp,
+                    )
+                    .returning(stored_files)
                 )
-                .returning(stored_files)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         user_file_ids: list[int] = []
         for user_id in user_ids:
             row = (
@@ -80,19 +84,27 @@ async def test_delete_user_file_keeps_shared_storage_until_last_reference(
 
     async with transaction() as conn:
         stored_after_first = (
-            await conn.execute(
-                select(stored_files).where(
-                    stored_files.c.id == seeded["stored_file_id"]
+            (
+                await conn.execute(
+                    select(stored_files).where(
+                        stored_files.c.id == seeded["stored_file_id"]
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         refs_after_first = (
-            await conn.execute(
-                select(user_files).where(
-                    user_files.c.stored_file_id == seeded["stored_file_id"]
+            (
+                await conn.execute(
+                    select(user_files).where(
+                        user_files.c.stored_file_id == seeded["stored_file_id"]
+                    )
                 )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
 
     assert stored_after_first is not None
     assert len(refs_after_first) == 1
@@ -105,12 +117,16 @@ async def test_delete_user_file_keeps_shared_storage_until_last_reference(
 
     async with transaction() as conn:
         stored_after_last = (
-            await conn.execute(
-                select(stored_files).where(
-                    stored_files.c.id == seeded["stored_file_id"]
+            (
+                await conn.execute(
+                    select(stored_files).where(
+                        stored_files.c.id == seeded["stored_file_id"]
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
 
     assert stored_after_last is None
     assert not seeded["path"].exists()
@@ -128,19 +144,27 @@ async def test_concurrent_delete_same_user_file_deletes_once(temp_db: str) -> No
 
     async with transaction() as conn:
         refs = (
-            await conn.execute(
-                select(user_files).where(
-                    user_files.c.stored_file_id == seeded["stored_file_id"]
+            (
+                await conn.execute(
+                    select(user_files).where(
+                        user_files.c.stored_file_id == seeded["stored_file_id"]
+                    )
                 )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         stored = (
-            await conn.execute(
-                select(stored_files).where(
-                    stored_files.c.id == seeded["stored_file_id"]
+            (
+                await conn.execute(
+                    select(stored_files).where(
+                        stored_files.c.id == seeded["stored_file_id"]
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
 
     assert sorted(results) == [False, True]
     assert refs == []
@@ -156,23 +180,27 @@ async def test_delete_last_reference_clears_download_and_pack_fk_and_usage(
     timestamp = now_ms()
     async with transaction() as conn:
         global_download = (
-            await conn.execute(
-                insert(global_downloads)
-                .values(
-                    resource_key="http:storage-fk",
-                    resource_kind="http",
-                    source_uri="https://example.com/file",
-                    status="completed",
-                    total_bytes=6,
-                    completed_bytes=6,
-                    completed_file_id=seeded["stored_file_id"],
-                    created_at_ms=timestamp,
-                    updated_at_ms=timestamp,
-                    completed_at_ms=timestamp,
+            (
+                await conn.execute(
+                    insert(global_downloads)
+                    .values(
+                        resource_key="http:storage-fk",
+                        resource_kind="http",
+                        source_uri="https://example.com/file",
+                        status="completed",
+                        total_bytes=6,
+                        completed_bytes=6,
+                        completed_file_id=seeded["stored_file_id"],
+                        created_at_ms=timestamp,
+                        updated_at_ms=timestamp,
+                        completed_at_ms=timestamp,
+                    )
+                    .returning(global_downloads)
                 )
-                .returning(global_downloads)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         await conn.execute(
             insert(user_tasks).values(
                 user_id=user["id"],
@@ -212,22 +240,22 @@ async def test_delete_last_reference_clears_download_and_pack_fk_and_usage(
     )
 
     async with transaction() as conn:
-        download = (
-            await conn.execute(select(global_downloads))
-        ).mappings().one()
-        user_task = (
-            await conn.execute(select(user_tasks))
-        ).mappings().one()
+        download = (await conn.execute(select(global_downloads))).mappings().one()
+        user_task = (await conn.execute(select(user_tasks))).mappings().one()
         pack_file_id = (
             await conn.execute(select(pack_tasks.c.output_stored_file_id))
         ).scalar_one()
         usage = (
-            await conn.execute(
-                select(user_storage_usage).where(
-                    user_storage_usage.c.user_id == user["id"]
+            (
+                await conn.execute(
+                    select(user_storage_usage).where(
+                        user_storage_usage.c.user_id == user["id"]
+                    )
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     assert download["completed_file_id"] is None
     assert download["status"] == "cancelled"
@@ -250,19 +278,23 @@ async def test_admin_bulk_delete_orphan_clears_download_and_pack_fks(
     timestamp = now_ms()
     async with transaction() as conn:
         stored = (
-            await conn.execute(
-                insert(stored_files)
-                .values(
-                    content_hash="admin_orphan_hash",
-                    real_path=str(path),
-                    size_bytes=6,
-                    is_directory=0,
-                    original_name="admin-orphan.bin",
-                    created_at_ms=timestamp,
+            (
+                await conn.execute(
+                    insert(stored_files)
+                    .values(
+                        content_hash="admin_orphan_hash",
+                        real_path=str(path),
+                        size_bytes=6,
+                        is_directory=0,
+                        original_name="admin-orphan.bin",
+                        created_at_ms=timestamp,
+                    )
+                    .returning(stored_files)
                 )
-                .returning(stored_files)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         await conn.execute(
             insert(global_downloads).values(
                 resource_key="http:admin-orphan",
@@ -300,10 +332,14 @@ async def test_admin_bulk_delete_orphan_clears_download_and_pack_fks(
 
     async with transaction() as conn:
         stored_after_delete = (
-            await conn.execute(
-                select(stored_files).where(stored_files.c.id == stored["id"])
+            (
+                await conn.execute(
+                    select(stored_files).where(stored_files.c.id == stored["id"])
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         download = (await conn.execute(select(global_downloads))).mappings().one()
         pack_file_id = (
             await conn.execute(select(pack_tasks.c.output_stored_file_id))

@@ -117,7 +117,9 @@ class TestPackListEndpoints:
 
 
 class TestPackCalculateEndpoints:
-    def test_calculate_size_with_file_ids(self, authenticated_client: TestClient, user_file: dict):
+    def test_calculate_size_with_file_ids(
+        self, authenticated_client: TestClient, user_file: dict
+    ):
         response = authenticated_client.post(
             "/api/files/pack/calculate-size",
             json={"file_ids": [user_file["id"]]},
@@ -132,7 +134,9 @@ class TestPackCalculateEndpoints:
         )
         assert response.status_code == 401
 
-    def test_calculate_size_nonexistent_file_ids(self, authenticated_client: TestClient):
+    def test_calculate_size_nonexistent_file_ids(
+        self, authenticated_client: TestClient
+    ):
         response = authenticated_client.post(
             "/api/files/pack/calculate-size",
             json={"file_ids": [99999]},
@@ -150,7 +154,9 @@ class TestPackCalculateEndpoints:
 
 
 class TestPackTaskOperations:
-    def test_cancel_pack_task_resets_progress(self, authenticated_client: TestClient, test_user: dict):
+    def test_cancel_pack_task_resets_progress(
+        self, authenticated_client: TestClient, test_user: dict
+    ):
         task_id = _insert_pack_task_v0(
             user_id=test_user["id"],
             status="pending",
@@ -159,7 +165,11 @@ class TestPackTaskOperations:
             progress=88,
         )
 
-        with patch("app.services.pack.PackTaskManager.cancel_pack", new_callable=AsyncMock, return_value=True):
+        with patch(
+            "app.services.pack.PackTaskManager.cancel_pack",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
             response = authenticated_client.delete(f"/api/files/pack/{task_id}")
         assert response.status_code == 200
 
@@ -168,7 +178,9 @@ class TestPackTaskOperations:
         assert detail.json()["status"] == "cancelled"
         assert detail.json()["progress"] == 0
 
-    def test_delete_cancelled_pack_removes_task(self, authenticated_client: TestClient, test_user: dict):
+    def test_delete_cancelled_pack_removes_task(
+        self, authenticated_client: TestClient, test_user: dict
+    ):
         task_id = _insert_pack_task_v0(
             user_id=test_user["id"],
             status="cancelled",
@@ -201,7 +213,9 @@ def test_create_pack_task_rejects_invalid_payload_shape(
 
 
 class TestPackTaskCreate:
-    def test_create_pack_task_nonexistent_file_ids(self, authenticated_client: TestClient):
+    def test_create_pack_task_nonexistent_file_ids(
+        self, authenticated_client: TestClient
+    ):
         response = authenticated_client.post(
             "/api/files/pack",
             json={"file_ids": [99999], "output_name": "test.7z"},
