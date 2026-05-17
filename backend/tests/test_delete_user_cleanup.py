@@ -1,143 +1,129 @@
-"""删除用户时清理任务测试
+"""删除用户时清理 v0 用户归属记录测试。"""
 
-测试场景：
-1. 删除用户时同时删除其任务记录
-2. 删除用户时同时删除其打包任务记录
-"""
+from __future__ import annotations
+
+import asyncio
+
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 from app.core.config import settings
-from app.db import execute, fetch_one, fetch_all
+from app.db.engine import transaction
+from app.db.schema import pack_tasks, user_tasks
+from tests.helpers_v0 import (
+    create_global_download_v0,
+    create_pack_task_v0,
+    create_user_task_v0,
+)
+
+
+async def _count_rows(table, user_id: int) -> int:
+    async with transaction() as conn:
+        value = (
+            await conn.execute(
+                select(func.count())
+                .select_from(table)
+                .where(table.c.user_id == user_id)
+            )
+        ).scalar_one()
+    return int(value or 0)
 
 
 class TestDeleteUserCleanup:
-    """删除用户时清理任务测试套件"""
+    """删除用户时清理任务测试套件。"""
 
-    def test_delete_user_removes_tasks(
-        self, client: TestClient, test_admin: dict, admin_session: str
-    ):
-        """测试删除用户时同时删除其任务记录"""
-        # 创建测试用户
+    def _create_user_via_api(
+        self, client: TestClient, admin_session: str, username: str
+    ) -> int:
         client.cookies.set(settings.session_cookie_name, admin_session)
         response = client.post(
             "/api/users",
             json={
-                "username": "testuser_tasks",
+                "username": username,
                 "password": "password123",
-                "is_admin": False
-            }
+                "is_admin": False,
+            },
         )
         assert response.status_code == 200
-        user_id = response.json()["id"]
+        return int(response.json()["id"])
 
-        # 为该用户创建任务记录
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
-        task_id = execute(
-            """
-            INSERT INTO tasks (owner_id, gid, uri, status, name, total_length, completed_length,
-                              download_speed, upload_speed, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [user_id, "test_gid_123", "https://example.com/file.zip", "complete",
-             "file.zip", 1000000, 1000000, 0, 0, now, now]
+    def test_delete_user_removes_user_tasks(
+        self, client: TestClient, test_admin: dict, admin_session: str
+    ) -> None:
+        user_id = self._create_user_via_api(client, admin_session, "testuser_tasks")
+        download = asyncio.run(
+            create_global_download_v0(
+                resource_key="delete-user-task",
+                source_uri="https://example.com/file.zip",
+                resource_kind="http",
+                status="completed",
+                display_name="file.zip",
+            )
         )
-        assert task_id is not None
+        asyncio.run(
+            create_user_task_v0(
+                user_id=user_id,
+                global_download_id=download["id"],
+                status="completed",
+                display_name="file.zip",
+            )
+        )
+        assert asyncio.run(_count_rows(user_tasks, user_id)) == 1
 
-        # 确认任务存在
-        task = fetch_one("SELECT * FROM tasks WHERE id = ?", [task_id])
-        assert task is not None
-
-        # 删除用户
         response = client.delete(f"/api/users/{user_id}")
         assert response.status_code == 200
 
-        # 确认任务被删除
-        task = fetch_one("SELECT * FROM tasks WHERE id = ?", [task_id])
-        assert task is None
+        assert asyncio.run(_count_rows(user_tasks, user_id)) == 0
 
     def test_delete_user_removes_pack_tasks(
         self, client: TestClient, test_admin: dict, admin_session: str
-    ):
-        """测试删除用户时同时删除其打包任务记录"""
-        # 创建测试用户
-        client.cookies.set(settings.session_cookie_name, admin_session)
-        response = client.post(
-            "/api/users",
-            json={
-                "username": "testuser_pack",
-                "password": "password123",
-                "is_admin": False
-            }
+    ) -> None:
+        user_id = self._create_user_via_api(client, admin_session, "testuser_pack")
+        asyncio.run(
+            create_pack_task_v0(
+                user_id=user_id,
+                source_user_file_ids=[1, 2],
+                source_size_bytes=1_000_000,
+                reserved_bytes=1_000_000,
+                status="completed",
+                output_name="archive.tar.zst",
+            )
         )
-        assert response.status_code == 200
-        user_id = response.json()["id"]
+        assert asyncio.run(_count_rows(pack_tasks, user_id)) == 1
 
-        # 为该用户创建打包任务记录
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
-        pack_task_id = execute(
-            """
-            INSERT INTO pack_tasks (owner_id, folder_path, folder_size, reserved_space, status, progress, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [user_id, "/test/path", 1000000, 1000000, "complete", 100, now, now]
-        )
-        assert pack_task_id is not None
-
-        # 确认打包任务存在
-        pack_task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [pack_task_id])
-        assert pack_task is not None
-
-        # 删除用户
         response = client.delete(f"/api/users/{user_id}")
         assert response.status_code == 200
 
-        # 确认打包任务被删除
-        pack_task = fetch_one("SELECT * FROM pack_tasks WHERE id = ?", [pack_task_id])
-        assert pack_task is None
+        assert asyncio.run(_count_rows(pack_tasks, user_id)) == 0
 
     def test_delete_user_multiple_tasks(
         self, client: TestClient, test_admin: dict, admin_session: str
-    ):
-        """测试删除用户时删除其所有任务"""
-        # 创建测试用户
-        client.cookies.set(settings.session_cookie_name, admin_session)
-        response = client.post(
-            "/api/users",
-            json={
-                "username": "testuser_multi_tasks",
-                "password": "password123",
-                "is_admin": False
-            }
+    ) -> None:
+        user_id = self._create_user_via_api(
+            client, admin_session, "testuser_multi_tasks"
         )
-        assert response.status_code == 200
-        user_id = response.json()["id"]
-
-        # 为该用户创建多个任务记录
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
-        task_ids = []
-        for i in range(5):
-            task_id = execute(
-                """
-                INSERT INTO tasks (owner_id, gid, uri, status, name, total_length, completed_length,
-                                  download_speed, upload_speed, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [user_id, f"test_gid_{i}", f"https://example.com/file{i}.zip", "complete",
-                 f"file{i}.zip", 1000000, 1000000, 0, 0, now, now]
+        for index in range(5):
+            download = asyncio.run(
+                create_global_download_v0(
+                    resource_key=f"delete-user-task-{index}",
+                    source_uri=f"https://example.com/file{index}.zip",
+                    resource_kind="http",
+                    status="completed",
+                    display_name=f"file{index}.zip",
+                )
             )
-            task_ids.append(task_id)
+            asyncio.run(
+                create_user_task_v0(
+                    user_id=user_id,
+                    global_download_id=download["id"],
+                    status="completed",
+                    display_name=f"file{index}.zip",
+                )
+            )
 
-        # 确认任务存在
-        tasks = fetch_all("SELECT * FROM tasks WHERE owner_id = ?", [user_id])
-        assert len(tasks) == 5
+        assert asyncio.run(_count_rows(user_tasks, user_id)) == 5
 
-        # 删除用户
         response = client.delete(f"/api/users/{user_id}")
         assert response.status_code == 200
 
-        # 确认所有任务被删除
-        tasks = fetch_all("SELECT * FROM tasks WHERE owner_id = ?", [user_id])
-        assert len(tasks) == 0
+        assert asyncio.run(_count_rows(user_tasks, user_id)) == 0

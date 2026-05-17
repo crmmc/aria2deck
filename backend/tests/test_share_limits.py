@@ -1,14 +1,18 @@
-from datetime import datetime, timezone
+import asyncio
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import insert
 
 from app.core.config import settings
+from app.core.download_limiter import download_config, download_limiter
 from app.core.rate_limit_config import rate_limit_config
 from app.core.request_rate_guard import ensure_share_access_allowed
-from app.db import execute
+from app.db.engine import transaction
+from app.db.schema import stored_file_entries
+from tests.helpers_v0 import create_user_file_v0
 
 
 def _create_share(client: TestClient, user_file_id: int, **kwargs) -> dict:
@@ -18,25 +22,52 @@ def _create_share(client: TestClient, user_file_id: int, **kwargs) -> dict:
 
 
 def _create_directory_file(test_user: dict, temp_db: str) -> int:
-    now = datetime.now(timezone.utc).isoformat()
+    del temp_db
     directory = Path(settings.download_dir) / "store" / "shared_dir"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "nested.txt").write_text("shared-content")
 
-    stored_file_id = execute(
-        """
-        INSERT INTO stored_files (content_hash, real_path, size, is_directory, ref_count, original_name, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        ["share_dir_hash", str(directory), 0, 1, 1, "shared_dir", now],
+    user_file = asyncio.run(
+        create_user_file_v0(
+            user_id=test_user["id"],
+            real_path=directory,
+            content_hash="share_dir_hash",
+            display_name="shared_dir",
+            size_bytes=0,
+            is_directory=True,
+        )
     )
-    return execute(
-        """
-        INSERT INTO user_files (owner_id, stored_file_id, display_name, created_at)
-        VALUES (?, ?, ?, ?)
-        """,
-        [test_user["id"], stored_file_id, "shared_dir", now],
-    )
+
+    async def add_entries() -> None:
+        async with transaction() as conn:
+            await conn.execute(
+                insert(stored_file_entries),
+                [
+                    {
+                        "stored_file_id": user_file["stored_file_id"],
+                        "relative_path": ".",
+                        "parent_path": "",
+                        "name": "shared_dir",
+                        "size_bytes": 0,
+                        "is_dir": 1,
+                        "mtime_ms": None,
+                        "sort_key": "\0/shared_dir",
+                    },
+                    {
+                        "stored_file_id": user_file["stored_file_id"],
+                        "relative_path": "nested.txt",
+                        "parent_path": "",
+                        "name": "nested.txt",
+                        "size_bytes": len("shared-content"),
+                        "is_dir": 0,
+                        "mtime_ms": None,
+                        "sort_key": "\1nested.txt",
+                    },
+                ],
+            )
+
+    asyncio.run(add_entries())
+    return int(user_file["id"])
 
 
 class TestShareAccessRateLimit:
@@ -80,8 +111,16 @@ class TestSharePublicRateLimitBuckets:
 
         original_public_limit = rate_limit_config.public_api
         original_download_limit = rate_limit_config.anonymous_download
+        original_anonymous_base = download_config.anonymous_base_connections
+        original_anonymous_borrow = download_config.anonymous_borrow_connections
+        original_anonymous_per_ip = download_config.anonymous_per_ip_connections
+        original_anonymous_per_file = download_config.anonymous_per_file_connections
         rate_limit_config.public_api = 1
         rate_limit_config.anonymous_download = 1
+        download_config.anonymous_base_connections = 1
+        download_config.anonymous_borrow_connections = 0
+        download_config.anonymous_per_ip_connections = 1
+        download_config.anonymous_per_file_connections = 1
         try:
             browse_response = client.get(f"/api/s/{share['share_code']}/browse")
             download_response = client.get(
@@ -96,6 +135,11 @@ class TestSharePublicRateLimitBuckets:
         finally:
             rate_limit_config.public_api = original_public_limit
             rate_limit_config.anonymous_download = original_download_limit
+            download_config.anonymous_base_connections = original_anonymous_base
+            download_config.anonymous_borrow_connections = original_anonymous_borrow
+            download_config.anonymous_per_ip_connections = original_anonymous_per_ip
+            download_config.anonymous_per_file_connections = original_anonymous_per_file
+            asyncio.run(download_limiter.clear_all())
 
         assert browse_response.status_code == 200
         assert download_response.status_code == 200

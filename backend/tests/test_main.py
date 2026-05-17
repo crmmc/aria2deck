@@ -127,11 +127,11 @@ class TestLifespan:
     @pytest.mark.asyncio
     async def test_lifespan_initializes_database(self, temp_db):
         """Test lifespan initializes database tables."""
-        from app.database import get_session
+        from app.db.engine import transaction
         from sqlalchemy import text
 
-        async with get_session() as db:
-            result = await db.execute(
+        async with transaction() as conn:
+            result = await conn.execute(
                 text("SELECT name FROM sqlite_master WHERE type='table'")
             )
             tables = [row[0] for row in result.fetchall()]
@@ -309,7 +309,7 @@ class TestDatabaseIntegrity:
     @pytest.mark.asyncio
     async def test_check_database_integrity(self, temp_db):
         """Test database integrity check passes."""
-        from app.database import check_database_integrity
+        from app.db.engine import check_database_integrity
 
         result = await check_database_integrity()
         assert result is True
@@ -317,7 +317,7 @@ class TestDatabaseIntegrity:
     @pytest.mark.asyncio
     async def test_check_wal_integrity(self, temp_db):
         """Test WAL integrity check passes."""
-        from app.database import check_wal_integrity
+        from app.db.engine import check_wal_integrity
 
         result = await check_wal_integrity()
         assert result is True
