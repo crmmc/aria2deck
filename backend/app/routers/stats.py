@@ -7,12 +7,11 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
 
 from app.auth import AuthUser, require_admin, require_user
 from app.core.config import settings
-from app.db.engine import transaction
-from app.db.schema import global_downloads, user_tasks
+from app.repositories.downloads import list_user_tasks
+from app.services.task_projection import stat_counts
 from app.services.usage_service import get_usage
 
 
@@ -76,28 +75,8 @@ async def get_stats(user: AuthUser = Depends(require_user)) -> dict:
         used_space + frozen_space + machine_free if is_limited else user_quota
     )
 
-    async with transaction() as conn:
-        active_count = int(
-            (
-                await conn.execute(
-                    select(func.count())
-                    .select_from(
-                        user_tasks.join(
-                            global_downloads,
-                            user_tasks.c.global_download_id == global_downloads.c.id,
-                        )
-                    )
-                    .where(
-                        user_tasks.c.user_id == user.id,
-                        user_tasks.c.status.in_(
-                            ("queued", "active", "waiting", "paused")
-                        ),
-                        global_downloads.c.status == "active",
-                    )
-                )
-            ).scalar_one()
-            or 0
-        )
+    rows = await list_user_tasks(user.id)
+    active_count = stat_counts(rows)["current"]
 
     result = {
         "disk_total_space": display_total,

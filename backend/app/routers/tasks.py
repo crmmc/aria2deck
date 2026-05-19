@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -22,8 +21,6 @@ from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_all
 from app.core.security import check_url_ssrf, mask_url_credentials
 from app.core.state import AppState, get_aria2_client
 from app.repositories.downloads import (
-    ACTIVE_USER_TASK_STATUSES,
-    TERMINAL_USER_TASK_STATUSES,
     clear_terminal_user_tasks,
     get_global_by_resource_key,
     list_user_tasks_for_download,
@@ -38,6 +35,7 @@ from app.services.hash import (
     is_magnet_link,
 )
 from app.services.http_probe import probe_url_with_get_fallback
+from app.services.task_projection import build_rest_task_response, filter_rows_for_status
 from app.services.download_service import (
     cancel_user_task,
     create_user_download,
@@ -67,20 +65,6 @@ def _has_url_credentials(url: str) -> bool:
     return parsed.username is not None or parsed.password is not None
 
 
-def _ms_to_iso(timestamp_ms: int | None) -> str | None:
-    if timestamp_ms is None:
-        return None
-    return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat()
-
-
-def _legacy_task_status(status_value: str) -> str:
-    return {
-        "completed": "complete",
-        "failed": "error",
-        "cancelled": "error",
-    }.get(status_value, status_value)
-
-
 def _v0_create_task_response(
     *,
     task_row: dict,
@@ -89,51 +73,32 @@ def _v0_create_task_response(
     fallback_name: str | None,
     fallback_total_length: int,
 ) -> dict:
-    error_message = task_row.get("error_message") or (
-        global_download.get("error_message") if global_download else None
-    )
-    return {
-        "id": task_row["id"],
-        "task_id": task_row["global_download_id"],
-        "status": _legacy_task_status(str(task_row["status"])),
-        "name": task_row.get("display_name")
-        or (global_download.get("display_name") if global_download else None)
-        or fallback_name,
-        "uri": (global_download.get("source_uri") if global_download else None)
+    row = {
+        **task_row,
+        "source_uri": (global_download.get("source_uri") if global_download else None)
         or fallback_uri,
-        "total_length": int(
-            (global_download.get("total_bytes") if global_download else None)
-            or fallback_total_length
-            or 0
+        "global_display_name": (
+            global_download.get("display_name") if global_download else None
+        )
+        or fallback_name,
+        "global_status": global_download.get("status") if global_download else None,
+        "total_bytes": (
+            global_download.get("total_bytes") if global_download else None
+        )
+        or fallback_total_length,
+        "completed_bytes": (
+            global_download.get("completed_bytes") if global_download else None
+        )
+        or 0,
+        "global_error_message": (
+            global_download.get("error_message") if global_download else None
         ),
-        "completed_length": int(
-            (global_download.get("completed_bytes") if global_download else None) or 0
-        ),
-        "download_speed": 0,
-        "upload_speed": 0,
-        "error": error_message,
-        "error_display": error_message,
-        "created_at": _ms_to_iso(task_row["created_at_ms"]),
-        "updated_at": _ms_to_iso(task_row["updated_at_ms"]),
-        "frozen_space": int(task_row["reserved_bytes"]),
     }
+    return build_rest_task_response(row)
 
 
 def _v0_list_task_response(row: dict) -> dict:
-    global_download = {
-        "display_name": row.get("global_display_name"),
-        "source_uri": row.get("source_uri"),
-        "total_bytes": row.get("total_bytes"),
-        "completed_bytes": row.get("completed_bytes"),
-        "error_message": row.get("global_error_message"),
-    }
-    return _v0_create_task_response(
-        task_row=row,
-        global_download=global_download,
-        fallback_uri=str(row.get("source_uri") or ""),
-        fallback_name=row.get("display_name") or row.get("global_display_name"),
-        fallback_total_length=int(row.get("total_bytes") or 0),
-    )
+    return build_rest_task_response(row)
 
 
 # ========== Schemas ==========
@@ -488,19 +453,8 @@ async def list_tasks(
     user: AuthUser = Depends(require_user),
 ) -> list[dict]:
     """获取当前用户的任务订阅列表"""
-    statuses: tuple[str, ...] | None = None
-    if status_filter in {"active", "current"}:
-        statuses = ACTIVE_USER_TASK_STATUSES
-    elif status_filter == "complete":
-        statuses = ("completed",)
-    elif status_filter == "error":
-        statuses = tuple(
-            status_value
-            for status_value in TERMINAL_USER_TASK_STATUSES
-            if status_value != "completed"
-        )
-
-    rows = await list_user_tasks(user.id, statuses)
+    rows = await list_user_tasks(user.id)
+    rows = filter_rows_for_status(rows, status_filter)
 
     logger.debug(
         "查询任务列表 user_id=%s status_filter=%s count=%s",

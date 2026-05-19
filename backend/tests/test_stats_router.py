@@ -232,6 +232,40 @@ class TestGetStatsWithActiveTasks:
         assert data["download_speed"] == 0
         assert data["upload_speed"] == 0
 
+    def test_get_stats_uses_effective_current_task_count(
+        self, authenticated_client: TestClient, test_user: dict
+    ) -> None:
+        _create_user_download_task(
+            test_user["id"],
+            "effective-active",
+            user_status="active",
+            global_status="active",
+        )
+        _create_user_download_task(
+            test_user["id"],
+            "effective-completed",
+            user_status="active",
+            global_status="completed",
+        )
+        _create_user_download_task(
+            test_user["id"],
+            "effective-failed",
+            user_status="active",
+            global_status="failed",
+        )
+        _create_user_download_task(
+            test_user["id"],
+            "effective-paused",
+            user_status="paused",
+            global_status="active",
+        )
+
+        with patch("shutil.disk_usage", return_value=_disk_usage()):
+            response = authenticated_client.get("/api/stats")
+
+        assert response.status_code == 200
+        assert response.json()["active_task_count"] == 2
+
 
 class TestGetStatsWithUsageRows:
     def test_get_stats_with_used_usage(

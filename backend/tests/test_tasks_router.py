@@ -10,7 +10,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 
+from app.db.engine import transaction
+from app.db.schema import global_downloads
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
 from app.services.download_service import create_user_download
 from app.services.hash import get_uri_hash
@@ -23,6 +26,15 @@ def _valid_torrent_payload() -> tuple[str, str]:
     return base64.b64encode(torrent).decode("ascii"), hashlib.sha1(
         info_dict
     ).hexdigest()
+
+
+async def _set_global_error_message(download_id: int, error_message: str) -> None:
+    async with transaction() as conn:
+        await conn.execute(
+            update(global_downloads)
+            .where(global_downloads.c.id == download_id)
+            .values(error_message=error_message)
+        )
 
 
 class TestSSRFProtection:
@@ -615,6 +627,82 @@ class TestListTasks:
         assert [row["name"] for row in complete_response.json()] == ["completed.bin"]
         assert [row["name"] for row in error_response.json()] == ["failed.bin"]
         assert [row["name"] for row in current_response.json()] == ["active.bin"]
+
+    def test_list_tasks_filters_by_effective_status(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        active_global = asyncio.run(
+            create_global_download_v0(
+                resource_key="http:effective-active",
+                resource_kind="http",
+                source_uri="https://example.com/active.bin",
+                status="active",
+                display_name="active.bin",
+                total_bytes=10,
+                completed_bytes=2,
+            )
+        )
+        completed_global = asyncio.run(
+            create_global_download_v0(
+                resource_key="http:effective-completed",
+                resource_kind="http",
+                source_uri="https://example.com/completed.bin",
+                status="completed",
+                display_name="completed.bin",
+                total_bytes=20,
+                completed_bytes=20,
+            )
+        )
+        failed_global = asyncio.run(
+            create_global_download_v0(
+                resource_key="http:effective-failed",
+                resource_kind="http",
+                source_uri="https://example.com/failed.bin",
+                status="failed",
+                display_name="failed.bin",
+                total_bytes=30,
+                completed_bytes=3,
+            )
+        )
+        asyncio.run(_set_global_error_message(failed_global["id"], "global failed"))
+        asyncio.run(
+            create_user_task_v0(
+                user_id=test_user["id"],
+                global_download_id=active_global["id"],
+                status="active",
+                display_name="active.bin",
+            )
+        )
+        asyncio.run(
+            create_user_task_v0(
+                user_id=test_user["id"],
+                global_download_id=completed_global["id"],
+                status="active",
+                display_name="completed.bin",
+            )
+        )
+        asyncio.run(
+            create_user_task_v0(
+                user_id=test_user["id"],
+                global_download_id=failed_global["id"],
+                status="active",
+                display_name="failed.bin",
+            )
+        )
+
+        current = authenticated_client.get("/api/tasks?status_filter=current").json()
+        complete = authenticated_client.get("/api/tasks?status_filter=complete").json()
+        error = authenticated_client.get("/api/tasks?status_filter=error").json()
+
+        assert [row["name"] for row in current] == ["active.bin"]
+        assert [(row["name"], row["status"]) for row in complete] == [
+            ("completed.bin", "complete")
+        ]
+        assert [(row["name"], row["status"], row["error"]) for row in error] == [
+            ("failed.bin", "error", "global failed")
+        ]
 
 
 class TestCancelTask:
