@@ -27,6 +27,7 @@ from app.repositories.downloads import (
     mark_global_download_failed,
     now_ms,
 )
+from app.services.task_projection import has_real_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,42 @@ def _safe_int(value: str | int | None, default: int = 0) -> int:
         return int(value) if value is not None else default
     except (ValueError, TypeError):
         return default
+
+
+def _status_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
+def _has_bittorrent_evidence(
+    status: dict[str, Any],
+    download: dict[str, Any],
+) -> bool:
+    if str(status.get("infoHash") or "").strip():
+        return True
+    return str(download.get("resource_kind") or "") in {"magnet", "torrent"}
+
+
+def _is_effectively_complete_active_bt_status(
+    status: dict[str, Any],
+    download: dict[str, Any],
+) -> bool:
+    if str(status.get("status") or "") != "active":
+        return False
+    if status.get("followedBy"):
+        return False
+    if _status_bool(status.get("verifyIntegrityPending")):
+        return False
+
+    total_bytes = _safe_int(status.get("totalLength"))
+    completed_bytes = _safe_int(status.get("completedLength"))
+    if total_bytes <= 0 or completed_bytes < total_bytes:
+        return False
+
+    return _has_bittorrent_evidence(status, download) and has_real_file_path(status)
 
 
 def _map_v0_status(status: dict[str, Any], download_id: int) -> dict[str, Any]:
@@ -218,6 +255,28 @@ async def _update_active_user_task_status(
         )
 
 
+async def _complete_v0_download_from_sync(
+    *,
+    state: AppState,
+    client: Aria2Client,
+    download: dict[str, Any],
+    aria2_status: dict[str, Any],
+    completion_gid: str,
+) -> None:
+    from app.aria2.listener import handle_v0_download_complete
+
+    completed = await handle_v0_download_complete(
+        state=state,
+        client=client,
+        download=download,
+        aria2_status=aria2_status,
+        completion_gid=completion_gid,
+        log_prefix="[Sync]",
+    )
+    if completed:
+        await _broadcast_download_update(state, int(download["id"]))
+
+
 async def _update_v0_download_from_aria2(
     *,
     state: AppState,
@@ -257,18 +316,23 @@ async def _update_v0_download_from_aria2(
         return
 
     if mapped["raw_status"] == "complete":
-        from app.aria2.listener import handle_v0_download_complete
-
-        completed = await handle_v0_download_complete(
+        await _complete_v0_download_from_sync(
             state=state,
             client=client,
             download=download,
             aria2_status=status,
             completion_gid=gid,
-            log_prefix="[Sync]",
         )
-        if completed:
-            await _broadcast_download_update(state, download_id)
+        return
+
+    if _is_effectively_complete_active_bt_status(status, download):
+        await _complete_v0_download_from_sync(
+            state=state,
+            client=client,
+            download=download,
+            aria2_status=status,
+            completion_gid=gid,
+        )
         return
 
     if mapped["status"] == "failed":

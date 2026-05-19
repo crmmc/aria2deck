@@ -17,7 +17,7 @@ from app.aria2.sync import (
 from app.core.config import settings
 from app.core.state import AppState, get_task_complete_lock
 from app.db.engine import transaction
-from app.db.schema import global_downloads, user_tasks
+from app.db.schema import global_downloads, user_files, user_tasks
 from app.repositories.downloads import now_ms
 from app.services.usage_service import get_usage, reserve_bytes
 from tests.helpers_v0 import (
@@ -227,6 +227,181 @@ async def test_active_aria2_status_does_not_overwrite_completed_download(
     assert updated["completed_bytes"] == 4
     assert updated["completed_file_id"] == user_file["stored_file_id"]
     assert updated_task["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_active_bt_status_with_full_bytes_completes_v0_download(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_active_full_bt", quota_bytes=1000)
+    await reserve_bytes(user["id"], 7, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="sync:active-full-bt",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:full",
+        status="active",
+        aria2_gid="gid-sync-active-full-bt",
+        total_bytes=7,
+        completed_bytes=6,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=7,
+    )
+    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
+    task_dir.mkdir(parents=True)
+    source_file = task_dir / "payload.bin"
+    source_file.write_bytes(b"payload")
+    client = AsyncMock()
+    client.remove_download_result.return_value = "OK"
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-sync-active-full-bt",
+            "status": "active",
+            "totalLength": "7",
+            "completedLength": "7",
+            "infoHash": "abc123",
+            "bittorrent": {"info": {"name": "payload.bin"}},
+            "files": [{"path": str(source_file), "length": "7", "completedLength": "7"}],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+    async with transaction() as conn:
+        user_file_count = (
+            await conn.execute(
+                select(user_files).where(user_files.c.user_id == user["id"])
+            )
+        ).all()
+
+    assert updated["status"] == "completed"
+    assert updated["completed_file_id"] is not None
+    assert updated["completed_bytes"] == 7
+    assert updated_task["status"] == "completed"
+    assert updated_task["reserved_bytes"] == 0
+    assert usage["reserved_bytes"] == 0
+    assert len(user_file_count) == 1
+    client.remove_download_result.assert_awaited_once_with("gid-sync-active-full-bt")
+
+
+@pytest.mark.asyncio
+async def test_active_full_bytes_without_real_file_name_stays_active(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_active_full_no_name", quota_bytes=1000)
+    await reserve_bytes(user["id"], 7, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="sync:active-full-no-name",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:no-name",
+        status="active",
+        aria2_gid="gid-sync-active-full-no-name",
+        total_bytes=7,
+        completed_bytes=6,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=7,
+    )
+    client = AsyncMock()
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-sync-active-full-no-name",
+            "status": "active",
+            "totalLength": "7",
+            "completedLength": "7",
+            "infoHash": "abc123",
+            "files": [
+                {
+                    "path": "magnet:?xt=urn:btih:no-name",
+                    "length": "7",
+                    "completedLength": "7",
+                }
+            ],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+
+    assert updated["status"] == "active"
+    assert updated["completed_file_id"] is None
+    assert updated["completed_bytes"] == 7
+    assert updated_task["status"] == "active"
+    assert updated_task["reserved_bytes"] == 7
+    assert usage["reserved_bytes"] == 7
+    client.remove_download_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_active_full_bytes_with_verify_integrity_pending_stays_active(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_active_full_verify", quota_bytes=1000)
+    await reserve_bytes(user["id"], 7, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="sync:active-full-verify",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:verify",
+        status="active",
+        aria2_gid="gid-sync-active-full-verify",
+        total_bytes=7,
+        completed_bytes=6,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=7,
+    )
+    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
+    task_dir.mkdir(parents=True)
+    source_file = task_dir / "payload.bin"
+    source_file.write_bytes(b"payload")
+    client = AsyncMock()
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-sync-active-full-verify",
+            "status": "active",
+            "totalLength": "7",
+            "completedLength": "7",
+            "infoHash": "abc123",
+            "verifyIntegrityPending": "true",
+            "bittorrent": {"info": {"name": "payload.bin"}},
+            "files": [{"path": str(source_file), "length": "7", "completedLength": "7"}],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+
+    assert updated["status"] == "active"
+    assert updated["completed_file_id"] is None
+    assert updated["completed_bytes"] == 7
+    assert updated_task["status"] == "active"
+    assert updated_task["reserved_bytes"] == 7
+    assert usage["reserved_bytes"] == 7
+    client.remove_download_result.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -37,7 +37,12 @@ from app.services.download_service import (
     create_user_torrent_download,
 )
 from app.services.hash import extract_info_hash_from_torrent_base64, get_uri_hash
-from app.services.task_projection import ACTIVE_LIKE_STATUSES, is_current, stat_counts
+from app.services.task_projection import (
+    ACTIVE_LIKE_STATUSES,
+    has_real_file_path,
+    is_current,
+    stat_counts,
+)
 from app.services.usage_service import get_usage
 
 
@@ -736,16 +741,7 @@ class Aria2RpcHandler:
 
     @staticmethod
     def _status_has_file_name(status: dict[str, Any]) -> bool:
-        files = status.get("files")
-        if not isinstance(files, list) or not files:
-            return False
-        for file_item in files:
-            if not isinstance(file_item, dict):
-                continue
-            path = file_item.get("path")
-            if isinstance(path, str) and path.strip():
-                return True
-        return False
+        return has_real_file_path(status)
 
     @staticmethod
     def _extract_gids_from_statuses(statuses: list[dict[str, Any]]) -> set[str]:

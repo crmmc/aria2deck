@@ -20,6 +20,17 @@ function getTaskDisplayName(task: Task): string {
   return task.name || "未知文件";
 }
 
+function formatTaskProgressLabel(task: Task): string {
+  if (task.total_length <= 0) {
+    return "0%";
+  }
+  const progress = (task.completed_length / task.total_length) * 100;
+  if (task.status !== "complete" && task.completed_length < task.total_length) {
+    return `${Math.min(progress, 99.9).toFixed(1)}%`;
+  }
+  return `${Math.min(progress, 100).toFixed(0)}%`;
+}
+
 function upsertTaskById(tasks: Task[], task: Task): Task[] {
   const existingIndex = tasks.findIndex((item) => item.id === task.id);
   if (existingIndex === -1) {
@@ -185,7 +196,7 @@ const TaskCard = memo(function TaskCard({
             )}
             {task.total_length > 0 && task.status !== "error" && (
               <span className="task-progress-text">
-                {((task.completed_length / task.total_length) * 100).toFixed(0)}%
+                {formatTaskProgressLabel(task)}
               </span>
             )}
             {task.status === "active" && task.download_speed > 0 && (

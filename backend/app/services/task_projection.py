@@ -75,15 +75,26 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _has_file_name(files: Any) -> bool:
+def is_uri_like_path(path: str) -> bool:
+    lowered = path.strip().lower()
+    return lowered.startswith(("magnet:", "torrent:"))
+
+
+def has_real_file_path(status: dict[str, Any]) -> bool:
+    files = status.get("files")
     if not isinstance(files, list):
         return False
     return any(
         isinstance(item, dict)
         and isinstance(item.get("path"), str)
         and item["path"].strip()
+        and not is_uri_like_path(item["path"])
         for item in files
     )
+
+
+def _has_file_name(files: Any) -> bool:
+    return has_real_file_path({"files": files})
 
 
 def _files_from_task(

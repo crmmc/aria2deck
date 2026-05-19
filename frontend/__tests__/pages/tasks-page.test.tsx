@@ -107,6 +107,23 @@ describe("TasksPage", () => {
     });
   });
 
+  test("does not round an active partial task up to 100 percent", async () => {
+    mockApi.listTasks.mockResolvedValue([
+      {
+        ...activeTask,
+        total_length: 1000,
+        completed_length: 998,
+        download_speed: 0,
+      },
+    ]);
+
+    render(<TasksPage />);
+
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+    expect(screen.getByText("99.8%")).toBeInTheDocument();
+    expect(screen.queryByText("100%")).not.toBeInTheDocument();
+  });
+
   test("batch cancels selected active tasks", async () => {
     render(<TasksPage />);
 

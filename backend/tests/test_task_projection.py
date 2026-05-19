@@ -5,6 +5,7 @@ from app.services.task_projection import (
     build_rest_task_response,
     effective_status,
     filter_rows_for_status,
+    has_real_file_path,
     stat_counts,
 )
 
@@ -108,3 +109,21 @@ def test_stat_counts_match_effective_projection() -> None:
     ]
 
     assert stat_counts(rows) == {"active": 1, "waiting": 2, "stopped": 2, "current": 3}
+
+
+def test_live_uri_like_file_path_does_not_override_projected_file_name() -> None:
+    live = {
+        "files": [
+            {
+                "path": "magnet:?xt=urn:btih:abc123",
+                "length": "10",
+                "completedLength": "10",
+            }
+        ]
+    }
+
+    assert not has_real_file_path(live)
+    assert build_aria2_status(
+        _row(user_status="active", global_status="active", name="payload.bin"),
+        live,
+    )["files"][0]["path"] == "payload.bin"
