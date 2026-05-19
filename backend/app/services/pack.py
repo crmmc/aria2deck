@@ -17,6 +17,7 @@ import zstandard as zstd
 from sqlalchemy import case, func, insert, select, update
 
 from app.core.config import settings
+from app.core.state import AppState
 from app.db.engine import transaction
 from app.db.schema import (
     global_downloads,
@@ -79,6 +80,12 @@ class _RunningPackJob:
     cancel_event: threading.Event
 
 
+@dataclass(frozen=True)
+class DeleteUserFileReferenceResult:
+    deleted: bool
+    affected_download_ids: list[int]
+
+
 async def _release_task_reservation(task: dict[str, Any]) -> None:
     reserved = int(task["reserved_bytes"] or 0)
     if reserved <= 0:
@@ -107,12 +114,12 @@ async def _convert_reserved_to_used(
         )
 
 
-async def _delete_user_file_reference_v0(
+async def _delete_user_file_reference_v0_result(
     user_id: int,
     user_file_id: int,
     *,
     adjust_usage: bool = True,
-) -> bool:
+) -> DeleteUserFileReferenceResult:
     from app.services.storage import get_store_dir, safe_delete_path
 
     async with transaction() as conn:
@@ -135,7 +142,7 @@ async def _delete_user_file_reference_v0(
             .first()
         )
         if row is None:
-            return False
+            return DeleteUserFileReferenceResult(False, [])
         deleted = await conn.execute(
             user_files.delete().where(
                 user_files.c.id == user_file_id,
@@ -143,7 +150,7 @@ async def _delete_user_file_reference_v0(
             )
         )
         if not deleted.rowcount:
-            return False
+            return DeleteUserFileReferenceResult(False, [])
         if adjust_usage:
             stored_file = (
                 await conn.execute(
@@ -170,7 +177,7 @@ async def _delete_user_file_reference_v0(
             )
         ).scalar_one()
         if int(refs or 0) > 0:
-            return True
+            return DeleteUserFileReferenceResult(True, [])
         timestamp = now_ms()
         affected_downloads = (
             await conn.execute(
@@ -226,7 +233,22 @@ async def _delete_user_file_reference_v0(
         recursive=path.is_dir(),
         allow_missing=True,
     )
-    return True
+    return DeleteUserFileReferenceResult(True, affected_download_ids)
+
+
+async def _delete_user_file_reference_v0(
+    user_id: int,
+    user_file_id: int,
+    *,
+    adjust_usage: bool = True,
+) -> bool:
+    return (
+        await _delete_user_file_reference_v0_result(
+            user_id,
+            user_file_id,
+            adjust_usage=adjust_usage,
+        )
+    ).deleted
 
 
 async def _register_pack_output_v0(
@@ -401,6 +423,7 @@ class PackTaskManager:
         delete_source: bool = False,
         source_names: list[str] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
+        app_state: AppState | None = None,
     ) -> None:
         async with _pack_queue_lock:
             await cls._do_pack(
@@ -412,6 +435,7 @@ class PackTaskManager:
                 delete_source,
                 source_names,
                 on_progress,
+                app_state,
             )
 
     @classmethod
@@ -425,6 +449,7 @@ class PackTaskManager:
         delete_source: bool = False,
         source_names: list[str] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
+        app_state: AppState | None = None,
     ) -> None:
         from app.core.config import settings
         from app.services.storage import get_downloading_dir
@@ -678,7 +703,22 @@ class PackTaskManager:
                 if stored_file_id and delete_source and file_ids:
                     for uf_id in file_ids:
                         try:
-                            await _delete_user_file_reference_v0(user_id, uf_id)
+                            delete_result = (
+                                await _delete_user_file_reference_v0_result(
+                                    user_id,
+                                    uf_id,
+                                )
+                            )
+                            if app_state and delete_result.affected_download_ids:
+                                from app.routers.tasks import (
+                                    broadcast_task_update_to_subscribers,
+                                )
+
+                                for download_id in delete_result.affected_download_ids:
+                                    await broadcast_task_update_to_subscribers(
+                                        app_state,
+                                        download_id,
+                                    )
                         except Exception:
                             logger.warning(
                                 "Failed to delete source ref: user_file_id=%s", uf_id

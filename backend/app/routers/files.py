@@ -1205,7 +1205,9 @@ async def get_pack_available_space(user: AuthUser = Depends(require_user)) -> di
 
 @router.post("/pack", status_code=status.HTTP_201_CREATED)
 async def create_pack_task(
-    payload: PackRequest, user: AuthUser = Depends(require_user)
+    payload: PackRequest,
+    request: Request,
+    user: AuthUser = Depends(require_user),
 ) -> dict:
     """创建打包任务 - 基于 UserFile ID"""
     user_id = _require_user_id(user)
@@ -1364,6 +1366,7 @@ async def create_pack_task(
             output_name,
             payload.delete_source,
             source_names=source_names,
+            app_state=request.app.state.app_state,
         )
     )
     logger.info("创建打包任务成功 user_id=%s task_id=%s", user_id, task_id)

@@ -208,12 +208,17 @@ def _build_stored_file_lookup_by_name_size(
 ) -> dict[tuple[str, int], dict[str, Any]]:
     """构建按 (name, size) 的精确匹配索引，避免同名文件错绑"""
     lookup: dict[tuple[str, int], dict[str, Any]] = {}
+    ambiguous_keys: set[tuple[str, int]] = set()
     for sf in stored_file_rows:
         name_key = str(sf["original_name"]).lower() if sf["original_name"] else ""
         if name_key:
             key = (name_key, int(sf["size_bytes"]))
-            if key not in lookup:
+            if key in lookup:
+                ambiguous_keys.add(key)
+            elif key not in ambiguous_keys:
                 lookup[key] = sf
+    for key in ambiguous_keys:
+        lookup.pop(key, None)
     return lookup
 
 

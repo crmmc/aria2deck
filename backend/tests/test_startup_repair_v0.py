@@ -140,3 +140,52 @@ async def test_repair_task_associations_skips_unsafe_size_match(temp_db: str) ->
     assert updated_task["status"] == "active"
     assert updated_task["reserved_bytes"] == 7
     assert usage["reserved_bytes"] == 7
+
+
+@pytest.mark.asyncio
+async def test_repair_task_associations_skips_ambiguous_name_size_match(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="repair_ambiguous", quota_bytes=1000)
+    await reserve_bytes(user["id"], 7, quota_bytes=user["quota_bytes"])
+    await _create_stored_file("payload.bin", 7)
+    await _create_stored_file("payload-copy.bin", 7)
+    timestamp = now_ms()
+    second_path = Path(settings.download_dir) / "store" / "payload-copy.bin"
+    async with transaction() as conn:
+        await conn.execute(
+            stored_files.update()
+            .where(stored_files.c.real_path == str(second_path))
+            .values(
+                content_hash="repair_payload_duplicate",
+                original_name="payload.bin",
+                created_at_ms=timestamp,
+            )
+        )
+    download = await create_global_download_v0(
+        resource_key="repair:ambiguous",
+        resource_kind="http",
+        source_uri="https://example.com/payload.bin",
+        status="completed",
+        display_name="payload.bin",
+        total_bytes=7,
+        completed_bytes=7,
+        completed_file_id=None,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=7,
+        display_name="payload.bin",
+    )
+
+    repaired = await repair_task_associations()
+    updated_task = await get_user_task_by_id(user["id"], task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+
+    assert repaired == 0
+    assert updated_task is not None
+    assert updated_task["status"] == "active"
+    assert updated_task["reserved_bytes"] == 7
+    assert usage["reserved_bytes"] == 7

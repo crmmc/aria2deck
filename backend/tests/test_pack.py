@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import insert, select
 
 from app.core.config import settings
+from app.core.state import AppState
 from app.db.engine import transaction
-from app.db.schema import pack_tasks, user_files, user_storage_usage
+from app.db.schema import (
+    global_downloads,
+    pack_tasks,
+    user_files,
+    user_storage_usage,
+    user_tasks,
+)
 from app.services.pack import PackTaskManager, calculate_folder_size, get_reserved_space
 import app.services.pack as pack_service
 from tests.helpers_v0 import create_user_file_v0, create_user_v0, now_ms
@@ -215,6 +223,102 @@ async def test_pack_task_writes_archive_and_registers_output(temp_db: str) -> No
     assert stored_task["output_stored_file_id"] == output_ref["stored_file_id"]
     assert usage["reserved_bytes"] == 0
     assert usage["used_bytes"] > 0
+
+
+@pytest.mark.asyncio
+async def test_pack_delete_source_broadcasts_cancelled_download_update(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(
+        username="pack_delete_source_broadcast", quota_bytes=10_000
+    )
+    source = Path(settings.download_dir) / "store" / "broadcast-source.txt"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"hello")
+    source_ref = await create_user_file_v0(
+        user_id=user["id"],
+        real_path=source,
+        content_hash="pack_broadcast_source_hash",
+        display_name="broadcast-source.txt",
+        size_bytes=5,
+    )
+    timestamp = now_ms()
+    async with transaction() as conn:
+        await conn.execute(
+            user_storage_usage.update()
+            .where(user_storage_usage.c.user_id == user["id"])
+            .values(used_bytes=5, reserved_bytes=5, updated_at_ms=timestamp)
+        )
+        download = (
+            (
+                await conn.execute(
+                    insert(global_downloads)
+                    .values(
+                        resource_key="pack:broadcast-source",
+                        resource_kind="http",
+                        source_uri="https://example.com/broadcast-source.txt",
+                        status="completed",
+                        total_bytes=5,
+                        completed_bytes=5,
+                        completed_file_id=source_ref["stored_file_id"],
+                        created_at_ms=timestamp,
+                        updated_at_ms=timestamp,
+                        completed_at_ms=timestamp,
+                    )
+                    .returning(global_downloads)
+                )
+            )
+            .mappings()
+            .one()
+        )
+        task = (
+            (
+                await conn.execute(
+                    insert(user_tasks)
+                    .values(
+                        user_id=user["id"],
+                        global_download_id=download["id"],
+                        status="completed",
+                        reserved_bytes=0,
+                        display_name="broadcast-source.txt",
+                        created_at_ms=timestamp,
+                        updated_at_ms=timestamp,
+                        finished_at_ms=timestamp,
+                    )
+                    .returning(user_tasks)
+                )
+            )
+            .mappings()
+            .one()
+        )
+    pack_task = await _insert_pack_task(
+        user_id=user["id"],
+        source_ids=[source_ref["id"]],
+        source_size_bytes=5,
+        reserved_bytes=5,
+        status="pending",
+        output_name="packed-broadcast",
+    )
+    state = AppState()
+    ws = AsyncMock()
+    state.ws_connections[user["id"]] = {ws}
+
+    await PackTaskManager.start_pack(
+        task_id=pack_task["id"],
+        user_id=user["id"],
+        abs_paths=[str(source)],
+        file_ids=[source_ref["id"]],
+        output_name="packed-broadcast",
+        delete_source=True,
+        source_names=["broadcast-source.txt"],
+        app_state=state,
+    )
+
+    ws.send_json.assert_awaited_once()
+    payload = ws.send_json.await_args.args[0]
+    assert payload["type"] == "task_update"
+    assert payload["task"]["id"] == task["id"]
+    assert payload["task"]["status"] == "error"
 
 
 @pytest.mark.asyncio
