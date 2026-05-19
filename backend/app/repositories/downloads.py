@@ -557,6 +557,110 @@ async def complete_active_user_tasks_for_stored_file(
     return user_files_created
 
 
+async def repair_completed_download_with_stored_file(
+    *,
+    global_download_id: int,
+    stored_file_id: int,
+    size_bytes: int,
+    original_name: str,
+    completed_at_ms: int,
+) -> bool:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                update(global_downloads)
+                .where(
+                    global_downloads.c.id == global_download_id,
+                    global_downloads.c.status == "completed",
+                    global_downloads.c.completed_file_id.is_(None),
+                )
+                .values(
+                    completed_file_id=stored_file_id,
+                    completed_bytes=size_bytes,
+                    completed_at_ms=completed_at_ms,
+                    error_code=None,
+                    error_message=None,
+                    updated_at_ms=timestamp,
+                )
+                .returning(global_downloads.c.id)
+            )
+        ).first()
+        if row is None:
+            return False
+
+        tasks = (
+            (
+                await conn.execute(
+                    select(user_tasks).where(
+                        user_tasks.c.global_download_id == global_download_id,
+                        user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+        for task in tasks:
+            user_id = int(task["user_id"])
+            display_name = str(task["display_name"] or original_name)
+            existing_file = (
+                await conn.execute(
+                    select(user_files.c.id).where(
+                        user_files.c.user_id == user_id,
+                        user_files.c.stored_file_id == stored_file_id,
+                    )
+                )
+            ).first()
+            if existing_file is None:
+                await conn.execute(
+                    insert(user_files).values(
+                        user_id=user_id,
+                        stored_file_id=stored_file_id,
+                        display_name=display_name,
+                        created_at_ms=timestamp,
+                        updated_at_ms=timestamp,
+                    )
+                )
+                await conn.execute(
+                    update(user_storage_usage)
+                    .where(user_storage_usage.c.user_id == user_id)
+                    .values(
+                        used_bytes=user_storage_usage.c.used_bytes + size_bytes,
+                        updated_at_ms=timestamp,
+                    )
+                )
+
+            reserved_bytes = int(task["reserved_bytes"] or 0)
+            if reserved_bytes > 0:
+                reserved_expr = user_storage_usage.c.reserved_bytes - reserved_bytes
+                await conn.execute(
+                    update(user_storage_usage)
+                    .where(user_storage_usage.c.user_id == user_id)
+                    .values(
+                        reserved_bytes=case(
+                            (reserved_expr < 0, 0),
+                            else_=reserved_expr,
+                        ),
+                        updated_at_ms=timestamp,
+                    )
+                )
+
+            await conn.execute(
+                update(user_tasks)
+                .where(user_tasks.c.id == task["id"])
+                .values(
+                    status="completed",
+                    reserved_bytes=0,
+                    error_message=None,
+                    updated_at_ms=timestamp,
+                    finished_at_ms=completed_at_ms,
+                )
+            )
+    return True
+
+
 async def mark_global_download_failed(
     download_id: int,
     *,

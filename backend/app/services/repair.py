@@ -7,10 +7,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from app.db.engine import transaction
 from app.db.schema import global_downloads, stored_files
+from app.repositories.downloads import now_ms, repair_completed_download_with_stored_file
 from app.repositories.files import create_stored_file_with_entries
 from app.services.hash import calculate_content_hash_async
 from app.services.storage import get_store_dir
@@ -169,7 +170,7 @@ async def repair_task_associations() -> int:
         # 构建按 (name, size) 的精确匹配索引
         sf_by_name_size = _build_stored_file_lookup_by_name_size(all_stored_files)
 
-        repaired_count = 0
+        repair_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for task in orphan_tasks:
             task_name = task["display_name"]
             if not task_name:
@@ -180,15 +181,24 @@ async def repair_task_associations() -> int:
             matched_sf = sf_by_name_size.get(lookup_key)
             if not matched_sf:
                 continue
-            await conn.execute(
-                update(global_downloads)
-                .where(global_downloads.c.id == task["id"])
-                .values(completed_file_id=matched_sf["id"])
-            )
-            repaired_count += 1
-            logger.info(
-                f"Repaired download {task['id']} ({task_name}) -> StoredFile {matched_sf['id']}"
-            )
+            repair_candidates.append((dict(task), dict(matched_sf)))
+
+    repaired_count = 0
+    for task, matched_sf in repair_candidates:
+        repaired = await repair_completed_download_with_stored_file(
+            global_download_id=int(task["id"]),
+            stored_file_id=int(matched_sf["id"]),
+            size_bytes=int(matched_sf["size_bytes"] or 0),
+            original_name=str(matched_sf["original_name"]),
+            completed_at_ms=int(task["completed_at_ms"] or now_ms()),
+        )
+        if not repaired:
+            continue
+        repaired_count += 1
+        logger.info(
+            f"Repaired download {task['id']} ({task['display_name']}) -> "
+            f"StoredFile {matched_sf['id']}"
+        )
 
     return repaired_count
 
