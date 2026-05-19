@@ -6,7 +6,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select, update
 
@@ -181,7 +181,8 @@ async def get_file_users(
 
 @router.delete("/files", response_model=BulkDeleteResponse)
 async def bulk_delete_files(
-    request: BulkDeleteRequest,
+    payload: BulkDeleteRequest,
+    http_request: Request,
     admin: AuthUser = Depends(require_admin),
 ) -> BulkDeleteResponse:
     del admin
@@ -189,8 +190,9 @@ async def bulk_delete_files(
     failed_ids: list[int] = []
     errors: list[str] = []
 
-    for file_id in request.file_ids:
+    for file_id in payload.file_ids:
         try:
+            affected_download_ids: list[int] = []
             async with transaction() as conn:
                 stored_file = (
                     (
@@ -266,13 +268,26 @@ async def bulk_delete_files(
 
             path = Path(real_path)
             if path.exists():
-                await asyncio.to_thread(
-                    safe_delete_path,
-                    base_dir=get_store_dir(),
-                    target=path,
-                    recursive=path.is_dir(),
-                    allow_missing=True,
-                )
+                try:
+                    await asyncio.to_thread(
+                        safe_delete_path,
+                        base_dir=get_store_dir(),
+                        target=path,
+                        recursive=path.is_dir(),
+                        allow_missing=True,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to delete unreferenced stored path=%s",
+                        path,
+                        exc_info=True,
+                    )
+            if affected_download_ids:
+                from app.routers.tasks import broadcast_task_update_to_subscribers
+
+                state = http_request.app.state.app_state
+                for download_id in affected_download_ids:
+                    await broadcast_task_update_to_subscribers(state, download_id)
             deleted_count += 1
             logger.info("管理员删除存储文件: %s", stored_file["content_hash"])
         except Exception as exc:

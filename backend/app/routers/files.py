@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -265,7 +266,15 @@ async def _get_user_space_info_v0(user_id: int, quota_bytes: int) -> dict[str, i
     }
 
 
-async def _delete_user_file_reference_v0(user_id: int, user_file_id: int) -> bool:
+@dataclass(frozen=True)
+class DeleteUserFileReferenceResult:
+    deleted: bool
+    affected_download_ids: list[int]
+
+
+async def _delete_user_file_reference_v0_result(
+    user_id: int, user_file_id: int
+) -> DeleteUserFileReferenceResult:
     async with transaction() as conn:
         row = (
             (
@@ -290,7 +299,7 @@ async def _delete_user_file_reference_v0(user_id: int, user_file_id: int) -> boo
             .first()
         )
         if row is None:
-            return False
+            return DeleteUserFileReferenceResult(False, [])
 
         deleted = await conn.execute(
             delete(user_files).where(
@@ -299,7 +308,7 @@ async def _delete_user_file_reference_v0(user_id: int, user_file_id: int) -> boo
             )
         )
         if not deleted.rowcount:
-            return False
+            return DeleteUserFileReferenceResult(False, [])
         used_expr = user_storage_usage.c.used_bytes - int(row["size_bytes"] or 0)
         await conn.execute(
             update(user_storage_usage)
@@ -317,7 +326,7 @@ async def _delete_user_file_reference_v0(user_id: int, user_file_id: int) -> boo
             )
         ).scalar_one()
         if int(refs or 0) > 0:
-            return True
+            return DeleteUserFileReferenceResult(True, [])
 
         timestamp = now_ms()
         affected_downloads = (
@@ -381,7 +390,13 @@ async def _delete_user_file_reference_v0(user_id: int, user_file_id: int) -> boo
         logger.warning(
             "Failed to delete unreferenced stored path=%s", path, exc_info=True
         )
-    return True
+    # The DB state is already committed; physical cleanup is best-effort, but
+    # subscribers still need the task cancellation state.
+    return DeleteUserFileReferenceResult(True, affected_download_ids)
+
+
+async def _delete_user_file_reference_v0(user_id: int, user_file_id: int) -> bool:
+    return (await _delete_user_file_reference_v0_result(user_id, user_file_id)).deleted
 
 
 def _validate_subpath(base_path: Path, subpath: str) -> Path:
@@ -939,6 +954,7 @@ async def cancel_or_delete_pack_task(
 @router.delete("/{file_hash}")
 async def delete_file(
     file_hash: str,
+    request: Request,
     user: AuthUser = Depends(require_user),
 ) -> dict:
     """删除文件引用
@@ -982,8 +998,10 @@ async def delete_file(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="该文件有活跃的分享链接，请先失效所有分享后再删除",
             )
-    success = await _delete_user_file_reference_v0(user_id, int(row["user_file_id"]))
-    if not success:
+    delete_result = await _delete_user_file_reference_v0_result(
+        user_id, int(row["user_file_id"])
+    )
+    if not delete_result.deleted:
         logger.warning(
             "删除文件失败 user_id=%s file_hash=%s reason=delete_reference_failed",
             user_id,
@@ -992,6 +1010,13 @@ async def delete_file(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文件不存在")
 
     logger.info("删除文件成功 user_id=%s file_hash=%s", user_id, file_hash)
+
+    if delete_result.affected_download_ids:
+        from app.routers.tasks import broadcast_task_update_to_subscribers
+
+        state = request.app.state.app_state
+        for download_id in delete_result.affected_download_ids:
+            await broadcast_task_update_to_subscribers(state, download_id)
 
     return {"ok": True}
 
