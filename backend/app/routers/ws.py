@@ -1,8 +1,6 @@
-import asyncio
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from starlette.websockets import WebSocketState
 
 from app.aria2.sync import register_ws, unregister_ws
 from app.auth import get_user_by_session
@@ -11,10 +9,6 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-# 心跳间隔（秒）
-HEARTBEAT_INTERVAL = 30
-
 
 @router.websocket("/ws/tasks")
 async def task_ws(websocket: WebSocket) -> None:
@@ -39,23 +33,6 @@ async def task_ws(websocket: WebSocket) -> None:
     logger.info("WebSocket 连接建立: path=/ws/tasks user_id=%s ip=%s", user_id, client_ip)
     await register_ws(state, user_id, websocket)
 
-    async def heartbeat():
-        """定时发送心跳 ping，检测连接是否存活"""
-        try:
-            while websocket.client_state == WebSocketState.CONNECTED:
-                await asyncio.sleep(HEARTBEAT_INTERVAL)
-                if websocket.client_state == WebSocketState.CONNECTED:
-                    try:
-                        await websocket.send_json({"type": "ping"})
-                    except (WebSocketDisconnect, RuntimeError):
-                        # RuntimeError: Starlette 在 closed socket 上 send 会抛
-                        logger.debug("WebSocket disconnected during heartbeat")
-                        break
-        except asyncio.CancelledError:
-            pass
-
-    heartbeat_task = asyncio.create_task(heartbeat())
-
     try:
         while True:
             data = await websocket.receive_text()
@@ -67,7 +44,6 @@ async def task_ws(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        heartbeat_task.cancel()
         await unregister_ws(state, user_id, websocket)
         logger.info("WebSocket 连接关闭: path=/ws/tasks user_id=%s ip=%s", user_id, client_ip)
 

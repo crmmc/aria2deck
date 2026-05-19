@@ -6,6 +6,7 @@ from app.services.task_projection import (
     effective_status,
     filter_rows_for_status,
     has_real_file_path,
+    speed_totals,
     stat_counts,
 )
 
@@ -127,3 +128,39 @@ def test_live_uri_like_file_path_does_not_override_projected_file_name() -> None
         _row(user_status="active", global_status="active", name="payload.bin"),
         live,
     )["files"][0]["path"] == "payload.bin"
+
+
+def test_rest_response_uses_live_speeds_for_current_task() -> None:
+    response = build_rest_task_response(
+        _row(user_status="active", global_status="active"),
+        {"downloadSpeed": "4096", "uploadSpeed": "128"},
+    )
+
+    assert response["download_speed"] == 4096
+    assert response["upload_speed"] == 128
+
+
+def test_rest_response_zeroes_live_speeds_for_terminal_task() -> None:
+    response = build_rest_task_response(
+        _row(user_status="completed", global_status="completed"),
+        {"downloadSpeed": "4096", "uploadSpeed": "128"},
+    )
+
+    assert response["download_speed"] == 0
+    assert response["upload_speed"] == 0
+
+
+def test_speed_totals_sum_current_rows_only() -> None:
+    rows = [
+        _row(user_status="active", global_status="active", name="a.bin"),
+        _row(user_status="paused", global_status="active", name="b.bin"),
+        _row(user_status="completed", global_status="completed", name="c.bin"),
+    ]
+    live_by_gid = {
+        "gid-1": {"downloadSpeed": "100", "uploadSpeed": "10"},
+    }
+
+    assert speed_totals(rows, live_by_gid) == {
+        "download_speed": 200,
+        "upload_speed": 20,
+    }

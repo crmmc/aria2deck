@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -53,6 +53,7 @@ def _create_user_download_task(
     *,
     user_status: str = "active",
     global_status: str = "active",
+    aria2_gid: str | None = None,
 ) -> None:
     download = asyncio.run(
         create_global_download_v0(
@@ -60,6 +61,7 @@ def _create_user_download_task(
             source_uri=f"https://example.com/{resource_key}.zip",
             resource_kind="http",
             status=global_status,
+            aria2_gid=aria2_gid,
             display_name=f"{resource_key}.zip",
             total_bytes=1_000_000,
         )
@@ -265,6 +267,49 @@ class TestGetStatsWithActiveTasks:
 
         assert response.status_code == 200
         assert response.json()["active_task_count"] == 2
+
+    def test_get_stats_sums_live_speeds_for_current_user(
+        self, authenticated_client: TestClient, test_user: dict
+    ) -> None:
+        _create_user_download_task(
+            test_user["id"],
+            "speed-active",
+            user_status="active",
+            global_status="active",
+            aria2_gid="gid-speed-active",
+        )
+        _create_user_download_task(
+            test_user["id"],
+            "speed-complete",
+            user_status="completed",
+            global_status="completed",
+            aria2_gid="gid-speed-complete",
+        )
+        client = AsyncMock()
+        client.tell_active.return_value = [
+            {
+                "gid": "gid-speed-active",
+                "downloadSpeed": "4096",
+                "uploadSpeed": "64",
+            },
+            {
+                "gid": "gid-speed-complete",
+                "downloadSpeed": "9999",
+                "uploadSpeed": "9999",
+            },
+        ]
+
+        with (
+            patch("shutil.disk_usage", return_value=_disk_usage()),
+            patch("app.routers.stats.get_aria2_client", return_value=client),
+        ):
+            response = authenticated_client.get("/api/stats")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["active_task_count"] == 1
+        assert data["download_speed"] == 4096
+        assert data["upload_speed"] == 64
 
 
 class TestGetStatsWithUsageRows:

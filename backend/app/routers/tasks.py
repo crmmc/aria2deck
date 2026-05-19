@@ -36,6 +36,10 @@ from app.services.hash import (
 )
 from app.services.http_probe import probe_url_with_get_fallback
 from app.services.task_projection import build_rest_task_response, filter_rows_for_status
+from app.services.task_runtime import (
+    fetch_active_live_statuses_by_gid,
+    fetch_live_status_for_row,
+)
 from app.services.download_service import (
     cancel_user_task,
     create_user_download,
@@ -97,8 +101,8 @@ def _v0_create_task_response(
     return build_rest_task_response(row)
 
 
-def _v0_list_task_response(row: dict) -> dict:
-    return build_rest_task_response(row)
+def _v0_list_task_response(row: dict, live: dict | None = None) -> dict:
+    return build_rest_task_response(row, live)
 
 
 # ========== Schemas ==========
@@ -449,12 +453,18 @@ async def create_torrent_task(
 
 @router.get("")
 async def list_tasks(
+    request: Request,
     status_filter: str | None = None,
     user: AuthUser = Depends(require_user),
 ) -> list[dict]:
     """获取当前用户的任务订阅列表"""
     rows = await list_user_tasks(user.id)
     rows = filter_rows_for_status(rows, status_filter)
+    live_by_gid = await fetch_active_live_statuses_by_gid(
+        rows,
+        _get_client(request),
+        logger,
+    )
 
     logger.debug(
         "查询任务列表 user_id=%s status_filter=%s count=%s",
@@ -463,7 +473,10 @@ async def list_tasks(
         len(rows),
     )
 
-    return [_v0_list_task_response(row) for row in rows]
+    return [
+        _v0_list_task_response(row, live_by_gid.get(str(row.get("aria2_gid") or "")))
+        for row in rows
+    ]
 
 
 @router.delete("/{subscription_id}")
@@ -524,11 +537,13 @@ async def _broadcast_task_update(state: AppState, task_id: int) -> None:
     from app.aria2.sync import unregister_ws
 
     rows = await list_user_tasks_for_download(task_id)
+    client = get_aria2_client(state=state)
 
     # Broadcast to each subscriber
     for row in rows:
         owner_id = int(row["user_id"])
-        payload = _v0_list_task_response(row)
+        live = await fetch_live_status_for_row(row, client, logger)
+        payload = _v0_list_task_response(row, live)
 
         async with state.lock:
             sockets = list(state.ws_connections.get(owner_id, set()))

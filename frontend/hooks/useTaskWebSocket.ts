@@ -15,7 +15,11 @@ type NotificationPayload = {
   level?: "info" | "warning" | "error" | string;
 };
 
-type ParsedPayload = TaskUpdatePayload | NotificationPayload;
+type PingPayload = {
+  type: "ping";
+};
+
+type ParsedPayload = TaskUpdatePayload | NotificationPayload | PingPayload;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -77,6 +81,10 @@ function parsePayload(rawMessage: unknown): ParsedPayload | null {
     };
   }
 
+  if (rawPayload.type === "ping") {
+    return { type: "ping" };
+  }
+
   console.warn("[ws] Unknown payload type", rawPayload.type);
   return null;
 }
@@ -134,6 +142,10 @@ export function useTaskWebSocket(callbacks: TaskWebSocketCallbacks) {
 
         const payload = parsePayload(event.data);
         if (!payload) {
+          return;
+        }
+
+        if (payload.type === "ping") {
           return;
         }
 

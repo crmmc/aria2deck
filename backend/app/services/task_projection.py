@@ -166,8 +166,37 @@ def build_aria2_status(
     }
 
 
-def build_rest_task_response(row: dict[str, Any]) -> dict[str, Any]:
+def projected_speeds(
+    row: dict[str, Any],
+    live: dict[str, Any] | None = None,
+) -> tuple[int, int]:
+    if effective_status(row) not in ACTIVE_LIKE_STATUSES:
+        return 0, 0
+    live = live or {}
+    return _safe_int(live.get("downloadSpeed")), _safe_int(live.get("uploadSpeed"))
+
+
+def speed_totals(
+    rows: list[dict[str, Any]],
+    live_by_gid: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, int]:
+    live_by_gid = live_by_gid or {}
+    download_speed = 0
+    upload_speed = 0
+    for row in rows:
+        gid = str(row.get("aria2_gid") or "")
+        row_download, row_upload = projected_speeds(row, live_by_gid.get(gid))
+        download_speed += row_download
+        upload_speed += row_upload
+    return {"download_speed": download_speed, "upload_speed": upload_speed}
+
+
+def build_rest_task_response(
+    row: dict[str, Any],
+    live: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     error_message = row.get("error_message") or row.get("global_error_message")
+    download_speed, upload_speed = projected_speeds(row, live)
     return {
         "id": row["id"],
         "task_id": row["global_download_id"],
@@ -176,8 +205,8 @@ def build_rest_task_response(row: dict[str, Any]) -> dict[str, Any]:
         "uri": row.get("source_uri") or "",
         "total_length": _safe_int(row.get("total_bytes")),
         "completed_length": _safe_int(row.get("completed_bytes")),
-        "download_speed": 0,
-        "upload_speed": 0,
+        "download_speed": download_speed,
+        "upload_speed": upload_speed,
         "error": error_message,
         "error_display": error_message,
         "created_at": ms_to_iso(row.get("created_at_ms")),

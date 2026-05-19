@@ -375,6 +375,7 @@ async def download_shared_file(
             target = base_path
             filename = share["file_name"] or "download"
 
+        should_count_download = not request.headers.get("range")
         timestamp = now_ms()
         async with transaction() as conn:
             conditions = [
@@ -384,13 +385,15 @@ async def download_shared_file(
             ]
             if share["max_downloads"] is not None:
                 conditions.append(share_links.c.download_count < share["max_downloads"])
+
+            values: dict[str, Any] = {"last_accessed_at_ms": timestamp}
+            if should_count_download:
+                values["download_count"] = share_links.c.download_count + 1
+
             result = await conn.execute(
                 update(share_links)
                 .where(*conditions)
-                .values(
-                    download_count=share_links.c.download_count + 1,
-                    last_accessed_at_ms=timestamp,
-                )
+                .values(**values)
             )
             if result.rowcount == 0:
                 raise HTTPException(status.HTTP_410_GONE, "分享已失效或下载次数已用完")

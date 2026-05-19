@@ -2,8 +2,9 @@
 import asyncio
 
 from fastapi.testclient import TestClient
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 
+from app.core.download_limiter import download_config
 from app.db.engine import transaction
 from app.db.schema import share_links
 from app.routers.shares import MAX_ACTIVE_SHARES_PER_FILE
@@ -49,6 +50,29 @@ def _create_share(client: TestClient, user_file_id: int, **kwargs) -> dict:
     resp = client.post("/api/shares", json=body)
     assert resp.status_code == 201, resp.text
     return resp.json()
+
+
+def _share_download_count(share_code: str) -> int:
+    async def load() -> int:
+        async with transaction() as conn:
+            row = (
+                await conn.execute(
+                    select(share_links.c.download_count).where(
+                        share_links.c.share_code == share_code
+                    )
+                )
+            ).one()
+        return int(row[0])
+
+    return asyncio.run(load())
+
+
+def _allow_anonymous_downloads(monkeypatch) -> None:
+    monkeypatch.setattr(download_config, "total_connections", 10)
+    monkeypatch.setattr(download_config, "anonymous_base_connections", 10)
+    monkeypatch.setattr(download_config, "anonymous_borrow_connections", 0)
+    monkeypatch.setattr(download_config, "anonymous_per_ip_connections", 10)
+    monkeypatch.setattr(download_config, "anonymous_per_file_connections", 10)
 
 
 class TestCreateShare:
@@ -188,6 +212,74 @@ class TestPublicShareAccess:
             json={"password": "secret"},
         )
         assert resp.status_code == 410
+
+    def test_full_download_increments_download_count_once(
+        self, authenticated_client, client, user_file, monkeypatch
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+
+        resp = client.get(f"/api/s/{share['share_code']}/download")
+
+        assert resp.status_code == 200
+        assert len(resp.content) == 1024
+        assert _share_download_count(share["share_code"]) == 1
+
+        exhausted = client.get(f"/api/s/{share['share_code']}/download")
+        assert exhausted.status_code == 410
+
+    def test_range_download_does_not_increment_download_count(
+        self, authenticated_client, client, user_file, monkeypatch
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+
+        range_resp = client.get(
+            f"/api/s/{share['share_code']}/download",
+            headers={"Range": "bytes=0-9"},
+        )
+
+        assert range_resp.status_code == 206
+        assert range_resp.content == b"x" * 10
+        assert _share_download_count(share["share_code"]) == 0
+
+        full_resp = client.get(f"/api/s/{share['share_code']}/download")
+        assert full_resp.status_code == 200
+        assert _share_download_count(share["share_code"]) == 1
+
+    def test_empty_range_header_counts_as_full_download(
+        self, authenticated_client, client, user_file, monkeypatch
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+
+        resp = client.get(
+            f"/api/s/{share['share_code']}/download",
+            headers={"Range": ""},
+        )
+
+        assert resp.status_code == 200
+        assert len(resp.content) == 1024
+        assert _share_download_count(share["share_code"]) == 1
+
+        exhausted = client.get(f"/api/s/{share['share_code']}/download")
+        assert exhausted.status_code == 410
+
+    def test_exhausted_share_rejects_range_download(
+        self, authenticated_client, client, user_file, monkeypatch
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+
+        full_resp = client.get(f"/api/s/{share['share_code']}/download")
+        assert full_resp.status_code == 200
+        assert _share_download_count(share["share_code"]) == 1
+
+        range_resp = client.get(
+            f"/api/s/{share['share_code']}/download",
+            headers={"Range": "bytes=0-9"},
+        )
+        assert range_resp.status_code == 410
 class TestDeleteProtection:
     def test_delete_blocked_by_active_share(self, authenticated_client, user_file):
         """File with active share cannot be deleted."""

@@ -508,6 +508,55 @@ class TestCreateTorrentTask:
         )
 
 
+class _FakeWebSocket:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+
+    async def send_json(self, payload: dict) -> None:
+        self.messages.append(payload)
+
+
+def test_broadcast_task_update_uses_live_speed(test_user: dict) -> None:
+    from app.core.state import AppState
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-broadcast-speed",
+        "downloadSpeed": "16384",
+        "uploadSpeed": "512",
+    }
+    global_download = asyncio.run(
+        create_global_download_v0(
+            resource_key="http:broadcast-speed",
+            resource_kind="http",
+            source_uri="https://example.com/broadcast-speed.bin",
+            status="active",
+            aria2_gid="gid-broadcast-speed",
+            display_name="broadcast-speed.bin",
+            total_bytes=100,
+        )
+    )
+    asyncio.run(
+        create_user_task_v0(
+            user_id=test_user["id"],
+            global_download_id=global_download["id"],
+            status="active",
+            display_name="broadcast-speed.bin",
+        )
+    )
+    state = AppState()
+    websocket = _FakeWebSocket()
+    state.ws_connections[test_user["id"]] = {websocket}
+
+    with patch("app.routers.tasks.get_aria2_client", return_value=client):
+        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
+
+    task = websocket.messages[0]["task"]
+    assert task["download_speed"] == 16384
+    assert task["upload_speed"] == 512
+
+
 class TestListTasks:
     def test_list_tasks_unauthorized(self, client: TestClient) -> None:
         response = client.get("/api/tasks")
@@ -552,6 +601,51 @@ class TestListTasks:
         assert data[0]["uri"] == "https://example.com/list-v0.bin"
         assert data[0]["total_length"] == 1234
         assert data[0]["frozen_space"] == 1234
+
+    @patch("app.routers.tasks._get_client")
+    def test_list_tasks_uses_live_speed_for_active_rows(
+        self,
+        mock_get_client: MagicMock,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        client = AsyncMock()
+        client.tell_active.return_value = [
+            {
+                "gid": "gid-speed-task",
+                "downloadSpeed": "8192",
+                "uploadSpeed": "256",
+            }
+        ]
+        mock_get_client.return_value = client
+        global_download = asyncio.run(
+            create_global_download_v0(
+                resource_key="http:speed-task",
+                resource_kind="http",
+                source_uri="https://example.com/speed-task.bin",
+                status="active",
+                aria2_gid="gid-speed-task",
+                display_name="speed-task.bin",
+                total_bytes=100,
+            )
+        )
+        asyncio.run(
+            create_user_task_v0(
+                user_id=test_user["id"],
+                global_download_id=global_download["id"],
+                status="active",
+                reserved_bytes=100,
+                display_name="speed-task.bin",
+            )
+        )
+
+        response = authenticated_client.get("/api/tasks")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data[0]["download_speed"] == 8192
+        assert data[0]["upload_speed"] == 256
+        client.tell_active.assert_awaited_once()
 
     def test_list_tasks_status_filters(
         self,

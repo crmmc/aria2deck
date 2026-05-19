@@ -162,6 +162,25 @@ describe("useTaskWebSocket", () => {
     warnSpy.mockRestore();
   });
 
+  it("ignores legacy json ping payloads without notifying consumers", () => {
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    const onTaskUpdate = jest.fn();
+    const onNotification = jest.fn();
+
+    render(<HookHarness onTaskUpdate={onTaskUpdate} onNotification={onNotification} />);
+    const ws = MockWebSocket.instances[0];
+
+    act(() => {
+      ws.open();
+      ws.emitMessage(JSON.stringify({ type: "ping" }));
+    });
+
+    expect(onTaskUpdate).not.toHaveBeenCalled();
+    expect(onNotification).not.toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
   it("reconnects with backoff and triggers disconnection callback", () => {
     const onDisconnected = jest.fn();
 

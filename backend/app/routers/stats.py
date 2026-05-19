@@ -6,12 +6,14 @@ import logging
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.auth import AuthUser, require_admin, require_user
 from app.core.config import settings
+from app.core.state import get_aria2_client
 from app.repositories.downloads import list_user_tasks
-from app.services.task_projection import stat_counts
+from app.services.task_projection import speed_totals, stat_counts
+from app.services.task_runtime import fetch_active_live_statuses_by_gid
 from app.services.usage_service import get_usage
 
 
@@ -35,7 +37,10 @@ def _get_directory_size_bytes(path: Path) -> int:
 
 
 @router.get("")
-async def get_stats(user: AuthUser = Depends(require_user)) -> dict:
+async def get_stats(
+    request: Request,
+    user: AuthUser = Depends(require_user),
+) -> dict:
     """获取系统状态
 
     所有用户返回:
@@ -76,15 +81,22 @@ async def get_stats(user: AuthUser = Depends(require_user)) -> dict:
     )
 
     rows = await list_user_tasks(user.id)
-    active_count = stat_counts(rows)["current"]
+    counts = stat_counts(rows)
+    live_by_gid = await fetch_active_live_statuses_by_gid(
+        rows,
+        get_aria2_client(request),
+        logger,
+    )
+    speeds = speed_totals(rows, live_by_gid)
+    active_count = counts["current"]
 
     result = {
         "disk_total_space": display_total,
         "disk_used_space": used_space,
         "disk_frozen_space": frozen_space,
         "disk_space_limited": is_limited,
-        "download_speed": 0,
-        "upload_speed": 0,
+        "download_speed": speeds["download_speed"],
+        "upload_speed": speeds["upload_speed"],
         "active_task_count": active_count,
     }
     logger.debug("获取用户统计 user_id=%s active=%s", user.id, active_count)
