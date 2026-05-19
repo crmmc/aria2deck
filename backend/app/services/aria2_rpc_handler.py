@@ -22,7 +22,6 @@ from app.routers.config import get_min_free_disk
 from app.repositories import auth as auth_repo
 from app.repositories.downloads import (
     ACTIVE_USER_TASK_STATUSES,
-    TERMINAL_USER_TASK_STATUSES,
     delete_all_terminal_user_tasks,
     delete_terminal_user_task,
     delete_terminal_user_task_by_gid,
@@ -38,6 +37,7 @@ from app.services.download_service import (
     create_user_torrent_download,
 )
 from app.services.hash import extract_info_hash_from_torrent_base64, get_uri_hash
+from app.services.task_projection import ACTIVE_LIKE_STATUSES, is_current, stat_counts
 from app.services.usage_service import get_usage
 
 
@@ -220,6 +220,15 @@ class Aria2RpcHandler:
                 continue
             gids.add(str(gid))
         return gids
+
+    async def _get_current_rows_by_gid(self) -> dict[str, dict[str, Any]]:
+        rows = await list_user_tasks(self.user_id, ACTIVE_LIKE_STATUSES)
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            gid = row.get("aria2_gid")
+            if gid and is_current(row):
+                result[str(gid)] = row
+        return result
 
     @staticmethod
     def _extract_scalar_value(value: Any) -> Any:
@@ -522,6 +531,31 @@ class Aria2RpcHandler:
     @staticmethod
     def _is_bittorrent_uri(uri: str) -> bool:
         return uri.startswith("magnet:") or uri.startswith("torrent:")
+
+    def _path_is_uri_like(self, path: str) -> bool:
+        return self._is_bittorrent_uri(path.strip().lower())
+
+    def _status_needs_tell_status_refresh(self, status: dict[str, Any]) -> bool:
+        if not status:
+            return False
+
+        bt_name = (
+            status.get("bittorrent", {}).get("info", {}).get("name")
+            if isinstance(status.get("bittorrent"), dict)
+            else None
+        )
+        if isinstance(bt_name, str) and self._path_is_uri_like(bt_name):
+            return True
+
+        files = status.get("files")
+        if not isinstance(files, list) or not files:
+            return False
+        return any(
+            isinstance(item, dict)
+            and isinstance(item.get("path"), str)
+            and self._path_is_uri_like(item["path"])
+            for item in files
+        )
 
     def _sanitize_status(self, status: dict) -> dict:
         """对 tellStatus 返回的数据进行脱敏处理"""
@@ -907,10 +941,11 @@ class Aria2RpcHandler:
         if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
 
-        live: dict[str, Any] = {}
         try:
             status = await self.client.tell_status(gid)
-            live = self._sanitize_status(status)
+            response = rpc_view_service.status_from_task(
+                row, self._sanitize_status(status)
+            )
         except Exception as exc:
             logger.debug(
                 "Fallback to DB status for gid=%s user_id=%s",
@@ -918,13 +953,12 @@ class Aria2RpcHandler:
                 self.user_id,
                 exc_info=exc,
             )
-        response = rpc_view_service.status_from_task(row, live)
+            response = rpc_view_service.status_from_task(row)
         return self._apply_status_keys(response, keys)
 
     async def _handle_tell_active(self, params: list) -> list:
         """aria2.tellActive([keys])"""
         keys = self._extract_status_keys(params, 0)
-        live_by_gid: dict[str, dict[str, Any]] = {}
         try:
             all_active = await self.client.tell_active()
         except Exception as exc:
@@ -933,22 +967,56 @@ class Aria2RpcHandler:
                 self.user_id,
                 exc_info=exc,
             )
-        else:
-            live_by_gid = {
-                str(row["gid"]): self._sanitize_status(row)
-                for row in all_active
-                if row.get("gid")
-            }
-        statuses = await rpc_view_service.list_active_statuses(
-            self.user_id, live_by_gid
-        )
+            statuses = await rpc_view_service.list_active_statuses(self.user_id)
+            return self._apply_status_keys_to_list(statuses, keys)
+
+        rows_by_gid = await self._get_current_rows_by_gid()
+        statuses: list[dict[str, Any]] = []
+        for active in all_active:
+            gid = str(active.get("gid") or "")
+            row = rows_by_gid.get(gid)
+            if row is None:
+                continue
+            live = self._sanitize_status(active)
+            if self._status_needs_tell_status_refresh(live):
+                try:
+                    live = self._sanitize_status(await self.client.tell_status(gid))
+                except Exception as exc:
+                    logger.debug(
+                        "aria2.tellStatus refresh failed for active gid=%s user_id=%s",
+                        gid,
+                        self.user_id,
+                        exc_info=exc,
+                    )
+            statuses.append(rpc_view_service.status_from_task(row, live))
         return self._apply_status_keys_to_list(statuses, keys)
 
     async def _handle_tell_waiting(self, params: list) -> list:
         """aria2.tellWaiting(offset, num[, keys])"""
         offset, num = self._normalize_pagination(params)
         keys = self._extract_status_keys(params, 2)
-        statuses = await rpc_view_service.list_waiting_statuses(self.user_id)
+        try:
+            all_waiting = await self._fetch_waiting_tasks()
+        except Exception as exc:
+            logger.warning(
+                "aria2.tellWaiting failed for user_id=%s",
+                self.user_id,
+                exc_info=exc,
+            )
+            statuses = await rpc_view_service.list_waiting_statuses(self.user_id)
+            sliced = self._slice_with_offset(statuses, offset, num)
+            return self._apply_status_keys_to_list(sliced, keys)
+
+        rows_by_gid = await self._get_current_rows_by_gid()
+        statuses: list[dict[str, Any]] = []
+        for waiting in all_waiting:
+            gid = str(waiting.get("gid") or "")
+            row = rows_by_gid.get(gid)
+            if row is None:
+                continue
+            statuses.append(
+                rpc_view_service.status_from_task(row, self._sanitize_status(waiting))
+            )
         sliced = self._slice_with_offset(statuses, offset, num)
         return self._apply_status_keys_to_list(sliced, keys)
 
@@ -962,14 +1030,11 @@ class Aria2RpcHandler:
 
     async def _handle_get_global_stat(self, params: list) -> dict:
         """aria2.getGlobalStat()"""
-        active_rows = await list_user_tasks(self.user_id, ["active"])
-        waiting_rows = await list_user_tasks(
-            self.user_id, ["queued", "waiting", "paused"]
-        )
-        stopped_rows = await list_user_tasks(self.user_id, TERMINAL_USER_TASK_STATUSES)
-        num_active = len(active_rows)
-        num_waiting = len(waiting_rows)
-        num_stopped = len(stopped_rows)
+        rows = await list_user_tasks(self.user_id)
+        counts = stat_counts(rows)
+        num_active = counts["active"]
+        num_waiting = counts["waiting"]
+        num_stopped = counts["stopped"]
 
         try:
             global_stat = await self.client.get_global_stat()

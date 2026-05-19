@@ -5,7 +5,7 @@ from typing import Any
 
 from collections.abc import Iterable
 
-from sqlalchemy import case, delete, func, insert, select, update
+from sqlalchemy import case, delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.db.engine import transaction
@@ -19,6 +19,17 @@ TERMINAL_USER_TASK_STATUSES = ("completed", "failed", "cancelled")
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _effective_terminal_user_task_condition():
+    return or_(
+        user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES),
+        user_tasks.c.global_download_id.in_(
+            select(global_downloads.c.id).where(
+                global_downloads.c.status.in_(TERMINAL_USER_TASK_STATUSES)
+            )
+        ),
+    )
 
 
 async def get_global_by_resource_key(resource_key: str) -> dict[str, Any] | None:
@@ -191,7 +202,7 @@ async def delete_all_terminal_user_tasks(user_id: int) -> int:
         result = await conn.execute(
             delete(user_tasks).where(
                 user_tasks.c.user_id == user_id,
-                user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES),
+                _effective_terminal_user_task_condition(),
             )
         )
     return int(result.rowcount or 0)
@@ -203,7 +214,7 @@ async def delete_terminal_user_task_by_gid(user_id: int, gid: str) -> bool:
             await conn.execute(
                 delete(user_tasks)
                 .where(user_tasks.c.user_id == user_id)
-                .where(user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES))
+                .where(_effective_terminal_user_task_condition())
                 .where(
                     user_tasks.c.global_download_id.in_(
                         select(global_downloads.c.id).where(
@@ -728,7 +739,7 @@ async def delete_terminal_user_task(user_id: int, user_task_id: int) -> bool:
                 .where(
                     user_tasks.c.id == user_task_id,
                     user_tasks.c.user_id == user_id,
-                    user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES),
+                    _effective_terminal_user_task_condition(),
                 )
                 .returning(user_tasks.c.id)
             )
@@ -743,7 +754,7 @@ async def clear_terminal_user_tasks(user_id: int) -> int:
                 delete(user_tasks)
                 .where(
                     user_tasks.c.user_id == user_id,
-                    user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES),
+                    _effective_terminal_user_task_condition(),
                 )
                 .returning(user_tasks.c.id)
             )
