@@ -152,15 +152,17 @@ def test_rest_response_zeroes_live_speeds_for_terminal_task() -> None:
 
 def test_speed_totals_sum_current_rows_only() -> None:
     rows = [
-        _row(user_status="active", global_status="active", name="a.bin"),
-        _row(user_status="paused", global_status="active", name="b.bin"),
-        _row(user_status="completed", global_status="completed", name="c.bin"),
+        {**_row(user_status="active", global_status="active", name="a.bin"), "aria2_gid": "gid-a"},
+        {**_row(user_status="paused", global_status="active", name="b.bin"), "aria2_gid": "gid-b"},
+        {**_row(user_status="completed", global_status="completed", name="c.bin"), "aria2_gid": "gid-c"},
     ]
     live_by_gid = {
-        "gid-1": {"downloadSpeed": "100", "uploadSpeed": "10"},
+        "gid-a": {"downloadSpeed": "100", "uploadSpeed": "10"},
+        "gid-b": {"downloadSpeed": "200", "uploadSpeed": "20"},
+        "gid-c": {"downloadSpeed": "999", "uploadSpeed": "999"},
     }
 
     assert speed_totals(rows, live_by_gid) == {
-        "download_speed": 200,
-        "upload_speed": 20,
+        "download_speed": 300,
+        "upload_speed": 30,
     }
