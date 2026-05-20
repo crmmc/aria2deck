@@ -11,6 +11,17 @@ from app.services.task_projection import is_current
 LIVE_STATUS_CACHE_TTL_SECONDS = 0.5
 
 
+async def _prune_expired_live_status_cache(state: AppState, now: float) -> None:
+    async with state.lock:
+        expired_gids = [
+            gid
+            for gid, entry in state.live_status_cache.items()
+            if now - entry.fetched_at > LIVE_STATUS_CACHE_TTL_SECONDS
+        ]
+        for gid in expired_gids:
+            state.live_status_cache.pop(gid, None)
+
+
 async def fetch_active_live_statuses_by_gid(
     rows: list[dict[str, Any]],
     aria2_client: Any,
@@ -50,6 +61,9 @@ async def fetch_cached_live_status_for_row(
     logger: logging.Logger,
     local_cache: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
+    now = time.monotonic()
+    await _prune_expired_live_status_cache(state, now)
+
     if not is_current(row):
         return None
     gid = str(row.get("aria2_gid") or "")
@@ -60,14 +74,11 @@ async def fetch_cached_live_status_for_row(
     if local_status is not None:
         return local_status
 
-    now = time.monotonic()
     async with state.lock:
         entry = state.live_status_cache.get(gid)
         if entry is not None:
-            if now - entry.fetched_at <= LIVE_STATUS_CACHE_TTL_SECONDS:
-                local_cache[gid] = entry.status
-                return entry.status
-            state.live_status_cache.pop(gid, None)
+            local_cache[gid] = entry.status
+            return entry.status
 
     try:
         status = await aria2_client.tell_status(gid)

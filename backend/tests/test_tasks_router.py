@@ -672,6 +672,53 @@ def test_broadcast_task_update_reuses_live_status_cache_within_ttl(
     ]
 
 
+def test_broadcast_task_update_prunes_unrequested_stale_live_status_cache(
+    test_user: dict,
+) -> None:
+    from app.core.state import AppState, LiveStatusCacheEntry
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-cache-prune",
+        "downloadSpeed": "100",
+        "uploadSpeed": "5",
+    }
+    global_download = asyncio.run(
+        create_global_download_v0(
+            resource_key="http:cache-prune",
+            resource_kind="http",
+            source_uri="https://example.com/cache-prune.bin",
+            status="active",
+            aria2_gid="gid-cache-prune",
+            display_name="cache-prune.bin",
+            total_bytes=100,
+        )
+    )
+    asyncio.run(
+        create_user_task_v0(
+            user_id=test_user["id"],
+            global_download_id=global_download["id"],
+            status="active",
+            display_name="cache-prune.bin",
+        )
+    )
+
+    state = AppState()
+    state.live_status_cache["stale-unrequested-gid"] = LiveStatusCacheEntry(
+        status={"gid": "stale-unrequested-gid"},
+        fetched_at=-1_000_000.0,
+    )
+    websocket = _FakeWebSocket()
+    state.ws_connections[test_user["id"]] = {websocket}
+
+    with patch("app.routers.tasks.get_aria2_client", return_value=client):
+        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
+
+    assert "stale-unrequested-gid" not in state.live_status_cache
+    assert "gid-cache-prune" in state.live_status_cache
+
+
 class TestListTasks:
     def test_list_tasks_unauthorized(self, client: TestClient) -> None:
         response = client.get("/api/tasks")
