@@ -43,28 +43,6 @@ async def fetch_active_live_statuses_by_gid(
     return result
 
 
-async def fetch_live_status_for_row(
-    row: dict[str, Any],
-    aria2_client: Any,
-    logger: logging.Logger,
-) -> dict[str, Any] | None:
-    if not is_current(row):
-        return None
-    gid = str(row.get("aria2_gid") or "")
-    if not gid:
-        return None
-    try:
-        status = await aria2_client.tell_status(gid)
-    except Exception as exc:
-        logger.warning(
-            "aria2.tellStatus failed while enriching task update gid=%s",
-            gid,
-            exc_info=exc,
-        )
-        return None
-    return status if isinstance(status, dict) else None
-
-
 async def fetch_cached_live_status_for_row(
     row: dict[str, Any],
     aria2_client: Any,
@@ -85,9 +63,11 @@ async def fetch_cached_live_status_for_row(
     now = time.monotonic()
     async with state.lock:
         entry = state.live_status_cache.get(gid)
-        if entry is not None and now - entry.fetched_at <= LIVE_STATUS_CACHE_TTL_SECONDS:
-            local_cache[gid] = entry.status
-            return entry.status
+        if entry is not None:
+            if now - entry.fetched_at <= LIVE_STATUS_CACHE_TTL_SECONDS:
+                local_cache[gid] = entry.status
+                return entry.status
+            state.live_status_cache.pop(gid, None)
 
     try:
         status = await aria2_client.tell_status(gid)
