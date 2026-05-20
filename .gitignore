@@ -82,4 +82,5 @@ CLAUDE.md
 
 # Local planning artifacts
 .planning/
+.worktrees/
 e2e_test_temp/
