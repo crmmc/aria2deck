@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
+from app.core.state import AppState, LiveStatusCacheEntry
 from app.services.task_projection import is_current
+
+
+LIVE_STATUS_CACHE_TTL_SECONDS = 0.5
 
 
 async def fetch_active_live_statuses_by_gid(
@@ -58,3 +63,50 @@ async def fetch_live_status_for_row(
         )
         return None
     return status if isinstance(status, dict) else None
+
+
+async def fetch_cached_live_status_for_row(
+    row: dict[str, Any],
+    aria2_client: Any,
+    state: AppState,
+    logger: logging.Logger,
+    local_cache: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not is_current(row):
+        return None
+    gid = str(row.get("aria2_gid") or "")
+    if not gid:
+        return None
+
+    local_status = local_cache.get(gid)
+    if local_status is not None:
+        return local_status
+
+    now = time.monotonic()
+    async with state.lock:
+        entry = state.live_status_cache.get(gid)
+        if entry is not None and now - entry.fetched_at <= LIVE_STATUS_CACHE_TTL_SECONDS:
+            local_cache[gid] = entry.status
+            return entry.status
+
+    try:
+        status = await aria2_client.tell_status(gid)
+    except Exception as exc:
+        logger.warning(
+            "aria2.tellStatus failed while enriching task update gid=%s",
+            gid,
+            exc_info=exc,
+        )
+        return None
+
+    if not isinstance(status, dict):
+        return None
+
+    fetched_at = time.monotonic()
+    local_cache[gid] = status
+    async with state.lock:
+        state.live_status_cache[gid] = LiveStatusCacheEntry(
+            status=status,
+            fetched_at=fetched_at,
+        )
+    return status

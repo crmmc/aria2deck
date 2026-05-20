@@ -17,7 +17,11 @@ from app.db.schema import global_downloads
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
 from app.services.download_service import create_user_download
 from app.services.hash import get_uri_hash
-from tests.helpers_v0 import create_global_download_v0, create_user_task_v0
+from tests.helpers_v0 import (
+    create_global_download_v0,
+    create_user_task_v0,
+    create_user_v0,
+)
 
 
 def _valid_torrent_payload() -> tuple[str, str]:
@@ -555,6 +559,117 @@ def test_broadcast_task_update_uses_live_speed(test_user: dict) -> None:
     task = websocket.messages[0]["task"]
     assert task["download_speed"] == 16384
     assert task["upload_speed"] == 512
+
+
+def test_broadcast_task_update_fetches_live_status_once_for_shared_download(
+    test_user: dict,
+) -> None:
+    from app.core.state import AppState
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+
+    second_user = asyncio.run(create_user_v0(username="broadcast-second-user"))
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-shared-broadcast",
+        "downloadSpeed": "2048",
+        "uploadSpeed": "128",
+    }
+    global_download = asyncio.run(
+        create_global_download_v0(
+            resource_key="http:shared-broadcast",
+            resource_kind="http",
+            source_uri="https://example.com/shared-broadcast.bin",
+            status="active",
+            aria2_gid="gid-shared-broadcast",
+            display_name="shared-broadcast.bin",
+            total_bytes=100,
+        )
+    )
+    for user_id in (test_user["id"], second_user["id"]):
+        asyncio.run(
+            create_user_task_v0(
+                user_id=user_id,
+                global_download_id=global_download["id"],
+                status="active",
+                display_name="shared-broadcast.bin",
+            )
+        )
+
+    state = AppState()
+    first_socket = _FakeWebSocket()
+    second_socket = _FakeWebSocket()
+    state.ws_connections[test_user["id"]] = {first_socket}
+    state.ws_connections[second_user["id"]] = {second_socket}
+
+    with patch("app.routers.tasks.get_aria2_client", return_value=client):
+        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
+
+    client.tell_status.assert_awaited_once_with("gid-shared-broadcast")
+    assert first_socket.messages[0]["task"]["download_speed"] == 2048
+    assert second_socket.messages[0]["task"]["download_speed"] == 2048
+
+
+def test_broadcast_task_update_reuses_live_status_cache_within_ttl(
+    test_user: dict,
+) -> None:
+    from app.core.state import AppState
+    from app.routers.tasks import broadcast_task_update_to_subscribers
+
+    client = AsyncMock()
+    client.tell_status.side_effect = [
+        {
+            "gid": "gid-cache-broadcast",
+            "downloadSpeed": "1000",
+            "uploadSpeed": "50",
+        },
+        {
+            "gid": "gid-cache-broadcast",
+            "downloadSpeed": "2000",
+            "uploadSpeed": "75",
+        },
+        {
+            "gid": "gid-cache-broadcast",
+            "downloadSpeed": "3000",
+            "uploadSpeed": "100",
+        },
+    ]
+    global_download = asyncio.run(
+        create_global_download_v0(
+            resource_key="http:cache-broadcast",
+            resource_kind="http",
+            source_uri="https://example.com/cache-broadcast.bin",
+            status="active",
+            aria2_gid="gid-cache-broadcast",
+            display_name="cache-broadcast.bin",
+            total_bytes=100,
+        )
+    )
+    asyncio.run(
+        create_user_task_v0(
+            user_id=test_user["id"],
+            global_download_id=global_download["id"],
+            status="active",
+            display_name="cache-broadcast.bin",
+        )
+    )
+
+    state = AppState()
+    websocket = _FakeWebSocket()
+    state.ws_connections[test_user["id"]] = {websocket}
+
+    with patch("app.routers.tasks.get_aria2_client", return_value=client):
+        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
+        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
+        if hasattr(state, "live_status_cache"):
+            state.live_status_cache["gid-cache-broadcast"].fetched_at = -1_000_000.0
+        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
+
+    assert client.tell_status.await_count == 2
+    assert [message["task"]["download_speed"] for message in websocket.messages] == [
+        1000,
+        1000,
+        2000,
+    ]
 
 
 class TestListTasks:

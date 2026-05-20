@@ -38,7 +38,7 @@ from app.services.http_probe import probe_url_with_get_fallback
 from app.services.task_projection import build_rest_task_response, filter_rows_for_status
 from app.services.task_runtime import (
     fetch_active_live_statuses_by_gid,
-    fetch_live_status_for_row,
+    fetch_cached_live_status_for_row,
 )
 from app.services.download_service import (
     cancel_user_task,
@@ -538,11 +538,18 @@ async def _broadcast_task_update(state: AppState, task_id: int) -> None:
 
     rows = await list_user_tasks_for_download(task_id)
     client = get_aria2_client(state=state)
+    live_by_gid: dict[str, dict] = {}
 
     # Broadcast to each subscriber
     for row in rows:
         owner_id = int(row["user_id"])
-        live = await fetch_live_status_for_row(row, client, logger)
+        live = await fetch_cached_live_status_for_row(
+            row,
+            client,
+            state,
+            logger,
+            live_by_gid,
+        )
         payload = _v0_list_task_response(row, live)
 
         async with state.lock:

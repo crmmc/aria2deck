@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Dict, Set
+from typing import Any, Dict, Set
 from weakref import WeakValueDictionary
 
 from fastapi import WebSocket, Request
@@ -12,12 +12,20 @@ from app.core.config import settings
 
 
 @dataclass
+class LiveStatusCacheEntry:
+    status: dict[str, Any]
+    fetched_at: float
+
+
+@dataclass
 class AppState:
     pending_tasks: Dict[int, dict] = field(default_factory=dict)
     ws_connections: Dict[int, Set[WebSocket]] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # 消息节流：记录每个任务的最后推送时间 {task_id: timestamp}
     last_broadcast: Dict[int, float] = field(default_factory=dict)
+    # WebSocket live status cache: {aria2_gid: cached status}
+    live_status_cache: Dict[str, LiveStatusCacheEntry] = field(default_factory=dict)
     # 使用弱引用字典自动回收不再被引用的锁，避免长期运行字典无限增长
     task_submit_locks: WeakValueDictionary[int, asyncio.Lock] = field(default_factory=WeakValueDictionary)
     # 用户空间锁，避免并发冻结/校验导致超额（自动回收）
