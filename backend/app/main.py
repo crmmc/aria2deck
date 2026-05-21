@@ -92,6 +92,7 @@ from app.routers import (
     ws,
 )
 from app.services.repair import run_startup_repair
+from app.services.storage import verify_download_dir_writable
 
 
 async def ensure_default_admin_v0() -> None:
@@ -130,7 +131,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理器"""
     # Startup
     Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(settings.download_dir).mkdir(parents=True, exist_ok=True)
+    verify_download_dir_writable()
 
     await bootstrap_database()
 

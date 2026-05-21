@@ -173,6 +173,186 @@ async def test_completion_with_followed_by_changes_gid_without_creating_files(
 
 
 @pytest.mark.asyncio
+async def test_completed_download_missing_task_dir_uses_directory_error(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="listener_missing_dir")
+    download = await create_global_download_v0(
+        resource_key="listener:missing-dir",
+        status="active",
+        aria2_gid="gid-missing-dir",
+        display_name="payload.bin",
+        total_bytes=7,
+        completed_bytes=7,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        display_name="payload.bin",
+    )
+
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-missing-dir",
+        "status": "complete",
+        "totalLength": "7",
+        "completedLength": "7",
+        "files": [],
+    }
+    client.force_remove.return_value = "OK"
+    client.remove_download_result.return_value = "OK"
+    _patch_aria2_client(monkeypatch, client)
+
+    await handle_aria2_event(AppState(), "gid-missing-dir", "complete")
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+
+    assert updated["status"] == "failed"
+    assert updated["error_code"] == "download_dir_not_found"
+    assert updated["error_message"] == "下载完成但下载目录不存在"
+    assert updated_task["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_completed_download_existing_task_dir_missing_file_uses_file_error(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="listener_missing_file")
+    download = await create_global_download_v0(
+        resource_key="listener:missing-file",
+        status="active",
+        aria2_gid="gid-missing-file",
+        display_name="payload.bin",
+        total_bytes=7,
+        completed_bytes=7,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        display_name="payload.bin",
+    )
+    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
+    task_dir.mkdir(parents=True)
+    (task_dir / "payload.bin.aria2").write_bytes(b"")
+
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-missing-file",
+        "status": "complete",
+        "totalLength": "7",
+        "completedLength": "7",
+        "files": [],
+    }
+    client.force_remove.return_value = "OK"
+    client.remove_download_result.return_value = "OK"
+    _patch_aria2_client(monkeypatch, client)
+
+    await handle_aria2_event(AppState(), "gid-missing-file", "complete")
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+
+    assert updated["status"] == "failed"
+    assert updated["error_code"] == "download_file_not_found"
+    assert updated["error_message"] == "下载完成但下载文件未找到"
+    assert updated_task["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_completed_download_with_short_file_fails_size_validation(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="listener_size_mismatch")
+    download = await create_global_download_v0(
+        resource_key="listener:size-mismatch",
+        status="active",
+        aria2_gid="gid-size-mismatch",
+        display_name="payload.bin",
+        total_bytes=9,
+        completed_bytes=9,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        display_name="payload.bin",
+    )
+    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
+    task_dir.mkdir(parents=True)
+    source_file = task_dir / "payload.bin"
+    source_file.write_bytes(b"short")
+
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-size-mismatch",
+        "status": "complete",
+        "totalLength": "9",
+        "completedLength": "9",
+        "files": [
+            {
+                "path": str(source_file),
+                "length": "9",
+                "completedLength": "9",
+            }
+        ],
+    }
+    client.force_remove.return_value = "OK"
+    client.remove_download_result.return_value = "OK"
+    _patch_aria2_client(monkeypatch, client)
+
+    await handle_aria2_event(AppState(), "gid-size-mismatch", "complete")
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    async with transaction() as conn:
+        stored_count = (
+            await conn.execute(select(func.count()).select_from(stored_files))
+        ).scalar_one()
+        user_file_count = (
+            await conn.execute(select(func.count()).select_from(user_files))
+        ).scalar_one()
+
+    assert updated["status"] == "failed"
+    assert updated["error_code"] == "completed_size_mismatch"
+    assert updated["error_message"] == "下载完成但文件大小不匹配"
+    assert updated_task["status"] == "failed"
+    assert stored_count == 0
+    assert user_file_count == 0
+    assert not task_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_complete_source_resolution_probes_four_times_every_half_second(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.aria2 import listener
+
+    sleep_intervals: list[float] = []
+
+    async def fake_sleep(interval: float) -> None:
+        sleep_intervals.append(interval)
+
+    monkeypatch.setattr(listener.asyncio, "sleep", fake_sleep)
+    source = await listener._resolve_complete_source_with_retry(
+        completion_gid=None,
+        task_dir=tmp_path / "missing",
+        files=[],
+        task_name=None,
+        state=AppState(),
+    )
+
+    assert source is None
+    assert sleep_intervals == [0.5, 0.5, 0.5]
+
+
+@pytest.mark.asyncio
 async def test_error_event_marks_global_and_user_tasks_failed_and_releases_reserved(
     temp_db: str,
     monkeypatch: pytest.MonkeyPatch,

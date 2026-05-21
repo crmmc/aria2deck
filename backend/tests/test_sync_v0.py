@@ -12,6 +12,7 @@ from app.aria2.sync import (
     _cleanup_stale_queued_downloads_v0,
     _fail_v0_download_and_cleanup,
     _repair_inconsistent_completed_downloads_v0,
+    sync_tasks,
     _update_v0_download_from_aria2,
 )
 from app.core.config import settings
@@ -268,7 +269,9 @@ async def test_active_bt_status_with_full_bytes_completes_v0_download(
             "completedLength": "7",
             "infoHash": "abc123",
             "bittorrent": {"info": {"name": "payload.bin"}},
-            "files": [{"path": str(source_file), "length": "7", "completedLength": "7"}],
+            "files": [
+                {"path": str(source_file), "length": "7", "completedLength": "7"}
+            ],
         },
     )
 
@@ -387,7 +390,9 @@ async def test_active_full_bytes_with_verify_integrity_pending_stays_active(
             "infoHash": "abc123",
             "verifyIntegrityPending": "true",
             "bittorrent": {"info": {"name": "payload.bin"}},
-            "files": [{"path": str(source_file), "length": "7", "completedLength": "7"}],
+            "files": [
+                {"path": str(source_file), "length": "7", "completedLength": "7"}
+            ],
         },
     )
 
@@ -505,3 +510,69 @@ async def test_sync_failure_cleanup_waits_for_completion_lock(
     assert updated_task["status"] == "failed"
     assert usage["reserved_bytes"] == 0
     client.force_remove.assert_awaited_once_with("gid-sync-failure-lock")
+
+
+@pytest.mark.asyncio
+async def test_sync_missing_gid_recovers_completed_file_from_disk(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="sync_missing_gid_recover", quota_bytes=1000)
+    await reserve_bytes(user["id"], 7, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="sync:missing-gid-recover",
+        status="active",
+        aria2_gid="gid-sync-missing-recover",
+        total_bytes=7,
+        completed_bytes=7,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=7,
+    )
+    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
+    task_dir.mkdir(parents=True)
+    (task_dir / "payload.bin").write_bytes(b"payload")
+
+    client = AsyncMock()
+    client.tell_status.side_effect = RuntimeError(
+        "GID gid-sync-missing-recover is not found"
+    )
+    client.tell_active.return_value = []
+    client.tell_waiting.return_value = []
+    client.tell_stopped.return_value = []
+    client.force_remove.return_value = "OK"
+    client.remove_download_result.return_value = "OK"
+
+    def get_client(*args: object, **kwargs: object) -> AsyncMock:
+        return client
+
+    monkeypatch.setattr("app.core.state.get_aria2_client", get_client)
+
+    async def stop_after_first_sleep(_interval: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("app.aria2.sync.asyncio.sleep", stop_after_first_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await sync_tasks(AppState(), interval=0.01)
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+    async with transaction() as conn:
+        user_file_count = (
+            await conn.execute(
+                select(user_files).where(user_files.c.user_id == user["id"])
+            )
+        ).all()
+
+    assert updated["status"] == "completed"
+    assert updated["completed_file_id"] is not None
+    assert updated_task["status"] == "completed"
+    assert updated_task["reserved_bytes"] == 0
+    assert usage["reserved_bytes"] == 0
+    assert len(user_file_count) == 1
+    client.remove_download_result.assert_awaited_once_with("gid-sync-missing-recover")

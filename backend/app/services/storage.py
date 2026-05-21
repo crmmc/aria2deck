@@ -12,6 +12,7 @@ from pathlib import Path
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+DOWNLOAD_DIR_PROBE_FILENAME = ".aria2deck-write-test"
 
 
 def get_store_dir() -> Path:
@@ -26,6 +27,24 @@ def get_downloading_dir() -> Path:
     downloading_dir = Path(settings.download_dir).resolve() / "downloading"
     downloading_dir.mkdir(parents=True, exist_ok=True)
     return downloading_dir
+
+
+def verify_download_dir_writable() -> None:
+    """Fail startup if the configured download directory is not writable."""
+    download_dir = Path(settings.download_dir).resolve()
+    probe_path = download_dir / DOWNLOAD_DIR_PROBE_FILENAME
+    try:
+        download_dir.mkdir(parents=True, exist_ok=True)
+        probe_path.write_bytes(b"")
+        probe_path.unlink()
+    except Exception as exc:
+        message = (
+            "Download directory is not writable: "
+            f"path={download_dir} probe_file={probe_path} "
+            f"error={type(exc).__name__}: {exc}"
+        )
+        logger.error(message)
+        raise RuntimeError(message) from exc
 
 
 def get_task_download_dir(task_id: int) -> Path:

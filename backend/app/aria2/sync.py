@@ -468,17 +468,66 @@ async def sync_tasks(
                 status = await client.tell_status(gid)
             except Exception as exc:
                 if _is_missing_gid_error(exc):
-                    logger.error(
-                        "[Sync] GID %s missing, failing v0 download: %s", gid, exc
+                    # 检查任务是否已完成
+                    async with transaction() as conn:
+                        row = (await conn.execute(
+                            select(
+                                global_downloads.c.status,
+                                global_downloads.c.completed_file_id,
+                                global_downloads.c.completed_bytes,
+                                global_downloads.c.total_bytes,
+                            )
+                            .where(global_downloads.c.id == download_id)
+                        )).first()
+
+                    if row is None:
+                        logger.debug(
+                            "[Sync] GID %s missing but download not found, skipping",
+                            gid
+                        )
+                        return
+
+                    status_val, completed_file_id, completed_bytes, total_bytes = row
+
+                    # 情况1: 任务已完成，GID 被外部清理是正常的
+                    if status_val == "completed" and completed_file_id is not None:
+                        logger.info(
+                            "[Sync] GID %s missing but download already completed, skipping",
+                            gid
+                        )
+                        return
+
+                    # 情况2: 任务不在活跃状态，不处理
+                    if status_val not in V0_SYNC_TRACKED_STATUSES:
+                        logger.debug(
+                            "[Sync] GID %s missing but download not active (status=%s), skipping",
+                            gid,
+                            status_val,
+                        )
+                        return
+
+                    # 情况3: 尝试从磁盘恢复
+                    logger.warning(
+                        "[Sync] GID %s missing, attempting recovery from disk download_id=%s",
+                        gid,
+                        download_id,
                     )
-                    await _fail_v0_download_and_cleanup(
+
+                    # 构造一个最小的 aria2_status 用于完成处理
+                    # files 字段为空，完成处理会依赖 task_dir 扫描
+                    fake_aria2_status = {
+                        "status": "complete",
+                        "files": [],
+                        "totalLength": total_bytes or 0,
+                        "completedLength": completed_bytes or 0,
+                    }
+
+                    await _complete_v0_download_from_sync(
                         state=state,
                         client=client,
-                        download_id=download_id,
-                        gid=gid,
-                        message="后端错误",
-                        error_code="missing_gid",
-                        log_prefix="[Sync]",
+                        download=download,
+                        aria2_status=fake_aria2_status,
+                        completion_gid=gid,
                     )
                     return
 

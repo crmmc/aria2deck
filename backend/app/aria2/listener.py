@@ -45,8 +45,11 @@ EVENT_MAP = {
 }
 
 RECONNECT_BASE_DELAY = 1.0
-COMPLETE_SOURCE_RETRY_COUNT = 5
-COMPLETE_SOURCE_RETRY_INTERVAL = 1.0
+COMPLETE_SOURCE_RETRY_COUNT = 4
+COMPLETE_SOURCE_RETRY_INTERVAL = 0.5
+DOWNLOAD_DIR_NOT_FOUND_MESSAGE = "下载完成但下载目录不存在"
+DOWNLOAD_FILE_NOT_FOUND_MESSAGE = "下载完成但下载文件未找到"
+COMPLETED_SIZE_MISMATCH_MESSAGE = "下载完成但文件大小不匹配"
 
 
 def _http_to_ws_url(http_url: str) -> str:
@@ -90,6 +93,67 @@ def _list_task_dir_entries(task_dir: Path) -> list[Path]:
     except OSError as exc:
         logger.error("Failed to list task directory %s: %s", task_dir, exc)
         return []
+
+
+def _source_not_found_error(task_dir: Path) -> tuple[str, str]:
+    if not task_dir.exists() or not task_dir.is_dir():
+        return "download_dir_not_found", DOWNLOAD_DIR_NOT_FOUND_MESSAGE
+    return "download_file_not_found", DOWNLOAD_FILE_NOT_FOUND_MESSAGE
+
+
+def _payload_size_bytes(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    if not path.is_dir():
+        return 0
+    return sum(
+        child.stat().st_size
+        for child in path.rglob("*")
+        if child.is_file() and not child.name.endswith(".aria2")
+    )
+
+
+def _expected_completed_size(
+    aria2_status: dict[str, Any],
+    source_path: Path,
+) -> int | None:
+    files = aria2_status.get("files", [])
+    if isinstance(files, list) and files:
+        expected = 0
+        has_length = False
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            raw_length = item.get("length")
+            length = _safe_int(raw_length, default=-1)
+            if length < 0:
+                continue
+            expected += length
+            has_length = True
+        if has_length:
+            return expected
+
+    total_length = _safe_int(aria2_status.get("totalLength"), default=-1)
+    if total_length < 0:
+        return None
+    if source_path.is_dir() or total_length > 0:
+        return total_length
+    return None
+
+
+def _completed_size_mismatch_error(
+    *,
+    source_path: Path,
+    expected_bytes: int,
+    actual_bytes: int,
+) -> tuple[str, str]:
+    logger.error(
+        "[WS] Completed download payload size mismatch path=%s expected=%s actual=%s",
+        source_path,
+        expected_bytes,
+        actual_bytes,
+    )
+    return "completed_size_mismatch", COMPLETED_SIZE_MISMATCH_MESSAGE
 
 
 def _resolve_complete_source_path(
@@ -174,10 +238,9 @@ async def _resolve_complete_source_with_retry(
         if source:
             return source
 
-        if attempt < COMPLETE_SOURCE_RETRY_COUNT - 1:
-            await asyncio.sleep(COMPLETE_SOURCE_RETRY_INTERVAL)
-
         if not completion_gid:
+            if attempt < COMPLETE_SOURCE_RETRY_COUNT - 1:
+                await asyncio.sleep(COMPLETE_SOURCE_RETRY_INTERVAL)
             continue
 
         try:
@@ -191,6 +254,9 @@ async def _resolve_complete_source_with_retry(
                 completion_gid,
                 exc,
             )
+
+        if attempt < COMPLETE_SOURCE_RETRY_COUNT - 1:
+            await asyncio.sleep(COMPLETE_SOURCE_RETRY_INTERVAL)
 
     return None
 
@@ -370,17 +436,59 @@ async def handle_v0_download_complete(
             state=state,
         )
         if source_path is None:
+            error_code, error_message = _source_not_found_error(task_dir)
             logger.error(
-                "%s Download completed but source path was not found id=%s gid=%s dir=%s files=%s",
+                "%s Download completed but source path was not found id=%s gid=%s dir=%s files=%s error_code=%s",
                 log_prefix,
                 download_id,
                 completion_gid,
                 task_dir,
                 len(files),
+                error_code,
+            )
+            # Mark as failed since aria2 reported completion but we can't find the file
+            owner_id = await get_representative_owner_id(download_id)
+            await mark_global_download_failed(
+                download_id,
+                message=error_message,
+                error_code=error_code,
+                clear_gid=True,
+            )
+            await cleanup_failed_task_artifacts(
+                client=client,
+                task_id=download_id,
+                gid=completion_gid,
+                owner_id=owner_id,
+                log_prefix=log_prefix,
             )
             return False
 
         original_name = task_name or source_path.name
+        expected_size = _expected_completed_size(aria2_status, source_path)
+        if expected_size is not None:
+            actual_size = _payload_size_bytes(source_path)
+            if actual_size < expected_size:
+                error_code, error_message = _completed_size_mismatch_error(
+                    source_path=source_path,
+                    expected_bytes=expected_size,
+                    actual_bytes=actual_size,
+                )
+                owner_id = await get_representative_owner_id(download_id)
+                await mark_global_download_failed(
+                    download_id,
+                    message=error_message,
+                    error_code=error_code,
+                    clear_gid=True,
+                )
+                await cleanup_failed_task_artifacts(
+                    client=client,
+                    task_id=download_id,
+                    gid=completion_gid,
+                    owner_id=owner_id,
+                    log_prefix=log_prefix,
+                )
+                return False
+
         result = await complete_global_download(
             global_download_id=download_id,
             source_path=source_path,

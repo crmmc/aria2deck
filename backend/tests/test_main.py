@@ -280,6 +280,84 @@ class TestLifespan:
             settings.download_dir = old_download_dir
             reset_engine()
 
+    def test_app_startup_rejects_unwritable_download_dir(self, tmp_path):
+        """Test startup refuses a download directory that cannot be write-probed."""
+        from fastapi.testclient import TestClient
+
+        from app.core.config import settings
+        from app.db.engine import reset_engine
+        from app.main import create_app
+
+        db_path = tmp_path / "startup.db"
+        download_dir = tmp_path / "downloads"
+        old_db_path = settings.database_path
+        old_download_dir = settings.download_dir
+        old_debug = settings.debug
+        settings.database_path = str(db_path)
+        settings.download_dir = str(download_dir)
+        settings.debug = True
+        reset_engine()
+        try:
+            with patch(
+                "app.services.storage.Path.write_bytes",
+                side_effect=PermissionError("read-only filesystem"),
+            ):
+                with pytest.raises(
+                    RuntimeError,
+                    match="Download directory is not writable.*read-only filesystem",
+                ):
+                    with TestClient(create_app()):
+                        pass
+        finally:
+            settings.database_path = old_db_path
+            settings.download_dir = old_download_dir
+            settings.debug = old_debug
+            reset_engine()
+
+    def test_app_startup_reports_download_dir_create_failure(self, tmp_path):
+        """Test startup wraps download directory creation failures with path details."""
+        from fastapi.testclient import TestClient
+
+        from app.core.config import settings
+        from app.db.engine import reset_engine
+        from app.main import create_app
+
+        db_path = tmp_path / "startup.db"
+        download_dir = tmp_path / "downloads"
+        old_db_path = settings.database_path
+        old_download_dir = settings.download_dir
+        old_debug = settings.debug
+        settings.database_path = str(db_path)
+        settings.download_dir = str(download_dir)
+        settings.debug = True
+        reset_engine()
+
+        original_mkdir = Path.mkdir
+
+        def fail_download_dir_mkdir(
+            self: Path, *args: object, **kwargs: object
+        ) -> None:
+            if self == download_dir.resolve():
+                raise PermissionError("cannot create download directory")
+            original_mkdir(self, *args, **kwargs)
+
+        try:
+            with patch("app.services.storage.Path.mkdir", fail_download_dir_mkdir):
+                with pytest.raises(
+                    RuntimeError,
+                    match=(
+                        "Download directory is not writable.*"
+                        "cannot create download directory"
+                    ),
+                ):
+                    with TestClient(create_app()):
+                        pass
+        finally:
+            settings.database_path = old_db_path
+            settings.download_dir = old_download_dir
+            settings.debug = old_debug
+            reset_engine()
+
 
 class TestAppState:
     """Tests for application state initialization."""
