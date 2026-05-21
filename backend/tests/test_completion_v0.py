@@ -150,8 +150,8 @@ async def test_complete_global_download_reuses_existing_stored_file_for_same_con
     second_source = Path(settings.download_dir) / "downloading" / str(
         second_task["global_download_id"]
     )
-    first_source.mkdir(parents=True)
-    second_source.mkdir(parents=True)
+    first_source.mkdir(parents=True, exist_ok=True)
+    second_source.mkdir(parents=True, exist_ok=True)
     (first_source / "same.txt").write_bytes(b"same")
     (second_source / "same.txt").write_bytes(b"same")
 
@@ -214,7 +214,7 @@ async def test_create_user_download_attaches_late_subscriber_to_completed_file(
     source_path = Path(settings.download_dir) / "downloading" / str(
         first_task["global_download_id"]
     )
-    source_path.mkdir(parents=True)
+    source_path.mkdir(parents=True, exist_ok=True)
     (source_path / "done.txt").write_bytes(b"done")
     await complete_global_download(
         global_download_id=first_task["global_download_id"],
@@ -277,7 +277,7 @@ async def test_complete_global_download_restores_source_when_index_registration_
     source_path = Path(settings.download_dir) / "downloading" / str(
         task["global_download_id"]
     )
-    source_path.mkdir(parents=True)
+    source_path.mkdir(parents=True, exist_ok=True)
     (source_path / "file.txt").write_bytes(b"rollback")
 
     async def fail_registration(*args: object, **kwargs: object) -> tuple[dict, int]:

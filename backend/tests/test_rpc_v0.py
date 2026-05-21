@@ -7,7 +7,7 @@ import pytest
 
 from app.core.state import AppState
 from app.repositories.downloads import list_user_tasks
-from app.services.aria2_rpc_handler import Aria2RpcHandler
+from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
 from app.services.download_service import create_user_download
 from tests.helpers_v0 import create_user_v0
 
@@ -76,13 +76,35 @@ async def test_rpc_add_uri_creates_v0_task_and_returns_gid(temp_db: str) -> None
     assert rows[0]["aria2_gid"] == "gid-rpc-add-uri"
     assert rows[0]["status"] == "active"
     assert rows[0]["source_uri"] == "https://example.com/add.bin"
-    client.add_uri.assert_awaited_once_with(
-        [
-            "https://example.com/add.bin",
-            "https://mirror.example.com/add.bin",
-        ],
-        {"out": "add.bin"},
-    )
+    client.add_uri.assert_awaited_once()
+    call_args = client.add_uri.call_args
+    assert call_args[0][0] == [
+        "https://example.com/add.bin",
+        "https://mirror.example.com/add.bin",
+    ]
+    opts = call_args[0][1]
+    assert opts["out"] == "add.bin"
+    assert opts["seed-time"] == "0"
+    assert "dir" in opts
+
+
+@pytest.mark.asyncio
+async def test_rpc_add_uri_rejects_path_like_out_option(temp_db: str) -> None:
+    user = await create_user_v0(username="rpc_add_uri_bad_out")
+    client = AsyncMock()
+    client.add_uri.return_value = "gid-rpc-bad-out"
+    handler = Aria2RpcHandler(user["id"], client, AppState())
+
+    with pytest.raises(RpcError) as exc_info:
+        await handler.handle(
+            "aria2.addUri",
+            [["https://example.com/bad.bin"], {"out": "../evil"}],
+        )
+
+    assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
+    assert "invalid out option" in exc_info.value.message
+    client.add_uri.assert_not_awaited()
+    assert await list_user_tasks(user["id"]) == []
 
 
 @pytest.mark.asyncio
@@ -105,8 +127,11 @@ async def test_rpc_add_torrent_creates_v0_task_and_returns_gid(temp_db: str) -> 
     assert rows[0]["status"] == "active"
     assert rows[0]["resource_kind"] == "torrent"
     assert str(rows[0]["source_uri"]).startswith("magnet:?xt=urn:btih:")
-    client.add_torrent.assert_awaited_once_with(
-        torrent_data,
-        ["https://example.com/seed"],
-        {"out": "seed.torrent"},
-    )
+    client.add_torrent.assert_awaited_once()
+    call_args = client.add_torrent.call_args
+    assert call_args[0][0] == torrent_data
+    assert call_args[0][1] == ["https://example.com/seed"]
+    opts = call_args[0][2]
+    assert opts["out"] == "seed.torrent"
+    assert opts["seed-time"] == "0"
+    assert "dir" in opts

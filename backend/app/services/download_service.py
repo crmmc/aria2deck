@@ -33,6 +33,7 @@ from app.services.hash import calculate_content_hash_async
 from app.services.storage import (
     get_downloading_dir,
     get_store_path_for_hash,
+    get_task_download_dir,
     safe_delete_path,
 )
 from app.services.storage_index import build_entry_templates
@@ -45,6 +46,17 @@ logger = logging.getLogger(__name__)
 RETRYABLE_DOWNLOAD_STATUSES = {"failed", "cancelled"}
 RETRYABLE_TASK_STATUSES = {"failed", "cancelled"}
 CANCELABLE_TASK_STATUSES = set(ACTIVE_USER_TASK_STATUSES)
+_ALLOWED_USER_OPTIONS = frozenset(
+    (
+        "out",
+        "header",
+        "select-file",
+        "max-connection-per-server",
+        "http-user",
+        "http-passwd",
+        "bt-tracker",
+    )
+)
 
 
 class Aria2SubmitClient(Protocol):
@@ -168,6 +180,21 @@ def _restore_moved_source(store_path: Path, source_path: Path) -> None:
         return
     source_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(store_path), str(source_path))
+
+
+def _normalize_out_option(value: Any) -> str:
+    out = str(value)
+    if not out or out in {".", ".."} or "/" in out or "\\" in out:
+        raise ValueError(
+            "invalid out option: must be a filename without path separators"
+        )
+    return out
+
+
+def _validate_submit_options(options: Mapping[str, Any] | None) -> None:
+    if not options or "out" not in options:
+        return
+    _normalize_out_option(options["out"])
 
 
 async def complete_global_download(
@@ -341,6 +368,7 @@ async def _create_user_download_with_submit(
     options: Mapping[str, Any] | None,
     submit_download: Callable[[Mapping[str, Any] | None], Awaitable[str]],
 ) -> dict[str, Any]:
+    _validate_submit_options(options)
     requested_total_bytes = max(0, int(total_bytes))
     global_values = {
         "resource_key": resource_key,
@@ -494,7 +522,20 @@ async def _ensure_download_submitted(
         if current.get("aria2_gid") or current["status"] != "queued":
             return current
 
-        gid = await submit_download(options)
+        task_dir = get_task_download_dir(current["id"])
+        submit_options: dict[str, Any] = {
+            "dir": str(task_dir),
+            "seed-time": "0",
+        }
+        if options:
+            for key in _ALLOWED_USER_OPTIONS:
+                if key in options:
+                    if key == "out":
+                        submit_options[key] = _normalize_out_option(options[key])
+                    else:
+                        submit_options[key] = str(options[key])
+
+        gid = await submit_download(submit_options)
         try:
             updated = await update_global_download(
                 current["id"],

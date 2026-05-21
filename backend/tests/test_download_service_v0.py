@@ -77,6 +77,41 @@ async def test_create_download_reserves_user_space(temp_db: str):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("out_value", "resource_key"),
+    [
+        ("../evil", "http:bad-out-parent"),
+        ("nested/evil", "http:bad-out-posix"),
+        (r"nested\evil", "http:bad-out-windows"),
+    ],
+)
+async def test_create_download_rejects_path_like_out_option_before_submit(
+    temp_db: str,
+    out_value: str,
+    resource_key: str,
+) -> None:
+    user = await create_user_v0(username=f"reject_{resource_key.rsplit('-', 1)[-1]}")
+    client = AsyncMock()
+    client.add_uri.return_value = "gid-bad-out"
+
+    with pytest.raises(ValueError, match="invalid out option"):
+        await create_user_download(
+            user_id=user["id"],
+            quota_bytes=user["quota_bytes"],
+            uri=f"https://example.com/{resource_key}.bin",
+            resource_key=resource_key,
+            resource_kind="http",
+            display_name="bad-out.bin",
+            total_bytes=0,
+            aria2_client=client,
+            options={"out": out_value},
+        )
+
+    client.add_uri.assert_not_awaited()
+    assert await get_global_by_resource_key(resource_key) is None
+
+
+@pytest.mark.asyncio
 async def test_concurrent_same_user_create_keeps_single_reservation(
     temp_db: str,
 ) -> None:
@@ -253,11 +288,13 @@ async def test_create_torrent_download_submits_add_torrent_without_initial_reser
     assert global_download["resource_kind"] == "torrent"
     assert global_download["source_uri"] == "magnet:?xt=urn:btih:torrent:submit"
     assert global_download["aria2_gid"] == "gid-torrent-submit"
-    client.add_torrent.assert_awaited_once_with(
-        "base64-torrent",
-        [],
-        {"dir": "/tmp/downloads"},
-    )
+    client.add_torrent.assert_awaited_once()
+    call_args = client.add_torrent.call_args
+    assert call_args[0][0] == "base64-torrent"
+    assert call_args[0][1] == []
+    opts = call_args[0][2]
+    assert "dir" in opts
+    assert opts["seed-time"] == "0"
     client.add_uri.assert_not_awaited()
 
 

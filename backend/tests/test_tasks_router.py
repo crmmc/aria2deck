@@ -322,6 +322,38 @@ class TestCreateTask:
     @patch("app.routers.tasks.probe_url_with_get_fallback")
     @patch("app.routers.tasks._get_client")
     @patch("app.routers.tasks._check_disk_space")
+    def test_create_task_rejects_path_like_out_option(
+        self,
+        mock_disk: MagicMock,
+        mock_get_client: MagicMock,
+        mock_probe: AsyncMock,
+        authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_get_client.return_value = mock_aria2_client
+        mock_result = MagicMock()
+        mock_result.success = True
+        mock_result.final_url = "http://example.com/bad-out.zip"
+        mock_result.filename = "bad-out.zip"
+        mock_result.content_length = 1024
+        mock_probe.return_value = mock_result
+
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={
+                "uri": "http://example.com/bad-out.zip",
+                "options": {"out": "../evil"},
+            },
+        )
+
+        assert response.status_code == 400
+        assert "invalid out option" in response.json()["detail"]
+        mock_aria2_client.add_uri.assert_not_awaited()
+
+    @patch("app.routers.tasks.probe_url_with_get_fallback")
+    @patch("app.routers.tasks._get_client")
+    @patch("app.routers.tasks._check_disk_space")
     def test_create_task_success_creates_v0_user_task(
         self,
         mock_disk: MagicMock,
@@ -360,10 +392,13 @@ class TestCreateTask:
         task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
         assert task is not None
         assert data["id"] == task["id"]
-        mock_aria2_client.add_uri.assert_awaited_once_with(
-            ["http://example.com/file.zip"],
-            {},
-        )
+        mock_aria2_client.add_uri.assert_awaited_once()
+        call_args = mock_aria2_client.add_uri.call_args
+        assert call_args[0][0] == ["http://example.com/file.zip"]
+        opts = call_args[0][1]
+        assert "dir" in opts
+        assert opts["dir"].endswith(f"/downloading/{global_download['id']}")
+        assert opts["seed-time"] == "0"
 
 
 class TestCreateTorrentTask:
@@ -505,11 +540,14 @@ class TestCreateTorrentTask:
         task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
         assert task is not None
         assert data["id"] == task["id"]
-        mock_aria2_client.add_torrent.assert_awaited_once_with(
-            torrent_data,
-            [],
-            {"dir": "/tmp/downloads"},
-        )
+        mock_aria2_client.add_torrent.assert_awaited_once()
+        call_args = mock_aria2_client.add_torrent.call_args
+        assert call_args[0][0] == torrent_data
+        assert call_args[0][1] == []
+        opts = call_args[0][2]
+        assert "dir" in opts
+        assert opts["dir"].endswith(f"/downloading/{global_download['id']}")
+        assert opts["seed-time"] == "0"
 
 
 class _FakeWebSocket:
