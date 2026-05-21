@@ -354,7 +354,7 @@ class TestJsonrpcHandler:
         )
 
         async def fake_get_version(self):
-            return {"rpc_url": self._rpc_url, "secret": self._secret}
+            return {"version": "1.36.0", "enabledFeatures": ["BitTorrent"]}
 
         monkeypatch.setattr(Aria2Client, "get_version", fake_get_version)
 
@@ -369,8 +369,9 @@ class TestJsonrpcHandler:
         )
         assert response.status_code == 200
         data = response.json()
-        assert data["result"]["rpc_url"] == "http://new-rpc:6800/jsonrpc"
-        assert data["result"]["secret"] == "new-secret"
+        assert data["result"]["version"] == "1.36.0"
+        assert "rpc_url" not in data["result"]
+        assert "secret" not in data["result"]
         assert client.app.state.aria2_client._rpc_url == "http://new-rpc:6800/jsonrpc"
 
     def test_get_query_invalid_params_encoding(self, client: TestClient):

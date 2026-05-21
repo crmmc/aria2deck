@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import shutil
@@ -141,11 +142,7 @@ class Aria2RpcHandler:
         "aria2.getVersion",
         "aria2.changePosition",
         "aria2.getOption",
-        "aria2.changeOption",
         "aria2.getGlobalOption",
-        "aria2.changeGlobalOption",
-        "aria2.shutdown",
-        "aria2.forceShutdown",
         "aria2.saveSession",
         "aria2.purgeDownloadResult",
         "aria2.removeDownloadResult",
@@ -168,6 +165,7 @@ class Aria2RpcHandler:
         if app_state is None:
             raise RuntimeError("AppState is required for Aria2RpcHandler")
         self.app_state: AppState = app_state
+        self._multicall_depth: int = 0
 
     async def handle(self, method: str, params: list) -> Any:
         """路由到具体方法处理"""
@@ -523,15 +521,7 @@ class Aria2RpcHandler:
             ]
         else:
             enabled_features = []
-        result: dict[str, Any] = {
-            "version": version,
-            "enabledFeatures": enabled_features,
-        }
-        for key in ("rpc_url", "secret", "sessionId"):
-            value = version_info.get(key)
-            if isinstance(value, str):
-                result[key] = value
-        return result
+        return {"version": version, "enabledFeatures": enabled_features}
 
     @staticmethod
     def _is_bittorrent_uri(uri: str) -> bool:
@@ -758,16 +748,26 @@ class Aria2RpcHandler:
         return [self._apply_status_keys(item, keys) for item in statuses]
 
     async def _fetch_waiting_tasks(
-        self, max_items: int = 10000, page_size: int = 1000
+        self,
+        user_gids: set[str],
+        need_count: int,
+        max_items: int = 1000,
+        page_size: int = 200,
     ) -> list[dict]:
         offset = 0
         all_waiting: list[dict] = []
+        matched = 0
         while offset < max_items:
             batch_limit = min(page_size, max_items - offset)
             batch = await self.client.tell_waiting(offset, batch_limit)
             if not batch:
                 break
             all_waiting.extend(batch)
+            matched += sum(
+                1 for t in batch if str(t.get("gid") or "") in user_gids
+            )
+            if matched >= need_count:
+                break
             if len(batch) < batch_limit:
                 break
             offset += len(batch)
@@ -967,32 +967,48 @@ class Aria2RpcHandler:
             return self._apply_status_keys_to_list(statuses, keys)
 
         rows_by_gid = await self._get_current_rows_by_gid()
-        statuses: list[dict[str, Any]] = []
+        statuses: list[tuple[dict, dict]] = []
+        need_refresh: list[tuple[int, str]] = []
+        MAX_REFRESH_COUNT = 10
+
         for active in all_active:
             gid = str(active.get("gid") or "")
             row = rows_by_gid.get(gid)
             if row is None:
                 continue
             live = self._sanitize_status(active)
-            if self._status_needs_tell_status_refresh(live):
-                try:
-                    live = self._sanitize_status(await self.client.tell_status(gid))
-                except Exception as exc:
-                    logger.debug(
-                        "aria2.tellStatus refresh failed for active gid=%s user_id=%s",
-                        gid,
-                        self.user_id,
-                        exc_info=exc,
-                    )
-            statuses.append(rpc_view_service.status_from_task(row, live))
-        return self._apply_status_keys_to_list(statuses, keys)
+            idx = len(statuses)
+            statuses.append((row, live))
+            if (
+                self._status_needs_tell_status_refresh(live)
+                and len(need_refresh) < MAX_REFRESH_COUNT
+            ):
+                need_refresh.append((idx, gid))
+
+        if need_refresh:
+            refresh_results = await asyncio.gather(
+                *[self.client.tell_status(gid) for _, gid in need_refresh],
+                return_exceptions=True,
+            )
+            for (idx, _gid), result in zip(need_refresh, refresh_results):
+                if not isinstance(result, BaseException):
+                    statuses[idx] = (statuses[idx][0], self._sanitize_status(result))
+
+        result_list = [
+            rpc_view_service.status_from_task(row, live) for row, live in statuses
+        ]
+        return self._apply_status_keys_to_list(result_list, keys)
 
     async def _handle_tell_waiting(self, params: list) -> list:
         """aria2.tellWaiting(offset, num[, keys])"""
         offset, num = self._normalize_pagination(params)
         keys = self._extract_status_keys(params, 2)
+        rows_by_gid = await self._get_current_rows_by_gid()
         try:
-            all_waiting = await self._fetch_waiting_tasks()
+            all_waiting = await self._fetch_waiting_tasks(
+                user_gids=set(rows_by_gid.keys()),
+                need_count=offset + num,
+            )
         except Exception as exc:
             logger.warning(
                 "aria2.tellWaiting failed for user_id=%s",
@@ -1003,7 +1019,6 @@ class Aria2RpcHandler:
             sliced = self._slice_with_offset(statuses, offset, num)
             return self._apply_status_keys_to_list(sliced, keys)
 
-        rows_by_gid = await self._get_current_rows_by_gid()
         statuses: list[dict[str, Any]] = []
         for waiting in all_waiting:
             gid = str(waiting.get("gid") or "")
@@ -1173,14 +1188,8 @@ class Aria2RpcHandler:
     async def _handle_get_option(self, params: list) -> dict:
         return {}
 
-    async def _handle_change_option(self, params: list) -> str:
-        return "OK"
-
     async def _handle_get_global_option(self, params: list) -> dict:
         return {}
-
-    async def _handle_change_global_option(self, params: list) -> str:
-        return "OK"
 
     async def _handle_change_position(self, params: list) -> int:
         return 0
@@ -1236,12 +1245,6 @@ class Aria2RpcHandler:
             )
             return []
 
-    async def _handle_shutdown(self, params: list) -> str:
-        return "OK"
-
-    async def _handle_force_shutdown(self, params: list) -> str:
-        return "OK"
-
     async def _handle_save_session(self, params: list) -> str:
         return "OK"
 
@@ -1257,26 +1260,38 @@ class Aria2RpcHandler:
         """system.multicall(methods)"""
         if not params or not isinstance(params[0], list):
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "methods is required")
+        if self._multicall_depth >= 1:
+            raise RpcError(RpcErrorCode.INVALID_REQUEST, "Nested multicall is not allowed")
         methods = params[0]
-        results = []
-        for call in methods:
-            if not isinstance(call, dict):
-                results.append(
-                    {
-                        "faultCode": RpcErrorCode.INVALID_PARAMS,
-                        "faultString": "Invalid method call",
-                    }
-                )
-                continue
-            method_name = call.get("methodName", "")
-            method_params = self._strip_rpc_token(call.get("params", []))
-            try:
-                result = await self.handle(method_name, method_params)
-                results.append([result])
-            except RpcError as e:
-                results.append({"faultCode": e.code, "faultString": e.message})
-            except Exception as e:
-                results.append(
-                    {"faultCode": RpcErrorCode.INTERNAL_ERROR, "faultString": str(e)}
-                )
-        return results
+        MAX_MULTICALL_SIZE = 20
+        if len(methods) > MAX_MULTICALL_SIZE:
+            raise RpcError(
+                RpcErrorCode.INVALID_REQUEST,
+                f"Too many methods in multicall, max {MAX_MULTICALL_SIZE}",
+            )
+        self._multicall_depth += 1
+        try:
+            results = []
+            for call in methods:
+                if not isinstance(call, dict):
+                    results.append(
+                        {
+                            "faultCode": RpcErrorCode.INVALID_PARAMS,
+                            "faultString": "Invalid method call",
+                        }
+                    )
+                    continue
+                method_name = call.get("methodName", "")
+                method_params = self._strip_rpc_token(call.get("params", []))
+                try:
+                    result = await self.handle(method_name, method_params)
+                    results.append([result])
+                except RpcError as e:
+                    results.append({"faultCode": e.code, "faultString": e.message})
+                except Exception as e:
+                    results.append(
+                        {"faultCode": RpcErrorCode.INTERNAL_ERROR, "faultString": str(e)}
+                    )
+            return results
+        finally:
+            self._multicall_depth -= 1

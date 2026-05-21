@@ -358,6 +358,21 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
                 status_code=200
             )
 
+        MAX_BATCH_SIZE = 20
+        if len(body) > MAX_BATCH_SIZE:
+            logger.warning(
+                "RPC批量请求过大 ip=%s request_id=%s count=%s",
+                client_ip, request_id, len(body),
+            )
+            return JSONResponse(
+                content=build_jsonrpc_error(
+                    RpcErrorCode.INVALID_REQUEST,
+                    f"Batch too large, max {MAX_BATCH_SIZE} requests",
+                    None,
+                ),
+                status_code=200,
+            )
+
         for _ in range(max(0, len(body) - 1)):
             if not await rpc_limiter.is_allowed(client_ip, limit=rate_limit_config.rpc):
                 logger.warning("RPC批量请求被限流 ip=%s request_id=%s", client_ip, request_id)

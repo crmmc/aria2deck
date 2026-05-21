@@ -702,13 +702,17 @@ async def test_static_compat_methods(handler: Aria2RpcHandler) -> None:
     assert await handler.handle("aria2.forcePauseAll", []) == "OK"
     assert await handler.handle("aria2.unpauseAll", []) == "OK"
     assert await handler.handle("aria2.getOption", ["gid"]) == {}
-    assert await handler.handle("aria2.changeOption", ["gid", {}]) == "OK"
     assert await handler.handle("aria2.getGlobalOption", []) == {}
-    assert await handler.handle("aria2.changeGlobalOption", [{}]) == "OK"
     assert await handler.handle("aria2.changePosition", ["gid", 0, "POS_SET"]) == 0
     assert await handler.handle("aria2.getSessionInfo", []) == {
         "sessionId": "aria2deck-proxy-session"
     }
+    # Removed dangerous methods should raise METHOD_NOT_FOUND
+    for method in ("aria2.changeOption", "aria2.changeGlobalOption",
+                   "aria2.shutdown", "aria2.forceShutdown"):
+        with pytest.raises(RpcError) as exc_info:
+            await handler.handle(method, [])
+        assert exc_info.value.code == RpcErrorCode.METHOD_NOT_FOUND
 
 
 @pytest.mark.asyncio
