@@ -64,4 +64,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:${ARIA2C_PORT:-8001}/api/health || exit 1
 
 # Run application
-CMD uv run uvicorn app.main:app --host ${ARIA2C_HOST:-0.0.0.0} --port ${ARIA2C_PORT:-8001}
+CMD ["sh", "-c", "uv run uvicorn app.main:app --host ${ARIA2C_HOST:-0.0.0.0} --port ${ARIA2C_PORT:-8001}"]
