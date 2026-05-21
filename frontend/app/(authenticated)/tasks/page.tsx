@@ -158,11 +158,6 @@ const TaskCard = memo(function TaskCard({
                 {formatTaskProgressLabel(task)}
               </span>
             )}
-            {task.status === "active" && task.download_speed > 0 && (
-              <span className="task-speed-badge">
-                {formatBytes(task.download_speed)}/s
-              </span>
-            )}
           </div>
 
           <div className="task-footer-right">
