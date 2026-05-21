@@ -218,6 +218,7 @@ a:hover {
 
 /* Liquid Glass Frame - Updated for Sidebar compatibility */
 .glass-frame {
+  position: relative;
   background: rgba(255, 255, 255, 0.4);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
@@ -230,6 +231,47 @@ a:hover {
   width: 100%;
   min-height: auto;
   overflow-y: auto;
+}
+
+.glass-frame::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.4) 0%,
+    rgba(255, 255, 255, 0.05) 40%,
+    rgba(255, 255, 255, 0) 60%,
+    rgba(255, 255, 255, 0.15) 100%
+  );
+  pointer-events: none;
+  z-index: 1;
+}
+
+.glass-frame::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: inherit;
+  border: 1px solid transparent;
+  background: linear-gradient(
+    160deg,
+    rgba(255, 255, 255, 0.6) 0%,
+    rgba(255, 255, 255, 0) 30%,
+    rgba(255, 255, 255, 0) 70%,
+    rgba(255, 255, 255, 0.2) 100%
+  ) border-box;
+  -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.glass-frame > * {
+  position: relative;
+  z-index: 2;
 }
 
 /* Full height variant for main content pages */
