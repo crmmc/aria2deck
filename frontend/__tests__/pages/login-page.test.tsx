@@ -106,6 +106,25 @@ describe("LoginPage", () => {
     expect(document.activeElement).toBe(passwordInput);
   });
 
+  test("toggles password visibility from the password field control", async () => {
+    mockApi.me.mockRejectedValue(new ApiError("unauthorized", 401, true));
+
+    render(<LoginPage />);
+
+    await screen.findByPlaceholderText("用户名");
+    const passwordInput = screen.getByPlaceholderText("密码");
+
+    expect(passwordInput).toHaveAttribute("type", "password");
+
+    fireEvent.click(screen.getByRole("button", { name: "显示密码" }));
+
+    expect(passwordInput).toHaveAttribute("type", "text");
+
+    fireEvent.click(screen.getByRole("button", { name: "隐藏密码" }));
+
+    expect(passwordInput).toHaveAttribute("type", "password");
+  });
+
   test("logs warnings when auto-login or site info request fails unexpectedly", async () => {
     const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
     mockApi.me.mockRejectedValue(new Error("session check failed"));

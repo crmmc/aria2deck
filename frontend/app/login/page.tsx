@@ -2,12 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Eye, EyeOff } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 
 export default function LoginPage() {
   const { push } = useRouter();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordVisible, setPasswordVisible] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [siteTitle, setSiteTitle] = useState('aria2 控制器');
   const usernameInputRef = useRef<HTMLInputElement>(null);
@@ -108,14 +110,24 @@ export default function LoginPage() {
             />
           </div>
           <div className="mb-6">
-            <input
-              className="input"
-              type="password"
-              placeholder="密码"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
+            <div className="password-input-wrap">
+              <input
+                className="input password-input"
+                type={passwordVisible ? "text" : "password"}
+                placeholder="密码"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+              <button
+                aria-label={passwordVisible ? "隐藏密码" : "显示密码"}
+                className="password-visibility-button"
+                onClick={() => setPasswordVisible((visible) => !visible)}
+                type="button"
+              >
+                {passwordVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
+            </div>
           </div>
 
           {error ? (

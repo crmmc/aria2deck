@@ -319,6 +319,43 @@ p {
   box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.15);
 }
 
+.password-input-wrap {
+  position: relative;
+}
+
+.password-input {
+  padding-right: 48px;
+}
+
+.password-visibility-button {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+  transform: translateY(-50%);
+}
+
+.password-visibility-button:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--foreground);
+}
+
+.password-visibility-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.15);
+}
+
 /* Buttons */
 .button {
   display: inline-flex;
