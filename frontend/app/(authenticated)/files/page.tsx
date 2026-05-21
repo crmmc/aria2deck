@@ -821,8 +821,14 @@ export default function FilesPage() {
             <p className="muted">加载中...</p>
           </div>
         ) : sortedBrowseContents.length === 0 ? (
-          <div className="card text-center py-8">
-            <p className="muted">文件夹为空</p>
+          <div className="empty-state">
+            <div className="empty-state-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+            </div>
+            <p className="font-medium mb-1">文件夹为空</p>
+            <p className="muted text-base">此文件夹中没有文件</p>
           </div>
         ) : (
           <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
@@ -1028,8 +1034,15 @@ export default function FilesPage() {
             <p className="text-danger">{error}</p>
           </div>
         ) : sortedFiles.length === 0 ? (
-          <div className="card text-center py-8">
-            <p className="muted">暂无文件</p>
+          <div className="empty-state">
+            <div className="empty-state-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+            </div>
+            <p className="font-medium mb-1">暂无文件</p>
+            <p className="muted text-base">下载完成的文件将显示在这里</p>
           </div>
         ) : (
           <>

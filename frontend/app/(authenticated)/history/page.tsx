@@ -56,77 +56,75 @@ const HistoryCard = memo(function HistoryCard({
 
   return (
     <div
-      className={`card${record.uri ? " cursor-pointer" : ""}`}
+      className={`task-card-inner${isSelected ? " selected" : ""}${record.uri ? " cursor-pointer" : ""}`}
       onClick={record.uri ? handleCardClick : undefined}
       role={record.uri ? "button" : undefined}
       tabIndex={record.uri ? 0 : undefined}
       onKeyDown={record.uri ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCardClick(); } } : undefined}
     >
-      <div className={`task-card-inner${isSelected ? " selected" : ""}`}>
-        <div>
-          <div className="space-between flex-start mb-3">
-            <div className="task-card-header">
-              <input
-                type="checkbox"
-                checked={isSelected}
-                onChange={handleCheckboxChange}
-                onClick={(e) => e.stopPropagation()}
-                className="checkbox-sm mt-2 cursor-pointer"
-              />
-              <div className="overflow-hidden flex-1">
-                <h3 className="task-name" title={record.task_name}>
-                  {record.task_name}
-                </h3>
-                <div className="muted tabular-nums text-sm">
-                  {formatBytes(record.total_length)}
-                </div>
+      <div>
+        <div className="space-between flex-start mb-3">
+          <div className="task-card-header">
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={handleCheckboxChange}
+              onClick={(e) => e.stopPropagation()}
+              className="checkbox-sm mt-2 cursor-pointer"
+            />
+            <div className="overflow-hidden flex-1">
+              <h3 className="task-name" title={record.task_name}>
+                {record.task_name}
+              </h3>
+              <div className="muted tabular-nums text-sm">
+                {formatBytes(record.total_length)}
               </div>
             </div>
-            <span
-              className={`task-status ${statusClass}`}
-              style={{ marginLeft: "auto" }}
-            >
-              {statusText}
-            </span>
           </div>
-
-          {record.reason && (
-            <div
-              className={`text-sm mb-3 ${record.result === "failed" ? "text-danger" : "muted"}`}
-              title={record.reason}
-            >
-              {record.reason}
-            </div>
-          )}
+          <span
+            className={`task-status ${statusClass}`}
+            style={{ marginLeft: "auto" }}
+          >
+            {statusText}
+          </span>
         </div>
 
-        <div className="task-card-footer" role="presentation" onClick={(e) => e.stopPropagation()}>
-          <div className="task-footer-left">
-            <span className="muted text-sm" suppressHydrationWarning>
-              {new Date(record.finished_at).toLocaleString()}
-            </span>
+        {record.reason && (
+          <div
+            className={`text-sm mb-3 ${record.result === "failed" ? "text-danger" : "muted"}`}
+            title={record.reason}
+          >
+            {record.reason}
           </div>
+        )}
+      </div>
 
-          <div className="task-footer-right">
-            {record.uri && (
-              <button
-                className="button secondary btn-task"
-                onClick={handleCopyClick}
-                title="复制链接"
-              >
-                复制
-              </button>
-            )}
-            {record.result === "failed" && record.uri && (
-              <button
-                className="button secondary btn-task"
-                onClick={handleRetryClick}
-                title="重新下载"
-              >
-                重试
-              </button>
-            )}
-          </div>
+      <div className="task-card-footer" role="presentation" onClick={(e) => e.stopPropagation()}>
+        <div className="task-footer-left">
+          <span className="muted text-sm" suppressHydrationWarning>
+            {new Date(record.finished_at).toLocaleString()}
+          </span>
+        </div>
+
+        <div className="task-footer-right">
+          {record.uri && (
+            <button
+              className="button secondary btn-task"
+              onClick={handleCopyClick}
+              title="复制链接"
+            >
+              复制
+            </button>
+          )}
+          {record.result === "failed" && record.uri && (
+            <button
+              className="button secondary btn-task"
+              onClick={handleRetryClick}
+              title="重新下载"
+            >
+              重试
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -390,16 +388,18 @@ export default function HistoryPage() {
             <p className="muted text-base">完成的下载任务将显示在这里</p>
           </div>
         ) : (
-          filteredRecords.map((record) => (
-            <HistoryCard
-              key={record.id}
-              record={record}
-              isSelected={selectedRecords.has(record.id)}
-              onToggleSelection={toggleRecordSelection}
-              onCopyUri={copyUri}
-              onRetry={retryTask}
-            />
-          ))
+          <div className="card task-card-container">
+            {filteredRecords.map((record) => (
+              <HistoryCard
+                key={record.id}
+                record={record}
+                isSelected={selectedRecords.has(record.id)}
+                onToggleSelection={toggleRecordSelection}
+                onCopyUri={copyUri}
+                onRetry={retryTask}
+              />
+            ))}
+          </div>
         )}
       </div>
     </div>

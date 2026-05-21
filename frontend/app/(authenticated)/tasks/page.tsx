@@ -84,14 +84,13 @@ const TaskCard = memo(function TaskCard({
 
   return (
     <div
-      className={`card${task.uri ? " cursor-pointer" : ""}`}
+      className={`task-card-inner${isSelected ? " selected" : ""}${task.uri ? " cursor-pointer" : ""}`}
       onClick={task.uri ? handleCardClick : undefined}
       role={task.uri ? "button" : undefined}
       tabIndex={task.uri ? 0 : undefined}
       onKeyDown={task.uri ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCardClick(); } } : undefined}
     >
-      <div className={`task-card-inner${isSelected ? " selected" : ""}`}>
-        <div>
+      <div>
           <div className="space-between flex-start mb-3">
             <div className="task-card-header">
               <input
@@ -154,6 +153,16 @@ const TaskCard = memo(function TaskCard({
                 {task.error}
               </span>
             )}
+            {task.total_length > 0 && task.status !== "error" && (
+              <span className="task-progress-text">
+                {formatTaskProgressLabel(task)}
+              </span>
+            )}
+            {task.status === "active" && task.download_speed > 0 && (
+              <span className="task-speed-badge">
+                {formatBytes(task.download_speed)}/s
+              </span>
+            )}
           </div>
 
           <div className="task-footer-right">
@@ -194,19 +203,8 @@ const TaskCard = memo(function TaskCard({
                 删除
               </button>
             )}
-            {task.total_length > 0 && task.status !== "error" && (
-              <span className="task-progress-text">
-                {formatTaskProgressLabel(task)}
-              </span>
-            )}
-            {task.status === "active" && task.download_speed > 0 && (
-              <span className="task-speed-badge">
-                {formatBytes(task.download_speed)}/s
-              </span>
-            )}
           </div>
         </div>
-      </div>
     </div>
   );
 });
@@ -877,18 +875,22 @@ export default function TasksPage() {
             </div>
           )}
 
-          {filteredTasks.map((task) => (
-            <TaskCard
-              key={task.id}
-              task={task}
-              isSelected={selectedTasks.has(task.id)}
-              isOperating={operatingTaskIds.has(task.id)}
-              onToggleSelection={toggleTaskSelection}
-              onCancel={cancelTask}
-              onCopyUri={copyUri}
-              onRetry={retryTask}
-            />
-          ))}
+          {filteredTasks.length > 0 && (
+            <div className="card task-card-container">
+              {filteredTasks.map((task) => (
+                <TaskCard
+                  key={task.id}
+                  task={task}
+                  isSelected={selectedTasks.has(task.id)}
+                  isOperating={operatingTaskIds.has(task.id)}
+                  onToggleSelection={toggleTaskSelection}
+                  onCancel={cancelTask}
+                  onCopyUri={copyUri}
+                  onRetry={retryTask}
+                />
+              ))}
+            </div>
+          )}
         </div>
       </div>
 

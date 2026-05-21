@@ -1416,7 +1416,8 @@ p {
   color: var(--primary);
 }
 
-.task-status-waiting {
+.task-status-waiting,
+.task-status-queued {
   background: rgba(255, 149, 0, 0.1);
   color: var(--warning);
 }
@@ -1912,6 +1913,27 @@ p {
   border: 1px solid rgba(0, 0, 0, 0.1);
   border-radius: 12px;
   padding: 20px;
+}
+
+.task-card-container {
+  padding: 0;
+  overflow: hidden;
+}
+
+.task-card-container .task-card-inner {
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.task-card-container .task-card-inner:last-child {
+  border-bottom: none;
+}
+
+.task-card-container .task-card-inner:hover {
+  transform: none;
+  box-shadow: none;
+  background: rgba(0, 0, 0, 0.02);
 }
 
 .task-card-inner:hover {

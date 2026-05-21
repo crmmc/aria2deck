@@ -69,86 +69,84 @@ const ShareCard = memo(function ShareCard({
 
   return (
     <div
-      className="card cursor-pointer"
+      className={`task-card-inner${isSelected ? " selected" : ""} cursor-pointer`}
       onClick={handleCardClick}
       role="button"
       tabIndex={0}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCardClick(); } }}
     >
-      <div className={`task-card-inner${isSelected ? " selected" : ""}`}>
-        <div>
-          <div className="space-between flex-start mb-3">
-            <div className="task-card-header">
-              <input
-                type="checkbox"
-                checked={isSelected}
-                onChange={handleCheckboxChange}
-                onClick={(e) => e.stopPropagation()}
-                className="checkbox-sm mt-2 cursor-pointer"
-              />
-              <div className="overflow-hidden flex-1">
-                <h3 className="task-name" title={record.file_name}>
-                  {record.file_name} {record.has_password && <span className="muted text-sm ml-1" title="有密码">🔒</span>}
-                </h3>
-                <div className="muted tabular-nums text-sm">
-                  {formatBytes(record.file_size)}
-                </div>
+      <div>
+        <div className="space-between flex-start mb-3">
+          <div className="task-card-header">
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={handleCheckboxChange}
+              onClick={(e) => e.stopPropagation()}
+              className="checkbox-sm mt-2 cursor-pointer"
+            />
+            <div className="overflow-hidden flex-1">
+              <h3 className="task-name" title={record.file_name}>
+                {record.file_name} {record.has_password && <span className="muted text-sm ml-1" title="有密码">🔒</span>}
+              </h3>
+              <div className="muted tabular-nums text-sm">
+                {formatBytes(record.file_size)}
               </div>
             </div>
-            <span
-              className={`task-status ${statusClass}`}
-              style={{ marginLeft: "auto" }}
-            >
-              {statusText}
-            </span>
           </div>
-
-          <div className="text-sm mb-3 muted">
-            <div>提取码: {record.share_code}</div>
-            <div>
-              下载次数: {record.download_count}
-              {record.max_downloads != null && record.max_downloads > 0 ? ` / ${record.max_downloads}` : ""}
-            </div>
-            {record.expires_at && (
-              <div suppressHydrationWarning>
-                过期时间: {new Date(record.expires_at).toLocaleString()}
-              </div>
-            )}
-          </div>
+          <span
+            className={`task-status ${statusClass}`}
+            style={{ marginLeft: "auto" }}
+          >
+            {statusText}
+          </span>
         </div>
 
-        <div className="task-card-footer" role="presentation" onClick={(e) => e.stopPropagation()}>
-          <div className="task-footer-left">
-            <span className="muted text-sm" suppressHydrationWarning>
-              创建于 {new Date(record.created_at).toLocaleString()}
-            </span>
+        <div className="text-sm mb-3 muted">
+          <div>提取码: {record.share_code}</div>
+          <div>
+            下载次数: {record.download_count}
+            {record.max_downloads != null && record.max_downloads > 0 ? ` / ${record.max_downloads}` : ""}
           </div>
+          {record.expires_at && (
+            <div suppressHydrationWarning>
+              过期时间: {new Date(record.expires_at).toLocaleString()}
+            </div>
+          )}
+        </div>
+      </div>
 
-          <div className="task-footer-right">
+      <div className="task-card-footer" role="presentation" onClick={(e) => e.stopPropagation()}>
+        <div className="task-footer-left">
+          <span className="muted text-sm" suppressHydrationWarning>
+            创建于 {new Date(record.created_at).toLocaleString()}
+          </span>
+        </div>
+
+        <div className="task-footer-right">
+          <button
+            className="button secondary btn-sm"
+            onClick={handleCopyClick}
+            title="复制链接"
+          >
+            复制链接
+          </button>
+          {currentStatus === "active" && (
             <button
               className="button secondary btn-sm"
-              onClick={handleCopyClick}
-              title="复制链接"
+              onClick={handleRevokeClick}
+              title="失效"
             >
-              复制链接
+              失效
             </button>
-            {currentStatus === "active" && (
-              <button
-                className="button secondary btn-sm"
-                onClick={handleRevokeClick}
-                title="失效"
-              >
-                失效
-              </button>
-            )}
-            <button
-              className="button secondary danger btn-sm"
-              onClick={handleDeleteClick}
-              title="删除"
-            >
-              删除
-            </button>
-          </div>
+          )}
+          <button
+            className="button secondary danger btn-sm"
+            onClick={handleDeleteClick}
+            title="删除"
+          >
+            删除
+          </button>
         </div>
       </div>
     </div>
@@ -442,17 +440,19 @@ export default function SharesPage() {
             <p className="muted text-base">你创建的文件分享链接将显示在这里</p>
           </div>
         ) : (
-          filteredRecords.map((record) => (
-            <ShareCard
-              key={record.id}
-              record={record}
-              isSelected={selectedRecords.has(record.id)}
-              onToggleSelection={toggleRecordSelection}
-              onCopyLink={copyLink}
-              onRevoke={revokeShare}
-              onDelete={deleteShare}
-            />
-          ))
+          <div className="card task-card-container">
+            {filteredRecords.map((record) => (
+              <ShareCard
+                key={record.id}
+                record={record}
+                isSelected={selectedRecords.has(record.id)}
+                onToggleSelection={toggleRecordSelection}
+                onCopyLink={copyLink}
+                onRevoke={revokeShare}
+                onDelete={deleteShare}
+              />
+            ))}
+          </div>
         )}
       </div>
     </div>
