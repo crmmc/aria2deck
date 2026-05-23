@@ -7,6 +7,7 @@ import {
   useEffect,
   useCallback,
   useMemo,
+  useRef,
 } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { api, authEvents, ApiError } from "./api";
@@ -25,103 +26,148 @@ type AuthContextType = {
 };
 
 const AuthContext = createContext<AuthContextType | null>(null);
+const DEFAULT_SITE_TITLE = "aria2 控制器";
+
+type AuthState = {
+  user: User | null;
+  loading: boolean;
+  error: string | null;
+  siteTitle: string;
+};
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const { push } = useRouter();
   const pathname = usePathname();
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [authState, setAuthState] = useState<AuthState>({
+    user: null,
+    loading: true,
+    error: null,
+    siteTitle: DEFAULT_SITE_TITLE,
+  });
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
-  const [initialized, setInitialized] = useState(false);
-  const [isUnauthorized, setIsUnauthorized] = useState(false);
-  const [siteTitle, setSiteTitle] = useState<string>('aria2 控制器');
+  const initializedRef = useRef(false);
+  const isUnauthorizedRef = useRef(false);
+  const mountedRef = useRef(false);
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
+
+  const shouldRedirectToLogin = useCallback(
+    () => pathnameRef.current !== "/login" && !pathnameRef.current.startsWith("/s/"),
+    []
+  );
 
   const refreshUser = useCallback(async () => {
     try {
       const u = await api.me();
-      setUser(u);
-      setError(null);
+      setAuthState((prev) => ({ ...prev, user: u, error: null }));
     } catch (err) {
       if (err instanceof ApiError && err.isUnauthorized) {
-        setUser(null);
+        setAuthState((prev) => ({ ...prev, user: null }));
       }
       // 其他错误不清除用户状态
     }
   }, []);
 
-  const retryAuth = useCallback(() => {
-    setError(null);
-    setIsUnauthorized(false);
-    setInitialized(false);
-    setLoading(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
-  useEffect(() => {
-    if (initialized) return;
+  const initializeAuth = useCallback(async () => {
+    if (initializedRef.current) return;
+    if (!mountedRef.current) return;
+    initializedRef.current = true;
 
-    api
-      .me()
-      .then((u) => {
-        setUser(u);
-        setError(null);
-        setIsUnauthorized(false);
-        setInitialized(true);
-        // 获取网站标题（无需认证）
-        api
-          .getSiteInfo()
-          .then((info) => {
-            setSiteTitle(info.site_title);
-            document.title = info.site_title;
-          })
-          .catch((err: unknown) => {
-            console.warn("加载站点标题失败", err);
-          });
-      })
-      .catch((err) => {
+    const siteInfoPromise = api
+      .getSiteInfo()
+      .then((info) => info.site_title)
+      .catch((err: unknown) => {
+        console.warn("加载站点标题失败", err);
+        return DEFAULT_SITE_TITLE;
+      });
+    const userPromise = api.me();
+
+    const [siteTitle, userResult] = await Promise.all([
+      siteInfoPromise,
+      userPromise.then(
+        (u) => ({ ok: true as const, user: u }),
+        (err: unknown) => ({ ok: false as const, err })
+      ),
+    ]);
+
+    if (mountedRef.current) {
+      if (siteTitle !== DEFAULT_SITE_TITLE) {
+        document.title = siteTitle;
+      }
+
+      if (userResult.ok) {
+        isUnauthorizedRef.current = false;
+        setAuthState({
+          user: userResult.user,
+          error: null,
+          loading: false,
+          siteTitle,
+        });
+      } else {
+        let nextError: string | null = null;
+        const err = userResult.err;
         if (err instanceof ApiError) {
           if (err.isUnauthorized) {
             // 401: 未登录或会话过期
-            setUser(null);
-            setIsUnauthorized(true);
+            isUnauthorizedRef.current = true;
+            if (shouldRedirectToLogin()) {
+              push("/login");
+            }
           } else if (err.isNetworkError) {
             // 网络错误: 保留可能的用户状态，显示错误
-            setError("无法连接服务器，请检查网络连接");
+            nextError = "无法连接服务器，请检查网络连接";
           } else {
             // 其他服务器错误 (500 等)
-            setError(`服务器错误: ${err.message}`);
+            nextError = `服务器错误: ${err.message}`;
           }
         } else {
-          setError("未知错误");
+          nextError = "未知错误";
         }
-        setInitialized(true);
-      })
-      .finally(() => setLoading(false));
-  }, [initialized]);
+
+        setAuthState({
+          user: null,
+          error: nextError,
+          loading: false,
+          siteTitle,
+        });
+      }
+    }
+  }, [push, shouldRedirectToLogin]);
+
+  const retryAuth = useCallback(() => {
+    isUnauthorizedRef.current = false;
+    initializedRef.current = false;
+    setAuthState((prev) => ({ ...prev, error: null, loading: true }));
+    void initializeAuth();
+  }, [initializeAuth]);
 
   useEffect(() => {
-    // 只有确认是 401 未授权时才跳转登录页
-    if (!loading && isUnauthorized && pathname !== "/login" && !pathname.startsWith("/s/")) {
-      push("/login");
-    }
-  }, [loading, isUnauthorized, pathname, push]);
+    void initializeAuth();
+  }, [initializeAuth]);
 
   // 监听 401 错误，自动跳转登录页
   useEffect(() => {
     return authEvents.onUnauthorized(() => {
-      setUser(null);
-      setIsUnauthorized(true);
-      if (pathname !== "/login" && !pathname.startsWith("/s/")) {
+      isUnauthorizedRef.current = true;
+      setAuthState((prev) => ({ ...prev, user: null }));
+      if (shouldRedirectToLogin()) {
         push("/login");
       }
     });
-  }, [pathname, push]);
+  }, [push, shouldRedirectToLogin]);
 
   useEffect(() => {
-    if (siteTitle && siteTitle !== "aria2 控制器") {
-      document.title = siteTitle;
+    if (authState.siteTitle && authState.siteTitle !== DEFAULT_SITE_TITLE) {
+      document.title = authState.siteTitle;
     }
-  }, [pathname, siteTitle]);
+  }, [pathname, authState.siteTitle]);
 
   const logout = useCallback(async () => {
     try {
@@ -129,17 +175,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (err) {
       console.error("退出登录请求失败，已执行本地登出", err);
     }
-    setUser(null);
-    setIsUnauthorized(true);
+    isUnauthorizedRef.current = true;
+    setAuthState((prev) => ({ ...prev, user: null }));
     push("/login");
   }, [push]);
 
   const contextValue = useMemo(
     () => ({
-      user,
-      loading,
-      error,
-      siteTitle,
+      user: authState.user,
+      loading: authState.loading,
+      error: authState.error,
+      siteTitle: authState.siteTitle,
       sidebarExpanded,
       setSidebarExpanded,
       logout,
@@ -147,10 +193,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       retryAuth,
     }),
     [
-      user,
-      loading,
-      error,
-      siteTitle,
+      authState,
       sidebarExpanded,
       logout,
       refreshUser,

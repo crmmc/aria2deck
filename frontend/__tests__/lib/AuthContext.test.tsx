@@ -50,12 +50,13 @@ jest.mock("next/navigation", () => ({
 }));
 
 function TestComponent() {
-  const { user, loading, error, logout, refreshUser, retryAuth } = useAuth();
+  const { user, loading, error, logout, refreshUser, retryAuth, siteTitle } = useAuth();
   return (
     <div>
       <div data-testid="loading">{String(loading)}</div>
       <div data-testid="user">{user ? user.username : "null"}</div>
       <div data-testid="error">{error || "null"}</div>
+      <div data-testid="site-title">{siteTitle}</div>
       <button onClick={logout}>Logout</button>
       <button onClick={refreshUser}>Refresh</button>
       <button onClick={retryAuth}>Retry</button>
@@ -89,6 +90,7 @@ describe("AuthProvider", () => {
     mockRouter.push.mockClear();
     mockAuthEvents.listeners.clear();
     mockPathname = "/tasks";
+    mockApi.getSiteInfo.mockResolvedValue({ site_title: "Test Site" });
   });
 
   it("renders children", async () => {
@@ -158,6 +160,56 @@ describe("AuthProvider", () => {
     
     await waitFor(() => {
       expect(mockRouter.push).toHaveBeenCalledWith("/login");
+    });
+  });
+
+  it("does not redirect public share pages on initial 401", async () => {
+    const { ApiError: MockApiError } = jest.requireMock("@/lib/api");
+    mockPathname = "/s/public-code";
+    mockApi.me.mockRejectedValue(new MockApiError("Unauthorized", 401, true, false));
+
+    render(
+      <AuthProvider>
+        <TestComponent />
+      </AuthProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("loading").textContent).toBe("false");
+      expect(screen.getByTestId("user").textContent).toBe("null");
+    });
+
+    expect(mockRouter.push).not.toHaveBeenCalledWith("/login");
+  });
+
+  it("starts loading site info while auth check is still pending", async () => {
+    let resolveMe: (value: User) => void;
+    mockApi.me.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveMe = resolve;
+        })
+    );
+    mockApi.getSiteInfo.mockResolvedValue({ site_title: "Fast Site" });
+
+    render(
+      <AuthProvider>
+        <TestComponent />
+      </AuthProvider>
+    );
+
+    await waitFor(() => {
+      expect(mockApi.getSiteInfo).toHaveBeenCalled();
+    });
+    expect(screen.getByTestId("loading").textContent).toBe("true");
+
+    await act(async () => {
+      resolveMe!({ id: 1, username: "test", is_admin: false });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("site-title").textContent).toBe("Fast Site");
+      expect(document.title).toBe("Fast Site");
     });
   });
 

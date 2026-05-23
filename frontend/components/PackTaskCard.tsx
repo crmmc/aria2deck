@@ -19,18 +19,33 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
   const expandTimerRef = useRef<NodeJS.Timeout | null>(null);
   const timersRef = useRef<Set<NodeJS.Timeout>>(new Set());
+  const taskStatusRef = useRef<Map<number, PackTask["status"]>>(new Map());
+  const onTaskCompleteRef = useRef(onTaskComplete);
+  onTaskCompleteRef.current = onTaskComplete;
 
   const loadTasks = useCallback(async () => {
     try {
       const data = await api.listPackTasks();
+      const previousStatuses = taskStatusRef.current;
+      const completedFromActive = data.some((task) => {
+        const previousStatus = previousStatuses.get(task.id);
+        return (
+          task.status === "done" &&
+          (previousStatus === "pending" || previousStatus === "packing")
+        );
+      });
+      taskStatusRef.current = new Map(data.map((task) => [task.id, task.status]));
       setTasks(data);
+      if (completedFromActive) {
+        onTaskCompleteRef.current?.();
+      }
     } catch (err) {
       console.error("Failed to load pack tasks:", err);
     }
   }, []);
 
   useEffect(() => {
-    loadTasks();
+    void loadTasks();
   }, [loadTasks]);
 
   useEffect(() => {
@@ -46,20 +61,6 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
     }
     return undefined;
   }, [tasks, loadTasks]);
-
-  const notifiedTaskIdsRef = useRef<Set<number>>(new Set());
-  const onTaskCompleteRef = useRef(onTaskComplete);
-  onTaskCompleteRef.current = onTaskComplete;
-
-  useEffect(() => {
-    const newlyDone = tasks.filter(
-      (t) => t.status === "done" && !notifiedTaskIdsRef.current.has(t.id)
-    );
-    if (newlyDone.length > 0) {
-      newlyDone.forEach((t) => notifiedTaskIdsRef.current.add(t.id));
-      onTaskCompleteRef.current?.();
-    }
-  }, [tasks]);
 
   useEffect(() => {
     const timers = timersRef.current;

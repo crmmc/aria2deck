@@ -43,6 +43,8 @@ jest.mock("@/lib/api", () => ({
 
 const mockApi = api as jest.Mocked<typeof api>;
 const mockUseTaskWebSocket = useTaskWebSocket as jest.MockedFunction<typeof useTaskWebSocket>;
+let intervalCallbacks: Map<number, () => void>;
+let intervalId = 0;
 
 const activeTask = {
   id: 1,
@@ -63,8 +65,16 @@ describe("TasksPage", () => {
     jest.clearAllMocks();
     mockUseTaskWebSocket.mockImplementation(() => undefined);
     showConfirmMock.mockResolvedValue(true);
-    jest.spyOn(global, "setInterval").mockImplementation((() => 1) as never);
-    jest.spyOn(global, "clearInterval").mockImplementation((() => undefined) as never);
+    intervalCallbacks = new Map();
+    intervalId = 0;
+    jest.spyOn(global, "setInterval").mockImplementation(((callback: () => void) => {
+      intervalId += 1;
+      intervalCallbacks.set(intervalId, callback);
+      return intervalId;
+    }) as never);
+    jest.spyOn(global, "clearInterval").mockImplementation(((id: number) => {
+      intervalCallbacks.delete(id);
+    }) as never);
     mockApi.listTasks.mockImplementation(async (statusFilter?: string) => {
       if (statusFilter === "active") {
         return [activeTask];
@@ -180,5 +190,74 @@ describe("TasksPage", () => {
 
     expect(screen.getByText("ubuntu.iso")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+
+  test("pauses fallback polling while websocket is connected and resumes after disconnect", async () => {
+    let wsCallbacks: {
+      onConnected?: () => void;
+      onDisconnected?: () => void;
+    } | null = null;
+    mockUseTaskWebSocket.mockImplementation((callbacks) => {
+      wsCallbacks = callbacks;
+    });
+
+    render(<TasksPage />);
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+
+    act(() => {
+      wsCallbacks?.onConnected?.();
+    });
+
+    await waitFor(() => {
+      expect(mockApi.listTasks).toHaveBeenCalledWith("current");
+    });
+    mockApi.listTasks.mockClear();
+
+    act(() => {
+      intervalCallbacks.forEach((callback) => callback());
+    });
+
+    expect(mockApi.listTasks).not.toHaveBeenCalledWith("active");
+
+    act(() => {
+      wsCallbacks?.onDisconnected?.();
+    });
+    mockApi.listTasks.mockClear();
+
+    act(() => {
+      intervalCallbacks.forEach((callback) => callback());
+    });
+
+    await waitFor(() => {
+      expect(mockApi.listTasks).toHaveBeenCalledWith("active");
+    });
+  });
+
+  test("fallback polling refreshes current tasks when an active task disappears", async () => {
+    const queuedTask: Task = {
+      ...activeTask,
+      id: 2,
+      name: "queued.iso",
+      status: "queued",
+    };
+
+    mockApi.listTasks
+      .mockResolvedValueOnce([activeTask])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([queuedTask]);
+
+    render(<TasksPage />);
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+
+    act(() => {
+      intervalCallbacks.forEach((callback) => callback());
+    });
+
+    await waitFor(() => {
+      expect(mockApi.listTasks).toHaveBeenCalledWith("active");
+      expect(mockApi.listTasks).toHaveBeenCalledWith("current");
+      expect(screen.getByText("queued.iso")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("ubuntu.iso")).not.toBeInTheDocument();
   });
 });

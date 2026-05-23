@@ -115,11 +115,35 @@ describe("PackTaskCard", () => {
     });
   });
 
-  it("calls onTaskComplete when done task appears", async () => {
+  it("does not call onTaskComplete for tasks that are already done on first load", async () => {
     const onTaskComplete = jest.fn();
     mockApi.listPackTasks.mockResolvedValue([makeTask({ status: "done", id: 3 })]);
 
     render(<PackTaskCard onTaskComplete={onTaskComplete} />);
+
+    const trigger = await screen.findByRole("button", { name: /打包任务/ });
+    const wrapper = trigger.closest(".relative") as HTMLElement;
+    fireEvent.mouseEnter(wrapper);
+    act(() => {
+      jest.advanceTimersByTime(20);
+    });
+    expect(await screen.findByText("已完成")).toBeInTheDocument();
+    expect(onTaskComplete).not.toHaveBeenCalled();
+  });
+
+  it("calls onTaskComplete when an active task becomes done after polling", async () => {
+    const onTaskComplete = jest.fn();
+    mockApi.listPackTasks
+      .mockResolvedValueOnce([makeTask({ status: "packing", id: 7, progress: 50 })])
+      .mockResolvedValueOnce([makeTask({ status: "done", id: 7, progress: 100 })]);
+
+    render(<PackTaskCard onTaskComplete={onTaskComplete} />);
+
+    expect(await screen.findByRole("button", { name: /打包任务/ })).toBeInTheDocument();
+
+    await act(async () => {
+      jest.advanceTimersByTime(2000);
+    });
 
     await waitFor(() => {
       expect(onTaskComplete).toHaveBeenCalledTimes(1);

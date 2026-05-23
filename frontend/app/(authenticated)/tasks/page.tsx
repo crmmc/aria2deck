@@ -245,7 +245,6 @@ export default function TasksPage() {
   const [operatingTaskIds, setOperatingTaskIds] = useState<Set<number>>(
     new Set()
   );
-  const [wsConnected, setWsConnected] = useState(false);
 
   useEffect(() => {
     if (showBatchAddModal) {
@@ -260,6 +259,7 @@ export default function TasksPage() {
 
   const deletedTaskIdsRef = useRef<Set<number>>(new Set());
   const tasksRef = useRef<Task[]>([]);
+  const wsConnectedRef = useRef(false);
   tasksRef.current = tasks;
 
   useEffect(() => {
@@ -287,62 +287,59 @@ export default function TasksPage() {
       });
   }, [showToast]);
 
+  const pollTasks = useCallback(async () => {
+    if (wsConnectedRef.current) return;
+    try {
+      const activeTasks = await api.listTasks("active");
+      const activeMap = new Map(activeTasks.map((t) => [t.id, t]));
+      const updatedActive = activeTasks.filter(
+        (t) => !deletedTaskIdsRef.current.has(t.id)
+      );
+
+      let needRefresh = false;
+      const prevTasks = tasksRef.current;
+      const prevActive = prevTasks.filter(
+        (t) => t.status === "active" || t.status === "queued"
+      );
+      for (const t of prevActive) {
+        if (!activeMap.has(t.id) && !deletedTaskIdsRef.current.has(t.id)) {
+          needRefresh = true;
+          break;
+        }
+      }
+
+      let currentTasks: Task[] | null = null;
+      if (needRefresh) {
+        try {
+          currentTasks = await api.listTasks("current");
+        } catch (err: unknown) {
+          console.warn("刷新当前任务列表失败", err);
+        }
+      }
+
+      setTasks((prev) => {
+        const deletedIds = new Set(deletedTaskIdsRef.current);
+        deletedTaskIdsRef.current.clear();
+        if (currentTasks) {
+          return currentTasks.filter((t) => !deletedIds.has(t.id));
+        }
+        const nonActive = prev.filter(
+          (t) => t.status !== "active" && t.status !== "queued" && !deletedIds.has(t.id)
+        );
+        return [...updatedActive, ...nonActive];
+      });
+    } catch (err: unknown) {
+      console.warn("轮询活动任务失败", err);
+    }
+  }, []);
+
   useEffect(() => {
-    if (wsConnected) return;
-
     const pollInterval = setInterval(() => {
-      api
-        .listTasks("active")
-        .then((activeTasks) => {
-          const activeMap = new Map(activeTasks.map((t) => [t.id, t]));
-
-          const updatedActive = activeTasks.filter(
-            (t) => !deletedTaskIdsRef.current.has(t.id)
-          );
-
-          let needRefresh = false;
-          const prevTasks = tasksRef.current;
-          const prevActive = prevTasks.filter(
-            (t) => t.status === "active" || t.status === "queued"
-          );
-          for (const t of prevActive) {
-            if (!activeMap.has(t.id) && !deletedTaskIdsRef.current.has(t.id)) {
-              needRefresh = true;
-              break;
-            }
-          }
-
-          // Merge: update active/queued tasks, preserve other statuses (error etc.)
-          setTasks((prev) => {
-            const deletedIds = new Set(deletedTaskIdsRef.current);
-            deletedTaskIdsRef.current.clear();
-            const nonActive = prev.filter(
-              (t) => t.status !== "active" && t.status !== "queued" && !deletedIds.has(t.id)
-            );
-            return [...updatedActive, ...nonActive];
-          });
-
-          if (needRefresh) {
-            api
-              .listTasks("current")
-              .then((currentTasks) => {
-                setTasks((prev) => {
-                  const freshDeletedIds = new Set(deletedTaskIdsRef.current);
-                  return currentTasks.filter((t) => !freshDeletedIds.has(t.id));
-                });
-              })
-              .catch((err: unknown) => {
-                console.warn("刷新当前任务列表失败", err);
-              });
-          }
-        })
-        .catch((err: unknown) => {
-          console.warn("轮询活动任务失败", err);
-        });
+      void pollTasks();
     }, 5000);
 
     return () => clearInterval(pollInterval);
-  }, [wsConnected]);
+  }, [pollTasks]);
 
   const handleTaskUpdate = useCallback((newTask: Task) => {
     const taskId = newTask.id;
@@ -414,6 +411,7 @@ export default function TasksPage() {
   );
 
   const handleWsConnected = useCallback(() => {
+    wsConnectedRef.current = true;
     api
       .listTasks("current")
       .then((currentTasks) => {
@@ -426,11 +424,10 @@ export default function TasksPage() {
         const message = err instanceof Error ? err.message : "未知错误";
         showToast(`同步任务状态失败: ${message}`, "warning");
       });
-    setWsConnected(true);
   }, [showToast]);
 
   const handleWsDisconnected = useCallback(() => {
-    setWsConnected(false);
+    wsConnectedRef.current = false;
   }, []);
 
   useTaskWebSocket({
