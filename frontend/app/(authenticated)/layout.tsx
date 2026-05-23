@@ -45,7 +45,7 @@ export default function AuthenticatedLayout({ children }: { children: React.Reac
               </div>
               <p className="font-medium mb-1">连接失败</p>
               <p className="muted text-base mb-4">{error}</p>
-              <button
+              <button type="button"
                 className="button"
                 onClick={retryAuth}
               >

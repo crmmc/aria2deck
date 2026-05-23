@@ -17,13 +17,22 @@ type EditingUser = {
   quotaUnit: string;
 };
 
+type LoadState = {
+  currentUser: User | null;
+  loading: boolean;
+  loadError: string | null;
+};
+
 export default function UsersPage() {
   const { push } = useRouter();
   const { showToast } = useToast();
   const [users, setUsers] = useState<User[]>([]);
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadState, setLoadState] = useState<LoadState>({
+    currentUser: null,
+    loading: true,
+    loadError: null,
+  });
+  const { currentUser, loading, loadError } = loadState;
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -40,31 +49,33 @@ export default function UsersPage() {
 
   useEffect(() => {
     let mounted = true;
-    api
-      .me()
-      .then((me) => {
-        if (!mounted) return null;
-        setCurrentUser(me);
+
+    async function loadUsers() {
+      try {
+        const me = await api.me();
+        if (!mounted) return;
         if (!me.is_admin) {
+          setLoadState({ currentUser: me, loading: false, loadError: null });
           push("/tasks");
-          return null;
+          return;
         }
-        return api.listUsers();
-      })
-      .then((data) => {
-        if (!mounted || !data) return;
+
+        const data = await api.listUsers();
+        if (!mounted) return;
         setUsers(data);
-      })
-      .catch((err) => {
+        setLoadState({ currentUser: me, loading: false, loadError: null });
+      } catch (err) {
         if (!mounted) return;
         console.error(err);
-        setLoadError("加载用户列表失败");
-      })
-      .finally(() => {
-        if (mounted) {
-          setLoading(false);
-        }
-      });
+        setLoadState({
+          currentUser: null,
+          loading: false,
+          loadError: "加载用户列表失败",
+        });
+      }
+    }
+
+    loadUsers();
     return () => {
       mounted = false;
     };
@@ -224,6 +235,7 @@ export default function UsersPage() {
                 <label className="form-label" htmlFor="user-create-username">用户名</label>
                 <input
                   id="user-create-username"
+                  aria-label="用户名"
                   className="input"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
@@ -234,6 +246,7 @@ export default function UsersPage() {
                 <label className="form-label" htmlFor="user-create-password">密码</label>
                 <input
                   id="user-create-password"
+                  aria-label="密码"
                   className="input"
                   type="password"
                   value={password}
@@ -247,6 +260,7 @@ export default function UsersPage() {
                 <div className="flex gap-2">
                   <input
                     id="user-create-quota"
+                    aria-label="存储配额"
                     className="input flex-1"
                     type="number"
                     step="0.01"
@@ -256,6 +270,7 @@ export default function UsersPage() {
                     required
                   />
                   <select
+                    aria-label="存储配额单位"
                     className="input"
                     value={quotaUnit}
                     onChange={(e) => setQuotaUnit(e.target.value)}
@@ -271,6 +286,7 @@ export default function UsersPage() {
             <div className="create-user-actions">
               <label className="checkbox-label">
                 <input
+                  aria-label="管理员"
                   type="checkbox"
                   checked={isAdmin}
                   onChange={(e) => setIsAdmin(e.target.checked)}
@@ -311,14 +327,14 @@ export default function UsersPage() {
                   </td>
                   <td className="table-cell text-right">
                     <div className="flex gap-2 flex-end">
-                      <button
+                      <button type="button"
                         onClick={() => openEditModal(u)}
                         className="button secondary btn-sm"
                       >
                         编辑
                       </button>
                       {u.id !== currentUser?.id && (
-                        <button
+                        <button type="button"
                           onClick={() => openDeleteModal(u)}
                           className="button secondary danger btn-sm"
                         >
@@ -345,6 +361,7 @@ export default function UsersPage() {
                 <label className="form-label" htmlFor="user-edit-username">用户名</label>
                 <input
                   id="user-edit-username"
+                  aria-label="编辑用户名"
                   className="input"
                   value={editingUser.username}
                   onChange={(e) =>
@@ -359,6 +376,7 @@ export default function UsersPage() {
                 </label>
                 <input
                   id="user-edit-password"
+                  aria-label="编辑新密码"
                   className="input"
                   type="password"
                   value={editingUser.password}
@@ -374,6 +392,7 @@ export default function UsersPage() {
                 <div className="flex gap-2">
                   <input
                     id="user-edit-quota"
+                    aria-label="编辑存储配额"
                     className="input flex-1"
                     type="number"
                     step="0.01"
@@ -385,6 +404,7 @@ export default function UsersPage() {
                     required
                   />
                   <select
+                    aria-label="编辑存储配额单位"
                     className="input"
                     value={editingUser.quotaUnit}
                     onChange={(e) =>
@@ -401,6 +421,7 @@ export default function UsersPage() {
               <div className="mb-5">
                 <label className="checkbox-label">
                   <input
+                    aria-label="编辑管理员权限"
                     type="checkbox"
                     checked={editingUser.is_admin}
                     onChange={(e) =>

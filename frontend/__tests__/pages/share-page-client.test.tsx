@@ -71,6 +71,7 @@ describe("SharePageClient", () => {
     });
     const openSpy = jest.spyOn(window, "open").mockImplementation(() => null);
     fireEvent.click(await screen.findByRole("button", { name: "下载文件" }));
+    expect(mockApi.shareDownloadUrl).toHaveBeenCalledWith("abc123", "token-1");
     expect(openSpy).toHaveBeenCalledWith("http://localhost/download", "_blank");
     openSpy.mockRestore();
   });
@@ -143,6 +144,7 @@ describe("SharePageClient", () => {
     fireEvent.click(screen.getByRole("button", { name: "提取文件" }));
 
     expect(await screen.findByText("wrong password")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("请输入提取码")).toBeInTheDocument();
   });
 
   test("renders expired and exhausted share states", async () => {
@@ -214,8 +216,61 @@ describe("SharePageClient", () => {
 
     fireEvent.click(screen.getByText("nested"));
     expect(await screen.findByRole("button", { name: "↵ 返回上级" })).toBeInTheDocument();
+    expect(mockApi.browseShare).toHaveBeenLastCalledWith("dirnav", undefined, "nested");
     fireEvent.click(screen.getByRole("button", { name: "↵ 返回上级" }));
     expect(await screen.findByText("root.txt")).toBeInTheDocument();
+    expect(mockApi.browseShare).toHaveBeenLastCalledWith("dirnav", undefined, undefined);
+
+    openSpy.mockRestore();
+  });
+
+  test("uses access token when browsing and downloading an unlocked directory", async () => {
+    window.history.pushState({}, "", "/s/secret-folder");
+    mockApi.getShareInfo.mockResolvedValue({
+      file_name: "secret",
+      file_size: 0,
+      is_directory: true,
+      has_password: true,
+      is_expired: false,
+      is_exhausted: false,
+    } as never);
+    mockApi.accessShare.mockResolvedValue({ access_token: "dir-token" } as never);
+    mockApi.browseShare
+      .mockResolvedValueOnce([
+        { name: "nested", is_dir: true, size: 0, path: "nested" },
+        { name: "locked.txt", is_dir: false, size: 42, path: "locked.txt" },
+      ] as never)
+      .mockResolvedValueOnce([
+        { name: "inside.txt", is_dir: false, size: 10, path: "nested/inside.txt" },
+      ] as never);
+
+    const openSpy = jest.spyOn(window, "open").mockImplementation(() => null);
+    render(<SharePageClient />);
+
+    fireEvent.change(await screen.findByPlaceholderText("请输入提取码"), {
+      target: { value: "secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提取文件" }));
+
+    expect(await screen.findByText("locked.txt")).toBeInTheDocument();
+    expect(mockApi.accessShare).toHaveBeenCalledWith("secret-folder", "secret");
+    expect(mockApi.browseShare).toHaveBeenCalledWith("secret-folder", "dir-token", undefined);
+
+    fireEvent.click(screen.getByRole("button", { name: "下载" }));
+    expect(mockApi.shareDownloadUrl).toHaveBeenCalledWith(
+      "secret-folder",
+      "dir-token",
+      "locked.txt"
+    );
+    expect(openSpy).toHaveBeenCalledWith("http://localhost/download", "_blank");
+
+    fireEvent.click(screen.getByText("nested"));
+    expect(await screen.findByText("inside.txt")).toBeInTheDocument();
+    expect(mockApi.browseShare).toHaveBeenLastCalledWith(
+      "secret-folder",
+      "dir-token",
+      "nested"
+    );
 
     openSpy.mockRestore();
   });
@@ -236,6 +291,31 @@ describe("SharePageClient", () => {
 
     await waitFor(() => {
       expect(console.warn).toHaveBeenCalledWith("加载站点标题失败", expect.any(Error));
+    });
+  });
+
+  test("updates document title when site info resolves after share info", async () => {
+    window.history.pushState({}, "", "/s/title1");
+    const siteInfoDeferred = createDeferred<{ site_title: string }>();
+    mockApi.getSiteInfo.mockReturnValueOnce(siteInfoDeferred.promise as never);
+    mockApi.getShareInfo.mockResolvedValue({
+      file_name: "demo.zip",
+      file_size: 1024,
+      is_directory: false,
+      has_password: false,
+      is_expired: false,
+      is_exhausted: false,
+    } as never);
+
+    render(<SharePageClient />);
+
+    expect(await screen.findByRole("button", { name: "下载文件" })).toBeInTheDocument();
+    expect(document.title).toBe("demo.zip - aria2 控制器");
+
+    siteInfoDeferred.resolve({ site_title: "Late Site" });
+
+    await waitFor(() => {
+      expect(document.title).toBe("demo.zip - Late Site");
     });
   });
 });

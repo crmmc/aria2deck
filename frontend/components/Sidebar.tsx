@@ -357,7 +357,7 @@ function SidebarContent({ user }: SidebarProps) {
         </nav>
 
         <div className="sidebar-footer">
-          <button onClick={logout} className="nav-item logout-btn">
+          <button type="button" onClick={logout} className="nav-item logout-btn">
             <span className="nav-icon">
               <LogoutIcon />
             </span>

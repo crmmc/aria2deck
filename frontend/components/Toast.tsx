@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ModalOverlay } from "@/components/ModalOverlay";
 
@@ -47,12 +47,15 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [mounted, setMounted] = useState(false);
   const toastTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const confirmRef = useRef<ConfirmState | null>(null);
+  const confirmResolvers = useRef<Set<ConfirmState["resolve"]>>(new Set());
 
   useEffect(() => {
+    const timers = toastTimers.current;
+    const resolvers = confirmResolvers.current;
     setMounted(true);
     return () => {
-      toastTimers.current.forEach(clearTimeout);
-      confirmRef.current?.resolve(false);
+      timers.forEach(clearTimeout);
+      resolvers.forEach((resolve) => resolve(false));
     };
   }, []);
 
@@ -70,12 +73,17 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     return new Promise((resolve) => {
       const state = { ...options, resolve };
       confirmRef.current = state;
+      confirmResolvers.current.add(resolve);
       setConfirm(state);
     });
   }, []);
 
   const handleConfirm = useCallback((result: boolean) => {
-    confirmRef.current?.resolve(result);
+    const current = confirmRef.current;
+    current?.resolve(result);
+    if (current) {
+      confirmResolvers.current.delete(current.resolve);
+    }
     confirmRef.current = null;
     setConfirm(null);
   }, []);
@@ -98,8 +106,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const contextValue = useMemo(
+    () => ({ showToast, showConfirm }),
+    [showToast, showConfirm]
+  );
+
   return (
-    <ToastContext.Provider value={{ showToast, showConfirm }}>
+    <ToastContext.Provider value={contextValue}>
       {children}
       {typeof window !== "undefined" &&
         mounted &&
@@ -125,13 +138,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                   )}
                   <p className="confirm-message">{confirm.message}</p>
                   <div className="flex gap-3 flex-end">
-                    <button
+                    <button type="button"
                       className="button secondary"
                       onClick={() => handleConfirm(false)}
                     >
                       {confirm.cancelText || "取消"}
                     </button>
-                    <button
+                    <button type="button"
                       className="button"
                       style={confirm.danger ? { background: "var(--danger)" } : undefined}
                       onClick={() => handleConfirm(true)}

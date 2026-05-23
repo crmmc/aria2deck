@@ -101,11 +101,11 @@ export default function FilesPage() {
     };
   }, [showSearchModal]);
 
-  const loadFiles = useCallback(async (page?: number, size?: number) => {
+  const loadFiles = useCallback(async (page: number, size: number) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await api.listFiles(page ?? currentPage, size ?? pageSize);
+      const response = await api.listFiles(page, size);
       setFiles(response.files);
       setSpace(response.space);
       setTotalFiles(response.total);
@@ -115,34 +115,11 @@ export default function FilesPage() {
     } finally {
       setLoading(false);
     }
-  }, [currentPage, pageSize]);
+  }, []);
 
   useEffect(() => {
-    loadFiles();
-  }, [loadFiles]);
-
-  // Focus search modal input when opened
-  useEffect(() => {
-    if (showSearchModal && searchModalInputRef.current) {
-      searchModalInputRef.current.focus();
-    }
-  }, [showSearchModal]);
-
-  // Keyboard shortcut for search (Cmd/Ctrl + F)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "f") {
-        if (browseContext) return; // Disable search inside folder
-        e.preventDefault();
-        openSearchModal();
-      }
-      if (e.key === "Escape" && showSearchModal) {
-        closeSearchModal();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showSearchModal, toolbarSearchKeyword, browseContext]);
+    loadFiles(currentPage, pageSize);
+  }, [currentPage, pageSize, loadFiles]);
 
   // Sorted files (folders first, then by sort field)
   const sortedFiles = useMemo(() => {
@@ -205,14 +182,37 @@ export default function FilesPage() {
   };
 
   // Search modal handlers
-  const openSearchModal = () => {
+  const openSearchModal = useCallback(() => {
     setSearchKeyword(toolbarSearchKeyword);
     setShowSearchModal(true);
-  };
+  }, [toolbarSearchKeyword]);
 
-  const closeSearchModal = () => {
+  const closeSearchModal = useCallback(() => {
     setShowSearchModal(false);
-  };
+  }, []);
+
+  // Focus search modal input when opened
+  useEffect(() => {
+    if (showSearchModal && searchModalInputRef.current) {
+      searchModalInputRef.current.focus();
+    }
+  }, [showSearchModal]);
+
+  // Keyboard shortcut for search (Cmd/Ctrl + F)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+        if (browseContext) return; // Disable search inside folder
+        e.preventDefault();
+        openSearchModal();
+      }
+      if (e.key === "Escape" && showSearchModal) {
+        closeSearchModal();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [browseContext, closeSearchModal, openSearchModal, showSearchModal]);
 
   const handleToolbarSearchKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
@@ -249,7 +249,7 @@ export default function FilesPage() {
 
     try {
       await api.deleteFile(file.content_hash);
-      loadFiles();
+      loadFiles(currentPage, pageSize);
     } catch (err) {
       showToast(`删除失败: ${(err as Error).message}`, "error");
     }
@@ -280,8 +280,9 @@ export default function FilesPage() {
       const targetPage = Math.min(currentPage, maxPage);
       if (targetPage !== currentPage) {
         setCurrentPage(targetPage);
+      } else {
+        loadFiles(targetPage, pageSize);
       }
-      loadFiles(targetPage);
     } catch (err) {
       showToast(`删除失败: ${(err as Error).message}`, "error");
     } finally {
@@ -405,7 +406,7 @@ export default function FilesPage() {
       await api.renameFile(file.content_hash, newName.trim());
       setRenaming(null);
       setNewName("");
-      loadFiles();
+      loadFiles(currentPage, pageSize);
     } catch (err) {
       showToast(`重命名失败: ${(err as Error).message}`, "error");
     }
@@ -559,8 +560,8 @@ export default function FilesPage() {
   };
 
   const handlePackTaskComplete = useCallback(() => {
-    loadFiles();
-  }, [loadFiles]);
+    loadFiles(currentPage, pageSize);
+  }, [currentPage, pageSize, loadFiles]);
 
   // Space display helpers
   const getSpacePercentage = (space: SpaceInfo) => {
@@ -714,6 +715,7 @@ export default function FilesPage() {
             </svg>
             <input
               type="text"
+              aria-label="搜索文件名"
               className="toolbar-search-input"
               placeholder={isMobile ? "搜索文件..." : "搜索文件名... (回车搜索)"}
               value={toolbarSearchKeyword}
@@ -724,6 +726,7 @@ export default function FilesPage() {
               <button
                 type="button"
                 className="search-clear-btn"
+                aria-label="清空文件搜索"
                 onClick={() => setToolbarSearchKeyword("")}
               >
                 ✕
@@ -837,6 +840,7 @@ export default function FilesPage() {
                 <div className="table-cell text-left">
                   <input
                     type="checkbox"
+                    aria-label="选择当前文件夹全部文件"
                     checked={(() => {
                       const allKeys = browseContents
                         .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
@@ -846,13 +850,13 @@ export default function FilesPage() {
                     className="checkbox-sm cursor-pointer"
                   />
                 </div>
-                <button
+                <button type="button"
                   className="table-cell text-left sortable-header"
                   onClick={() => handleSort("name")}
                 >
                   名称 <span className="sort-icon">{getSortIcon("name")}</span>
                 </button>
-                <button
+                <button type="button"
                   className="table-cell text-right sortable-header"
                   onClick={() => handleSort("size")}
                 >
@@ -871,6 +875,7 @@ export default function FilesPage() {
                       <div className="card-header">
                         <input
                           type="checkbox"
+                          aria-label={`选择 ${item.name}`}
                           checked={selectedBrowseFiles.has(itemKey)}
                           onChange={() => toggleBrowseFileSelection(item)}
                           className="checkbox-sm cursor-pointer"
@@ -880,7 +885,7 @@ export default function FilesPage() {
                             {item.is_directory ? "📁" : "📄"}
                           </span>
                           {item.is_directory ? (
-                            <button
+                            <button type="button"
                               className="mobile-name"
                               onClick={() => navigateIntoSubfolder(item.name)}
                             >
@@ -896,14 +901,14 @@ export default function FilesPage() {
                       </div>
                       <div className="card-actions">
                         {item.is_directory ? (
-                          <button
+                          <button type="button"
                             className="button secondary btn-sm"
                             onClick={() => navigateIntoSubfolder(item.name)}
                           >
                             打开
                           </button>
                         ) : (
-                          <button
+                          <button type="button"
                             className="button secondary btn-sm"
                             onClick={() => {
                               handleDownload(
@@ -917,7 +922,7 @@ export default function FilesPage() {
                             下载
                           </button>
                         )}
-                        <button
+                        <button type="button"
                           className="button secondary danger btn-sm"
                           onClick={() => {
                             showToast("文件夹内暂不支持在此页面单文件直接删除", "warning");
@@ -959,6 +964,7 @@ export default function FilesPage() {
                               <div className="table-cell" style={{ paddingTop: '20px' }}>
                                 <input
                                   type="checkbox"
+                                  aria-label={`选择 ${item.name}`}
                                   checked={selectedBrowseFiles.has(itemKey)}
                                   onChange={() => toggleBrowseFileSelection(item)}
                                   className="checkbox-sm cursor-pointer"
@@ -970,7 +976,7 @@ export default function FilesPage() {
                                     {item.is_directory ? "📁" : "📄"}
                                   </span>
                                   {item.is_directory ? (
-                                    <button
+                                    <button type="button"
                                       className="file-name-btn"
                                       onClick={() => navigateIntoSubfolder(item.name)}
                                       title={item.name}
@@ -989,14 +995,14 @@ export default function FilesPage() {
                               <div className="table-cell text-right" style={{ paddingTop: '14px' }}>
                                 <div className="flex gap-2 flex-end">
                                   {item.is_directory ? (
-                                    <button
+                                    <button type="button"
                                       className="button secondary btn-sm"
                                       onClick={() => navigateIntoSubfolder(item.name)}
                                     >
                                       打开
                                     </button>
                                   ) : (
-                                    <button
+                                    <button type="button"
                                       className="button secondary btn-sm"
                                       onClick={() =>
                                         handleDownload(
@@ -1052,24 +1058,25 @@ export default function FilesPage() {
                 <div className="table-cell text-left">
                   <input
                     type="checkbox"
+                    aria-label="选择全部文件"
                     checked={selectedFiles.size === sortedFiles.length && sortedFiles.length > 0}
                     onChange={toggleSelectAll}
                     className="checkbox-sm cursor-pointer"
                   />
                 </div>
-                <button
+                <button type="button"
                   className="table-cell text-left sortable-header"
                   onClick={() => handleSort("name")}
                 >
                   名称 <span className="sort-icon">{getSortIcon("name")}</span>
                 </button>
-                <button
+                <button type="button"
                   className="table-cell text-right sortable-header"
                   onClick={() => handleSort("size")}
                 >
                   大小 <span className="sort-icon">{getSortIcon("size")}</span>
                 </button>
-                <button
+                <button type="button"
                   className="table-cell text-right sortable-header"
                   onClick={() => handleSort("created_at")}
                 >
@@ -1086,6 +1093,7 @@ export default function FilesPage() {
                     <div className="card-header">
                       <input
                         type="checkbox"
+                        aria-label={`选择 ${file.name}`}
                         checked={selectedFiles.has(file.id)}
                         onChange={() => toggleFileSelection(file.id)}
                         className="checkbox-sm cursor-pointer"
@@ -1096,9 +1104,10 @@ export default function FilesPage() {
                         </span>
                         {renaming === file.id ? (
                           <div className="flex gap-2 flex-1" style={{ minWidth: 0 }}>
-                            <input
-                              className="input py-1 px-3 text-base"
-                              value={newName}
+                              <input
+                                className="input py-1 px-3 text-base"
+                                aria-label={`重命名 ${file.name}`}
+                                value={newName}
                               onChange={(e) => setNewName(e.target.value)}
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") handleRename(file);
@@ -1107,13 +1116,13 @@ export default function FilesPage() {
                               ref={(el) => el?.focus()}
                               onClick={(e) => e.stopPropagation()}
                             />
-                            <button
+                            <button type="button"
                               className="button secondary btn-sm"
                               onClick={(e) => { e.stopPropagation(); handleRename(file); }}
                             >
                               ✓
                             </button>
-                            <button
+                            <button type="button"
                               className="button secondary btn-sm"
                               onClick={(e) => { e.stopPropagation(); cancelRename(); }}
                             >
@@ -1122,7 +1131,7 @@ export default function FilesPage() {
                           </div>
                         ) : (
                           file.is_directory ? (
-                            <button
+                            <button type="button"
                               className="mobile-name"
                               onClick={() => enterFolder(file)}
                             >
@@ -1139,14 +1148,14 @@ export default function FilesPage() {
                     </div>
                     <div className="card-actions">
                       {file.is_directory ? (
-                        <button
+                        <button type="button"
                           className="button secondary btn-sm"
                           onClick={() => enterFolder(file)}
                         >
                           浏览
                         </button>
                       ) : (
-                        <button
+                        <button type="button"
                           className="button secondary btn-sm"
                           onClick={() => handleDownload(file.content_hash, file.name, file.id)}
                           disabled={downloadingFile === file.id}
@@ -1154,19 +1163,19 @@ export default function FilesPage() {
                           {downloadingFile === file.id ? "下载中..." : "下载"}
                         </button>
                       )}
-                      <button
+                      <button type="button"
                         className="button secondary btn-sm"
                         onClick={() => startRename(file)}
                       >
                         重命名
                       </button>
-                      <button
+                      <button type="button"
                         className="button secondary btn-sm"
                         onClick={() => setShareDialogFile({ id: file.id, name: file.name })}
                       >
                         分享
                       </button>
-                      <button
+                      <button type="button"
                         className="button secondary danger btn-sm"
                         onClick={() => handleDelete(file)}
                       >
@@ -1204,6 +1213,7 @@ export default function FilesPage() {
                               <div className="table-cell" style={{ paddingTop: '20px' }}>
                                 <input
                                   type="checkbox"
+                                  aria-label={`选择 ${file.name}`}
                                   checked={selectedFiles.has(file.id)}
                                   onChange={() => toggleFileSelection(file.id)}
                                   className="checkbox-sm cursor-pointer"
@@ -1214,6 +1224,7 @@ export default function FilesPage() {
                                   <div className="flex gap-2">
                                     <input
                                       className="input py-1 px-3 text-base"
+                                      aria-label={`重命名 ${file.name}`}
                                       value={newName}
                                       onChange={(e) => setNewName(e.target.value)}
                                       onKeyDown={(e) => {
@@ -1223,13 +1234,13 @@ export default function FilesPage() {
                                       ref={(el) => el?.focus()}
                                       onClick={(e) => e.stopPropagation()}
                                     />
-                                    <button
+                                    <button type="button"
                                       className="button secondary btn-sm"
                                       onClick={(e) => { e.stopPropagation(); handleRename(file); }}
                                     >
                                       ✓
                                     </button>
-                                    <button
+                                    <button type="button"
                                       className="button secondary btn-sm"
                                       onClick={(e) => { e.stopPropagation(); cancelRename(); }}
                                     >
@@ -1242,7 +1253,7 @@ export default function FilesPage() {
                                       {file.is_directory ? "📁" : "📄"}
                                     </span>
                                     {file.is_directory ? (
-                                      <button
+                                      <button type="button"
                                         className="file-name-btn"
                                         onClick={() => enterFolder(file)}
                                         title={file.name}
@@ -1265,14 +1276,14 @@ export default function FilesPage() {
                               <div className="table-cell text-right" style={{ paddingTop: '14px' }}>
                                 <div className="flex gap-2 flex-end">
                                   {file.is_directory ? (
-                                    <button
+                                    <button type="button"
                                       className="button secondary btn-sm"
                                       onClick={() => enterFolder(file)}
                                     >
                                       浏览
                                     </button>
                                   ) : (
-                                    <button
+                                    <button type="button"
                                       className="button secondary btn-sm"
                                       onClick={() => handleDownload(file.content_hash, file.name, file.id)}
                                       disabled={downloadingFile === file.id}
@@ -1280,19 +1291,19 @@ export default function FilesPage() {
                                       {downloadingFile === file.id ? "下载中..." : "下载"}
                                     </button>
                                   )}
-                                  <button
+                                  <button type="button"
                                     className="button secondary btn-sm"
                                     onClick={() => startRename(file)}
                                   >
                                     重命名
                                   </button>
-                                  <button
+                                  <button type="button"
                                     className="button secondary btn-sm"
                                     onClick={() => setShareDialogFile({ id: file.id, name: file.name })}
                                   >
                                     分享
                                   </button>
-                                  <button
+                                  <button type="button"
                                     className="button secondary danger btn-sm"
                                     onClick={() => handleDelete(file)}
                                   >
@@ -1330,7 +1341,6 @@ export default function FilesPage() {
                     const s = Number(e.target.value);
                     setPageSize(s);
                     setCurrentPage(1);
-                    loadFiles(1, s);
                   }}
                 >
                   {[10, 20, 30, 50, 100].map((n) => (
@@ -1341,29 +1351,29 @@ export default function FilesPage() {
                   共 {totalFiles} 项
                 </span>
                 <div className="flex items-center gap-0" style={{ marginLeft: 8 }}>
-                  <button
+                  <button type="button"
                     className="button secondary btn-sm"
                     style={{ borderRadius: '4px 0 0 4px' }}
                     disabled={currentPage <= 1}
-                    onClick={() => { setCurrentPage(p => p - 1); loadFiles(currentPage - 1); }}
+                    onClick={() => setCurrentPage(p => p - 1)}
                   >
                     ‹
                   </button>
                   {pages.map((p) => (
-                    <button
+                    <button type="button"
                       key={p}
                       className={`button btn-sm ${p === currentPage ? 'primary' : 'secondary'}`}
                       style={{ borderRadius: 0, minWidth: 32 }}
-                      onClick={() => { if (p !== currentPage) { setCurrentPage(p); loadFiles(p); } }}
+                      onClick={() => { if (p !== currentPage) setCurrentPage(p); }}
                     >
                       {p}
                     </button>
                   ))}
-                  <button
+                  <button type="button"
                     className="button secondary btn-sm"
                     style={{ borderRadius: '0 4px 4px 0' }}
                     disabled={currentPage >= totalPages}
-                    onClick={() => { setCurrentPage(p => p + 1); loadFiles(currentPage + 1); }}
+                    onClick={() => setCurrentPage(p => p + 1)}
                   >
                     ›
                   </button>
@@ -1399,14 +1409,16 @@ export default function FilesPage() {
               <input
                 ref={searchModalInputRef}
                 type="text"
+                aria-label="搜索文件名"
                 className="search-modal-input"
                 placeholder="搜索文件名..."
                 value={searchKeyword}
                 onChange={(e) => handleSearchModalInputChange(e.target.value)}
               />
               {searchKeyword && (
-                <button
+                <button type="button"
                   className="search-modal-clear"
+                  aria-label="清空搜索"
                   onClick={() => handleSearchModalInputChange("")}
                 >
                   ✕
@@ -1427,13 +1439,11 @@ export default function FilesPage() {
               ) : (
                 <div className="search-results-list">
                   {searchResults.map((file) => (
-                    <div
+                    <button
+                      type="button"
                       key={file.id}
                       className="search-result-item"
-                      role="button"
-                      tabIndex={0}
                       onClick={() => handleSearchResultClick(file)}
-                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleSearchResultClick(file); } }}
                     >
                       <span className="file-icon">
                         {file.is_directory ? "📁" : "📄"}
@@ -1444,7 +1454,7 @@ export default function FilesPage() {
                           {formatBytes(file.size)} · {formatDate(file.created_at)}
                         </span>
                       </div>
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}
@@ -1514,6 +1524,7 @@ export default function FilesPage() {
                   <input
                     id="pack-output-name"
                     type="text"
+                    aria-label="输出文件名"
                     className="input"
                     placeholder="默认自动生成"
                     value={packOutputName}
@@ -1526,6 +1537,7 @@ export default function FilesPage() {
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
                   <input
                     type="checkbox"
+                    aria-label="打包后删除源文件"
                     checked={packDeleteSource}
                     onChange={(e) => setPackDeleteSource(e.target.checked)}
                     disabled={packing}

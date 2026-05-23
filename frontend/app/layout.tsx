@@ -46,7 +46,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <head>
-        <style dangerouslySetInnerHTML={{ __html: loadingStyles }} />
+        <style>{loadingStyles}</style>
       </head>
       <body>
         <LiquidGlassFilter id="liquid-glass" width={1280} height={720} />

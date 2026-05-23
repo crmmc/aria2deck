@@ -13,6 +13,12 @@ import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/AuthContext";
 import { RpcAccessStatus } from "@/types";
 
+const defaultNotificationSettings: NotificationSettings = {
+  enabled: false,
+  onComplete: true,
+  onError: true,
+};
+
 export default function ProfilePage() {
   const { showToast, showConfirm } = useToast();
   const { user, refreshUser } = useAuth();
@@ -29,12 +35,11 @@ export default function ProfilePage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordChanging, setPasswordChanging] = useState(false);
 
-  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>({
-    enabled: false,
-    onComplete: true,
-    onError: true,
-  });
-  const [notificationSupported, setNotificationSupported] = useState(false);
+  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>(() =>
+    typeof window !== "undefined" ? getNotificationSettings() : defaultNotificationSettings
+  );
+  const notificationSupported =
+    typeof window !== "undefined" && "Notification" in window;
 
   const [rpcAccess, setRpcAccess] = useState<RpcAccessStatus | null>(null);
   const [rpcLoading, setRpcLoading] = useState(false);
@@ -46,8 +51,6 @@ export default function ProfilePage() {
   useEffect(() => {
     mountedRef.current = true;
     setMounted(true);
-    setNotificationSettings(getNotificationSettings());
-    setNotificationSupported(typeof window !== "undefined" && "Notification" in window);
     loadRpcAccess().finally(() => {
       if (mountedRef.current) setLoading(false);
     });
@@ -66,6 +69,7 @@ export default function ProfilePage() {
   }, []);
 
   const loadRpcAccess = async () => {
+    if (!mountedRef.current) return;
     try {
       const data = await api.getRpcAccess();
       if (!mountedRef.current) return;
@@ -76,6 +80,7 @@ export default function ProfilePage() {
   };
 
   const handleRpcToggle = async (enabled: boolean) => {
+    if (!mountedRef.current) return;
     setRpcLoading(true);
     try {
       const data = await api.setRpcAccess(enabled);
@@ -98,6 +103,7 @@ export default function ProfilePage() {
       danger: true,
     });
     if (!confirmed) return;
+    if (!mountedRef.current) return;
     setRpcLoading(true);
     try {
       const data = await api.refreshRpcSecret();
@@ -173,6 +179,7 @@ export default function ProfilePage() {
     setPasswordChanging(true);
     try {
       // 需要传入当前用户名
+      if (!mountedRef.current) return;
       await api.changePassword(oldPassword, newPassword, user.username);
       if (!mountedRef.current) return;
       showToast("密码修改成功", "success");
@@ -196,6 +203,7 @@ export default function ProfilePage() {
 
   async function handleNotificationToggle(enabled: boolean) {
     if (enabled) {
+      if (!mountedRef.current) return;
       const granted = await requestNotificationPermission();
       if (!mountedRef.current) return;
       if (!granted) {
@@ -229,7 +237,7 @@ export default function ProfilePage() {
                 您当前使用的是管理员设置的初始密码，为了账户安全，请尽快修改为您自己的密码。
               </p>
             </div>
-            <button
+            <button type="button"
               className="button w-full"
               onClick={() => setShowInitialPasswordAlert(false)}
             >
@@ -258,6 +266,7 @@ export default function ProfilePage() {
                 <label className="form-label" htmlFor="profile-old-password">当前密码</label>
                 <input
                   id="profile-old-password"
+                  aria-label="当前密码"
                   type="password"
                   className="input"
                   value={oldPassword}
@@ -270,6 +279,7 @@ export default function ProfilePage() {
               <label className="form-label" htmlFor="profile-new-password">新密码</label>
               <input
                 id="profile-new-password"
+                aria-label="新密码"
                 type="password"
                 className="input"
                 value={newPassword}
@@ -283,6 +293,7 @@ export default function ProfilePage() {
               <label className="form-label" htmlFor="profile-confirm-password">确认新密码</label>
               <input
                 id="profile-confirm-password"
+                aria-label="确认新密码"
                 type="password"
                 className="input"
                 value={confirmPassword}
@@ -316,6 +327,8 @@ export default function ProfilePage() {
                   <button
                     id="profile-notify-toggle"
                     type="button"
+                    aria-label="启用通知"
+                    aria-pressed={notificationSettings.enabled}
                     onClick={() => handleNotificationToggle(!notificationSettings.enabled)}
                     className={`toggle-switch ${notificationSettings.enabled ? "toggle-switch-on" : "toggle-switch-off"}`}
                   >
@@ -338,6 +351,8 @@ export default function ProfilePage() {
                       <button
                         id="profile-notify-complete"
                         type="button"
+                        aria-label="下载完成时发送通知"
+                        aria-pressed={notificationSettings.onComplete}
                         onClick={() => handleNotificationOptionChange("onComplete", !notificationSettings.onComplete)}
                         className={`toggle-switch toggle-switch-sm ${notificationSettings.onComplete ? "toggle-switch-on" : "toggle-switch-off"}`}
                       >
@@ -355,6 +370,8 @@ export default function ProfilePage() {
                       <button
                         id="profile-notify-error"
                         type="button"
+                        aria-label="下载失败时发送通知"
+                        aria-pressed={notificationSettings.onError}
                         onClick={() => handleNotificationOptionChange("onError", !notificationSettings.onError)}
                         className={`toggle-switch toggle-switch-sm ${notificationSettings.onError ? "toggle-switch-on" : "toggle-switch-off"}`}
                       >
@@ -381,6 +398,8 @@ export default function ProfilePage() {
                 <button
                   id="profile-rpc-toggle"
                   type="button"
+                  aria-label="允许外部 aria2 客户端连接"
+                  aria-pressed={Boolean(rpcAccess?.enabled)}
                   onClick={() => handleRpcToggle(!rpcAccess?.enabled)}
                   disabled={rpcLoading}
                   className={`toggle-switch ${rpcAccess?.enabled ? "toggle-switch-on" : "toggle-switch-off"} ${rpcLoading ? "opacity-60 cursor-not-allowed" : ""}`}

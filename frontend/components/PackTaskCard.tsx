@@ -18,6 +18,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   const hideTimerRef = useRef<NodeJS.Timeout | null>(null);
   const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
   const expandTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const timersRef = useRef<Set<NodeJS.Timeout>>(new Set());
 
   const loadTasks = useCallback(async () => {
     try {
@@ -61,31 +62,45 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   }, [tasks]);
 
   useEffect(() => {
+    const timers = timersRef.current;
     return () => {
-      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
-      if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current);
-      if (expandTimerRef.current) clearTimeout(expandTimerRef.current);
+      timers.forEach(clearTimeout);
     };
   }, []);
 
   const handleMouseEnter = () => {
     if (hideTimerRef.current) {
       clearTimeout(hideTimerRef.current);
+      timersRef.current.delete(hideTimerRef.current);
       hideTimerRef.current = null;
     }
     if (collapseTimerRef.current) {
       clearTimeout(collapseTimerRef.current);
+      timersRef.current.delete(collapseTimerRef.current);
       collapseTimerRef.current = null;
     }
     setExpanded(true);
-    expandTimerRef.current = setTimeout(() => setVisible(true), 10);
+    const expandTimer = setTimeout(() => {
+      setVisible(true);
+      timersRef.current.delete(expandTimer);
+    }, 10);
+    expandTimerRef.current = expandTimer;
+    timersRef.current.add(expandTimer);
   };
 
   const handleMouseLeave = () => {
-    hideTimerRef.current = setTimeout(() => {
+    const hideTimer = setTimeout(() => {
       setVisible(false);
-      collapseTimerRef.current = setTimeout(() => setExpanded(false), 400);
+      timersRef.current.delete(hideTimer);
+      const collapseTimer = setTimeout(() => {
+        setExpanded(false);
+        timersRef.current.delete(collapseTimer);
+      }, 400);
+      collapseTimerRef.current = collapseTimer;
+      timersRef.current.add(collapseTimer);
     }, 1200);
+    hideTimerRef.current = hideTimer;
+    timersRef.current.add(hideTimer);
   };
 
   const activeTasks = tasks.filter(
@@ -182,7 +197,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
-      <button className="button secondary pack-task-btn">
+      <button type="button" className="button secondary pack-task-btn">
         <span>打包任务</span>
         {activeTasks.length > 0 && (
           <span className="pack-task-badge">{activeTasks.length}</span>
@@ -193,7 +208,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
         <div className={`card pack-dropdown ${visible ? "pack-dropdown-visible" : "pack-dropdown-hidden"}`}>
           {terminalTasks.length > 0 && (
             <div className="pack-dropdown-header">
-              <button
+              <button type="button"
                 className="button secondary btn-sm"
                 onClick={handleClearAll}
               >
@@ -222,7 +237,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
                     <span className="muted text-xs">
                       {task.progress}% - 已预留: {formatBytes(task.reserved_space)}
                     </span>
-                    <button
+                    <button type="button"
                       className="button secondary danger btn-sm"
                       onClick={() => handleCancel(task.id)}
                     >
@@ -238,7 +253,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
                     输出: {formatBytes(task.output_size || 0)}
                     {task.delete_source && " · 已删除源文件"}
                   </span>
-                  <button
+                  <button type="button"
                     className="button secondary danger btn-sm"
                     onClick={() => handleDelete(task.id)}
                   >
@@ -253,7 +268,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
                     <p className="text-xs text-danger mb-2">{task.error_message}</p>
                   )}
                   <div className="flex flex-end">
-                    <button
+                    <button type="button"
                       className="button secondary btn-sm"
                       onClick={() => handleDelete(task.id)}
                     >
@@ -265,7 +280,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
 
               {task.status === "cancelled" && (
                 <div className="flex flex-end">
-                  <button
+                  <button type="button"
                     className="button secondary btn-sm"
                     onClick={() => handleDelete(task.id)}
                   >

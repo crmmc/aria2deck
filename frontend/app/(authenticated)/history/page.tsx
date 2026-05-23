@@ -54,19 +54,32 @@ const HistoryCard = memo(function HistoryCard({
         ? "task-status-cancelled"
         : "task-status-error";
 
+  const interactiveProps = record.uri
+    ? {
+        role: "button",
+        tabIndex: 0,
+        onClick: handleCardClick,
+        onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            handleCardClick();
+          }
+        },
+        "aria-label": `复制历史任务链接 ${record.task_name}`,
+      }
+    : {};
+
   return (
     <div
       className={`task-card-inner${isSelected ? " selected" : ""}${record.uri ? " cursor-pointer" : ""}`}
-      onClick={record.uri ? handleCardClick : undefined}
-      role={record.uri ? "button" : undefined}
-      tabIndex={record.uri ? 0 : undefined}
-      onKeyDown={record.uri ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCardClick(); } } : undefined}
+      {...interactiveProps}
     >
       <div>
         <div className="space-between flex-start mb-3">
           <div className="task-card-header">
             <input
               type="checkbox"
+              aria-label={`选择历史记录 ${record.task_name}`}
               checked={isSelected}
               onChange={handleCheckboxChange}
               onClick={(e) => e.stopPropagation()}
@@ -108,7 +121,7 @@ const HistoryCard = memo(function HistoryCard({
 
         <div className="task-footer-right">
           {record.uri && (
-            <button
+            <button type="button"
               className="button secondary btn-task"
               onClick={handleCopyClick}
               title="复制链接"
@@ -117,7 +130,7 @@ const HistoryCard = memo(function HistoryCard({
             </button>
           )}
           {record.result === "failed" && record.uri && (
-            <button
+            <button type="button"
               className="button secondary btn-task"
               onClick={handleRetryClick}
               title="重新下载"
@@ -143,13 +156,8 @@ export default function HistoryPage() {
   const [isBatchOperating, setIsBatchOperating] = useState(false);
   const mountedRef = useRef(true);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    loadHistory();
-    return () => { mountedRef.current = false; };
-  }, []);
-
-  async function loadHistory() {
+  const loadHistory = useCallback(async () => {
+    if (!mountedRef.current) return;
     setLoading(true);
     try {
       const history = await api.listHistory();
@@ -161,7 +169,14 @@ export default function HistoryPage() {
     } finally {
       if (mountedRef.current) setLoading(false);
     }
-  }
+  }, [showToast]);
+
+  useEffect(() => {
+    const mounted = mountedRef;
+    mounted.current = true;
+    loadHistory();
+    return () => { mounted.current = false; };
+  }, [loadHistory]);
 
   const copyUri = useCallback(
     (uri: string) => {
@@ -354,6 +369,7 @@ export default function HistoryPage() {
         <div className="filter-group toolbar-search-group">
           <input
             type="text"
+            aria-label="搜索历史任务"
             placeholder="搜索任务..."
             value={searchKeyword}
             onChange={(e) => setSearchKeyword(e.target.value)}

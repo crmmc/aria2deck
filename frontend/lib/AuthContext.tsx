@@ -6,6 +6,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useMemo,
 } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { api, authEvents, ApiError } from "./api";
@@ -133,20 +134,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     push("/login");
   }, [push]);
 
+  const contextValue = useMemo(
+    () => ({
+      user,
+      loading,
+      error,
+      siteTitle,
+      sidebarExpanded,
+      setSidebarExpanded,
+      logout,
+      refreshUser,
+      retryAuth,
+    }),
+    [
+      user,
+      loading,
+      error,
+      siteTitle,
+      sidebarExpanded,
+      logout,
+      refreshUser,
+      retryAuth,
+    ]
+  );
+
   return (
-    <AuthContext.Provider
-      value={{
-        user,
-        loading,
-        error,
-        siteTitle,
-        sidebarExpanded,
-        setSidebarExpanded,
-        logout,
-        refreshUser,
-        retryAuth,
-      }}
-    >
+    <AuthContext.Provider value={contextValue}>
       {children}
     </AuthContext.Provider>
   );

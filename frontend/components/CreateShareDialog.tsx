@@ -89,6 +89,7 @@ export default function CreateShareDialog({
                 <div className="flex gap-2">
                   <input
                     id="share-link"
+                    aria-label="分享链接"
                     type="text"
                     className="input flex-1"
                     value={shareUrl}
@@ -137,6 +138,7 @@ export default function CreateShareDialog({
                 <label className="label" htmlFor="share-password">密码（可选）</label>
                 <input
                   id="share-password"
+                  aria-label="密码（可选）"
                   type="text"
                   className="input"
                   style={{ width: "100%" }}
@@ -150,6 +152,7 @@ export default function CreateShareDialog({
                 <label className="label" htmlFor="share-max-downloads">下载次数限制（可选）</label>
                 <input
                   id="share-max-downloads"
+                  aria-label="下载次数限制（可选）"
                   type="number"
                   className="input"
                   style={{ width: "100%" }}

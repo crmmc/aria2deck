@@ -82,19 +82,32 @@ const TaskCard = memo(function TaskCard({
     onRetry(task);
   }, [task, onRetry]);
 
+  const interactiveProps = task.uri
+    ? {
+        role: "button",
+        tabIndex: 0,
+        onClick: handleCardClick,
+        onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            handleCardClick();
+          }
+        },
+        "aria-label": `复制任务链接 ${getTaskDisplayName(task)}`,
+      }
+    : {};
+
   return (
     <div
       className={`task-card-inner${isSelected ? " selected" : ""}${task.uri ? " cursor-pointer" : ""}`}
-      onClick={task.uri ? handleCardClick : undefined}
-      role={task.uri ? "button" : undefined}
-      tabIndex={task.uri ? 0 : undefined}
-      onKeyDown={task.uri ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCardClick(); } } : undefined}
+      {...interactiveProps}
     >
       <div>
           <div className="space-between flex-start mb-3">
             <div className="task-card-header">
               <input
                 type="checkbox"
+                aria-label={`选择任务 ${getTaskDisplayName(task)}`}
                 checked={isSelected}
                 onChange={handleCheckboxChange}
                 onClick={(e) => e.stopPropagation()}
@@ -162,7 +175,7 @@ const TaskCard = memo(function TaskCard({
 
           <div className="task-footer-right">
             {task.uri && (
-              <button
+              <button type="button"
                 className="button secondary btn-task"
                 onClick={handleCopyClick}
                 title="复制链接"
@@ -171,7 +184,7 @@ const TaskCard = memo(function TaskCard({
               </button>
             )}
             {task.status === "error" && task.uri && (
-              <button
+              <button type="button"
                 className="button secondary btn-task"
                 onClick={handleRetryClick}
                 title="重新下载"
@@ -180,7 +193,7 @@ const TaskCard = memo(function TaskCard({
               </button>
             )}
             {(task.status === "active" || task.status === "queued") && (
-              <button
+              <button type="button"
                 className={`button secondary danger btn-task${isOperating ? " opacity-60" : ""}`}
                 onClick={handleCancelClick}
                 disabled={isOperating}
@@ -189,7 +202,7 @@ const TaskCard = memo(function TaskCard({
               </button>
             )}
             {task.status === "error" && (
-              <button
+              <button type="button"
                 className={`button secondary danger btn-task${isOperating ? " opacity-60" : ""}`}
                 onClick={handleCancelClick}
                 disabled={isOperating}
@@ -740,6 +753,7 @@ export default function TasksPage() {
           <form onSubmit={createTask} className="add-task-form">
             <input
               className="input add-task-input"
+              aria-label="添加下载链接"
               placeholder="粘贴磁力链接、HTTP 或 FTP URL..."
               value={uri}
               onChange={(event) => setUri(event.target.value)}
@@ -747,6 +761,7 @@ export default function TasksPage() {
             />
             <input
               type="file"
+              aria-label="上传 torrent 文件"
               ref={torrentInputRef}
               accept=".torrent"
               onChange={handleTorrentUpload}
@@ -837,6 +852,7 @@ export default function TasksPage() {
           <div className="filter-group toolbar-search-group">
             <input
               type="text"
+              aria-label="搜索任务"
               placeholder="搜索任务..."
               value={searchKeyword}
               onChange={(e) => setSearchKeyword(e.target.value)}
@@ -912,6 +928,7 @@ export default function TasksPage() {
               </p>
 
               <textarea
+                aria-label="批量添加下载链接"
                 value={batchUris}
                 onChange={(e) => setBatchUris(e.target.value)}
                 placeholder="magnet:?xt=urn:btih:...&#10;https://example.com/file1.zip&#10;https://example.com/file2.zip"

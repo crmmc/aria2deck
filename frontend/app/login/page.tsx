@@ -102,6 +102,7 @@ export default function LoginPage() {
           <div className="mb-4">
             <input
               className="input"
+              aria-label="用户名"
               placeholder="用户名"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
@@ -113,6 +114,7 @@ export default function LoginPage() {
             <div className="password-input-wrap">
               <input
                 className="input password-input"
+                aria-label="密码"
                 type={passwordVisible ? "text" : "password"}
                 placeholder="密码"
                 value={password}

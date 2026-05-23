@@ -73,6 +73,7 @@ const ShareCard = memo(function ShareCard({
       onClick={handleCardClick}
       role="button"
       tabIndex={0}
+      aria-label={`打开分享 ${record.file_name}`}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCardClick(); } }}
     >
       <div>
@@ -80,6 +81,7 @@ const ShareCard = memo(function ShareCard({
           <div className="task-card-header">
             <input
               type="checkbox"
+              aria-label={`选择分享 ${record.file_name}`}
               checked={isSelected}
               onChange={handleCheckboxChange}
               onClick={(e) => e.stopPropagation()}
@@ -124,7 +126,7 @@ const ShareCard = memo(function ShareCard({
         </div>
 
         <div className="task-footer-right">
-          <button
+          <button type="button"
             className="button secondary btn-sm"
             onClick={handleCopyClick}
             title="复制链接"
@@ -132,7 +134,7 @@ const ShareCard = memo(function ShareCard({
             复制链接
           </button>
           {currentStatus === "active" && (
-            <button
+            <button type="button"
               className="button secondary btn-sm"
               onClick={handleRevokeClick}
               title="失效"
@@ -140,7 +142,7 @@ const ShareCard = memo(function ShareCard({
               失效
             </button>
           )}
-          <button
+          <button type="button"
             className="button secondary danger btn-sm"
             onClick={handleDeleteClick}
             title="删除"
@@ -166,6 +168,7 @@ export default function SharesPage() {
   const mountedRef = useRef(true);
 
   const loadShares = useCallback(async () => {
+    if (!mountedRef.current) return;
     setLoading(true);
     try {
       const shares = await api.listShares();
@@ -389,6 +392,7 @@ export default function SharesPage() {
         <div className="filter-group toolbar-select-group">
           <span className="muted text-sm">筛选:</span>
           <select
+            aria-label="分享状态筛选"
             value={filterStatus}
             onChange={(e) => setFilterStatus(e.target.value)}
             className="select"
@@ -403,6 +407,7 @@ export default function SharesPage() {
         <div className="filter-group toolbar-search-group">
           <input
             type="text"
+            aria-label="搜索分享"
             placeholder="搜索分享..."
             value={searchKeyword}
             onChange={(e) => setSearchKeyword(e.target.value)}

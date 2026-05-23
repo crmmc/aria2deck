@@ -5,13 +5,13 @@ import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
 
 type DirItem = { name: string; is_dir: boolean; size: number; path: string };
+const DEFAULT_SITE_TITLE = "aria2 控制器";
 
 export default function SharePageClient() {
-  const [code, setCode] = useState("");
   const [shareInfo, setShareInfo] = useState<ShareInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [accessToken, setAccessToken] = useState("");
+  const [hasAccess, setHasAccess] = useState(false);
   const [password, setPassword] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [downloading, setDownloading] = useState(false);
@@ -19,12 +19,16 @@ export default function SharePageClient() {
   const [dirItems, setDirItems] = useState<DirItem[]>([]);
   const [loadingDir, setLoadingDir] = useState(false);
   const [dirError, setDirError] = useState("");
-  const [siteTitle, setSiteTitle] = useState('aria2 控制器');
   const mountedRef = useRef(true);
+  const shareCodeRef = useRef("");
+  const accessTokenRef = useRef("");
+  const shareInfoRef = useRef<ShareInfo | null>(null);
+  const siteTitleRef = useRef(DEFAULT_SITE_TITLE);
   const downloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadDirectory = async (shareCode: string, token: string, path: string) => {
     if (!mountedRef.current) return;
+    if (!shareCode) return;
     setLoadingDir(true);
     setDirError("");
     try {
@@ -42,6 +46,14 @@ export default function SharePageClient() {
 
   useEffect(() => {
     mountedRef.current = true;
+    const updateDocumentTitle = (
+      info = shareInfoRef.current,
+      title = siteTitleRef.current
+    ) => {
+      if (info && !info.is_expired && !info.is_exhausted) {
+        document.title = `${info.file_name} - ${title}`;
+      }
+    };
     const parts = window.location.pathname.split("/");
     const idx = parts.indexOf("s");
     const urlCode = idx >= 0 && parts.length > idx + 1 ? parts[idx + 1] : "";
@@ -50,12 +62,13 @@ export default function SharePageClient() {
       setLoading(false);
       return;
     }
-    setCode(urlCode);
+    shareCodeRef.current = urlCode;
     api
       .getSiteInfo()
       .then((info) => {
         if (!mountedRef.current) return;
-        setSiteTitle(info.site_title);
+        siteTitleRef.current = info.site_title;
+        updateDocumentTitle();
       })
       .catch((err: unknown) => {
         console.warn("加载站点标题失败", err);
@@ -63,10 +76,9 @@ export default function SharePageClient() {
     api.getShareInfo(urlCode)
       .then((info) => {
         if (!mountedRef.current) return;
+        shareInfoRef.current = info;
         setShareInfo(info);
-        if (!info.is_expired && !info.is_exhausted) {
-          // document.title 由下方 useEffect 统一处理
-        }
+        updateDocumentTitle(info);
         if (info.is_directory && !info.has_password) {
           loadDirectory(urlCode, "", "");
         }
@@ -83,22 +95,20 @@ export default function SharePageClient() {
       if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
     };
   }, []);
-  // 当 siteTitle 或 shareInfo 变化时更新页面标题
-  useEffect(() => {
-    if (shareInfo && !shareInfo.is_expired && !shareInfo.is_exhausted) {
-      document.title = `${shareInfo.file_name} - ${siteTitle}`;
-    }
-  }, [siteTitle, shareInfo]);
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!password) return;
+    const shareCode = shareCodeRef.current;
+    if (!shareCode) return;
+    if (!mountedRef.current) return;
     setPasswordError("");
     try {
-      const res = await api.accessShare(code, password);
+      const res = await api.accessShare(shareCode, password);
       if (!mountedRef.current) return;
-      setAccessToken(res.access_token);
-      if (shareInfo?.is_directory) loadDirectory(code, res.access_token, "");
+      accessTokenRef.current = res.access_token;
+      setHasAccess(true);
+      if (shareInfo?.is_directory) loadDirectory(shareCode, res.access_token, "");
     } catch (err: unknown) {
       if (!mountedRef.current) return;
       setPasswordError(err instanceof Error ? err.message : "密码错误");
@@ -106,23 +116,32 @@ export default function SharePageClient() {
   };
 
   const handleDownload = () => {
+    const shareCode = shareCodeRef.current;
+    if (!shareCode) return;
     setDownloading(true);
     if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
     downloadTimerRef.current = setTimeout(() => setDownloading(false), 2000);
-    window.open(api.shareDownloadUrl(code, accessToken || undefined), "_blank");
+    window.open(api.shareDownloadUrl(shareCode, accessTokenRef.current || undefined), "_blank");
   };
 
   const handleItemDownload = (itemPath: string) => {
-    window.open(api.shareDownloadUrl(code, accessToken || undefined, itemPath), "_blank");
+    const shareCode = shareCodeRef.current;
+    if (!shareCode) return;
+    window.open(
+      api.shareDownloadUrl(shareCode, accessTokenRef.current || undefined, itemPath),
+      "_blank"
+    );
   };
 
-  const handleDirClick = (itemPath: string) => loadDirectory(code, accessToken, itemPath);
+  const handleDirClick = (itemPath: string) => {
+    loadDirectory(shareCodeRef.current, accessTokenRef.current, itemPath);
+  };
 
   const handleGoBack = () => {
     if (!currentPath) return;
     const parts = currentPath.split("/").filter(Boolean);
     parts.pop();
-    loadDirectory(code, accessToken, parts.join("/"));
+    loadDirectory(shareCodeRef.current, accessTokenRef.current, parts.join("/"));
   };
 
 
@@ -178,7 +197,7 @@ export default function SharePageClient() {
   }
 
 
-  if (shareInfo.has_password && !accessToken) {
+  if (shareInfo.has_password && !hasAccess) {
     return (
       <div className="fixed inset-0 flex-center p-4">
         <div className="glass-frame animate-in max-w-400 w-full">
@@ -191,6 +210,7 @@ export default function SharePageClient() {
             <div className="mb-4">
               <input
                 type="password"
+                aria-label="分享提取码"
                 className="input"
                 placeholder="请输入提取码"
                 value={password}
@@ -226,7 +246,7 @@ export default function SharePageClient() {
 
 
         {!shareInfo.is_directory && (
-          <button
+          <button type="button"
             onClick={handleDownload}
             className="button w-full"
             disabled={downloading}
@@ -244,7 +264,7 @@ export default function SharePageClient() {
               <div className="space-between">
                 <code className="muted" style={{ fontSize: 13 }}>/{currentPath || "."}</code>
                 {currentPath !== "" && (
-                  <button onClick={handleGoBack} className="button secondary" style={{ padding: "6px 12px", fontSize: 13 }}>
+                  <button type="button" onClick={handleGoBack} className="button secondary" style={{ padding: "6px 12px", fontSize: 13 }}>
                     ↵ 返回上级
                   </button>
                 )}
@@ -267,7 +287,23 @@ export default function SharePageClient() {
                   </div>
                 ) : (
                   <ul style={{ listStyle: "none", padding: 0, margin: 0, maxHeight: 360, overflowY: "auto" }}>
-                    {dirItems.map((item, i) => (
+                    {dirItems.map((item, i) => {
+                      const interactiveProps = item.is_dir
+                        ? {
+                            role: "button",
+                            tabIndex: 0,
+                            onClick: () => handleDirClick(item.path),
+                            onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                handleDirClick(item.path);
+                              }
+                            },
+                            "aria-label": `打开文件夹 ${item.name}`,
+                          }
+                        : {};
+
+                      return (
                       <li
                         key={item.path}
                         style={{
@@ -287,10 +323,7 @@ export default function SharePageClient() {
                             overflow: "hidden",
                             cursor: item.is_dir ? "pointer" : "default",
                           }}
-                          role={item.is_dir ? "button" : undefined}
-                          tabIndex={item.is_dir ? 0 : undefined}
-                          onClick={item.is_dir ? () => handleDirClick(item.path) : undefined}
-                          onKeyDown={item.is_dir ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleDirClick(item.path); } } : undefined}
+                          {...interactiveProps}
                         >
                           <span style={{ fontSize: 16 }}>{item.is_dir ? "📁" : "📄"}</span>
                           <span
@@ -311,7 +344,7 @@ export default function SharePageClient() {
                             </span>
                           )}
                           {!item.is_dir && (
-                            <button
+                            <button type="button"
                               onClick={() => handleItemDownload(item.path)}
                               className="button secondary"
                               style={{ padding: "4px 10px", fontSize: 12 }}
@@ -325,7 +358,8 @@ export default function SharePageClient() {
                           )}
                         </div>
                       </li>
-                    ))}
+                      );
+                    })}
                   </ul>
                 )}
               </div>

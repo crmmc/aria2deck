@@ -371,6 +371,7 @@ export default function SettingsPage() {
             <p className="muted text-sm mb-2">自定义网站标题，显示在侧边栏和页面标题中。留空使用默认值。</p>
             <input
               id="settings-site-title"
+              aria-label="网站标题"
               className="input"
               type="text"
               value={siteTitle}
@@ -385,6 +386,7 @@ export default function SettingsPage() {
             <p className="muted text-sm mb-2">超过此大小的任务将被拒绝。</p>
             <input
               id="settings-max-task-size"
+              aria-label="最大任务大小 GB"
               className="input"
               type="number"
               step="any"
@@ -399,6 +401,7 @@ export default function SettingsPage() {
             <p className="muted text-sm mb-2">如果剩余空间低于此值，将停止接受新任务。</p>
             <input
               id="settings-min-disk-space"
+              aria-label="最小剩余磁盘空间 GB"
               className="input"
               type="number"
               step="any"
@@ -430,6 +433,7 @@ export default function SettingsPage() {
             <p className="muted text-sm mb-2">aria2 JSON-RPC 接口地址，例如：http://localhost:6800/jsonrpc</p>
             <input
               id="settings-rpc-url"
+              aria-label="aria2 RPC URL"
               className="input"
               type="text"
               value={aria2RpcUrl}
@@ -443,6 +447,7 @@ export default function SettingsPage() {
             <p className="muted text-sm mb-2">aria2 RPC 认证密钥（可选）。留空表示不使用认证。</p>
             <input
               id="settings-rpc-secret"
+              aria-label="aria2 RPC Secret"
               className="input"
               type="password"
               value={aria2RpcSecret}
@@ -490,6 +495,7 @@ export default function SettingsPage() {
             <div className="flex gap-2 mb-3">
               <input
                 id="settings-hidden-extensions"
+                aria-label="隐藏文件后缀名"
                 className="input flex-1"
                 type="text"
                 value={extensionInput}
@@ -545,23 +551,25 @@ export default function SettingsPage() {
               <label className="checkbox-label">
                 <input
                   id="settings-pack-format"
+                  aria-labelledby="settings-pack-format-zip-label"
                   type="radio"
                   name="packFormat"
                   value="zip"
                   checked={packFormat === "zip"}
                   onChange={() => setPackFormat("zip")}
                 />
-                <span>ZIP（Deflate64）</span>
+                <span id="settings-pack-format-zip-label">ZIP（Deflate64）</span>
               </label>
               <label className="checkbox-label">
                 <input
+                  aria-labelledby="settings-pack-format-tar-zst-label"
                   type="radio"
                   name="packFormat"
                   value="tar.zst"
                   checked={packFormat === "tar.zst"}
                   onChange={() => setPackFormat("tar.zst")}
                 />
-                <span>TAR + Zstandard</span>
+                <span id="settings-pack-format-tar-zst-label">TAR + Zstandard</span>
               </label>
             </div>
           </div>
@@ -575,6 +583,7 @@ export default function SettingsPage() {
             </p>
             <input
               id="settings-pack-compression-level"
+              aria-label="打包压缩等级"
               type="range"
               min="0"
               max="9"
@@ -593,6 +602,7 @@ export default function SettingsPage() {
             <p className="muted text-sm mb-3">指数退避的最大等待时间（1-300 秒）</p>
             <input
               id="settings-ws-max-delay"
+              aria-label="最大重连延迟"
               type="range"
               min="1"
               max="300"
@@ -608,6 +618,7 @@ export default function SettingsPage() {
             <p className="muted text-sm mb-3">重连延迟的随机波动范围（0-100%）</p>
             <input
               id="settings-ws-jitter"
+              aria-label="重连抖动系数"
               type="range"
               min="0"
               max="100"
@@ -623,6 +634,7 @@ export default function SettingsPage() {
             <p className="muted text-sm mb-3">每次重连延迟的倍增系数（1.1-10）</p>
             <input
               id="settings-ws-factor"
+              aria-label="重连指数因子"
               type="range"
               min="11"
               max="100"
@@ -641,6 +653,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">每 5 分钟最大尝试次数（登录、首个用户创建、修改密码）</p>
               <input
                 id="settings-rate-account-security"
+                aria-label="账户安全限流"
                 type="number"
                 min="1"
                 max="100"
@@ -655,6 +668,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">每分钟最大查询请求次数（0 = 不限制）</p>
               <input
                 id="settings-rate-auth-api"
+                aria-label="普通已登录 API 限流"
                 type="number"
                 min="0"
                 max="10000"
@@ -669,6 +683,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">每分钟最大公开查询次数（0 = 不限制）</p>
               <input
                 id="settings-rate-public-api"
+                aria-label="普通匿名公开 API 限流"
                 type="number"
                 min="0"
                 max="10000"
@@ -683,6 +698,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">每分钟最大密码验证次数</p>
               <input
                 id="settings-rate-share-access"
+                aria-label="分享密码验证限流"
                 type="number"
                 min="1"
                 max="10000"
@@ -697,6 +713,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">每分钟最大请求次数（0 = 不限制）</p>
               <input
                 id="settings-rate-auth-download"
+                aria-label="已登录下载限流"
                 type="number"
                 min="0"
                 max="10000"
@@ -711,6 +728,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">每分钟最大匿名下载请求次数（0 = 不限制）</p>
               <input
                 id="settings-rate-anon-download"
+                aria-label="匿名下载限流"
                 type="number"
                 min="0"
                 max="10000"
@@ -725,6 +743,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">每分钟最大创建任务次数</p>
               <input
                 id="settings-rate-create-task"
+                aria-label="创建任务限流"
                 type="number"
                 min="1"
                 max="10000"
@@ -739,6 +758,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">每分钟最大上传种子次数</p>
               <input
                 id="settings-rate-create-torrent"
+                aria-label="创建种子限流"
                 type="number"
                 min="1"
                 max="10000"
@@ -753,6 +773,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">每分钟最大创建打包次数</p>
               <input
                 id="settings-rate-create-pack"
+                aria-label="创建打包限流"
                 type="number"
                 min="1"
                 max="10000"
@@ -767,6 +788,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">每分钟最大连接测试次数</p>
               <input
                 id="settings-rate-aria2-test"
+                aria-label="aria2 测试限流"
                 type="number"
                 min="1"
                 max="10000"
@@ -781,6 +803,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">每分钟最大 RPC 请求次数</p>
               <input
                 id="settings-rate-rpc"
+                aria-label="JSON-RPC 限流"
                 type="number"
                 min="1"
                 max="10000"
@@ -798,6 +821,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">所有用户的总并发下载连接数上限（0 = 不限制）</p>
               <input
                 id="settings-conn-total"
+                aria-label="系统总下载连接上限"
                 type="number"
                 min="0"
                 max="10000"
@@ -812,6 +836,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">为已登录下载预留的最小可用连接数</p>
               <input
                 id="settings-conn-auth-reserved"
+                aria-label="已登录保底连接数"
                 type="number"
                 min="0"
                 max="10000"
@@ -826,6 +851,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">单个已登录用户的并发下载连接数上限（0 = 不限制）</p>
               <input
                 id="settings-conn-user-max"
+                aria-label="已登录单用户最大并发"
                 type="number"
                 min="0"
                 max="1000"
@@ -840,6 +866,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">同一已登录用户对同一文件的并发下载连接数上限（0 = 不限制）</p>
               <input
                 id="settings-conn-auth-per-file"
+                aria-label="已登录单文件最大并发"
                 type="number"
                 min="0"
                 max="100"
@@ -854,6 +881,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">匿名分享下载默认可占用的连接数</p>
               <input
                 id="settings-conn-anon-base"
+                aria-label="匿名基础连接数"
                 type="number"
                 min="0"
                 max="10000"
@@ -868,6 +896,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">匿名分享在不影响已登录保底的前提下可额外借用的连接数</p>
               <input
                 id="settings-conn-anon-borrow"
+                aria-label="匿名可借用连接数"
                 type="number"
                 min="0"
                 max="10000"
@@ -882,6 +911,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">单个匿名来源的并发下载连接数上限（0 = 不限制）</p>
               <input
                 id="settings-conn-anon-per-ip"
+                aria-label="匿名单 IP 最大并发"
                 type="number"
                 min="0"
                 max="1000"
@@ -896,6 +926,7 @@ export default function SettingsPage() {
               <p className="muted text-sm mb-3">同一匿名来源对同一文件的并发下载连接数上限（0 = 不限制）</p>
               <input
                 id="settings-conn-anon-per-file"
+                aria-label="匿名单文件最大并发"
                 type="number"
                 min="0"
                 max="100"

@@ -47,6 +47,7 @@ export default function StoragePage() {
   const initialLoadDone = useRef(false);
 
   const loadFiles = useCallback(async () => {
+    if (!mountedRef.current) return;
     if (!initialLoadDone.current) setLoading(true);
     try {
       const res = await api.listStoredFiles(search || undefined, orphanOnly);
@@ -92,6 +93,7 @@ export default function StoragePage() {
 
   const handleDelete = async () => {
     if (selected.size === 0) return;
+    if (!mountedRef.current) return;
     setDeleting(true);
     try {
       const res = await api.bulkDeleteStoredFiles(Array.from(selected));
@@ -111,6 +113,7 @@ export default function StoragePage() {
   };
 
   const openUserModal = async (file: StoredFileInfo) => {
+    if (!mountedRef.current) return;
     setUserModalFile(file);
     setUserModalUsers([]);
     setUserModalLoading(true);
@@ -141,6 +144,7 @@ export default function StoragePage() {
           <div className="flex gap-4 flex-wrap items-center">
             <input
               className="input"
+              aria-label="搜索存储文件"
               placeholder="搜索文件名..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -149,18 +153,19 @@ export default function StoragePage() {
             <label className="checkbox-label">
               <input
                 type="checkbox"
+                aria-label="仅显示孤立文件"
                 checked={orphanOnly}
                 onChange={(e) => setOrphanOnly(e.target.checked)}
               />
               <span className="text-base">仅显示孤立文件</span>
             </label>
-            <button
+            <button type="button"
               className="button"
               onClick={loadFiles}
             >
               刷新
             </button>
-            <button
+            <button type="button"
               className="button danger"
               onClick={handleDelete}
               disabled={selected.size === 0 || deleting}
@@ -178,6 +183,7 @@ export default function StoragePage() {
                   <th className="table-cell" style={{ width: 40 }}>
                     <input
                       type="checkbox"
+                      aria-label="选择全部存储文件"
                       checked={files.length > 0 && selected.size === files.length}
                       onChange={(e) => handleSelectAll(e.target.checked)}
                     />
@@ -196,6 +202,7 @@ export default function StoragePage() {
                   <td className="table-cell">
                     <input
                       type="checkbox"
+                      aria-label={`选择存储文件 ${f.original_name}`}
                       checked={selected.has(f.id)}
                       onChange={(e) => handleSelect(f.id, e.target.checked)}
                     />
@@ -208,7 +215,7 @@ export default function StoragePage() {
                     {f.content_hash.slice(0, 8)}...
                   </td>
                   <td className="table-cell">
-                    <button
+                    <button type="button"
                       className="button secondary btn-sm"
                       onClick={() => openUserModal(f)}
                       disabled={f.ref_count === 0}
@@ -263,7 +270,7 @@ export default function StoragePage() {
               </ul>
             )}
             <div className="flex flex-end">
-              <button
+              <button type="button"
                 className="button secondary"
                 onClick={() => setUserModalFile(null)}
               >

@@ -348,6 +348,31 @@ describe("Folder in-page browsing", () => {
     });
   });
 
+  test("pagination loads the next page only once", async () => {
+    mockApi.listFiles.mockResolvedValue({
+      files: [regularFile],
+      total: 25,
+      space: { used: 1024, frozen: 0, available: 9216 },
+    } satisfies FileListResponse);
+
+    render(
+      <ToastProvider>
+        <FilesPage />
+      </ToastProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("readme.txt")).toBeInTheDocument();
+    });
+    expect(mockApi.listFiles).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "›" }));
+
+    await waitFor(() => {
+      expect(mockApi.listFiles).toHaveBeenCalledTimes(2);
+    });
+    expect(mockApi.listFiles).toHaveBeenLastCalledWith(2, 10);
+  });
+
   test("search input is disabled inside folder", async () => {
     await renderAndWait();
     await enterFolder();

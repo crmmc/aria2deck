@@ -22,8 +22,9 @@ export default function PasswordWarningBanner({ user }: Props) {
         <div className="password-warning-header">
           <span className="password-warning-icon">⚠️</span>
           <span className="password-warning-title">安全提醒</span>
-          <button
+          <button type="button"
             className="password-warning-close"
+            aria-label="关闭安全提醒"
             onClick={() => setDismissed(true)}
             title="关闭"
           >
@@ -34,7 +35,7 @@ export default function PasswordWarningBanner({ user }: Props) {
           您<span className="text-danger">正在使用默认密码</span>，请尽快修改以确保账户安全
         </p>
         <div className="password-warning-footer">
-          <button
+          <button type="button"
             className="password-warning-action"
             onClick={() => push("/profile")}
           >
