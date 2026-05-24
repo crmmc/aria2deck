@@ -31,7 +31,7 @@ const loadingStyles = `
   margin-top: 16px;
   font-size: 14px;
   color: #86868b;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif;
 }
 @keyframes app-spin {
   to { transform: rotate(360deg); }

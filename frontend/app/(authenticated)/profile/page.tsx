@@ -9,6 +9,7 @@ import {
   requestNotificationPermission,
   type NotificationSettings,
 } from "@/lib/notification";
+import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/AuthContext";
 import { RpcAccessStatus } from "@/types";
@@ -24,7 +25,7 @@ export default function ProfilePage() {
   const { user, refreshUser } = useAuth();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [mounted, setMounted] = useState(false);
+  const mounted = useMounted();
 
   // 初始密码提醒弹窗
   const [showInitialPasswordAlert, setShowInitialPasswordAlert] = useState(false);
@@ -50,7 +51,6 @@ export default function ProfilePage() {
 
   useEffect(() => {
     mountedRef.current = true;
-    setMounted(true);
     loadRpcAccess().finally(() => {
       if (mountedRef.current) setLoading(false);
     });

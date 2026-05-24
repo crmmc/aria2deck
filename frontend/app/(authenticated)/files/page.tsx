@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
+import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
 import { ModalOverlay } from "@/components/ModalOverlay";
 import PackTaskCard from "@/components/PackTaskCard";
@@ -81,9 +82,8 @@ export default function FilesPage() {
 
   // Mobile detection
   const [isMobile, setIsMobile] = useState(false);
-  const [mounted, setMounted] = useState(false);
+  const mounted = useMounted();
   useEffect(() => {
-    setMounted(true);
     const check = () => setIsMobile(window.innerWidth < 768);
     check();
     window.addEventListener('resize', check);

@@ -9,6 +9,7 @@ import { useToast } from "@/components/Toast";
 import { ModalOverlay } from "@/components/ModalOverlay";
 import StatsWidget from "@/components/StatsWidget";
 import { useTaskWebSocket } from "@/hooks/useTaskWebSocket";
+import { useMounted } from "@/lib/useMounted";
 import {
   sendTaskCompleteNotification,
   sendTaskErrorNotification,
@@ -238,7 +239,7 @@ export default function TasksPage() {
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [isBatchAdding, setIsBatchAdding] = useState(false);
   const [batchUris, setBatchUris] = useState("");
-  const [mounted, setMounted] = useState(false);
+  const mounted = useMounted();
   const torrentInputRef = useRef<HTMLInputElement>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isBatchOperating, setIsBatchOperating] = useState(false);
@@ -261,10 +262,6 @@ export default function TasksPage() {
   const tasksRef = useRef<Task[]>([]);
   const wsConnectedRef = useRef(false);
   tasksRef.current = tasks;
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   useEffect(() => {
     if (typeof window !== "undefined") {

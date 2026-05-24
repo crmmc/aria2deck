@@ -1053,10 +1053,48 @@ p {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+}
+
+dialog.modal-overlay,
+dialog.confirm-overlay {
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+}
+
+dialog.modal-overlay::backdrop,
+dialog.confirm-overlay::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+dialog.modal-overlay {
+  background: transparent;
+}
+
+.modal-backdrop-button {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: default;
 }
 
 /* Modal Content */
+.modal-content,
+.confirm-content,
+.batch-modal-content,
+.search-modal {
+  position: relative;
+  z-index: 1;
+}
+
 .modal-content {
   background: white;
   border-radius: 16px;
@@ -1641,8 +1679,11 @@ p {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 10001;
   animation: fadeIn 0.2s ease;
+}
+
+dialog.confirm-overlay {
+  background: transparent;
 }
 
 .confirm-content {

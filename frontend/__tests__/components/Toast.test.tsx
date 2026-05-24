@@ -210,7 +210,7 @@ describe("ToastProvider", () => {
     });
   });
 
-  it("resolves false when overlay clicked", async () => {
+  it("resolves false when dialog backdrop clicked", async () => {
     render(
       <ToastProvider>
         <TestComponent />
@@ -223,9 +223,7 @@ describe("ToastProvider", () => {
       expect(screen.getByText("Confirm?")).toBeInTheDocument();
     });
 
-    const overlay = document.querySelector(".confirm-overlay");
-    expect(overlay).toBeInTheDocument();
-    fireEvent.click(overlay!);
+    fireEvent.click(document.querySelector(".modal-backdrop-button")!);
 
     await waitFor(() => {
       expect(document.body.getAttribute("data-confirm-result")).toBe("false");

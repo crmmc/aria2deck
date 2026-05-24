@@ -1,6 +1,15 @@
 "use client";
 
-import { useEffect, type ReactNode, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, type ReactNode, type CSSProperties } from "react";
+
+const FOCUSABLE_SELECTOR = [
+  "button:not([disabled]):not([aria-hidden='true'])",
+  "[href]",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 
 interface ModalOverlayProps {
   onClose: () => void;
@@ -17,33 +26,57 @@ export function ModalOverlay({
   contentClassName,
   contentStyle,
 }: ModalOverlayProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  const stableOnClose = useCallback(() => onCloseRef.current(), []);
+
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+
+    if (!dialog.open) {
+      dialog.showModal();
+    }
+
+    const focusTarget = contentRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+    focusTarget?.focus();
+
+    const handleCancel = (event: Event) => {
+      event.preventDefault();
+      onCloseRef.current();
     };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+
+    dialog.addEventListener("cancel", handleCancel);
+    return () => {
+      dialog.removeEventListener("cancel", handleCancel);
+      if (dialog.open) {
+        dialog.close();
+      }
+    };
+  }, []);
 
   return (
-    <div
+    <dialog
+      ref={dialogRef}
       className={className}
-      role="dialog"
-      aria-modal="true"
-      onClick={onClose}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") onClose();
-      }}
-      tabIndex={-1}
     >
+      <button
+        type="button"
+        className="modal-backdrop-button"
+        aria-hidden="true"
+        tabIndex={-1}
+        onClick={stableOnClose}
+      />
       <div
+        ref={contentRef}
         className={contentClassName}
         style={contentStyle}
-        role="presentation"
-        onClick={(e) => e.stopPropagation()}
       >
         {children}
       </div>
-    </div>
+    </dialog>
   );
 }

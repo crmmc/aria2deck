@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
+import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
 import { ModalOverlay } from "@/components/ModalOverlay";
 import type { ShareLink } from "@/types";
@@ -62,10 +63,7 @@ export default function CreateShareDialog({
     );
   };
 
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+  const mounted = useMounted();
 
   if (!mounted) return null;
 

@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { useMounted } from "@/lib/useMounted";
 import { ModalOverlay } from "@/components/ModalOverlay";
 
 type ToastType = "success" | "error" | "info" | "warning";
@@ -44,7 +45,7 @@ let toastId = 0;
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
-  const [mounted, setMounted] = useState(false);
+  const mounted = useMounted();
   const toastTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const confirmRef = useRef<ConfirmState | null>(null);
   const confirmResolvers = useRef<Set<ConfirmState["resolve"]>>(new Set());
@@ -52,7 +53,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const timers = toastTimers.current;
     const resolvers = confirmResolvers.current;
-    setMounted(true);
     return () => {
       timers.forEach(clearTimeout);
       resolvers.forEach((resolve) => resolve(false));

@@ -123,16 +123,14 @@ describe("CreateShareDialog", () => {
     });
   });
 
-  it("closes on close button and overlay click", async () => {
+  it("closes on close button and dialog backdrop click", async () => {
     const onClose = jest.fn();
     render(<CreateShareDialog userFileId={42} fileName="demo.txt" onClose={onClose} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "✕" }));
     expect(onClose).toHaveBeenCalledTimes(1);
 
-    const overlay = document.querySelector(".modal-overlay");
-    expect(overlay).not.toBeNull();
-    fireEvent.click(overlay as Element);
+    fireEvent.click(document.querySelector(".modal-backdrop-button")!);
     expect(onClose).toHaveBeenCalledTimes(2);
   });
 });
