@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import SharesPage from "@/app/(authenticated)/shares/page";
 import { api } from "@/lib/api";
 
@@ -65,6 +65,28 @@ describe("SharesPage", () => {
       expect(showConfirmMock).toHaveBeenCalled();
       expect(mockApi.revokeAllShares).toHaveBeenCalled();
     });
+  });
+
+  test("uses a native card copy button without nesting other controls", async () => {
+    render(<SharesPage />);
+
+    const copyCardButton = await screen.findByRole("button", {
+      name: "打开分享 demo.zip",
+    });
+
+    expect(copyCardButton.tagName).toBe("BUTTON");
+    expect(
+      within(copyCardButton).queryByRole("checkbox", { name: "选择分享 demo.zip" })
+    ).not.toBeInTheDocument();
+    expect(
+      within(copyCardButton).queryByRole("button", { name: "复制链接" })
+    ).not.toBeInTheDocument();
+    expect(
+      within(copyCardButton).queryByRole("button", { name: "失效" })
+    ).not.toBeInTheDocument();
+    expect(
+      within(copyCardButton).queryByRole("button", { name: "删除" })
+    ).not.toBeInTheDocument();
   });
 
   test("deletes a share after confirmation", async () => {

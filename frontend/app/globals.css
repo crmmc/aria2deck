@@ -1986,6 +1986,56 @@ dialog.confirm-overlay {
   border: 2px solid var(--primary);
 }
 
+.share-card-item {
+  cursor: default;
+}
+
+.share-card-main-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.share-card-copy-area {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.share-card-copy-area:focus-visible {
+  outline: none;
+  border-radius: 8px;
+  box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.12);
+}
+
+.share-card-copy-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.share-card-title {
+  display: block;
+}
+
+.share-card-line,
+.share-card-details {
+  display: block;
+}
+
+.share-card-details > span {
+  display: block;
+}
+
 /* Task Card Header */
 .task-card-header {
   display: flex;

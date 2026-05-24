@@ -69,56 +69,55 @@ const ShareCard = memo(function ShareCard({
 
   return (
     <div
-      className={`task-card-inner${isSelected ? " selected" : ""} cursor-pointer`}
-      onClick={handleCardClick}
-      role="button"
-      tabIndex={0}
-      aria-label={`打开分享 ${record.file_name}`}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCardClick(); } }}
+      className={`task-card-inner share-card-item${isSelected ? " selected" : ""}`}
     >
-      <div>
-        <div className="space-between flex-start mb-3">
-          <div className="task-card-header">
-            <input
-              type="checkbox"
-              aria-label={`选择分享 ${record.file_name}`}
-              checked={isSelected}
-              onChange={handleCheckboxChange}
-              onClick={(e) => e.stopPropagation()}
-              className="checkbox-sm mt-2 cursor-pointer"
-            />
-            <div className="overflow-hidden flex-1">
-              <h3 className="task-name" title={record.file_name}>
+      <div className="share-card-main-row">
+        <input
+          type="checkbox"
+          aria-label={`选择分享 ${record.file_name}`}
+          checked={isSelected}
+          onChange={handleCheckboxChange}
+          className="checkbox-sm mt-2 cursor-pointer"
+        />
+        <button
+          type="button"
+          className="share-card-copy-area"
+          onClick={handleCardClick}
+          aria-label={`打开分享 ${record.file_name}`}
+        >
+          <span className="share-card-copy-header">
+            <span className="overflow-hidden flex-1">
+              <span className="task-name share-card-title" title={record.file_name}>
                 {record.file_name} {record.has_password && <span className="muted text-sm ml-1" title="有密码">🔒</span>}
-              </h3>
-              <div className="muted tabular-nums text-sm">
+              </span>
+              <span className="muted tabular-nums text-sm share-card-line">
                 {formatBytes(record.file_size)}
-              </div>
-            </div>
-          </div>
-          <span
-            className={`task-status ${statusClass}`}
-            style={{ marginLeft: "auto" }}
-          >
-            {statusText}
+              </span>
+            </span>
+            <span
+              className={`task-status ${statusClass}`}
+              style={{ marginLeft: "auto" }}
+            >
+              {statusText}
+            </span>
           </span>
-        </div>
 
-        <div className="text-sm mb-3 muted">
-          <div>提取码: {record.share_code}</div>
-          <div>
-            下载次数: {record.download_count}
-            {record.max_downloads != null && record.max_downloads > 0 ? ` / ${record.max_downloads}` : ""}
-          </div>
-          {record.expires_at && (
-            <div suppressHydrationWarning>
-              过期时间: {new Date(record.expires_at).toLocaleString()}
-            </div>
-          )}
-        </div>
+          <span className="text-sm mb-3 muted share-card-details">
+            <span>提取码: {record.share_code}</span>
+            <span>
+              下载次数: {record.download_count}
+              {record.max_downloads != null && record.max_downloads > 0 ? ` / ${record.max_downloads}` : ""}
+            </span>
+            {record.expires_at && (
+              <span suppressHydrationWarning>
+                过期时间: {new Date(record.expires_at).toLocaleString()}
+              </span>
+            )}
+          </span>
+        </button>
       </div>
 
-      <div className="task-card-footer" role="presentation" onClick={(e) => e.stopPropagation()}>
+      <div className="task-card-footer">
         <div className="task-footer-left">
           <span className="muted text-sm" suppressHydrationWarning>
             创建于 {new Date(record.created_at).toLocaleString()}
