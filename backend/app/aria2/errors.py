@@ -63,6 +63,24 @@ def get_error_message(error_code: int | str | None, fallback: str | None = None)
     return ERROR_CODE_MAP.get(code, fallback or f"错误码 {code}")
 
 
+def prefer_aria2_error_message(
+    error_code: int | str | None,
+    aria2_error: str | None,
+    fallback: str | None = None,
+) -> str:
+    """Prefer aria2's concrete error text, falling back to code mapping.
+
+    aria2's ``errorMessage`` is the closest source for failures that happen inside
+    aria2 itself. Internal completion/indexing failures should pass their own
+    explicit messages instead of using this helper.
+    """
+    if aria2_error:
+        message = str(aria2_error).strip()
+        if message:
+            return message
+    return get_error_message(error_code, fallback)
+
+
 def parse_error_message(aria2_error: str | None) -> str:
     """解析 aria2 错误消息，尝试提取错误码并翻译
 
@@ -80,7 +98,7 @@ def parse_error_message(aria2_error: str | None) -> str:
     import re
 
     # 尝试提取错误码
-    match = re.search(r'errorCode[=:\s]*(\d+)', aria2_error, re.IGNORECASE)
+    match = re.search(r"errorCode[=:\s]*(\d+)", aria2_error, re.IGNORECASE)
     if match:
         code = int(match.group(1))
         translated = ERROR_CODE_MAP.get(code)
@@ -89,20 +107,20 @@ def parse_error_message(aria2_error: str | None) -> str:
 
     # 常见错误消息模式匹配
     error_patterns = [
-        (r'timeout', "网络超时"),
-        (r'404|not found', "资源未找到 (404)"),
-        (r'403|forbidden', "访问被拒绝 (403)"),
-        (r'401|unauthorized', "需要认证 (401)"),
-        (r'500|internal server error', "服务器内部错误 (500)"),
-        (r'502|bad gateway', "网关错误 (502)"),
-        (r'503|service unavailable', "服务不可用 (503)"),
-        (r'dns|name.*resolution', "DNS 解析失败"),
-        (r'connection refused', "连接被拒绝"),
-        (r'connection reset', "连接被重置"),
-        (r'no space', "磁盘空间不足"),
-        (r'permission denied', "权限不足"),
-        (r'ssl|certificate', "SSL/TLS 证书错误"),
-        (r'too many redirect', "重定向次数过多"),
+        (r"timeout", "网络超时"),
+        (r"404|not found", "资源未找到 (404)"),
+        (r"403|forbidden", "访问被拒绝 (403)"),
+        (r"401|unauthorized", "需要认证 (401)"),
+        (r"500|internal server error", "服务器内部错误 (500)"),
+        (r"502|bad gateway", "网关错误 (502)"),
+        (r"503|service unavailable", "服务不可用 (503)"),
+        (r"dns|name.*resolution", "DNS 解析失败"),
+        (r"connection refused", "连接被拒绝"),
+        (r"connection reset", "连接被重置"),
+        (r"no space", "磁盘空间不足"),
+        (r"permission denied", "权限不足"),
+        (r"ssl|certificate", "SSL/TLS 证书错误"),
+        (r"too many redirect", "重定向次数过多"),
     ]
 
     aria2_error_lower = aria2_error.lower()

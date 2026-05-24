@@ -69,6 +69,7 @@ async def test_default_app_settings_match_bootstrap_contract(temp_db: str) -> No
     assert defaults["id"] == 1
     assert defaults["max_task_size_bytes"] == 10737418240
     assert defaults["pack_format"] == "tar.zst"
+    assert defaults["aria2_bt_stop_timeout_seconds"] == 7 * 24 * 60 * 60
     assert defaults["created_at_ms"] == 123
     assert defaults["updated_at_ms"] == 123
 

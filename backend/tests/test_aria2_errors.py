@@ -71,6 +71,21 @@ class TestParseErrorMessage:
         assert parse_error_message(msg) == "后端错误"
 
 
+class TestPreferAria2ErrorMessage:
+    """aria2 明确返回 errorMessage 时优先保留原始原因。"""
+
+    def test_keeps_specific_aria2_error_message(self):
+        from app.aria2.errors import prefer_aria2_error_message
+
+        msg = "CUID#7 - Download aborted. URI=https://example.com/file.iso"
+        assert prefer_aria2_error_message("7", msg) == msg
+
+    def test_falls_back_to_code_when_message_is_empty(self):
+        from app.aria2.errors import prefer_aria2_error_message
+
+        assert prefer_aria2_error_message("9", "") == "磁盘空间不足"
+
+
 class TestErrorCodeMapCoverage:
     """错误码映射覆盖测试"""
 

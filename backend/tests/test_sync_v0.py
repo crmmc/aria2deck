@@ -178,6 +178,104 @@ async def test_error_aria2_result_marks_active_user_tasks_failed(
 
 
 @pytest.mark.asyncio
+async def test_error_aria2_result_preserves_specific_aria2_error_message(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_specific_error", quota_bytes=1000)
+    await reserve_bytes(user["id"], 100, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="sync:specific-error",
+        status="active",
+        aria2_gid="gid-sync-specific-error",
+        total_bytes=100,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=100,
+    )
+    client = AsyncMock()
+    client.force_remove.return_value = "OK"
+    raw_error = "CUID#12 - Download aborted. URI=https://example.com/file.iso"
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-sync-specific-error",
+            "status": "error",
+            "errorCode": "7",
+            "errorMessage": raw_error,
+            "totalLength": "100",
+            "completedLength": "1",
+            "files": [],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+
+    assert updated["status"] == "failed"
+    assert updated["error_message"] == raw_error
+
+
+@pytest.mark.asyncio
+async def test_metadata_followed_by_refreshes_real_task_progress_and_name(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_followed_refresh")
+    download = await create_global_download_v0(
+        resource_key="sync:followed-refresh",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:followed",
+        status="active",
+        aria2_gid="gid-metadata",
+        display_name="magnet:?xt=urn:btih:followed",
+        total_bytes=0,
+        completed_bytes=0,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+    )
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-real",
+        "status": "active",
+        "totalLength": "2048",
+        "completedLength": "512",
+        "bittorrent": {"info": {"name": "Real Torrent"}},
+        "files": [{"path": "/downloads/Real Torrent/file.bin", "length": "2048"}],
+    }
+    client.remove_download_result.return_value = "OK"
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-metadata",
+            "status": "complete",
+            "followedBy": ["gid-real"],
+            "totalLength": "0",
+            "completedLength": "0",
+            "files": [],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+
+    assert updated["aria2_gid"] == "gid-real"
+    assert updated["status"] == "active"
+    assert updated["display_name"] == "Real Torrent"
+    assert updated["total_bytes"] == 2048
+    assert updated["completed_bytes"] == 512
+    client.tell_status.assert_awaited_once_with("gid-real")
+
+
+@pytest.mark.asyncio
 async def test_active_aria2_status_does_not_overwrite_completed_download(
     temp_db: str,
 ) -> None:

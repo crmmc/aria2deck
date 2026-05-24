@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
 from typing import Any
+
+from app.core.config import settings
 
 from app.repositories.usage import (
     apply_usage_delta,
@@ -34,6 +38,36 @@ async def _resolve_quota(user_id: int, quota_bytes: int | None) -> int:
 
 async def get_usage(user_id: int, quota_bytes: int) -> dict[str, int]:
     return _with_available(await get_usage_row(user_id), int(quota_bytes))
+
+
+def visible_space_from_usage(
+    usage: dict[str, int],
+    *,
+    machine_free: int,
+) -> dict[str, int | bool]:
+    used = int(usage["used_bytes"])
+    reserved = int(usage["reserved_bytes"])
+    quota = int(usage["quota_bytes"])
+    quota_available = max(0, quota - used - reserved)
+    limited = int(machine_free) < quota_available
+    available = max(0, int(machine_free) if limited else quota_available)
+    total = used + reserved + available if limited else quota
+    return {
+        "quota": quota,
+        "used": used,
+        "frozen": reserved,
+        "available": available,
+        "total": total,
+        "limited": limited,
+    }
+
+
+async def get_visible_space(user_id: int, quota_bytes: int) -> dict[str, int | bool]:
+    usage = await get_usage(user_id, quota_bytes)
+    download_path = Path(settings.download_dir)
+    download_path.mkdir(parents=True, exist_ok=True)
+    machine_free = shutil.disk_usage(download_path).free
+    return visible_space_from_usage(usage, machine_free=machine_free)
 
 
 async def reserve_bytes(

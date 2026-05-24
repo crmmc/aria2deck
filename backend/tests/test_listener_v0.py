@@ -173,6 +173,57 @@ async def test_completion_with_followed_by_changes_gid_without_creating_files(
 
 
 @pytest.mark.asyncio
+async def test_completion_with_followed_by_refreshes_real_task_name_and_size(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="listener_followed_refresh")
+    download = await create_global_download_v0(
+        resource_key="listener:followed-refresh",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:followed",
+        status="active",
+        aria2_gid="gid-metadata",
+        display_name="magnet:?xt=urn:btih:followed",
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+    )
+    client = AsyncMock()
+    client.tell_status.side_effect = [
+        {
+            "gid": "gid-metadata",
+            "status": "complete",
+            "followedBy": ["gid-real"],
+            "totalLength": "0",
+            "completedLength": "0",
+            "files": [],
+        },
+        {
+            "gid": "gid-real",
+            "status": "active",
+            "totalLength": "4096",
+            "completedLength": "1024",
+            "bittorrent": {"info": {"name": "Real Torrent"}},
+            "files": [{"path": "/downloads/Real Torrent/file.bin", "length": "4096"}],
+        },
+    ]
+    client.remove_download_result.return_value = "OK"
+    _patch_aria2_client(monkeypatch, client)
+
+    await handle_aria2_event(AppState(), "gid-metadata", "complete")
+
+    updated = await _fetch_global(download["id"])
+
+    assert updated["aria2_gid"] == "gid-real"
+    assert updated["display_name"] == "Real Torrent"
+    assert updated["total_bytes"] == 4096
+    assert updated["completed_bytes"] == 1024
+
+
+@pytest.mark.asyncio
 async def test_completed_download_missing_task_dir_uses_directory_error(
     temp_db: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -398,6 +449,7 @@ async def test_error_event_marks_global_and_user_tasks_failed_and_releases_reser
     assert updated["status"] == "failed"
     assert updated["aria2_gid"] is None
     assert updated["error_code"] == "3"
+    assert updated["error_message"] == "disk full"
     assert updated_task["status"] == "failed"
     assert updated_task["reserved_bytes"] == 0
     assert usage["reserved_bytes"] == 0

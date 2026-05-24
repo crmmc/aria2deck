@@ -51,6 +51,7 @@ class TestGetConfig:
         assert "ws_reconnect_max_delay" in data
         assert "ws_reconnect_jitter" in data
         assert "ws_reconnect_factor" in data
+        assert "aria2_bt_stop_timeout_seconds" in data
         assert "rate_limit_account_security" in data
         assert "rate_limit_authenticated_api" in data
         assert "rate_limit_public_api" in data
@@ -82,6 +83,7 @@ class TestUpdateConfig:
             "hidden_file_extensions": [".Tmp", "log"],
             "ws_reconnect_jitter": 0.35,
             "ws_reconnect_factor": 2.5,
+            "aria2_bt_stop_timeout_seconds": 3600,
         }
 
         response = admin_client.put("/api/config", json=payload)
@@ -108,6 +110,7 @@ class TestUpdateConfig:
         assert row["hidden_file_extensions_json"] == '[".tmp", ".log"]'
         assert row["ws_reconnect_jitter"] == "0.35"
         assert row["ws_reconnect_factor"] == "2.5"
+        assert row["aria2_bt_stop_timeout_seconds"] == 3600
 
         get_response = admin_client.get("/api/config")
         assert get_response.status_code == 200
@@ -117,6 +120,7 @@ class TestUpdateConfig:
         assert data["hidden_file_extensions"] == [".tmp", ".log"]
         assert data["ws_reconnect_jitter"] == 0.35
         assert data["ws_reconnect_factor"] == 2.5
+        assert data["aria2_bt_stop_timeout_seconds"] == 3600
 
     def test_update_max_task_size(self, admin_client: TestClient):
         response = admin_client.put(

@@ -12,6 +12,7 @@ from urllib.parse import urlparse, urlunparse
 import aiohttp
 from sqlalchemy import update
 
+from app.aria2.errors import prefer_aria2_error_message
 from app.aria2.failed_task_cleanup import (
     cleanup_failed_task_artifacts,
     get_representative_owner_id,
@@ -370,6 +371,21 @@ async def _update_download_and_active_user_tasks(
     return True
 
 
+async def _refresh_followed_download_values(
+    client: Aria2Client,
+    gid: str,
+    fallback: str | None,
+) -> dict[str, Any]:
+    try:
+        status = await client.tell_status(gid)
+    except Exception as exc:
+        logger.debug(
+            "[WS] Failed to refresh followed download gid=%s error=%s", gid, exc
+        )
+        return {}
+    return _progress_values(status, fallback)
+
+
 async def _remove_download_result_best_effort(
     client: Aria2Client,
     gid: str,
@@ -512,7 +528,6 @@ async def handle_aria2_event(
     event: str,
 ) -> None:
     """Handle a single aria2 event against v0 global_downloads/user_tasks."""
-    from app.aria2.errors import parse_error_message
     from app.core.state import get_aria2_client, get_task_complete_lock
     from app.routers.tasks import broadcast_task_update_to_subscribers
 
@@ -551,12 +566,18 @@ async def handle_aria2_event(
             logger.info(
                 "[WS] Metadata download complete, updating GID: %s -> %s", gid, new_gid
             )
+            real_progress_values = await _refresh_followed_download_values(
+                client,
+                new_gid,
+                display_name_fallback,
+            )
             await _update_download_and_active_user_tasks(
                 download_id=download_id,
                 global_values={
                     "aria2_gid": new_gid,
                     "status": "active",
                     **progress_values,
+                    **real_progress_values,
                 },
                 user_status="active",
             )
@@ -577,8 +598,12 @@ async def handle_aria2_event(
             message = "外部取消（管理员/外部客户端）"
             error_code = "removed"
         else:
-            raw_error = str(aria2_status.get("errorMessage") or "后端错误")
-            message = parse_error_message(raw_error)
+            raw_error = aria2_status.get("errorMessage")
+            message = prefer_aria2_error_message(
+                aria2_status.get("errorCode"),
+                str(raw_error) if raw_error is not None else None,
+                "后端错误",
+            )
             error_code = str(aria2_status.get("errorCode") or "error")
 
         if progress_values:

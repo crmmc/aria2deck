@@ -14,7 +14,7 @@ from app.core.state import get_aria2_client
 from app.repositories.downloads import list_user_tasks
 from app.services.task_projection import speed_totals, stat_counts
 from app.services.task_runtime import fetch_active_live_statuses_by_gid
-from app.services.usage_service import get_usage
+from app.services.usage_service import get_usage, visible_space_from_usage
 
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -53,31 +53,16 @@ async def get_stats(
     - active_task_count: 用户活跃任务数
     """
     usage = await get_usage(user.id, user.quota_bytes)
-    used_space = usage["used_bytes"]
-    frozen_space = usage["reserved_bytes"]
-
-    # 用户配额
-    user_quota = (
-        user.quota_bytes if user.quota_bytes else 100 * 1024 * 1024 * 1024
-    )  # 默认 100GB
+    used_space = int(usage["used_bytes"])
+    frozen_space = int(usage["reserved_bytes"])
 
     # 获取机器实际剩余空间
     download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
-    machine_free = disk.free
-
-    # 用户理论可用空间（基于配额）
-    user_free_by_quota = max(0, user_quota - used_space - frozen_space)
-
-    # 判断是否受机器空间限制
-    is_limited = machine_free < user_free_by_quota
-
-    # 动态调整显示的总空间：
-    # - 如果受限：总空间 = 已使用 + 冻结 + 机器剩余空间
-    # - 如果不受限：总空间 = 用户配额
-    display_total = (
-        used_space + frozen_space + machine_free if is_limited else user_quota
+    visible_space = visible_space_from_usage(
+        usage,
+        machine_free=int(disk.free),
     )
 
     rows = await list_user_tasks(user.id)
@@ -91,10 +76,10 @@ async def get_stats(
     active_count = counts["current"]
 
     result = {
-        "disk_total_space": display_total,
+        "disk_total_space": visible_space["total"],
         "disk_used_space": used_space,
         "disk_frozen_space": frozen_space,
-        "disk_space_limited": is_limited,
+        "disk_space_limited": visible_space["limited"],
         "download_speed": speeds["download_speed"],
         "upload_speed": speeds["upload_speed"],
         "active_task_count": active_count,

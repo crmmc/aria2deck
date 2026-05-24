@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.db.engine import transaction
 from app.db.schema import user_files
+from app.repositories.usage import apply_usage_delta
 
 FIXED_MACHINE_FREE = 8 * 1024**3
 
@@ -67,6 +68,37 @@ class TestSpaceEndpoints:
         assert quota_data["used"] == space_data["used"]
         assert quota_data["total"] == space_data["used"] + space_data["available"]
         assert quota_data["percentage"] == 0
+
+    def test_get_space_total_matches_stats_visible_total(
+        self, authenticated_client: TestClient, test_user: dict
+    ):
+        import asyncio
+
+        asyncio.run(
+            apply_usage_delta(
+                test_user["id"],
+                used_delta=3 * 1024**3,
+                reserved_delta=1024**3,
+            )
+        )
+        disk_usage = SimpleNamespace(free=8 * 1024**3)
+
+        with (
+            patch("app.routers.stats.shutil.disk_usage", return_value=disk_usage),
+            patch("app.services.storage.shutil.disk_usage", return_value=disk_usage),
+        ):
+            stats_response = authenticated_client.get("/api/stats")
+            space_response = authenticated_client.get("/api/files/space")
+
+        assert stats_response.status_code == 200
+        assert space_response.status_code == 200
+        stats_data = stats_response.json()
+        space_data = space_response.json()
+
+        assert (
+            space_data["used"] + space_data["frozen"] + space_data["available"]
+            == stats_data["disk_total_space"]
+        )
 
     def test_get_quota_unauthorized(self, client: TestClient, temp_db: str):
         response = client.get("/api/files/quota")

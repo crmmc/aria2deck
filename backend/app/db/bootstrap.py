@@ -20,6 +20,7 @@ def default_app_settings(timestamp_ms: int) -> dict:
         "min_free_disk_bytes": 1024 * 1024 * 1024,
         "aria2_rpc_url": settings.aria2_rpc_url,
         "aria2_rpc_secret": settings.aria2_rpc_secret,
+        "aria2_bt_stop_timeout_seconds": 7 * 24 * 60 * 60,
         "hidden_file_extensions_json": "[]",
         "pack_format": "tar.zst",
         "pack_compression_level": 5,

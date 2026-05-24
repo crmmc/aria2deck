@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import app.services.download_service as download_service
+from app.routers.config import set_config_value_async
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
 from app.services.download_service import (
     cancel_user_task,
@@ -74,6 +75,49 @@ async def test_create_download_reserves_user_space(temp_db: str):
 
     assert task["reserved_bytes"] == 400
     assert task["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_submit_options_include_default_bt_stop_timeout(temp_db: str) -> None:
+    user = await create_user_v0(username="bt_stop_default")
+    client = AsyncMock()
+    client.add_uri.return_value = "gid-bt-stop-default"
+
+    await create_user_download(
+        user_id=user["id"],
+        quota_bytes=user["quota_bytes"],
+        uri="magnet:?xt=urn:btih:0123456789abcdef",
+        resource_key="magnet:bt-stop-default",
+        resource_kind="magnet",
+        display_name=None,
+        total_bytes=0,
+        aria2_client=client,
+    )
+
+    submit_options = client.add_uri.await_args.args[1]
+    assert submit_options["bt-stop-timeout"] == str(7 * 24 * 60 * 60)
+
+
+@pytest.mark.asyncio
+async def test_submit_options_use_configured_bt_stop_timeout(temp_db: str) -> None:
+    await set_config_value_async("aria2_bt_stop_timeout_seconds", "3600")
+    user = await create_user_v0(username="bt_stop_configured")
+    client = AsyncMock()
+    client.add_uri.return_value = "gid-bt-stop-configured"
+
+    await create_user_download(
+        user_id=user["id"],
+        quota_bytes=user["quota_bytes"],
+        uri="magnet:?xt=urn:btih:abcdef0123456789",
+        resource_key="magnet:bt-stop-configured",
+        resource_kind="magnet",
+        display_name=None,
+        total_bytes=0,
+        aria2_client=client,
+    )
+
+    submit_options = client.add_uri.await_args.args[1]
+    assert submit_options["bt-stop-timeout"] == "3600"
 
 
 @pytest.mark.asyncio

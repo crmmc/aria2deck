@@ -523,9 +523,12 @@ async def _ensure_download_submitted(
             return current
 
         task_dir = get_task_download_dir(current["id"])
+        from app.routers.config import get_aria2_bt_stop_timeout_seconds
+
         submit_options: dict[str, Any] = {
             "dir": str(task_dir),
             "seed-time": "0",
+            "bt-stop-timeout": str(get_aria2_bt_stop_timeout_seconds()),
         }
         if options:
             for key in _ALLOWED_USER_OPTIONS:

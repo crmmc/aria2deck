@@ -50,6 +50,12 @@ class ConfigUpdate(BaseModel):
     )
     aria2_rpc_url: str | None = None
     aria2_rpc_secret: str | None = None
+    aria2_bt_stop_timeout_seconds: int | None = Field(
+        None,
+        ge=0,
+        le=365 * 24 * 60 * 60,
+        description="BT 连续无数据传输停止超时（秒，0=禁用）",
+    )
     hidden_file_extensions: list[str] | None = None
     pack_format: str | None = None
     pack_compression_level: int | None = Field(
@@ -216,6 +222,17 @@ def get_min_free_disk() -> int:
     return 1 * 1024 * 1024 * 1024
 
 
+def get_aria2_bt_stop_timeout_seconds() -> int:
+    """获取 aria2 BT 无数据传输停止超时，默认 7 天。"""
+    val = get_config_value("aria2_bt_stop_timeout_seconds")
+    if val:
+        try:
+            return max(0, int(val))
+        except (ValueError, TypeError):
+            pass
+    return 7 * 24 * 60 * 60
+
+
 def get_hidden_file_extensions() -> list[str]:
     """获取隐藏的文件后缀名列表"""
     import json
@@ -293,6 +310,7 @@ def _serialize_config(aria2_rpc_url: str, aria2_rpc_secret: str) -> dict:
         "min_free_disk": get_min_free_disk(),
         "aria2_rpc_url": aria2_rpc_url,
         "aria2_rpc_secret": masked_secret,
+        "aria2_bt_stop_timeout_seconds": get_aria2_bt_stop_timeout_seconds(),
         "hidden_file_extensions": get_hidden_file_extensions(),
         "pack_format": get_pack_format(),
         "pack_compression_level": get_pack_compression_level(),

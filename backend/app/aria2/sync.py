@@ -13,7 +13,7 @@ from fastapi import WebSocket
 from sqlalchemy import select, update
 
 from app.aria2.client import Aria2Client
-from app.aria2.errors import parse_error_message
+from app.aria2.errors import prefer_aria2_error_message
 from app.aria2.failed_task_cleanup import (
     cleanup_failed_task_artifacts,
     get_representative_owner_id,
@@ -123,14 +123,17 @@ def _map_v0_status(status: dict[str, Any], download_id: int) -> dict[str, Any]:
     )[0].get("path")
     raw_status = str(status.get("status") or "unknown")
     raw_error = status.get("errorMessage")
-    error_display = parse_error_message(raw_error) if raw_error else None
     return {
         "status": ARIA2_TO_V0_STATUS.get(raw_status, "active"),
         "raw_status": raw_status,
         "display_name": sanitize_string(_sanitize_path(raw_name, download_id)),
         "total_bytes": _safe_int(status.get("totalLength")),
         "completed_bytes": _safe_int(status.get("completedLength")),
-        "error_message": sanitize_string(error_display or raw_error),
+        "error_message": sanitize_string(
+            prefer_aria2_error_message(status.get("errorCode"), raw_error, "后端错误")
+            if raw_error or raw_status == "error"
+            else None
+        ),
     }
 
 
@@ -291,20 +294,40 @@ async def _update_v0_download_from_aria2(
 
     if mapped["raw_status"] == "complete" and followed_by:
         new_gid = str(followed_by[0])
+        real_status: dict[str, Any] | None = None
+        try:
+            real_status = await client.tell_status(new_gid)
+        except Exception as exc:
+            logger.debug(
+                "[Sync] Failed to refresh followed download gid=%s error=%s",
+                new_gid,
+                exc,
+            )
+        real_mapped = _map_v0_status(real_status, download_id) if real_status else None
         logger.info(
             "[Sync] Metadata download complete, updating GID: %s -> %s", gid, new_gid
         )
+        global_values: dict[str, Any] = {
+            "aria2_gid": new_gid,
+            "status": real_mapped["status"] if real_mapped else "active",
+        }
+        if real_mapped:
+            global_values.update(
+                {
+                    "total_bytes": real_mapped["total_bytes"],
+                    "completed_bytes": real_mapped["completed_bytes"],
+                }
+            )
+            if real_mapped["display_name"]:
+                global_values["display_name"] = real_mapped["display_name"]
         changed = await _guarded_update_global_download(
             download_id,
-            {
-                "aria2_gid": new_gid,
-                "status": "active",
-            },
+            global_values,
         )
         if not changed:
             return
 
-        await _update_active_user_task_status(download_id, "active")
+        await _update_active_user_task_status(download_id, str(global_values["status"]))
         if gid != new_gid:
             try:
                 await client.remove_download_result(gid)
@@ -470,20 +493,21 @@ async def sync_tasks(
                 if _is_missing_gid_error(exc):
                     # 检查任务是否已完成
                     async with transaction() as conn:
-                        row = (await conn.execute(
-                            select(
-                                global_downloads.c.status,
-                                global_downloads.c.completed_file_id,
-                                global_downloads.c.completed_bytes,
-                                global_downloads.c.total_bytes,
+                        row = (
+                            await conn.execute(
+                                select(
+                                    global_downloads.c.status,
+                                    global_downloads.c.completed_file_id,
+                                    global_downloads.c.completed_bytes,
+                                    global_downloads.c.total_bytes,
+                                ).where(global_downloads.c.id == download_id)
                             )
-                            .where(global_downloads.c.id == download_id)
-                        )).first()
+                        ).first()
 
                     if row is None:
                         logger.debug(
                             "[Sync] GID %s missing but download not found, skipping",
-                            gid
+                            gid,
                         )
                         return
 
@@ -493,7 +517,7 @@ async def sync_tasks(
                     if status_val == "completed" and completed_file_id is not None:
                         logger.info(
                             "[Sync] GID %s missing but download already completed, skipping",
-                            gid
+                            gid,
                         )
                         return
 

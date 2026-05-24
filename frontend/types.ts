@@ -51,6 +51,7 @@ export type SystemConfig = {
   min_free_disk: number;
   aria2_rpc_url: string;
   aria2_rpc_secret: string;
+  aria2_bt_stop_timeout_seconds: number;
   hidden_file_extensions: string[];
   pack_format: "zip" | "tar.zst";
   pack_compression_level: number;

@@ -15,6 +15,7 @@ CONFIG_KEY_TO_COLUMN: dict[str, str] = {
     "min_free_disk": "min_free_disk_bytes",
     "aria2_rpc_url": "aria2_rpc_url",
     "aria2_rpc_secret": "aria2_rpc_secret",
+    "aria2_bt_stop_timeout_seconds": "aria2_bt_stop_timeout_seconds",
     "hidden_file_extensions": "hidden_file_extensions_json",
     "pack_format": "pack_format",
     "pack_compression_level": "pack_compression_level",
@@ -47,6 +48,7 @@ INT_CONFIG_COLUMNS = {
     "max_task_size_bytes",
     "min_free_disk_bytes",
     "pack_compression_level",
+    "aria2_bt_stop_timeout_seconds",
     "ws_reconnect_max_delay",
     "rate_limit_account_security",
     "rate_limit_authenticated_api",
@@ -130,6 +132,7 @@ def row_to_api_settings(row: Mapping[str, Any]) -> dict[str, Any]:
         "min_free_disk": int(row["min_free_disk_bytes"]),
         "aria2_rpc_url": row["aria2_rpc_url"],
         "aria2_rpc_secret": _masked_secret(row.get("aria2_rpc_secret")),
+        "aria2_bt_stop_timeout_seconds": int(row["aria2_bt_stop_timeout_seconds"]),
         "hidden_file_extensions": _decode_hidden_extensions(
             row["hidden_file_extensions_json"]
         ),

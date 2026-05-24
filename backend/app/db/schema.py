@@ -109,6 +109,7 @@ app_settings = Table(
     Column("min_free_disk_bytes", Integer, nullable=False),
     Column("aria2_rpc_url", Text, nullable=False),
     Column("aria2_rpc_secret", Text),
+    Column("aria2_bt_stop_timeout_seconds", Integer, nullable=False),
     Column("hidden_file_extensions_json", Text, nullable=False),
     Column("pack_format", String(32), nullable=False),
     Column("pack_compression_level", Integer, nullable=False),

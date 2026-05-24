@@ -36,7 +36,14 @@ from app.db.schema import (
     user_files,
     user_storage_usage,
 )
-from app.services.usage_service import get_usage, release_reserved, reserve_bytes
+from app.services import storage as storage_service
+from app.core.config import settings
+from app.services.usage_service import (
+    get_usage,
+    release_reserved,
+    reserve_bytes,
+    visible_space_from_usage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -243,26 +250,17 @@ async def _directory_entries(
 
 
 async def _get_user_space_info_v0(user_id: int, quota_bytes: int) -> dict[str, int]:
-    async with transaction() as conn:
-        used = (
-            await conn.execute(
-                select(func.coalesce(func.sum(stored_files.c.size_bytes), 0))
-                .select_from(
-                    user_files.join(
-                        stored_files, user_files.c.stored_file_id == stored_files.c.id
-                    )
-                )
-                .where(user_files.c.user_id == user_id)
-            )
-        ).scalar_one()
     usage = await get_usage(user_id, quota_bytes)
-    reserved = int(usage["reserved_bytes"])
-    available = max(0, quota_bytes - int(used or 0) - reserved)
+    download_path = Path(settings.download_dir)
+    download_path.mkdir(parents=True, exist_ok=True)
+    disk = storage_service.shutil.disk_usage(download_path)
+    visible = visible_space_from_usage(usage, machine_free=int(disk.free))
     return {
-        "quota": quota_bytes,
-        "used": int(used or 0),
-        "frozen": reserved,
-        "available": available,
+        "quota": int(visible["quota"]),
+        "used": int(visible["used"]),
+        "frozen": int(visible["frozen"]),
+        "available": int(visible["available"]),
+        "total": int(visible["total"]),
     }
 
 
@@ -1122,7 +1120,12 @@ async def get_space(user: AuthUser = Depends(require_user)) -> dict:
     )
     space_info = await _get_user_space_info_v0(user_id, user.quota)
     logger.debug("查询空间信息 user_id=%s", user_id)
-    return space_info
+    return {
+        "quota": space_info["quota"],
+        "used": space_info["used"],
+        "frozen": space_info["frozen"],
+        "available": space_info["available"],
+    }
 
 
 def _pack_task_to_dict(task: dict[str, Any]) -> dict:
@@ -1442,8 +1445,8 @@ async def get_quota(user: AuthUser = Depends(require_user)) -> dict:
     )
     space_info = await _get_user_space_info_v0(user_id, user.quota)
 
-    # Calculate percentage
-    total = space_info["used"] + space_info["available"]
+    # Calculate percentage against the same visible total as the task page.
+    total = space_info["total"]
     percentage = (space_info["used"] / total * 100) if total > 0 else 0
 
     logger.debug("查询配额信息 user_id=%s", user_id)

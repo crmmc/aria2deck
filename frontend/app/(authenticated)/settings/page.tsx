@@ -59,6 +59,7 @@ export default function SettingsPage() {
   const [minFreeDisk, setMinFreeDisk] = useState("");
   const [aria2RpcUrl, setAria2RpcUrl] = useState("");
   const [aria2RpcSecret, setAria2RpcSecret] = useState("");
+  const [aria2BtStopTimeoutSeconds, setAria2BtStopTimeoutSeconds] = useState(7 * 24 * 60 * 60);
   const [hiddenExtensions, setHiddenExtensions] = useState<string[]>([]);
   const [extensionInput, setExtensionInput] = useState("");
   const [packFormat, setPackFormat] = useState<"zip" | "tar.zst">("zip");
@@ -140,6 +141,7 @@ export default function SettingsPage() {
       setMinFreeDisk(bytesToGB(cfg.min_free_disk));
       setAria2RpcUrl(cfg.aria2_rpc_url || "");
       setAria2RpcSecret(cfg.aria2_rpc_secret || "");
+      setAria2BtStopTimeoutSeconds(cfg.aria2_bt_stop_timeout_seconds ?? 7 * 24 * 60 * 60);
       setHiddenExtensions(cfg.hidden_file_extensions || []);
       setPackFormat(cfg.pack_format || "zip");
       setPackCompressionLevel(cfg.pack_compression_level ?? 5);
@@ -207,6 +209,7 @@ export default function SettingsPage() {
         aria2_rpc_secret: aria2RpcSecret.startsWith("*")
           ? undefined
           : aria2RpcSecret,
+        aria2_bt_stop_timeout_seconds: aria2BtStopTimeoutSeconds,
         hidden_file_extensions: hiddenExtensions,
         pack_format: packFormat,
         pack_compression_level: packCompressionLevel,
@@ -453,6 +456,21 @@ export default function SettingsPage() {
               value={aria2RpcSecret}
               onChange={(e) => setAria2RpcSecret(e.target.value)}
               placeholder="留空表示无密钥"
+            />
+          </div>
+
+          <div className="mb-6">
+            <label className="form-label-lg" htmlFor="settings-bt-stop-timeout">BT 无数据停止超时 (秒)</label>
+            <p className="muted text-sm mb-2">创建 aria2 任务时写入 bt-stop-timeout，默认 604800 秒（7 天），0 表示禁用。</p>
+            <input
+              id="settings-bt-stop-timeout"
+              aria-label="BT 无数据停止超时秒数"
+              className="input"
+              type="number"
+              min="0"
+              max={365 * 24 * 60 * 60}
+              value={aria2BtStopTimeoutSeconds}
+              onChange={(e) => setAria2BtStopTimeoutSeconds(Math.max(0, parseInt(e.target.value) || 0))}
             />
           </div>
 
