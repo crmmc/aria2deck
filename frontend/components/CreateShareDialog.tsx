@@ -136,7 +136,7 @@ export default function CreateShareDialog({
                 <label className="label" htmlFor="share-password">密码（可选）</label>
                 <input
                   id="share-password"
-                  aria-label="密码（可选）"
+                  aria-label="密码"
                   type="text"
                   className="input"
                   style={{ width: "100%" }}
@@ -150,7 +150,7 @@ export default function CreateShareDialog({
                 <label className="label" htmlFor="share-max-downloads">下载次数限制（可选）</label>
                 <input
                   id="share-max-downloads"
-                  aria-label="下载次数限制（可选）"
+                  aria-label="下载次数限制"
                   type="number"
                   className="input"
                   style={{ width: "100%" }}

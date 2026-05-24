@@ -218,8 +218,7 @@ function SidebarContent({ user }: SidebarProps) {
             <span className="bottom-nav-label">{item.name}</span>
           </Link>
         ))}
-        <button
-          type="button"
+        <button type="button"
           className={`bottom-nav-item ${showMoreMenu ? "active" : ""}`}
           onClick={() => setShowMoreMenu(true)}
         >
@@ -239,8 +238,7 @@ function SidebarContent({ user }: SidebarProps) {
         >
             <div className="more-menu-header">
               <h3 className="more-menu-title">更多</h3>
-              <button
-                type="button"
+              <button type="button"
                 className="more-menu-close"
                 onClick={() => setShowMoreMenu(false)}
               >
@@ -296,8 +294,7 @@ function SidebarContent({ user }: SidebarProps) {
               </>
             )}
 
-            <button
-              type="button"
+            <button type="button"
               className="more-menu-item danger"
               onClick={() => {
                 setShowMoreMenu(false);

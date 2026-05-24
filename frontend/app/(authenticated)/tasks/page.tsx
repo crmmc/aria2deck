@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { api } from "@/lib/api";
@@ -9,28 +9,14 @@ import { useToast } from "@/components/Toast";
 import { ModalOverlay } from "@/components/ModalOverlay";
 import StatsWidget from "@/components/StatsWidget";
 import { useTaskWebSocket } from "@/hooks/useTaskWebSocket";
-import { useMounted } from "@/lib/useMounted";
 import {
   sendTaskCompleteNotification,
   sendTaskErrorNotification,
 } from "@/lib/notification";
 
-import { formatBytes } from "@/lib/utils";
-
-function getTaskDisplayName(task: Task): string {
-  return task.name || "未知文件";
-}
-
-function formatTaskProgressLabel(task: Task): string {
-  if (task.total_length <= 0) {
-    return "0%";
-  }
-  const progress = (task.completed_length / task.total_length) * 100;
-  if (task.status !== "complete" && task.completed_length < task.total_length) {
-    return `${Math.min(progress, 99.9).toFixed(1)}%`;
-  }
-  return `${Math.min(progress, 100).toFixed(0)}%`;
-}
+import { AddTaskForm } from "./_components/AddTaskForm";
+import { TaskToolbar } from "./_components/TaskToolbar";
+import { TaskList } from "./_components/TaskList";
 
 function upsertTaskById(tasks: Task[], task: Task): Task[] {
   const existingIndex = tasks.findIndex((item) => item.id === task.id);
@@ -42,181 +28,9 @@ function upsertTaskById(tasks: Task[], task: Task): Task[] {
   return next;
 }
 
-interface TaskCardProps {
-  task: Task;
-  isSelected: boolean;
-  isOperating: boolean;
-  onToggleSelection: (id: number) => void;
-  onCancel: (id: number) => void;
-  onCopyUri: (uri: string) => void;
-  onRetry: (task: Task) => void;
+function getTaskDisplayName(task: Task): string {
+  return task.name || "未知文件";
 }
-
-const TaskCard = memo(function TaskCard({
-  task,
-  isSelected,
-  isOperating,
-  onToggleSelection,
-  onCancel,
-  onCopyUri,
-  onRetry,
-}: TaskCardProps) {
-  const handleCardClick = useCallback(() => {
-    if (task.uri) {
-      onCopyUri(task.uri);
-    }
-  }, [task.uri, onCopyUri]);
-
-  const handleCheckboxChange = useCallback(() => {
-    onToggleSelection(task.id);
-  }, [task.id, onToggleSelection]);
-
-  const handleCopyClick = useCallback(() => {
-    if (task.uri) onCopyUri(task.uri);
-  }, [task.uri, onCopyUri]);
-
-  const handleCancelClick = useCallback(() => {
-    onCancel(task.id);
-  }, [task.id, onCancel]);
-
-  const handleRetryClick = useCallback(() => {
-    onRetry(task);
-  }, [task, onRetry]);
-
-  const interactiveProps = task.uri
-    ? {
-        role: "button",
-        tabIndex: 0,
-        onClick: handleCardClick,
-        onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            handleCardClick();
-          }
-        },
-        "aria-label": `复制任务链接 ${getTaskDisplayName(task)}`,
-      }
-    : {};
-
-  return (
-    <div
-      className={`task-card-inner${isSelected ? " selected" : ""}${task.uri ? " cursor-pointer" : ""}`}
-      {...interactiveProps}
-    >
-      <div>
-          <div className="space-between flex-start mb-3">
-            <div className="task-card-header">
-              <input
-                type="checkbox"
-                aria-label={`选择任务 ${getTaskDisplayName(task)}`}
-                checked={isSelected}
-                onChange={handleCheckboxChange}
-                onClick={(e) => e.stopPropagation()}
-                className="checkbox-sm mt-2 cursor-pointer"
-              />
-              <div className="overflow-hidden flex-1">
-                <h3 className="task-name" title={task.name || undefined}>
-                  {getTaskDisplayName(task)}
-                </h3>
-                <div className="muted tabular-nums text-sm">
-                  {formatBytes(task.completed_length)} /{" "}
-                  {formatBytes(task.total_length)}
-                </div>
-              </div>
-            </div>
-            {task.status === "active" && (
-              <span className="badge active tabular-nums">
-                {formatBytes(task.download_speed)}/s
-              </span>
-            )}
-          </div>
-
-          <div className="progress-container mb-3">
-            <div
-              className={`progress-bar ${
-                task.status === "active"
-                  ? "progress-bar-active progress-bar-primary"
-                  : task.status === "error"
-                    ? "progress-bar-error"
-                    : "progress-bar-primary"
-              }`}
-              style={{
-                width: `${task.total_length ? (task.completed_length / task.total_length) * 100 : 0}%`,
-              }}
-            />
-          </div>
-        </div>
-
-        <div
-          className="task-card-footer"
-          role="presentation"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="task-footer-left">
-            <span className={`task-status task-status-${task.status}`}>
-              {task.status === "active"
-                ? "下载中"
-                : task.status === "queued"
-                  ? "排队中"
-                  : task.status === "error"
-                    ? "失败"
-                    : task.status}
-            </span>
-            {task.error && (
-              <span className="text-danger text-sm" title={task.error}>
-                {task.error}
-              </span>
-            )}
-            {task.total_length > 0 && task.status !== "error" && (
-              <span className="task-progress-text">
-                {formatTaskProgressLabel(task)}
-              </span>
-            )}
-          </div>
-
-          <div className="task-footer-right">
-            {task.uri && (
-              <button type="button"
-                className="button secondary btn-task"
-                onClick={handleCopyClick}
-                title="复制链接"
-              >
-                复制
-              </button>
-            )}
-            {task.status === "error" && task.uri && (
-              <button type="button"
-                className="button secondary btn-task"
-                onClick={handleRetryClick}
-                title="重新下载"
-              >
-                重试
-              </button>
-            )}
-            {(task.status === "active" || task.status === "queued") && (
-              <button type="button"
-                className={`button secondary danger btn-task${isOperating ? " opacity-60" : ""}`}
-                onClick={handleCancelClick}
-                disabled={isOperating}
-              >
-                {isOperating ? "处理中..." : "取消"}
-              </button>
-            )}
-            {task.status === "error" && (
-              <button type="button"
-                className={`button secondary danger btn-task${isOperating ? " opacity-60" : ""}`}
-                onClick={handleCancelClick}
-                disabled={isOperating}
-                title="删除失败任务"
-              >
-                删除
-              </button>
-            )}
-          </div>
-        </div>
-    </div>
-  );
-});
 
 export default function TasksPage() {
   const { showToast, showConfirm } = useToast();
@@ -239,13 +53,14 @@ export default function TasksPage() {
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [isBatchAdding, setIsBatchAdding] = useState(false);
   const [batchUris, setBatchUris] = useState("");
-  const mounted = useMounted();
+  const [mounted, setMounted] = useState(false);
   const torrentInputRef = useRef<HTMLInputElement>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isBatchOperating, setIsBatchOperating] = useState(false);
   const [operatingTaskIds, setOperatingTaskIds] = useState<Set<number>>(
     new Set()
   );
+  const [wsConnected, setWsConnected] = useState(false);
 
   useEffect(() => {
     if (showBatchAddModal) {
@@ -260,8 +75,11 @@ export default function TasksPage() {
 
   const deletedTaskIdsRef = useRef<Set<number>>(new Set());
   const tasksRef = useRef<Task[]>([]);
-  const wsConnectedRef = useRef(false);
   tasksRef.current = tasks;
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -284,59 +102,61 @@ export default function TasksPage() {
       });
   }, [showToast]);
 
-  const pollTasks = useCallback(async () => {
-    if (wsConnectedRef.current) return;
-    try {
-      const activeTasks = await api.listTasks("active");
-      const activeMap = new Map(activeTasks.map((t) => [t.id, t]));
-      const updatedActive = activeTasks.filter(
-        (t) => !deletedTaskIdsRef.current.has(t.id)
-      );
-
-      let needRefresh = false;
-      const prevTasks = tasksRef.current;
-      const prevActive = prevTasks.filter(
-        (t) => t.status === "active" || t.status === "queued"
-      );
-      for (const t of prevActive) {
-        if (!activeMap.has(t.id) && !deletedTaskIdsRef.current.has(t.id)) {
-          needRefresh = true;
-          break;
-        }
-      }
-
-      let currentTasks: Task[] | null = null;
-      if (needRefresh) {
-        try {
-          currentTasks = await api.listTasks("current");
-        } catch (err: unknown) {
-          console.warn("刷新当前任务列表失败", err);
-        }
-      }
-
-      setTasks((prev) => {
-        const deletedIds = new Set(deletedTaskIdsRef.current);
-        deletedTaskIdsRef.current.clear();
-        if (currentTasks) {
-          return currentTasks.filter((t) => !deletedIds.has(t.id));
-        }
-        const nonActive = prev.filter(
-          (t) => t.status !== "active" && t.status !== "queued" && !deletedIds.has(t.id)
-        );
-        return [...updatedActive, ...nonActive];
-      });
-    } catch (err: unknown) {
-      console.warn("轮询活动任务失败", err);
-    }
-  }, []);
-
   useEffect(() => {
+    if (wsConnected) return;
+
     const pollInterval = setInterval(() => {
-      void pollTasks();
+      api
+        .listTasks("active")
+        .then((activeTasks) => {
+          const activeMap = new Map(activeTasks.map((t) => [t.id, t]));
+
+          const updatedActive = activeTasks.filter(
+            (t) => !deletedTaskIdsRef.current.has(t.id)
+          );
+
+          let needRefresh = false;
+          const prevTasks = tasksRef.current;
+          const prevActive = prevTasks.filter(
+            (t) => t.status === "active" || t.status === "queued"
+          );
+          for (const t of prevActive) {
+            if (!activeMap.has(t.id) && !deletedTaskIdsRef.current.has(t.id)) {
+              needRefresh = true;
+              break;
+            }
+          }
+
+          setTasks((prev) => {
+            const deletedIds = new Set(deletedTaskIdsRef.current);
+            deletedTaskIdsRef.current.clear();
+            const nonActive = prev.filter(
+              (t) => t.status !== "active" && t.status !== "queued" && !deletedIds.has(t.id)
+            );
+            return [...updatedActive, ...nonActive];
+          });
+
+          if (needRefresh) {
+            api
+              .listTasks("current")
+              .then((currentTasks) => {
+                setTasks((prev) => {
+                  const freshDeletedIds = new Set(deletedTaskIdsRef.current);
+                  return currentTasks.filter((t) => !freshDeletedIds.has(t.id));
+                });
+              })
+              .catch((err: unknown) => {
+                console.warn("刷新当前任务列表失败", err);
+              });
+          }
+        })
+        .catch((err: unknown) => {
+          console.warn("轮询活动任务失败", err);
+        });
     }, 5000);
 
     return () => clearInterval(pollInterval);
-  }, [pollTasks]);
+  }, [wsConnected]);
 
   const handleTaskUpdate = useCallback((newTask: Task) => {
     const taskId = newTask.id;
@@ -345,7 +165,6 @@ export default function TasksPage() {
       return;
     }
 
-    // Keep active/queued/error in task page; complete is moved to history.
     const isVisibleStatus =
       newTask.status === "active" ||
       newTask.status === "queued" ||
@@ -360,7 +179,6 @@ export default function TasksPage() {
         if (oldTask.status !== "complete" && newTask.status === "complete") {
           sendTaskCompleteNotification(taskName, newTask.id);
           showToast(`${taskName} 下载完成`, "success");
-          // Remove completed task from list (it goes to history)
           if (idx !== -1) {
             const next = [...prev];
             next.splice(idx, 1);
@@ -373,7 +191,6 @@ export default function TasksPage() {
         }
       }
 
-      // Remove completed tasks from the list
       if (newTask.status === "complete") {
         if (idx !== -1) {
           const next = [...prev];
@@ -383,7 +200,6 @@ export default function TasksPage() {
         return prev;
       }
 
-      // Keep only active, queued and error tasks in current list
       if (!isVisibleStatus) {
         if (idx !== -1) {
           const next = [...prev];
@@ -408,7 +224,6 @@ export default function TasksPage() {
   );
 
   const handleWsConnected = useCallback(() => {
-    wsConnectedRef.current = true;
     api
       .listTasks("current")
       .then((currentTasks) => {
@@ -421,10 +236,11 @@ export default function TasksPage() {
         const message = err instanceof Error ? err.message : "未知错误";
         showToast(`同步任务状态失败: ${message}`, "warning");
       });
+    setWsConnected(true);
   }, [showToast]);
 
   const handleWsDisconnected = useCallback(() => {
-    wsConnectedRef.current = false;
+    setWsConnected(false);
   }, []);
 
   useTaskWebSocket({
@@ -743,159 +559,42 @@ export default function TasksPage() {
 
         <StatsWidget />
 
-        <div className="card add-task-card">
-          <form onSubmit={createTask} className="add-task-form">
-            <input
-              className="input add-task-input"
-              aria-label="添加下载链接"
-              placeholder="粘贴磁力链接、HTTP 或 FTP URL..."
-              value={uri}
-              onChange={(event) => setUri(event.target.value)}
-              required
-            />
-            <input
-              type="file"
-              aria-label="上传 torrent 文件"
-              ref={torrentInputRef}
-              accept=".torrent"
-              onChange={handleTorrentUpload}
-              className="hidden"
-            />
-            <button
-              className={`button flex-shrink-0 shadow-none${isSubmitting ? " opacity-60" : ""}`}
-              type="submit"
-              disabled={isSubmitting}
-            >
-              {isSubmitting ? "添加中..." : "+ 添加任务"}
-            </button>
-            <button
-              className="button secondary flex-shrink-0 shadow-none"
-              type="button"
-              onClick={() => setShowBatchAddModal(true)}
-            >
-              批量添加
-            </button>
-            <button
-              className="button secondary flex-shrink-0 shadow-none"
-              type="button"
-              onClick={() => torrentInputRef.current?.click()}
-              title="上传种子文件"
-            >
-              上传种子
-            </button>
-          </form>
-          {error ? <div className="form-error">{error}</div> : null}
-        </div>
+        <AddTaskForm
+          uri={uri}
+          error={error}
+          isSubmitting={isSubmitting}
+          torrentInputRef={torrentInputRef}
+          onUriChange={setUri}
+          onSubmit={createTask}
+          onTorrentUpload={handleTorrentUpload}
+          onBatchAdd={() => setShowBatchAddModal(true)}
+        />
 
-        <div className="card filter-toolbar inline-filter-toolbar">
-          <div className="filter-group toolbar-actions-group">
-            <button
-              type="button"
-              className="button secondary btn-sm"
-              onClick={toggleSelectAll}
-            >
-              {selectedTasks.size === filteredTasks.length &&
-              filteredTasks.length > 0
-                ? "取消全选"
-                : "全选"}
-            </button>
-            {selectedTasks.size > 0 && (
-              <>
-                <span className="muted text-sm">
-                  已选 {selectedTasks.size} 项
-                </span>
-                {hasActiveTasks && (
-                  <button
-                    type="button"
-                    className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
-                    onClick={batchCancelTasks}
-                    disabled={isBatchOperating}
-                  >
-                    取消下载
-                  </button>
-                )}
-              </>
-            )}
-          </div>
-
-          <div className="filter-group toolbar-select-group">
-            <span className="muted text-sm">筛选:</span>
-            <select
-              value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value)}
-              className="select"
-            >
-              <option value="all">当前任务</option>
-              <option value="active">进行中</option>
-            </select>
-          </div>
-
-          <div className="filter-group toolbar-select-group">
-            <span className="muted text-sm">排序:</span>
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
-              className="select"
-            >
-              <option value="default">默认</option>
-              <option value="speed">下载速度</option>
-              <option value="progress">下载进度</option>
-            </select>
-          </div>
-
-          <div className="filter-group toolbar-search-group">
-            <input
-              type="text"
-              aria-label="搜索任务"
-              placeholder="搜索任务..."
-              value={searchKeyword}
-              onChange={(e) => setSearchKeyword(e.target.value)}
-              className="search-input"
-            />
-          </div>
-        </div>
+        <TaskToolbar
+          selectedCount={selectedTasks.size}
+          filteredCount={filteredTasks.length}
+          filterStatus={filterStatus}
+          sortBy={sortBy}
+          searchKeyword={searchKeyword}
+          hasActiveTasks={hasActiveTasks}
+          isBatchOperating={isBatchOperating}
+          onToggleSelectAll={toggleSelectAll}
+          onBatchCancel={batchCancelTasks}
+          onFilterStatusChange={setFilterStatus}
+          onSortByChange={setSortBy}
+          onSearchKeywordChange={setSearchKeyword}
+        />
 
         <div className="task-list">
-          {filteredTasks.length === 0 && (
-            <div className="empty-state">
-              <div className="empty-state-icon">
-                <svg
-                  width="48"
-                  height="48"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
-                  <polyline points="13 2 13 9 20 9" />
-                </svg>
-              </div>
-              <p className="font-medium mb-1">暂无活动任务</p>
-              <p className="muted text-base">
-                添加新任务开始下载，已完成的文件请前往文件页面查看
-              </p>
-            </div>
-          )}
-
-          {filteredTasks.length > 0 && (
-            <div className="card task-card-container">
-              {filteredTasks.map((task) => (
-                <TaskCard
-                  key={task.id}
-                  task={task}
-                  isSelected={selectedTasks.has(task.id)}
-                  isOperating={operatingTaskIds.has(task.id)}
-                  onToggleSelection={toggleTaskSelection}
-                  onCancel={cancelTask}
-                  onCopyUri={copyUri}
-                  onRetry={retryTask}
-                />
-              ))}
-            </div>
-          )}
+          <TaskList
+            filteredTasks={filteredTasks}
+            selectedTasks={selectedTasks}
+            operatingTaskIds={operatingTaskIds}
+            onToggleSelection={toggleTaskSelection}
+            onCancel={cancelTask}
+            onCopyUri={copyUri}
+            onRetry={retryTask}
+          />
         </div>
       </div>
 
@@ -922,11 +621,11 @@ export default function TasksPage() {
               </p>
 
               <textarea
-                aria-label="批量添加下载链接"
                 value={batchUris}
                 onChange={(e) => setBatchUris(e.target.value)}
                 placeholder="magnet:?xt=urn:btih:...&#10;https://example.com/file1.zip&#10;https://example.com/file2.zip"
                 className="batch-textarea"
+                aria-label="批量下载链接"
               />
 
               <div className="modal-footer">

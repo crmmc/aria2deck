@@ -1,183 +1,30 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
 import { api } from "@/lib/api";
-import type { ShareLink } from "@/types";
 import { useToast } from "@/components/Toast";
-import { formatBytes } from "@/lib/utils";
-
-interface ShareCardProps {
-  record: ShareLink;
-  isSelected: boolean;
-  onToggleSelection: (id: number) => void;
-  onCopyLink: (shareCode: string) => void;
-  onRevoke: (id: number) => void;
-  onDelete: (id: number) => void;
-}
-
-const ShareCard = memo(function ShareCard({
-  record,
-  isSelected,
-  onToggleSelection,
-  onCopyLink,
-  onRevoke,
-  onDelete,
-}: ShareCardProps) {
-  const handleCardClick = useCallback(() => {
-    onCopyLink(record.share_code);
-  }, [record.share_code, onCopyLink]);
-
-  const handleCheckboxChange = useCallback(() => {
-    onToggleSelection(record.id);
-  }, [record.id, onToggleSelection]);
-
-  const handleCopyClick = useCallback(() => {
-    onCopyLink(record.share_code);
-  }, [record.share_code, onCopyLink]);
-
-  const handleRevokeClick = useCallback(() => {
-    onRevoke(record.id);
-  }, [record.id, onRevoke]);
-
-  const handleDeleteClick = useCallback(() => {
-    onDelete(record.id);
-  }, [record.id, onDelete]);
-
-  const isExpiredByTime = record.expires_at ? new Date(record.expires_at) <= new Date() : false;
-  const isExpiredByCount = record.max_downloads != null && record.max_downloads > 0 && record.download_count >= record.max_downloads;
-  const isExpired = isExpiredByTime || isExpiredByCount;
-  
-  let currentStatus: string = record.status;
-  if (currentStatus === "active" && isExpired) {
-    currentStatus = "expired";
-  }
-
-  const statusText =
-    currentStatus === "active"
-      ? "活跃"
-      : currentStatus === "expired"
-        ? "已过期"
-        : "已失效";
-
-  const statusClass =
-    currentStatus === "active"
-      ? "task-status-complete"
-      : currentStatus === "expired"
-        ? "task-status-cancelled"
-        : "task-status-error";
-
-  return (
-    <div
-      className={`task-card-inner share-card-item${isSelected ? " selected" : ""}`}
-    >
-      <div className="share-card-main-row">
-        <input
-          type="checkbox"
-          aria-label={`选择分享 ${record.file_name}`}
-          checked={isSelected}
-          onChange={handleCheckboxChange}
-          className="checkbox-sm mt-2 cursor-pointer"
-        />
-        <button
-          type="button"
-          className="share-card-copy-area"
-          onClick={handleCardClick}
-          aria-label={`打开分享 ${record.file_name}`}
-        >
-          <span className="share-card-copy-header">
-            <span className="overflow-hidden flex-1">
-              <span className="task-name share-card-title" title={record.file_name}>
-                {record.file_name} {record.has_password && <span className="muted text-sm ml-1" title="有密码">🔒</span>}
-              </span>
-              <span className="muted tabular-nums text-sm share-card-line">
-                {formatBytes(record.file_size)}
-              </span>
-            </span>
-            <span
-              className={`task-status ${statusClass}`}
-              style={{ marginLeft: "auto" }}
-            >
-              {statusText}
-            </span>
-          </span>
-
-          <span className="text-sm mb-3 muted share-card-details">
-            <span>提取码: {record.share_code}</span>
-            <span>
-              下载次数: {record.download_count}
-              {record.max_downloads != null && record.max_downloads > 0 ? ` / ${record.max_downloads}` : ""}
-            </span>
-            {record.expires_at && (
-              <span suppressHydrationWarning>
-                过期时间: {new Date(record.expires_at).toLocaleString()}
-              </span>
-            )}
-          </span>
-        </button>
-      </div>
-
-      <div className="task-card-footer">
-        <div className="task-footer-left">
-          <span className="muted text-sm" suppressHydrationWarning>
-            创建于 {new Date(record.created_at).toLocaleString()}
-          </span>
-        </div>
-
-        <div className="task-footer-right">
-          <button type="button"
-            className="button secondary btn-sm"
-            onClick={handleCopyClick}
-            title="复制链接"
-          >
-            复制链接
-          </button>
-          {currentStatus === "active" && (
-            <button type="button"
-              className="button secondary btn-sm"
-              onClick={handleRevokeClick}
-              title="失效"
-            >
-              失效
-            </button>
-          )}
-          <button type="button"
-            className="button secondary danger btn-sm"
-            onClick={handleDeleteClick}
-            title="删除"
-          >
-            删除
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-});
+import { sharesReducer, initialSharesState, filterRecords } from "./shareState";
+import type { ShareFilterStatus } from "./shareState";
+import { SharesToolbar } from "./_components/SharesToolbar";
+import { SharesList } from "./_components/SharesList";
 
 export default function SharesPage() {
   const { showToast, showConfirm } = useToast();
-  const [records, setRecords] = useState<ShareLink[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [selectedRecords, setSelectedRecords] = useState<Set<number>>(
-    new Set()
-  );
-  const [filterStatus, setFilterStatus] = useState<string>("all");
-  const [searchKeyword, setSearchKeyword] = useState("");
-  const [isOperating, setIsOperating] = useState(false);
+  const [state, dispatch] = useReducer(sharesReducer, initialSharesState);
   const mountedRef = useRef(true);
 
   const loadShares = useCallback(async () => {
-    if (!mountedRef.current) return;
-    setLoading(true);
+    dispatch({ type: "load_start" });
     try {
       const shares = await api.listShares();
       if (!mountedRef.current) return;
-      setRecords(shares);
+      dispatch({ type: "load_success", records: shares });
     } catch {
       if (!mountedRef.current) return;
       showToast("加载分享记录失败", "error");
     } finally {
-      if (mountedRef.current) setLoading(false);
+      if (mountedRef.current) dispatch({ type: "load_finish" });
     }
   }, [showToast]);
 
@@ -236,8 +83,8 @@ export default function SharesPage() {
     [showToast, showConfirm, loadShares]
   );
 
-  async function revokeAllShares() {
-    if (records.length === 0) {
+  const revokeAllShares = useCallback(async () => {
+    if (state.records.length === 0) {
       showToast("没有分享记录", "warning");
       return;
     }
@@ -250,7 +97,7 @@ export default function SharesPage() {
     });
     if (!confirmed) return;
 
-    setIsOperating(true);
+    dispatch({ type: "set_operating", operating: true });
     try {
       await api.revokeAllShares();
       showToast("已让所有分享失效", "success");
@@ -258,60 +105,29 @@ export default function SharesPage() {
     } catch (err) {
       showToast("操作失败：" + (err as Error).message, "error");
     } finally {
-      if (mountedRef.current) setIsOperating(false);
+      if (mountedRef.current) dispatch({ type: "set_operating", operating: false });
     }
-  }
+  }, [state.records.length, showToast, showConfirm, loadShares]);
 
   const toggleRecordSelection = useCallback((id: number) => {
-    setSelectedRecords((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
+    dispatch({ type: "toggle_selected", id });
   }, []);
 
-  const filteredRecords = useMemo(() => {
-    let filtered = records;
-
-    if (searchKeyword.trim()) {
-      const keyword = searchKeyword.toLowerCase();
-      filtered = filtered.filter((r) =>
-        r.file_name.toLowerCase().includes(keyword) || r.share_code.toLowerCase().includes(keyword)
-      );
-    }
-
-    if (filterStatus !== "all") {
-      filtered = filtered.filter((r) => {
-        const isExpiredByTime = r.expires_at ? new Date(r.expires_at) <= new Date() : false;
-        const isExpiredByCount = r.max_downloads != null && r.max_downloads > 0 && r.download_count >= r.max_downloads;
-        const isExpired = isExpiredByTime || isExpiredByCount;
-        
-        let currentStatus: string = r.status;
-        if (currentStatus === "active" && isExpired) {
-          currentStatus = "expired";
-        }
-        
-        return currentStatus === filterStatus;
-      });
-    }
-
-    return filtered;
-  }, [records, searchKeyword, filterStatus]);
+  const filteredRecords = useMemo(
+    () => filterRecords(state.records, state.searchKeyword, state.filterStatus),
+    [state.records, state.searchKeyword, state.filterStatus]
+  );
 
   const toggleSelectAll = useCallback(() => {
-    if (selectedRecords.size === filteredRecords.length) {
-      setSelectedRecords(new Set());
+    if (state.selectedIds.size === filteredRecords.length) {
+      dispatch({ type: "clear_selected" });
     } else {
-      setSelectedRecords(new Set(filteredRecords.map((r) => r.id)));
+      dispatch({ type: "set_selected", ids: filteredRecords.map((r) => r.id) });
     }
-  }, [selectedRecords.size, filteredRecords]);
+  }, [state.selectedIds.size, filteredRecords]);
 
-  async function batchDeleteShares() {
-    const selectedList = records.filter((r) => selectedRecords.has(r.id));
+  const batchDeleteShares = useCallback(async () => {
+    const selectedList = state.records.filter((r) => state.selectedIds.has(r.id));
     if (selectedList.length === 0) {
       showToast("请先选择要删除的记录", "warning");
       return;
@@ -325,20 +141,20 @@ export default function SharesPage() {
     });
     if (!confirmed) return;
 
-    setIsOperating(true);
+    dispatch({ type: "set_operating", operating: true });
     try {
       await Promise.all(selectedList.map((r) => api.deleteShare(r.id)));
-      setSelectedRecords(new Set());
+      dispatch({ type: "clear_selected" });
       showToast(`已删除 ${selectedList.length} 条分享记录`, "success");
     } catch (err) {
       showToast("部分删除失败：" + (err as Error).message, "error");
     } finally {
       if (mountedRef.current) {
-        setIsOperating(false);
+        dispatch({ type: "set_operating", operating: false });
         loadShares();
       }
     }
-  }
+  }, [state.records, state.selectedIds, showToast, showConfirm, loadShares]);
 
   return (
     <div className="glass-frame full-height animate-in">
@@ -349,115 +165,34 @@ export default function SharesPage() {
         </div>
       </div>
 
-      <div className="card filter-toolbar inline-filter-toolbar">
-        <div className="filter-group toolbar-actions-group">
-          <button
-            type="button"
-            className="button secondary btn-sm"
-            onClick={toggleSelectAll}
-          >
-            {selectedRecords.size === filteredRecords.length &&
-            filteredRecords.length > 0
-              ? "取消全选"
-              : "全选"}
-          </button>
-          {selectedRecords.size > 0 && (
-            <>
-              <span className="muted text-sm">
-                已选 {selectedRecords.size} 项
-              </span>
-              <button
-                type="button"
-                className={`button secondary danger btn-sm${isOperating ? " opacity-60" : ""}`}
-                onClick={batchDeleteShares}
-                disabled={isOperating}
-              >
-                删除选中
-              </button>
-            </>
-          )}
-          {records.length > 0 && (
-            <button
-              type="button"
-              className={`button secondary btn-sm${isOperating ? " opacity-60" : ""}`}
-              onClick={revokeAllShares}
-              disabled={isOperating}
-            >
-              一键失效全部
-            </button>
-          )}
-        </div>
-
-        <div className="filter-group toolbar-select-group">
-          <span className="muted text-sm">筛选:</span>
-          <select
-            aria-label="分享状态筛选"
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-            className="select"
-          >
-            <option value="all">全部</option>
-            <option value="active">活跃</option>
-            <option value="expired">已过期</option>
-            <option value="revoked">已失效</option>
-          </select>
-        </div>
-
-        <div className="filter-group toolbar-search-group">
-          <input
-            type="text"
-            aria-label="搜索分享"
-            placeholder="搜索分享..."
-            value={searchKeyword}
-            onChange={(e) => setSearchKeyword(e.target.value)}
-            className="search-input"
-          />
-        </div>
-      </div>
+      <SharesToolbar
+        selectedCount={state.selectedIds.size}
+        filteredCount={filteredRecords.length}
+        filterStatus={state.filterStatus}
+        searchKeyword={state.searchKeyword}
+        isOperating={state.isOperating}
+        hasRecords={state.records.length > 0}
+        onToggleSelectAll={toggleSelectAll}
+        onBatchDelete={batchDeleteShares}
+        onRevokeAll={revokeAllShares}
+        onFilterStatusChange={(status: ShareFilterStatus) =>
+          dispatch({ type: "set_filter_status", status })
+        }
+        onSearchKeywordChange={(keyword: string) =>
+          dispatch({ type: "set_search_keyword", keyword })
+        }
+      />
 
       <div className="task-list">
-        {loading ? (
-          <div className="empty-state">
-            <p className="muted">加载中...</p>
-          </div>
-        ) : filteredRecords.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon">
-              <svg
-                width="48"
-                height="48"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="18" cy="5" r="3" />
-                <circle cx="6" cy="12" r="3" />
-                <circle cx="18" cy="19" r="3" />
-                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
-                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
-              </svg>
-            </div>
-            <p className="font-medium mb-1">暂无分享记录</p>
-            <p className="muted text-base">你创建的文件分享链接将显示在这里</p>
-          </div>
-        ) : (
-          <div className="card task-card-container">
-            {filteredRecords.map((record) => (
-              <ShareCard
-                key={record.id}
-                record={record}
-                isSelected={selectedRecords.has(record.id)}
-                onToggleSelection={toggleRecordSelection}
-                onCopyLink={copyLink}
-                onRevoke={revokeShare}
-                onDelete={deleteShare}
-              />
-            ))}
-          </div>
-        )}
+        <SharesList
+          loading={state.loading}
+          filteredRecords={filteredRecords}
+          selectedIds={state.selectedIds}
+          onToggleSelection={toggleRecordSelection}
+          onCopyLink={copyLink}
+          onRevoke={revokeShare}
+          onDelete={deleteShare}
+        />
       </div>
     </div>
   );

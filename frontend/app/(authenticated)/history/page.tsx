@@ -79,7 +79,7 @@ const HistoryCard = memo(function HistoryCard({
           <div className="task-card-header">
             <input
               type="checkbox"
-              aria-label={`选择历史记录 ${record.task_name}`}
+              aria-label={`选择 ${record.task_name}`}
               checked={isSelected}
               onChange={handleCheckboxChange}
               onClick={(e) => e.stopPropagation()}
@@ -315,8 +315,7 @@ export default function HistoryPage() {
 
       <div className="card filter-toolbar inline-filter-toolbar">
         <div className="filter-group toolbar-actions-group">
-          <button
-            type="button"
+          <button type="button"
             className="button secondary btn-sm"
             onClick={toggleSelectAll}
           >
@@ -330,8 +329,7 @@ export default function HistoryPage() {
               <span className="muted text-sm">
                 已选 {selectedRecords.size} 项
               </span>
-              <button
-                type="button"
+              <button type="button"
                 className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
                 onClick={batchDeleteHistory}
                 disabled={isBatchOperating}
@@ -341,8 +339,7 @@ export default function HistoryPage() {
             </>
           )}
           {records.length > 0 && (
-            <button
-              type="button"
+            <button type="button"
               className={`button secondary btn-sm${isBatchOperating ? " opacity-60" : ""}`}
               onClick={clearAllHistory}
               disabled={isBatchOperating}
@@ -358,6 +355,7 @@ export default function HistoryPage() {
             value={filterStatus}
             onChange={(e) => setFilterStatus(e.target.value)}
             className="select"
+            aria-label="筛选历史"
           >
             <option value="all">全部</option>
             <option value="completed">已完成</option>
@@ -369,7 +367,7 @@ export default function HistoryPage() {
         <div className="filter-group toolbar-search-group">
           <input
             type="text"
-            aria-label="搜索历史任务"
+            aria-label="搜索历史"
             placeholder="搜索任务..."
             value={searchKeyword}
             onChange={(e) => setSearchKeyword(e.target.value)}

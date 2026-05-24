@@ -4,7 +4,6 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
-import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
 import { ModalOverlay } from "@/components/ModalOverlay";
 import PackTaskCard from "@/components/PackTaskCard";
@@ -12,6 +11,8 @@ import CreateShareDialog from "@/components/CreateShareDialog";
 import type { FileInfo, BrowseFileInfo, SpaceInfo } from "@/types";
 import { List } from "react-window";
 import { AutoSizer } from "react-virtualized-auto-sizer";
+import { SearchModal } from "./_components/SearchModal";
+import { FileToolbar, type SortField, type SortOrder } from "./_components/FileToolbar";
 
 function formatDate(dateStr: string): string {
   const date = new Date(dateStr);
@@ -22,9 +23,6 @@ function formatDate(dateStr: string): string {
   const mm = String(date.getMinutes()).padStart(2, '0');
   return `${y}/${m}/${d} ${hh}:${mm}`;
 }
-
-type SortField = "name" | "size" | "created_at";
-type SortOrder = "asc" | "desc";
 
 export default function FilesPage() {
   const { showToast, showConfirm } = useToast();
@@ -82,8 +80,9 @@ export default function FilesPage() {
 
   // Mobile detection
   const [isMobile, setIsMobile] = useState(false);
-  const mounted = useMounted();
+  const [mounted, setMounted] = useState(false);
   useEffect(() => {
+    setMounted(true);
     const check = () => setIsMobile(window.innerWidth < 768);
     check();
     window.addEventListener('resize', check);
@@ -120,6 +119,29 @@ export default function FilesPage() {
   useEffect(() => {
     loadFiles(currentPage, pageSize);
   }, [currentPage, pageSize, loadFiles]);
+
+  // Focus search modal input when opened
+  useEffect(() => {
+    if (showSearchModal && searchModalInputRef.current) {
+      searchModalInputRef.current.focus();
+    }
+  }, [showSearchModal]);
+
+  // Keyboard shortcut for search (Cmd/Ctrl + F)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+        if (browseContext) return; // Disable search inside folder
+        e.preventDefault();
+        openSearchModal();
+      }
+      if (e.key === "Escape" && showSearchModal) {
+        closeSearchModal();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showSearchModal, toolbarSearchKeyword, browseContext]);
 
   // Sorted files (folders first, then by sort field)
   const sortedFiles = useMemo(() => {
@@ -182,37 +204,14 @@ export default function FilesPage() {
   };
 
   // Search modal handlers
-  const openSearchModal = useCallback(() => {
+  const openSearchModal = () => {
     setSearchKeyword(toolbarSearchKeyword);
     setShowSearchModal(true);
-  }, [toolbarSearchKeyword]);
+  };
 
-  const closeSearchModal = useCallback(() => {
+  const closeSearchModal = () => {
     setShowSearchModal(false);
-  }, []);
-
-  // Focus search modal input when opened
-  useEffect(() => {
-    if (showSearchModal && searchModalInputRef.current) {
-      searchModalInputRef.current.focus();
-    }
-  }, [showSearchModal]);
-
-  // Keyboard shortcut for search (Cmd/Ctrl + F)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "f") {
-        if (browseContext) return; // Disable search inside folder
-        e.preventDefault();
-        openSearchModal();
-      }
-      if (e.key === "Escape" && showSearchModal) {
-        closeSearchModal();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [browseContext, closeSearchModal, openSearchModal, showSearchModal]);
+  };
 
   const handleToolbarSearchKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
@@ -280,9 +279,8 @@ export default function FilesPage() {
       const targetPage = Math.min(currentPage, maxPage);
       if (targetPage !== currentPage) {
         setCurrentPage(targetPage);
-      } else {
-        loadFiles(targetPage, pageSize);
       }
+      loadFiles(targetPage, pageSize);
     } catch (err) {
       showToast(`删除失败: ${(err as Error).message}`, "error");
     } finally {
@@ -561,7 +559,7 @@ export default function FilesPage() {
 
   const handlePackTaskComplete = useCallback(() => {
     loadFiles(currentPage, pageSize);
-  }, [currentPage, pageSize, loadFiles]);
+  }, [loadFiles, currentPage, pageSize]);
 
   // Space display helpers
   const getSpacePercentage = (space: SpaceInfo) => {
@@ -632,190 +630,32 @@ export default function FilesPage() {
       )}
 
       {/* Toolbar - Always visible */}
-      <div className="card filter-toolbar mb-4">
-        {/* Path breadcrumb */}
-        <div className="filter-group path-breadcrumb">
-          {isInsideFolder ? (
-            <>
-              <button
-                type="button"
-                className="path-segment"
-                onClick={returnToRoot}
-              >
-                <span className="file-icon">📁</span>
-                <span className="text-sm font-medium">根目录</span>
-              </button>
-              <span className="path-separator">/</span>
-              <button
-                type="button"
-                className="path-segment"
-                onClick={() => navigateToBreadcrumb(-1)}
-              >
-                {browseContext!.fileName}
-              </button>
-              {browseContext!.path.map((segment, index) => (
-                <span key={browseContext!.path.slice(0, index + 1).join("/")} className="path-segment-wrapper">
-                  <span className="path-separator">/</span>
-                  <button
-                    type="button"
-                    className="path-segment"
-                    onClick={() => navigateToBreadcrumb(index)}
-                  >
-                    {segment}
-                  </button>
-                </span>
-              ))}
-              <span className="muted text-sm">({browseContents.length} 项)</span>
-            </>
-          ) : (
-            <>
-              <span className="file-icon">📁</span>
-              <span className="text-sm font-medium">根目录</span>
-            </>
-          )}
-        </div>
-
-        {/* Search and Sort Row */}
-        <div className="search-sort-row">
-          {/* Sort select */}
-          <div className="filter-group sort-group">
-            <select
-              className="select"
-              value={`${sortField}-${sortOrder}`}
-              onChange={(e) => {
-                const [field, order] = e.target.value.split("-") as [SortField, SortOrder];
-                setSortField(field);
-                setSortOrder(order);
-              }}
-            >
-              <option value="created_at-desc">时间 (最新)</option>
-              <option value="created_at-asc">时间 (最早)</option>
-              <option value="name-asc">名称 (A-Z)</option>
-              <option value="name-desc">名称 (Z-A)</option>
-              <option value="size-desc">大小 (最大)</option>
-              <option value="size-asc">大小 (最小)</option>
-            </select>
-          </div>
-
-          {/* Search input */}
-          <div className={`filter-group search-input-group${isInsideFolder ? " opacity-40 pointer-events-none" : ""}`}>
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="search-input-icon"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <path d="m21 21-4.35-4.35" />
-            </svg>
-            <input
-              type="text"
-              aria-label="搜索文件名"
-              className="toolbar-search-input"
-              placeholder={isMobile ? "搜索文件..." : "搜索文件名... (回车搜索)"}
-              value={toolbarSearchKeyword}
-              onChange={(e) => setToolbarSearchKeyword(e.target.value)}
-              onKeyDown={handleToolbarSearchKeyDown}
-            />
-            {toolbarSearchKeyword && (
-              <button
-                type="button"
-                className="search-clear-btn"
-                aria-label="清空文件搜索"
-                onClick={() => setToolbarSearchKeyword("")}
-              >
-                ✕
-              </button>
-            )}
-          </div>
-          {/* Batch operations */}
-          <div className="filter-group batch-actions">
-            {isInsideFolder ? (
-            <>
-              {selectedBrowseFiles.size > 0 && (
-                <>
-                  <span className="muted text-sm">
-                    已选 {selectedBrowseFiles.size} 项
-                  </span>
-                  <button
-                    type="button"
-                    className="button secondary btn-sm"
-                    onClick={handleBrowseBatchDownload}
-                  >
-                    批量下载
-                  </button>
-                </>
-              )}
-              {browseContents.length > 0 && (
-                <button
-                  type="button"
-                  className="button secondary btn-sm"
-                  onClick={toggleAllBrowseFiles}
-                >
-                  {(() => {
-                    const allKeys = browseContents
-                      .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
-                    return allKeys.length > 0 && allKeys.every((k) => selectedBrowseFiles.has(k))
-                      ? "取消全选"
-                      : "全选";
-                  })()}
-                </button>
-              )}
-            </>
-          ) : (
-            <>
-              {selectedFiles.size > 0 && (
-                <>
-                  <span className="muted text-sm">
-                    已选 {selectedFiles.size} 项 ({formatBytes(selectedSize)})
-                  </span>
-                  <button
-                    type="button"
-                    className="button secondary btn-sm"
-                    onClick={handleBatchDownload}
-                    disabled={isBatchOperating}
-                  >
-                    批量下载
-                  </button>
-                  <button
-                    type="button"
-                    className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
-                    onClick={handleBatchDelete}
-                    disabled={isBatchOperating}
-                  >
-                    {isBatchOperating ? "删除中..." : "批量删除"}
-                  </button>
-                  <button
-                    type="button"
-                    className="button secondary btn-sm"
-                    onClick={openPackDialog}
-                    disabled={isBatchOperating}
-                  >
-                    打包
-                  </button>
-                </>
-              )}
-              {sortedFiles.length > 0 && (
-                <button
-                  type="button"
-                  className="button secondary btn-sm"
-                  onClick={toggleSelectAll}
-                >
-                  {selectedFiles.size === sortedFiles.length && sortedFiles.length > 0
-                    ? "取消全选"
-                    : "全选"}
-                </button>
-              )}
-            </>
-          )}
-          </div>
-        </div>
-      </div>
+      <FileToolbar
+        isInsideFolder={isInsideFolder}
+        isMobile={isMobile}
+        browseContext={browseContext}
+        browseContents={browseContents}
+        selectedBrowseFiles={selectedBrowseFiles}
+        selectedFiles={selectedFiles}
+        selectedSize={selectedSize}
+        sortedFilesLength={sortedFiles.length}
+        sortField={sortField}
+        sortOrder={sortOrder}
+        toolbarSearchKeyword={toolbarSearchKeyword}
+        isBatchOperating={isBatchOperating}
+        onReturnToRoot={returnToRoot}
+        onNavigateToBreadcrumb={navigateToBreadcrumb}
+        onSortFieldChange={setSortField}
+        onSortOrderChange={setSortOrder}
+        onToolbarSearchKeywordChange={setToolbarSearchKeyword}
+        onToolbarSearchKeyDown={handleToolbarSearchKeyDown}
+        onToggleAllBrowseFiles={toggleAllBrowseFiles}
+        onBrowseBatchDownload={handleBrowseBatchDownload}
+        onToggleSelectAll={toggleSelectAll}
+        onBatchDownload={handleBatchDownload}
+        onBatchDelete={handleBatchDelete}
+        onOpenPackDialog={openPackDialog}
+      />
 
       {/* Folder contents table (inside folder) */}
       {isInsideFolder ? (
@@ -840,7 +680,6 @@ export default function FilesPage() {
                 <div className="table-cell text-left">
                   <input
                     type="checkbox"
-                    aria-label="选择当前文件夹全部文件"
                     checked={(() => {
                       const allKeys = browseContents
                         .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
@@ -848,6 +687,7 @@ export default function FilesPage() {
                     })()}
                     onChange={toggleAllBrowseFiles}
                     className="checkbox-sm cursor-pointer"
+                    aria-label="全选"
                   />
                 </div>
                 <button type="button"
@@ -875,10 +715,10 @@ export default function FilesPage() {
                       <div className="card-header">
                         <input
                           type="checkbox"
-                          aria-label={`选择 ${item.name}`}
                           checked={selectedBrowseFiles.has(itemKey)}
                           onChange={() => toggleBrowseFileSelection(item)}
                           className="checkbox-sm cursor-pointer"
+                          aria-label={`选择 ${item.name}`}
                         />
                         <div className="file-title">
                           <span className="file-icon">
@@ -964,10 +804,10 @@ export default function FilesPage() {
                               <div className="table-cell" style={{ paddingTop: '20px' }}>
                                 <input
                                   type="checkbox"
-                                  aria-label={`选择 ${item.name}`}
                                   checked={selectedBrowseFiles.has(itemKey)}
                                   onChange={() => toggleBrowseFileSelection(item)}
                                   className="checkbox-sm cursor-pointer"
+                                  aria-label="选择文件"
                                 />
                               </div>
                               <div className="table-cell" data-label="名称" style={{ paddingTop: '14px', paddingBottom: '14px', overflow: 'hidden' }}>
@@ -1058,10 +898,10 @@ export default function FilesPage() {
                 <div className="table-cell text-left">
                   <input
                     type="checkbox"
-                    aria-label="选择全部文件"
                     checked={selectedFiles.size === sortedFiles.length && sortedFiles.length > 0}
                     onChange={toggleSelectAll}
                     className="checkbox-sm cursor-pointer"
+                    aria-label="全选"
                   />
                 </div>
                 <button type="button"
@@ -1093,10 +933,10 @@ export default function FilesPage() {
                     <div className="card-header">
                       <input
                         type="checkbox"
-                        aria-label={`选择 ${file.name}`}
                         checked={selectedFiles.has(file.id)}
                         onChange={() => toggleFileSelection(file.id)}
                         className="checkbox-sm cursor-pointer"
+                        aria-label={`选择 ${file.name}`}
                       />
                       <div className="file-title">
                         <span className="file-icon">
@@ -1104,16 +944,16 @@ export default function FilesPage() {
                         </span>
                         {renaming === file.id ? (
                           <div className="flex gap-2 flex-1" style={{ minWidth: 0 }}>
-                              <input
-                                className="input py-1 px-3 text-base"
-                                aria-label={`重命名 ${file.name}`}
-                                value={newName}
+                            <input
+                              className="input py-1 px-3 text-base"
+                              value={newName}
                               onChange={(e) => setNewName(e.target.value)}
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") handleRename(file);
                                 if (e.key === "Escape") cancelRename();
                               }}
                               ref={(el) => el?.focus()}
+                              aria-label="重命名文件"
                               onClick={(e) => e.stopPropagation()}
                             />
                             <button type="button"
@@ -1213,10 +1053,10 @@ export default function FilesPage() {
                               <div className="table-cell" style={{ paddingTop: '20px' }}>
                                 <input
                                   type="checkbox"
-                                  aria-label={`选择 ${file.name}`}
                                   checked={selectedFiles.has(file.id)}
                                   onChange={() => toggleFileSelection(file.id)}
                                   className="checkbox-sm cursor-pointer"
+                                  aria-label="选择文件"
                                 />
                               </div>
                               <div className="table-cell" data-label="名称" style={{ paddingTop: '14px', paddingBottom: '14px', overflow: 'hidden' }}>
@@ -1224,9 +1064,9 @@ export default function FilesPage() {
                                   <div className="flex gap-2">
                                     <input
                                       className="input py-1 px-3 text-base"
-                                      aria-label={`重命名 ${file.name}`}
                                       value={newName}
                                       onChange={(e) => setNewName(e.target.value)}
+                                      aria-label="重命名文件"
                                       onKeyDown={(e) => {
                                         if (e.key === "Enter") handleRename(file);
                                         if (e.key === "Escape") cancelRename();
@@ -1337,6 +1177,7 @@ export default function FilesPage() {
                 <select
                   className="select-sm"
                   value={pageSize}
+                  aria-label="每页条数"
                   onChange={(e) => {
                     const s = Number(e.target.value);
                     setPageSize(s);
@@ -1387,87 +1228,14 @@ export default function FilesPage() {
 
       {/* Search Modal */}
       {showSearchModal && mounted && createPortal(
-        <ModalOverlay
+        <SearchModal
+          searchKeyword={searchKeyword}
+          searchResults={searchResults}
+          inputRef={searchModalInputRef}
+          onInputChange={handleSearchModalInputChange}
+          onResultClick={handleSearchResultClick}
           onClose={closeSearchModal}
-          contentClassName="search-modal"
-        >
-            <div className="search-modal-header">
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="search-modal-icon"
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.35-4.35" />
-              </svg>
-              <input
-                ref={searchModalInputRef}
-                type="text"
-                aria-label="搜索文件名"
-                className="search-modal-input"
-                placeholder="搜索文件名..."
-                value={searchKeyword}
-                onChange={(e) => handleSearchModalInputChange(e.target.value)}
-              />
-              {searchKeyword && (
-                <button type="button"
-                  className="search-modal-clear"
-                  aria-label="清空搜索"
-                  onClick={() => handleSearchModalInputChange("")}
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-
-            <div className="search-modal-results">
-              {searchKeyword.trim() === "" ? (
-                <div className="search-modal-hint">
-                  <p className="muted">输入关键词搜索文件</p>
-                  <p className="muted text-sm">按 ESC 关闭</p>
-                </div>
-              ) : searchResults.length === 0 ? (
-                <div className="search-modal-hint">
-                  <p className="muted">未找到匹配的文件</p>
-                </div>
-              ) : (
-                <div className="search-results-list">
-                  {searchResults.map((file) => (
-                    <button
-                      type="button"
-                      key={file.id}
-                      className="search-result-item"
-                      onClick={() => handleSearchResultClick(file)}
-                    >
-                      <span className="file-icon">
-                        {file.is_directory ? "📁" : "📄"}
-                      </span>
-                      <div className="search-result-info">
-                        <span className="search-result-name">{file.name}</span>
-                        <span className="search-result-meta">
-                          {formatBytes(file.size)} · {formatDate(file.created_at)}
-                        </span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="search-modal-footer">
-              <span className="muted text-sm">
-                {searchResults.length > 0
-                  ? `找到 ${searchResults.length} 个文件`
-                  : "⌘F 打开搜索"}
-              </span>
-            </div>
-        </ModalOverlay>,
+        />,
         document.body
       )}
 
@@ -1480,8 +1248,7 @@ export default function FilesPage() {
         >
             <div className="modal-header">
               <h2 className="m-0">打包</h2>
-              <button
-                type="button"
+              <button type="button"
                 onClick={() => !packing && setPackDialogOpen(false)}
                 className="modal-close-btn"
                 disabled={packing}
@@ -1524,38 +1291,36 @@ export default function FilesPage() {
                   <input
                     id="pack-output-name"
                     type="text"
-                    aria-label="输出文件名"
                     className="input"
                     placeholder="默认自动生成"
                     value={packOutputName}
                     onChange={(e) => setPackOutputName(e.target.value)}
                     maxLength={200}
                     disabled={packing}
+                    aria-label="输出文件名"
                   />
                 </div>
 
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
                   <input
                     type="checkbox"
-                    aria-label="打包后删除源文件"
                     checked={packDeleteSource}
                     onChange={(e) => setPackDeleteSource(e.target.checked)}
                     disabled={packing}
+                    aria-label="打包后删除源文件"
                   />
                   <span>打包后删除源文件</span>
                 </label>
 
                 <div className="flex gap-3 flex-end">
-                  <button
-                    type="button"
+                  <button type="button"
                     className="button secondary"
                     onClick={() => setPackDialogOpen(false)}
                     disabled={packing}
                   >
                     取消
                   </button>
-                  <button
-                    type="button"
+                  <button type="button"
                     className="button primary"
                     onClick={handlePackConfirm}
                     disabled={

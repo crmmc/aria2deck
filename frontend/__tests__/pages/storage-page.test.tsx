@@ -107,4 +107,11 @@ describe("StoragePage", () => {
       expect(showToastMock).toHaveBeenCalledWith("删除失败", "error");
     });
   });
+
+  test("renders exactly one storage table after loading files", async () => {
+    const { container } = render(<StoragePage />);
+
+    expect(await screen.findByText("movie.mkv")).toBeInTheDocument();
+    expect(container.querySelectorAll("table.table")).toHaveLength(1);
+  });
 });

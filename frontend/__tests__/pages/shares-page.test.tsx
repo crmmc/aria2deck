@@ -100,6 +100,21 @@ describe("SharesPage", () => {
     });
   });
 
+  test("filters shares and select all only selects visible records", async () => {
+    mockApi.listShares.mockResolvedValue([
+      share,
+      { ...share, id: 2, file_name: "movie.mkv", share_code: "movie1" },
+    ] as never);
+
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("搜索分享"), { target: { value: "movie" } });
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+
+    expect(screen.getByText("已选 1 项")).toBeInTheDocument();
+  });
+
   test("renders expired and revoked statuses", async () => {
     mockApi.listShares.mockResolvedValue([
       {

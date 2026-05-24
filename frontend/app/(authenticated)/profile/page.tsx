@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import {
   getNotificationSettings,
@@ -9,38 +8,34 @@ import {
   requestNotificationPermission,
   type NotificationSettings,
 } from "@/lib/notification";
-import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/AuthContext";
 import { RpcAccessStatus } from "@/types";
-
-const defaultNotificationSettings: NotificationSettings = {
-  enabled: false,
-  onComplete: true,
-  onError: true,
-};
+import { InitialPasswordAlert } from "./_components/InitialPasswordAlert";
+import { PasswordSection } from "./_components/PasswordSection";
+import { NotificationSection } from "./_components/NotificationSection";
+import { RpcAccessSection } from "./_components/RpcAccessSection";
 
 export default function ProfilePage() {
   const { showToast, showConfirm } = useToast();
   const { user, refreshUser } = useAuth();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const mounted = useMounted();
+  const [mounted, setMounted] = useState(false);
 
-  // 初始密码提醒弹窗
   const [showInitialPasswordAlert, setShowInitialPasswordAlert] = useState(false);
 
-  // 修改密码表单
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordChanging, setPasswordChanging] = useState(false);
 
-  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>(() =>
-    typeof window !== "undefined" ? getNotificationSettings() : defaultNotificationSettings
-  );
-  const notificationSupported =
-    typeof window !== "undefined" && "Notification" in window;
+  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>({
+    enabled: false,
+    onComplete: true,
+    onError: true,
+  });
+  const [notificationSupported, setNotificationSupported] = useState(false);
 
   const [rpcAccess, setRpcAccess] = useState<RpcAccessStatus | null>(null);
   const [rpcLoading, setRpcLoading] = useState(false);
@@ -51,11 +46,13 @@ export default function ProfilePage() {
 
   useEffect(() => {
     mountedRef.current = true;
+    setMounted(true);
+    setNotificationSettings(getNotificationSettings());
+    setNotificationSupported(typeof window !== "undefined" && "Notification" in window);
     loadRpcAccess().finally(() => {
       if (mountedRef.current) setLoading(false);
     });
 
-    // 检查是否需要显示初始密码提醒
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       if (params.get("initial_password") === "1") {
@@ -69,7 +66,6 @@ export default function ProfilePage() {
   }, []);
 
   const loadRpcAccess = async () => {
-    if (!mountedRef.current) return;
     try {
       const data = await api.getRpcAccess();
       if (!mountedRef.current) return;
@@ -80,7 +76,6 @@ export default function ProfilePage() {
   };
 
   const handleRpcToggle = async (enabled: boolean) => {
-    if (!mountedRef.current) return;
     setRpcLoading(true);
     try {
       const data = await api.setRpcAccess(enabled);
@@ -103,7 +98,6 @@ export default function ProfilePage() {
       danger: true,
     });
     if (!confirmed) return;
-    if (!mountedRef.current) return;
     setRpcLoading(true);
     try {
       const data = await api.refreshRpcSecret();
@@ -178,8 +172,6 @@ export default function ProfilePage() {
 
     setPasswordChanging(true);
     try {
-      // 需要传入当前用户名
-      if (!mountedRef.current) return;
       await api.changePassword(oldPassword, newPassword, user.username);
       if (!mountedRef.current) return;
       showToast("密码修改成功", "success");
@@ -203,7 +195,6 @@ export default function ProfilePage() {
 
   async function handleNotificationToggle(enabled: boolean) {
     if (enabled) {
-      if (!mountedRef.current) return;
       const granted = await requestNotificationPermission();
       if (!mountedRef.current) return;
       if (!granted) {
@@ -228,24 +219,11 @@ export default function ProfilePage() {
 
   return (
     <>
-      {/* 初始密码提醒弹窗 - 使用 Portal 渲染到 body */}
-      {mounted && showInitialPasswordAlert && createPortal(
-        <div className="modal-overlay z-10000">
-          <div className="modal-content max-w-400 animate-in">
-            <div className="alert alert-danger mb-4">
-              <p className="text-center m-0" style={{ fontSize: '15px' }}>
-                您当前使用的是管理员设置的初始密码，为了账户安全，请尽快修改为您自己的密码。
-              </p>
-            </div>
-            <button type="button"
-              className="button w-full"
-              onClick={() => setShowInitialPasswordAlert(false)}
-            >
-              我知道了
-            </button>
-          </div>
-        </div>,
-        document.body
+      {mounted && (
+        <InitialPasswordAlert
+          open={showInitialPasswordAlert}
+          onClose={() => setShowInitialPasswordAlert(false)}
+        />
       )}
 
       <div className="glass-frame full-height animate-in">
@@ -258,205 +236,36 @@ export default function ProfilePage() {
           <div className="card text-danger mb-6">{error}</div>
         )}
 
-        <div className="card mb-6">
-          <h2 className="section-title">修改密码</h2>
-          <form onSubmit={handleChangePassword} className="max-w-400">
-            {!user?.is_initial_password && (
-              <div className="mb-4">
-                <label className="form-label" htmlFor="profile-old-password">当前密码</label>
-                <input
-                  id="profile-old-password"
-                  aria-label="当前密码"
-                  type="password"
-                  className="input"
-                  value={oldPassword}
-                  onChange={(e) => setOldPassword(e.target.value)}
-                  required
-                />
-              </div>
-            )}
-            <div className="mb-4">
-              <label className="form-label" htmlFor="profile-new-password">新密码</label>
-              <input
-                id="profile-new-password"
-                aria-label="新密码"
-                type="password"
-                className="input"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                minLength={6}
-                required
-              />
-              <p className="muted text-sm mt-1">至少 6 位字符</p>
-            </div>
-            <div className="mb-6">
-              <label className="form-label" htmlFor="profile-confirm-password">确认新密码</label>
-              <input
-                id="profile-confirm-password"
-                aria-label="确认新密码"
-                type="password"
-                className="input"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                minLength={6}
-                required
-              />
-            </div>
-            <button
-              type="submit"
-              className="button"
-              disabled={passwordChanging}
-            >
-              {passwordChanging ? "修改中..." : "修改密码"}
-            </button>
-          </form>
-        </div>
+        <PasswordSection
+          isInitialPassword={!!user?.is_initial_password}
+          oldPassword={oldPassword}
+          newPassword={newPassword}
+          confirmPassword={confirmPassword}
+          changing={passwordChanging}
+          onOldPasswordChange={setOldPassword}
+          onNewPasswordChange={setNewPassword}
+          onConfirmPasswordChange={setConfirmPassword}
+          onSubmit={handleChangePassword}
+        />
 
-        <div className="card mb-6">
-          <h2 className="section-title">浏览器通知</h2>
+        <NotificationSection
+          supported={notificationSupported}
+          settings={notificationSettings}
+          onEnabledChange={handleNotificationToggle}
+          onOptionChange={handleNotificationOptionChange}
+        />
 
-          {!notificationSupported ? (
-            <div className="alert alert-warning">
-              <p>您的浏览器不支持通知功能</p>
-            </div>
-          ) : (
-            <div className="max-w-600">
-              <div className="mb-6">
-                <div className="flex-between mb-2">
-                  <label className="font-semibold" htmlFor="profile-notify-toggle">启用通知</label>
-                  <button
-                    id="profile-notify-toggle"
-                    type="button"
-                    aria-label="启用通知"
-                    aria-pressed={notificationSettings.enabled}
-                    onClick={() => handleNotificationToggle(!notificationSettings.enabled)}
-                    className={`toggle-switch ${notificationSettings.enabled ? "toggle-switch-on" : "toggle-switch-off"}`}
-                  >
-                    <div
-                      className="toggle-knob"
-                      style={{ left: notificationSettings.enabled ? 24 : 2 }}
-                    />
-                  </button>
-                </div>
-                <p className="muted text-sm">当下载任务状态变化时，发送浏览器桌面通知</p>
-              </div>
-
-              {notificationSettings.enabled && (
-                <div className="bg-black-02 rounded-lg p-4">
-                  <p className="muted text-sm mb-4">选择何时发送通知：</p>
-
-                  <div className="mb-4">
-                    <div className="flex-between">
-                      <label className="text-base" htmlFor="profile-notify-complete">下载完成时</label>
-                      <button
-                        id="profile-notify-complete"
-                        type="button"
-                        aria-label="下载完成时发送通知"
-                        aria-pressed={notificationSettings.onComplete}
-                        onClick={() => handleNotificationOptionChange("onComplete", !notificationSettings.onComplete)}
-                        className={`toggle-switch toggle-switch-sm ${notificationSettings.onComplete ? "toggle-switch-on" : "toggle-switch-off"}`}
-                      >
-                        <div
-                          className="toggle-knob toggle-knob-sm"
-                          style={{ left: notificationSettings.onComplete ? 22 : 2 }}
-                        />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="flex-between">
-                      <label className="text-base" htmlFor="profile-notify-error">下载失败时</label>
-                      <button
-                        id="profile-notify-error"
-                        type="button"
-                        aria-label="下载失败时发送通知"
-                        aria-pressed={notificationSettings.onError}
-                        onClick={() => handleNotificationOptionChange("onError", !notificationSettings.onError)}
-                        className={`toggle-switch toggle-switch-sm ${notificationSettings.onError ? "toggle-switch-on" : "toggle-switch-off"}`}
-                      >
-                        <div
-                          className="toggle-knob toggle-knob-sm"
-                          style={{ left: notificationSettings.onError ? 22 : 2 }}
-                        />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="card">
-          <h2 className="section-title">外部访问</h2>
-
-          <div className="max-w-600">
-            <div className={`bg-black-02 rounded-lg p-4 ${rpcAccess?.enabled ? "mb-6" : ""}`}>
-              <div className="flex-between mb-2">
-                <label className="font-semibold" htmlFor="profile-rpc-toggle">允许外部 aria2 客户端连接</label>
-                <button
-                  id="profile-rpc-toggle"
-                  type="button"
-                  aria-label="允许外部 aria2 客户端连接"
-                  aria-pressed={Boolean(rpcAccess?.enabled)}
-                  onClick={() => handleRpcToggle(!rpcAccess?.enabled)}
-                  disabled={rpcLoading}
-                  className={`toggle-switch ${rpcAccess?.enabled ? "toggle-switch-on" : "toggle-switch-off"} ${rpcLoading ? "opacity-60 cursor-not-allowed" : ""}`}
-                >
-                  <div
-                    className="toggle-knob"
-                    style={{ left: rpcAccess?.enabled ? 24 : 2 }}
-                  />
-                </button>
-              </div>
-              <p className="muted text-sm">开启后可使用 AriaNg、Motrix 等客户端管理下载任务</p>
-            </div>
-
-            {rpcAccess?.enabled && rpcAccess.secret && (
-              <div className="alert alert-info p-4">
-                <div className="mb-5">
-                  <div className="flex-between mb-2">
-                    <span className="font-semibold text-base">RPC 密钥</span>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        className="button secondary btn-sm"
-                        onClick={copySecret}
-                      >
-                        {copiedSecret ? "已复制" : "复制"}
-                      </button>
-                      <button
-                        type="button"
-                        className="button secondary btn-sm"
-                        onClick={handleRefreshSecret}
-                        disabled={rpcLoading}
-                        style={{ opacity: rpcLoading ? 0.6 : 1 }}
-                      >
-                        刷新
-                      </button>
-                    </div>
-                  </div>
-                  <code className="code-block">{rpcAccess.secret}</code>
-                </div>
-
-                <div>
-                  <div className="flex-between mb-2">
-                    <span className="font-semibold text-base">RPC 地址</span>
-                    <button
-                      type="button"
-                      className="button secondary btn-sm"
-                      onClick={copyRpcUrl}
-                    >
-                      {copiedUrl ? "已复制" : "复制"}
-                    </button>
-                  </div>
-                  <code className="code-block">{getRpcUrl()}</code>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
+        <RpcAccessSection
+          rpcAccess={rpcAccess}
+          rpcLoading={rpcLoading}
+          copiedSecret={copiedSecret}
+          copiedUrl={copiedUrl}
+          rpcUrl={getRpcUrl()}
+          onToggle={handleRpcToggle}
+          onRefreshSecret={handleRefreshSecret}
+          onCopySecret={copySecret}
+          onCopyRpcUrl={copyRpcUrl}
+        />
       </div>
     </>
   );
