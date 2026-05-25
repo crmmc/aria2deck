@@ -50,7 +50,6 @@ _ALLOWED_USER_OPTIONS = frozenset(
     (
         "out",
         "header",
-        "select-file",
         "max-connection-per-server",
         "http-user",
         "http-passwd",
@@ -317,6 +316,7 @@ async def create_user_download(
         total_bytes=total_bytes,
         aria2_client=aria2_client,
         options=options,
+        server_options=None,
         submit_download=submit_download,
     )
 
@@ -332,6 +332,7 @@ async def create_user_torrent_download(
     total_bytes: int,
     aria2_client: Aria2SubmitClient,
     options: Mapping[str, Any] | None = None,
+    server_options: Mapping[str, Any] | None = None,
     uris: list[str] | None = None,
 ) -> dict[str, Any]:
     async def submit_download(submit_options: Mapping[str, Any] | None) -> str:
@@ -351,6 +352,7 @@ async def create_user_torrent_download(
         total_bytes=total_bytes,
         aria2_client=aria2_client,
         options=options,
+        server_options=server_options,
         submit_download=submit_download,
     )
 
@@ -366,6 +368,7 @@ async def _create_user_download_with_submit(
     total_bytes: int,
     aria2_client: Aria2SubmitClient,
     options: Mapping[str, Any] | None,
+    server_options: Mapping[str, Any] | None = None,
     submit_download: Callable[[Mapping[str, Any] | None], Awaitable[str]],
 ) -> dict[str, Any]:
     _validate_submit_options(options)
@@ -474,6 +477,7 @@ async def _create_user_download_with_submit(
             global_download = await _ensure_download_submitted(
                 global_download=global_download,
                 options=options,
+                server_options=server_options,
                 aria2_client=aria2_client,
                 submit_download=submit_download,
             )
@@ -502,6 +506,7 @@ async def _ensure_download_submitted(
     *,
     global_download: dict[str, Any],
     options: Mapping[str, Any] | None,
+    server_options: Mapping[str, Any] | None,
     aria2_client: Aria2SubmitClient,
     submit_download: Callable[[Mapping[str, Any] | None], Awaitable[str]],
 ) -> dict[str, Any]:
@@ -537,6 +542,9 @@ async def _ensure_download_submitted(
                         submit_options[key] = _normalize_out_option(options[key])
                     else:
                         submit_options[key] = str(options[key])
+        if server_options:
+            for key, value in server_options.items():
+                submit_options[str(key)] = str(value)
 
         gid = await submit_download(submit_options)
         try:

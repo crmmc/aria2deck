@@ -343,6 +343,51 @@ async def test_create_torrent_download_submits_add_torrent_without_initial_reser
 
 
 @pytest.mark.asyncio
+async def test_torrent_download_uses_server_generated_select_file(temp_db: str) -> None:
+    user = await create_user_v0(username="torrent_select_file", quota_bytes=1000)
+    client = AsyncMock()
+    client.add_torrent.return_value = "gid-select-file"
+
+    await create_user_torrent_download(
+        user_id=user["id"],
+        quota_bytes=int(user["quota_bytes"]),
+        torrent_data="base64-torrent",
+        resource_key="torrent:select-file",
+        source_uri="magnet:?xt=urn:btih:select-file",
+        display_name="select.torrent",
+        total_bytes=10,
+        aria2_client=client,
+        server_options={"select-file": "1,3"},
+    )
+
+    opts = client.add_torrent.call_args[0][2]
+    assert opts["select-file"] == "1,3"
+
+
+@pytest.mark.asyncio
+async def test_user_options_cannot_set_select_file(temp_db: str) -> None:
+    user = await create_user_v0(username="torrent_user_select_file", quota_bytes=1000)
+    client = AsyncMock()
+    client.add_torrent.return_value = "gid-user-select-file"
+
+    await create_user_torrent_download(
+        user_id=user["id"],
+        quota_bytes=int(user["quota_bytes"]),
+        torrent_data="base64-torrent",
+        resource_key="torrent:user-select-file",
+        source_uri="magnet:?xt=urn:btih:user-select-file",
+        display_name="select.torrent",
+        total_bytes=10,
+        aria2_client=client,
+        options={"select-file": "1,2", "bt-tracker": "http://tracker.example.com/announce"},
+    )
+
+    opts = client.add_torrent.call_args[0][2]
+    assert "select-file" not in opts
+    assert opts["bt-tracker"] == "http://tracker.example.com/announce"
+
+
+@pytest.mark.asyncio
 async def test_two_users_share_one_global_torrent_download(temp_db: str) -> None:
     user_a = await create_user_v0(username="torrent_share_a")
     user_b = await create_user_v0(username="torrent_share_b")
