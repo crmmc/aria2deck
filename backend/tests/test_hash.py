@@ -79,15 +79,26 @@ class TestExtractInfoHashFromTorrent:
     def test_valid_torrent(self):
         """Test extraction from valid torrent data"""
         # Create a minimal valid torrent structure
-        # d8:announce...4:infod4:name4:test12:piece lengthi16384e6:pieces20:...ee
+        # d8:announce...4:infod4:name4:test6:lengthi1024e12:piece lengthi16384e6:pieces20:...ee
         info_dict = (
-            b"d4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789e"
+            b"d4:name4:test6:lengthi1024e12:piece lengthi16384e6:pieces20:01234567890123456789e"
         )
-        torrent = b"d8:announce25:http://tracker.example.com4:info" + info_dict + b"e"
+        torrent = b"d8:announce26:http://tracker.example.com4:info" + info_dict + b"e"
 
         result = extract_info_hash_from_torrent(torrent)
         expected = hashlib.sha1(info_dict).hexdigest().lower()
         assert result == expected
+
+    def test_multifile_torrent_hash_matches_raw_info_dict(self):
+        info_dict = (
+            b"d5:filesld6:lengthi1e4:pathl5:a.txteed6:lengthi2e4:pathl5:b.txteee"
+            b"4:name4:root12:piece lengthi16384e6:pieces20:01234567890123456789e"
+        )
+        torrent = b"d8:announce26:http://tracker.example.com4:info" + info_dict + b"e"
+
+        result = extract_info_hash_from_torrent(torrent)
+
+        assert result == hashlib.sha1(info_dict).hexdigest().lower()
 
     def test_invalid_torrent_no_info(self):
         """Test torrent without info dict"""
@@ -112,9 +123,9 @@ class TestExtractInfoHashFromTorrentBase64:
     def test_valid_base64_torrent(self):
         """Test extraction from base64-encoded torrent"""
         info_dict = (
-            b"d4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789e"
+            b"d4:name4:test6:lengthi1024e12:piece lengthi16384e6:pieces20:01234567890123456789e"
         )
-        torrent = b"d8:announce25:http://tracker.example.com4:info" + info_dict + b"e"
+        torrent = b"d8:announce26:http://tracker.example.com4:info" + info_dict + b"e"
         torrent_b64 = base64.b64encode(torrent).decode("ascii")
 
         result = extract_info_hash_from_torrent_base64(torrent_b64)
@@ -419,9 +430,9 @@ class TestGetUriHash:
     def test_torrent_with_base64(self):
         """Test hash extraction from torrent with base64 data"""
         info_dict = (
-            b"d4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789e"
+            b"d4:name4:test6:lengthi1024e12:piece lengthi16384e6:pieces20:01234567890123456789e"
         )
-        torrent = b"d8:announce25:http://tracker.example.com4:info" + info_dict + b"e"
+        torrent = b"d8:announce26:http://tracker.example.com4:info" + info_dict + b"e"
         torrent_b64 = base64.b64encode(torrent).decode("ascii")
 
         result = get_uri_hash("[torrent]", torrent_b64)

@@ -16,6 +16,8 @@ import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from app.services.torrent_metadata import TorrentMetadataError, parse_torrent_bytes
+
 logger = logging.getLogger(__name__)
 
 # Magnet link info_hash pattern (btih = BitTorrent Info Hash)
@@ -75,14 +77,10 @@ def extract_info_hash_from_torrent(torrent_data: bytes) -> str | None:
         Lowercase hex info_hash (40 chars) or None if parsing fails
     """
     try:
-        # Simple bencode parser for extracting info dict
-        info_dict_bytes = _extract_info_dict_bytes(torrent_data)
-        if info_dict_bytes:
-            return hashlib.sha1(info_dict_bytes).hexdigest().lower()
-    except Exception as e:
+        return parse_torrent_bytes(torrent_data).info_hash
+    except TorrentMetadataError as e:
         logger.warning(f"Failed to parse torrent file: {e}")
-
-    return None
+        return None
 
 
 def extract_info_hash_from_torrent_base64(torrent_base64: str) -> str | None:
@@ -95,11 +93,11 @@ def extract_info_hash_from_torrent_base64(torrent_base64: str) -> str | None:
         Lowercase hex info_hash (40 chars) or None if parsing fails
     """
     try:
-        torrent_data = base64.b64decode(torrent_base64)
-        return extract_info_hash_from_torrent(torrent_data)
+        torrent_data = base64.b64decode(torrent_base64, validate=True)
     except Exception as e:
         logger.warning(f"Failed to decode base64 torrent: {e}")
         return None
+    return extract_info_hash_from_torrent(torrent_data)
 
 
 def _extract_info_dict_bytes(data: bytes) -> bytes | None:
