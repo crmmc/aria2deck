@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/lib/api";
 import type { Task, TorrentPreview } from "@/types";
@@ -25,9 +25,14 @@ export function TorrentCreateWizard({
   onCreated,
   onError,
 }: TorrentCreateWizardProps) {
+  const dialogRef = useRef<HTMLElement>(null);
   const [stage, setStage] = useState<Stage>("select");
   const [searchQuery, setSearchQuery] = useState("");
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+
+  useEffect(() => {
+    dialogRef.current?.focus();
+  }, []);
   const [isCreating, setIsCreating] = useState(false);
   const [selectedIndexes, setSelectedIndexes] = useState<Set<number>>(
     () => new Set(preview.files.map((file) => file.index))
@@ -85,10 +90,12 @@ export function TorrentCreateWizard({
   return (
     <div className="torrent-wizard-backdrop" role="presentation">
       <section
+        ref={dialogRef}
         className="torrent-wizard"
         role="dialog"
         aria-modal="true"
         aria-label="添加 BT 下载任务"
+        tabIndex={-1}
       >
         <header className="torrent-wizard-header">
           <div>
@@ -130,8 +137,10 @@ export function TorrentCreateWizard({
               />
               <div className="torrent-toolbar">
                 <input
+                  id="torrent-search"
                   className="input torrent-search"
                   placeholder="搜索文件"
+                  aria-label="搜索文件"
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
                 />
