@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { api } from "@/lib/api";
-import type { Task } from "@/types";
+import type { Task, TorrentPreview } from "@/types";
 import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
 import StatsWidget from "@/components/StatsWidget";
@@ -18,6 +18,7 @@ import { AddTaskForm } from "./_components/AddTaskForm";
 import { BatchAddTasksDialog } from "./_components/BatchAddTasksDialog";
 import { TaskToolbar } from "./_components/TaskToolbar";
 import { TaskList } from "./_components/TaskList";
+import { TorrentCreateWizard } from "./_components/TorrentCreateWizard";
 
 function upsertTaskById(tasks: Task[], task: Task): Task[] {
   const existingIndex = tasks.findIndex((item) => item.id === task.id);
@@ -54,6 +55,10 @@ export default function TasksPage() {
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [isBatchAdding, setIsBatchAdding] = useState(false);
   const [batchUris, setBatchUris] = useState("");
+  const [torrentWizard, setTorrentWizard] = useState<{
+    torrentBase64: string;
+    preview: TorrentPreview;
+  } | null>(null);
   const mounted = useMounted();
   const torrentInputRef = useRef<HTMLInputElement>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -307,10 +312,8 @@ export default function TasksPage() {
           reader.readAsDataURL(file);
         });
 
-        const task = await api.uploadTorrent(base64Content);
-        if (task.status === "active" || task.status === "queued") {
-          setTasks((prev) => upsertTaskById(prev, task));
-        }
+        const preview = await api.previewTorrent(base64Content);
+        setTorrentWizard({ torrentBase64: base64Content, preview });
       } catch (err) {
         const message = (err as Error).message;
         if (message.includes("您已拥有此文件")) {
@@ -327,6 +330,23 @@ export default function TasksPage() {
     },
     [showToast]
   );
+
+  const handleTorrentCreated = useCallback((task: Task) => {
+    if (task.status === "active" || task.status === "queued") {
+      setTasks((prev) => upsertTaskById(prev, task));
+    }
+    setTorrentWizard(null);
+    if (torrentInputRef.current) {
+      torrentInputRef.current.value = "";
+    }
+  }, []);
+
+  const handleTorrentWizardCancel = useCallback(() => {
+    setTorrentWizard(null);
+    if (torrentInputRef.current) {
+      torrentInputRef.current.value = "";
+    }
+  }, []);
 
   const cancelTask = useCallback(
     async (id: number) => {
@@ -551,7 +571,10 @@ export default function TasksPage() {
 
   return (
     <>
-      <div className="glass-frame full-height animate-in">
+      <div
+        className="glass-frame full-height animate-in"
+        aria-hidden={torrentWizard ? "true" : undefined}
+      >
         <div className="space-between mb-7">
           <div>
             <h1 className="text-2xl">任务</h1>
@@ -612,6 +635,18 @@ export default function TasksPage() {
           />,
           document.body
         )}
+      {mounted && torrentWizard
+        ? createPortal(
+            <TorrentCreateWizard
+              torrentBase64={torrentWizard.torrentBase64}
+              preview={torrentWizard.preview}
+              onCancel={handleTorrentWizardCancel}
+              onCreated={handleTorrentCreated}
+              onError={setError}
+            />,
+            document.body
+          )
+        : null}
     </>
   );
 }

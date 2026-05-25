@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import TasksPage from "@/app/(authenticated)/tasks/page";
 import { api } from "@/lib/api";
 import { useTaskWebSocket } from "@/hooks/useTaskWebSocket";
-import type { Task } from "@/types";
+import type { Task, TorrentPreview, UploadTorrentRequest } from "@/types";
 
 const showToastMock = jest.fn();
 const showConfirmMock = jest.fn();
@@ -36,7 +36,8 @@ jest.mock("@/lib/api", () => ({
   api: {
     listTasks: jest.fn<Promise<Task[]>, [string?]>(),
     createTask: jest.fn<Promise<Task>, [string]>(),
-    uploadTorrent: jest.fn<Promise<Task>, [string, Record<string, unknown>?]>(),
+    previewTorrent: jest.fn<Promise<TorrentPreview>, [string]>(),
+    uploadTorrent: jest.fn<Promise<Task>, [string, UploadTorrentRequest?]>(),
     cancelTask: jest.fn<Promise<{ ok: boolean }>, [number]>(),
   },
 }));
@@ -58,6 +59,59 @@ const activeTask = {
   frozen_space: 0,
   error: null,
   created_at: "2024-01-01T00:00:00Z",
+};
+
+const torrentPreview = {
+  info_hash: "abc",
+  name: "Fedora Workstation",
+  file_count: 3,
+  total_size: 4234,
+  files: [
+    { index: 1, path: ["Fedora Workstation", "iso.bin"], size: 4096 },
+    { index: 2, path: ["Fedora Workstation", "docs", "release.pdf"], size: 48 },
+    { index: 3, path: ["Fedora Workstation", "docs", "install.pdf"], size: 90 },
+  ],
+  tree: [
+    {
+      type: "directory" as const,
+      name: "Fedora Workstation",
+      path: ["Fedora Workstation"],
+      size: 4234,
+      children: [
+        {
+          type: "file" as const,
+          name: "iso.bin",
+          path: ["Fedora Workstation", "iso.bin"],
+          index: 1,
+          size: 4096,
+        },
+        {
+          type: "directory" as const,
+          name: "docs",
+          path: ["Fedora Workstation", "docs"],
+          size: 138,
+          children: [
+            {
+              type: "file" as const,
+              name: "release.pdf",
+              path: ["Fedora Workstation", "docs", "release.pdf"],
+              index: 2,
+              size: 48,
+            },
+            {
+              type: "file" as const,
+              name: "install.pdf",
+              path: ["Fedora Workstation", "docs", "install.pdf"],
+              index: 3,
+              size: 90,
+            },
+          ],
+        },
+      ],
+    },
+  ],
+  limits: { max_files: 5000 },
+  default_selection: "all" as const,
 };
 
 describe("TasksPage", () => {
@@ -86,6 +140,13 @@ describe("TasksPage", () => {
       id: 2,
       name: "new-task.zip",
       uri: "https://example.com/new-task.zip",
+    });
+    mockApi.previewTorrent.mockResolvedValue(torrentPreview);
+    mockApi.uploadTorrent.mockResolvedValue({
+      ...activeTask,
+      id: 3,
+      name: "Fedora Workstation",
+      uri: "magnet:?xt=urn:btih:abc",
     });
     mockApi.cancelTask.mockResolvedValue({ ok: true });
     Object.assign(navigator, {
@@ -266,5 +327,119 @@ describe("TasksPage", () => {
       expect(screen.getByText("queued.iso")).toBeInTheDocument();
     });
     expect(screen.queryByText("ubuntu.iso")).not.toBeInTheDocument();
+  });
+
+  test("previews torrent and creates selected torrent task", async () => {
+    const readAsDataURL = jest
+      .spyOn(FileReader.prototype, "readAsDataURL")
+      .mockImplementation(function () {
+        Object.defineProperty(this, "result", {
+          configurable: true,
+          value: "data:application/x-bittorrent;base64,dG9ycmVudA==",
+        });
+        this.onload?.({} as ProgressEvent<FileReader>);
+      });
+
+    render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+
+    const input = screen.getByLabelText("上传种子文件");
+    const file = new File(["torrent"], "fedora.torrent", {
+      type: "application/x-bittorrent",
+    });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(mockApi.previewTorrent).toHaveBeenCalledWith("dG9ycmVudA==");
+    });
+
+    expect(await screen.findByText("添加 BT 下载任务")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("搜索文件")).toBeInTheDocument();
+    expect(screen.getByText("Fedora Workstation")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /release\.pdf/ }));
+    fireEvent.click(screen.getByRole("button", { name: "下一阶段" }));
+
+    expect(await screen.findByText("确认下载内容")).toBeInTheDocument();
+    expect(screen.getByText("iso.bin")).toBeInTheDocument();
+    expect(screen.queryByText("release.pdf")).not.toBeInTheDocument();
+    expect(screen.getByText("install.pdf")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认" }));
+
+    await waitFor(() => {
+      expect(mockApi.uploadTorrent).toHaveBeenCalledWith("dG9ycmVudA==", {
+        selected_file_indexes: [1, 3],
+      });
+    });
+
+    readAsDataURL.mockRestore();
+  });
+
+  test("torrent search filters rows without changing selection", async () => {
+    const readAsDataURL = jest
+      .spyOn(FileReader.prototype, "readAsDataURL")
+      .mockImplementation(function () {
+        Object.defineProperty(this, "result", {
+          configurable: true,
+          value: "data:application/x-bittorrent;base64,dG9ycmVudA==",
+        });
+        this.onload?.({} as ProgressEvent<FileReader>);
+      });
+
+    render(<TasksPage />);
+    const input = screen.getByLabelText("上传种子文件");
+    fireEvent.change(input, {
+      target: {
+        files: [
+          new File(["torrent"], "fedora.torrent", {
+            type: "application/x-bittorrent",
+          }),
+        ],
+      },
+    });
+
+    expect(await screen.findByText("添加 BT 下载任务")).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("搜索文件"), {
+      target: { value: "install" },
+    });
+
+    expect(screen.getByText("install.pdf")).toBeInTheDocument();
+    expect(screen.queryByText("release.pdf")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "下一阶段" }));
+    expect(await screen.findByText("release.pdf")).toBeInTheDocument();
+
+    readAsDataURL.mockRestore();
+  });
+
+  test("torrent cancel asks for confirmation", async () => {
+    const readAsDataURL = jest
+      .spyOn(FileReader.prototype, "readAsDataURL")
+      .mockImplementation(function () {
+        Object.defineProperty(this, "result", {
+          configurable: true,
+          value: "data:application/x-bittorrent;base64,dG9ycmVudA==",
+        });
+        this.onload?.({} as ProgressEvent<FileReader>);
+      });
+
+    render(<TasksPage />);
+    fireEvent.change(screen.getByLabelText("上传种子文件"), {
+      target: {
+        files: [
+          new File(["torrent"], "fedora.torrent", {
+            type: "application/x-bittorrent",
+          }),
+        ],
+      },
+    });
+
+    expect(await screen.findByText("添加 BT 下载任务")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+
+    expect(screen.getByText("取消添加任务？")).toBeInTheDocument();
+
+    readAsDataURL.mockRestore();
   });
 });
