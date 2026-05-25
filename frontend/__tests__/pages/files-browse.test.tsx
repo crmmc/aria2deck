@@ -382,6 +382,31 @@ describe("Folder in-page browsing", () => {
     expect(searchGroup?.className).toContain("pointer-events-none");
   });
 
+  test("search results use native buttons", async () => {
+    await renderAndWait();
+
+    const searchInput = screen.getByRole("textbox", { name: "搜索文件" });
+    fireEvent.change(searchInput, { target: { value: "readme" } });
+    fireEvent.keyDown(searchInput, { key: "Enter" });
+
+    const resultButton = await screen.findByRole("button", { name: /readme\.txt/ });
+    expect(resultButton.tagName).toBe("BUTTON");
+  });
+
+  test("keyboard shortcut opens and closes search modal", async () => {
+    await renderAndWait();
+
+    fireEvent.keyDown(window, { key: "f", metaKey: true });
+
+    expect(await screen.findByRole("textbox", { name: "搜索文件名" })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("textbox", { name: "搜索文件名" })).not.toBeInTheDocument();
+    });
+  });
+
   test("sorting works inside folder — directories first", async () => {
     await renderAndWait();
     await enterFolder();

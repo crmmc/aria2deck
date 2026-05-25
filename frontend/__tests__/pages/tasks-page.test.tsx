@@ -134,6 +134,13 @@ describe("TasksPage", () => {
     expect(screen.queryByText("100%")).not.toBeInTheDocument();
   });
 
+  test("uses a native button for the task copy target", async () => {
+    render(<TasksPage />);
+
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /ubuntu\.iso/ }).tagName).toBe("BUTTON");
+  });
+
   test("batch cancels selected active tasks", async () => {
     render(<TasksPage />);
 

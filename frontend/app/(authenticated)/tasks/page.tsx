@@ -5,8 +5,8 @@ import { createPortal } from "react-dom";
 
 import { api } from "@/lib/api";
 import type { Task } from "@/types";
+import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
-import { ModalOverlay } from "@/components/ModalOverlay";
 import StatsWidget from "@/components/StatsWidget";
 import { useTaskWebSocket } from "@/hooks/useTaskWebSocket";
 import {
@@ -15,6 +15,7 @@ import {
 } from "@/lib/notification";
 
 import { AddTaskForm } from "./_components/AddTaskForm";
+import { BatchAddTasksDialog } from "./_components/BatchAddTasksDialog";
 import { TaskToolbar } from "./_components/TaskToolbar";
 import { TaskList } from "./_components/TaskList";
 
@@ -53,14 +54,14 @@ export default function TasksPage() {
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [isBatchAdding, setIsBatchAdding] = useState(false);
   const [batchUris, setBatchUris] = useState("");
-  const [mounted, setMounted] = useState(false);
+  const mounted = useMounted();
   const torrentInputRef = useRef<HTMLInputElement>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isBatchOperating, setIsBatchOperating] = useState(false);
   const [operatingTaskIds, setOperatingTaskIds] = useState<Set<number>>(
     new Set()
   );
-  const [wsConnected, setWsConnected] = useState(false);
+  const wsConnectedRef = useRef(false);
 
   useEffect(() => {
     if (showBatchAddModal) {
@@ -76,10 +77,6 @@ export default function TasksPage() {
   const deletedTaskIdsRef = useRef<Set<number>>(new Set());
   const tasksRef = useRef<Task[]>([]);
   tasksRef.current = tasks;
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -103,9 +100,9 @@ export default function TasksPage() {
   }, [showToast]);
 
   useEffect(() => {
-    if (wsConnected) return;
-
     const pollInterval = setInterval(() => {
+      if (wsConnectedRef.current) return;
+
       api
         .listTasks("active")
         .then((activeTasks) => {
@@ -156,7 +153,7 @@ export default function TasksPage() {
     }, 5000);
 
     return () => clearInterval(pollInterval);
-  }, [wsConnected]);
+  }, []);
 
   const handleTaskUpdate = useCallback((newTask: Task) => {
     const taskId = newTask.id;
@@ -224,6 +221,7 @@ export default function TasksPage() {
   );
 
   const handleWsConnected = useCallback(() => {
+    wsConnectedRef.current = true;
     api
       .listTasks("current")
       .then((currentTasks) => {
@@ -236,11 +234,10 @@ export default function TasksPage() {
         const message = err instanceof Error ? err.message : "未知错误";
         showToast(`同步任务状态失败: ${message}`, "warning");
       });
-    setWsConnected(true);
   }, [showToast]);
 
   const handleWsDisconnected = useCallback(() => {
-    setWsConnected(false);
+    wsConnectedRef.current = false;
   }, []);
 
   useTaskWebSocket({
@@ -491,6 +488,11 @@ export default function TasksPage() {
     }
   }, [batchUris, showToast, isBatchAdding]);
 
+  const cancelBatchAdd = useCallback(() => {
+    setShowBatchAddModal(false);
+    setBatchUris("");
+  }, []);
+
   const toggleTaskSelection = useCallback((id: number) => {
     setSelectedTasks((prev) => {
       const next = new Set(prev);
@@ -601,54 +603,13 @@ export default function TasksPage() {
       {mounted &&
         showBatchAddModal &&
         createPortal(
-          <ModalOverlay
-            onClose={() => setShowBatchAddModal(false)}
-            contentClassName="batch-modal-content"
-          >
-              <div className="modal-header">
-                <h2 className="m-0">批量添加任务</h2>
-                <button
-                  type="button"
-                  onClick={() => setShowBatchAddModal(false)}
-                  className="modal-close-btn"
-                >
-                  ×
-                </button>
-              </div>
-
-              <p className="muted text-sm mb-3">
-                每行输入一个链接，支持磁力链接、HTTP 或 FTP URL
-              </p>
-
-              <textarea
-                value={batchUris}
-                onChange={(e) => setBatchUris(e.target.value)}
-                placeholder="magnet:?xt=urn:btih:...&#10;https://example.com/file1.zip&#10;https://example.com/file2.zip"
-                className="batch-textarea"
-                aria-label="批量下载链接"
-              />
-
-              <div className="modal-footer">
-                <button
-                  type="button"
-                  className="button secondary btn-task"
-                  onClick={() => {
-                    setShowBatchAddModal(false);
-                    setBatchUris("");
-                  }}
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  className="button btn-task"
-                  onClick={batchAddTasks}
-                  disabled={isBatchAdding}
-                >
-                  {isBatchAdding ? "添加中..." : "添加任务"}
-                </button>
-              </div>
-          </ModalOverlay>,
+          <BatchAddTasksDialog
+            batchUris={batchUris}
+            isBatchAdding={isBatchAdding}
+            onBatchUrisChange={setBatchUris}
+            onSubmit={batchAddTasks}
+            onCancel={cancelBatchAdd}
+          />,
           document.body
         )}
     </>

@@ -11,13 +11,21 @@ import { UsersTable } from "./_components/UsersTable";
 import { EditUserDialog, type EditingUser } from "./_components/EditUserDialog";
 import { DeleteUserDialog } from "./_components/DeleteUserDialog";
 
+type InitialLoadState = {
+  currentUser: User | null;
+  loading: boolean;
+  error: string | null;
+};
+
 export default function UsersPage() {
   const { push } = useRouter();
   const { showToast } = useToast();
   const [users, setUsers] = useState<User[]>([]);
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [initialLoad, setInitialLoad] = useState<InitialLoadState>({
+    currentUser: null,
+    loading: true,
+    error: null,
+  });
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -33,31 +41,32 @@ export default function UsersPage() {
 
   useEffect(() => {
     let mounted = true;
-    api
-      .me()
-      .then((me) => {
-        if (!mounted) return null;
-        setCurrentUser(me);
+    (async () => {
+      let me: User | null = null;
+      try {
+        me = await api.me();
+        if (!mounted) return;
+
         if (!me.is_admin) {
+          setInitialLoad({ currentUser: me, loading: false, error: null });
           push("/tasks");
-          return null;
+          return;
         }
-        return api.listUsers();
-      })
-      .then((data) => {
-        if (!mounted || !data) return;
+
+        const data = await api.listUsers();
+        if (!mounted) return;
         setUsers(data);
-      })
-      .catch((err) => {
+        setInitialLoad({ currentUser: me, loading: false, error: null });
+      } catch (err) {
         if (!mounted) return;
         console.error(err);
-        setLoadError("加载用户列表失败");
-      })
-      .finally(() => {
-        if (mounted) {
-          setLoading(false);
-        }
-      });
+        setInitialLoad({
+          currentUser: me,
+          loading: false,
+          error: "加载用户列表失败",
+        });
+      }
+    })();
     return () => {
       mounted = false;
     };
@@ -162,13 +171,13 @@ export default function UsersPage() {
     }
   }
 
-  if (loading) return null;
-  if (loadError) return (
+  if (initialLoad.loading) return null;
+  if (initialLoad.error) return (
     <div className="glass-frame full-height animate-in">
-      <div className="card text-danger">{loadError}</div>
+      <div className="card text-danger">{initialLoad.error}</div>
     </div>
   );
-  if (!currentUser?.is_admin) return null;
+  if (!initialLoad.currentUser?.is_admin) return null;
 
   return (
     <>
@@ -195,7 +204,7 @@ export default function UsersPage() {
 
         <UsersTable
           users={users}
-          currentUserId={currentUser?.id}
+          currentUserId={initialLoad.currentUser?.id}
           onEdit={openEditModal}
           onDelete={setDeletingUser}
         />
@@ -204,7 +213,7 @@ export default function UsersPage() {
       {editingUser && (
         <EditUserDialog
           editingUser={editingUser}
-          currentUserId={currentUser?.id}
+          currentUserId={initialLoad.currentUser?.id}
           editError={editError}
           onFieldChange={(updates) =>
             setEditingUser((prev) => prev ? { ...prev, ...updates } : prev)

@@ -1949,7 +1949,6 @@ dialog.confirm-overlay {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  cursor: pointer;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
   border: 1px solid rgba(0, 0, 0, 0.1);
   border-radius: 12px;
@@ -2036,6 +2035,99 @@ dialog.confirm-overlay {
   display: block;
 }
 
+.share-directory-path-card {
+  padding: 10px 16px;
+}
+
+.share-directory-path {
+  font-size: 13px;
+}
+
+.share-directory-back-button {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.share-directory-list-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.share-directory-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.share-directory-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.share-directory-row:last-child {
+  border-bottom: none;
+}
+
+.share-directory-item-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.share-directory-dir-button {
+  cursor: pointer;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.share-directory-icon {
+  font-size: 16px;
+}
+
+.share-directory-item-name {
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-directory-dir-name {
+  font-weight: 500;
+}
+
+.share-directory-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.share-directory-size {
+  font-size: 12px;
+  min-width: 60px;
+  text-align: right;
+}
+
+.share-directory-download-button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.share-directory-chevron {
+  font-size: 12px;
+}
+
 /* Task Card Header */
 .task-card-header {
   display: flex;
@@ -2043,6 +2135,29 @@ dialog.confirm-overlay {
   align-items: flex-start;
   overflow: hidden;
   flex: 1;
+}
+
+.task-card-copy-target {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-card-copy-target.non-interactive {
+  cursor: default;
+}
+
+.task-card-copy-target:focus-visible {
+  outline: none;
+  border-radius: 8px;
+  box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.12);
 }
 
 /* Task Name */
@@ -2620,8 +2735,14 @@ dialog.confirm-overlay {
   display: flex;
   align-items: center;
   gap: 12px;
+  width: 100%;
   padding: 10px 12px;
+  border: 0;
   border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: background 0.15s ease;
 }

@@ -84,13 +84,11 @@ export function SearchModal({
           ) : (
             <div className="search-results-list">
               {searchResults.map((file) => (
-                <div
+                <button
+                  type="button"
                   key={file.id}
                   className="search-result-item"
-                  role="button"
-                  tabIndex={0}
                   onClick={() => onResultClick(file)}
-                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onResultClick(file); } }}
                 >
                   <span className="file-icon">
                     {file.is_directory ? "📁" : "📄"}
@@ -101,7 +99,7 @@ export function SearchModal({
                       {formatBytes(file.size)} · {formatDate(file.created_at)}
                     </span>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           )}

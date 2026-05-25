@@ -3,16 +3,21 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
+import { triggerDownloadsSequentially } from "@/lib/download-trigger";
 import { formatBytes } from "@/lib/utils";
+import { useIsMobile } from "@/hooks/useIsMobile";
+import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
-import { ModalOverlay } from "@/components/ModalOverlay";
 import PackTaskCard from "@/components/PackTaskCard";
 import CreateShareDialog from "@/components/CreateShareDialog";
 import type { FileInfo, BrowseFileInfo, SpaceInfo } from "@/types";
-import { List } from "react-window";
-import { AutoSizer } from "react-virtualized-auto-sizer";
+import { BrowseFolderView } from "./_components/BrowseFolderView";
 import { SearchModal } from "./_components/SearchModal";
 import { FileToolbar, type SortField, type SortOrder } from "./_components/FileToolbar";
+import { PackDialog } from "./_components/PackDialog";
+import { PaginationControls } from "./_components/PaginationControls";
+import { RootFileTable } from "./_components/RootFileTable";
+import { SpaceUsageCard } from "./_components/SpaceUsageCard";
 
 function formatDate(dateStr: string): string {
   const date = new Date(dateStr);
@@ -77,17 +82,17 @@ export default function FilesPage() {
   const [pageSize, setPageSize] = useState(10);
   const [totalFiles, setTotalFiles] = useState(0);
 
+  const openSearchModal = useCallback(() => {
+    setSearchKeyword(toolbarSearchKeyword);
+    setShowSearchModal(true);
+  }, [toolbarSearchKeyword]);
 
-  // Mobile detection
-  const [isMobile, setIsMobile] = useState(false);
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => {
-    setMounted(true);
-    const check = () => setIsMobile(window.innerWidth < 768);
-    check();
-    window.addEventListener('resize', check);
-    return () => window.removeEventListener('resize', check);
+  const closeSearchModal = useCallback(() => {
+    setShowSearchModal(false);
   }, []);
+
+  const isMobile = useIsMobile();
+  const mounted = useMounted();
 
   useEffect(() => {
     if (showSearchModal) {
@@ -141,7 +146,7 @@ export default function FilesPage() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showSearchModal, toolbarSearchKeyword, browseContext]);
+  }, [showSearchModal, browseContext, openSearchModal, closeSearchModal]);
 
   // Sorted files (folders first, then by sort field)
   const sortedFiles = useMemo(() => {
@@ -201,16 +206,6 @@ export default function FilesPage() {
   const getSortIcon = (field: SortField) => {
     if (sortField !== field) return "↕";
     return sortOrder === "asc" ? "↑" : "↓";
-  };
-
-  // Search modal handlers
-  const openSearchModal = () => {
-    setSearchKeyword(toolbarSearchKeyword);
-    setShowSearchModal(true);
-  };
-
-  const closeSearchModal = () => {
-    setShowSearchModal(false);
   };
 
   const handleToolbarSearchKeyDown = (e: React.KeyboardEvent) => {
@@ -299,28 +294,9 @@ export default function FilesPage() {
     const selectedList = files.filter(f => selectedFiles.has(f.id));
     showToast(`正在发送已选 ${selectedList.length} 个文件的下载请求，请稍候...`, "info");
 
-    for (let i = 0; i < selectedList.length; i++) {
-      const file = selectedList[i];
-      const url = api.downloadFileUrl(file.content_hash);
-      
-      // 使用 iframe 触发下载，这种方式对第三方下载软件拦截更友好
-      const iframe = document.createElement("iframe");
-      iframe.style.display = "none";
-      iframe.src = url;
-      document.body.appendChild(iframe);
-      
-      // 5秒后移除 iframe
-      setTimeout(() => {
-        if (document.body.contains(iframe)) {
-          document.body.removeChild(iframe);
-        }
-      }, 5000);
-
-      if (i < selectedList.length - 1) {
-        // 增加间隔到 1.2 秒，确保下载软件有足够时间响应
-        await new Promise((r) => setTimeout(r, 1200));
-      }
-    }
+    await triggerDownloadsSequentially(
+      selectedList.map((file) => api.downloadFileUrl(file.content_hash)),
+    );
     showToast(`已完成 ${selectedList.length} 个文件的下载触发`, "success");
   };
 
@@ -535,47 +511,15 @@ export default function FilesPage() {
     const selectedPaths = Array.from(selectedBrowseFiles);
     showToast(`正在发送已选 ${selectedPaths.length} 个文件的下载请求...`, "info");
 
-    for (let i = 0; i < selectedPaths.length; i++) {
-      const path = selectedPaths[i];
-      const url = api.downloadFileUrl(browseContext.fileHash, path);
-      
-      const iframe = document.createElement("iframe");
-      iframe.style.display = "none";
-      iframe.src = url;
-      document.body.appendChild(iframe);
-      
-      setTimeout(() => {
-        if (document.body.contains(iframe)) {
-          document.body.removeChild(iframe);
-        }
-      }, 5000);
-
-      if (i < selectedPaths.length - 1) {
-        await new Promise((r) => setTimeout(r, 1200));
-      }
-    }
+    await triggerDownloadsSequentially(
+      selectedPaths.map((path) => api.downloadFileUrl(browseContext.fileHash, path)),
+    );
     showToast(`已完成 ${selectedPaths.length} 个文件的下载触发`, "success");
   };
 
   const handlePackTaskComplete = useCallback(() => {
     loadFiles(currentPage, pageSize);
   }, [loadFiles, currentPage, pageSize]);
-
-  // Space display helpers
-  const getSpacePercentage = (space: SpaceInfo) => {
-    const total = space.used + space.frozen + space.available;
-    if (total === 0) return { used: 0, frozen: 0 };
-    return {
-      used: (space.used / total) * 100,
-      frozen: (space.frozen / total) * 100,
-    };
-  };
-
-  const getSpaceColor = (percentage: number) => {
-    if (percentage >= 80) return "var(--danger)";
-    if (percentage >= 50) return "var(--warning)";
-    return "var(--success)";
-  };
 
   return (
     <div className="glass-frame full-height animate-in">
@@ -587,47 +531,7 @@ export default function FilesPage() {
         <PackTaskCard key={packTasksKey} onTaskComplete={handlePackTaskComplete} />
       </div>
 
-      {space && (
-        <div className="card mb-6">
-          <div className="flex-between mb-3">
-            <div>
-              <h3 className="stats-label">存储使用情况</h3>
-              <div className="flex items-baseline gap-2">
-                <span className="stats-value">{formatBytes(space.used)}</span>
-                <span className="muted">
-                  / {formatBytes(space.used + space.frozen + space.available)}
-                </span>
-              </div>
-              {space.frozen > 0 && (
-                <div className="text-sm muted mt-1">
-                  已冻结: {formatBytes(space.frozen)} (下载中)
-                </div>
-              )}
-            </div>
-          </div>
-          <div className="progress-container" style={{ position: "relative" }}>
-            <div
-              className="progress-bar"
-              style={{
-                width: `${getSpacePercentage(space).used + getSpacePercentage(space).frozen}%`,
-                background: getSpaceColor(getSpacePercentage(space).used + getSpacePercentage(space).frozen),
-              }}
-            />
-            {space.frozen > 0 && (
-              <div
-                style={{
-                  position: "absolute",
-                  left: `${getSpacePercentage(space).used}%`,
-                  top: 0,
-                  width: `${getSpacePercentage(space).frozen}%`,
-                  height: "100%",
-                  background: "repeating-linear-gradient(45deg, transparent, transparent 2px, rgba(255,255,255,0.3) 2px, rgba(255,255,255,0.3) 4px)",
-                }}
-              />
-            )}
-          </div>
-        </div>
-      )}
+      {space && <SpaceUsageCard space={space} />}
 
       {/* Toolbar - Always visible */}
       <FileToolbar
@@ -659,571 +563,57 @@ export default function FilesPage() {
 
       {/* Folder contents table (inside folder) */}
       {isInsideFolder ? (
-        browseLoading ? (
-          <div className="card text-center py-8">
-            <p className="muted">加载中...</p>
-          </div>
-        ) : sortedBrowseContents.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-              </svg>
-            </div>
-            <p className="font-medium mb-1">文件夹为空</p>
-            <p className="muted text-base">此文件夹中没有文件</p>
-          </div>
-        ) : (
-          <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-            {!isMobile && (
-              <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px', paddingRight: '16px' }}>
-                <div className="table-cell text-left">
-                  <input
-                    type="checkbox"
-                    checked={(() => {
-                      const allKeys = browseContents
-                        .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
-                      return allKeys.length > 0 && allKeys.every((k) => selectedBrowseFiles.has(k));
-                    })()}
-                    onChange={toggleAllBrowseFiles}
-                    className="checkbox-sm cursor-pointer"
-                    aria-label="全选"
-                  />
-                </div>
-                <button type="button"
-                  className="table-cell text-left sortable-header"
-                  onClick={() => handleSort("name")}
-                >
-                  名称 <span className="sort-icon">{getSortIcon("name")}</span>
-                </button>
-                <button type="button"
-                  className="table-cell text-right sortable-header"
-                  onClick={() => handleSort("size")}
-                >
-                  大小 <span className="sort-icon">{getSortIcon("size")}</span>
-                </button>
-                <div className="table-cell text-right">操作</div>
-              </div>
-            )}
-
-            {isMobile ? (
-              <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
-                {sortedBrowseContents.map((item) => {
-                  const itemKey = [...(browseContext?.path ?? []), item.name].join("/");
-                  return (
-                    <div key={item.name} className="mobile-file-card">
-                      <div className="card-header">
-                        <input
-                          type="checkbox"
-                          checked={selectedBrowseFiles.has(itemKey)}
-                          onChange={() => toggleBrowseFileSelection(item)}
-                          className="checkbox-sm cursor-pointer"
-                          aria-label={`选择 ${item.name}`}
-                        />
-                        <div className="file-title">
-                          <span className="file-icon">
-                            {item.is_directory ? "📁" : "📄"}
-                          </span>
-                          {item.is_directory ? (
-                            <button type="button"
-                              className="mobile-name"
-                              onClick={() => navigateIntoSubfolder(item.name)}
-                            >
-                              {item.name}
-                            </button>
-                          ) : (
-                            <span className="mobile-name">{item.name}</span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="card-meta">
-                        {item.is_directory ? "-" : formatBytes(item.size)}
-                      </div>
-                      <div className="card-actions">
-                        {item.is_directory ? (
-                          <button type="button"
-                            className="button secondary btn-sm"
-                            onClick={() => navigateIntoSubfolder(item.name)}
-                          >
-                            打开
-                          </button>
-                        ) : (
-                          <button type="button"
-                            className="button secondary btn-sm"
-                            onClick={() => {
-                              handleDownload(
-                                browseContext!.fileHash,
-                                item.name,
-                                undefined,
-                                [...browseContext!.path, item.name].join("/")
-                              );
-                            }}
-                          >
-                            下载
-                          </button>
-                        )}
-                        <button type="button"
-                          className="button secondary danger btn-sm"
-                          onClick={() => {
-                            showToast("文件夹内暂不支持在此页面单文件直接删除", "warning");
-                          }}
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div style={{ flex: 1, minHeight: 320 }}>
-                <AutoSizer renderProp={({ height, width }) => {
-                  const safeHeight = typeof height === "number" && height > 0 ? height : 400;
-                  const safeWidth = typeof width === "number" && width > 0 ? width : 1200;
-                  return (
-                    <List
-                      style={{ height: safeHeight, width: safeWidth }}
-                      rowCount={sortedBrowseContents.length}
-                      rowHeight={80}
-                      rowProps={{}}
-                      rowComponent={({ index, style }) => {
-                        const item = sortedBrowseContents[index];
-                        const itemKey = [...(browseContext?.path ?? []), item.name].join("/");
-                        return (
-                          <div style={style} key={item.name}>
-                            <div
-                              className="table-row transition-bg"
-                              style={{
-                                display: 'grid',
-                                gridTemplateColumns: '40px minmax(220px, 1fr) 120px 300px',
-                                height: '100%',
-                                alignItems: 'flex-start',
-                                overflow: 'hidden'
-                              }}
-                            >
-                              <div className="table-cell" style={{ paddingTop: '20px' }}>
-                                <input
-                                  type="checkbox"
-                                  checked={selectedBrowseFiles.has(itemKey)}
-                                  onChange={() => toggleBrowseFileSelection(item)}
-                                  className="checkbox-sm cursor-pointer"
-                                  aria-label="选择文件"
-                                />
-                              </div>
-                              <div className="table-cell" data-label="名称" style={{ paddingTop: '14px', paddingBottom: '14px', overflow: 'hidden' }}>
-                                <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
-                                  <span className="file-icon" style={{ flexShrink: 0 }}>
-                                    {item.is_directory ? "📁" : "📄"}
-                                  </span>
-                                  {item.is_directory ? (
-                                    <button type="button"
-                                      className="file-name-btn"
-                                      onClick={() => navigateIntoSubfolder(item.name)}
-                                      title={item.name}
-                                      style={{ wordBreak: 'break-all', textAlign: 'left', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-                                    >
-                                      {item.name}
-                                    </button>
-                                  ) : (
-                                    <span className="text-base" title={item.name} style={{ wordBreak: 'break-all', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{item.name}</span>
-                                  )}
-                                </div>
-                              </div>
-                              <div className="table-cell text-right muted text-base" data-label="大小" style={{ paddingTop: '20px' }}>
-                                {item.is_directory ? "-" : formatBytes(item.size)}
-                              </div>
-                              <div className="table-cell text-right" style={{ paddingTop: '14px' }}>
-                                <div className="flex gap-2 flex-end">
-                                  {item.is_directory ? (
-                                    <button type="button"
-                                      className="button secondary btn-sm"
-                                      onClick={() => navigateIntoSubfolder(item.name)}
-                                    >
-                                      打开
-                                    </button>
-                                  ) : (
-                                    <button type="button"
-                                      className="button secondary btn-sm"
-                                      onClick={() =>
-                                        handleDownload(
-                                          browseContext!.fileHash,
-                                          item.name,
-                                          undefined,
-                                          [...browseContext!.path, item.name].join("/")
-                                        )}
-                                    >
-                                      下载
-                                    </button>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      }}
-                    />
-                  );
-                }}
-                />
-              </div>
-            )}
-          </div>
-        )
+        <BrowseFolderView
+          isMobile={isMobile}
+          browseLoading={browseLoading}
+          browseContext={browseContext}
+          browseContents={browseContents}
+          sortedBrowseContents={sortedBrowseContents}
+          selectedBrowseFiles={selectedBrowseFiles}
+          onSort={handleSort}
+          getSortIcon={getSortIcon}
+          onToggleAllBrowseFiles={toggleAllBrowseFiles}
+          onToggleBrowseFileSelection={toggleBrowseFileSelection}
+          onNavigateIntoSubfolder={navigateIntoSubfolder}
+          onDownload={handleDownload}
+          onUnavailableDelete={() => {
+            showToast("文件夹内暂不支持在此页面单文件直接删除", "warning");
+          }}
+        />
       ) : (
         /* Root file table */
-        loading ? (
-          <div className="card text-center py-8">
-            <p className="muted">加载中...</p>
-          </div>
-        ) : error ? (
-          <div className="card text-center py-8">
-            <p className="text-danger">{error}</p>
-          </div>
-        ) : sortedFiles.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-              </svg>
-            </div>
-            <p className="font-medium mb-1">暂无文件</p>
-            <p className="muted text-base">下载完成的文件将显示在这里</p>
-          </div>
-        ) : (
           <>
-          <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-            {!isMobile && (
-              <div className="table-header" style={{ display: 'grid', gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px', paddingRight: '16px' }}>
-                <div className="table-cell text-left">
-                  <input
-                    type="checkbox"
-                    checked={selectedFiles.size === sortedFiles.length && sortedFiles.length > 0}
-                    onChange={toggleSelectAll}
-                    className="checkbox-sm cursor-pointer"
-                    aria-label="全选"
-                  />
-                </div>
-                <button type="button"
-                  className="table-cell text-left sortable-header"
-                  onClick={() => handleSort("name")}
-                >
-                  名称 <span className="sort-icon">{getSortIcon("name")}</span>
-                </button>
-                <button type="button"
-                  className="table-cell text-right sortable-header"
-                  onClick={() => handleSort("size")}
-                >
-                  大小 <span className="sort-icon">{getSortIcon("size")}</span>
-                </button>
-                <button type="button"
-                  className="table-cell text-right sortable-header"
-                  onClick={() => handleSort("created_at")}
-                >
-                  添加时间 <span className="sort-icon">{getSortIcon("created_at")}</span>
-                </button>
-                <div className="table-cell text-right">操作</div>
-              </div>
-            )}
-
-            {isMobile ? (
-              <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
-                {sortedFiles.map((file) => (
-                  <div key={file.id} className="mobile-file-card">
-                    <div className="card-header">
-                      <input
-                        type="checkbox"
-                        checked={selectedFiles.has(file.id)}
-                        onChange={() => toggleFileSelection(file.id)}
-                        className="checkbox-sm cursor-pointer"
-                        aria-label={`选择 ${file.name}`}
-                      />
-                      <div className="file-title">
-                        <span className="file-icon">
-                          {file.is_directory ? "📁" : "📄"}
-                        </span>
-                        {renaming === file.id ? (
-                          <div className="flex gap-2 flex-1" style={{ minWidth: 0 }}>
-                            <input
-                              className="input py-1 px-3 text-base"
-                              value={newName}
-                              onChange={(e) => setNewName(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") handleRename(file);
-                                if (e.key === "Escape") cancelRename();
-                              }}
-                              ref={(el) => el?.focus()}
-                              aria-label="重命名文件"
-                              onClick={(e) => e.stopPropagation()}
-                            />
-                            <button type="button"
-                              className="button secondary btn-sm"
-                              onClick={(e) => { e.stopPropagation(); handleRename(file); }}
-                            >
-                              ✓
-                            </button>
-                            <button type="button"
-                              className="button secondary btn-sm"
-                              onClick={(e) => { e.stopPropagation(); cancelRename(); }}
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        ) : (
-                          file.is_directory ? (
-                            <button type="button"
-                              className="mobile-name"
-                              onClick={() => enterFolder(file)}
-                            >
-                              {file.name}
-                            </button>
-                          ) : (
-                            <span className="mobile-name">{file.name}</span>
-                          )
-                        )}
-                      </div>
-                    </div>
-                    <div className="card-meta">
-                      {formatBytes(file.size)} • {formatDate(file.created_at)}
-                    </div>
-                    <div className="card-actions">
-                      {file.is_directory ? (
-                        <button type="button"
-                          className="button secondary btn-sm"
-                          onClick={() => enterFolder(file)}
-                        >
-                          浏览
-                        </button>
-                      ) : (
-                        <button type="button"
-                          className="button secondary btn-sm"
-                          onClick={() => handleDownload(file.content_hash, file.name, file.id)}
-                          disabled={downloadingFile === file.id}
-                        >
-                          {downloadingFile === file.id ? "下载中..." : "下载"}
-                        </button>
-                      )}
-                      <button type="button"
-                        className="button secondary btn-sm"
-                        onClick={() => startRename(file)}
-                      >
-                        重命名
-                      </button>
-                      <button type="button"
-                        className="button secondary btn-sm"
-                        onClick={() => setShareDialogFile({ id: file.id, name: file.name })}
-                      >
-                        分享
-                      </button>
-                      <button type="button"
-                        className="button secondary danger btn-sm"
-                        onClick={() => handleDelete(file)}
-                      >
-                        删除
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div style={{ flex: 1, minHeight: 320 }}>
-                <AutoSizer renderProp={({ height, width }) => {
-                  const safeHeight = typeof height === "number" && height > 0 ? height : 400;
-                  const safeWidth = typeof width === "number" && width > 0 ? width : 1200;
-                  return (
-                    <List
-                      style={{ height: safeHeight, width: safeWidth }}
-                      rowCount={sortedFiles.length}
-                      rowHeight={80}
-                      rowProps={{}}
-                      rowComponent={({ index, style }) => {
-                        const file = sortedFiles[index];
-                        return (
-                          <div style={style} key={file.id}>
-                            <div
-                              className="table-row transition-bg"
-                              style={{
-                                display: 'grid',
-                                gridTemplateColumns: '40px minmax(220px, 1fr) 120px 180px 300px',
-                                height: '100%',
-                                alignItems: 'flex-start',
-                                overflow: 'hidden'
-                              }}
-                            >
-                              <div className="table-cell" style={{ paddingTop: '20px' }}>
-                                <input
-                                  type="checkbox"
-                                  checked={selectedFiles.has(file.id)}
-                                  onChange={() => toggleFileSelection(file.id)}
-                                  className="checkbox-sm cursor-pointer"
-                                  aria-label="选择文件"
-                                />
-                              </div>
-                              <div className="table-cell" data-label="名称" style={{ paddingTop: '14px', paddingBottom: '14px', overflow: 'hidden' }}>
-                                {renaming === file.id ? (
-                                  <div className="flex gap-2">
-                                    <input
-                                      className="input py-1 px-3 text-base"
-                                      value={newName}
-                                      onChange={(e) => setNewName(e.target.value)}
-                                      aria-label="重命名文件"
-                                      onKeyDown={(e) => {
-                                        if (e.key === "Enter") handleRename(file);
-                                        if (e.key === "Escape") cancelRename();
-                                      }}
-                                      ref={(el) => el?.focus()}
-                                      onClick={(e) => e.stopPropagation()}
-                                    />
-                                    <button type="button"
-                                      className="button secondary btn-sm"
-                                      onClick={(e) => { e.stopPropagation(); handleRename(file); }}
-                                    >
-                                      ✓
-                                    </button>
-                                    <button type="button"
-                                      className="button secondary btn-sm"
-                                      onClick={(e) => { e.stopPropagation(); cancelRename(); }}
-                                    >
-                                      ✕
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
-                                    <span className="file-icon" style={{ flexShrink: 0 }}>
-                                      {file.is_directory ? "📁" : "📄"}
-                                    </span>
-                                    {file.is_directory ? (
-                                      <button type="button"
-                                        className="file-name-btn"
-                                        onClick={() => enterFolder(file)}
-                                        title={file.name}
-                                        style={{ wordBreak: 'break-all', textAlign: 'left', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-                                      >
-                                        {file.name}
-                                      </button>
-                                    ) : (
-                                      <span className="text-base" title={file.name} style={{ wordBreak: 'break-all', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{file.name}</span>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                              <div className="table-cell text-right muted text-base" data-label="大小" style={{ paddingTop: '20px' }}>
-                                {formatBytes(file.size)}
-                              </div>
-                              <div className="table-cell text-right muted text-sm" data-label="添加时间" style={{ paddingTop: '22px' }}>
-                                {formatDate(file.created_at)}
-                              </div>
-                              <div className="table-cell text-right" style={{ paddingTop: '14px' }}>
-                                <div className="flex gap-2 flex-end">
-                                  {file.is_directory ? (
-                                    <button type="button"
-                                      className="button secondary btn-sm"
-                                      onClick={() => enterFolder(file)}
-                                    >
-                                      浏览
-                                    </button>
-                                  ) : (
-                                    <button type="button"
-                                      className="button secondary btn-sm"
-                                      onClick={() => handleDownload(file.content_hash, file.name, file.id)}
-                                      disabled={downloadingFile === file.id}
-                                    >
-                                      {downloadingFile === file.id ? "下载中..." : "下载"}
-                                    </button>
-                                  )}
-                                  <button type="button"
-                                    className="button secondary btn-sm"
-                                    onClick={() => startRename(file)}
-                                  >
-                                    重命名
-                                  </button>
-                                  <button type="button"
-                                    className="button secondary btn-sm"
-                                    onClick={() => setShareDialogFile({ id: file.id, name: file.name })}
-                                  >
-                                    分享
-                                  </button>
-                                  <button type="button"
-                                    className="button secondary danger btn-sm"
-                                    onClick={() => handleDelete(file)}
-                                  >
-                                    删除
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      }}
-                    />
-                  );
-                }}
-                />
-              </div>
-            )}
-          </div>
-          {/* Pagination */}
-          {/* Pagination */}
-          {(() => {
-            const totalPages = Math.max(1, Math.ceil(totalFiles / pageSize));
-            // 生成当前页附近的页码（最多显示 5 个）
-            const pages: number[] = [];
-            let start = Math.max(1, currentPage - 2);
-            const end = Math.min(totalPages, start + 4);
-            start = Math.max(1, end - 4);
-            for (let i = start; i <= end; i++) pages.push(i);
-            return (
-              <div className="flex items-center justify-end gap-2 py-3 px-2">
-                <select
-                  className="select-sm"
-                  value={pageSize}
-                  aria-label="每页条数"
-                  onChange={(e) => {
-                    const s = Number(e.target.value);
-                    setPageSize(s);
-                    setCurrentPage(1);
-                  }}
-                >
-                  {[10, 20, 30, 50, 100].map((n) => (
-                    <option key={n} value={n}>{n} 条/页</option>
-                  ))}
-                </select>
-                <span className="text-sm muted" style={{ marginLeft: 4 }}>
-                  共 {totalFiles} 项
-                </span>
-                <div className="flex items-center gap-0" style={{ marginLeft: 8 }}>
-                  <button type="button"
-                    className="button secondary btn-sm"
-                    style={{ borderRadius: '4px 0 0 4px' }}
-                    disabled={currentPage <= 1}
-                    onClick={() => setCurrentPage(p => p - 1)}
-                  >
-                    ‹
-                  </button>
-                  {pages.map((p) => (
-                    <button type="button"
-                      key={p}
-                      className={`button btn-sm ${p === currentPage ? 'primary' : 'secondary'}`}
-                      style={{ borderRadius: 0, minWidth: 32 }}
-                      onClick={() => { if (p !== currentPage) setCurrentPage(p); }}
-                    >
-                      {p}
-                    </button>
-                  ))}
-                  <button type="button"
-                    className="button secondary btn-sm"
-                    style={{ borderRadius: '0 4px 4px 0' }}
-                    disabled={currentPage >= totalPages}
-                    onClick={() => setCurrentPage(p => p + 1)}
-                  >
-                    ›
-                  </button>
-                </div>
-              </div>
-            );
-          })()}
+          <RootFileTable
+            isMobile={isMobile}
+            loading={loading}
+            error={error}
+            sortedFiles={sortedFiles}
+            selectedFiles={selectedFiles}
+            renaming={renaming}
+            newName={newName}
+            downloadingFile={downloadingFile}
+            onSort={handleSort}
+            getSortIcon={getSortIcon}
+            onToggleSelectAll={toggleSelectAll}
+            onToggleFileSelection={toggleFileSelection}
+            onNewNameChange={setNewName}
+            onRename={handleRename}
+            onCancelRename={cancelRename}
+            onStartRename={startRename}
+            onEnterFolder={enterFolder}
+            onDownload={handleDownload}
+            onShare={(file) => setShareDialogFile({ id: file.id, name: file.name })}
+            onDelete={handleDelete}
+            formatDate={formatDate}
+          />
+          <PaginationControls
+            currentPage={currentPage}
+            pageSize={pageSize}
+            totalFiles={totalFiles}
+            onPageChange={setCurrentPage}
+            onPageSizeChange={setPageSize}
+          />
           </>
-        )
       )}
 
       {/* Search Modal */}
@@ -1241,99 +631,19 @@ export default function FilesPage() {
 
       {/* Pack Dialog */}
       {packDialogOpen && mounted && createPortal(
-        <ModalOverlay
-          onClose={() => !packing && setPackDialogOpen(false)}
-          contentClassName="batch-modal-content"
-          contentStyle={{ maxWidth: "500px", width: "90%" }}
-        >
-            <div className="modal-header">
-              <h2 className="m-0">打包</h2>
-              <button type="button"
-                onClick={() => !packing && setPackDialogOpen(false)}
-                className="modal-close-btn"
-                disabled={packing}
-              >
-                ×
-              </button>
-            </div>
-
-            {packLoading ? (
-              <div className="text-center py-8">
-                <p className="muted">计算中...</p>
-              </div>
-            ) : (
-              <div className="p-4">
-                <div className="mb-4">
-                  <p className="text-base mb-2">
-                    已选择 <strong>{selectedFiles.size}</strong> 个文件
-                  </p>
-                  {packSize !== null && (
-                    <p className="text-base mb-2">
-                      预估大小: <strong>{formatBytes(packSize)}</strong>
-                    </p>
-                  )}
-                  {availableSpace !== null && (
-                    <p className="text-base mb-2">
-                      可用空间: <strong>{formatBytes(availableSpace)}</strong>
-                    </p>
-                  )}
-                  {packSize !== null && availableSpace !== null && packSize > availableSpace && (
-                    <p className="text-danger text-sm">
-                      空间不足，无法创建打包任务
-                    </p>
-                  )}
-                </div>
-
-                <div className="mb-4">
-                  <label className="text-sm muted mb-1 block" htmlFor="pack-output-name">
-                    输出文件名 (可选)
-                  </label>
-                  <input
-                    id="pack-output-name"
-                    type="text"
-                    className="input"
-                    placeholder="默认自动生成"
-                    value={packOutputName}
-                    onChange={(e) => setPackOutputName(e.target.value)}
-                    maxLength={200}
-                    disabled={packing}
-                    aria-label="输出文件名"
-                  />
-                </div>
-
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={packDeleteSource}
-                    onChange={(e) => setPackDeleteSource(e.target.checked)}
-                    disabled={packing}
-                    aria-label="打包后删除源文件"
-                  />
-                  <span>打包后删除源文件</span>
-                </label>
-
-                <div className="flex gap-3 flex-end">
-                  <button type="button"
-                    className="button secondary"
-                    onClick={() => setPackDialogOpen(false)}
-                    disabled={packing}
-                  >
-                    取消
-                  </button>
-                  <button type="button"
-                    className="button primary"
-                    onClick={handlePackConfirm}
-                    disabled={
-                      packing ||
-                      (packSize !== null && availableSpace !== null && packSize > availableSpace)
-                    }
-                  >
-                    {packing ? "创建中..." : "确认打包"}
-                  </button>
-                </div>
-              </div>
-            )}
-        </ModalOverlay>,
+        <PackDialog
+          selectedCount={selectedFiles.size}
+          packSize={packSize}
+          availableSpace={availableSpace}
+          packOutputName={packOutputName}
+          packDeleteSource={packDeleteSource}
+          packLoading={packLoading}
+          packing={packing}
+          onClose={() => setPackDialogOpen(false)}
+          onOutputNameChange={setPackOutputName}
+          onDeleteSourceChange={setPackDeleteSource}
+          onConfirm={handlePackConfirm}
+        />,
         document.body
       )}
       {/* Share Dialog */}

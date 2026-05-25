@@ -161,8 +161,7 @@ export default function HistoryPage() {
     setLoading(true);
     try {
       const history = await api.listHistory();
-      if (!mountedRef.current) return;
-      setRecords(history);
+      if (mountedRef.current) setRecords(history);
     } catch {
       if (!mountedRef.current) return;
       showToast("加载历史失败", "error");
@@ -220,6 +219,7 @@ export default function HistoryPage() {
       danger: true,
     });
     if (!confirmed) return;
+    if (!mountedRef.current) return;
 
     setIsBatchOperating(true);
     const idsToDelete = new Set(selectedList.map((r) => r.id));

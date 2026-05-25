@@ -10,7 +10,6 @@ import { ShareDownloadActions } from "./_components/ShareDownloadActions";
 type DirItem = { name: string; is_dir: boolean; size: number; path: string };
 
 export default function SharePageClient() {
-  const [code, setCode] = useState("");
   const [shareInfo, setShareInfo] = useState<ShareInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -22,9 +21,17 @@ export default function SharePageClient() {
   const [dirItems, setDirItems] = useState<DirItem[]>([]);
   const [loadingDir, setLoadingDir] = useState(false);
   const [dirError, setDirError] = useState("");
-  const [siteTitle, setSiteTitle] = useState('aria2 控制器');
+  const codeRef = useRef("");
+  const shareInfoRef = useRef<ShareInfo | null>(null);
+  const siteTitleRef = useRef("aria2 控制器");
   const mountedRef = useRef(true);
   const downloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const updateDocumentTitle = (info: ShareInfo | null) => {
+    if (info && !info.is_expired && !info.is_exhausted) {
+      document.title = `${info.file_name} - ${siteTitleRef.current}`;
+    }
+  };
 
   const loadDirectory = async (shareCode: string, token: string, path: string) => {
     if (!mountedRef.current) return;
@@ -32,9 +39,10 @@ export default function SharePageClient() {
     setDirError("");
     try {
       const items = await api.browseShare(shareCode, token || undefined, path || undefined);
-      if (!mountedRef.current) return;
-      setDirItems(items);
-      setCurrentPath(path);
+      if (mountedRef.current) {
+        setDirItems(items);
+        setCurrentPath(path);
+      }
     } catch (err: unknown) {
       if (!mountedRef.current) return;
       setDirError(err instanceof Error ? err.message : "加载目录失败");
@@ -53,12 +61,13 @@ export default function SharePageClient() {
       setLoading(false);
       return;
     }
-    setCode(urlCode);
+    codeRef.current = urlCode;
     api
       .getSiteInfo()
       .then((info) => {
         if (!mountedRef.current) return;
-        setSiteTitle(info.site_title);
+        siteTitleRef.current = info.site_title;
+        updateDocumentTitle(shareInfoRef.current);
       })
       .catch((err: unknown) => {
         console.warn("加载站点标题失败", err);
@@ -66,7 +75,9 @@ export default function SharePageClient() {
     api.getShareInfo(urlCode)
       .then((info) => {
         if (!mountedRef.current) return;
+        shareInfoRef.current = info;
         setShareInfo(info);
+        updateDocumentTitle(info);
         if (info.is_directory && !info.has_password) {
           loadDirectory(urlCode, "", "");
         }
@@ -84,21 +95,16 @@ export default function SharePageClient() {
     };
   }, []);
 
-  useEffect(() => {
-    if (shareInfo && !shareInfo.is_expired && !shareInfo.is_exhausted) {
-      document.title = `${shareInfo.file_name} - ${siteTitle}`;
-    }
-  }, [siteTitle, shareInfo]);
-
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!password) return;
     setPasswordError("");
     try {
-      const res = await api.accessShare(code, password);
-      if (!mountedRef.current) return;
-      setAccessToken(res.access_token);
-      if (shareInfo?.is_directory) loadDirectory(code, res.access_token, "");
+      const res = await api.accessShare(codeRef.current, password);
+      if (mountedRef.current) {
+        setAccessToken(res.access_token);
+        if (shareInfo?.is_directory) loadDirectory(codeRef.current, res.access_token, "");
+      }
     } catch (err: unknown) {
       if (!mountedRef.current) return;
       setPasswordError(err instanceof Error ? err.message : "密码错误");
@@ -109,20 +115,20 @@ export default function SharePageClient() {
     setDownloading(true);
     if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
     downloadTimerRef.current = setTimeout(() => setDownloading(false), 2000);
-    window.open(api.shareDownloadUrl(code, accessToken || undefined), "_blank");
+    window.open(api.shareDownloadUrl(codeRef.current, accessToken || undefined), "_blank");
   };
 
   const handleItemDownload = (itemPath: string) => {
-    window.open(api.shareDownloadUrl(code, accessToken || undefined, itemPath), "_blank");
+    window.open(api.shareDownloadUrl(codeRef.current, accessToken || undefined, itemPath), "_blank");
   };
 
-  const handleDirClick = (itemPath: string) => loadDirectory(code, accessToken, itemPath);
+  const handleDirClick = (itemPath: string) => loadDirectory(codeRef.current, accessToken, itemPath);
 
   const handleGoBack = () => {
     if (!currentPath) return;
     const parts = currentPath.split("/").filter(Boolean);
     parts.pop();
-    loadDirectory(code, accessToken, parts.join("/"));
+    loadDirectory(codeRef.current, accessToken, parts.join("/"));
   };
 
   if (loading) {

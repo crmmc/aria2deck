@@ -90,13 +90,14 @@ export default function SettingsPage() {
     (async () => {
       try {
         const user = await api.me();
-        if (!mountedRef.current) return;
-        if (!user.is_admin) {
-          push("/tasks");
-          return;
+        if (mountedRef.current) {
+          if (!user.is_admin) {
+            push("/tasks");
+            return;
+          }
+          setIsAdmin(true);
+          await loadConfig();
         }
-        setIsAdmin(true);
-        await loadConfig();
       } catch {
         if (!mountedRef.current) return;
         setError("加载配置失败");
@@ -116,11 +117,12 @@ export default function SettingsPage() {
         api.getMachineStats(),
         api.getAria2Version(),
       ]);
-      if (!mountedRef.current) return;
-      dispatch({ type: "replace", state: configToSettingsFormState(cfg as Record<string, unknown>) });
-      setMachineStats(stats);
-      setAria2Status(aria2Ver);
-      setTestResult(null);
+      if (mountedRef.current) {
+        dispatch({ type: "replace", state: configToSettingsFormState(cfg as Record<string, unknown>) });
+        setMachineStats(stats);
+        setAria2Status(aria2Ver);
+        setTestResult(null);
+      }
     } catch {
       if (!mountedRef.current) return;
       setError("加载配置失败");
@@ -140,11 +142,11 @@ export default function SettingsPage() {
         setSaveError(validation.error);
         return;
       }
+      if (!mountedRef.current) return;
 
       await api.updateConfig(validation.payload);
       await loadConfig(true);
-      if (!mountedRef.current) return;
-      showToast("配置已保存", "success");
+      if (mountedRef.current) showToast("配置已保存", "success");
     } catch (err) {
       if (!mountedRef.current) return;
       const message = (err as Error).message || "保存配置失败";
@@ -167,8 +169,7 @@ export default function SettingsPage() {
         form.aria2RpcUrl,
         form.aria2RpcSecret.startsWith("*") ? undefined : form.aria2RpcSecret,
       );
-      if (!mountedRef.current) return;
-      setTestResult(result);
+      if (mountedRef.current) setTestResult(result);
     } catch (err) {
       if (!mountedRef.current) return;
       setTestResult({ connected: false, error: (err as Error).message });

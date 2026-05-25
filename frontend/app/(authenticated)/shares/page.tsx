@@ -18,8 +18,7 @@ export default function SharesPage() {
     dispatch({ type: "load_start" });
     try {
       const shares = await api.listShares();
-      if (!mountedRef.current) return;
-      dispatch({ type: "load_success", records: shares });
+      if (mountedRef.current) dispatch({ type: "load_success", records: shares });
     } catch {
       if (!mountedRef.current) return;
       showToast("加载分享记录失败", "error");

@@ -8,6 +8,7 @@ import {
   requestNotificationPermission,
   type NotificationSettings,
 } from "@/lib/notification";
+import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/AuthContext";
 import { RpcAccessStatus } from "@/types";
@@ -21,7 +22,7 @@ export default function ProfilePage() {
   const { user, refreshUser } = useAuth();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [mounted, setMounted] = useState(false);
+  const mounted = useMounted();
 
   const [showInitialPasswordAlert, setShowInitialPasswordAlert] = useState(false);
 
@@ -46,7 +47,6 @@ export default function ProfilePage() {
 
   useEffect(() => {
     mountedRef.current = true;
-    setMounted(true);
     setNotificationSettings(getNotificationSettings());
     setNotificationSupported(typeof window !== "undefined" && "Notification" in window);
     loadRpcAccess().finally(() => {
@@ -68,8 +68,7 @@ export default function ProfilePage() {
   const loadRpcAccess = async () => {
     try {
       const data = await api.getRpcAccess();
-      if (!mountedRef.current) return;
-      setRpcAccess(data);
+      if (mountedRef.current) setRpcAccess(data);
     } catch (err) {
       console.error("加载 RPC 访问状态失败", err);
     }
@@ -79,8 +78,7 @@ export default function ProfilePage() {
     setRpcLoading(true);
     try {
       const data = await api.setRpcAccess(enabled);
-      if (!mountedRef.current) return;
-      setRpcAccess(data);
+      if (mountedRef.current) setRpcAccess(data);
     } catch (err) {
       if (!mountedRef.current) return;
       console.error("设置 RPC 访问失败", err);
@@ -98,11 +96,11 @@ export default function ProfilePage() {
       danger: true,
     });
     if (!confirmed) return;
+    if (!mountedRef.current) return;
     setRpcLoading(true);
     try {
       const data = await api.refreshRpcSecret();
-      if (!mountedRef.current) return;
-      setRpcAccess(data);
+      if (mountedRef.current) setRpcAccess(data);
     } catch (err) {
       if (!mountedRef.current) return;
       console.error("刷新 Secret 失败", err);
@@ -173,12 +171,13 @@ export default function ProfilePage() {
     setPasswordChanging(true);
     try {
       await api.changePassword(oldPassword, newPassword, user.username);
-      if (!mountedRef.current) return;
-      showToast("密码修改成功", "success");
-      setOldPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-      await refreshUser();
+      if (mountedRef.current) {
+        showToast("密码修改成功", "success");
+        setOldPassword("");
+        setNewPassword("");
+        setConfirmPassword("");
+        await refreshUser();
+      }
     } catch (err) {
       if (!mountedRef.current) return;
       const message = (err as Error).message;
@@ -196,16 +195,16 @@ export default function ProfilePage() {
   async function handleNotificationToggle(enabled: boolean) {
     if (enabled) {
       const granted = await requestNotificationPermission();
-      if (!mountedRef.current) return;
-      if (!granted) {
+      if (mountedRef.current && !granted) {
         showToast("浏览器通知权限被拒绝，请在浏览器设置中允许通知", "warning");
-        return;
       }
+      if (!granted) return;
     }
-    if (!mountedRef.current) return;
-    const newSettings = { ...notificationSettings, enabled };
-    setNotificationSettings(newSettings);
-    saveNotificationSettings(newSettings);
+    if (mountedRef.current) {
+      const newSettings = { ...notificationSettings, enabled };
+      setNotificationSettings(newSettings);
+      saveNotificationSettings(newSettings);
+    }
   }
 
   function handleNotificationOptionChange(key: "onComplete" | "onError", value: boolean) {

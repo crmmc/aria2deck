@@ -77,6 +77,7 @@ export const createMockSystemConfig = (overrides: Partial<SystemConfig> = {}): S
   min_free_disk: 1073741824,
   aria2_rpc_url: "http://localhost:6800/jsonrpc",
   aria2_rpc_secret: "secret",
+  aria2_bt_stop_timeout_seconds: 30,
   hidden_file_extensions: [".aria2", ".torrent"],
   pack_format: "zip",
   pack_compression_level: 5,

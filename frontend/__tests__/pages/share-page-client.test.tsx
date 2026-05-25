@@ -95,6 +95,7 @@ describe("SharePageClient", () => {
 
     expect(await screen.findByText("sub.txt")).toBeInTheDocument();
     expect(screen.getByText("nested")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /nested/ }).tagName).toBe("BUTTON");
   });
 
   test("shows error when loading share info fails", async () => {
