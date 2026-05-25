@@ -25,11 +25,45 @@ from tests.helpers_v0 import (
 
 
 def _valid_torrent_payload() -> tuple[str, str]:
-    info_dict = b"d4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789e"
-    torrent = b"d8:announce25:http://tracker.example.com4:info" + info_dict + b"e"
+    info_dict = b"d4:name4:test6:lengthi1024e12:piece lengthi16384e6:pieces20:01234567890123456789e"
+    torrent = b"d8:announce26:http://tracker.example.com4:info" + info_dict + b"e"
     return base64.b64encode(torrent).decode("ascii"), hashlib.sha1(
         info_dict
     ).hexdigest()
+
+
+def _multi_file_torrent_payload() -> tuple[str, str]:
+    def bstr(value: bytes) -> bytes:
+        return str(len(value)).encode("ascii") + b":" + value
+
+    def bint(value: int) -> bytes:
+        return b"i" + str(value).encode("ascii") + b"e"
+
+    def bdict(items: list[tuple[bytes, bytes]]) -> bytes:
+        return b"d" + b"".join(bstr(key) + value for key, value in items) + b"e"
+
+    def blist(values: list[bytes]) -> bytes:
+        return b"l" + b"".join(values) + b"e"
+
+    info = bdict(
+        [
+            (b"name", bstr(b"Fedora Workstation")),
+            (
+                b"files",
+                blist(
+                    [
+                        bdict([(b"length", bint(4096)), (b"path", blist([bstr(b"iso.bin")]))]),
+                        bdict([(b"length", bint(48)), (b"path", blist([bstr(b"docs"), bstr(b"release.pdf")]))]),
+                        bdict([(b"length", bint(90)), (b"path", blist([bstr(b"docs"), bstr(b"install.pdf")]))]),
+                    ]
+                ),
+            ),
+            (b"piece length", bint(16384)),
+            (b"pieces", bstr(b"1" * 20)),
+        ]
+    )
+    torrent = bdict([(b"announce", bstr(b"http://tracker.example.com")), (b"info", info)])
+    return base64.b64encode(torrent).decode("ascii"), hashlib.sha1(info).hexdigest()
 
 
 async def _set_global_error_message(download_id: int, error_message: str) -> None:
@@ -401,6 +435,48 @@ class TestCreateTask:
         assert opts["seed-time"] == "0"
 
 
+class TestTorrentPreview:
+    def test_torrent_preview_unauthorized(self, client: TestClient) -> None:
+        response = client.post("/api/tasks/torrent/preview", json={"torrent": "abc123"})
+
+        assert response.status_code == 401
+
+    def test_torrent_preview_invalid_base64(self, authenticated_client: TestClient) -> None:
+        response = authenticated_client.post(
+            "/api/tasks/torrent/preview",
+            json={"torrent": "not-valid-base64!!!"},
+        )
+
+        assert response.status_code == 400
+        assert "无效的种子文件" in response.json()["detail"]
+
+    def test_torrent_preview_returns_metadata_without_creating_records(
+        self,
+        authenticated_client: TestClient,
+    ) -> None:
+        torrent_data, info_hash = _multi_file_torrent_payload()
+
+        response = authenticated_client.post(
+            "/api/tasks/torrent/preview",
+            json={"torrent": torrent_data},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["info_hash"] == info_hash
+        assert data["name"] == "Fedora Workstation"
+        assert data["file_count"] == 3
+        assert data["total_size"] == 4234
+        assert data["default_selection"] == "all"
+        assert data["limits"]["max_files"] == 5000
+        assert data["files"][1]["index"] == 2
+        assert data["files"][1]["path"] == ["Fedora Workstation", "docs", "release.pdf"]
+        assert data["tree"][0]["type"] == "directory"
+
+        global_download = asyncio.run(get_global_by_resource_key(info_hash))
+        assert global_download is None
+
+
 class TestCreateTorrentTask:
     def test_create_torrent_unauthorized(self, client: TestClient) -> None:
         response = client.post("/api/tasks/torrent", json={"torrent": "abc123"})
@@ -470,7 +546,7 @@ class TestCreateTorrentTask:
         )
 
         assert response.status_code == 403
-        assert "可用空间不足" in response.json()["detail"]
+        assert "超过可用空间" in response.json()["detail"]
 
     @patch("app.routers.tasks.create_user_torrent_download")
     @patch("app.routers.tasks.get_usage")
@@ -530,8 +606,8 @@ class TestCreateTorrentTask:
         data = response.json()
         assert data["uri"] == f"magnet:?xt=urn:btih:{info_hash}"
         assert data["status"] == "active"
-        assert data["total_length"] == 0
-        assert data["frozen_space"] == 0
+        assert data["total_length"] == 1024
+        assert data["frozen_space"] == 1024
 
         global_download = asyncio.run(get_global_by_resource_key(info_hash))
         assert global_download is not None
@@ -548,6 +624,96 @@ class TestCreateTorrentTask:
         assert "dir" in opts
         assert opts["dir"].endswith(f"/downloading/{global_download['id']}")
         assert opts["seed-time"] == "0"
+
+    @patch("app.routers.tasks._get_client")
+    @patch("app.routers.tasks._check_disk_space")
+    def test_create_torrent_partial_selection_sets_select_file_and_selected_size(
+        self,
+        mock_disk: MagicMock,
+        mock_get_client: MagicMock,
+        authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_aria2_client.add_torrent.return_value = "gid-torrent-partial"
+        mock_get_client.return_value = mock_aria2_client
+        torrent_data, info_hash = _multi_file_torrent_payload()
+
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={
+                "torrent": torrent_data,
+                "selected_file_indexes": [3, 1],
+                "options": {"select-file": "2", "bt-tracker": "http://tracker.example.com/announce"},
+            },
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["total_length"] == 4186
+        assert data["frozen_space"] == 4186
+
+        global_downloads_for_info = asyncio.run(get_global_by_resource_key(info_hash))
+        assert global_downloads_for_info is None
+
+        call_args = mock_aria2_client.add_torrent.call_args
+        opts = call_args[0][2]
+        assert opts["select-file"] == "1,3"
+        assert opts["bt-tracker"] == "http://tracker.example.com/announce"
+
+    @patch("app.routers.tasks._get_client")
+    @patch("app.routers.tasks._check_disk_space")
+    def test_create_torrent_full_selection_keeps_info_hash_key_and_no_select_file(
+        self,
+        mock_disk: MagicMock,
+        mock_get_client: MagicMock,
+        authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_aria2_client.add_torrent.return_value = "gid-torrent-full"
+        mock_get_client.return_value = mock_aria2_client
+        torrent_data, info_hash = _multi_file_torrent_payload()
+
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={"torrent": torrent_data, "selected_file_indexes": [1, 2, 3]},
+        )
+
+        assert response.status_code == 201
+        assert response.json()["total_length"] == 4234
+        global_download = asyncio.run(get_global_by_resource_key(info_hash))
+        assert global_download is not None
+        opts = mock_aria2_client.add_torrent.call_args[0][2]
+        assert "select-file" not in opts
+
+    def test_create_torrent_rejects_invalid_selected_indexes(
+        self,
+        authenticated_client: TestClient,
+    ) -> None:
+        torrent_data, _ = _multi_file_torrent_payload()
+
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={"torrent": torrent_data, "selected_file_indexes": [1, 1]},
+        )
+
+        assert response.status_code == 400
+        assert "duplicate" in response.json()["detail"]
+
+    def test_create_torrent_rejects_non_integer_selected_indexes(
+        self,
+        authenticated_client: TestClient,
+    ) -> None:
+        torrent_data, _ = _multi_file_torrent_payload()
+
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={"torrent": torrent_data, "selected_file_indexes": ["1"]},
+        )
+
+        assert response.status_code == 400
+        assert "integers" in response.json()["detail"]
 
 
 class _FakeWebSocket:
@@ -1150,6 +1316,22 @@ class TestRateLimiting:
 
         response = authenticated_client.post(
             "/api/tasks/torrent",
+            json={"torrent": "abc123"},
+        )
+
+        assert response.status_code == 429
+        assert "操作过于频繁" in response.json()["detail"]
+
+    @patch("app.routers.tasks.ensure_authenticated_allowed")
+    def test_torrent_preview_rate_limited(
+        self,
+        mock_limiter: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
+        mock_limiter.side_effect = HTTPException(429, "操作过于频繁，请稍后再试")
+
+        response = authenticated_client.post(
+            "/api/tasks/torrent/preview",
             json={"torrent": "abc123"},
         )
 

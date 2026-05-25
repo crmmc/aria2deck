@@ -29,7 +29,6 @@ from app.repositories.downloads import (
 from app.routers.config import get_max_task_size, get_min_free_disk
 from app.services.hash import (
     extract_info_hash_from_magnet,
-    extract_info_hash_from_torrent_base64,
     get_uri_hash,
     is_http_url,
     is_magnet_link,
@@ -44,6 +43,16 @@ from app.services.download_service import (
     cancel_user_task,
     create_user_download,
     create_user_torrent_download,
+)
+from app.services.torrent_metadata import (
+    MAX_TORRENT_FILE_COUNT,
+    TorrentMetadata,
+    TorrentMetadataError,
+    build_select_file_option,
+    build_selection_resource_key,
+    parse_torrent_base64,
+    selected_total_size,
+    validate_selected_indexes,
 )
 from app.services.usage_service import get_usage
 
@@ -119,7 +128,14 @@ class TorrentCreate(BaseModel):
     """上传种子请求体"""
 
     torrent: str  # Base64 encoded
+    selected_file_indexes: list[object] | None = None
     options: dict | None = None
+
+
+class TorrentPreviewCreate(BaseModel):
+    """预览种子请求体"""
+
+    torrent: str
 
 
 # ========== Helpers ==========
@@ -136,6 +152,36 @@ def _check_disk_space() -> tuple[bool, int]:
     disk = shutil.disk_usage(download_path)
     min_free = get_min_free_disk()
     return disk.free > min_free, disk.free
+
+
+def _torrent_preview_response(metadata: TorrentMetadata) -> dict:
+    return {
+        "info_hash": metadata.info_hash,
+        "name": metadata.name,
+        "file_count": metadata.file_count,
+        "total_size": metadata.total_size,
+        "files": [
+            {
+                "index": file.index,
+                "path": list(file.path),
+                "size": file.size,
+            }
+            for file in metadata.files
+        ],
+        "tree": metadata.tree,
+        "limits": {"max_files": MAX_TORRENT_FILE_COUNT},
+        "default_selection": "all",
+    }
+
+
+def _parse_torrent_or_400(torrent: str) -> TorrentMetadata:
+    try:
+        return parse_torrent_base64(torrent)
+    except TorrentMetadataError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"无效的种子文件: {exc}",
+        ) from exc
 
 
 # ========== API Endpoints ==========
@@ -335,6 +381,40 @@ async def create_task(
     )
 
 
+@router.post("/torrent/preview")
+async def preview_torrent_task(
+    payload: TorrentPreviewCreate,
+    user: AuthUser = Depends(require_user),
+) -> dict:
+    """解析种子文件并返回可选择的文件列表，不创建任务。"""
+    user_id = user.id
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="用户未登录"
+        )
+
+    try:
+        await ensure_authenticated_allowed(
+            user_id,
+            RateLimitScope.CREATE_TORRENT,
+            detail="操作过于频繁，请稍后再试",
+        )
+    except HTTPException:
+        logger.warning("预览种子任务被限流 user_id=%s", user.id)
+        raise
+
+    max_base64_length = 14 * 1024 * 1024
+    if len(payload.torrent) > max_base64_length:
+        logger.warning("预览种子任务失败 user_id=%s reason=torrent_too_large", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="种子文件过大，最大支持 10MB",
+        )
+
+    metadata = _parse_torrent_or_400(payload.torrent)
+    return _torrent_preview_response(metadata)
+
+
 @router.post("/torrent", status_code=status.HTTP_201_CREATED)
 async def create_torrent_task(
     payload: TorrentCreate,
@@ -381,41 +461,83 @@ async def create_torrent_task(
             detail=f"磁盘空间不足，剩余 {disk_free / 1024 / 1024 / 1024:.2f} GB",
         )
 
-    # Extract info_hash from torrent
-    uri_hash = extract_info_hash_from_torrent_base64(payload.torrent)
-    if not uri_hash:
-        logger.warning("创建种子任务失败 user_id=%s reason=invalid_torrent", user.id)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="无效的种子文件"
-        )
+    metadata = _parse_torrent_or_400(payload.torrent)
+    uri_hash = metadata.info_hash
 
     # Get user space info
     usage_info = await get_usage(user_id, user.quota_bytes)
     available_space = min(usage_info["available_bytes"], disk_free)
 
-    # Check minimum space
-    if available_space < MAGNET_MIN_SPACE:
+    try:
+        selected_indexes = validate_selected_indexes(
+            metadata, payload.selected_file_indexes
+        )
+    except TorrentMetadataError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    selected_size = selected_total_size(metadata, selected_indexes)
+
+    if selected_size <= 0:
+        if available_space < MAGNET_MIN_SPACE:
+            logger.warning(
+                "创建种子任务失败 user_id=%s reason=space_low_for_torrent available=%s",
+                user.id,
+                available_space,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="可用空间不足"
+            )
+    elif selected_size > available_space:
         logger.warning(
-            "创建种子任务失败 user_id=%s reason=space_low_for_torrent available=%s",
+            "创建种子任务失败 user_id=%s reason=user_space_insufficient size=%s available=%s",
             user.id,
+            selected_size,
             available_space,
         )
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="可用空间不足"
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"文件大小 {selected_size / 1024**3:.2f} GB 超过可用空间 {available_space / 1024**3:.2f} GB",
         )
 
+    max_task_size = get_max_task_size()
+    if selected_size > 0 and selected_size > max_task_size:
+        logger.warning(
+            "创建种子任务失败 user_id=%s reason=task_too_large size=%s limit=%s",
+            user.id,
+            selected_size,
+            max_task_size,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"文件大小 {selected_size / 1024**3:.2f} GB 超过系统限制 {max_task_size / 1024**3:.2f} GB",
+        )
+
+    resource_key = build_selection_resource_key(
+        uri_hash,
+        selected_indexes,
+        total_file_count=metadata.file_count,
+    )
+    select_file = build_select_file_option(
+        selected_indexes,
+        total_file_count=metadata.file_count,
+    )
+    server_options = {"select-file": select_file} if select_file else None
     magnet_uri = f"magnet:?xt=urn:btih:{uri_hash}"
     try:
         task_row = await create_user_torrent_download(
             user_id=user_id,
             quota_bytes=int(user.quota_bytes),
             torrent_data=payload.torrent,
-            resource_key=uri_hash,
+            resource_key=resource_key,
             source_uri=magnet_uri,
-            display_name=None,
-            total_bytes=0,
+            display_name=metadata.name,
+            total_bytes=selected_size,
             aria2_client=_get_client(request),
             options=payload.options,
+            server_options=server_options,
         )
     except ValueError as exc:
         if str(exc) == "quota exceeded":
@@ -441,13 +563,13 @@ async def create_torrent_task(
             detail="添加下载任务失败",
         ) from exc
 
-    global_download = await get_global_by_resource_key(uri_hash)
+    global_download = await get_global_by_resource_key(resource_key)
     return _v0_create_task_response(
         task_row=task_row,
         global_download=global_download,
         fallback_uri=magnet_uri,
-        fallback_name=None,
-        fallback_total_length=0,
+        fallback_name=metadata.name,
+        fallback_total_length=selected_size,
     )
 
 
