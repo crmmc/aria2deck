@@ -337,22 +337,77 @@ describe("api methods", () => {
     });
   });
 
+  describe("api.previewTorrent", () => {
+    it("previews torrent metadata", async () => {
+      const preview = {
+        info_hash: "abc",
+        name: "root",
+        file_count: 1,
+        total_size: 10,
+        files: [{ index: 1, path: ["root"], size: 10 }],
+        tree: [{ type: "file", name: "root", path: ["root"], index: 1, size: 10 }],
+        limits: { max_files: 5000 },
+        default_selection: "all",
+      };
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(preview),
+      });
+
+      const result = await api.previewTorrent("base64data");
+
+      expect(result).toEqual(preview);
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/api/tasks/torrent/preview"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ torrent: "base64data" }),
+        })
+      );
+    });
+  });
+
   describe("api.uploadTorrent", () => {
-    it("uploads torrent with options", async () => {
+    it("uploads torrent with selected indexes and options", async () => {
       const mockTask = { id: 1, name: "test.torrent" };
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve(mockTask),
       });
 
-      const result = await api.uploadTorrent("base64data", { dir: "/downloads" });
-      
+      const result = await api.uploadTorrent("base64data", {
+        selected_file_indexes: [1, 3],
+        options: { "bt-tracker": "http://tracker.example.com/announce" },
+      });
+
       expect(result).toEqual(mockTask);
       expect(global.fetch).toHaveBeenCalledWith(
         expect.stringContaining("/api/tasks/torrent"),
         expect.objectContaining({
           method: "POST",
-          body: JSON.stringify({ torrent: "base64data", options: { dir: "/downloads" } }),
+          body: JSON.stringify({
+            torrent: "base64data",
+            selected_file_indexes: [1, 3],
+            options: { "bt-tracker": "http://tracker.example.com/announce" },
+          }),
+        })
+      );
+    });
+
+    it("preserves old uploadTorrent callers without a second argument", async () => {
+      const mockTask = { id: 1, name: "test.torrent" };
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockTask),
+      });
+
+      await api.uploadTorrent("base64data");
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/api/tasks/torrent"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ torrent: "base64data" }),
         })
       );
     });

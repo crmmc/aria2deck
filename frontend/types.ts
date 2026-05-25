@@ -36,6 +36,48 @@ export type Task = {
   created_at: string;
 };
 
+export type TorrentFileNode = {
+  type: "file";
+  name: string;
+  path: string[];
+  size: number;
+  index: number;
+};
+
+export type TorrentDirectoryNode = {
+  type: "directory";
+  name: string;
+  path: string[];
+  size: number;
+  children: TorrentTreeNode[];
+};
+
+export type TorrentTreeNode = TorrentFileNode | TorrentDirectoryNode;
+
+export type TorrentPreviewFile = {
+  index: number;
+  path: string[];
+  size: number;
+};
+
+export type TorrentPreview = {
+  info_hash: string;
+  name: string;
+  file_count: number;
+  total_size: number;
+  files: TorrentPreviewFile[];
+  tree: TorrentTreeNode[];
+  limits: {
+    max_files: number;
+  };
+  default_selection: "all";
+};
+
+export type UploadTorrentRequest = {
+  selected_file_indexes?: number[];
+  options?: Record<string, unknown>;
+};
+
 export type SystemStats = {
   download_speed: number;
   upload_speed: number;

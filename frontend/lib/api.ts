@@ -17,6 +17,8 @@ import type {
   ShareLink,
   ShareInfo,
   CreateShareRequest,
+  TorrentPreview,
+  UploadTorrentRequest,
 } from "@/types";
 import { hashPassword } from "./crypto";
 
@@ -136,10 +138,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ uri }),
     }),
-  uploadTorrent: (torrent: string, options?: Record<string, unknown>) =>
+  previewTorrent: (torrent: string) =>
+    request<TorrentPreview>("/api/tasks/torrent/preview", {
+      method: "POST",
+      body: JSON.stringify({ torrent }),
+    }),
+  uploadTorrent: (torrent: string, payload?: UploadTorrentRequest) =>
     request<Task>("/api/tasks/torrent", {
       method: "POST",
-      body: JSON.stringify({ torrent, options }),
+      body: JSON.stringify({
+        torrent,
+        ...(payload?.selected_file_indexes
+          ? { selected_file_indexes: payload.selected_file_indexes }
+          : {}),
+        ...(payload?.options ? { options: payload.options } : {}),
+      }),
     }),
   cancelTask: (subscriptionId: number) =>
     request<{ ok: boolean }>(`/api/tasks/${subscriptionId}`, {
