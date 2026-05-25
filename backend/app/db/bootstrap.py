@@ -6,6 +6,10 @@ from sqlalchemy import insert, inspect, select, text
 
 from app.core.config import settings
 from app.db.engine import apply_sqlite_pragmas, get_engine
+from app.db.migrations import (
+    DEFAULT_ARIA2_BT_STOP_TIMEOUT_SECONDS,
+    run_migrations,
+)
 from app.db.schema import SCHEMA_VERSION, app_settings, metadata, schema_meta
 
 
@@ -20,7 +24,7 @@ def default_app_settings(timestamp_ms: int) -> dict:
         "min_free_disk_bytes": 1024 * 1024 * 1024,
         "aria2_rpc_url": settings.aria2_rpc_url,
         "aria2_rpc_secret": settings.aria2_rpc_secret,
-        "aria2_bt_stop_timeout_seconds": 7 * 24 * 60 * 60,
+        "aria2_bt_stop_timeout_seconds": DEFAULT_ARIA2_BT_STOP_TIMEOUT_SECONDS,
         "hidden_file_extensions_json": "[]",
         "pack_format": "tar.zst",
         "pack_compression_level": 5,
@@ -59,14 +63,14 @@ async def _table_names() -> set[str]:
         )
 
 
-async def validate_schema_version() -> None:
+async def load_schema_version() -> int | None:
     tables = await _table_names()
     if not tables:
-        return
+        return None
     if "schema_meta" not in tables:
         raise RuntimeError(
             "Unsupported database schema: schema_meta is missing. "
-            "This greenfield v0 release only supports an empty database or schema version 0. "
+            "This release only supports an empty database or a versioned database. "
             "Back up and rebuild the database file."
         )
 
@@ -77,13 +81,54 @@ async def validate_schema_version() -> None:
             )
         ).first()
     if row is None:
+        raise RuntimeError("Unsupported database schema: schema_meta row is missing.")
+    return int(row[0])
+
+
+async def validate_schema_version() -> None:
+    version = await load_schema_version()
+    if version is None:
+        return
+    if version > SCHEMA_VERSION:
         raise RuntimeError(
-            "Unsupported database schema: schema_meta row is missing; expected version 0."
+            "Unsupported database schema: database version "
+            f"{version} is newer than supported version {SCHEMA_VERSION}."
         )
-    version = int(row[0])
-    if version != SCHEMA_VERSION:
+
+
+async def validate_current_schema_shape() -> None:
+    expected_columns = {
+        table.name: {column.name for column in table.columns}
+        for table in metadata.sorted_tables
+    }
+    async with get_engine().connect() as conn:
+        actual_columns = await conn.run_sync(
+            lambda sync_conn: {
+                table_name: {
+                    column["name"]
+                    for column in inspect(sync_conn).get_columns(table_name)
+                }
+                for table_name in inspect(sync_conn).get_table_names()
+            }
+        )
+
+    missing_tables = sorted(set(expected_columns) - set(actual_columns))
+    if missing_tables:
         raise RuntimeError(
-            f"Unsupported database schema: expected version 0, got {version}. Rebuild the database."
+            "Unsupported database schema: missing required tables: "
+            + ", ".join(missing_tables)
+        )
+
+    missing_columns: list[str] = []
+    for table_name, column_names in sorted(expected_columns.items()):
+        missing_columns.extend(
+            f"{table_name}.{column_name}"
+            for column_name in sorted(column_names - actual_columns[table_name])
+        )
+    if missing_columns:
+        raise RuntimeError(
+            "Unsupported database schema: missing required columns: "
+            + ", ".join(missing_columns)
         )
 
 
@@ -91,7 +136,12 @@ async def bootstrap_database() -> None:
     await apply_sqlite_pragmas()
     tables = await _table_names()
     if tables:
-        await validate_schema_version()
+        version = await load_schema_version()
+        if version is None:
+            return
+        async with get_engine().begin() as conn:
+            await run_migrations(conn, version)
+        await validate_current_schema_shape()
         return
 
     timestamp_ms = now_ms()

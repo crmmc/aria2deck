@@ -10,13 +10,13 @@ from app.db.engine import transaction
 from app.db.schema import app_settings
 
 
-def test_tokens_use_v0_schema(authenticated_client: TestClient):
+def test_tokens_use_current_schema(authenticated_client: TestClient):
     create_response = authenticated_client.post(
-        "/api/config/tokens", json={"name": "v0 token"}
+        "/api/config/tokens", json={"name": "config token"}
     )
     assert create_response.status_code == 200
     token = create_response.json()
-    assert token["name"] == "v0 token"
+    assert token["name"] == "config token"
     assert token["token"].startswith("aria2_")
     assert isinstance(token["created_at"], str)
     assert "T" in token["created_at"]
@@ -26,7 +26,7 @@ def test_tokens_use_v0_schema(authenticated_client: TestClient):
     rows = list_response.json()
     assert len(rows) == 1
     assert rows[0]["id"] == token["id"]
-    assert rows[0]["name"] == "v0 token"
+    assert rows[0]["name"] == "config token"
 
 
 @pytest.fixture

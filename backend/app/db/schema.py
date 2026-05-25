@@ -13,7 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 
-SCHEMA_VERSION = 0
+SCHEMA_VERSION = 1
 
 GLOBAL_DOWNLOAD_STATUSES = (
     "queued",
@@ -52,7 +52,7 @@ schema_meta = Table(
     Column("version", Integer, nullable=False),
     Column("created_at_ms", Integer, nullable=False),
     CheckConstraint("id = 1", name="ck_schema_meta_single_row"),
-    CheckConstraint("version = 0", name="ck_schema_meta_version_0"),
+    CheckConstraint("version >= 0", name="ck_schema_meta_non_negative_version"),
 )
 
 users = Table(

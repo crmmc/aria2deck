@@ -163,13 +163,14 @@ class TestLifespan:
         assert admin["is_initial_password"] == 1
 
     def test_app_startup_bootstraps_database_and_default_admin(self, tmp_path):
-        """Test real FastAPI lifespan creates v0 schema and default admin."""
+        """Test real FastAPI lifespan creates latest schema and default admin."""
         import sqlite3
 
         from fastapi.testclient import TestClient
 
         from app.core.config import settings
         from app.db.engine import reset_engine
+        from app.db.schema import SCHEMA_VERSION
         from app.main import create_app
 
         db_path = tmp_path / "startup.db"
@@ -214,7 +215,7 @@ class TestLifespan:
             finally:
                 conn.close()
 
-            assert version == 0
+            assert version == SCHEMA_VERSION
             assert admin == (1, 1)
             assert settings_row == (1,)
         finally:
@@ -249,7 +250,7 @@ class TestLifespan:
         assert reset_admin["is_initial_password"] == 1
 
     def test_app_startup_rejects_legacy_schema(self, tmp_path):
-        """Test startup refuses a non-v0 legacy database."""
+        """Test startup refuses a legacy database without schema metadata."""
         import sqlite3
 
         from fastapi.testclient import TestClient
