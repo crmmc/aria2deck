@@ -21,6 +21,38 @@ NC='\033[0m' # No Color
 
 # 本地开发用的 Hook Secret（与 make run 保持一致）
 DEV_HOOK_SECRET="dev_hook_secret_local_12345"
+ARIA2_CONF="backend/aria2/aria2.conf"
+
+read_conf_value() {
+    local key="$1"
+    local default_value="$2"
+    local value
+
+    value="$(awk -F= -v key="$key" '
+        /^[[:space:]]*(#|$)/ { next }
+        {
+            left = $1
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", left)
+            if (left == key) {
+                sub(/^[^=]*=/, "")
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+                print $0
+                exit
+            }
+        }
+    ' "$ARIA2_CONF")"
+
+    if [ -n "$value" ]; then
+        printf '%s' "$value"
+    else
+        printf '%s' "$default_value"
+    fi
+}
+
+DOWNLOAD_DIR="$(read_conf_value "dir" "backend/downloads")"
+LOG_FILE="$(read_conf_value "log" "backend/aria2/aria2.log")"
+SESSION_FILE="$(read_conf_value "input-file" "backend/aria2/aria2.session")"
+RPC_PORT="$(read_conf_value "rpc-listen-port" "6800")"
 
 echo -e "${GREEN}=== aria2 本地测试服务 ===${NC}"
 echo ""
@@ -42,20 +74,20 @@ aria2c --version | head -n 1
 echo ""
 
 # 创建必要的目录
-mkdir -p backend/downloads
+mkdir -p "$DOWNLOAD_DIR"
 mkdir -p backend/aria2
 
 # 创建空的 session 文件（如果不存在）
-touch backend/aria2/aria2.session
+touch "$SESSION_FILE"
 
 # 显示配置信息
 echo -e "${YELLOW}配置信息:${NC}"
-echo "  配置文件: backend/aria2/aria2.conf"
-echo "  下载目录: backend/downloads"
-echo "  日志文件: backend/aria2/aria2.log"
-echo "  会话文件: backend/aria2/aria2.session"
-echo "  RPC 端口: 6800"
-echo "  RPC 地址: http://localhost:6800/jsonrpc"
+echo "  配置文件: $ARIA2_CONF"
+echo "  下载目录: $DOWNLOAD_DIR"
+echo "  日志文件: $LOG_FILE"
+echo "  会话文件: $SESSION_FILE"
+echo "  RPC 端口: $RPC_PORT"
+echo "  RPC 地址: http://localhost:$RPC_PORT/jsonrpc"
 echo ""
 echo -e "${CYAN}Hook Secret: ${DEV_HOOK_SECRET}${NC}"
 echo -e "${CYAN}提示: 启动后端时请使用 'make run' 以自动配置 Hook Secret${NC}"
@@ -66,4 +98,4 @@ echo -e "${YELLOW}提示: 按 Ctrl+C 停止服务${NC}"
 echo ""
 
 # 启动 aria2（前台模式）
-exec aria2c --conf-path=backend/aria2/aria2.conf
+exec aria2c --conf-path="$ARIA2_CONF"
