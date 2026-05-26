@@ -1088,6 +1088,15 @@ class TestListTasks:
         assert [row["name"] for row in error_response.json()] == ["failed.bin"]
         assert [row["name"] for row in current_response.json()] == ["active.bin"]
 
+    def test_list_tasks_rejects_unknown_status_filter(
+        self,
+        authenticated_client: TestClient,
+    ) -> None:
+        response = authenticated_client.get("/api/tasks?status_filter=bogus")
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Unsupported status_filter: bogus"
+
     def test_list_tasks_filters_by_effective_status(
         self,
         authenticated_client: TestClient,

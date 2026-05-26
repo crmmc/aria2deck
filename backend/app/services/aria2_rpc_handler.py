@@ -42,6 +42,7 @@ from app.services.task_projection import (
     ACTIVE_LIKE_STATUSES,
     has_real_file_path,
     is_current,
+    speed_totals,
     stat_counts,
 )
 from app.services.usage_service import get_usage
@@ -1047,21 +1048,29 @@ class Aria2RpcHandler:
         num_waiting = counts["waiting"]
         num_stopped = counts["stopped"]
 
+        rows_by_gid = await self._get_current_rows_by_gid()
+        live_by_gid: dict[str, dict[str, Any]] = {}
         try:
-            global_stat = await self.client.get_global_stat()
-            download_speed = global_stat.get("downloadSpeed", "0")
-            upload_speed = global_stat.get("uploadSpeed", "0")
+            all_active = await self.client.tell_active()
         except Exception as exc:
             logger.warning(
-                "aria2.getGlobalStat failed for user_id=%s, fallback to zero speed",
+                "aria2.tellActive failed for getGlobalStat user_id=%s, fallback to zero speed",
                 self.user_id,
                 exc_info=exc,
             )
-            download_speed = "0"
-            upload_speed = "0"
+        else:
+            if isinstance(all_active, list):
+                for active in all_active:
+                    if not isinstance(active, dict):
+                        continue
+                    gid = str(active.get("gid") or "")
+                    if gid in rows_by_gid:
+                        live_by_gid[gid] = self._sanitize_status(active)
+
+        speeds = speed_totals(rows, live_by_gid)
         return {
-            "downloadSpeed": download_speed,
-            "uploadSpeed": upload_speed,
+            "downloadSpeed": str(speeds["download_speed"]),
+            "uploadSpeed": str(speeds["upload_speed"]),
             "numActive": str(num_active),
             "numWaiting": str(num_waiting),
             "numStopped": str(num_stopped),

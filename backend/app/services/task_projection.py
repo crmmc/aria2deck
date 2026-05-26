@@ -8,6 +8,11 @@ from urllib.parse import unquote, urlsplit
 ACTIVE_LIKE_STATUSES = ("queued", "active", "waiting", "paused")
 TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 ERROR_STATUSES = ("failed", "cancelled")
+REST_TASK_STATUS_FILTERS = frozenset(("active", "current", "complete", "error"))
+
+
+class InvalidTaskStatusFilter(ValueError):
+    pass
 
 
 def ms_to_iso(timestamp_ms: int | None) -> str | None:
@@ -218,6 +223,10 @@ def build_rest_task_response(
 def filter_rows_for_status(
     rows: list[dict[str, Any]], status_filter: str | None
 ) -> list[dict[str, Any]]:
+    if status_filter is None:
+        return rows
+    if status_filter not in REST_TASK_STATUS_FILTERS:
+        raise InvalidTaskStatusFilter(status_filter)
     if status_filter in {"active", "current"}:
         return [row for row in rows if is_current(row)]
     if status_filter == "complete":

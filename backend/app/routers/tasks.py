@@ -34,7 +34,11 @@ from app.services.hash import (
     is_magnet_link,
 )
 from app.services.http_probe import probe_url_with_get_fallback
-from app.services.task_projection import build_rest_task_response, filter_rows_for_status
+from app.services.task_projection import (
+    InvalidTaskStatusFilter,
+    build_rest_task_response,
+    filter_rows_for_status,
+)
 from app.services.task_runtime import (
     fetch_active_live_statuses_by_gid,
     fetch_cached_live_status_for_row,
@@ -581,7 +585,13 @@ async def list_tasks(
 ) -> list[dict]:
     """获取当前用户的任务订阅列表"""
     rows = await list_user_tasks(user.id)
-    rows = filter_rows_for_status(rows, status_filter)
+    try:
+        rows = filter_rows_for_status(rows, status_filter)
+    except InvalidTaskStatusFilter as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported status_filter: {exc.args[0]}",
+        ) from exc
     live_by_gid = await fetch_active_live_statuses_by_gid(
         rows,
         _get_client(request),

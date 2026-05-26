@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from app.services.task_projection import (
+    InvalidTaskStatusFilter,
+    REST_TASK_STATUS_FILTERS,
     build_aria2_status,
     build_rest_task_response,
     effective_status,
@@ -98,6 +100,32 @@ def test_filter_rows_for_status_uses_effective_state() -> None:
         "user-done.bin",
     ]
     assert [r["global_display_name"] for r in filter_rows_for_status(rows, "error")] == ["failed.bin"]
+
+
+def test_filter_rows_for_status_none_returns_all_rows() -> None:
+    rows = [
+        _row(user_status="active", global_status="active", name="active.bin"),
+        _row(user_status="completed", global_status="completed", name="done.bin"),
+    ]
+
+    assert filter_rows_for_status(rows, None) == rows
+
+
+def test_filter_rows_for_status_rejects_unknown_filter() -> None:
+    rows = [_row(user_status="active", global_status="active", name="active.bin")]
+
+    try:
+        filter_rows_for_status(rows, "bogus")
+    except InvalidTaskStatusFilter as exc:
+        assert exc.args == ("bogus",)
+    else:
+        raise AssertionError("InvalidTaskStatusFilter was not raised")
+
+
+def test_rest_task_status_filter_whitelist_is_explicit() -> None:
+    assert REST_TASK_STATUS_FILTERS == frozenset(
+        {"active", "current", "complete", "error"}
+    )
 
 
 def test_stat_counts_match_effective_projection() -> None:

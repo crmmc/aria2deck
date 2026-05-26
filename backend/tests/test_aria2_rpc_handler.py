@@ -173,6 +173,14 @@ async def test_get_global_stat_counts_v0_tasks(
     await create_rpc_task(
         user_id=handler.user_id, gid="gid-done", status="completed", name="done.bin"
     )
+    handler.client.tell_active.return_value = [
+        {
+            "gid": "gid-active",
+            "status": "active",
+            "downloadSpeed": "1000",
+            "uploadSpeed": "500",
+        }
+    ]
 
     result = await handler.handle("aria2.getGlobalStat", [])
 
@@ -180,6 +188,57 @@ async def test_get_global_stat_counts_v0_tasks(
     assert result["uploadSpeed"] == "500"
     assert result["numActive"] == "1"
     assert result["numWaiting"] == "1"
+    assert result["numStopped"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_get_global_stat_uses_owned_live_speeds_only(
+    handler: Aria2RpcHandler,
+) -> None:
+    other = await create_user_v0(username="rpc_global_stat_other")
+    await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-owned-active",
+        status="active",
+        name="owned-active.bin",
+    )
+    await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-owned-complete",
+        status="completed",
+        name="owned-complete.bin",
+    )
+    await create_rpc_task(
+        user_id=other["id"],
+        gid="gid-foreign-active",
+        status="active",
+        name="foreign-active.bin",
+    )
+    handler.client.tell_active.return_value = [
+        {
+            "gid": "gid-owned-active",
+            "status": "active",
+            "downloadSpeed": "40",
+            "uploadSpeed": "4",
+        },
+        {
+            "gid": "gid-foreign-active",
+            "status": "active",
+            "downloadSpeed": "900",
+            "uploadSpeed": "90",
+        },
+    ]
+    handler.client.get_global_stat.return_value = {
+        "downloadSpeed": "940",
+        "uploadSpeed": "94",
+    }
+
+    result = await handler.handle("aria2.getGlobalStat", [])
+
+    assert result["downloadSpeed"] == "40"
+    assert result["uploadSpeed"] == "4"
+    assert result["numActive"] == "1"
+    assert result["numWaiting"] == "0"
     assert result["numStopped"] == "1"
 
 
@@ -299,6 +358,61 @@ async def test_tell_active_refreshes_stale_live_bt_metadata(
         }
     ]
     handler.client.tell_status.assert_awaited_once_with("gid-stale-bt")
+
+
+@pytest.mark.asyncio
+async def test_tell_active_keeps_sanitized_live_status_when_bt_refresh_fails(
+    handler: Aria2RpcHandler,
+) -> None:
+    await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-refresh-fails",
+        status="active",
+        name="fallback-name.bin",
+        total_bytes=100,
+        completed_bytes=10,
+    )
+    handler.client.tell_active.return_value = [
+        {
+            "gid": "gid-refresh-fails",
+            "status": "active",
+            "downloadSpeed": "5",
+            "bittorrent": {"info": {"name": "magnet:?xt=urn:btih:stale"}},
+            "files": [
+                {
+                    "index": "1",
+                    "path": "magnet:?xt=urn:btih:stale",
+                    "length": "100",
+                    "completedLength": "10",
+                }
+            ],
+        }
+    ]
+    handler.client.tell_status.side_effect = RuntimeError("aria2 unavailable")
+
+    result = await handler.handle(
+        "aria2.tellActive",
+        [["gid", "status", "downloadSpeed", "files"]],
+    )
+
+    assert result == [
+        {
+            "gid": "gid-refresh-fails",
+            "status": "active",
+            "downloadSpeed": "5",
+            "files": [
+                {
+                    "index": "1",
+                    "path": "fallback-name.bin",
+                    "length": "100",
+                    "completedLength": "10",
+                    "selected": "true",
+                    "uris": [],
+                }
+            ],
+        }
+    ]
+    handler.client.tell_status.assert_awaited_once_with("gid-refresh-fails")
 
 
 @pytest.mark.asyncio
@@ -636,6 +750,24 @@ async def test_remove_download_result_accepts_gid_and_task_fallback(
 
 
 @pytest.mark.asyncio
+async def test_remove_download_result_rejects_other_user_terminal_gid(
+    handler: Aria2RpcHandler,
+) -> None:
+    other = await create_user_v0(username="rpc_remove_other")
+    await create_rpc_task(
+        user_id=other["id"],
+        gid="gid-other-terminal",
+        status="completed",
+        name="other-terminal.bin",
+    )
+
+    with pytest.raises(RpcError) as exc_info:
+        await handler.handle("aria2.removeDownloadResult", ["gid-other-terminal"])
+
+    assert exc_info.value.code == RpcErrorCode.TASK_NOT_FOUND
+
+
+@pytest.mark.asyncio
 async def test_remove_download_result_deletes_effective_terminal_gid(
     handler: Aria2RpcHandler,
 ) -> None:
@@ -723,6 +855,41 @@ async def test_system_multicall_strips_inner_token(handler: Aria2RpcHandler) -> 
     )
 
     assert result == [[{"version": "1.36.0", "enabledFeatures": ["BitTorrent"]}]]
+
+
+@pytest.mark.asyncio
+async def test_system_multicall_rejects_nested_calls(handler: Aria2RpcHandler) -> None:
+    result = await handler.handle(
+        "system.multicall",
+        [
+            [
+                {
+                    "methodName": "system.multicall",
+                    "params": [[{"methodName": "aria2.getVersion", "params": []}]],
+                }
+            ]
+        ],
+    )
+
+    assert result == [
+        {
+            "faultCode": RpcErrorCode.INVALID_REQUEST,
+            "faultString": "Nested multicall is not allowed",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_system_multicall_rejects_oversized_batches(
+    handler: Aria2RpcHandler,
+) -> None:
+    calls = [{"methodName": "aria2.getVersion", "params": []} for _ in range(21)]
+
+    with pytest.raises(RpcError) as exc_info:
+        await handler.handle("system.multicall", [calls])
+
+    assert exc_info.value.code == RpcErrorCode.INVALID_REQUEST
+    assert exc_info.value.message == "Too many methods in multicall, max 20"
 
 
 @pytest.mark.asyncio
