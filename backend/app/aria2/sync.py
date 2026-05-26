@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from pathlib import Path
 from typing import Any
 
@@ -32,8 +31,7 @@ from app.services.task_projection import has_real_file_path
 logger = logging.getLogger(__name__)
 
 
-ORPHAN_GRACE_SECONDS = 60.0
-ORPHAN_CLEANUP_BATCH = 50
+OWNED_STOPPED_RESULT_CLEANUP_BATCH = 50
 COMPLETE_REPAIR_GRACE_SECONDS = 30.0
 STALE_QUEUED_GRACE_SECONDS = 300.0
 MISSING_GID_KEYWORDS = ("gid", "not found")
@@ -115,6 +113,44 @@ def _is_effectively_complete_active_bt_status(
         return False
 
     return _has_bittorrent_evidence(status, download) and has_real_file_path(status)
+
+
+def _is_metadata_handoff_pending(
+    status: dict[str, Any],
+    download: dict[str, Any],
+) -> bool:
+    if str(status.get("status") or "") != "complete":
+        return False
+    if status.get("followedBy"):
+        return False
+    if status.get("following") or status.get("followingGid"):
+        return False
+    if str(download.get("resource_kind") or "") != "magnet":
+        return False
+
+    display_name = str(download.get("display_name") or "").strip().lower()
+    if display_name and not display_name.startswith(("magnet:", "torrent:")):
+        return False
+
+    bittorrent = status.get("bittorrent")
+    if isinstance(bittorrent, dict):
+        info = bittorrent.get("info")
+        if isinstance(info, dict) and str(info.get("name") or "").strip():
+            return False
+
+    files = status.get("files")
+    if isinstance(files, list):
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            raw_path = item.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            name = Path(raw_path).name.lower()
+            if name and name != "metadata" and not name.endswith(".torrent"):
+                return False
+
+    return True
 
 
 def _map_v0_status(status: dict[str, Any], download_id: int) -> dict[str, Any]:
@@ -265,6 +301,7 @@ async def _complete_v0_download_from_sync(
     download: dict[str, Any],
     aria2_status: dict[str, Any],
     completion_gid: str,
+    allow_metadata_handoff_defer: bool = True,
 ) -> None:
     from app.aria2.listener import handle_v0_download_complete
 
@@ -275,9 +312,67 @@ async def _complete_v0_download_from_sync(
         aria2_status=aria2_status,
         completion_gid=completion_gid,
         log_prefix="[Sync]",
+        allow_metadata_handoff_defer=allow_metadata_handoff_defer,
     )
     if completed:
         await _broadcast_download_update(state, int(download["id"]))
+
+
+async def _switch_to_followed_download_from_sync(
+    *,
+    state: AppState,
+    client: Aria2Client,
+    download: dict[str, Any],
+    metadata_gid: str,
+    followed_gid: str,
+) -> None:
+    download_id = int(download["id"])
+    real_status: dict[str, Any] | None = None
+    try:
+        real_status = await client.tell_status(followed_gid)
+    except Exception as exc:
+        logger.debug(
+            "[Sync] Failed to refresh followed download gid=%s error=%s",
+            followed_gid,
+            exc,
+        )
+    real_mapped = _map_v0_status(real_status, download_id) if real_status else None
+    logger.info(
+        "[Sync] Metadata download complete, updating GID: %s -> %s",
+        metadata_gid,
+        followed_gid,
+    )
+    global_values: dict[str, Any] = {
+        "aria2_gid": followed_gid,
+        "status": real_mapped["status"] if real_mapped else "active",
+    }
+    if real_mapped:
+        global_values.update(
+            {
+                "total_bytes": real_mapped["total_bytes"],
+                "completed_bytes": real_mapped["completed_bytes"],
+            }
+        )
+        if real_mapped["display_name"]:
+            global_values["display_name"] = real_mapped["display_name"]
+    changed = await _guarded_update_global_download(
+        download_id,
+        global_values,
+    )
+    if not changed:
+        return
+
+    await _update_active_user_task_status(download_id, str(global_values["status"]))
+    if metadata_gid != followed_gid:
+        try:
+            await client.remove_download_result(metadata_gid)
+        except Exception as exc:
+            logger.debug(
+                "[Sync] Failed to remove metadata result gid=%s error=%s",
+                metadata_gid,
+                exc,
+            )
+    await _broadcast_download_update(state, download_id)
 
 
 async def _update_v0_download_from_aria2(
@@ -293,49 +388,48 @@ async def _update_v0_download_from_aria2(
     followed_by = status.get("followedBy") or []
 
     if mapped["raw_status"] == "complete" and followed_by:
-        new_gid = str(followed_by[0])
-        real_status: dict[str, Any] | None = None
+        await _switch_to_followed_download_from_sync(
+            state=state,
+            client=client,
+            download=download,
+            metadata_gid=gid,
+            followed_gid=str(followed_by[0]),
+        )
+        return
+
+    if _is_metadata_handoff_pending(status, download):
+        followed_gid = None
         try:
-            real_status = await client.tell_status(new_gid)
+            refreshed_status = await client.tell_status(gid)
+            followed_by = refreshed_status.get("followedBy") or []
+            if followed_by:
+                followed_gid = str(followed_by[0])
         except Exception as exc:
             logger.debug(
-                "[Sync] Failed to refresh followed download gid=%s error=%s",
-                new_gid,
+                "[Sync] Failed to refresh metadata handoff gid=%s error=%s",
+                gid,
                 exc,
             )
-        real_mapped = _map_v0_status(real_status, download_id) if real_status else None
-        logger.info(
-            "[Sync] Metadata download complete, updating GID: %s -> %s", gid, new_gid
-        )
-        global_values: dict[str, Any] = {
-            "aria2_gid": new_gid,
-            "status": real_mapped["status"] if real_mapped else "active",
-        }
-        if real_mapped:
-            global_values.update(
-                {
-                    "total_bytes": real_mapped["total_bytes"],
-                    "completed_bytes": real_mapped["completed_bytes"],
-                }
+        if followed_gid:
+            await _switch_to_followed_download_from_sync(
+                state=state,
+                client=client,
+                download=download,
+                metadata_gid=gid,
+                followed_gid=followed_gid,
             )
-            if real_mapped["display_name"]:
-                global_values["display_name"] = real_mapped["display_name"]
-        changed = await _guarded_update_global_download(
-            download_id,
-            global_values,
-        )
-        if not changed:
             return
 
-        await _update_active_user_task_status(download_id, str(global_values["status"]))
-        if gid != new_gid:
-            try:
-                await client.remove_download_result(gid)
-            except Exception as exc:
-                logger.debug(
-                    "[Sync] Failed to remove metadata result gid=%s error=%s", gid, exc
-                )
-        await _broadcast_download_update(state, download_id)
+        logger.info(
+            "[Sync] Metadata download complete without followedBy, waiting for handoff id=%s gid=%s",
+            download_id,
+            gid,
+        )
+        await _guarded_update_global_download(
+            download_id,
+            {"status": "active"},
+        )
+        await _update_active_user_task_status(download_id, "active")
         return
 
     if mapped["raw_status"] == "complete":
@@ -469,17 +563,12 @@ async def sync_tasks(
     """Synchronize aria2 task state into v0 tables."""
     from app.core.state import get_aria2_client
 
-    orphan_seen_at: dict[str, float] = {}
-
     while True:
         await _repair_inconsistent_completed_downloads_v0()
         client = get_aria2_client(state=state)
 
-        tracked_downloads = await _list_v0_downloads()
-        tracked_gids = {
-            str(row["aria2_gid"]) for row in tracked_downloads if row.get("aria2_gid")
-        }
         downloads = await _list_v0_tracked_downloads()
+        removable_stopped_gids: set[str] = set()
 
         async def fetch_and_update(download: dict[str, Any]) -> None:
             gid = str(download.get("aria2_gid") or "")
@@ -539,7 +628,7 @@ async def sync_tasks(
 
                     # 构造一个最小的 aria2_status 用于完成处理
                     # files 字段为空，完成处理会依赖 task_dir 扫描
-                    fake_aria2_status = {
+                    fake_aria2_status: dict[str, Any] = {
                         "status": "complete",
                         "files": [],
                         "totalLength": total_bytes or 0,
@@ -552,6 +641,7 @@ async def sync_tasks(
                         download=download,
                         aria2_status=fake_aria2_status,
                         completion_gid=gid,
+                        allow_metadata_handoff_defer=False,
                     )
                     return
 
@@ -565,6 +655,8 @@ async def sync_tasks(
                 download=download,
                 status=status,
             )
+            if str(status.get("status") or "") in {"complete", "error", "removed"}:
+                removable_stopped_gids.add(gid)
 
         results = await asyncio.gather(
             *[fetch_and_update(download) for download in downloads],
@@ -578,37 +670,35 @@ async def sync_tasks(
                     result,
                 )
 
-        await _cleanup_orphan_aria2_tasks(
+        await _cleanup_owned_stopped_results(
             client=client,
-            tracked_gids=tracked_gids,
-            orphan_seen_at=orphan_seen_at,
-            grace_seconds=ORPHAN_GRACE_SECONDS,
-            max_actions=ORPHAN_CLEANUP_BATCH,
+            removable_gids=removable_stopped_gids,
+            max_actions=OWNED_STOPPED_RESULT_CLEANUP_BATCH,
         )
         await _cleanup_stale_queued_downloads_v0(state=state)
 
         await asyncio.sleep(interval)
 
 
-async def _cleanup_orphan_aria2_tasks(
+async def _cleanup_owned_stopped_results(
     client: Aria2Client,
-    tracked_gids: set[str],
-    orphan_seen_at: dict[str, float],
-    grace_seconds: float,
+    removable_gids: set[str],
     max_actions: int,
 ) -> None:
-    """Clean aria2 tasks whose GIDs no longer exist in the database."""
+    """Remove stopped aria2 results only after aria2deck has consumed them.
+
+    Unknown GIDs may belong to another service sharing the same aria2 instance
+    or may be useful debugging evidence, so they are intentionally ignored.
+    Running tasks and unprocessed stopped results are never force-removed here.
+    """
     try:
-        active = await client.tell_active()
-        waiting = await client.tell_waiting(0, 1000)
         stopped = await client.tell_stopped(0, 1000)
     except Exception as exc:
         logger.warning(
-            "[Sync] Failed to list aria2 tasks, skipping orphan cleanup: %s", exc
+            "[Sync] Failed to list stopped aria2 tasks, skipping owned result cleanup: %s",
+            exc,
         )
         return
-
-    now = time.monotonic()
 
     def _extract_gids(rows: list[dict[str, Any]]) -> list[str]:
         gids: list[str] = []
@@ -618,71 +708,25 @@ async def _cleanup_orphan_aria2_tasks(
                 gids.append(gid)
         return gids
 
-    active_gids = _extract_gids(active)
-    waiting_gids = _extract_gids(waiting)
     stopped_gids = _extract_gids(stopped)
-
-    current_orphan_gids = {
-        gid
-        for gid in [*active_gids, *waiting_gids, *stopped_gids]
-        if gid not in tracked_gids
-    }
-
-    for gid in list(orphan_seen_at.keys()):
-        if gid not in current_orphan_gids:
-            orphan_seen_at.pop(gid, None)
-
-    for gid in current_orphan_gids:
-        if gid not in orphan_seen_at:
-            orphan_seen_at[gid] = now
-            logger.warning("[Sync] Found orphan aria2 task gid=%s", gid)
 
     actions = 0
 
     for gid in stopped_gids:
-        if gid in tracked_gids:
+        if gid not in removable_gids:
             continue
         if actions >= max_actions:
             break
         try:
             await client.remove_download_result(gid)
-            orphan_seen_at.pop(gid, None)
             actions += 1
-            logger.info("[Sync] Removed orphan stopped task gid=%s", gid)
+            logger.info("[Sync] Removed owned stopped aria2 result gid=%s", gid)
         except Exception as exc:
             logger.debug(
-                "[Sync] Failed to remove orphan stopped result gid=%s error=%s",
+                "[Sync] Failed to remove owned stopped result gid=%s error=%s",
                 gid,
                 exc,
             )
-
-    for gid in [*active_gids, *waiting_gids]:
-        if gid in tracked_gids:
-            continue
-        if actions >= max_actions:
-            break
-
-        first_seen = orphan_seen_at.get(gid, now)
-        if (now - first_seen) < grace_seconds:
-            continue
-
-        try:
-            await client.force_remove(gid)
-        except Exception as exc:
-            logger.debug(
-                "[Sync] Failed to force remove orphan gid=%s error=%s", gid, exc
-            )
-
-        try:
-            await client.remove_download_result(gid)
-        except Exception as exc:
-            logger.debug(
-                "[Sync] Failed to remove orphan result gid=%s error=%s", gid, exc
-            )
-
-        orphan_seen_at.pop(gid, None)
-        actions += 1
-        logger.warning("[Sync] Removed orphan running task gid=%s", gid)
 
 
 async def register_ws(state: AppState, user_id: int, ws: WebSocket) -> None:

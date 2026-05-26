@@ -358,6 +358,70 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
 
 
 @pytest.mark.asyncio
+async def test_metadata_completion_without_followed_by_does_not_index_metadata_file(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="listener_metadata_wait")
+    download = await create_global_download_v0(
+        resource_key="listener:metadata-wait",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:metadatawait",
+        status="active",
+        aria2_gid="gid-metadata",
+        display_name="magnet:?xt=urn:btih:metadatawait",
+        total_bytes=8,
+        completed_bytes=8,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+    )
+    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
+    task_dir.mkdir(parents=True)
+    metadata_file = task_dir / "metadata"
+    metadata_file.write_bytes(b"metadata")
+
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-metadata",
+        "status": "complete",
+        "totalLength": "8",
+        "completedLength": "8",
+        "files": [
+            {
+                "path": str(metadata_file),
+                "length": "8",
+                "completedLength": "8",
+            }
+        ],
+    }
+    client.remove_download_result.return_value = "OK"
+    _patch_aria2_client(monkeypatch, client)
+
+    await handle_aria2_event(AppState(), "gid-metadata", "complete")
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    async with transaction() as conn:
+        stored_count = (
+            await conn.execute(select(func.count()).select_from(stored_files))
+        ).scalar_one()
+        user_file_count = (
+            await conn.execute(select(func.count()).select_from(user_files))
+        ).scalar_one()
+
+    assert updated["aria2_gid"] == "gid-metadata"
+    assert updated["status"] == "active"
+    assert updated["completed_file_id"] is None
+    assert updated_task["status"] == "active"
+    assert stored_count == 0
+    assert user_file_count == 0
+    client.remove_download_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_completed_download_missing_task_dir_uses_directory_error(
     temp_db: str,
     monkeypatch: pytest.MonkeyPatch,

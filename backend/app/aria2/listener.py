@@ -296,6 +296,68 @@ def _can_create_followed_download(download: dict[str, Any]) -> bool:
     return source_uri.startswith(("magnet:", "torrent:"))
 
 
+def _is_magnet_download(download: dict[str, Any]) -> bool:
+    if str(download.get("resource_kind") or "").lower() == "magnet":
+        return True
+    return str(download.get("source_uri") or "").lower().startswith("magnet:")
+
+
+def _has_unresolved_magnet_display_name(download: dict[str, Any]) -> bool:
+    display_name = str(download.get("display_name") or "").strip().lower()
+    if not display_name:
+        return True
+    return display_name.startswith(("magnet:", "torrent:"))
+
+
+def _has_bittorrent_payload_info(aria2_status: dict[str, Any]) -> bool:
+    bittorrent = aria2_status.get("bittorrent")
+    if not isinstance(bittorrent, dict):
+        return False
+
+    info = bittorrent.get("info")
+    if not isinstance(info, dict):
+        return False
+
+    return bool(str(info.get("name") or "").strip())
+
+
+def _has_payload_like_file_path(aria2_status: dict[str, Any]) -> bool:
+    files = aria2_status.get("files")
+    if not isinstance(files, list):
+        return False
+
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        raw_path = item.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        name = Path(raw_path).name.lower()
+        if name and name != "metadata" and not name.endswith(".torrent"):
+            return True
+    return False
+
+
+def _is_metadata_handoff_pending(
+    download: dict[str, Any],
+    aria2_status: dict[str, Any],
+) -> bool:
+    if str(aria2_status.get("status") or "") != "complete":
+        return False
+    if not _is_magnet_download(download):
+        return False
+    if not _has_unresolved_magnet_display_name(download):
+        return False
+    if _first_followed_gid(aria2_status) is not None:
+        return False
+    if _following_gid(aria2_status) is not None:
+        return False
+
+    return not _has_bittorrent_payload_info(
+        aria2_status
+    ) and not _has_payload_like_file_path(aria2_status)
+
+
 def _extract_display_name(
     aria2_status: dict[str, Any],
     fallback: str | None,
@@ -505,6 +567,41 @@ async def _switch_to_late_followed_download_if_supported(
     )
 
 
+async def _defer_metadata_completion_if_handoff_pending(
+    *,
+    client: Aria2Client,
+    download: dict[str, Any],
+    aria2_status: dict[str, Any],
+    metadata_gid: str | None,
+    display_name_fallback: str | None,
+    log_prefix: str,
+) -> bool:
+    if not _is_metadata_handoff_pending(download, aria2_status):
+        return False
+
+    if await _switch_to_late_followed_download_if_supported(
+        client=client,
+        download=download,
+        metadata_gid=metadata_gid,
+        display_name_fallback=display_name_fallback,
+        log_prefix=log_prefix,
+    ):
+        return True
+
+    logger.info(
+        "%s Metadata download complete without followedBy, waiting for handoff id=%s gid=%s",
+        log_prefix,
+        download["id"],
+        metadata_gid,
+    )
+    await _update_download_and_active_user_tasks(
+        download_id=int(download["id"]),
+        global_values={"status": "active"},
+        user_status="active",
+    )
+    return True
+
+
 async def _remove_download_result_best_effort(
     client: Aria2Client,
     gid: str,
@@ -526,6 +623,7 @@ async def handle_v0_download_complete(
     aria2_status: dict[str, Any],
     completion_gid: str | None,
     log_prefix: str = "[WS]",
+    allow_metadata_handoff_defer: bool = True,
 ) -> bool:
     """Index a completed v0 download and attach it to active user tasks."""
     from app.core.state import get_task_complete_lock
@@ -565,6 +663,18 @@ async def handle_v0_download_complete(
             aria2_status,
             display_name_fallback,
         )
+        if allow_metadata_handoff_defer and (
+            await _defer_metadata_completion_if_handoff_pending(
+                client=client,
+                download=current,
+                aria2_status=aria2_status,
+                metadata_gid=completion_gid,
+                display_name_fallback=display_name_fallback,
+                log_prefix=log_prefix,
+            )
+        ):
+            return False
+
         task_dir = get_downloading_dir() / str(download_id)
         source_path = await _resolve_complete_source_with_retry(
             completion_gid=completion_gid,

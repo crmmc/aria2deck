@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 
 from app.aria2.sync import (
     STALE_QUEUED_GRACE_SECONDS,
+    _cleanup_owned_stopped_results,
     _cleanup_stale_queued_downloads_v0,
     _fail_v0_download_and_cleanup,
     _repair_inconsistent_completed_downloads_v0,
@@ -51,6 +52,61 @@ async def _fetch_user_task(task_id: int) -> dict:
             .one()
         )
     return dict(row)
+
+
+@pytest.mark.asyncio
+async def test_unknown_aria2_gids_are_ignored_by_cleanup(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = AsyncMock()
+    client.tell_active.return_value = [{"gid": "foreign-active"}]
+    client.tell_waiting.return_value = [{"gid": "foreign-waiting"}]
+    client.tell_stopped.return_value = [{"gid": "foreign-stopped"}]
+    client.force_remove.return_value = "OK"
+    client.remove_download_result.return_value = "OK"
+
+    await _cleanup_owned_stopped_results(
+        client=client,
+        removable_gids={"owned-stopped"},
+        max_actions=10,
+    )
+
+    client.force_remove.assert_not_awaited()
+    client.remove_download_result.assert_not_awaited()
+    assert "foreign-" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_owned_stopped_aria2_gid_result_is_removed() -> None:
+    client = AsyncMock()
+    client.tell_active.return_value = []
+    client.tell_waiting.return_value = []
+    client.tell_stopped.return_value = [{"gid": "owned-stopped"}]
+    client.remove_download_result.return_value = "OK"
+
+    await _cleanup_owned_stopped_results(
+        client=client,
+        removable_gids={"owned-stopped"},
+        max_actions=10,
+    )
+
+    client.force_remove.assert_not_awaited()
+    client.remove_download_result.assert_awaited_once_with("owned-stopped")
+
+
+@pytest.mark.asyncio
+async def test_tracked_stopped_gid_is_not_removed_without_cleanup_eligibility() -> None:
+    client = AsyncMock()
+    client.tell_stopped.return_value = [{"gid": "owned-active"}]
+    client.remove_download_result.return_value = "OK"
+
+    await _cleanup_owned_stopped_results(
+        client=client,
+        removable_gids=set(),
+        max_actions=10,
+    )
+
+    client.remove_download_result.assert_not_awaited()
 
 
 @pytest.mark.asyncio
