@@ -2356,9 +2356,16 @@ dialog.confirm-overlay {
 .torrent-wizard-panel {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 12px;
   padding: 14px 16px 16px;
+}
+
+.torrent-wizard-panel-select {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
+.torrent-wizard-panel-confirm {
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
 .torrent-summary-grid {
@@ -2399,6 +2406,14 @@ dialog.confirm-overlay {
 
 .torrent-wizard-actions,
 .torrent-cancel-actions {
+  justify-content: flex-start;
+}
+
+.torrent-wizard-panel-select .torrent-wizard-actions {
+  justify-content: flex-end;
+}
+
+.torrent-wizard-panel-confirm .torrent-wizard-actions {
   justify-content: flex-start;
 }
 

@@ -129,7 +129,7 @@ export function TorrentCreateWizard({
           </aside>
 
           {stage === "select" ? (
-            <main className="torrent-wizard-panel">
+            <main className="torrent-wizard-panel torrent-wizard-panel-select">
               <TorrentSelectionSummary
                 selectedCount={selectedIndexes.size}
                 selectedSize={selectedSize}
@@ -179,7 +179,7 @@ export function TorrentCreateWizard({
               </footer>
             </main>
           ) : (
-            <main className="torrent-wizard-panel">
+            <main className="torrent-wizard-panel torrent-wizard-panel-confirm">
               <div className="torrent-review-head">
                 <h3>确认下载内容</h3>
                 <p>{selectedIndexes.size} 个文件</p>
