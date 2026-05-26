@@ -173,6 +173,50 @@ async def test_completion_with_followed_by_changes_gid_without_creating_files(
 
 
 @pytest.mark.asyncio
+async def test_event_for_followed_task_uses_following_to_update_original_gid(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="listener_following")
+    download = await create_global_download_v0(
+        resource_key="listener:following",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:following",
+        status="waiting",
+        aria2_gid="gid-metadata",
+        display_name="magnet:?xt=urn:btih:following",
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="waiting",
+    )
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-real",
+        "status": "active",
+        "following": "gid-metadata",
+        "totalLength": "4096",
+        "completedLength": "1024",
+        "bittorrent": {"info": {"name": "Real Torrent"}},
+        "files": [{"path": "/downloads/Real Torrent/file.bin", "length": "4096"}],
+    }
+    _patch_aria2_client(monkeypatch, client)
+
+    await handle_aria2_event(AppState(), "gid-real", "start")
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+
+    assert updated["aria2_gid"] == "gid-real"
+    assert updated["status"] == "active"
+    assert updated["display_name"] == "Real Torrent"
+    assert updated["total_bytes"] == 4096
+    assert updated["completed_bytes"] == 1024
+    assert updated_task["status"] == "active"
+
+
+@pytest.mark.asyncio
 async def test_completion_with_followed_by_refreshes_real_task_name_and_size(
     temp_db: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -221,6 +265,96 @@ async def test_completion_with_followed_by_refreshes_real_task_name_and_size(
     assert updated["display_name"] == "Real Torrent"
     assert updated["total_bytes"] == 4096
     assert updated["completed_bytes"] == 1024
+
+
+@pytest.mark.asyncio
+async def test_metadata_completion_retries_for_late_followed_by_before_file_validation(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="listener_late_followed_by")
+    download = await create_global_download_v0(
+        resource_key="listener:late-followed-by",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:late-followed",
+        status="active",
+        aria2_gid="gid-metadata",
+        display_name="magnet:?xt=urn:btih:late-followed",
+        total_bytes=9,
+        completed_bytes=9,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+    )
+    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
+    task_dir.mkdir(parents=True)
+    metadata_file = task_dir / "metadata"
+    metadata_file.write_bytes(b"short")
+
+    client = AsyncMock()
+    client.tell_status.side_effect = [
+        {
+            "gid": "gid-metadata",
+            "status": "complete",
+            "totalLength": "9",
+            "completedLength": "9",
+            "files": [
+                {
+                    "path": str(metadata_file),
+                    "length": "9",
+                    "completedLength": "9",
+                }
+            ],
+        },
+        {
+            "gid": "gid-metadata",
+            "status": "complete",
+            "followedBy": ["gid-real"],
+            "totalLength": "9",
+            "completedLength": "9",
+            "files": [
+                {
+                    "path": str(metadata_file),
+                    "length": "9",
+                    "completedLength": "9",
+                }
+            ],
+        },
+        {
+            "gid": "gid-real",
+            "status": "active",
+            "totalLength": "4096",
+            "completedLength": "512",
+            "bittorrent": {"info": {"name": "Real Torrent"}},
+            "files": [{"path": "/downloads/Real Torrent/file.bin", "length": "4096"}],
+        },
+    ]
+    client.remove_download_result.return_value = "OK"
+    _patch_aria2_client(monkeypatch, client)
+
+    await handle_aria2_event(AppState(), "gid-metadata", "complete")
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    async with transaction() as conn:
+        stored_count = (
+            await conn.execute(select(func.count()).select_from(stored_files))
+        ).scalar_one()
+        user_file_count = (
+            await conn.execute(select(func.count()).select_from(user_files))
+        ).scalar_one()
+
+    assert updated["aria2_gid"] == "gid-real"
+    assert updated["status"] == "active"
+    assert updated["error_code"] is None
+    assert updated["display_name"] == "Real Torrent"
+    assert updated["total_bytes"] == 4096
+    assert updated["completed_bytes"] == 512
+    assert updated_task["status"] == "active"
+    assert stored_count == 0
+    assert user_file_count == 0
 
 
 @pytest.mark.asyncio

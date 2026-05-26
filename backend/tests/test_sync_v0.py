@@ -276,6 +276,100 @@ async def test_metadata_followed_by_refreshes_real_task_progress_and_name(
 
 
 @pytest.mark.asyncio
+async def test_metadata_completion_retries_for_late_followed_by_before_file_validation(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_late_followed_by", quota_bytes=1000)
+    await reserve_bytes(user["id"], 9, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="sync:late-followed-by",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:late-followed",
+        status="active",
+        aria2_gid="gid-metadata",
+        display_name="magnet:?xt=urn:btih:late-followed",
+        total_bytes=9,
+        completed_bytes=9,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=9,
+    )
+    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
+    task_dir.mkdir(parents=True)
+    metadata_file = task_dir / "metadata"
+    metadata_file.write_bytes(b"short")
+    client = AsyncMock()
+    client.tell_status.side_effect = [
+        {
+            "gid": "gid-metadata",
+            "status": "complete",
+            "followedBy": ["gid-real"],
+            "totalLength": "9",
+            "completedLength": "9",
+            "files": [
+                {
+                    "path": str(metadata_file),
+                    "length": "9",
+                    "completedLength": "9",
+                }
+            ],
+        },
+        {
+            "gid": "gid-real",
+            "status": "active",
+            "totalLength": "2048",
+            "completedLength": "256",
+            "bittorrent": {"info": {"name": "Real Torrent"}},
+            "files": [{"path": "/downloads/Real Torrent/file.bin", "length": "2048"}],
+        },
+    ]
+    client.remove_download_result.return_value = "OK"
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-metadata",
+            "status": "complete",
+            "totalLength": "9",
+            "completedLength": "9",
+            "files": [
+                {
+                    "path": str(metadata_file),
+                    "length": "9",
+                    "completedLength": "9",
+                }
+            ],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+    async with transaction() as conn:
+        user_file_count = (
+            await conn.execute(
+                select(user_files).where(user_files.c.user_id == user["id"])
+            )
+        ).all()
+
+    assert updated["aria2_gid"] == "gid-real"
+    assert updated["status"] == "active"
+    assert updated["error_code"] is None
+    assert updated["display_name"] == "Real Torrent"
+    assert updated["total_bytes"] == 2048
+    assert updated["completed_bytes"] == 256
+    assert updated_task["status"] == "active"
+    assert updated_task["reserved_bytes"] == 9
+    assert usage["reserved_bytes"] == 9
+    assert len(user_file_count) == 0
+
+
+@pytest.mark.asyncio
 async def test_active_aria2_status_does_not_overwrite_completed_download(
     temp_db: str,
 ) -> None:
