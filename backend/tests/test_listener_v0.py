@@ -583,7 +583,7 @@ async def test_error_event_marks_global_and_user_tasks_failed_and_releases_reser
     assert updated["status"] == "failed"
     assert updated["aria2_gid"] is None
     assert updated["error_code"] == "3"
-    assert updated["error_message"] == "disk full"
+    assert updated["error_message"] == "aria2: disk full"
     assert updated_task["status"] == "failed"
     assert updated_task["reserved_bytes"] == 0
     assert usage["reserved_bytes"] == 0

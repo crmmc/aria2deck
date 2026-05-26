@@ -217,7 +217,7 @@ async def test_error_aria2_result_preserves_specific_aria2_error_message(
     updated = await _fetch_global(download["id"])
 
     assert updated["status"] == "failed"
-    assert updated["error_message"] == raw_error
+    assert updated["error_message"] == f"aria2: {raw_error}"
 
 
 @pytest.mark.asyncio

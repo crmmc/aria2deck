@@ -4,6 +4,11 @@
 参考: https://aria2.github.io/manual/en/html/aria2c.html#exit-status
 """
 
+import re
+
+ARIA2_ERROR_PREFIX = "aria2: "
+
+
 # aria2 错误码到中文描述的映射
 ERROR_CODE_MAP: dict[int, str] = {
     0: "下载成功",
@@ -42,6 +47,20 @@ ERROR_CODE_MAP: dict[int, str] = {
 }
 
 
+def _format_specific_aria2_error_message(message: str) -> str:
+    max_file_not_found = re.search(r"max-file-not-found count=(\d+)", message, re.IGNORECASE)
+    if max_file_not_found:
+        count = max_file_not_found.group(1)
+        return f"下载源不可用：上游资源连续返回不存在或 404（{count} 次）"
+    return message
+
+
+def _prefix_aria2_error_message(message: str) -> str:
+    if message.lower().startswith(ARIA2_ERROR_PREFIX):
+        return message
+    return f"{ARIA2_ERROR_PREFIX}{message}"
+
+
 def get_error_message(error_code: int | str | None, fallback: str | None = None) -> str:
     """获取错误码对应的中文描述
 
@@ -77,8 +96,8 @@ def prefer_aria2_error_message(
     if aria2_error:
         message = str(aria2_error).strip()
         if message:
-            return message
-    return get_error_message(error_code, fallback)
+            return _prefix_aria2_error_message(_format_specific_aria2_error_message(message))
+    return _prefix_aria2_error_message(get_error_message(error_code, fallback))
 
 
 def parse_error_message(aria2_error: str | None) -> str:
@@ -95,8 +114,6 @@ def parse_error_message(aria2_error: str | None) -> str:
 
     # aria2 错误消息格式通常是 "errorCode=X errorMessage=..."
     # 或直接是错误描述
-    import re
-
     # 尝试提取错误码
     match = re.search(r"errorCode[=:\s]*(\d+)", aria2_error, re.IGNORECASE)
     if match:

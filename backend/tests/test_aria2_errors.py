@@ -6,7 +6,7 @@
 3. 错误消息模式匹配
 """
 
-from app.aria2.errors import get_error_message, parse_error_message, ERROR_CODE_MAP
+from app.aria2.errors import ERROR_CODE_MAP, get_error_message, parse_error_message
 
 
 class TestGetErrorMessage:
@@ -78,12 +78,26 @@ class TestPreferAria2ErrorMessage:
         from app.aria2.errors import prefer_aria2_error_message
 
         msg = "CUID#7 - Download aborted. URI=https://example.com/file.iso"
+        assert prefer_aria2_error_message("7", msg) == f"aria2: {msg}"
+
+    def test_does_not_duplicate_aria2_prefix(self):
+        from app.aria2.errors import prefer_aria2_error_message
+
+        msg = "aria2: CUID#7 - Download aborted. URI=https://example.com/file.iso"
         assert prefer_aria2_error_message("7", msg) == msg
+
+    def test_describes_max_file_not_found_as_upstream_source_failure(self):
+        from app.aria2.errors import prefer_aria2_error_message
+
+        assert (
+            prefer_aria2_error_message("4", "Reached max-file-not-found count=10")
+            == "aria2: 下载源不可用：上游资源连续返回不存在或 404（10 次）"
+        )
 
     def test_falls_back_to_code_when_message_is_empty(self):
         from app.aria2.errors import prefer_aria2_error_message
 
-        assert prefer_aria2_error_message("9", "") == "磁盘空间不足"
+        assert prefer_aria2_error_message("9", "") == "aria2: 磁盘空间不足"
 
 
 class TestErrorCodeMapCoverage:
@@ -94,6 +108,10 @@ class TestErrorCodeMapCoverage:
         common_codes = [0, 1, 2, 3, 6, 9, 19, 24]
         for code in common_codes:
             assert code in ERROR_CODE_MAP, f"错误码 {code} 缺少映射"
+
+    def test_all_official_exit_status_codes_exist(self):
+        """aria2 文档的 exit status 0-32 都应有映射。"""
+        assert set(ERROR_CODE_MAP) == set(range(33))
 
     def test_all_codes_have_chinese_description(self):
         """测试所有映射都是中文描述"""
