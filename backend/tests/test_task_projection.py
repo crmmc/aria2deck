@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 from app.services.task_projection import (
+    METADATA_NAME_PREFIX,
     InvalidTaskStatusFilter,
     REST_TASK_STATUS_FILTERS,
     build_aria2_status,
@@ -8,6 +7,7 @@ from app.services.task_projection import (
     effective_status,
     filter_rows_for_status,
     has_real_file_path,
+    is_metadata_phase_status,
     speed_totals,
     stat_counts,
 )
@@ -194,3 +194,99 @@ def test_speed_totals_sum_current_rows_only() -> None:
         "download_speed": 300,
         "upload_speed": 30,
     }
+
+
+# ---------------------------------------------------------------------------
+# Metadata phase detection
+# ---------------------------------------------------------------------------
+
+def test_is_metadata_phase_status_detects_metadata_prefix() -> None:
+    status = {"bittorrent": {"info": {"name": "[METADATA]abc123"}}}
+    assert is_metadata_phase_status(status) is True
+
+
+def test_is_metadata_phase_status_passes_real_name() -> None:
+    status = {"bittorrent": {"info": {"name": "Ubuntu.24.04.iso"}}}
+    assert is_metadata_phase_status(status) is False
+
+
+def test_is_metadata_phase_status_returns_false_without_bittorrent() -> None:
+    assert is_metadata_phase_status({}) is False
+    assert is_metadata_phase_status({"bittorrent": {}}) is False
+    assert is_metadata_phase_status({"bittorrent": {"info": {}}}) is False
+
+
+def test_metadata_name_prefix_is_exact_string() -> None:
+    assert METADATA_NAME_PREFIX == "[METADATA]"
+
+
+# ---------------------------------------------------------------------------
+# Live-first projection: normal (non-metadata) active task
+# ---------------------------------------------------------------------------
+
+def test_rest_response_prefers_live_progress_for_active_task() -> None:
+    row = _row(user_status="active", global_status="active",
+               total_bytes=100, completed_bytes=50)
+    live = {"totalLength": "2000", "completedLength": "1000",
+            "downloadSpeed": "500", "uploadSpeed": "0"}
+
+    response = build_rest_task_response(row, live)
+
+    assert response["total_length"] == 2000
+    assert response["completed_length"] == 1000
+    assert response["download_speed"] == 500
+
+
+def test_rest_response_prefers_live_bt_name_for_active_task() -> None:
+    row = _row(user_status="active", global_status="active", name="old.bin")
+    live = {"bittorrent": {"info": {"name": "real_file.iso"}},
+            "downloadSpeed": "0", "uploadSpeed": "0"}
+
+    response = build_rest_task_response(row, live)
+
+    assert response["name"] == "real_file.iso"
+
+
+def test_rest_response_uses_db_for_terminal_task_even_with_live() -> None:
+    row = _row(user_status="completed", global_status="completed",
+               total_bytes=999, completed_bytes=999, name="done.bin")
+    live = {"totalLength": "1", "completedLength": "0"}
+
+    response = build_rest_task_response(row, live)
+
+    assert response["total_length"] == 999
+    assert response["completed_length"] == 999
+    assert response["name"] == "done.bin"
+
+
+# ---------------------------------------------------------------------------
+# Live-first projection: metadata phase
+# ---------------------------------------------------------------------------
+
+def test_rest_response_skips_metadata_total_but_keeps_completed() -> None:
+    """During metadata phase, totalLength is the tiny metadata size — skip it.
+    completedLength should still pass through so the user sees activity."""
+    row = _row(user_status="active", global_status="active",
+               total_bytes=0, completed_bytes=0)
+    live = {"totalLength": "32768", "completedLength": "16384",
+            "bittorrent": {"info": {"name": "[METADATA]abc"}},
+            "downloadSpeed": "5000", "uploadSpeed": "0"}
+
+    response = build_rest_task_response(row, live)
+
+    assert response["total_length"] == 0           # DB fallback (not metadata size)
+    assert response["completed_length"] == 16384   # live passthrough
+    assert response["download_speed"] == 5000      # speed always from live
+
+
+def test_rest_response_filters_metadata_name_uses_db_fallback() -> None:
+    row = _row(user_status="active", global_status="active", name="global.bin",
+               user_name="magnet:?xt=urn:btih:abc")
+    live = {"bittorrent": {"info": {"name": "[METADATA]ida93"}},
+            "downloadSpeed": "0", "uploadSpeed": "0"}
+
+    response = build_rest_task_response(row, live)
+
+    # [METADATA] name filtered, falls back to user_name from row
+    assert response["name"] == "magnet:?xt=urn:btih:abc"
+    assert METADATA_NAME_PREFIX not in response["name"]

@@ -20,6 +20,7 @@ def refreshable_user_task_display_name_condition() -> ColumnElement[bool]:
         user_tasks.c.display_name == "",
         user_tasks.c.display_name.startswith("magnet:"),
         user_tasks.c.display_name.startswith("torrent:"),
+        user_tasks.c.display_name.startswith("[METADATA]"),
         exists().where(
             global_downloads.c.id == user_tasks.c.global_download_id,
             global_downloads.c.resource_kind == "torrent",

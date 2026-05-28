@@ -196,20 +196,70 @@ def speed_totals(
     return {"download_speed": download_speed, "upload_speed": upload_speed}
 
 
+METADATA_NAME_PREFIX = "[METADATA]"
+
+
+def is_metadata_phase_status(aria2_status: dict[str, Any]) -> bool:
+    """Check if aria2 status represents a metadata download phase.
+
+    Returns True when ``bittorrent.info.name`` starts with the ``[METADATA]``
+    prefix that aria2 assigns during magnet-link metadata resolution.
+    """
+    bt = aria2_status.get("bittorrent")
+    if not isinstance(bt, dict):
+        return False
+    info = bt.get("info")
+    if not isinstance(info, dict):
+        return False
+    return str(info.get("name") or "").startswith(METADATA_NAME_PREFIX)
+
+
+def _extract_live_display_name(live: dict[str, Any]) -> str | None:
+    """Extract display name from live aria2 status, filtering placeholders."""
+    bt = live.get("bittorrent")
+    if isinstance(bt, dict):
+        info = bt.get("info")
+        if isinstance(info, dict):
+            name = str(info.get("name") or "").strip()
+            if name and not name.startswith(METADATA_NAME_PREFIX):
+                return name
+    return None
+
+
 def build_rest_task_response(
     row: dict[str, Any],
     live: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     error_message = row.get("error_message") or row.get("global_error_message")
     download_speed, upload_speed = projected_speeds(row, live)
+    name = row.get("display_name") or row.get("global_display_name") or display_name(row)
+    total_length = _safe_int(row.get("total_bytes"))
+    completed_length = _safe_int(row.get("completed_bytes"))
+
+    # Prefer live aria2 data for active tasks — fresher and avoids
+    # stale/polluted DB values (e.g. during metadata download phase).
+    if live and effective_status(row) in ACTIVE_LIKE_STATUSES:
+        live_name = _extract_live_display_name(live)
+        if live_name:
+            name = live_name
+        if not is_metadata_phase_status(live):
+            live_total = _safe_int(live.get("totalLength"))
+            if live_total > 0:
+                total_length = live_total
+                completed_length = _safe_int(live.get("completedLength"))
+        else:
+            # Metadata phase: show downloaded bytes so user sees activity,
+            # but keep total_length at 0 to avoid a misleading percentage.
+            completed_length = _safe_int(live.get("completedLength"))
+
     return {
         "id": row["id"],
         "task_id": row["global_download_id"],
         "status": legacy_rest_status(effective_status(row)),
-        "name": row.get("display_name") or row.get("global_display_name") or display_name(row),
+        "name": name,
         "uri": row.get("source_uri") or "",
-        "total_length": _safe_int(row.get("total_bytes")),
-        "completed_length": _safe_int(row.get("completed_bytes")),
+        "total_length": total_length,
+        "completed_length": completed_length,
         "download_speed": download_speed,
         "upload_speed": upload_speed,
         "error": error_message,

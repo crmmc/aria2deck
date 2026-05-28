@@ -27,7 +27,11 @@ from app.repositories.downloads import (
     mark_global_download_failed,
     now_ms,
 )
-from app.services.task_projection import has_real_file_path
+from app.services.task_projection import (
+    METADATA_NAME_PREFIX,
+    has_real_file_path,
+    is_metadata_phase_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,8 +140,10 @@ def _is_metadata_handoff_pending(
     bittorrent = status.get("bittorrent")
     if isinstance(bittorrent, dict):
         info = bittorrent.get("info")
-        if isinstance(info, dict) and str(info.get("name") or "").strip():
-            return False
+        if isinstance(info, dict):
+            bt_name = str(info.get("name") or "").strip()
+            if bt_name and not bt_name.startswith(METADATA_NAME_PREFIX):
+                return False
 
     files = status.get("files")
     if isinstance(files, list):
@@ -148,7 +154,12 @@ def _is_metadata_handoff_pending(
             if not isinstance(raw_path, str) or not raw_path.strip():
                 continue
             name = Path(raw_path).name.lower()
-            if name and name != "metadata" and not name.endswith(".torrent"):
+            if (
+                name
+                and name != "metadata"
+                and not name.endswith(".torrent")
+                and not name.startswith("[metadata]")
+            ):
                 return False
 
     return True
@@ -492,22 +503,28 @@ async def _update_v0_download_from_aria2(
         )
         return
 
+    # Skip progress and name updates during metadata download phase
+    is_metadata = is_metadata_phase_status(status)
+
     timestamp = now_ms()
     global_values: dict[str, Any] = {
         "status": mapped["status"],
-        "total_bytes": mapped["total_bytes"],
         "completed_bytes": mapped["completed_bytes"],
         "updated_at_ms": timestamp,
     }
-    if mapped["display_name"]:
-        global_values["display_name"] = mapped["display_name"]
+    if not is_metadata:
+        global_values["total_bytes"] = mapped["total_bytes"]
+        if mapped["display_name"]:
+            global_values["display_name"] = mapped["display_name"]
 
     changed = await _guarded_update_global_download(download_id, global_values)
     if not changed:
         return
 
     await _update_active_user_task_status(
-        download_id, mapped["status"], display_name=mapped["display_name"]
+        download_id,
+        mapped["status"],
+        display_name=mapped["display_name"] if not is_metadata else None,
     )
     await _broadcast_download_update(state, download_id)
 

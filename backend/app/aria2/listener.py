@@ -28,6 +28,10 @@ from app.repositories.downloads import (
     update_global_download,
 )
 from app.services.download_service import complete_global_download
+from app.services.task_projection import (
+    METADATA_NAME_PREFIX,
+    is_metadata_phase_status,
+)
 
 if TYPE_CHECKING:
     from app.aria2.client import Aria2Client
@@ -319,7 +323,8 @@ def _has_bittorrent_payload_info(aria2_status: dict[str, Any]) -> bool:
     if not isinstance(info, dict):
         return False
 
-    return bool(str(info.get("name") or "").strip())
+    name = str(info.get("name") or "").strip()
+    return bool(name) and not name.startswith(METADATA_NAME_PREFIX)
 
 
 def _has_payload_like_file_path(aria2_status: dict[str, Any]) -> bool:
@@ -334,7 +339,12 @@ def _has_payload_like_file_path(aria2_status: dict[str, Any]) -> bool:
         if not isinstance(raw_path, str) or not raw_path.strip():
             continue
         name = Path(raw_path).name.lower()
-        if name and name != "metadata" and not name.endswith(".torrent"):
+        if (
+            name
+            and name != "metadata"
+            and not name.endswith(".torrent")
+            and not name.startswith("[metadata]")
+        ):
             return True
     return False
 
@@ -367,7 +377,10 @@ def _extract_display_name(
         aria2_status.get("files") or [{}]
     )[0].get("path")
     if isinstance(raw_name, str) and raw_name:
-        return Path(raw_name).name or raw_name
+        name = Path(raw_name).name or raw_name
+        if name.startswith(METADATA_NAME_PREFIX):
+            return fallback
+        return name
     return fallback
 
 
@@ -377,11 +390,15 @@ def _progress_values(
 ) -> dict[str, Any]:
     values: dict[str, Any] = {}
     if aria2_status:
-        values["total_bytes"] = _safe_int(aria2_status.get("totalLength"))
-        values["completed_bytes"] = _safe_int(aria2_status.get("completedLength"))
         display_name = _extract_display_name(aria2_status, display_name_fallback)
-        if display_name:
+        if display_name and not display_name.startswith(METADATA_NAME_PREFIX):
             values["display_name"] = display_name
+        # Skip total_bytes during metadata phase — the tiny metadata size
+        # must not overwrite the real file size in the database.
+        # completed_bytes is always written so speed and activity remain visible.
+        if not is_metadata_phase_status(aria2_status):
+            values["total_bytes"] = _safe_int(aria2_status.get("totalLength"))
+        values["completed_bytes"] = _safe_int(aria2_status.get("completedLength"))
     return values
 
 
@@ -733,6 +750,8 @@ async def handle_v0_download_complete(
             return False
 
         original_name = task_name or source_path.name
+        if original_name.startswith(METADATA_NAME_PREFIX):
+            original_name = source_path.name
         expected_size = _expected_completed_size(aria2_status, source_path)
         if expected_size is not None:
             actual_size = _payload_size_bytes(source_path)
