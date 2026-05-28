@@ -332,6 +332,92 @@ async def test_metadata_followed_by_refreshes_real_task_progress_and_name(
 
 
 @pytest.mark.asyncio
+async def test_torrent_synthetic_task_name_is_replaced_with_real_name(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_torrent_placeholder")
+    resource_key = "1234567890abcdef"
+    download = await create_global_download_v0(
+        resource_key=resource_key,
+        resource_kind="torrent",
+        source_uri=f"magnet:?xt=urn:btih:{resource_key}",
+        status="active",
+        aria2_gid="gid-torrent-placeholder",
+        display_name=f"torrent-{resource_key[:12]}",
+        total_bytes=0,
+        completed_bytes=0,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        display_name=f"torrent-{resource_key[:12]}",
+    )
+    client = AsyncMock()
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-torrent-placeholder",
+            "status": "active",
+            "totalLength": "2048",
+            "completedLength": "512",
+            "bittorrent": {"info": {"name": "Real Torrent"}},
+            "files": [{"path": "/downloads/Real Torrent/file.bin", "length": "2048"}],
+        },
+    )
+
+    updated_task = await _fetch_user_task(task["id"])
+
+    assert updated_task["display_name"] == "Real Torrent"
+
+
+@pytest.mark.asyncio
+async def test_torrent_prefixed_user_task_name_is_not_overwritten_for_http_download(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_torrent_prefix_http")
+    download = await create_global_download_v0(
+        resource_key="sync:http-torrent-prefix",
+        resource_kind="http",
+        source_uri="https://example.com/torrent-release.iso",
+        status="active",
+        aria2_gid="gid-http-torrent-prefix",
+        display_name="torrent-release.iso",
+        total_bytes=0,
+        completed_bytes=0,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        display_name="torrent-release.iso",
+    )
+    client = AsyncMock()
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-http-torrent-prefix",
+            "status": "active",
+            "totalLength": "2048",
+            "completedLength": "512",
+            "files": [{"path": "/downloads/renamed-by-server.iso", "length": "2048"}],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+
+    assert updated["display_name"] == "renamed-by-server.iso"
+    assert updated_task["display_name"] == "torrent-release.iso"
+
+
+@pytest.mark.asyncio
 async def test_metadata_completion_retries_for_late_followed_by_before_file_validation(
     temp_db: str,
 ) -> None:

@@ -12,6 +12,7 @@ from fastapi import WebSocket
 from sqlalchemy import select, update
 
 from app.aria2.client import Aria2Client
+from app.aria2.display_name import refreshable_user_task_display_name_condition
 from app.aria2.errors import prefer_aria2_error_message
 from app.aria2.failed_task_cleanup import (
     cleanup_failed_task_artifacts,
@@ -282,16 +283,28 @@ async def _guarded_update_global_download(
 async def _update_active_user_task_status(
     download_id: int,
     status: str,
+    display_name: str | None = None,
 ) -> None:
+    timestamp = now_ms()
+    base_condition = [
+        user_tasks.c.global_download_id == download_id,
+        user_tasks.c.status.in_(V0_SYNC_TRACKED_STATUSES),
+    ]
     async with transaction() as conn:
         await conn.execute(
             update(user_tasks)
-            .where(
-                user_tasks.c.global_download_id == download_id,
-                user_tasks.c.status.in_(V0_SYNC_TRACKED_STATUSES),
-            )
-            .values(status=status, updated_at_ms=now_ms())
+            .where(*base_condition)
+            .values(status=status, updated_at_ms=timestamp)
         )
+        if display_name:
+            await conn.execute(
+                update(user_tasks)
+                .where(
+                    *base_condition,
+                    refreshable_user_task_display_name_condition(),
+                )
+                .values(display_name=display_name, updated_at_ms=timestamp)
+            )
 
 
 async def _complete_v0_download_from_sync(
@@ -362,7 +375,11 @@ async def _switch_to_followed_download_from_sync(
     if not changed:
         return
 
-    await _update_active_user_task_status(download_id, str(global_values["status"]))
+    await _update_active_user_task_status(
+        download_id,
+        str(global_values["status"]),
+        display_name=global_values.get("display_name"),
+    )
     if metadata_gid != followed_gid:
         try:
             await client.remove_download_result(metadata_gid)
@@ -489,7 +506,9 @@ async def _update_v0_download_from_aria2(
     if not changed:
         return
 
-    await _update_active_user_task_status(download_id, mapped["status"])
+    await _update_active_user_task_status(
+        download_id, mapped["status"], display_name=mapped["display_name"]
+    )
     await _broadcast_download_update(state, download_id)
 
 

@@ -12,6 +12,7 @@ from urllib.parse import urlparse, urlunparse
 import aiohttp
 from sqlalchemy import update
 
+from app.aria2.display_name import refreshable_user_task_display_name_condition
 from app.aria2.errors import prefer_aria2_error_message
 from app.aria2.failed_task_cleanup import (
     cleanup_failed_task_artifacts,
@@ -446,16 +447,27 @@ async def _update_download_and_active_user_tasks(
     if updated is None:
         return False
 
+    new_display_name = global_values.get("display_name")
     timestamp = now_ms()
     async with transaction() as conn:
+        base_condition = [
+            user_tasks.c.global_download_id == download_id,
+            user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+        ]
         if user_status is not None:
             await conn.execute(
                 update(user_tasks)
-                .where(
-                    user_tasks.c.global_download_id == download_id,
-                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
-                )
+                .where(*base_condition)
                 .values(status=user_status, updated_at_ms=timestamp)
+            )
+        if new_display_name:
+            await conn.execute(
+                update(user_tasks)
+                .where(
+                    *base_condition,
+                    refreshable_user_task_display_name_condition(),
+                )
+                .values(display_name=new_display_name, updated_at_ms=timestamp)
             )
     return True
 
