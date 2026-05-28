@@ -20,8 +20,6 @@ class RateLimitConfig:
         "aria2_test": 60,
         "public_api": 60,
         "share_access": 60,
-        "authenticated_download": 60,
-        "anonymous_download": 60,
         "rpc": 60,
     }
 
@@ -42,12 +40,6 @@ class RateLimitConfig:
         "rate_limit_aria2_test": ("aria2_test", 10, ()),
         "rate_limit_public_api": ("public_api", 60, ()),
         "rate_limit_share_access": ("share_access", 5, ()),
-        "rate_limit_authenticated_download": (
-            "authenticated_download",
-            300,
-            ("download_rate_limit",),
-        ),
-        "rate_limit_anonymous_download": ("anonymous_download", 60, ()),
         "rate_limit_rpc": ("rpc", 300, ()),
     }
 
@@ -60,8 +52,6 @@ class RateLimitConfig:
         self.aria2_test: int = 10
         self.public_api: int = 60
         self.share_access: int = 5
-        self.authenticated_download: int = 300
-        self.anonymous_download: int = 60
         self.rpc: int = 300
 
     async def load_from_db(self) -> None:
@@ -81,8 +71,7 @@ class RateLimitConfig:
         logger.info(
             "频率限制配置已加载 account_security=%s authenticated_api=%s "
             "create_task=%s create_torrent=%s create_pack=%s aria2_test=%s "
-            "public_api=%s share_access=%s authenticated_download=%s "
-            "anonymous_download=%s rpc=%s",
+            "public_api=%s share_access=%s rpc=%s",
             self.account_security,
             self.authenticated_api,
             self.create_task,
@@ -91,8 +80,6 @@ class RateLimitConfig:
             self.aria2_test,
             self.public_api,
             self.share_access,
-            self.authenticated_download,
-            self.anonymous_download,
             self.rpc,
         )
 

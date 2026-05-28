@@ -146,39 +146,32 @@ class TestDownloadFile:
         assert response.status_code == 403
         assert response.json()["detail"] == "无权访问此路径"
 
-    def test_browse_and_download_use_separate_rate_limit_buckets(
-        self,
-        authenticated_client: TestClient,
-        user_file: dict,
-        user_directory: dict,
+    def test_range_downloads_are_not_limited_by_authenticated_api_rate_limit(
+        self, authenticated_client: TestClient, test_user: dict
     ):
-        original_api_limit = rate_limit_config.authenticated_api
-        original_download_limit = rate_limit_config.authenticated_download
+        data = _create_range_file(
+            test_user,
+            "range_auth_api_limit_hash",
+            "range_auth_api_limit.bin",
+        )
+        original_limit = rate_limit_config.authenticated_api
         rate_limit_config.authenticated_api = 1
-        rate_limit_config.authenticated_download = 1
         try:
-            browse_first = authenticated_client.get(
-                f"/api/files/{user_directory['content_hash']}/browse"
+            first = authenticated_client.get(
+                "/api/files/range_auth_api_limit_hash/download",
+                headers={"Range": "bytes=0-9"},
             )
-            download_first = authenticated_client.get(
-                f"/api/files/{user_file['content_hash']}/download"
-            )
-            browse_second = authenticated_client.get(
-                f"/api/files/{user_directory['content_hash']}/browse"
-            )
-            download_second = authenticated_client.get(
-                f"/api/files/{user_file['content_hash']}/download"
+            second = authenticated_client.get(
+                "/api/files/range_auth_api_limit_hash/download",
+                headers={"Range": "bytes=10-19"},
             )
         finally:
-            rate_limit_config.authenticated_api = original_api_limit
-            rate_limit_config.authenticated_download = original_download_limit
+            rate_limit_config.authenticated_api = original_limit
 
-        assert browse_first.status_code == 200
-        assert download_first.status_code == 200
-        assert browse_second.status_code == 429
-        assert browse_second.json()["detail"] == "请求过于频繁，请稍后再试"
-        assert download_second.status_code == 429
-        assert download_second.json()["detail"] == "下载请求过于频繁，请稍后再试"
+        assert first.status_code == 206
+        assert first.content == data[0:10]
+        assert second.status_code == 206
+        assert second.content == data[10:20]
 
 
 class TestBrowseDirectoryRealFiles:

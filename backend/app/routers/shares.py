@@ -345,11 +345,6 @@ async def download_shared_file(
     subpath: str | None = Query(default=None),
 ):
     client_ip = client_ip_from_request(request)
-    await ensure_public_allowed(
-        client_ip,
-        RateLimitScope.ANONYMOUS_DOWNLOAD,
-        detail="下载请求过于频繁，请稍后再试",
-    )
     share = await _check_share_access(code, token, request)
     acquire_result = await download_limiter.acquire_anonymous(client_ip, share["content_hash"])
     if not acquire_result.allowed:

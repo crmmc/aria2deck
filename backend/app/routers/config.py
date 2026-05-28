@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from time import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import require_admin, require_user
 from app.core.download_limiter import download_config
@@ -43,6 +43,8 @@ def _ms_to_iso(timestamp_ms: int | None) -> str | None:
 
 class ConfigUpdate(BaseModel):
     """配置更新请求体"""
+
+    model_config = ConfigDict(extra="forbid")
 
     max_task_size: int | None = Field(None, ge=0, description="单任务最大大小（字节）")
     min_free_disk: int | None = Field(
@@ -84,12 +86,6 @@ class ConfigUpdate(BaseModel):
     )
     rate_limit_share_access: int | None = Field(
         None, ge=1, le=10000, description="分享密码验证限流（次/分钟）"
-    )
-    rate_limit_authenticated_download: int | None = Field(
-        None, ge=0, le=10000, description="已登录下载限流（次/分钟，0=不限制）"
-    )
-    rate_limit_anonymous_download: int | None = Field(
-        None, ge=0, le=10000, description="匿名下载限流（次/分钟，0=不限制）"
     )
     rate_limit_create_task: int | None = Field(
         None, ge=1, le=10000, description="创建任务限流（次/分钟）"
@@ -322,8 +318,6 @@ def _serialize_config(aria2_rpc_url: str, aria2_rpc_secret: str) -> dict:
         "rate_limit_authenticated_api": rate_limit_config.authenticated_api,
         "rate_limit_public_api": rate_limit_config.public_api,
         "rate_limit_share_access": rate_limit_config.share_access,
-        "rate_limit_authenticated_download": rate_limit_config.authenticated_download,
-        "rate_limit_anonymous_download": rate_limit_config.anonymous_download,
         "rate_limit_create_task": rate_limit_config.create_task,
         "rate_limit_create_torrent": rate_limit_config.create_torrent,
         "rate_limit_create_pack": rate_limit_config.create_pack,
@@ -467,8 +461,6 @@ async def update_config(
         "rate_limit_authenticated_api",
         "rate_limit_public_api",
         "rate_limit_share_access",
-        "rate_limit_authenticated_download",
-        "rate_limit_anonymous_download",
         "rate_limit_create_task",
         "rate_limit_create_torrent",
         "rate_limit_create_pack",

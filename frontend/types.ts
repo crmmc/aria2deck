@@ -113,8 +113,6 @@ export type SystemConfig = {
   rate_limit_authenticated_api: number;
   rate_limit_public_api: number;
   rate_limit_share_access: number;
-  rate_limit_authenticated_download: number;
-  rate_limit_anonymous_download: number;
   rate_limit_create_task: number;
   rate_limit_create_torrent: number;
   rate_limit_create_pack: number;

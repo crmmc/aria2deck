@@ -738,11 +738,6 @@ async def download_file(
         path: BT 文件夹内的相对路径（可选）
     """
     user_id = _require_user_id(user)
-    await ensure_authenticated_allowed(
-        user_id,
-        RateLimitScope.AUTHENTICATED_DOWNLOAD,
-        detail="下载请求过于频繁，请稍后再试",
-    )
     acquire_result = await download_limiter.acquire_authenticated(user_id, file_hash)
     if not acquire_result.allowed:
         raise HTTPException(

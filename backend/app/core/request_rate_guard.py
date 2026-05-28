@@ -18,8 +18,6 @@ class RateLimitScope(StrEnum):
     ARIA2_TEST = "aria2_test"
     PUBLIC_API = "public_api"
     SHARE_ACCESS = "share_access"
-    AUTHENTICATED_DOWNLOAD = "authenticated_download"
-    ANONYMOUS_DOWNLOAD = "anonymous_download"
     RPC = "rpc"
 
 

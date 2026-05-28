@@ -56,13 +56,13 @@ class TestGetConfig:
         assert "rate_limit_authenticated_api" in data
         assert "rate_limit_public_api" in data
         assert "rate_limit_share_access" in data
-        assert "rate_limit_authenticated_download" in data
-        assert "rate_limit_anonymous_download" in data
         assert "download_total_connections" in data
         assert "download_authenticated_reserved_connections" in data
         assert "download_anonymous_base_connections" in data
         assert "rate_limit_login" not in data
         assert "download_rate_limit" not in data
+        assert "rate_limit_authenticated_download" not in data
+        assert "rate_limit_anonymous_download" not in data
 
     def test_get_config_non_admin(self, authenticated_client: TestClient):
         response = authenticated_client.get("/api/config")
@@ -196,8 +196,6 @@ class TestUpdateConfig:
                 "rate_limit_authenticated_api": 90,
                 "rate_limit_public_api": 40,
                 "rate_limit_share_access": 3,
-                "rate_limit_authenticated_download": 240,
-                "rate_limit_anonymous_download": 30,
             },
         )
         assert response.status_code == 200
@@ -206,8 +204,6 @@ class TestUpdateConfig:
         assert data["rate_limit_authenticated_api"] == 90
         assert data["rate_limit_public_api"] == 40
         assert data["rate_limit_share_access"] == 3
-        assert data["rate_limit_authenticated_download"] == 240
-        assert data["rate_limit_anonymous_download"] == 30
 
     def test_update_download_connection_pools(self, admin_client: TestClient):
         response = admin_client.put(
@@ -248,6 +244,19 @@ class TestUpdateConfig:
         )
         assert response.status_code == 400
         assert "不能超过系统总连接上限" in response.json()["detail"]
+
+    def test_update_rejects_removed_download_rate_limit_fields(
+        self, admin_client: TestClient
+    ):
+        response = admin_client.put(
+            "/api/config",
+            json={
+                "rate_limit_authenticated_download": 300,
+                "rate_limit_anonymous_download": 60,
+            },
+        )
+
+        assert response.status_code == 422
 
     def test_update_config_non_admin(self, authenticated_client: TestClient):
         response = authenticated_client.put("/api/config", json={"max_task_size": 1024})

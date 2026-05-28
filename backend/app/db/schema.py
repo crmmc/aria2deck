@@ -121,6 +121,7 @@ app_settings = Table(
     Column("rate_limit_authenticated_api", Integer, nullable=False),
     Column("rate_limit_public_api", Integer, nullable=False),
     Column("rate_limit_share_access", Integer, nullable=False),
+    # Deprecated: kept for schema compatibility; download request rate limiting was removed.
     Column("rate_limit_authenticated_download", Integer, nullable=False),
     Column("rate_limit_anonymous_download", Integer, nullable=False),
     Column("rate_limit_create_task", Integer, nullable=False),

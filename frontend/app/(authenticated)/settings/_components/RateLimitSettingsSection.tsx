@@ -1,20 +1,30 @@
 import type { SettingsFormState } from "../settingsState";
 
+type RateLimitForm = Pick<
+  SettingsFormState,
+  | "rateLimitAccountSecurity"
+  | "rateLimitAuthenticatedApi"
+  | "rateLimitPublicApi"
+  | "rateLimitShareAccess"
+  | "rateLimitCreateTask"
+  | "rateLimitCreateTorrent"
+  | "rateLimitCreatePack"
+  | "rateLimitAria2Test"
+  | "rateLimitRpc"
+>;
+
+type RateLimitFieldKey = keyof RateLimitForm;
+
 type RateLimitSettingsSectionProps = {
-  form: Pick<SettingsFormState,
-    "rateLimitAccountSecurity" | "rateLimitAuthenticatedApi" | "rateLimitPublicApi" |
-    "rateLimitShareAccess" | "rateLimitAuthenticatedDownload" | "rateLimitAnonymousDownload" |
-    "rateLimitCreateTask" | "rateLimitCreateTorrent" | "rateLimitCreatePack" |
-    "rateLimitAria2Test" | "rateLimitRpc"
-  >;
-  onFieldChange: <K extends keyof SettingsFormState>(field: K, value: SettingsFormState[K]) => void;
+  form: RateLimitForm;
+  onFieldChange: (field: RateLimitFieldKey, value: number) => void;
 };
 
 type RateLimitField = {
   id: string;
   label: string;
   description: string;
-  field: keyof SettingsFormState;
+  field: RateLimitFieldKey;
   min: number;
   max: number;
 };
@@ -24,8 +34,7 @@ const rateLimitFields: RateLimitField[] = [
   { id: "settings-rate-auth-api", label: "普通已登录 API 限流", description: "每分钟最大查询请求次数（0 = 不限制）", field: "rateLimitAuthenticatedApi", min: 0, max: 10000 },
   { id: "settings-rate-public-api", label: "普通匿名公开 API 限流", description: "每分钟最大公开查询次数（0 = 不限制）", field: "rateLimitPublicApi", min: 0, max: 10000 },
   { id: "settings-rate-share-access", label: "分享密码验证限流", description: "每分钟最大密码验证次数", field: "rateLimitShareAccess", min: 1, max: 10000 },
-  { id: "settings-rate-auth-download", label: "已登录下载限流", description: "每分钟最大请求次数（0 = 不限制）", field: "rateLimitAuthenticatedDownload", min: 0, max: 10000 },
-  { id: "settings-rate-anon-download", label: "匿名下载限流", description: "每分钟最大匿名下载请求次数（0 = 不限制）", field: "rateLimitAnonymousDownload", min: 0, max: 10000 },
+
   { id: "settings-rate-create-task", label: "创建任务限流", description: "每分钟最大创建任务次数", field: "rateLimitCreateTask", min: 1, max: 10000 },
   { id: "settings-rate-create-torrent", label: "创建种子限流", description: "每分钟最大上传种子次数", field: "rateLimitCreateTorrent", min: 1, max: 10000 },
   { id: "settings-rate-create-pack", label: "创建打包限流", description: "每分钟最大创建打包次数", field: "rateLimitCreatePack", min: 1, max: 10000 },
@@ -47,7 +56,7 @@ export function RateLimitSettingsSection({ form, onFieldChange }: RateLimitSetti
             type="number"
             min={min}
             max={max}
-            value={form[field as keyof typeof form] as number}
+            value={form[field]}
             onChange={(e) => onFieldChange(field, Math.max(min, Math.min(max, parseInt(e.target.value) || min)))}
             className="input"
             style={{ maxWidth: 200 }}

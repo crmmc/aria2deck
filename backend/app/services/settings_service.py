@@ -27,8 +27,6 @@ CONFIG_KEY_TO_COLUMN: dict[str, str] = {
     "rate_limit_authenticated_api": "rate_limit_authenticated_api",
     "rate_limit_public_api": "rate_limit_public_api",
     "rate_limit_share_access": "rate_limit_share_access",
-    "rate_limit_authenticated_download": "rate_limit_authenticated_download",
-    "rate_limit_anonymous_download": "rate_limit_anonymous_download",
     "rate_limit_create_task": "rate_limit_create_task",
     "rate_limit_create_torrent": "rate_limit_create_torrent",
     "rate_limit_create_pack": "rate_limit_create_pack",
@@ -54,8 +52,6 @@ INT_CONFIG_COLUMNS = {
     "rate_limit_authenticated_api",
     "rate_limit_public_api",
     "rate_limit_share_access",
-    "rate_limit_authenticated_download",
-    "rate_limit_anonymous_download",
     "rate_limit_create_task",
     "rate_limit_create_torrent",
     "rate_limit_create_pack",
@@ -146,10 +142,6 @@ def row_to_api_settings(row: Mapping[str, Any]) -> dict[str, Any]:
         "rate_limit_authenticated_api": int(row["rate_limit_authenticated_api"]),
         "rate_limit_public_api": int(row["rate_limit_public_api"]),
         "rate_limit_share_access": int(row["rate_limit_share_access"]),
-        "rate_limit_authenticated_download": int(
-            row["rate_limit_authenticated_download"]
-        ),
-        "rate_limit_anonymous_download": int(row["rate_limit_anonymous_download"]),
         "rate_limit_create_task": int(row["rate_limit_create_task"]),
         "rate_limit_create_torrent": int(row["rate_limit_create_torrent"]),
         "rate_limit_create_pack": int(row["rate_limit_create_pack"]),

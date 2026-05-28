@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import insert, select
 
 from app.core.download_limiter import download_config
+from app.core.rate_limit_config import rate_limit_config
 from app.db.engine import transaction
 from app.db.schema import share_links
 from app.routers.shares import MAX_ACTIVE_SHARES_PER_FILE
@@ -246,6 +247,31 @@ class TestPublicShareAccess:
         full_resp = client.get(f"/api/s/{share['share_code']}/download")
         assert full_resp.status_code == 200
         assert _share_download_count(share["share_code"]) == 1
+
+    def test_range_downloads_are_not_limited_by_public_api_rate_limit(
+        self, authenticated_client, client, user_file, monkeypatch
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+        original_limit = rate_limit_config.public_api
+        rate_limit_config.public_api = 1
+        try:
+            first = client.get(
+                f"/api/s/{share['share_code']}/download",
+                headers={"Range": "bytes=0-9"},
+            )
+            second = client.get(
+                f"/api/s/{share['share_code']}/download",
+                headers={"Range": "bytes=10-19"},
+            )
+        finally:
+            rate_limit_config.public_api = original_limit
+
+        assert first.status_code == 206
+        assert first.content == b"x" * 10
+        assert second.status_code == 206
+        assert second.content == b"x" * 10
+        assert _share_download_count(share["share_code"]) == 0
 
     def test_empty_range_header_counts_as_full_download(
         self, authenticated_client, client, user_file, monkeypatch

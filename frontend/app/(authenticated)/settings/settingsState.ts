@@ -17,8 +17,6 @@ export type SettingsFormState = {
   rateLimitAuthenticatedApi: number;
   rateLimitPublicApi: number;
   rateLimitShareAccess: number;
-  rateLimitAuthenticatedDownload: number;
-  rateLimitAnonymousDownload: number;
   rateLimitCreateTask: number;
   rateLimitCreateTorrent: number;
   rateLimitCreatePack: number;
@@ -58,8 +56,6 @@ export const initialSettingsFormState: SettingsFormState = {
   rateLimitAuthenticatedApi: 60,
   rateLimitPublicApi: 60,
   rateLimitShareAccess: 5,
-  rateLimitAuthenticatedDownload: 300,
-  rateLimitAnonymousDownload: 60,
   rateLimitCreateTask: 30,
   rateLimitCreateTorrent: 20,
   rateLimitCreatePack: 5,
@@ -122,8 +118,6 @@ export function configToSettingsFormState(cfg: Record<string, unknown>): Setting
     rateLimitAuthenticatedApi: (cfg.rate_limit_authenticated_api as number) ?? 60,
     rateLimitPublicApi: (cfg.rate_limit_public_api as number) ?? 60,
     rateLimitShareAccess: (cfg.rate_limit_share_access as number) ?? 5,
-    rateLimitAuthenticatedDownload: (cfg.rate_limit_authenticated_download as number) ?? 300,
-    rateLimitAnonymousDownload: (cfg.rate_limit_anonymous_download as number) ?? 60,
     rateLimitCreateTask: (cfg.rate_limit_create_task as number) ?? 30,
     rateLimitCreateTorrent: (cfg.rate_limit_create_torrent as number) ?? 20,
     rateLimitCreatePack: (cfg.rate_limit_create_pack as number) ?? 5,
@@ -181,8 +175,6 @@ export function settingsFormStateToPayload(state: SettingsFormState): SettingsPa
       rate_limit_authenticated_api: state.rateLimitAuthenticatedApi,
       rate_limit_public_api: state.rateLimitPublicApi,
       rate_limit_share_access: state.rateLimitShareAccess,
-      rate_limit_authenticated_download: state.rateLimitAuthenticatedDownload,
-      rate_limit_anonymous_download: state.rateLimitAnonymousDownload,
       rate_limit_create_task: state.rateLimitCreateTask,
       rate_limit_create_torrent: state.rateLimitCreateTorrent,
       rate_limit_create_pack: state.rateLimitCreatePack,

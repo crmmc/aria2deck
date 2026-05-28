@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -66,6 +67,10 @@ def _multi_file_torrent_payload() -> tuple[str, str]:
     return base64.b64encode(torrent).decode("ascii"), hashlib.sha1(info).hexdigest()
 
 
+def _public_dns_result() -> list[tuple]:
+    return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("8.8.8.8", 80))]
+
+
 async def _set_global_error_message(download_id: int, error_message: str) -> None:
     async with transaction() as conn:
         await conn.execute(
@@ -123,8 +128,9 @@ class TestSSRFProtection:
     async def test_check_url_safety_public_url(self) -> None:
         from app.routers.tasks import _check_url_safety
 
-        await _check_url_safety("http://example.com/file.zip")
-        await _check_url_safety("https://github.com/file.zip")
+        with patch("app.core.security.socket.getaddrinfo", return_value=_public_dns_result()):
+            await _check_url_safety("http://example.com/file.zip")
+            await _check_url_safety("https://github.com/file.zip")
 
     @pytest.mark.asyncio
     async def test_check_url_safety_magnet(self) -> None:
@@ -183,6 +189,11 @@ class TestHelperFunctions:
 
 
 class TestCreateTask:
+    @pytest.fixture(autouse=True)
+    def public_dns(self):
+        with patch("app.core.security.socket.getaddrinfo", return_value=_public_dns_result()):
+            yield
+
     def test_create_task_unauthorized(self, client: TestClient) -> None:
         response = client.post(
             "/api/tasks", json={"uri": "http://example.com/file.zip"}

@@ -56,8 +56,6 @@ const baseConfig = {
   rate_limit_authenticated_api: 60,
   rate_limit_public_api: 60,
   rate_limit_share_access: 5,
-  rate_limit_authenticated_download: 300,
-  rate_limit_anonymous_download: 60,
   rate_limit_create_task: 30,
   rate_limit_create_torrent: 20,
   rate_limit_create_pack: 5,
