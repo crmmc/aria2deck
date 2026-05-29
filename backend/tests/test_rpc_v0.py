@@ -33,9 +33,10 @@ async def test_rpc_tell_active_uses_user_tasks(temp_db: str) -> None:
 
     handler = Aria2RpcHandler(user["id"], client, AppState())
     rows = await handler.handle("aria2.tellActive", [])
+    owned = await list_user_tasks(user["id"])
 
     assert len(rows) == 1
-    assert rows[0]["gid"] == "gid-rpc-active"
+    assert rows[0]["gid"] == f"task-{owned[0]['id']}"
     assert rows[0]["downloadSpeed"] == "10"
 
 
@@ -71,7 +72,7 @@ async def test_rpc_add_uri_creates_v0_task_and_returns_gid(temp_db: str) -> None
     )
 
     rows = await list_user_tasks(user["id"])
-    assert result == "gid-rpc-add-uri"
+    assert result == f"task-{rows[0]['id']}"
     assert len(rows) == 1
     assert rows[0]["aria2_gid"] == "gid-rpc-add-uri"
     assert rows[0]["status"] == "active"
@@ -121,7 +122,7 @@ async def test_rpc_add_torrent_creates_v0_task_and_returns_gid(temp_db: str) -> 
     )
 
     rows = await list_user_tasks(user["id"])
-    assert result == "gid-rpc-add-torrent"
+    assert result == f"task-{rows[0]['id']}"
     assert len(rows) == 1
     assert rows[0]["aria2_gid"] == "gid-rpc-add-torrent"
     assert rows[0]["status"] == "active"

@@ -26,7 +26,6 @@ from app.repositories.downloads import (
     delete_all_terminal_user_tasks,
     delete_terminal_user_task,
     delete_terminal_user_task_by_gid,
-    get_global_by_resource_key,
     get_user_task_by_gid,
     get_user_task_by_id,
     list_user_tasks,
@@ -55,7 +54,6 @@ DEFAULT_STATUS_WAITING = "waiting"
 DEFAULT_STATUS_ERROR = "error"
 DEFAULT_BOOL_FALSE = "false"
 DEFAULT_ERROR_CODE = "0"
-SPECIAL_GID_PREFIXES = ("hist-", "task-")
 
 ALLOWED_STATUS_VALUES = {
     "active",
@@ -207,6 +205,36 @@ class Aria2RpcHandler:
     async def _verify_task_owner(self, gid: str) -> dict[str, Any] | None:
         """Return the current user's v0 task row for an aria2 gid."""
         return await get_user_task_by_gid(self.user_id, gid)
+
+    async def _resolve_owned_row(self, gid: str) -> dict[str, Any] | None:
+        """Resolve a client-facing gid to the current user's task row.
+
+        The only identity exposed to clients is ``task-{id}``; a raw aria2 gid
+        is still accepted for backward compatibility. ``hist-`` gids never map
+        to a live task.
+        """
+        _, task_id, history_id = self._parse_history_gid(gid)
+        if history_id is not None:
+            return None
+        if task_id is not None:
+            return await self._get_task_pair_by_task_id(task_id)
+        return await self._verify_task_owner(gid)
+
+    async def _fetch_live_status(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        """Fetch sanitized live aria2 status via the real backend gid."""
+        real_gid = str(row.get("aria2_gid") or "")
+        if not real_gid or not is_current(row):
+            return None
+        try:
+            return self._sanitize_status(await self.client.tell_status(real_gid))
+        except Exception as exc:
+            logger.debug(
+                "live tellStatus failed for task=%s user_id=%s",
+                row.get("id"),
+                self.user_id,
+                exc_info=exc,
+            )
+            return None
 
     async def _get_user_gids(
         self,
@@ -398,25 +426,10 @@ class Aria2RpcHandler:
     def _sanitize_bittorrent(self, bt_info: Any) -> dict:
         sanitized = {
             "announceList": [],
-            "comment": "",
-            "creationDate": "0",
-            "mode": "single",
             "info": {"name": ""},
         }
         if not isinstance(bt_info, dict):
             return sanitized
-
-        mode = bt_info.get("mode")
-        if isinstance(mode, str) and mode in {"single", "multi"}:
-            sanitized["mode"] = mode
-
-        comment = bt_info.get("comment")
-        if isinstance(comment, str):
-            sanitized["comment"] = comment
-
-        creation_date = bt_info.get("creationDate")
-        if creation_date is not None:
-            sanitized["creationDate"] = self._status_str(creation_date, "0")
 
         info = bt_info.get("info")
         if isinstance(info, dict):
@@ -699,37 +712,6 @@ class Aria2RpcHandler:
     async def _get_task_pair_by_task_id(self, task_id: int) -> dict[str, Any] | None:
         return await get_user_task_by_id(self.user_id, task_id)
 
-    async def _get_history_status(self, history_id: int) -> dict | None:
-        return None
-
-    async def _get_special_gid_status(self, gid: str) -> dict | None:
-        _, task_id, history_id = self._parse_history_gid(gid)
-        if history_id is not None:
-            return await self._get_history_status(history_id)
-        if task_id is None:
-            return None
-        row = await self._get_task_pair_by_task_id(task_id)
-        if row is None:
-            return None
-        return rpc_view_service.status_from_task(row)
-
-    async def _resolve_special_gid_status(self, gid: str) -> dict | None:
-        if not gid.startswith(SPECIAL_GID_PREFIXES):
-            return None
-        return await self._get_special_gid_status(gid)
-
-    async def _get_special_gid_source_uri(self, gid: str) -> str | None:
-        _, task_id, history_id = self._parse_history_gid(gid)
-        if history_id is not None:
-            return None
-
-        if task_id is None:
-            return None
-        row = await self._get_task_pair_by_task_id(task_id)
-        if row is None:
-            return None
-        return str(row.get("source_uri") or "")
-
     @staticmethod
     def _status_has_file_name(status: dict[str, Any]) -> bool:
         return has_real_file_path(status)
@@ -808,9 +790,6 @@ class Aria2RpcHandler:
         task: dict[str, Any],
         resource_key: str,
     ) -> str:
-        global_download = await get_global_by_resource_key(resource_key)
-        if global_download and global_download.get("aria2_gid"):
-            return str(global_download["aria2_gid"])
         return f"task-{task['id']}"
 
     @staticmethod
@@ -908,7 +887,7 @@ class Aria2RpcHandler:
         if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
         gid = str(params[0])
-        row = await self._verify_task_owner(gid)
+        row = await self._resolve_owned_row(gid)
         if row is None or row["status"] not in ACTIVE_USER_TASK_STATUSES:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
         await cancel_user_task(
@@ -930,27 +909,12 @@ class Aria2RpcHandler:
         gid = str(params[0])
         keys = self._extract_status_keys(params, 1)
 
-        special_status = await self._resolve_special_gid_status(gid)
-        if special_status is not None:
-            return self._apply_status_keys(special_status, keys)
-
-        row = await self._verify_task_owner(gid)
+        row = await self._resolve_owned_row(gid)
         if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
 
-        try:
-            status = await self.client.tell_status(gid)
-            response = rpc_view_service.status_from_task(
-                row, self._sanitize_status(status)
-            )
-        except Exception as exc:
-            logger.debug(
-                "Fallback to DB status for gid=%s user_id=%s",
-                gid,
-                self.user_id,
-                exc_info=exc,
-            )
-            response = rpc_view_service.status_from_task(row)
+        live = await self._fetch_live_status(row)
+        response = rpc_view_service.status_from_task(row, live)
         return self._apply_status_keys(response, keys)
 
     async def _handle_tell_active(self, params: list) -> list:
@@ -1082,26 +1046,22 @@ class Aria2RpcHandler:
         if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
         gid = str(params[0])
-        special_status = await self._resolve_special_gid_status(gid)
-        if gid.startswith(SPECIAL_GID_PREFIXES):
-            if special_status is None:
-                raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-            return self._sanitize_files(special_status.get("files"))
-        row = await self._verify_task_owner(gid)
+        row = await self._resolve_owned_row(gid)
         if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-        try:
-            files = await self.client.get_files(gid)
-            sanitized = self._sanitize_files(files)
-            if sanitized and self._status_has_file_name({"files": sanitized}):
-                return sanitized
-        except Exception as exc:
-            logger.warning(
-                "aria2.getFiles failed for gid=%s user_id=%s",
-                gid,
-                self.user_id,
-                exc_info=exc,
-            )
+        real_gid = str(row.get("aria2_gid") or "")
+        if real_gid and is_current(row):
+            try:
+                sanitized = self._sanitize_files(await self.client.get_files(real_gid))
+                if sanitized and self._status_has_file_name({"files": sanitized}):
+                    return sanitized
+            except Exception as exc:
+                logger.warning(
+                    "aria2.getFiles failed for task=%s user_id=%s",
+                    row.get("id"),
+                    self.user_id,
+                    exc_info=exc,
+                )
         return self._sanitize_files(rpc_view_service.status_from_task(row).get("files"))
 
     async def _handle_get_uris(self, params: list) -> list:
@@ -1109,33 +1069,26 @@ class Aria2RpcHandler:
         if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
         gid = str(params[0])
-        special_status = await self._resolve_special_gid_status(gid)
-        if gid.startswith(SPECIAL_GID_PREFIXES):
-            if special_status is None:
-                raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-            source_uri = await self._get_special_gid_source_uri(gid)
-            if not source_uri:
-                return []
-            return self._sanitize_uris([{"uri": source_uri, "status": "used"}])
-        row = await self._verify_task_owner(gid)
+        row = await self._resolve_owned_row(gid)
         if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-        try:
-            uris = await self.client.get_uris(gid)
-            return self._sanitize_uris(uris)
-        except Exception as exc:
-            logger.warning(
-                "aria2.getUris failed for gid=%s user_id=%s",
-                gid,
-                self.user_id,
-                exc_info=exc,
-            )
-            source_uri = row.get("source_uri")
-            return (
-                self._sanitize_uris([{"uri": source_uri, "status": "used"}])
-                if source_uri
-                else []
-            )
+        real_gid = str(row.get("aria2_gid") or "")
+        if real_gid and is_current(row):
+            try:
+                return self._sanitize_uris(await self.client.get_uris(real_gid))
+            except Exception as exc:
+                logger.warning(
+                    "aria2.getUris failed for task=%s user_id=%s",
+                    row.get("id"),
+                    self.user_id,
+                    exc_info=exc,
+                )
+        source_uri = row.get("source_uri")
+        return (
+            self._sanitize_uris([{"uri": source_uri, "status": "used"}])
+            if source_uri
+            else []
+        )
 
     async def _handle_get_version(self, params: list) -> dict:
         """aria2.getVersion()"""
@@ -1210,49 +1163,42 @@ class Aria2RpcHandler:
         if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
         gid = str(params[0])
-        special_status = await self._resolve_special_gid_status(gid)
-        if gid.startswith(SPECIAL_GID_PREFIXES):
-            if special_status is None:
-                raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-            return []
-        row = await self._verify_task_owner(gid)
+        row = await self._resolve_owned_row(gid)
         if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-        try:
-            peers = await self.client.get_peers(gid)
-            return self._sanitize_peers(peers)
-        except Exception as exc:
-            logger.warning(
-                "aria2.getPeers failed for gid=%s user_id=%s",
-                gid,
-                self.user_id,
-                exc_info=exc,
-            )
-            return []
+        real_gid = str(row.get("aria2_gid") or "")
+        if real_gid and is_current(row):
+            try:
+                return self._sanitize_peers(await self.client.get_peers(real_gid))
+            except Exception as exc:
+                logger.warning(
+                    "aria2.getPeers failed for task=%s user_id=%s",
+                    row.get("id"),
+                    self.user_id,
+                    exc_info=exc,
+                )
+        return []
 
     async def _handle_get_servers(self, params: list) -> list:
         if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
         gid = str(params[0])
-        special_status = await self._resolve_special_gid_status(gid)
-        if gid.startswith(SPECIAL_GID_PREFIXES):
-            if special_status is None:
-                raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-            return []
-        row = await self._verify_task_owner(gid)
+        row = await self._resolve_owned_row(gid)
         if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-        try:
-            server_groups = await self.client.get_servers(gid)
-            return self._sanitize_servers(server_groups)
-        except Exception as exc:
-            logger.warning(
-                "aria2.getServers failed for gid=%s user_id=%s",
-                gid,
-                self.user_id,
-                exc_info=exc,
-            )
-            return []
+        real_gid = str(row.get("aria2_gid") or "")
+        if real_gid and is_current(row):
+            try:
+                server_groups = await self.client.get_servers(real_gid)
+                return self._sanitize_servers(server_groups)
+            except Exception as exc:
+                logger.warning(
+                    "aria2.getServers failed for task=%s user_id=%s",
+                    row.get("id"),
+                    self.user_id,
+                    exc_info=exc,
+                )
+        return []
 
     async def _handle_save_session(self, params: list) -> str:
         return "OK"

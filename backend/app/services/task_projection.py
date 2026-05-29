@@ -62,15 +62,17 @@ def display_name(row: dict[str, Any]) -> str:
     for key in ("display_name", "global_display_name"):
         value = row.get(key)
         if isinstance(value, str) and value.strip():
-            return Path(value).name
+            return value if is_uri_like_path(value) else Path(value).name
 
     source_uri = str(row.get("source_uri") or "")
+    if is_uri_like_path(source_uri):
+        return source_uri
     parsed = urlsplit(source_uri)
     if parsed.path:
         name = Path(unquote(parsed.path)).name
         if name:
             return name
-    return str(row.get("aria2_gid") or f"task-{row['id']}")
+    return f"task-{row['id']}"
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -117,6 +119,10 @@ def _files_from_task(
     ]
 
 
+def is_torrent_row(row: dict[str, Any]) -> bool:
+    return str(row.get("resource_kind") or "") in ("magnet", "torrent")
+
+
 def build_aria2_status(
     row: dict[str, Any], live: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -126,7 +132,7 @@ def build_aria2_status(
     if live and effective not in TERMINAL_STATUSES:
         status = str(live.get("status") or status)
 
-    gid = row.get("aria2_gid") or f"task-{row['id']}"
+    gid = f"task-{row['id']}"
     total_bytes = _safe_int(row.get("total_bytes"))
     completed_bytes = _safe_int(row.get("completed_bytes"))
     if status == "complete" and completed_bytes <= 0:
@@ -140,7 +146,7 @@ def build_aria2_status(
     )
     error_message = row.get("error_message") or row.get("global_error_message") or ""
 
-    return {
+    result = {
         "gid": gid,
         "status": status,
         "totalLength": str(live.get("totalLength", total_bytes)),
@@ -148,27 +154,20 @@ def build_aria2_status(
         "uploadLength": str(live.get("uploadLength", "0")),
         "downloadSpeed": str(live.get("downloadSpeed", "0")),
         "uploadSpeed": str(live.get("uploadSpeed", "0")),
-        "pieceLength": str(live.get("pieceLength", "0")),
-        "numPieces": str(live.get("numPieces", "0")),
-        "connections": str(live.get("connections", "0")),
+        "connections": "0",
         "dir": "",
         "files": files,
         "errorCode": "1" if status == "error" else "0",
         "errorMessage": error_message if status == "error" else "",
-        "infoHash": str(live.get("infoHash", "")),
-        "numSeeders": str(live.get("numSeeders", "0")),
-        "seeder": str(live.get("seeder", "false")),
-        "bittorrent": live.get(
-            "bittorrent",
-            {
-                "announceList": [],
-                "comment": "",
-                "creationDate": "0",
-                "mode": "single",
-                "info": {"name": display_name(row)},
-            },
-        ),
     }
+    if is_torrent_row(row):
+        # 元数据阶段还没有真实种子名时，用磁力链接占位以便区分不同任务
+        name = _extract_live_display_name(live) or display_name(row)
+        result["infoHash"] = str(live.get("infoHash", ""))
+        result["numSeeders"] = "0"
+        result["seeder"] = "false"
+        result["bittorrent"] = {"announceList": [], "info": {"name": name}}
+    return result
 
 
 def projected_speeds(

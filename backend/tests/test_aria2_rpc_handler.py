@@ -25,6 +25,7 @@ async def create_rpc_task(
     name: str,
     global_status: str | None = None,
     uri: str | None = None,
+    resource_kind: str = "http",
     total_bytes: int = 100,
     completed_bytes: int = 0,
     error_message: str | None = None,
@@ -40,7 +41,7 @@ async def create_rpc_task(
                     insert(global_downloads)
                     .values(
                         resource_key=f"rpc:{user_id}:{gid or name}:{timestamp}",
-                        resource_kind="http",
+                        resource_kind=resource_kind,
                         source_uri=source_uri,
                         display_name=name,
                         aria2_gid=gid,
@@ -246,7 +247,7 @@ async def test_get_global_stat_uses_owned_live_speeds_only(
 async def test_tell_active_uses_v0_tasks_and_live_speed(
     handler: Aria2RpcHandler,
 ) -> None:
-    await create_rpc_task(
+    task = await create_rpc_task(
         user_id=handler.user_id,
         gid="gid-active",
         status="active",
@@ -264,7 +265,7 @@ async def test_tell_active_uses_v0_tasks_and_live_speed(
 
     assert result == [
         {
-            "gid": "gid-active",
+            "gid": f"task-{task['id']}",
             "downloadSpeed": "42",
             "files": [
                 {
@@ -284,12 +285,13 @@ async def test_tell_active_uses_v0_tasks_and_live_speed(
 async def test_tell_active_refreshes_stale_live_bt_metadata(
     handler: Aria2RpcHandler,
 ) -> None:
-    await create_rpc_task(
+    task = await create_rpc_task(
         user_id=handler.user_id,
         gid="gid-stale-bt",
         status="active",
         name="magnet:?xt=urn:btih:stale",
         uri="magnet:?xt=urn:btih:stale",
+        resource_kind="magnet",
         total_bytes=868_289_498,
         completed_bytes=866_552_794,
     )
@@ -335,14 +337,11 @@ async def test_tell_active_refreshes_stale_live_bt_metadata(
 
     assert result == [
         {
-            "gid": "gid-stale-bt",
+            "gid": f"task-{task['id']}",
             "completedLength": "868289498",
             "infoHash": "145c59fb37d713ad1c1b84caa64ac4d9c6f78fe1",
             "bittorrent": {
                 "announceList": [],
-                "comment": "",
-                "creationDate": "0",
-                "mode": "single",
                 "info": {"name": "real-file.mkv"},
             },
             "files": [
@@ -364,7 +363,7 @@ async def test_tell_active_refreshes_stale_live_bt_metadata(
 async def test_tell_active_keeps_sanitized_live_status_when_bt_refresh_fails(
     handler: Aria2RpcHandler,
 ) -> None:
-    await create_rpc_task(
+    task = await create_rpc_task(
         user_id=handler.user_id,
         gid="gid-refresh-fails",
         status="active",
@@ -397,7 +396,7 @@ async def test_tell_active_keeps_sanitized_live_status_when_bt_refresh_fails(
 
     assert result == [
         {
-            "gid": "gid-refresh-fails",
+            "gid": f"task-{task['id']}",
             "status": "active",
             "downloadSpeed": "5",
             "files": [
@@ -424,6 +423,7 @@ async def test_tell_status_prefers_live_status_over_stale_db(
         gid="gid-live-status",
         status="active",
         name="stale-name.bin",
+        resource_kind="magnet",
         total_bytes=100,
         completed_bytes=90,
     )
@@ -477,7 +477,7 @@ async def test_tell_waiting_prefers_live_rows_and_filters_by_user(
     handler: Aria2RpcHandler,
 ) -> None:
     other = await create_user_v0(username="rpc_waiting_other")
-    await create_rpc_task(
+    owned = await create_rpc_task(
         user_id=handler.user_id,
         gid="gid-waiting-owned",
         status="waiting",
@@ -507,7 +507,7 @@ async def test_tell_waiting_prefers_live_rows_and_filters_by_user(
 
     assert result == [
         {
-            "gid": "gid-waiting-owned",
+            "gid": f"task-{owned['id']}",
             "status": "waiting",
             "totalLength": "55",
             "files": [
@@ -527,7 +527,7 @@ async def test_tell_waiting_prefers_live_rows_and_filters_by_user(
 @pytest.mark.asyncio
 async def test_tell_waiting_paginates_v0_rows(handler: Aria2RpcHandler) -> None:
     base = now_ms()
-    await create_rpc_task(
+    old = await create_rpc_task(
         user_id=handler.user_id,
         gid="gid-old",
         status="queued",
@@ -545,19 +545,19 @@ async def test_tell_waiting_paginates_v0_rows(handler: Aria2RpcHandler) -> None:
 
     result = await handler.handle("aria2.tellWaiting", [1, 1, ["gid"]])
 
-    assert result == [{"gid": "gid-old"}]
+    assert result == [{"gid": f"task-{old['id']}"}]
 
 
 @pytest.mark.asyncio
 async def test_tell_stopped_maps_terminal_tasks(handler: Aria2RpcHandler) -> None:
-    await create_rpc_task(
+    ok = await create_rpc_task(
         user_id=handler.user_id,
         gid="gid-ok",
         status="completed",
         name="ok.bin",
         total_bytes=9,
     )
-    await create_rpc_task(
+    fail = await create_rpc_task(
         user_id=handler.user_id,
         gid="gid-fail",
         status="failed",
@@ -570,16 +570,20 @@ async def test_tell_stopped_maps_terminal_tasks(handler: Aria2RpcHandler) -> Non
     )
 
     assert result[0] == {
-        "gid": "gid-fail",
+        "gid": f"task-{fail['id']}",
         "status": "error",
         "errorMessage": "network",
     }
-    assert result[1] == {"gid": "gid-ok", "status": "complete", "errorMessage": ""}
+    assert result[1] == {
+        "gid": f"task-{ok['id']}",
+        "status": "complete",
+        "errorMessage": "",
+    }
 
 
 @pytest.mark.asyncio
 async def test_tell_status_falls_back_to_v0_row(handler: Aria2RpcHandler) -> None:
-    await create_rpc_task(
+    task = await create_rpc_task(
         user_id=handler.user_id,
         gid="gid-status",
         status="active",
@@ -591,7 +595,7 @@ async def test_tell_status_falls_back_to_v0_row(handler: Aria2RpcHandler) -> Non
 
     result = await handler.handle("aria2.tellStatus", ["gid-status"])
 
-    assert result["gid"] == "gid-status"
+    assert result["gid"] == f"task-{task['id']}"
     assert result["status"] == "active"
     assert result["files"][0]["path"] == "status.bin"
 
@@ -784,7 +788,7 @@ async def test_remove_download_result_deletes_effective_terminal_gid(
     stopped = await handler.handle("aria2.tellStopped", [0, 10, ["gid", "status"]])
     result = await handler.handle("aria2.removeDownloadResult", ["gid-effective-complete"])
 
-    assert stopped == [{"gid": "gid-effective-complete", "status": "complete"}]
+    assert stopped == [{"gid": f"task-{task['id']}", "status": "complete"}]
     assert result == "OK"
     assert await get_user_task_by_id(handler.user_id, task["id"]) is None
 
@@ -943,3 +947,128 @@ async def test_list_user_tasks_helper_still_orders_by_updated_at(
     rows = await list_user_tasks(handler.user_id, ["active"])
 
     assert [row["aria2_gid"] for row in rows] == ["gid-b", "gid-a"]
+
+
+# ---------------------------------------------------------------------------
+# Regression: the backend aria2 gid must never be exposed to RPC clients.
+# The external identity is always task-{user_task_id}; live data is still
+# fetched from aria2 via the real backend gid behind the scenes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tell_active_masks_backend_gid(handler: Aria2RpcHandler) -> None:
+    task = await create_rpc_task(
+        user_id=handler.user_id,
+        gid="backend-gid-active",
+        status="active",
+        name="active.bin",
+    )
+    handler.client.tell_active.return_value = [
+        {"gid": "backend-gid-active", "status": "active", "downloadSpeed": "42"}
+    ]
+
+    result = await handler.handle("aria2.tellActive", [["gid", "downloadSpeed"]])
+
+    assert result == [{"gid": f"task-{task['id']}", "downloadSpeed": "42"}]
+
+
+@pytest.mark.asyncio
+async def test_tell_status_by_task_gid_keeps_live_data(
+    handler: Aria2RpcHandler,
+) -> None:
+    task = await create_rpc_task(
+        user_id=handler.user_id,
+        gid="backend-gid-status",
+        status="active",
+        name="stale-name.bin",
+        total_bytes=100,
+        completed_bytes=10,
+    )
+    handler.client.tell_status.return_value = {
+        "gid": "backend-gid-status",
+        "status": "active",
+        "totalLength": "100",
+        "completedLength": "80",
+        "downloadSpeed": "999",
+    }
+
+    result = await handler.handle(
+        "aria2.tellStatus",
+        [f"task-{task['id']}", ["gid", "completedLength", "downloadSpeed"]],
+    )
+
+    # Output identity is masked, but the live aria2 numbers are preserved by
+    # resolving task-{id} back to the real backend gid.
+    assert result["gid"] == f"task-{task['id']}"
+    assert result["completedLength"] == "80"
+    assert result["downloadSpeed"] == "999"
+    handler.client.tell_status.assert_awaited_once_with("backend-gid-status")
+
+
+@pytest.mark.asyncio
+async def test_remove_accepts_task_gid(handler: Aria2RpcHandler) -> None:
+    task = await create_rpc_task(
+        user_id=handler.user_id,
+        gid="backend-gid-remove",
+        status="active",
+        name="remove.bin",
+    )
+
+    result = await handler.handle("aria2.remove", [f"task-{task['id']}"])
+    latest = await get_user_task_by_id(handler.user_id, task["id"])
+
+    assert result == f"task-{task['id']}"
+    assert latest is not None
+    assert latest["status"] == "cancelled"
+    handler.client.force_remove.assert_awaited_once_with("backend-gid-remove")
+
+
+@pytest.mark.asyncio
+async def test_http_task_omits_bittorrent_and_infohash(
+    handler: Aria2RpcHandler,
+) -> None:
+    await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-http",
+        status="active",
+        name="file.bin",
+        resource_kind="http",
+    )
+    handler.client.tell_active.return_value = [
+        {"gid": "gid-http", "status": "active", "infoHash": "deadbeef"}
+    ]
+
+    result = await handler.handle("aria2.tellActive", [])
+
+    assert len(result) == 1
+    status = result[0]
+    for key in ("bittorrent", "infoHash", "numSeeders", "seeder"):
+        assert key not in status
+
+
+@pytest.mark.asyncio
+async def test_magnet_metadata_phase_name_falls_back_to_magnet(
+    handler: Aria2RpcHandler,
+) -> None:
+    magnet = "magnet:?xt=urn:btih:abc123"
+    await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-magnet",
+        status="active",
+        name=magnet,
+        uri=magnet,
+        resource_kind="magnet",
+    )
+    # During metadata resolution aria2 reports a [METADATA] placeholder name.
+    handler.client.tell_active.return_value = [
+        {
+            "gid": "gid-magnet",
+            "status": "active",
+            "bittorrent": {"info": {"name": "[METADATA]abc123"}},
+        }
+    ]
+
+    result = await handler.handle("aria2.tellActive", [["gid", "bittorrent"]])
+
+    assert result[0]["bittorrent"]["info"]["name"] == magnet
