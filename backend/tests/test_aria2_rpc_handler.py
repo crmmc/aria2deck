@@ -1045,6 +1045,9 @@ async def test_http_task_omits_bittorrent_and_infohash(
     status = result[0]
     for key in ("bittorrent", "infoHash", "numSeeders", "seeder"):
         assert key not in status
+    # 通用字段（所有下载都应有）需保留，否则第三方客户端会报错
+    for key in ("pieceLength", "numPieces", "connections"):
+        assert key in status
 
 
 @pytest.mark.asyncio

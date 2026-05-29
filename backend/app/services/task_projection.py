@@ -154,6 +154,8 @@ def build_aria2_status(
         "uploadLength": str(live.get("uploadLength", "0")),
         "downloadSpeed": str(live.get("downloadSpeed", "0")),
         "uploadSpeed": str(live.get("uploadSpeed", "0")),
+        "pieceLength": "1048576",
+        "numPieces": "0",
         "connections": "0",
         "dir": "",
         "files": files,
