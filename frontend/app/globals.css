@@ -1056,7 +1056,8 @@ p {
 }
 
 dialog.modal-overlay,
-dialog.confirm-overlay {
+dialog.confirm-overlay,
+dialog.more-menu-overlay {
   width: 100vw;
   max-width: none;
   height: 100vh;
@@ -1068,11 +1069,13 @@ dialog.confirm-overlay {
 }
 
 dialog.modal-overlay::backdrop,
-dialog.confirm-overlay::backdrop {
+dialog.confirm-overlay::backdrop,
+dialog.more-menu-overlay::backdrop {
   background: rgba(0, 0, 0, 0.5);
 }
 
-dialog.modal-overlay {
+dialog.modal-overlay,
+dialog.more-menu-overlay {
   background: transparent;
 }
 
@@ -1090,7 +1093,8 @@ dialog.modal-overlay {
 .modal-content,
 .confirm-content,
 .batch-modal-content,
-.search-modal {
+.search-modal,
+.more-menu {
   position: relative;
   z-index: 1;
 }
@@ -3343,7 +3347,6 @@ dialog.confirm-overlay {
     display: flex;
     align-items: flex-end;
     justify-content: center;
-    animation: fadeIn 0.2s ease;
   }
 
   .more-menu {
@@ -3353,7 +3356,6 @@ dialog.confirm-overlay {
     max-width: 500px;
     padding: 16px;
     padding-bottom: calc(16px + env(safe-area-inset-bottom, 0));
-    animation: slideUp 0.3s ease;
   }
 
   @keyframes slideUp {
