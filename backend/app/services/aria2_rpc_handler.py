@@ -1166,17 +1166,6 @@ class Aria2RpcHandler:
         row = await self._resolve_owned_row(gid)
         if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-        real_gid = str(row.get("aria2_gid") or "")
-        if real_gid and is_current(row):
-            try:
-                return self._sanitize_peers(await self.client.get_peers(real_gid))
-            except Exception as exc:
-                logger.warning(
-                    "aria2.getPeers failed for task=%s user_id=%s",
-                    row.get("id"),
-                    self.user_id,
-                    exc_info=exc,
-                )
         return []
 
     async def _handle_get_servers(self, params: list) -> list:
@@ -1186,18 +1175,6 @@ class Aria2RpcHandler:
         row = await self._resolve_owned_row(gid)
         if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-        real_gid = str(row.get("aria2_gid") or "")
-        if real_gid and is_current(row):
-            try:
-                server_groups = await self.client.get_servers(real_gid)
-                return self._sanitize_servers(server_groups)
-            except Exception as exc:
-                logger.warning(
-                    "aria2.getServers failed for task=%s user_id=%s",
-                    row.get("id"),
-                    self.user_id,
-                    exc_info=exc,
-                )
         return []
 
     async def _handle_save_session(self, params: list) -> str:

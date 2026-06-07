@@ -673,31 +673,18 @@ async def test_get_uris_masks_credentials_and_falls_back_to_source_uri(
 
 
 @pytest.mark.asyncio
-async def test_get_peers_and_servers_mask_sensitive_fields(
+async def test_get_peers_and_servers_return_empty(
     handler: Aria2RpcHandler,
 ) -> None:
     await create_rpc_task(
         user_id=handler.user_id, gid="gid-peer", status="active", name="peer.bin"
     )
-    handler.client.get_peers.return_value = [
-        {"peerId": "raw", "ip": "8.8.8.8", "downloadSpeed": "1"}
-    ]
-    handler.client.get_servers.return_value = [
-        {
-            "index": "1",
-            "servers": [
-                {"uri": "https://x", "currentUri": "https://y", "downloadSpeed": "2"}
-            ],
-        }
-    ]
 
     peers = await handler.handle("aria2.getPeers", ["gid-peer"])
     servers = await handler.handle("aria2.getServers", ["gid-peer"])
 
-    assert peers[0]["peerId"] == "masked-peer"
-    assert peers[0]["ip"] == "0.0.0.0"
-    assert servers[0]["servers"][0]["uri"] == ""
-    assert servers[0]["servers"][0]["downloadSpeed"] == "2"
+    assert peers == []
+    assert servers == []
 
 
 @pytest.mark.asyncio
