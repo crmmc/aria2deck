@@ -1175,7 +1175,20 @@ class Aria2RpcHandler:
         row = await self._resolve_owned_row(gid)
         if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
-        return []
+        real_gid = str(row.get("aria2_gid") or "")
+        indexes = ["1"]
+        if real_gid and is_current(row):
+            try:
+                files = await self.client.get_files(real_gid)
+                if isinstance(files, list):
+                    indexes = [
+                        str(item.get("index"))
+                        for item in files
+                        if isinstance(item, dict) and item.get("index") is not None
+                    ] or indexes
+            except Exception:
+                pass
+        return [{"index": index, "servers": []} for index in indexes]
 
     async def _handle_save_session(self, params: list) -> str:
         return "OK"

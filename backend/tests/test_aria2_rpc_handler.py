@@ -684,7 +684,18 @@ async def test_get_peers_and_servers_return_empty(
     servers = await handler.handle("aria2.getServers", ["gid-peer"])
 
     assert peers == []
-    assert servers == []
+    assert servers == [{"index": "1", "servers": []}]
+
+    handler.client.get_files.return_value = [
+        {"index": "1", "path": "/dl/file1.bin", "length": "100"},
+        None,
+        {"index": "3", "path": "/dl/file3.bin", "length": "300"},
+    ]
+    servers = await handler.handle("aria2.getServers", ["gid-peer"])
+    assert servers == [
+        {"index": "1", "servers": []},
+        {"index": "3", "servers": []},
+    ]
 
 
 @pytest.mark.asyncio
