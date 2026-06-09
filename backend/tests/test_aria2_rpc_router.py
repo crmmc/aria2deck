@@ -312,7 +312,7 @@ class TestJsonrpcHandler:
             "/aria2/jsonrpc",
             params={
                 "jsonrpc": "2.0",
-                "method": "aria2.pause",
+                "method": "aria2.getOption",
                 "id": "get-json-1",
                 "params": json.dumps([f"token:{rpc_user['rpc_secret']}", "dummy-gid"]),
             },
@@ -320,7 +320,7 @@ class TestJsonrpcHandler:
         assert response.status_code == 200
         data = response.json()
         assert data["id"] == "get-json-1"
-        assert data["result"] == "dummy-gid"
+        assert data["result"] == {}
 
     def test_get_query_base64_params(self, client: TestClient, rpc_user: dict):
         encoded_params = base64.b64encode(
@@ -331,7 +331,7 @@ class TestJsonrpcHandler:
             "/aria2/jsonrpc",
             params={
                 "jsonrpc": "2.0",
-                "method": "aria2.pause",
+                "method": "aria2.getOption",
                 "id": "get-b64-1",
                 "params": encoded_params,
             },
@@ -339,7 +339,7 @@ class TestJsonrpcHandler:
         assert response.status_code == 200
         data = response.json()
         assert data["id"] == "get-b64-1"
-        assert data["result"] == "dummy-gid"
+        assert data["result"] == {}
 
     def test_uses_refreshed_aria2_client_config(
         self, client: TestClient, rpc_user: dict, monkeypatch

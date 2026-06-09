@@ -1024,12 +1024,11 @@ async def test_invalid_params_raise_rpc_errors(handler: Aria2RpcHandler) -> None
 
 @pytest.mark.asyncio
 async def test_static_compat_methods(handler: Aria2RpcHandler) -> None:
-    assert await handler.handle("aria2.pause", ["gid"]) == "gid"
-    assert await handler.handle("aria2.forcePause", ["gid"]) == "gid"
-    assert await handler.handle("aria2.unpause", ["gid"]) == "gid"
-    assert await handler.handle("aria2.pauseAll", []) == "OK"
-    assert await handler.handle("aria2.forcePauseAll", []) == "OK"
-    assert await handler.handle("aria2.unpauseAll", []) == "OK"
+    for method in ("aria2.pause", "aria2.forcePause", "aria2.unpause",
+                   "aria2.pauseAll", "aria2.forcePauseAll", "aria2.unpauseAll"):
+        with pytest.raises(RpcError) as exc_info:
+            await handler.handle(method, ["gid"])
+        assert exc_info.value.code == 1
     assert await handler.handle("aria2.getOption", ["gid"]) == {}
     assert await handler.handle("aria2.getGlobalOption", []) == {}
     assert await handler.handle("aria2.changePosition", ["gid", 0, "POS_SET"]) == 0

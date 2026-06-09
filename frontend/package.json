@@ -11,6 +11,7 @@
     "test:watch": "jest --watch"
   },
   "dependencies": {
+    "@noble/hashes": "^2.2.0",
     "@types/react-virtualized-auto-sizer": "^1.0.8",
     "@types/react-window": "^2.0.0",
     "lucide-react": "^1.16.0",

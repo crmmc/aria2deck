@@ -83,6 +83,7 @@ async def _authenticate_from_params(
     request_id: str | int | None,
     client_ip: str,
     outer_request_id: str,
+    method: str | None = None,
 ) -> tuple[dict | None, list | None, dict | None]:
     if not isinstance(params, list):
         logger.warning("RPC参数类型错误 ip=%s request_id=%s", client_ip, outer_request_id)
@@ -92,7 +93,10 @@ async def _authenticate_from_params(
             request_id,
         )
 
-    secret, remaining_params = extract_secret_from_params(params)
+    if method == "system.multicall":
+        secret, remaining_params = extract_secret_for_multicall(params)
+    else:
+        secret, remaining_params = extract_secret_from_params(params)
     if not secret:
         logger.warning("RPC缺少Token ip=%s request_id=%s", client_ip, outer_request_id)
         return None, None, build_jsonrpc_error(
@@ -131,6 +135,31 @@ def extract_secret_from_params(params: list) -> tuple[str | None, list]:
     if isinstance(first_param, str) and first_param.startswith("token:"):
         secret = first_param[6:]  # 移除 "token:" 前缀
         return secret, params[1:]
+
+    return None, params
+
+
+def extract_secret_for_multicall(params: list) -> tuple[str | None, list]:
+    """从 system.multicall 的 nested calls 中提取 token
+
+    system.multicall 的 params 结构是 [[{methodName, params}, ...]]，
+    token 放在每个 nested call 的 params[0] 而非顶层。
+    从第一个 nested call 中提取 token 做顶层鉴权。
+    """
+    if not params or not isinstance(params[0], list) or not params[0]:
+        return None, params
+
+    first_call = params[0][0]
+    if not isinstance(first_call, dict):
+        return None, params
+
+    call_params = first_call.get("params")
+    if not isinstance(call_params, list) or not call_params:
+        return None, params
+
+    first_param = call_params[0]
+    if isinstance(first_param, str) and first_param.startswith("token:"):
+        return first_param[6:], params
 
     return None, params
 
@@ -459,6 +488,7 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
         body.get("id"),
         client_ip,
         request_id,
+        method=body.get("method") if isinstance(body, dict) else None,
     )
     if auth_error is not None:
         _log_rpc_method_response(

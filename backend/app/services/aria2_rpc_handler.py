@@ -222,8 +222,10 @@ class Aria2RpcHandler:
         if history_id is not None:
             return None
         if task_id is not None:
-            return await self._get_task_pair_by_task_id(task_id)
-        return await self._verify_task_owner(gid)
+            row = await self._get_task_pair_by_task_id(task_id)
+        else:
+            row = await self._verify_task_owner(gid)
+        return row
 
     async def _fetch_live_status(self, row: dict[str, Any]) -> dict[str, Any] | None:
         """Fetch sanitized live aria2 status via the real backend gid."""
@@ -1112,25 +1114,24 @@ class Aria2RpcHandler:
         await delete_all_terminal_user_tasks(self.user_id)
         return "OK"
 
-    # ========== 静默返回的方法（不支持但不报错） ==========
+    # ========== 明确拒绝暂停（aria2deck 不支持暂停，只支持取消） ==========
     async def _handle_pause(self, params: list) -> str:
-        """aria2.pause - 不支持，静默返回 gid"""
-        return params[0] if params else "0"
+        raise RpcError(1, "Pause is not supported, use aria2.remove to cancel")
 
     async def _handle_force_pause(self, params: list) -> str:
-        return params[0] if params else "0"
+        raise RpcError(1, "Pause is not supported, use aria2.remove to cancel")
 
     async def _handle_unpause(self, params: list) -> str:
-        return params[0] if params else "0"
+        raise RpcError(1, "Unpause is not supported")
 
     async def _handle_pause_all(self, params: list) -> str:
-        return "OK"
+        raise RpcError(1, "Pause is not supported")
 
     async def _handle_force_pause_all(self, params: list) -> str:
-        return "OK"
+        raise RpcError(1, "Pause is not supported")
 
     async def _handle_unpause_all(self, params: list) -> str:
-        return "OK"
+        raise RpcError(1, "Unpause is not supported")
 
     async def _handle_get_option(self, params: list) -> dict:
         return {}
@@ -1154,7 +1155,9 @@ class Aria2RpcHandler:
         real_gid = str(row.get("aria2_gid") or "")
         if real_gid and is_current(row):
             try:
-                return self._sanitize_peers(await self.client.get_peers(real_gid))
+                raw_peers = await self.client.get_peers(real_gid)
+                sanitized = self._sanitize_peers(raw_peers)
+                return sanitized
             except Exception as exc:
                 logger.warning(
                     "aria2.getPeers failed for task=%s user_id=%s",
@@ -1226,7 +1229,7 @@ class Aria2RpcHandler:
         self._multicall_depth += 1
         try:
             results: list[Any] = []
-            for call in methods:
+            for index, call in enumerate(methods):
                 if not isinstance(call, dict):
                     results.append(
                         {
@@ -1236,7 +1239,8 @@ class Aria2RpcHandler:
                     )
                     continue
                 method_name = call.get("methodName", "")
-                method_params = self._strip_rpc_token(call.get("params", []))
+                raw_method_params = call.get("params", [])
+                method_params = self._strip_rpc_token(raw_method_params)
                 try:
                     result = await self.handle(method_name, method_params)
                     results.append([result])

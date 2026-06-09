@@ -5,6 +5,7 @@
     "": {
       "name": "aria2-controler-frontend",
       "dependencies": {
+        "@noble/hashes": "^2.2.0",
         "@types/react-virtualized-auto-sizer": "^1.0.8",
         "@types/react-window": "^2.0.0",
         "lucide-react": "^1.16.0",
@@ -184,6 +185,8 @@
     "@next/swc-win32-ia32-msvc": ["@next/swc-win32-ia32-msvc@14.2.5", "https://registry.npmmirror.com/@next/swc-win32-ia32-msvc/-/swc-win32-ia32-msvc-14.2.5.tgz", { "os": "win32", "cpu": "ia32" }, "sha512-Igh9ZlxwvCDsu6438FXlQTHlRno4gFpJzqPjSIBZooD22tKeI4fE/YMRoHVJHmrQ2P5YL1DoZ0qaOKkbeFWeMg=="],
 
     "@next/swc-win32-x64-msvc": ["@next/swc-win32-x64-msvc@14.2.5", "https://registry.npmmirror.com/@next/swc-win32-x64-msvc/-/swc-win32-x64-msvc-14.2.5.tgz", { "os": "win32", "cpu": "x64" }, "sha512-tEQ7oinq1/CjSG9uSTerca3v4AZ+dFa+4Yu6ihaG8Ud8ddqLQgFGcnwYls13H5X5CPDPZJdYxyeMui6muOLd4g=="],
+
+    "@noble/hashes": ["@noble/hashes@2.2.0", "https://mirrors.tencent.com/npm/@noble/hashes/-/hashes-2.2.0.tgz", {}, "sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg=="],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.34.48", "https://registry.npmmirror.com/@sinclair/typebox/-/typebox-0.34.48.tgz", {}, "sha512-kKJTNuK3AQOrgjjotVxMrCn1sUJwM76wMszfq1kdU4uYVJjvEWuFQ6HgvLt4Xz3fSmZlTOxJ/Ie13KnIcWQXFA=="],
 
