@@ -301,6 +301,7 @@ def create_app() -> FastAPI:
         "http://127.0.0.1:8080",
         "https://ariang.mayswind.net",
         "https://ariang.js.org",
+        "null",
     ]
     # 从环境变量添加额外的 CORS 域名（逗号分隔）
     extra_origins = os.environ.get("ARIA2C_CORS_ORIGINS", "")
@@ -309,10 +310,6 @@ def create_app() -> FastAPI:
             origin = origin.strip()
             if origin and origin not in cors_origins:
                 cors_origins.append(origin)
-    # 仅在 debug 模式下允许 null origin（本地文件调试）
-    if settings.debug:
-        cors_origins.append("null")
-
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,

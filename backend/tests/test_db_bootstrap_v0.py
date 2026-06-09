@@ -18,6 +18,8 @@ from app.db.migrations import (
     DEFAULT_ARIA2_BT_STOP_TIMEOUT_SECONDS,
     V1_ADDED_COLUMNS,
     V1_APP_SETTINGS_ADDED_COLUMNS,
+    V2_ADDED_COLUMNS,
+    V2_GLOBAL_DOWNLOADS_ADDED_COLUMNS,
 )
 from app.db.schema import metadata, sessions
 
@@ -207,7 +209,7 @@ async def test_bootstrap_creates_latest_schema(isolated_db: Path):
             await conn.execute(text("SELECT id FROM app_settings"))
         ).scalar_one()
 
-    assert version == SCHEMA_VERSION == 1
+    assert version == SCHEMA_VERSION == 2
     assert users_exists == "users"
     assert settings_id == 1
 
@@ -218,6 +220,8 @@ def test_current_schema_changes_are_accounted_for_in_migration_contract():
         for table_name, columns in SCHEMA_V0_BASELINE_COLUMNS.items()
     }
     for table_name, columns in V1_ADDED_COLUMNS.items():
+        accounted_columns.setdefault(table_name, set()).update(columns)
+    for table_name, columns in V2_ADDED_COLUMNS.items():
         accounted_columns.setdefault(table_name, set()).update(columns)
 
     current_columns = {
@@ -232,6 +236,10 @@ def test_current_schema_changes_are_accounted_for_in_migration_contract():
 
 def test_app_settings_v1_columns_are_registered_in_migration_map():
     assert V1_ADDED_COLUMNS["app_settings"] is V1_APP_SETTINGS_ADDED_COLUMNS
+
+
+def test_global_downloads_v2_columns_are_registered_in_migration_map():
+    assert V2_ADDED_COLUMNS["global_downloads"] is V2_GLOBAL_DOWNLOADS_ADDED_COLUMNS
 
 
 @pytest.mark.asyncio
@@ -291,9 +299,16 @@ async def test_bootstrap_migrates_existing_v0_schema_to_latest_version(
                 )
             )
         ).scalar_one()
+        global_download_columns = {
+            row[1]
+            for row in (
+                await conn.execute(text("PRAGMA table_info(global_downloads)"))
+            ).all()
+        }
 
-    assert version == SCHEMA_VERSION == 1
+    assert version == SCHEMA_VERSION == 2
     assert timeout_seconds == DEFAULT_ARIA2_BT_STOP_TIMEOUT_SECONDS
+    assert "bt_info_hash" in global_download_columns
     assert "version = 0" not in schema_meta_sql
     assert "version >= 0" in schema_meta_sql
 

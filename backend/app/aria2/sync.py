@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -29,13 +30,16 @@ from app.repositories.downloads import (
 )
 from app.services.task_projection import (
     METADATA_NAME_PREFIX,
+    has_live_bt_evidence,
     has_real_file_path,
+    is_bt_resource_kind,
     is_metadata_phase_status,
 )
 
 logger = logging.getLogger(__name__)
 
 
+INFO_HASH_HEX_PATTERN = re.compile(r"^[a-fA-F0-9]{40}$")
 OWNED_STOPPED_RESULT_CLEANUP_BATCH = 50
 COMPLETE_REPAIR_GRACE_SECONDS = 30.0
 STALE_QUEUED_GRACE_SECONDS = 300.0
@@ -96,9 +100,23 @@ def _has_bittorrent_evidence(
     status: dict[str, Any],
     download: dict[str, Any],
 ) -> bool:
-    if str(status.get("infoHash") or "").strip():
-        return True
-    return str(download.get("resource_kind") or "") in {"magnet", "torrent"}
+    return is_bt_resource_kind(download) or has_live_bt_evidence(status)
+
+
+def _should_upgrade_to_torrent(
+    status: dict[str, Any],
+    download: dict[str, Any],
+) -> bool:
+    return not is_bt_resource_kind(download) and has_live_bt_evidence(status)
+
+
+def _bt_info_hash_from_status(status: dict[str, Any] | None) -> str | None:
+    if not isinstance(status, dict):
+        return None
+    info_hash = str(status.get("infoHash") or "").strip()
+    if INFO_HASH_HEX_PATTERN.fullmatch(info_hash):
+        return info_hash.lower()
+    return None
 
 
 def _is_effectively_complete_active_bt_status(
@@ -165,10 +183,20 @@ def _is_metadata_handoff_pending(
     return True
 
 
-def _map_v0_status(status: dict[str, Any], download_id: int) -> dict[str, Any]:
-    raw_name = status.get("bittorrent", {}).get("info", {}).get("name") or (
-        status.get("files") or [{}]
-    )[0].get("path")
+def _map_v0_status(
+    status: dict[str, Any],
+    download_id: int,
+    *,
+    prefer_bittorrent_name: bool = False,
+) -> dict[str, Any]:
+    raw_name = None
+    if prefer_bittorrent_name:
+        bittorrent = status.get("bittorrent")
+        if isinstance(bittorrent, dict):
+            info = bittorrent.get("info")
+            if isinstance(info, dict):
+                raw_name = info.get("name")
+    raw_name = raw_name or (status.get("files") or [{}])[0].get("path")
     raw_status = str(status.get("status") or "unknown")
     raw_error = status.get("errorMessage")
     return {
@@ -360,7 +388,15 @@ async def _switch_to_followed_download_from_sync(
             followed_gid,
             exc,
         )
-    real_mapped = _map_v0_status(real_status, download_id) if real_status else None
+    real_mapped = (
+        _map_v0_status(
+            real_status,
+            download_id,
+            prefer_bittorrent_name=True,
+        )
+        if real_status
+        else None
+    )
     logger.info(
         "[Sync] Metadata download complete, updating GID: %s -> %s",
         metadata_gid,
@@ -370,6 +406,11 @@ async def _switch_to_followed_download_from_sync(
         "aria2_gid": followed_gid,
         "status": real_mapped["status"] if real_mapped else "active",
     }
+    bt_info_hash = _bt_info_hash_from_status(real_status)
+    if bt_info_hash:
+        global_values["bt_info_hash"] = bt_info_hash
+    if not is_bt_resource_kind(download):
+        global_values["resource_kind"] = "torrent"
     if real_mapped:
         global_values.update(
             {
@@ -411,7 +452,13 @@ async def _update_v0_download_from_aria2(
     status: dict[str, Any],
 ) -> None:
     download_id = int(download["id"])
-    mapped = _map_v0_status(status, download_id)
+    bt_evidence = _has_bittorrent_evidence(status, download)
+    upgrade_to_torrent = _should_upgrade_to_torrent(status, download)
+    mapped = _map_v0_status(
+        status,
+        download_id,
+        prefer_bittorrent_name=bt_evidence,
+    )
     gid = str(download.get("aria2_gid") or "")
     followed_by = status.get("followedBy") or []
 
@@ -504,7 +551,7 @@ async def _update_v0_download_from_aria2(
         return
 
     # Skip progress and name updates during metadata download phase
-    is_metadata = is_metadata_phase_status(status)
+    is_metadata = bt_evidence and is_metadata_phase_status(status)
 
     timestamp = now_ms()
     global_values: dict[str, Any] = {
@@ -512,6 +559,11 @@ async def _update_v0_download_from_aria2(
         "completed_bytes": mapped["completed_bytes"],
         "updated_at_ms": timestamp,
     }
+    if upgrade_to_torrent:
+        global_values["resource_kind"] = "torrent"
+    bt_info_hash = _bt_info_hash_from_status(status)
+    if bt_evidence and bt_info_hash:
+        global_values["bt_info_hash"] = bt_info_hash
     if not is_metadata:
         global_values["total_bytes"] = mapped["total_bytes"]
         if mapped["display_name"]:

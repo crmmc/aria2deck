@@ -12,12 +12,12 @@ import asyncio
 import hashlib
 import logging
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 from urllib.parse import unquote, urlsplit
 
 from app.core.config import settings
-from app.core.security import mask_url_credentials
 from app.core.state import AppState
 from app.routers.config import get_min_free_disk
 from app.repositories import auth as auth_repo
@@ -39,6 +39,9 @@ from app.services.download_service import (
 from app.services.hash import extract_info_hash_from_torrent_base64, get_uri_hash
 from app.services.task_projection import (
     ACTIVE_LIKE_STATUSES,
+    build_bittorrent_payload,
+    has_bittorrent_payload,
+    has_live_bt_evidence,
     has_real_file_path,
     is_current,
     speed_totals,
@@ -66,12 +69,14 @@ ALLOWED_STATUS_VALUES = {
 
 
 class RpcBackendClient(Protocol):
-    async def add_uri(self, uris: list[str], options: dict | None = None) -> str: ...
+    async def add_uri(
+        self, uris: list[str], options: Mapping[str, Any] | None = None
+    ) -> str: ...
     async def add_torrent(
         self,
         torrent: str,
         uris: list[str] | None = None,
-        options: dict | None = None,
+        options: Mapping[str, Any] | None = None,
     ) -> str: ...
     async def tell_status(self, gid: str) -> dict: ...
     async def tell_active(self) -> list[dict]: ...
@@ -364,16 +369,6 @@ class Aria2RpcHandler:
             "errorMessage": "",
             "dir": "",
             "files": [],
-            "infoHash": "",
-            "numSeeders": DEFAULT_STATUS_DOWNLOADS,
-            "seeder": DEFAULT_BOOL_FALSE,
-            "bittorrent": {
-                "announceList": [],
-                "comment": "",
-                "creationDate": "0",
-                "mode": "single",
-                "info": {"name": ""},
-            },
         }
 
     @staticmethod
@@ -420,24 +415,27 @@ class Aria2RpcHandler:
             file_data["path"] = self._sanitize_file_path(
                 self._status_str(item.get("path"), "")
             )
+            file_data["uris"] = self._sanitize_uris(item.get("uris"))
             sanitized_files.append(file_data)
         return sanitized_files
 
     def _sanitize_bittorrent(self, bt_info: Any) -> dict:
-        sanitized = {
-            "announceList": [],
-            "info": {"name": ""},
-        }
+        name = ""
+        mode = "single"
         if not isinstance(bt_info, dict):
-            return sanitized
+            return build_bittorrent_payload(name, mode)
 
         info = bt_info.get("info")
         if isinstance(info, dict):
-            name = info.get("name")
-            if isinstance(name, str):
-                sanitized["info"]["name"] = name
+            raw_name = info.get("name")
+            if isinstance(raw_name, str):
+                name = raw_name
 
-        return sanitized
+        raw_mode = bt_info.get("mode")
+        if isinstance(raw_mode, str) and raw_mode.strip():
+            mode = raw_mode
+
+        return build_bittorrent_payload(name, mode)
 
     @staticmethod
     def _new_peer_payload() -> dict[str, str]:
@@ -462,29 +460,7 @@ class Aria2RpcHandler:
         }
 
     def _sanitize_peers(self, peers: Any) -> list[dict]:
-        if not isinstance(peers, list):
-            return []
-        sanitized_peers: list[dict] = []
-        for item in peers:
-            if not isinstance(item, dict):
-                continue
-            peer = self._new_peer_payload()
-            peer["bitfield"] = self._status_str(item.get("bitfield"), "")
-            peer["amChoking"] = self._status_bool(
-                item.get("amChoking"), DEFAULT_BOOL_FALSE
-            )
-            peer["peerChoking"] = self._status_bool(
-                item.get("peerChoking"), DEFAULT_BOOL_FALSE
-            )
-            peer["downloadSpeed"] = self._status_str(
-                item.get("downloadSpeed"), DEFAULT_STATUS_DOWNLOADS
-            )
-            peer["uploadSpeed"] = self._status_str(
-                item.get("uploadSpeed"), DEFAULT_STATUS_DOWNLOADS
-            )
-            peer["seeder"] = self._status_bool(item.get("seeder"), DEFAULT_BOOL_FALSE)
-            sanitized_peers.append(peer)
-        return sanitized_peers
+        return []
 
     def _sanitize_servers(self, server_groups: Any) -> list[dict]:
         if not isinstance(server_groups, list):
@@ -495,19 +471,19 @@ class Aria2RpcHandler:
             if not isinstance(group, dict):
                 continue
             index = self._status_str(group.get("index"), "1")
-            servers = group.get("servers")
-            sanitized_servers: list[dict] = []
-            if isinstance(servers, list):
-                for server in servers:
-                    if not isinstance(server, dict):
-                        continue
-                    payload = self._new_server_payload()
-                    payload["downloadSpeed"] = self._status_str(
-                        server.get("downloadSpeed"), DEFAULT_STATUS_DOWNLOADS
-                    )
-                    sanitized_servers.append(payload)
-            sanitized_groups.append({"index": index, "servers": sanitized_servers})
+            sanitized_groups.append(
+                {
+                    "index": index,
+                    "servers": [self._new_server_payload()],
+                }
+            )
         return sanitized_groups
+
+    def _server_groups_for_indexes(self, indexes: list[str]) -> list[dict]:
+        return [
+            {"index": index, "servers": [self._new_server_payload()]}
+            for index in indexes
+        ]
 
     def _sanitize_uris(self, uris: Any) -> list[dict]:
         if not isinstance(uris, list):
@@ -516,11 +492,10 @@ class Aria2RpcHandler:
         for item in uris:
             if not isinstance(item, dict):
                 continue
-            uri = mask_url_credentials(self._status_str(item.get("uri"), ""))
             status = self._status_str(item.get("status"), "waiting")
             if status not in {"used", "waiting"}:
                 status = "waiting"
-            sanitized_uris.append({"uri": uri, "status": status})
+            sanitized_uris.append({"uri": "", "status": status})
         return sanitized_uris
 
     def _sanitize_version(self, version_info: Any) -> dict:
@@ -602,12 +577,15 @@ class Aria2RpcHandler:
         result["errorMessage"] = self._status_str(status.get("errorMessage"), "")
         result["dir"] = ""
         result["files"] = self._sanitize_files(status.get("files"))
-        result["infoHash"] = self._status_str(status.get("infoHash"), "")
-        result["numSeeders"] = self._status_str(
-            status.get("numSeeders"), DEFAULT_STATUS_DOWNLOADS
-        )
-        result["seeder"] = self._status_bool(status.get("seeder"), DEFAULT_BOOL_FALSE)
-        result["bittorrent"] = self._sanitize_bittorrent(status.get("bittorrent"))
+        if has_live_bt_evidence(status) or has_bittorrent_payload(status):
+            result["infoHash"] = self._status_str(status.get("infoHash"), "")
+            result["numSeeders"] = self._status_str(
+                status.get("numSeeders"), DEFAULT_STATUS_DOWNLOADS
+            )
+            result["seeder"] = self._status_bool(
+                status.get("seeder"), DEFAULT_BOOL_FALSE
+            )
+            result["bittorrent"] = self._sanitize_bittorrent(status.get("bittorrent"))
 
         bitfield = status.get("bitfield")
         if isinstance(bitfield, str):
@@ -928,11 +906,13 @@ class Aria2RpcHandler:
                 self.user_id,
                 exc_info=exc,
             )
-            statuses = await rpc_view_service.list_active_statuses(self.user_id)
-            return self._apply_status_keys_to_list(statuses, keys)
+            fallback_statuses = await rpc_view_service.list_active_statuses(
+                self.user_id
+            )
+            return self._apply_status_keys_to_list(fallback_statuses, keys)
 
         rows_by_gid = await self._get_current_rows_by_gid()
-        statuses: list[tuple[dict, dict]] = []
+        active_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
         need_refresh: list[tuple[int, str]] = []
         MAX_REFRESH_COUNT = 10
 
@@ -942,8 +922,8 @@ class Aria2RpcHandler:
             if row is None:
                 continue
             live = self._sanitize_status(active)
-            idx = len(statuses)
-            statuses.append((row, live))
+            idx = len(active_pairs)
+            active_pairs.append((row, live))
             if (
                 self._status_needs_tell_status_refresh(live)
                 and len(need_refresh) < MAX_REFRESH_COUNT
@@ -957,10 +937,13 @@ class Aria2RpcHandler:
             )
             for (idx, _gid), result in zip(need_refresh, refresh_results):
                 if not isinstance(result, BaseException):
-                    statuses[idx] = (statuses[idx][0], self._sanitize_status(result))
+                    active_pairs[idx] = (
+                        active_pairs[idx][0],
+                        self._sanitize_status(result),
+                    )
 
         result_list = [
-            rpc_view_service.status_from_task(row, live) for row, live in statuses
+            rpc_view_service.status_from_task(row, live) for row, live in active_pairs
         ]
         return self._apply_status_keys_to_list(result_list, keys)
 
@@ -980,28 +963,30 @@ class Aria2RpcHandler:
                 self.user_id,
                 exc_info=exc,
             )
-            statuses = await rpc_view_service.list_waiting_statuses(self.user_id)
-            sliced = self._slice_with_offset(statuses, offset, num)
+            fallback_statuses = await rpc_view_service.list_waiting_statuses(
+                self.user_id
+            )
+            sliced = self._slice_with_offset(fallback_statuses, offset, num)
             return self._apply_status_keys_to_list(sliced, keys)
 
-        statuses: list[dict[str, Any]] = []
+        waiting_statuses: list[dict[str, Any]] = []
         for waiting in all_waiting:
             gid = str(waiting.get("gid") or "")
             row = rows_by_gid.get(gid)
             if row is None:
                 continue
-            statuses.append(
+            waiting_statuses.append(
                 rpc_view_service.status_from_task(row, self._sanitize_status(waiting))
             )
-        sliced = self._slice_with_offset(statuses, offset, num)
+        sliced = self._slice_with_offset(waiting_statuses, offset, num)
         return self._apply_status_keys_to_list(sliced, keys)
 
     async def _handle_tell_stopped(self, params: list) -> list:
         """aria2.tellStopped(offset, num[, keys])"""
         offset, num = self._normalize_pagination(params)
         keys = self._extract_status_keys(params, 2)
-        statuses = await rpc_view_service.list_stopped_statuses(self.user_id)
-        sliced = self._slice_with_offset(statuses, offset, num)
+        stopped_statuses = await rpc_view_service.list_stopped_statuses(self.user_id)
+        sliced = self._slice_with_offset(stopped_statuses, offset, num)
         return self._apply_status_keys_to_list(sliced, keys)
 
     async def _handle_get_global_stat(self, params: list) -> dict:
@@ -1166,6 +1151,17 @@ class Aria2RpcHandler:
         row = await self._resolve_owned_row(gid)
         if row is None:
             raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid}")
+        real_gid = str(row.get("aria2_gid") or "")
+        if real_gid and is_current(row):
+            try:
+                return self._sanitize_peers(await self.client.get_peers(real_gid))
+            except Exception as exc:
+                logger.warning(
+                    "aria2.getPeers failed for task=%s user_id=%s",
+                    row.get("id"),
+                    self.user_id,
+                    exc_info=exc,
+                )
         return []
 
     async def _handle_get_servers(self, params: list) -> list:
@@ -1179,6 +1175,19 @@ class Aria2RpcHandler:
         indexes = ["1"]
         if real_gid and is_current(row):
             try:
+                sanitized = self._sanitize_servers(
+                    await self.client.get_servers(real_gid)
+                )
+                if sanitized:
+                    return sanitized
+            except Exception as exc:
+                logger.warning(
+                    "aria2.getServers failed for task=%s user_id=%s",
+                    row.get("id"),
+                    self.user_id,
+                    exc_info=exc,
+                )
+            try:
                 files = await self.client.get_files(real_gid)
                 if isinstance(files, list):
                     indexes = [
@@ -1188,7 +1197,7 @@ class Aria2RpcHandler:
                     ] or indexes
             except Exception:
                 pass
-        return [{"index": index, "servers": []} for index in indexes]
+        return self._server_groups_for_indexes(indexes)
 
     async def _handle_save_session(self, params: list) -> str:
         return "OK"
@@ -1216,7 +1225,7 @@ class Aria2RpcHandler:
             )
         self._multicall_depth += 1
         try:
-            results = []
+            results: list[Any] = []
             for call in methods:
                 if not isinstance(call, dict):
                     results.append(

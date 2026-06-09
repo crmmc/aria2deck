@@ -133,6 +133,7 @@ def _user_task_download_select():
         global_downloads.c.resource_key,
         global_downloads.c.resource_kind,
         global_downloads.c.source_uri,
+        global_downloads.c.bt_info_hash,
         global_downloads.c.display_name.label("global_display_name"),
         global_downloads.c.aria2_gid,
         global_downloads.c.status.label("global_status"),

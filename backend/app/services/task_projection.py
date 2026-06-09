@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,8 @@ ACTIVE_LIKE_STATUSES = ("queued", "active", "waiting", "paused")
 TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 ERROR_STATUSES = ("failed", "cancelled")
 REST_TASK_STATUS_FILTERS = frozenset(("active", "current", "complete", "error"))
+BT_TRACKER_PLACEHOLDER = "http://aria2deck.invalid/announce"
+INFO_HASH_HEX_PATTERN = re.compile(r"^[a-fA-F0-9]{40}$")
 
 
 class InvalidTaskStatusFilter(ValueError):
@@ -106,7 +109,7 @@ def _has_file_name(files: Any) -> bool:
 
 def _files_from_task(
     row: dict[str, Any], total_bytes: int, completed_bytes: int
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     return [
         {
             "index": "1",
@@ -119,8 +122,80 @@ def _files_from_task(
     ]
 
 
-def is_torrent_row(row: dict[str, Any]) -> bool:
+def is_bt_resource_kind(row: dict[str, Any]) -> bool:
     return str(row.get("resource_kind") or "") in ("magnet", "torrent")
+
+
+def is_torrent_row(row: dict[str, Any]) -> bool:
+    return is_bt_resource_kind(row)
+
+
+def has_bittorrent_payload(live: dict[str, Any] | None) -> bool:
+    if not isinstance(live, dict):
+        return False
+    bt = live.get("bittorrent")
+    return isinstance(bt, dict) and bool(bt)
+
+
+def _hex_info_hash_parts(value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    return [
+        part.lower()
+        for part in re.split(r"[^a-fA-F0-9]+", value)
+        if INFO_HASH_HEX_PATTERN.fullmatch(part)
+    ]
+
+
+def info_hash_from_row(row: dict[str, Any]) -> str:
+    bt_info_hash = row.get("bt_info_hash")
+    if isinstance(bt_info_hash, str):
+        normalized = bt_info_hash.strip().lower()
+        if INFO_HASH_HEX_PATTERN.fullmatch(normalized):
+            return normalized
+
+    for key in ("resource_key", "source_uri"):
+        parts = _hex_info_hash_parts(row.get(key))
+        if parts:
+            return parts[0]
+    return ""
+
+
+def has_live_bt_evidence(live: dict[str, Any] | None) -> bool:
+    if not isinstance(live, dict):
+        return False
+    info_hash = str(live.get("infoHash") or "").strip()
+    if INFO_HASH_HEX_PATTERN.fullmatch(info_hash):
+        return True
+    followed_by = live.get("followedBy")
+    if isinstance(followed_by, list) and followed_by:
+        return True
+    return bool(live.get("following") or live.get("followingGid"))
+
+
+def should_project_bittorrent(
+    row: dict[str, Any], live: dict[str, Any] | None = None
+) -> bool:
+    return is_bt_resource_kind(row) or has_live_bt_evidence(live)
+
+
+def build_bittorrent_payload(name: str = "", mode: str = "single") -> dict[str, Any]:
+    return {
+        "announceList": [[BT_TRACKER_PLACEHOLDER]],
+        "comment": "",
+        "creationDate": 0,
+        "mode": mode or "single",
+        "info": {"name": name},
+    }
+
+
+def _live_bittorrent_mode(live: dict[str, Any]) -> str:
+    bt = live.get("bittorrent")
+    if isinstance(bt, dict):
+        mode = bt.get("mode")
+        if isinstance(mode, str) and mode.strip():
+            return mode
+    return "single"
 
 
 def build_aria2_status(
@@ -156,19 +231,21 @@ def build_aria2_status(
         "uploadSpeed": str(live.get("uploadSpeed", "0")),
         "pieceLength": "1048576",
         "numPieces": "0",
-        "connections": "0",
+        "connections": str(live.get("connections", "0")),
         "dir": "",
         "files": files,
         "errorCode": "1" if status == "error" else "0",
         "errorMessage": error_message if status == "error" else "",
     }
-    if is_torrent_row(row):
+    if should_project_bittorrent(row, live):
         # 元数据阶段还没有真实种子名时，用磁力链接占位以便区分不同任务
         name = _extract_live_display_name(live) or display_name(row)
-        result["infoHash"] = str(live.get("infoHash", ""))
+        result["infoHash"] = str(live.get("infoHash") or info_hash_from_row(row))
         result["numSeeders"] = "0"
         result["seeder"] = "false"
-        result["bittorrent"] = {"announceList": [], "info": {"name": name}}
+        result["bittorrent"] = build_bittorrent_payload(
+            name, _live_bittorrent_mode(live)
+        )
     return result
 
 
@@ -240,10 +317,12 @@ def build_rest_task_response(
     # Prefer live aria2 data for active tasks — fresher and avoids
     # stale/polluted DB values (e.g. during metadata download phase).
     if live and effective_status(row) in ACTIVE_LIKE_STATUSES:
-        live_name = _extract_live_display_name(live)
-        if live_name:
-            name = live_name
-        if not is_metadata_phase_status(live):
+        project_bt = should_project_bittorrent(row, live)
+        if project_bt:
+            live_name = _extract_live_display_name(live)
+            if live_name:
+                name = live_name
+        if not (project_bt and is_metadata_phase_status(live)):
             live_total = _safe_int(live.get("totalLength"))
             if live_total > 0:
                 total_length = live_total

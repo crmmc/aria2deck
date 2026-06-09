@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 
 
 def _client_password_hash(password: str, username: str) -> str:
@@ -79,6 +80,29 @@ class TestCreateApp:
 
         middleware_classes = [m.cls.__name__ for m in app.user_middleware]
         assert "CORSMiddleware" in middleware_classes
+
+    def test_aria2_rpc_allows_null_origin_preflight(self):
+        """Test aria2 RPC allows browser clients that send Origin: null."""
+        from app.main import create_app
+
+        app = create_app()
+        client = TestClient(app)
+
+        response = client.options(
+            "/aria2/jsonrpc",
+            headers={
+                "Origin": "null",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "null"
+        assert "POST" in response.headers["access-control-allow-methods"]
+        assert "content-type" in response.headers[
+            "access-control-allow-headers"
+        ].lower()
 
 
 class TestStaticAliasMiddleware:

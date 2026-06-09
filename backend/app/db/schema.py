@@ -13,7 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 GLOBAL_DOWNLOAD_STATUSES = (
     "queued",
@@ -162,6 +162,7 @@ global_downloads = Table(
     Column("resource_key", String(128), nullable=False, unique=True),
     Column("resource_kind", String(16), nullable=False),
     Column("source_uri", Text, nullable=False),
+    Column("bt_info_hash", String(40)),
     Column("display_name", Text),
     Column("aria2_gid", String(32), unique=True),
     Column("status", String(16), nullable=False),

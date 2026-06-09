@@ -1,4 +1,5 @@
 from app.services.task_projection import (
+    BT_TRACKER_PLACEHOLDER,
     METADATA_NAME_PREFIX,
     InvalidTaskStatusFilter,
     REST_TASK_STATUS_FILTERS,
@@ -36,6 +37,7 @@ def _row(
         "resource_key": "http:file",
         "resource_kind": "http",
         "source_uri": "https://example.com/file.bin",
+        "bt_info_hash": None,
         "global_display_name": name,
         "aria2_gid": "gid-1",
         "global_status": global_status,
@@ -238,13 +240,101 @@ def test_rest_response_prefers_live_progress_for_active_task() -> None:
 
 
 def test_rest_response_prefers_live_bt_name_for_active_task() -> None:
-    row = _row(user_status="active", global_status="active", name="old.bin")
+    row = {
+        **_row(user_status="active", global_status="active", name="old.bin"),
+        "resource_kind": "torrent",
+    }
     live = {"bittorrent": {"info": {"name": "real_file.iso"}},
             "downloadSpeed": "0", "uploadSpeed": "0"}
 
     response = build_rest_task_response(row, live)
 
     assert response["name"] == "real_file.iso"
+
+
+def test_http_rest_response_ignores_bt_name_without_live_evidence() -> None:
+    row = _row(user_status="active", global_status="active", name="old.bin")
+    live = {
+        "bittorrent": {"info": {"name": "real_file.iso"}},
+        "totalLength": "2000",
+        "completedLength": "1000",
+        "downloadSpeed": "0",
+        "uploadSpeed": "0",
+    }
+
+    response = build_rest_task_response(row, live)
+
+    assert response["name"] == "old.bin"
+    assert response["total_length"] == 2000
+    assert response["completed_length"] == 1000
+
+
+def test_http_torrent_conversion_projects_bittorrent_with_live_infohash() -> None:
+    info_hash = "0123456789abcdef0123456789abcdef01234567"
+    row = _row(
+        user_status="active",
+        global_status="active",
+        name="payload.torrent",
+    )
+    live = {
+        "infoHash": info_hash,
+        "bittorrent": {"mode": "multi", "info": {"name": "real torrent"}},
+    }
+
+    result = build_aria2_status(row, live)
+
+    assert result["infoHash"] == info_hash
+    assert result["bittorrent"] == {
+        "announceList": [[BT_TRACKER_PLACEHOLDER]],
+        "comment": "",
+        "creationDate": 0,
+        "mode": "multi",
+        "info": {"name": "real torrent"},
+    }
+
+
+def test_stopped_torrent_status_uses_row_info_hash_when_live_missing() -> None:
+    info_hash = "0123456789abcdef0123456789abcdef01234567"
+    row = {
+        **_row(
+            user_status="completed",
+            global_status="completed",
+            name="done.torrent",
+            total_bytes=10,
+            completed_bytes=10,
+        ),
+        "resource_kind": "torrent",
+        "resource_key": f"torrent:{info_hash}",
+        "source_uri": f"magnet:?xt=urn:btih:{info_hash}",
+    }
+
+    result = build_aria2_status(row)
+
+    assert result["status"] == "complete"
+    assert result["infoHash"] == info_hash
+    assert result["bittorrent"]["info"]["name"] == "done.torrent"
+
+
+def test_stopped_torrent_status_prefers_bt_info_hash_field() -> None:
+    info_hash = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+    row = {
+        **_row(
+            user_status="completed",
+            global_status="completed",
+            name="payload.torrent",
+            total_bytes=10,
+            completed_bytes=10,
+        ),
+        "resource_kind": "torrent",
+        "resource_key": "sync:http-torrent-upgrade",
+        "source_uri": "https://example.com/payload.torrent",
+        "bt_info_hash": info_hash.upper(),
+    }
+
+    result = build_aria2_status(row)
+
+    assert result["status"] == "complete"
+    assert result["infoHash"] == info_hash
 
 
 def test_rest_response_uses_db_for_terminal_task_even_with_live() -> None:
@@ -266,8 +356,11 @@ def test_rest_response_uses_db_for_terminal_task_even_with_live() -> None:
 def test_rest_response_skips_metadata_total_but_keeps_completed() -> None:
     """During metadata phase, totalLength is the tiny metadata size — skip it.
     completedLength should still pass through so the user sees activity."""
-    row = _row(user_status="active", global_status="active",
-               total_bytes=0, completed_bytes=0)
+    row = {
+        **_row(user_status="active", global_status="active",
+               total_bytes=0, completed_bytes=0),
+        "resource_kind": "magnet",
+    }
     live = {"totalLength": "32768", "completedLength": "16384",
             "bittorrent": {"info": {"name": "[METADATA]abc"}},
             "downloadSpeed": "5000", "uploadSpeed": "0"}
@@ -280,8 +373,11 @@ def test_rest_response_skips_metadata_total_but_keeps_completed() -> None:
 
 
 def test_rest_response_filters_metadata_name_uses_db_fallback() -> None:
-    row = _row(user_status="active", global_status="active", name="global.bin",
-               user_name="magnet:?xt=urn:btih:abc")
+    row = {
+        **_row(user_status="active", global_status="active", name="global.bin",
+               user_name="magnet:?xt=urn:btih:abc"),
+        "resource_kind": "magnet",
+    }
     live = {"bittorrent": {"info": {"name": "[METADATA]ida93"}},
             "downloadSpeed": "0", "uploadSpeed": "0"}
 

@@ -14,6 +14,7 @@ from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks, users
 from app.repositories.downloads import get_user_task_by_id, list_user_tasks
 from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
+from app.services.task_projection import BT_TRACKER_PLACEHOLDER
 from tests.helpers_v0 import create_user_v0, now_ms
 
 
@@ -341,7 +342,10 @@ async def test_tell_active_refreshes_stale_live_bt_metadata(
             "completedLength": "868289498",
             "infoHash": "145c59fb37d713ad1c1b84caa64ac4d9c6f78fe1",
             "bittorrent": {
-                "announceList": [],
+                "announceList": [[BT_TRACKER_PLACEHOLDER]],
+                "comment": "",
+                "creationDate": 0,
+                "mode": "single",
                 "info": {"name": "real-file.mkv"},
             },
             "files": [
@@ -618,6 +622,140 @@ async def test_tell_status_accepts_task_fallback_gid(handler: Aria2RpcHandler) -
 
 
 @pytest.mark.asyncio
+async def test_tell_status_keeps_aria2_shape_with_bt_placeholders(
+    handler: Aria2RpcHandler,
+) -> None:
+    task = await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-bt-shape",
+        status="active",
+        name="fallback.torrent",
+        resource_kind="torrent",
+        total_bytes=10,
+        completed_bytes=1,
+    )
+    handler.client.tell_status.return_value = {
+        "gid": "gid-bt-shape",
+        "status": "active",
+        "totalLength": "10",
+        "completedLength": "1",
+        "downloadSpeed": "7",
+        "uploadSpeed": "3",
+        "connections": "2",
+        "bittorrent": {
+            "announceList": [["udp://private-tracker.example/announce"]],
+            "comment": "private comment",
+            "creationDate": "1700000000",
+            "mode": "multi",
+            "info": {"name": "public display name"},
+        },
+        "files": [
+            {
+                "index": "1",
+                "path": "/downloads/public display name/file.bin",
+                "length": "10",
+                "completedLength": "1",
+                "selected": "true",
+                "uris": [
+                    {
+                        "uri": "https://user:pass@example.com/file.bin",
+                        "status": "used",
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = await handler.handle("aria2.tellStatus", ["gid-bt-shape"])
+
+    assert result["gid"] == f"task-{task['id']}"
+    assert result["downloadSpeed"] == "7"
+    assert result["uploadSpeed"] == "3"
+    assert result["connections"] == "2"
+    assert result["files"][0]["uris"] == [{"uri": "", "status": "used"}]
+    assert result["bittorrent"] == {
+        "announceList": [[BT_TRACKER_PLACEHOLDER]],
+        "comment": "",
+        "creationDate": 0,
+        "mode": "multi",
+        "info": {"name": "public display name"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_http_tell_status_does_not_expose_bt_fields_from_noisy_live_status(
+    handler: Aria2RpcHandler,
+) -> None:
+    task = await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-http-bt-noise",
+        status="active",
+        name="plain.bin",
+        resource_kind="http",
+    )
+    handler.client.tell_status.return_value = {
+        "gid": "gid-http-bt-noise",
+        "status": "active",
+        "totalLength": "100",
+        "completedLength": "10",
+        "bittorrent": {"info": {"name": "not-a-torrent-name"}},
+        "files": [{"index": "1", "path": "/downloads/plain.bin"}],
+    }
+
+    result = await handler.handle(
+        "aria2.tellStatus",
+        [
+            "gid-http-bt-noise",
+            ["gid", "bittorrent", "infoHash", "numSeeders", "seeder"],
+        ],
+    )
+
+    assert result == {"gid": f"task-{task['id']}"}
+
+
+@pytest.mark.asyncio
+async def test_http_torrent_conversion_tell_status_projects_bt_shape(
+    handler: Aria2RpcHandler,
+) -> None:
+    info_hash = "0123456789abcdef0123456789abcdef01234567"
+    task = await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-http-torrent-converted",
+        status="active",
+        name="payload.torrent",
+        resource_kind="http",
+    )
+    handler.client.tell_status.return_value = {
+        "gid": "gid-http-torrent-converted",
+        "status": "active",
+        "totalLength": "4096",
+        "completedLength": "1024",
+        "infoHash": info_hash,
+        "bittorrent": {"mode": "multi", "info": {"name": "Real Torrent"}},
+        "files": [
+            {"index": "1", "path": "/downloads/Real Torrent/a.bin"},
+            {"index": "2", "path": "/downloads/Real Torrent/b.bin"},
+        ],
+    }
+
+    result = await handler.handle(
+        "aria2.tellStatus",
+        ["gid-http-torrent-converted", ["gid", "infoHash", "bittorrent", "files"]],
+    )
+
+    assert result["gid"] == f"task-{task['id']}"
+    assert result["infoHash"] == info_hash
+    assert result["bittorrent"] == {
+        "announceList": [[BT_TRACKER_PLACEHOLDER]],
+        "comment": "",
+        "creationDate": 0,
+        "mode": "multi",
+        "info": {"name": "Real Torrent"},
+    }
+    assert [item["path"] for item in result["files"]] == ["a.bin", "b.bin"]
+
+
+@pytest.mark.asyncio
 async def test_get_files_strips_paths_and_falls_back_to_v0_name(
     handler: Aria2RpcHandler,
 ) -> None:
@@ -629,7 +767,7 @@ async def test_get_files_strips_paths_and_falls_back_to_v0_name(
             "index": "1",
             "path": "/private/downloads/file.bin",
             "length": "10",
-            "uris": [{"uri": "http://x"}],
+            "uris": [{"uri": "https://user:pass@example.com/file.bin"}],
         }
     ]
     live_files = await handler.handle("aria2.getFiles", ["gid-files"])
@@ -638,12 +776,12 @@ async def test_get_files_strips_paths_and_falls_back_to_v0_name(
     fallback_files = await handler.handle("aria2.getFiles", ["gid-files"])
 
     assert live_files[0]["path"] == "file.bin"
-    assert live_files[0]["uris"] == []
+    assert live_files[0]["uris"] == [{"uri": "", "status": "waiting"}]
     assert fallback_files[0]["path"] == "fallback.bin"
 
 
 @pytest.mark.asyncio
-async def test_get_uris_masks_credentials_and_falls_back_to_source_uri(
+async def test_get_uris_preserves_shape_with_empty_uri(
     handler: Aria2RpcHandler,
 ) -> None:
     await create_rpc_task(
@@ -662,30 +800,70 @@ async def test_get_uris_masks_credentials_and_falls_back_to_source_uri(
     handler.client.get_uris.side_effect = RuntimeError("aria2 unavailable")
     fallback = await handler.handle("aria2.getUris", ["gid-uris"])
 
-    assert live[0] == {
-        "uri": "https://***:***@example.com/secret.bin",
-        "status": "used",
-    }
-    assert live[1] == {"uri": "https://example.com/next.bin", "status": "waiting"}
-    assert fallback == [
-        {"uri": "https://***:***@example.com/secret.bin", "status": "used"}
-    ]
+    assert live[0] == {"uri": "", "status": "used"}
+    assert live[1] == {"uri": "", "status": "waiting"}
+    assert fallback == [{"uri": "", "status": "used"}]
 
 
 @pytest.mark.asyncio
-async def test_get_peers_and_servers_return_empty(
+async def test_get_peers_and_servers_keep_stable_private_shape(
     handler: Aria2RpcHandler,
 ) -> None:
     await create_rpc_task(
-        user_id=handler.user_id, gid="gid-peer", status="active", name="peer.bin"
+        user_id=handler.user_id,
+        gid="gid-peer",
+        status="active",
+        name="magnet:?xt=urn:btih:abc",
+        uri="magnet:?xt=urn:btih:abc",
+        resource_kind="magnet",
     )
+    handler.client.get_peers.return_value = [
+        {
+            "peerId": "private-peer-id",
+            "ip": "203.0.113.9",
+            "port": "6881",
+            "bitfield": "ffff",
+            "amChoking": "true",
+            "peerChoking": "true",
+            "downloadSpeed": "123",
+            "uploadSpeed": "456",
+            "seeder": "true",
+        },
+        {
+            "peerId": "another-private-peer-id",
+            "ip": "203.0.113.10",
+            "port": "6882",
+            "downloadSpeed": "789",
+            "uploadSpeed": "10",
+        },
+    ]
+    handler.client.get_servers.return_value = [
+        {
+            "index": "1",
+            "servers": [
+                {
+                    "uri": "https://tracker-or-server.example/one",
+                    "currentUri": "https://tracker-or-server.example/current-one",
+                    "downloadSpeed": "123",
+                },
+                {
+                    "uri": "https://tracker-or-server.example/two",
+                    "currentUri": "https://tracker-or-server.example/current-two",
+                    "downloadSpeed": "456",
+                },
+            ],
+        }
+    ]
 
     peers = await handler.handle("aria2.getPeers", ["gid-peer"])
     servers = await handler.handle("aria2.getServers", ["gid-peer"])
 
     assert peers == []
-    assert servers == [{"index": "1", "servers": []}]
+    assert servers == [
+        {"index": "1", "servers": [{"uri": "", "currentUri": "", "downloadSpeed": "0"}]}
+    ]
 
+    handler.client.get_servers.return_value = []
     handler.client.get_files.return_value = [
         {"index": "1", "path": "/dl/file1.bin", "length": "100"},
         None,
@@ -693,8 +871,25 @@ async def test_get_peers_and_servers_return_empty(
     ]
     servers = await handler.handle("aria2.getServers", ["gid-peer"])
     assert servers == [
-        {"index": "1", "servers": []},
-        {"index": "3", "servers": []},
+        {"index": "1", "servers": [{"uri": "", "currentUri": "", "downloadSpeed": "0"}]},
+        {"index": "3", "servers": [{"uri": "", "currentUri": "", "downloadSpeed": "0"}]},
+    ]
+
+    handler.client.get_servers.return_value = [
+        {
+            "index": "9",
+            "servers": [
+                {
+                    "uri": "https://private.example/file.bin",
+                    "currentUri": "https://private.example/file.bin",
+                    "downloadSpeed": "999",
+                }
+            ],
+        }
+    ]
+    servers = await handler.handle("aria2.getServers", ["gid-peer"])
+    assert servers == [
+        {"index": "9", "servers": [{"uri": "", "currentUri": "", "downloadSpeed": "0"}]}
     ]
 
 

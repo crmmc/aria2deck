@@ -418,6 +418,161 @@ async def test_torrent_prefixed_user_task_name_is_not_overwritten_for_http_downl
 
 
 @pytest.mark.asyncio
+async def test_http_download_ignores_noisy_bittorrent_name_without_live_evidence(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_http_bt_noise")
+    download = await create_global_download_v0(
+        resource_key="sync:http-bt-noise",
+        resource_kind="http",
+        source_uri="https://example.com/plain.bin",
+        status="active",
+        aria2_gid="gid-http-bt-noise",
+        display_name="plain.bin",
+        total_bytes=0,
+        completed_bytes=0,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        display_name="plain.bin",
+    )
+    client = AsyncMock()
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-http-bt-noise",
+            "status": "active",
+            "totalLength": "2048",
+            "completedLength": "512",
+            "bittorrent": {"info": {"name": "Noisy Torrent Name"}},
+            "files": [{"path": "/downloads/plain.bin", "length": "2048"}],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+
+    assert updated["resource_kind"] == "http"
+    assert updated["display_name"] == "plain.bin"
+    assert updated["total_bytes"] == 2048
+    assert updated["completed_bytes"] == 512
+
+
+@pytest.mark.asyncio
+async def test_http_torrent_live_infohash_upgrades_resource_kind_and_name(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_http_torrent_upgrade")
+    info_hash = "0123456789abcdef0123456789abcdef01234567"
+    download = await create_global_download_v0(
+        resource_key="sync:http-torrent-upgrade",
+        resource_kind="http",
+        source_uri="https://example.com/payload.torrent",
+        status="active",
+        aria2_gid="gid-http-torrent-upgrade",
+        display_name="payload.torrent",
+        total_bytes=0,
+        completed_bytes=0,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        display_name="payload.torrent",
+    )
+    client = AsyncMock()
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-http-torrent-upgrade",
+            "status": "active",
+            "totalLength": "4096",
+            "completedLength": "1024",
+            "infoHash": info_hash,
+            "bittorrent": {"info": {"name": "Real Torrent"}},
+            "files": [{"path": "/downloads/Real Torrent/file.bin"}],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+
+    assert updated["resource_kind"] == "torrent"
+    assert updated["resource_key"] == "sync:http-torrent-upgrade"
+    assert updated["bt_info_hash"] == info_hash
+    assert updated["display_name"] == "Real Torrent"
+    assert updated["total_bytes"] == 4096
+    assert updated["completed_bytes"] == 1024
+    assert updated_task["display_name"] == "payload.torrent"
+
+
+@pytest.mark.asyncio
+async def test_http_torrent_followed_by_handoff_upgrades_resource_kind(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_http_followed_upgrade")
+    info_hash = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+    download = await create_global_download_v0(
+        resource_key="sync:http-followed-upgrade",
+        resource_kind="http",
+        source_uri="https://example.com/payload.torrent",
+        status="active",
+        aria2_gid="gid-http-metadata",
+        display_name="payload.torrent",
+        total_bytes=0,
+        completed_bytes=0,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        display_name="payload.torrent",
+    )
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-real-bt",
+        "status": "active",
+        "totalLength": "8192",
+        "completedLength": "2048",
+        "infoHash": info_hash,
+        "bittorrent": {"info": {"name": "Real Followed Torrent"}},
+        "files": [{"path": "/downloads/Real Followed Torrent/file.bin"}],
+    }
+    client.remove_download_result.return_value = "OK"
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-http-metadata",
+            "status": "complete",
+            "followedBy": ["gid-real-bt"],
+            "totalLength": "0",
+            "completedLength": "0",
+            "files": [],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+
+    assert updated["aria2_gid"] == "gid-real-bt"
+    assert updated["resource_kind"] == "torrent"
+    assert updated["resource_key"] == "sync:http-followed-upgrade"
+    assert updated["bt_info_hash"] == info_hash
+    assert updated["display_name"] == "Real Followed Torrent"
+    assert updated["total_bytes"] == 8192
+    assert updated["completed_bytes"] == 2048
+
+
+@pytest.mark.asyncio
 async def test_metadata_completion_retries_for_late_followed_by_before_file_validation(
     temp_db: str,
 ) -> None:
