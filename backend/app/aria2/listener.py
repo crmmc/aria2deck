@@ -10,27 +10,22 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
-from sqlalchemy import update
 
-from app.aria2.display_name import refreshable_user_task_display_name_condition
+from app.aria2 import download_ops
 from app.aria2.errors import prefer_aria2_error_message
 from app.aria2.failed_task_cleanup import (
     cleanup_failed_task_artifacts,
     get_representative_owner_id,
 )
-from app.db.engine import transaction
-from app.db.schema import global_downloads, user_tasks
 from app.repositories.downloads import (
     ACTIVE_USER_TASK_STATUSES,
     get_global_download_by_gid,
     mark_global_download_failed,
-    now_ms,
     update_global_download,
 )
 from app.services.download_service import complete_global_download
 from app.services.task_projection import (
     METADATA_NAME_PREFIX,
-    is_metadata_phase_status,
 )
 
 if TYPE_CHECKING:
@@ -131,7 +126,7 @@ def _expected_completed_size(
             if not isinstance(item, dict):
                 continue
             raw_length = item.get("length")
-            length = _safe_int(raw_length, default=-1)
+            length = download_ops.safe_int(raw_length, default=-1)
             if length < 0:
                 continue
             expected += length
@@ -139,7 +134,7 @@ def _expected_completed_size(
         if has_length:
             return expected
 
-    total_length = _safe_int(aria2_status.get("totalLength"), default=-1)
+    total_length = download_ops.safe_int(aria2_status.get("totalLength"), default=-1)
     if total_length < 0:
         return None
     if source_path.is_dir() or total_length > 0:
@@ -267,13 +262,6 @@ async def _resolve_complete_source_with_retry(
     return None
 
 
-def _safe_int(value: str | int | None, default: int = 0) -> int:
-    try:
-        return int(value) if value is not None else default
-    except (TypeError, ValueError):
-        return default
-
-
 def _first_followed_gid(aria2_status: dict[str, Any]) -> str | None:
     followed_by = aria2_status.get("followedBy")
     if not isinstance(followed_by, list):
@@ -290,15 +278,6 @@ def _following_gid(aria2_status: dict[str, Any]) -> str | None:
     if isinstance(following, (str, int)) and str(following):
         return str(following)
     return None
-
-
-def _can_create_followed_download(download: dict[str, Any]) -> bool:
-    resource_kind = str(download.get("resource_kind") or "").lower()
-    if resource_kind in {"magnet", "torrent"}:
-        return True
-
-    source_uri = str(download.get("source_uri") or "").lower()
-    return source_uri.startswith(("magnet:", "torrent:"))
 
 
 def _is_magnet_download(download: dict[str, Any]) -> bool:
@@ -369,39 +348,6 @@ def _is_metadata_handoff_pending(
     ) and not _has_payload_like_file_path(aria2_status)
 
 
-def _extract_display_name(
-    aria2_status: dict[str, Any],
-    fallback: str | None,
-) -> str | None:
-    raw_name = aria2_status.get("bittorrent", {}).get("info", {}).get("name") or (
-        aria2_status.get("files") or [{}]
-    )[0].get("path")
-    if isinstance(raw_name, str) and raw_name:
-        name = Path(raw_name).name or raw_name
-        if name.startswith(METADATA_NAME_PREFIX):
-            return fallback
-        return name
-    return fallback
-
-
-def _progress_values(
-    aria2_status: dict[str, Any],
-    display_name_fallback: str | None,
-) -> dict[str, Any]:
-    values: dict[str, Any] = {}
-    if aria2_status:
-        display_name = _extract_display_name(aria2_status, display_name_fallback)
-        if display_name and not display_name.startswith(METADATA_NAME_PREFIX):
-            values["display_name"] = display_name
-        # Skip total_bytes during metadata phase — the tiny metadata size
-        # must not overwrite the real file size in the database.
-        # completed_bytes is always written so speed and activity remain visible.
-        if not is_metadata_phase_status(aria2_status):
-            values["total_bytes"] = _safe_int(aria2_status.get("totalLength"))
-        values["completed_bytes"] = _safe_int(aria2_status.get("completedLength"))
-    return values
-
-
 async def _resolve_download_for_gid(
     gid: str,
     aria2_status: dict[str, Any],
@@ -429,29 +375,9 @@ async def _guarded_update_global_download(
     download_id: int,
     values: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if not values:
-        return None
-
-    timestamp = now_ms()
-    row_values = {**values, "updated_at_ms": timestamp}
-    async with transaction() as conn:
-        row = (
-            (
-                await conn.execute(
-                    update(global_downloads)
-                    .where(
-                        global_downloads.c.id == download_id,
-                        global_downloads.c.status.in_(ACTIVE_USER_TASK_STATUSES),
-                        global_downloads.c.completed_file_id.is_(None),
-                    )
-                    .values(**row_values)
-                    .returning(global_downloads)
-                )
-            )
-            .mappings()
-            .first()
-        )
-    return dict(row) if row else None
+    return await download_ops.guarded_update_global_download(
+        download_id, values, return_row=True
+    )
 
 
 async def _update_download_and_active_user_tasks(
@@ -465,43 +391,14 @@ async def _update_download_and_active_user_tasks(
         return False
 
     new_display_name = global_values.get("display_name")
-    timestamp = now_ms()
-    async with transaction() as conn:
-        base_condition = [
-            user_tasks.c.global_download_id == download_id,
-            user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
-        ]
-        if user_status is not None:
-            await conn.execute(
-                update(user_tasks)
-                .where(*base_condition)
-                .values(status=user_status, updated_at_ms=timestamp)
-            )
-        if new_display_name:
-            await conn.execute(
-                update(user_tasks)
-                .where(
-                    *base_condition,
-                    refreshable_user_task_display_name_condition(),
-                )
-                .values(display_name=new_display_name, updated_at_ms=timestamp)
-            )
-    return True
-
-
-async def _refresh_followed_download_values(
-    client: Aria2Client,
-    gid: str,
-    fallback: str | None,
-) -> dict[str, Any]:
-    try:
-        status = await client.tell_status(gid)
-    except Exception as exc:
-        logger.debug(
-            "[WS] Failed to refresh followed download gid=%s error=%s", gid, exc
+    if user_status is not None or new_display_name:
+        await download_ops.update_active_user_tasks(
+            download_id,
+            status=user_status,
+            display_name=new_display_name,
+            force_display_name=False,
         )
-        return {}
-    return _progress_values(status, fallback)
+    return True
 
 
 async def _switch_to_followed_download(
@@ -514,31 +411,17 @@ async def _switch_to_followed_download(
     metadata_values: dict[str, Any] | None = None,
     log_prefix: str,
 ) -> bool:
-    logger.info(
-        "%s Metadata download complete, updating GID: %s -> %s",
-        log_prefix,
-        metadata_gid,
-        followed_gid,
+    download = await get_global_download_by_gid(metadata_gid or followed_gid)
+    if download is None:
+        return False
+    return await download_ops.switch_to_followed_download(
+        client=client,
+        download=download,
+        metadata_gid=metadata_gid,
+        followed_gid=followed_gid,
+        display_name_fallback=display_name_fallback,
+        log_prefix=log_prefix,
     )
-    real_progress_values = await _refresh_followed_download_values(
-        client,
-        followed_gid,
-        display_name_fallback,
-    )
-    global_values = {
-        "aria2_gid": followed_gid,
-        "status": "active",
-        **(metadata_values or {}),
-        **real_progress_values,
-    }
-    changed = await _update_download_and_active_user_tasks(
-        download_id=download_id,
-        global_values=global_values,
-        user_status="active",
-    )
-    if changed and metadata_gid and metadata_gid != followed_gid:
-        await _remove_download_result_best_effort(client, metadata_gid, log_prefix)
-    return changed
 
 
 async def _refresh_followed_gid(
@@ -579,9 +462,6 @@ async def _switch_to_late_followed_download_if_supported(
     display_name_fallback: str | None,
     log_prefix: str,
 ) -> bool:
-    if not _can_create_followed_download(download):
-        return False
-
     followed_gid = await _refresh_followed_gid(client, metadata_gid, log_prefix)
     if followed_gid is None:
         return False
@@ -688,7 +568,7 @@ async def handle_v0_download_complete(
         if not isinstance(files, list):
             files = []
 
-        task_name = _extract_display_name(
+        task_name = download_ops.extract_display_name(
             aria2_status,
             display_name_fallback,
         )
@@ -826,7 +706,7 @@ async def handle_aria2_event(
 
     download_id = int(download["id"])
     display_name_fallback = download.get("display_name") or download.get("source_uri")
-    progress_values = _progress_values(aria2_status, display_name_fallback)
+    progress_values = download_ops.map_progress_values(aria2_status, display_name_fallback)
 
     if event == "start":
         await _update_download_and_active_user_tasks(
