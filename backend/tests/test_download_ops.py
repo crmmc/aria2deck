@@ -234,3 +234,165 @@ async def test_update_active_user_tasks_respects_refreshable(
         ).mappings().one()
     # "file.bin" does not match refreshable condition, so unchanged
     assert row["display_name"] == "file.bin"
+
+
+from unittest.mock import AsyncMock
+
+from app.aria2.download_ops import switch_to_followed_download
+
+
+@pytest.mark.asyncio
+async def test_switch_to_followed_http_to_torrent(temp_db: str) -> None:
+    """HTTP torrent link switches to BT: resource_kind upgraded, hash written, name forced."""
+    user = await create_user_v0(username="switcher")
+    dl = await create_global_download_v0(
+        resource_key="http-torrent-key",
+        resource_kind="http",
+        source_uri="http://example.com/file.torrent",
+        status="active",
+        aria2_gid="meta-gid-1",
+        display_name="file.torrent",
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=dl["id"],
+        status="active",
+        display_name="file.torrent",
+    )
+
+    mock_client = AsyncMock()
+    mock_client.tell_status.return_value = {
+        "status": "active",
+        "bittorrent": {"info": {"name": "Ubuntu 24.04 LTS"}},
+        "infoHash": "ab" * 20,
+        "totalLength": "4000000000",
+        "completedLength": "100000",
+        "files": [{"path": "/downloads/Ubuntu 24.04 LTS/ubuntu.iso"}],
+    }
+    mock_client.remove_download_result = AsyncMock()
+
+    result = await switch_to_followed_download(
+        client=mock_client,
+        download=dl,
+        metadata_gid="meta-gid-1",
+        followed_gid="real-gid-1",
+        display_name_fallback="file.torrent",
+        log_prefix="[Test]",
+    )
+
+    assert result is True
+
+    async with transaction() as conn:
+        g_row = (
+            await conn.execute(
+                select(global_downloads).where(global_downloads.c.id == dl["id"])
+            )
+        ).mappings().one()
+    assert g_row["aria2_gid"] == "real-gid-1"
+    assert g_row["resource_kind"] == "torrent"
+    assert g_row["bt_info_hash"] == "ab" * 20
+    assert g_row["display_name"] == "Ubuntu 24.04 LTS"
+
+    async with transaction() as conn:
+        t_row = (
+            await conn.execute(
+                select(user_tasks).where(user_tasks.c.id == task["id"])
+            )
+        ).mappings().one()
+    assert t_row["display_name"] == "Ubuntu 24.04 LTS"
+    assert t_row["status"] == "active"
+
+    mock_client.remove_download_result.assert_called_once_with("meta-gid-1")
+
+
+@pytest.mark.asyncio
+async def test_switch_to_followed_magnet_no_kind_upgrade(temp_db: str) -> None:
+    """Magnet→torrent: resource_kind stays as-is (already BT type)."""
+    user = await create_user_v0(username="magnet-user")
+    dl = await create_global_download_v0(
+        resource_key="magnet-key",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:" + "cc" * 20,
+        status="active",
+        aria2_gid="meta-gid-2",
+        display_name="magnet:?xt=urn:btih:" + "cc" * 20,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=dl["id"],
+        status="active",
+        display_name="magnet:?xt=urn:btih:" + "cc" * 20,
+    )
+
+    mock_client = AsyncMock()
+    mock_client.tell_status.return_value = {
+        "status": "active",
+        "bittorrent": {"info": {"name": "Debian ISO"}},
+        "infoHash": "dd" * 20,
+        "totalLength": "3000000000",
+        "completedLength": "0",
+        "files": [{"path": "/downloads/debian.iso"}],
+    }
+    mock_client.remove_download_result = AsyncMock()
+
+    await switch_to_followed_download(
+        client=mock_client,
+        download=dl,
+        metadata_gid="meta-gid-2",
+        followed_gid="real-gid-2",
+        display_name_fallback=None,
+        log_prefix="[Test]",
+    )
+
+    async with transaction() as conn:
+        g_row = (
+            await conn.execute(
+                select(global_downloads).where(global_downloads.c.id == dl["id"])
+            )
+        ).mappings().one()
+    # magnet is already BT kind, should NOT be overwritten to "torrent"
+    assert g_row["resource_kind"] == "magnet"
+
+
+@pytest.mark.asyncio
+async def test_switch_to_followed_tell_status_fails(temp_db: str) -> None:
+    """tell_status failure: still updates GID and resource_kind, no crash."""
+    user = await create_user_v0(username="fail-user")
+    dl = await create_global_download_v0(
+        resource_key="fail-key",
+        resource_kind="http",
+        source_uri="http://example.com/big.torrent",
+        status="active",
+        aria2_gid="meta-gid-3",
+        display_name="big.torrent",
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=dl["id"],
+        status="active",
+        display_name="big.torrent",
+    )
+
+    mock_client = AsyncMock()
+    mock_client.tell_status.side_effect = Exception("connection refused")
+    mock_client.remove_download_result = AsyncMock()
+
+    result = await switch_to_followed_download(
+        client=mock_client,
+        download=dl,
+        metadata_gid="meta-gid-3",
+        followed_gid="real-gid-3",
+        display_name_fallback="big.torrent",
+        log_prefix="[Test]",
+    )
+
+    assert result is True
+
+    async with transaction() as conn:
+        g_row = (
+            await conn.execute(
+                select(global_downloads).where(global_downloads.c.id == dl["id"])
+            )
+        ).mappings().one()
+    assert g_row["aria2_gid"] == "real-gid-3"
+    assert g_row["resource_kind"] == "torrent"

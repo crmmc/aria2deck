@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.aria2.client import Aria2Client
 
 from sqlalchemy import update
 
@@ -144,3 +147,74 @@ async def update_active_user_tasks(
                     )
                     .values(display_name=display_name, updated_at_ms=timestamp)
                 )
+
+
+async def switch_to_followed_download(
+    *,
+    client: "Aria2Client",
+    download: dict[str, Any],
+    metadata_gid: str | None,
+    followed_gid: str,
+    display_name_fallback: str | None,
+    log_prefix: str,
+) -> bool:
+    download_id = int(download["id"])
+    logger.info(
+        "%s Metadata download complete, updating GID: %s -> %s",
+        log_prefix,
+        metadata_gid,
+        followed_gid,
+    )
+
+    real_status: dict[str, Any] | None = None
+    try:
+        real_status = await client.tell_status(followed_gid)
+    except Exception as exc:
+        logger.debug(
+            "%s Failed to refresh followed download gid=%s error=%s",
+            log_prefix,
+            followed_gid,
+            exc,
+        )
+
+    global_values: dict[str, Any] = {
+        "aria2_gid": followed_gid,
+        "status": "active",
+    }
+    display_name: str | None = None
+
+    if real_status:
+        progress = map_progress_values(real_status, display_name_fallback)
+        global_values.update(progress)
+        display_name = progress.get("display_name")
+
+        bt_hash = bt_info_hash_from_status(real_status)
+        if bt_hash:
+            global_values["bt_info_hash"] = bt_hash
+
+    if not is_bt_resource_kind(download):
+        global_values["resource_kind"] = "torrent"
+
+    changed = await guarded_update_global_download(download_id, global_values)
+    if not changed:
+        return False
+
+    await update_active_user_tasks(
+        download_id,
+        status="active",
+        display_name=display_name,
+        force_display_name=True,
+    )
+
+    if metadata_gid and metadata_gid != followed_gid:
+        try:
+            await client.remove_download_result(metadata_gid)
+        except Exception as exc:
+            logger.debug(
+                "%s Failed to remove metadata result gid=%s error=%s",
+                log_prefix,
+                metadata_gid,
+                exc,
+            )
+
+    return True
