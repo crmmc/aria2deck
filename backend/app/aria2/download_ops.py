@@ -218,3 +218,48 @@ async def switch_to_followed_download(
             )
 
     return True
+
+
+def is_metadata_handoff_pending(
+    download: dict[str, Any],
+    aria2_status: dict[str, Any],
+) -> bool:
+    if str(aria2_status.get("status") or "") != "complete":
+        return False
+    if aria2_status.get("followedBy"):
+        return False
+    if aria2_status.get("following") or aria2_status.get("followingGid"):
+        return False
+    if str(download.get("resource_kind") or "") != "magnet":
+        return False
+
+    display_name = str(download.get("display_name") or "").strip().lower()
+    if display_name and not display_name.startswith(("magnet:", "torrent:")):
+        return False
+
+    bittorrent = aria2_status.get("bittorrent")
+    if isinstance(bittorrent, dict):
+        info = bittorrent.get("info")
+        if isinstance(info, dict):
+            bt_name = str(info.get("name") or "").strip()
+            if bt_name and not bt_name.startswith(METADATA_NAME_PREFIX):
+                return False
+
+    files = aria2_status.get("files")
+    if isinstance(files, list):
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            raw_path = item.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            name = Path(raw_path).name.lower()
+            if (
+                name
+                and name != "metadata"
+                and not name.endswith(".torrent")
+                and not name.startswith("[metadata]")
+            ):
+                return False
+
+    return True

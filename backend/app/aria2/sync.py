@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
 import aiohttp
 from fastapi import WebSocket
-from sqlalchemy import select, update
+from sqlalchemy import select
 
+from app.aria2 import download_ops
 from app.aria2.client import Aria2Client
-from app.aria2.display_name import refreshable_user_task_display_name_condition
 from app.aria2.errors import prefer_aria2_error_message
 from app.aria2.failed_task_cleanup import (
     cleanup_failed_task_artifacts,
@@ -22,14 +21,13 @@ from app.aria2.failed_task_cleanup import (
 from app.core.security import sanitize_string
 from app.core.state import AppState
 from app.db.engine import transaction
-from app.db.schema import global_downloads, user_tasks
+from app.db.schema import global_downloads
 from app.repositories.downloads import (
     ACTIVE_USER_TASK_STATUSES,
     mark_global_download_failed,
     now_ms,
 )
 from app.services.task_projection import (
-    METADATA_NAME_PREFIX,
     has_live_bt_evidence,
     has_real_file_path,
     is_bt_resource_kind,
@@ -39,7 +37,6 @@ from app.services.task_projection import (
 logger = logging.getLogger(__name__)
 
 
-INFO_HASH_HEX_PATTERN = re.compile(r"^[a-fA-F0-9]{40}$")
 OWNED_STOPPED_RESULT_CLEANUP_BATCH = 50
 COMPLETE_REPAIR_GRACE_SECONDS = 30.0
 STALE_QUEUED_GRACE_SECONDS = 300.0
@@ -81,13 +78,6 @@ def _sanitize_path(file_path: str | None, task_id: int) -> str | None:
         return file_path
 
 
-def _safe_int(value: str | int | None, default: int = 0) -> int:
-    try:
-        return int(value) if value is not None else default
-    except (ValueError, TypeError):
-        return default
-
-
 def _status_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -110,15 +100,6 @@ def _should_upgrade_to_torrent(
     return not is_bt_resource_kind(download) and has_live_bt_evidence(status)
 
 
-def _bt_info_hash_from_status(status: dict[str, Any] | None) -> str | None:
-    if not isinstance(status, dict):
-        return None
-    info_hash = str(status.get("infoHash") or "").strip()
-    if INFO_HASH_HEX_PATTERN.fullmatch(info_hash):
-        return info_hash.lower()
-    return None
-
-
 def _is_effectively_complete_active_bt_status(
     status: dict[str, Any],
     download: dict[str, Any],
@@ -130,57 +111,12 @@ def _is_effectively_complete_active_bt_status(
     if _status_bool(status.get("verifyIntegrityPending")):
         return False
 
-    total_bytes = _safe_int(status.get("totalLength"))
-    completed_bytes = _safe_int(status.get("completedLength"))
+    total_bytes = download_ops.safe_int(status.get("totalLength"))
+    completed_bytes = download_ops.safe_int(status.get("completedLength"))
     if total_bytes <= 0 or completed_bytes < total_bytes:
         return False
 
     return _has_bittorrent_evidence(status, download) and has_real_file_path(status)
-
-
-def _is_metadata_handoff_pending(
-    status: dict[str, Any],
-    download: dict[str, Any],
-) -> bool:
-    if str(status.get("status") or "") != "complete":
-        return False
-    if status.get("followedBy"):
-        return False
-    if status.get("following") or status.get("followingGid"):
-        return False
-    if str(download.get("resource_kind") or "") != "magnet":
-        return False
-
-    display_name = str(download.get("display_name") or "").strip().lower()
-    if display_name and not display_name.startswith(("magnet:", "torrent:")):
-        return False
-
-    bittorrent = status.get("bittorrent")
-    if isinstance(bittorrent, dict):
-        info = bittorrent.get("info")
-        if isinstance(info, dict):
-            bt_name = str(info.get("name") or "").strip()
-            if bt_name and not bt_name.startswith(METADATA_NAME_PREFIX):
-                return False
-
-    files = status.get("files")
-    if isinstance(files, list):
-        for item in files:
-            if not isinstance(item, dict):
-                continue
-            raw_path = item.get("path")
-            if not isinstance(raw_path, str) or not raw_path.strip():
-                continue
-            name = Path(raw_path).name.lower()
-            if (
-                name
-                and name != "metadata"
-                and not name.endswith(".torrent")
-                and not name.startswith("[metadata]")
-            ):
-                return False
-
-    return True
 
 
 def _map_v0_status(
@@ -189,22 +125,23 @@ def _map_v0_status(
     *,
     prefer_bittorrent_name: bool = False,
 ) -> dict[str, Any]:
-    raw_name = None
+    fallback_name = (status.get("files") or [{}])[0].get("path")
+    if fallback_name:
+        fallback_name = _sanitize_path(fallback_name, download_id)
+
     if prefer_bittorrent_name:
-        bittorrent = status.get("bittorrent")
-        if isinstance(bittorrent, dict):
-            info = bittorrent.get("info")
-            if isinstance(info, dict):
-                raw_name = info.get("name")
-    raw_name = raw_name or (status.get("files") or [{}])[0].get("path")
+        extracted = download_ops.extract_display_name(status, fallback_name)
+    else:
+        extracted = sanitize_string(fallback_name) if fallback_name else None
+
     raw_status = str(status.get("status") or "unknown")
     raw_error = status.get("errorMessage")
     return {
         "status": ARIA2_TO_V0_STATUS.get(raw_status, "active"),
         "raw_status": raw_status,
-        "display_name": sanitize_string(_sanitize_path(raw_name, download_id)),
-        "total_bytes": _safe_int(status.get("totalLength")),
-        "completed_bytes": _safe_int(status.get("completedLength")),
+        "display_name": extracted,
+        "total_bytes": download_ops.safe_int(status.get("totalLength")),
+        "completed_bytes": download_ops.safe_int(status.get("completedLength")),
         "error_message": sanitize_string(
             prefer_aria2_error_message(status.get("errorCode"), raw_error, "后端错误")
             if raw_error or raw_status == "error"
@@ -294,58 +231,6 @@ async def _fail_v0_download_and_cleanup(
         await _broadcast_download_update(state, download_id)
 
 
-async def _guarded_update_global_download(
-    download_id: int,
-    values: dict[str, Any],
-) -> bool:
-    if not values:
-        return False
-
-    row_values = {**values}
-    row_values.setdefault("updated_at_ms", now_ms())
-    async with transaction() as conn:
-        row = (
-            await conn.execute(
-                update(global_downloads)
-                .where(
-                    global_downloads.c.id == download_id,
-                    global_downloads.c.status.in_(V0_SYNC_TRACKED_STATUSES),
-                    global_downloads.c.completed_file_id.is_(None),
-                )
-                .values(**row_values)
-                .returning(global_downloads.c.id)
-            )
-        ).first()
-    return row is not None
-
-
-async def _update_active_user_task_status(
-    download_id: int,
-    status: str,
-    display_name: str | None = None,
-) -> None:
-    timestamp = now_ms()
-    base_condition = [
-        user_tasks.c.global_download_id == download_id,
-        user_tasks.c.status.in_(V0_SYNC_TRACKED_STATUSES),
-    ]
-    async with transaction() as conn:
-        await conn.execute(
-            update(user_tasks)
-            .where(*base_condition)
-            .values(status=status, updated_at_ms=timestamp)
-        )
-        if display_name:
-            await conn.execute(
-                update(user_tasks)
-                .where(
-                    *base_condition,
-                    refreshable_user_task_display_name_condition(),
-                )
-                .values(display_name=display_name, updated_at_ms=timestamp)
-            )
-
-
 async def _complete_v0_download_from_sync(
     *,
     state: AppState,
@@ -370,80 +255,6 @@ async def _complete_v0_download_from_sync(
         await _broadcast_download_update(state, int(download["id"]))
 
 
-async def _switch_to_followed_download_from_sync(
-    *,
-    state: AppState,
-    client: Aria2Client,
-    download: dict[str, Any],
-    metadata_gid: str,
-    followed_gid: str,
-) -> None:
-    download_id = int(download["id"])
-    real_status: dict[str, Any] | None = None
-    try:
-        real_status = await client.tell_status(followed_gid)
-    except Exception as exc:
-        logger.debug(
-            "[Sync] Failed to refresh followed download gid=%s error=%s",
-            followed_gid,
-            exc,
-        )
-    real_mapped = (
-        _map_v0_status(
-            real_status,
-            download_id,
-            prefer_bittorrent_name=True,
-        )
-        if real_status
-        else None
-    )
-    logger.info(
-        "[Sync] Metadata download complete, updating GID: %s -> %s",
-        metadata_gid,
-        followed_gid,
-    )
-    global_values: dict[str, Any] = {
-        "aria2_gid": followed_gid,
-        "status": real_mapped["status"] if real_mapped else "active",
-    }
-    bt_info_hash = _bt_info_hash_from_status(real_status)
-    if bt_info_hash:
-        global_values["bt_info_hash"] = bt_info_hash
-    if not is_bt_resource_kind(download):
-        global_values["resource_kind"] = "torrent"
-    if real_mapped:
-        global_values.update(
-            {
-                "total_bytes": real_mapped["total_bytes"],
-                "completed_bytes": real_mapped["completed_bytes"],
-            }
-        )
-        if real_mapped["display_name"]:
-            global_values["display_name"] = real_mapped["display_name"]
-    changed = await _guarded_update_global_download(
-        download_id,
-        global_values,
-    )
-    if not changed:
-        return
-
-    await _update_active_user_task_status(
-        download_id,
-        str(global_values["status"]),
-        display_name=global_values.get("display_name"),
-    )
-    if metadata_gid != followed_gid:
-        try:
-            await client.remove_download_result(metadata_gid)
-        except Exception as exc:
-            logger.debug(
-                "[Sync] Failed to remove metadata result gid=%s error=%s",
-                metadata_gid,
-                exc,
-            )
-    await _broadcast_download_update(state, download_id)
-
-
 async def _update_v0_download_from_aria2(
     *,
     state: AppState,
@@ -463,16 +274,19 @@ async def _update_v0_download_from_aria2(
     followed_by = status.get("followedBy") or []
 
     if mapped["raw_status"] == "complete" and followed_by:
-        await _switch_to_followed_download_from_sync(
-            state=state,
+        switched = await download_ops.switch_to_followed_download(
             client=client,
             download=download,
             metadata_gid=gid,
             followed_gid=str(followed_by[0]),
+            display_name_fallback=str(download.get("display_name") or ""),
+            log_prefix="[Sync]",
         )
+        if switched:
+            await _broadcast_download_update(state, int(download["id"]))
         return
 
-    if _is_metadata_handoff_pending(status, download):
+    if download_ops.is_metadata_handoff_pending(download, status):
         followed_gid = None
         try:
             refreshed_status = await client.tell_status(gid)
@@ -486,13 +300,16 @@ async def _update_v0_download_from_aria2(
                 exc,
             )
         if followed_gid:
-            await _switch_to_followed_download_from_sync(
-                state=state,
+            switched = await download_ops.switch_to_followed_download(
                 client=client,
                 download=download,
                 metadata_gid=gid,
                 followed_gid=followed_gid,
+                display_name_fallback=str(download.get("display_name") or ""),
+                log_prefix="[Sync]",
             )
+            if switched:
+                await _broadcast_download_update(state, int(download["id"]))
             return
 
         logger.info(
@@ -500,11 +317,11 @@ async def _update_v0_download_from_aria2(
             download_id,
             gid,
         )
-        await _guarded_update_global_download(
+        await download_ops.guarded_update_global_download(
             download_id,
             {"status": "active"},
         )
-        await _update_active_user_task_status(download_id, "active")
+        await download_ops.update_active_user_tasks(download_id, status="active")
         return
 
     if mapped["raw_status"] == "complete":
@@ -561,7 +378,7 @@ async def _update_v0_download_from_aria2(
     }
     if upgrade_to_torrent:
         global_values["resource_kind"] = "torrent"
-    bt_info_hash = _bt_info_hash_from_status(status)
+    bt_info_hash = download_ops.bt_info_hash_from_status(status)
     if bt_evidence and bt_info_hash:
         global_values["bt_info_hash"] = bt_info_hash
     if not is_metadata:
@@ -569,13 +386,13 @@ async def _update_v0_download_from_aria2(
         if mapped["display_name"]:
             global_values["display_name"] = mapped["display_name"]
 
-    changed = await _guarded_update_global_download(download_id, global_values)
+    changed = await download_ops.guarded_update_global_download(download_id, global_values)
     if not changed:
         return
 
-    await _update_active_user_task_status(
+    await download_ops.update_active_user_tasks(
         download_id,
-        mapped["status"],
+        status=mapped["status"],
         display_name=mapped["display_name"] if not is_metadata else None,
     )
     await _broadcast_download_update(state, download_id)
