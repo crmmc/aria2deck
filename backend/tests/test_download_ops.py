@@ -112,3 +112,125 @@ class TestMapProgressValues:
         }
         result = map_progress_values(status, "fallback", skip_total_on_metadata=False)
         assert result["total_bytes"] == 99
+
+
+# --- DB operation tests ---
+
+from sqlalchemy import select
+
+from app.aria2.download_ops import (
+    guarded_update_global_download,
+    update_active_user_tasks,
+)
+from app.db.engine import transaction
+from app.db.schema import global_downloads, user_tasks
+from tests.helpers_v0 import (
+    create_global_download_v0,
+    create_user_task_v0,
+    create_user_v0,
+)
+
+
+@pytest.mark.asyncio
+async def test_guarded_update_returns_bool(temp_db: str) -> None:
+    dl = await create_global_download_v0(
+        resource_key="test-key-1",
+        status="active",
+        aria2_gid="aaa111",
+    )
+    result = await guarded_update_global_download(
+        dl["id"], {"status": "active", "total_bytes": 999}
+    )
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_guarded_update_returns_row(temp_db: str) -> None:
+    dl = await create_global_download_v0(
+        resource_key="test-key-2",
+        status="active",
+        aria2_gid="bbb222",
+    )
+    result = await guarded_update_global_download(
+        dl["id"], {"aria2_gid": "ccc333"}, return_row=True
+    )
+    assert isinstance(result, dict)
+    assert result["aria2_gid"] == "ccc333"
+
+
+@pytest.mark.asyncio
+async def test_guarded_update_skips_completed(temp_db: str) -> None:
+    dl = await create_global_download_v0(
+        resource_key="test-key-3",
+        status="completed",
+        aria2_gid="ddd444",
+    )
+    result = await guarded_update_global_download(
+        dl["id"], {"total_bytes": 100}
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_update_active_user_tasks_force_display_name(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="tester")
+    dl = await create_global_download_v0(
+        resource_key="test-key-4",
+        status="active",
+        aria2_gid="eee555",
+        display_name="old.torrent",
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=dl["id"],
+        status="active",
+        display_name="old.torrent",
+    )
+    await update_active_user_tasks(
+        dl["id"],
+        display_name="Real BT Name",
+        force_display_name=True,
+    )
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                select(user_tasks).where(user_tasks.c.id == task["id"])
+            )
+        ).mappings().one()
+    assert row["display_name"] == "Real BT Name"
+
+
+@pytest.mark.asyncio
+async def test_update_active_user_tasks_respects_refreshable(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="tester2")
+    dl = await create_global_download_v0(
+        resource_key="test-key-5",
+        resource_kind="http",
+        source_uri="http://example.com/file.bin",
+        status="active",
+        aria2_gid="fff666",
+        display_name="file.bin",
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=dl["id"],
+        status="active",
+        display_name="file.bin",
+    )
+    await update_active_user_tasks(
+        dl["id"],
+        display_name="New Name",
+        force_display_name=False,
+    )
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                select(user_tasks).where(user_tasks.c.id == task["id"])
+            )
+        ).mappings().one()
+    # "file.bin" does not match refreshable condition, so unchanged
+    assert row["display_name"] == "file.bin"
