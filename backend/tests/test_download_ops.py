@@ -7,6 +7,8 @@ import pytest
 from app.aria2.download_ops import (
     bt_info_hash_from_status,
     extract_display_name,
+    is_metadata_handoff_pending,
+    map_aria2_status,
     map_progress_values,
     safe_int,
 )
@@ -99,6 +101,7 @@ class TestMapProgressValues:
         }
         result = map_progress_values(status, "fallback")
         assert "total_bytes" not in result
+        assert "display_name" not in result
         assert result["completed_bytes"] == 10
 
     def test_empty_status_returns_empty(self) -> None:
@@ -112,6 +115,64 @@ class TestMapProgressValues:
         }
         result = map_progress_values(status, "fallback", skip_total_on_metadata=False)
         assert result["total_bytes"] == 99
+
+
+class TestMapAria2Status:
+    def test_waiting_maps_to_waiting(self) -> None:
+        assert map_aria2_status({"status": "waiting"}) == "waiting"
+
+    def test_paused_maps_to_paused(self) -> None:
+        assert map_aria2_status({"status": "paused"}) == "paused"
+
+    def test_unknown_status_uses_default(self) -> None:
+        assert map_aria2_status({"status": "unknown"}, default="active") == "active"
+
+    def test_missing_status_uses_default(self) -> None:
+        assert map_aria2_status({}, default="active") == "active"
+
+
+class TestIsMetadataHandoffPending:
+    def test_magnet_source_uri_is_pending_even_when_kind_is_http(self) -> None:
+        download = {
+            "resource_kind": "http",
+            "source_uri": "magnet:?xt=urn:btih:" + "a" * 40,
+            "display_name": "magnet:?xt=urn:btih:" + "a" * 40,
+        }
+        status = {
+            "status": "complete",
+            "bittorrent": {"info": {"name": "[METADATA]abc"}},
+            "files": [{"path": "/downloads/metadata"}],
+        }
+
+        assert is_metadata_handoff_pending(download, status) is True
+
+    def test_real_bittorrent_name_is_not_pending(self) -> None:
+        download = {
+            "resource_kind": "magnet",
+            "source_uri": "magnet:?xt=urn:btih:" + "b" * 40,
+            "display_name": "magnet:?xt=urn:btih:" + "b" * 40,
+        }
+        status = {
+            "status": "complete",
+            "bittorrent": {"info": {"name": "Real Torrent"}},
+            "files": [],
+        }
+
+        assert is_metadata_handoff_pending(download, status) is False
+
+    def test_payload_file_path_is_not_pending(self) -> None:
+        download = {
+            "resource_kind": "magnet",
+            "source_uri": "magnet:?xt=urn:btih:" + "c" * 40,
+            "display_name": "magnet:?xt=urn:btih:" + "c" * 40,
+        }
+        status = {
+            "status": "complete",
+            "bittorrent": {"info": {"name": "[METADATA]abc"}},
+            "files": [{"path": "/downloads/movie.mkv"}],
+        }
+
+        assert is_metadata_handoff_pending(download, status) is False
 
 
 # --- DB operation tests ---
@@ -303,6 +364,61 @@ async def test_switch_to_followed_http_to_torrent(temp_db: str) -> None:
     assert t_row["status"] == "active"
 
     mock_client.remove_download_result.assert_called_once_with("meta-gid-1")
+
+
+@pytest.mark.asyncio
+async def test_switch_to_followed_uses_real_status(temp_db: str) -> None:
+    """followedBy switching preserves the real aria2 task status."""
+    user = await create_user_v0(username="waiting-switcher")
+    dl = await create_global_download_v0(
+        resource_key="waiting-followed-key",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:" + "ef" * 20,
+        status="active",
+        aria2_gid="meta-gid-waiting",
+        display_name="magnet:?xt=urn:btih:" + "ef" * 20,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=dl["id"],
+        status="active",
+        display_name="magnet:?xt=urn:btih:" + "ef" * 20,
+    )
+
+    mock_client = AsyncMock()
+    mock_client.tell_status.return_value = {
+        "status": "waiting",
+        "bittorrent": {"info": {"name": "Queued Torrent"}},
+        "infoHash": "ef" * 20,
+        "totalLength": "1234",
+        "completedLength": "0",
+        "files": [{"path": "/downloads/Queued Torrent/file.bin"}],
+    }
+    mock_client.remove_download_result = AsyncMock()
+
+    result = await switch_to_followed_download(
+        client=mock_client,
+        download=dl,
+        metadata_gid="meta-gid-waiting",
+        followed_gid="real-gid-waiting",
+        display_name_fallback=dl["display_name"],
+        log_prefix="[Test]",
+    )
+
+    assert result is True
+
+    async with transaction() as conn:
+        g_row = (
+            await conn.execute(
+                select(global_downloads).where(global_downloads.c.id == dl["id"])
+            )
+        ).mappings().one()
+        t_row = (
+            await conn.execute(select(user_tasks).where(user_tasks.c.id == task["id"]))
+        ).mappings().one()
+
+    assert g_row["status"] == "waiting"
+    assert t_row["status"] == "waiting"
 
 
 @pytest.mark.asyncio

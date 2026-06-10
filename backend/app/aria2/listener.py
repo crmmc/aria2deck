@@ -280,74 +280,6 @@ def _following_gid(aria2_status: dict[str, Any]) -> str | None:
     return None
 
 
-def _is_magnet_download(download: dict[str, Any]) -> bool:
-    if str(download.get("resource_kind") or "").lower() == "magnet":
-        return True
-    return str(download.get("source_uri") or "").lower().startswith("magnet:")
-
-
-def _has_unresolved_magnet_display_name(download: dict[str, Any]) -> bool:
-    display_name = str(download.get("display_name") or "").strip().lower()
-    if not display_name:
-        return True
-    return display_name.startswith(("magnet:", "torrent:"))
-
-
-def _has_bittorrent_payload_info(aria2_status: dict[str, Any]) -> bool:
-    bittorrent = aria2_status.get("bittorrent")
-    if not isinstance(bittorrent, dict):
-        return False
-
-    info = bittorrent.get("info")
-    if not isinstance(info, dict):
-        return False
-
-    name = str(info.get("name") or "").strip()
-    return bool(name) and not name.startswith(METADATA_NAME_PREFIX)
-
-
-def _has_payload_like_file_path(aria2_status: dict[str, Any]) -> bool:
-    files = aria2_status.get("files")
-    if not isinstance(files, list):
-        return False
-
-    for item in files:
-        if not isinstance(item, dict):
-            continue
-        raw_path = item.get("path")
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            continue
-        name = Path(raw_path).name.lower()
-        if (
-            name
-            and name != "metadata"
-            and not name.endswith(".torrent")
-            and not name.startswith("[metadata]")
-        ):
-            return True
-    return False
-
-
-def _is_metadata_handoff_pending(
-    download: dict[str, Any],
-    aria2_status: dict[str, Any],
-) -> bool:
-    if str(aria2_status.get("status") or "") != "complete":
-        return False
-    if not _is_magnet_download(download):
-        return False
-    if not _has_unresolved_magnet_display_name(download):
-        return False
-    if _first_followed_gid(aria2_status) is not None:
-        return False
-    if _following_gid(aria2_status) is not None:
-        return False
-
-    return not _has_bittorrent_payload_info(
-        aria2_status
-    ) and not _has_payload_like_file_path(aria2_status)
-
-
 async def _resolve_download_for_gid(
     gid: str,
     aria2_status: dict[str, Any],
@@ -485,7 +417,7 @@ async def _defer_metadata_completion_if_handoff_pending(
     display_name_fallback: str | None,
     log_prefix: str,
 ) -> bool:
-    if not _is_metadata_handoff_pending(download, aria2_status):
+    if not download_ops.is_metadata_handoff_pending(download, aria2_status):
         return False
 
     if await _switch_to_late_followed_download_if_supported(

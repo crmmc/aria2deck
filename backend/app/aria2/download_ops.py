@@ -26,6 +26,14 @@ from app.services.task_projection import (
 logger = logging.getLogger(__name__)
 
 INFO_HASH_HEX_PATTERN = re.compile(r"^[a-fA-F0-9]{40}$")
+ARIA2_TO_V0_STATUS = {
+    "active": "active",
+    "waiting": "waiting",
+    "paused": "paused",
+    "complete": "completed",
+    "error": "failed",
+    "removed": "failed",
+}
 
 
 def safe_int(value: str | int | None, default: int = 0) -> int:
@@ -33,6 +41,13 @@ def safe_int(value: str | int | None, default: int = 0) -> int:
         return int(value) if value is not None else default
     except (ValueError, TypeError):
         return default
+
+
+def map_aria2_status(status: dict[str, Any] | None, default: str = "active") -> str:
+    if not isinstance(status, dict):
+        return default
+    raw_status = str(status.get("status") or "")
+    return ARIA2_TO_V0_STATUS.get(raw_status, default)
 
 
 def bt_info_hash_from_status(status: dict[str, Any] | None) -> str | None:
@@ -68,10 +83,15 @@ def map_progress_values(
     values: dict[str, Any] = {}
     if not aria2_status:
         return values
+    is_metadata = skip_total_on_metadata and is_metadata_phase_status(aria2_status)
     display_name = extract_display_name(aria2_status, display_name_fallback)
-    if display_name and not display_name.startswith(METADATA_NAME_PREFIX):
+    if (
+        not is_metadata
+        and display_name
+        and not display_name.startswith(METADATA_NAME_PREFIX)
+    ):
         values["display_name"] = display_name
-    if skip_total_on_metadata and is_metadata_phase_status(aria2_status):
+    if is_metadata:
         pass
     else:
         values["total_bytes"] = safe_int(aria2_status.get("totalLength"))
@@ -184,6 +204,8 @@ async def switch_to_followed_download(
     display_name: str | None = None
 
     if real_status:
+        if first_followed_gid(real_status) is None:
+            global_values["status"] = map_aria2_status(real_status)
         progress = map_progress_values(real_status, display_name_fallback)
         global_values.update(progress)
         display_name = progress.get("display_name")
@@ -201,7 +223,7 @@ async def switch_to_followed_download(
 
     await update_active_user_tasks(
         download_id,
-        status="active",
+        status=str(global_values["status"]),
         display_name=display_name,
         force_display_name=True,
     )
@@ -220,46 +242,87 @@ async def switch_to_followed_download(
     return True
 
 
+def first_followed_gid(aria2_status: dict[str, Any]) -> str | None:
+    followed_by = aria2_status.get("followedBy")
+    if not isinstance(followed_by, list):
+        return None
+
+    for gid in followed_by:
+        if isinstance(gid, (str, int)) and str(gid):
+            return str(gid)
+    return None
+
+
+def following_gid(aria2_status: dict[str, Any]) -> str | None:
+    following = aria2_status.get("following") or aria2_status.get("followingGid")
+    if isinstance(following, (str, int)) and str(following):
+        return str(following)
+    return None
+
+
+def _is_magnet_download(download: dict[str, Any]) -> bool:
+    if str(download.get("resource_kind") or "").lower() == "magnet":
+        return True
+    return str(download.get("source_uri") or "").lower().startswith("magnet:")
+
+
+def _has_unresolved_magnet_display_name(download: dict[str, Any]) -> bool:
+    display_name = str(download.get("display_name") or "").strip().lower()
+    if not display_name:
+        return True
+    return display_name.startswith(("magnet:", "torrent:"))
+
+
+def _has_bittorrent_payload_info(aria2_status: dict[str, Any]) -> bool:
+    bittorrent = aria2_status.get("bittorrent")
+    if not isinstance(bittorrent, dict):
+        return False
+
+    info = bittorrent.get("info")
+    if not isinstance(info, dict):
+        return False
+
+    name = str(info.get("name") or "").strip()
+    return bool(name) and not name.startswith(METADATA_NAME_PREFIX)
+
+
+def _has_payload_like_file_path(aria2_status: dict[str, Any]) -> bool:
+    files = aria2_status.get("files")
+    if not isinstance(files, list):
+        return False
+
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        raw_path = item.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        name = Path(raw_path).name.lower()
+        if (
+            name
+            and name != "metadata"
+            and not name.endswith(".torrent")
+            and not name.startswith("[metadata]")
+        ):
+            return True
+    return False
+
+
 def is_metadata_handoff_pending(
     download: dict[str, Any],
     aria2_status: dict[str, Any],
 ) -> bool:
     if str(aria2_status.get("status") or "") != "complete":
         return False
-    if aria2_status.get("followedBy"):
+    if not _is_magnet_download(download):
         return False
-    if aria2_status.get("following") or aria2_status.get("followingGid"):
+    if not _has_unresolved_magnet_display_name(download):
         return False
-    if str(download.get("resource_kind") or "") != "magnet":
+    if first_followed_gid(aria2_status) is not None:
         return False
-
-    display_name = str(download.get("display_name") or "").strip().lower()
-    if display_name and not display_name.startswith(("magnet:", "torrent:")):
+    if following_gid(aria2_status) is not None:
         return False
 
-    bittorrent = aria2_status.get("bittorrent")
-    if isinstance(bittorrent, dict):
-        info = bittorrent.get("info")
-        if isinstance(info, dict):
-            bt_name = str(info.get("name") or "").strip()
-            if bt_name and not bt_name.startswith(METADATA_NAME_PREFIX):
-                return False
-
-    files = aria2_status.get("files")
-    if isinstance(files, list):
-        for item in files:
-            if not isinstance(item, dict):
-                continue
-            raw_path = item.get("path")
-            if not isinstance(raw_path, str) or not raw_path.strip():
-                continue
-            name = Path(raw_path).name.lower()
-            if (
-                name
-                and name != "metadata"
-                and not name.endswith(".torrent")
-                and not name.startswith("[metadata]")
-            ):
-                return False
-
-    return True
+    return not _has_bittorrent_payload_info(
+        aria2_status
+    ) and not _has_payload_like_file_path(aria2_status)

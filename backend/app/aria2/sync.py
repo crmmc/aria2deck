@@ -54,14 +54,6 @@ TRANSIENT_RPC_ERROR_KEYWORDS = (
     "timed out",
 )
 
-ARIA2_TO_V0_STATUS = {
-    "active": "active",
-    "waiting": "waiting",
-    "paused": "paused",
-    "complete": "completed",
-    "error": "failed",
-    "removed": "failed",
-}
 V0_SYNC_TRACKED_STATUSES = ACTIVE_USER_TASK_STATUSES
 
 
@@ -137,7 +129,7 @@ def _map_v0_status(
     raw_status = str(status.get("status") or "unknown")
     raw_error = status.get("errorMessage")
     return {
-        "status": ARIA2_TO_V0_STATUS.get(raw_status, "active"),
+        "status": download_ops.map_aria2_status(status),
         "raw_status": raw_status,
         "display_name": extracted,
         "total_bytes": download_ops.safe_int(status.get("totalLength")),

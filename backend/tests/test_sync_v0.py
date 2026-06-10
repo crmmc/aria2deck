@@ -332,6 +332,60 @@ async def test_metadata_followed_by_refreshes_real_task_progress_and_name(
 
 
 @pytest.mark.asyncio
+async def test_metadata_followed_by_preserves_real_waiting_status(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_followed_waiting")
+    download = await create_global_download_v0(
+        resource_key="sync:followed-waiting",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:followedwaiting",
+        status="active",
+        aria2_gid="gid-metadata-waiting",
+        display_name="magnet:?xt=urn:btih:followedwaiting",
+        total_bytes=0,
+        completed_bytes=0,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        display_name="magnet:?xt=urn:btih:followedwaiting",
+    )
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-real-waiting",
+        "status": "waiting",
+        "totalLength": "2048",
+        "completedLength": "0",
+        "bittorrent": {"info": {"name": "Waiting Torrent"}},
+        "files": [{"path": "/downloads/Waiting Torrent/file.bin", "length": "2048"}],
+    }
+    client.remove_download_result.return_value = "OK"
+
+    await _update_v0_download_from_aria2(
+        state=AppState(),
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-metadata-waiting",
+            "status": "complete",
+            "followedBy": ["gid-real-waiting"],
+            "totalLength": "0",
+            "completedLength": "0",
+            "files": [],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+
+    assert updated["aria2_gid"] == "gid-real-waiting"
+    assert updated["status"] == "waiting"
+    assert updated_task["status"] == "waiting"
+
+
+@pytest.mark.asyncio
 async def test_torrent_synthetic_task_name_is_replaced_with_real_name(
     temp_db: str,
 ) -> None:
