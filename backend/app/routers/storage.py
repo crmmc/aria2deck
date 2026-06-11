@@ -283,7 +283,7 @@ async def bulk_delete_files(
                         exc_info=True,
                     )
             if affected_download_ids:
-                from app.routers.tasks import broadcast_task_update_to_subscribers
+                from app.services.task_broadcast import broadcast_task_update_to_subscribers
 
                 state = http_request.app.state.app_state
                 for download_id in affected_download_ids:

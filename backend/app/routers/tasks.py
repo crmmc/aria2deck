@@ -19,14 +19,12 @@ from app.auth import AuthUser, require_user
 from app.core.config import settings
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
 from app.core.security import check_url_ssrf, mask_url_credentials
-from app.core.state import AppState, get_aria2_client
+from app.core.state import get_aria2_client
 from app.repositories.downloads import (
     clear_terminal_user_tasks,
     get_global_by_resource_key,
-    list_user_tasks_for_download,
     list_user_tasks,
 )
-from app.routers.config import get_max_task_size, get_min_free_disk
 from app.services.hash import (
     extract_info_hash_from_magnet,
     get_uri_hash,
@@ -34,6 +32,7 @@ from app.services.hash import (
     is_magnet_link,
 )
 from app.services.http_probe import probe_url_with_get_fallback
+from app.services.settings_service import get_max_task_size, get_min_free_disk
 from app.services.task_projection import (
     InvalidTaskStatusFilter,
     build_rest_task_response,
@@ -41,7 +40,6 @@ from app.services.task_projection import (
 )
 from app.services.task_runtime import (
     fetch_active_live_statuses_by_gid,
-    fetch_cached_live_status_for_row,
 )
 from app.services.download_service import (
     cancel_user_task,
@@ -656,55 +654,3 @@ async def clear_history(user: AuthUser = Depends(require_user)) -> dict:
     logger.info("清空任务记录成功 user_id=%s count=%s", user.id, count)
 
     return {"ok": True, "count": count}
-
-
-# ========== Broadcast Helpers ==========
-
-
-async def _broadcast_task_update(state: AppState, task_id: int) -> None:
-    """Broadcast a v0 global download update to all subscribers.
-
-    Handles connection failures gracefully.
-    """
-    from app.aria2.sync import unregister_ws
-
-    rows = await list_user_tasks_for_download(task_id)
-    client = get_aria2_client(state=state)
-    live_by_gid: dict[str, dict] = {}
-
-    # Broadcast to each subscriber
-    for row in rows:
-        owner_id = int(row["user_id"])
-        live = await fetch_cached_live_status_for_row(
-            row,
-            client,
-            state,
-            logger,
-            live_by_gid,
-        )
-        payload = _v0_list_task_response(row, live)
-
-        async with state.lock:
-            sockets = list(state.ws_connections.get(owner_id, set()))
-
-        failed_sockets = []
-        for ws in sockets:
-            try:
-                await ws.send_json({"type": "task_update", "task": payload})
-            except Exception as e:
-                logger.debug("WebSocket send failed for user %s: %s", owner_id, e)
-                failed_sockets.append(ws)
-
-        # Clean up failed connections outside the iteration
-        for ws in failed_sockets:
-            try:
-                await unregister_ws(state, owner_id, ws)
-            except Exception as e:
-                logger.warning(
-                    "Failed to unregister websocket for user %s: %s", owner_id, e
-                )
-
-
-async def broadcast_task_update_to_subscribers(state: AppState, task_id: int) -> None:
-    """Public function to broadcast task updates (used by listener/sync)"""
-    await _broadcast_task_update(state, task_id)

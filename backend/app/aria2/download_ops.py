@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 if TYPE_CHECKING:
     from app.aria2.client import Aria2Client
@@ -99,12 +99,30 @@ def map_progress_values(
     return values
 
 
+@overload
+async def guarded_update_global_download(
+    download_id: int,
+    values: dict[str, Any],
+    *,
+    return_row: Literal[False] = False,
+) -> bool: ...
+
+
+@overload
+async def guarded_update_global_download(
+    download_id: int,
+    values: dict[str, Any],
+    *,
+    return_row: Literal[True],
+) -> dict[str, Any] | None: ...
+
+
 async def guarded_update_global_download(
     download_id: int,
     values: dict[str, Any],
     *,
     return_row: bool = False,
-) -> dict[str, Any] | bool:
+) -> dict[str, Any] | bool | None:
     if not values:
         return None if return_row else False
 

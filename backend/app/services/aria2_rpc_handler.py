@@ -19,7 +19,6 @@ from urllib.parse import unquote, urlsplit
 
 from app.core.config import settings
 from app.core.state import AppState
-from app.routers.config import get_min_free_disk
 from app.repositories import auth as auth_repo
 from app.repositories.downloads import (
     ACTIVE_USER_TASK_STATUSES,
@@ -37,6 +36,7 @@ from app.services.download_service import (
     create_user_torrent_download,
 )
 from app.services.hash import extract_info_hash_from_torrent_base64, get_uri_hash
+from app.services.settings_service import get_min_free_disk
 from app.services.task_projection import (
     ACTIVE_LIKE_STATUSES,
     build_bittorrent_payload,

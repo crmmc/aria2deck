@@ -2,9 +2,9 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.aria2.sync import register_ws, unregister_ws
 from app.auth import get_user_by_session
 from app.core.config import settings
+from app.services.task_broadcast import register_ws, unregister_ws
 
 
 logger = logging.getLogger(__name__)

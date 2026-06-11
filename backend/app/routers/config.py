@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import secrets
 import string
 from datetime import datetime, timezone
-from time import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,11 +16,6 @@ from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_all
 from app.core.rate_limit_config import rate_limit_config
 from app.repositories import auth as auth_repo
 from app.services import settings_service
-
-_config_cache: dict[str, tuple[str | None, float]] = {}
-_config_cache_lock = asyncio.Lock()  # 保护异步缓存访问
-_CACHE_TTL = 60.0  # 缓存有效期（秒）
-
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 logger = logging.getLogger(__name__)
@@ -136,204 +129,6 @@ class Aria2TestRequest(BaseModel):
     aria2_rpc_secret: str | None = None
 
 
-def get_config_value(key: str) -> str | None:
-    """获取单个配置值（带缓存）- 同步版本用于非异步上下文"""
-    now = time()
-    if key in _config_cache:
-        value, ts = _config_cache[key]
-        if now - ts < _CACHE_TTL:
-            return value
-
-    # 使用同步方式读取（用于向后兼容）
-    import sqlite3
-    from app.core.config import settings
-
-    column_name = CONFIG_KEY_TO_COLUMN.get(key)
-    if column_name is None:
-        _config_cache[key] = (None, now)
-        return None
-    try:
-        conn = sqlite3.connect(settings.database_path)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute(f"SELECT {column_name} AS value FROM app_settings WHERE id = 1")
-        row = cur.fetchone()
-        value = settings_service.serialize_config_value(row["value"]) if row else None
-        cur.close()
-        conn.close()
-        _config_cache[key] = (value, now)
-        return value
-    except Exception as exc:
-        logger.warning("读取配置失败 key=%s error=%s", key, exc)
-        return None
-
-
-async def get_config_value_async(key: str) -> str | None:
-    """获取单个配置值（带缓存）- 异步版本"""
-    now = time()
-    async with _config_cache_lock:
-        if key in _config_cache:
-            value, ts = _config_cache[key]
-            if now - ts < _CACHE_TTL:
-                return value
-
-    value = await settings_service.get_config_value(key)
-
-    async with _config_cache_lock:
-        _config_cache[key] = (value, now)
-    return value
-
-
-async def set_config_value_async(key: str, value: str) -> None:
-    """设置单个配置值 - 异步版本"""
-    if key not in CONFIG_KEY_TO_COLUMN:
-        async with _config_cache_lock:
-            _config_cache[key] = (None, time())
-        return
-
-    await settings_service.set_config_value(key, value)
-    async with _config_cache_lock:
-        _config_cache[key] = (value, time())
-
-
-def get_max_task_size() -> int:
-    """获取单任务最大大小（字节），默认 10GB"""
-    val = get_config_value("max_task_size")
-    if val:
-        try:
-            return int(val)
-        except (ValueError, TypeError):
-            pass
-    return 10 * 1024 * 1024 * 1024
-
-
-def get_min_free_disk() -> int:
-    """获取磁盘最小剩余空间（字节），默认 1GB"""
-    val = get_config_value("min_free_disk")
-    if val:
-        try:
-            return int(val)
-        except (ValueError, TypeError):
-            pass
-    return 1 * 1024 * 1024 * 1024
-
-
-def get_aria2_bt_stop_timeout_seconds() -> int:
-    """获取 aria2 BT 无数据传输停止超时，默认 7 天。"""
-    val = get_config_value("aria2_bt_stop_timeout_seconds")
-    if val:
-        try:
-            return max(0, int(val))
-        except (ValueError, TypeError):
-            pass
-    return 7 * 24 * 60 * 60
-
-
-def get_hidden_file_extensions() -> list[str]:
-    """获取隐藏的文件后缀名列表"""
-    import json
-
-    val = get_config_value("hidden_file_extensions")
-    if val:
-        try:
-            return json.loads(val)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse hidden_file_extensions config: {e}")
-            return []
-    return []
-
-
-def get_pack_format() -> str:
-    val = get_config_value("pack_format")
-    if val == "7z":
-        return "tar.zst"
-    return val if val in ("zip", "tar.zst") else "zip"
-
-
-def get_pack_compression_level() -> int:
-    """获取压缩等级 (0-9)，默认 5"""
-    val = get_config_value("pack_compression_level")
-    try:
-        level = int(val) if val else 5
-        return max(0, min(9, level))
-    except ValueError:
-        return 5
-
-
-def get_ws_reconnect_max_delay() -> float:
-    """获取 WebSocket 最大重连延迟（秒），默认 60"""
-    val = get_config_value("ws_reconnect_max_delay")
-    try:
-        return float(val) if val else 60.0
-    except ValueError:
-        return 60.0
-
-
-def get_ws_reconnect_jitter() -> float:
-    """获取 WebSocket 重连抖动系数 (0-1)，默认 0.2"""
-    val = get_config_value("ws_reconnect_jitter")
-    try:
-        jitter = float(val) if val else 0.2
-        return max(0.0, min(1.0, jitter))
-    except ValueError:
-        return 0.2
-
-
-def get_ws_reconnect_factor() -> float:
-    """获取 WebSocket 重连指数因子，默认 2.0"""
-    val = get_config_value("ws_reconnect_factor")
-    try:
-        factor = float(val) if val else 2.0
-        return max(1.1, min(10.0, factor))  # 限制范围 1.1-10
-    except ValueError:
-        return 2.0
-
-
-def get_site_title() -> str:
-    """获取网站标题，默认 'Aria2 控制器'"""
-    val = get_config_value("site_title")
-    return val if val else "Aria2 控制器"
-
-
-def _serialize_config(aria2_rpc_url: str, aria2_rpc_secret: str) -> dict:
-    """构造配置响应体。"""
-    masked_secret = ""
-    if aria2_rpc_secret:
-        masked_secret = "*" * min(len(aria2_rpc_secret), 8)
-
-    return {
-        "max_task_size": get_max_task_size(),
-        "min_free_disk": get_min_free_disk(),
-        "aria2_rpc_url": aria2_rpc_url,
-        "aria2_rpc_secret": masked_secret,
-        "aria2_bt_stop_timeout_seconds": get_aria2_bt_stop_timeout_seconds(),
-        "hidden_file_extensions": get_hidden_file_extensions(),
-        "pack_format": get_pack_format(),
-        "pack_compression_level": get_pack_compression_level(),
-        "ws_reconnect_max_delay": get_ws_reconnect_max_delay(),
-        "ws_reconnect_jitter": get_ws_reconnect_jitter(),
-        "ws_reconnect_factor": get_ws_reconnect_factor(),
-        "site_title": get_site_title(),
-        "rate_limit_account_security": rate_limit_config.account_security,
-        "rate_limit_authenticated_api": rate_limit_config.authenticated_api,
-        "rate_limit_public_api": rate_limit_config.public_api,
-        "rate_limit_share_access": rate_limit_config.share_access,
-        "rate_limit_create_task": rate_limit_config.create_task,
-        "rate_limit_create_torrent": rate_limit_config.create_torrent,
-        "rate_limit_create_pack": rate_limit_config.create_pack,
-        "rate_limit_aria2_test": rate_limit_config.aria2_test,
-        "rate_limit_rpc": rate_limit_config.rpc,
-        "download_total_connections": download_config.total_connections,
-        "download_authenticated_reserved_connections": download_config.authenticated_reserved_connections,
-        "download_authenticated_per_user_connections": download_config.authenticated_per_user_connections,
-        "download_authenticated_per_file_connections": download_config.authenticated_per_file_connections,
-        "download_anonymous_base_connections": download_config.anonymous_base_connections,
-        "download_anonymous_borrow_connections": download_config.anonymous_borrow_connections,
-        "download_anonymous_per_ip_connections": download_config.anonymous_per_ip_connections,
-        "download_anonymous_per_file_connections": download_config.anonymous_per_file_connections,
-    }
-
-
 def _merged_download_settings(payload: ConfigUpdate) -> dict[str, int]:
     """将当前并发配置与更新 payload 合并为最终值。"""
     return {
@@ -402,7 +197,7 @@ def _validate_download_settings(settings_map: dict[str, int]) -> None:
 async def get_public_site_info() -> dict:
     """获取公开的网站信息（无需认证）"""
     return {
-        "site_title": get_site_title(),
+        "site_title": settings_service.get_site_title(),
     }
 
 
@@ -474,8 +269,7 @@ async def update_config(
     result = await settings_service.update_api_settings(payload_values)
     changed_keys = result.changed_keys
 
-    async with _config_cache_lock:
-        _config_cache.clear()
+    await settings_service.clear_config_cache_async()
 
     if _download_config_changed:
         await download_config.refresh()
@@ -509,9 +303,10 @@ async def get_aria2_version(admin=Depends(require_admin)) -> dict:
     from app.aria2.client import Aria2Client
 
     aria2_rpc_url = (
-        await get_config_value_async("aria2_rpc_url") or "http://localhost:6800/jsonrpc"
+        await settings_service.get_config_value("aria2_rpc_url")
+        or "http://localhost:6800/jsonrpc"
     )
-    aria2_rpc_secret = await get_config_value_async("aria2_rpc_secret") or ""
+    aria2_rpc_secret = await settings_service.get_config_value("aria2_rpc_secret") or ""
 
     client = Aria2Client(aria2_rpc_url, aria2_rpc_secret)
 
@@ -576,7 +371,7 @@ async def test_aria2_connection(
     # - 其他: 用户输入的新密码
     secret = payload.aria2_rpc_secret
     if secret is None or (isinstance(secret, str) and secret.startswith("*")):
-        secret = await get_config_value_async("aria2_rpc_secret") or ""
+        secret = await settings_service.get_config_value("aria2_rpc_secret") or ""
 
     client = Aria2Client(payload.aria2_rpc_url, secret)
 

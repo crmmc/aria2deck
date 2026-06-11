@@ -24,6 +24,13 @@ from app.repositories.downloads import (
     update_global_download,
 )
 from app.services.download_service import complete_global_download
+from app.services.settings_service import (
+    get_config_value_sync,
+    get_ws_reconnect_factor,
+    get_ws_reconnect_jitter,
+    get_ws_reconnect_max_delay,
+)
+from app.services.task_broadcast import broadcast_task_update_to_subscribers
 from app.services.task_projection import (
     METADATA_NAME_PREFIX,
 )
@@ -67,12 +74,6 @@ def _calculate_backoff(
     factor: float | None = None,
 ) -> float:
     """Calculate exponential reconnect backoff with jitter."""
-    from app.routers.config import (
-        get_ws_reconnect_factor,
-        get_ws_reconnect_jitter,
-        get_ws_reconnect_max_delay,
-    )
-
     if max_delay is None:
         max_delay = get_ws_reconnect_max_delay()
     if jitter is None:
@@ -622,7 +623,6 @@ async def handle_aria2_event(
 ) -> None:
     """Handle a single aria2 event against v0 global_downloads/user_tasks."""
     from app.core.state import get_aria2_client, get_task_complete_lock
-    from app.routers.tasks import broadcast_task_update_to_subscribers
 
     client = get_aria2_client(state=state)
     try:
@@ -720,12 +720,11 @@ async def handle_aria2_event(
 async def listen_aria2_events(state: AppState) -> None:
     """aria2 WebSocket event listener main loop."""
     from app.core.config import settings
-    from app.routers.config import get_config_value
 
     reconnect_attempt = 0
 
     while True:
-        rpc_url = get_config_value("aria2_rpc_url") or settings.aria2_rpc_url
+        rpc_url = get_config_value_sync("aria2_rpc_url") or settings.aria2_rpc_url
         ws_url = _http_to_ws_url(rpc_url)
 
         try:

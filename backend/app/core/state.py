@@ -9,6 +9,7 @@ from fastapi import WebSocket, Request
 
 from app.aria2.client import Aria2Client
 from app.core.config import settings
+from app.services import settings_service
 
 
 @dataclass
@@ -122,9 +123,7 @@ def get_aria2_client(request: Request | None = None, state: "AppState | None" = 
 
 async def refresh_aria2_config(state: AppState) -> None:
     """从数据库异步刷新 aria2 配置到 AppState 缓存"""
-    from app.routers.config import get_config_value_async
-
-    rpc_url = await get_config_value_async("aria2_rpc_url")
-    rpc_secret = await get_config_value_async("aria2_rpc_secret")
+    rpc_url = await settings_service.get_config_value("aria2_rpc_url")
+    rpc_secret = await settings_service.get_config_value("aria2_rpc_secret")
     state._cached_rpc_url = rpc_url if rpc_url is not None else settings.aria2_rpc_url
     state._cached_rpc_secret = rpc_secret if rpc_secret is not None else settings.aria2_rpc_secret

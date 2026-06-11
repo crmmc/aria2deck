@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
+from time import time
 from typing import Any
 
 from app.repositories import settings as settings_repo
 
 logger = logging.getLogger(__name__)
+
+_config_cache: dict[str, tuple[str | None, float]] = {}
+_config_cache_lock = asyncio.Lock()
+_CACHE_TTL = 60.0
 
 CONFIG_KEY_TO_COLUMN: dict[str, str] = {
     "max_task_size": "max_task_size_bytes",
@@ -86,6 +93,138 @@ def coerce_raw_config_value(column_name: str, value: str) -> Any:
             return int(float(value))
         return int(value)
     return value
+
+
+def _column_for_key(key: str) -> str | None:
+    return CONFIG_KEY_TO_COLUMN.get(key)
+
+
+def _read_config_value_sync(column_name: str) -> str | None:
+    from app.core.config import settings
+
+    conn: sqlite3.Connection | None = None
+    cur: sqlite3.Cursor | None = None
+    try:
+        conn = sqlite3.connect(settings.database_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(f"SELECT {column_name} AS value FROM app_settings WHERE id = 1")
+        row = cur.fetchone()
+        return serialize_config_value(row["value"]) if row else None
+    except Exception as exc:
+        logger.warning("读取配置失败 column=%s error=%s", column_name, exc)
+        return None
+    finally:
+        if cur is not None:
+            cur.close()
+        if conn is not None:
+            conn.close()
+
+
+def clear_config_cache() -> None:
+    _config_cache.clear()
+
+
+async def clear_config_cache_async() -> None:
+    async with _config_cache_lock:
+        _config_cache.clear()
+
+
+def get_config_value_sync(key: str) -> str | None:
+    now = time()
+    cached = _config_cache.get(key)
+    if cached is not None:
+        value, ts = cached
+        if now - ts < _CACHE_TTL:
+            return value
+
+    column_name = _column_for_key(key)
+    if column_name is None:
+        _config_cache[key] = (None, now)
+        return None
+
+    value = _read_config_value_sync(column_name)
+    _config_cache[key] = (value, now)
+    return value
+
+
+def _int_config(
+    key: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    value = get_config_value_sync(key)
+    try:
+        resolved = int(value) if value else default
+    except (TypeError, ValueError):
+        resolved = default
+    if minimum is not None:
+        resolved = max(minimum, resolved)
+    if maximum is not None:
+        resolved = min(maximum, resolved)
+    return resolved
+
+
+def _float_config(
+    key: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    value = get_config_value_sync(key)
+    try:
+        resolved = float(value) if value else default
+    except (TypeError, ValueError):
+        resolved = default
+    if minimum is not None:
+        resolved = max(minimum, resolved)
+    if maximum is not None:
+        resolved = min(maximum, resolved)
+    return resolved
+
+
+def get_max_task_size() -> int:
+    return _int_config("max_task_size", 10 * 1024 * 1024 * 1024)
+
+
+def get_min_free_disk() -> int:
+    return _int_config("min_free_disk", 1 * 1024 * 1024 * 1024)
+
+
+def get_aria2_bt_stop_timeout_seconds() -> int:
+    return _int_config("aria2_bt_stop_timeout_seconds", 7 * 24 * 60 * 60, minimum=0)
+
+
+def get_hidden_file_extensions() -> list[str]:
+    return _decode_hidden_extensions(get_config_value_sync("hidden_file_extensions"))
+
+
+def get_pack_format() -> str:
+    return _api_pack_format(get_config_value_sync("pack_format"))
+
+
+def get_pack_compression_level() -> int:
+    return _int_config("pack_compression_level", 5, minimum=0, maximum=9)
+
+
+def get_ws_reconnect_max_delay() -> float:
+    return _float_config("ws_reconnect_max_delay", 60.0)
+
+
+def get_ws_reconnect_jitter() -> float:
+    return _float_config("ws_reconnect_jitter", 0.2, minimum=0.0, maximum=1.0)
+
+
+def get_ws_reconnect_factor() -> float:
+    return _float_config("ws_reconnect_factor", 2.0, minimum=1.1, maximum=10.0)
+
+
+def get_site_title() -> str:
+    value = get_config_value_sync("site_title")
+    return value if value else "Aria2 控制器"
 
 
 def _masked_secret(secret: str | None) -> str:
@@ -225,18 +364,36 @@ async def update_api_settings(payload: Mapping[str, Any]) -> SettingsUpdateResul
 
 
 async def get_config_value(key: str) -> str | None:
-    column_name = CONFIG_KEY_TO_COLUMN.get(key)
+    now = time()
+    async with _config_cache_lock:
+        cached = _config_cache.get(key)
+        if cached is not None:
+            value, ts = cached
+            if now - ts < _CACHE_TTL:
+                return value
+
+    column_name = _column_for_key(key)
     if column_name is None:
+        async with _config_cache_lock:
+            _config_cache[key] = (None, now)
         return None
+
     row = await settings_repo.get_settings_row()
-    if row is None:
-        return None
-    return serialize_config_value(row.get(column_name))
+    value = serialize_config_value(row.get(column_name)) if row else None
+
+    async with _config_cache_lock:
+        _config_cache[key] = (value, now)
+    return value
 
 
 async def set_config_value(key: str, value: str) -> None:
-    column_name = CONFIG_KEY_TO_COLUMN.get(key)
+    column_name = _column_for_key(key)
     if column_name is None:
+        async with _config_cache_lock:
+            _config_cache[key] = (None, time())
         return
+
     coerced = coerce_raw_config_value(column_name, value)
     await settings_repo.update_settings_row({column_name: coerced})
+    async with _config_cache_lock:
+        _config_cache[key] = (value, time())

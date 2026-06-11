@@ -432,58 +432,57 @@ class TestTokens:
 
 class TestConfigHelperFunctions:
     def test_get_config_value_exception(self, temp_db: str):
-        from app.routers.config import get_config_value, _config_cache
+        from app.services.settings_service import clear_config_cache, get_config_value_sync
         import sqlite3
 
-        _config_cache.clear()
+        clear_config_cache()
 
         with patch.object(sqlite3, "connect", side_effect=Exception("DB error")):
-            result = get_config_value("nonexistent_key")
+            result = get_config_value_sync("nonexistent_key")
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_get_config_value_async_cache_hit(self, temp_db: str):
-        from app.routers.config import (
-            get_config_value_async,
-            _config_cache,
-            _config_cache_lock,
+    async def test_get_config_value_cache_hit(self, temp_db: str):
+        from app.services.settings_service import (
+            clear_config_cache_async,
+            get_config_value,
+            set_config_value,
         )
-        from time import time
 
-        async with _config_cache_lock:
-            _config_cache["test_key"] = ("cached_value", time())
+        await clear_config_cache_async()
+        await set_config_value("site_title", "cached_value")
 
-        result = await get_config_value_async("test_key")
+        result = await get_config_value("site_title")
         assert result == "cached_value"
 
     @pytest.mark.asyncio
-    async def test_set_config_value_async_update(self, temp_db: str):
-        from app.routers.config import (
-            set_config_value_async,
-            get_config_value_async,
-            _config_cache,
+    async def test_set_config_value_update(self, temp_db: str):
+        from app.services.settings_service import (
+            clear_config_cache_async,
+            get_config_value,
+            set_config_value,
         )
 
-        _config_cache.clear()
-        await set_config_value_async("site_title", "Initial Title")
-        result1 = await get_config_value_async("site_title")
+        await clear_config_cache_async()
+        await set_config_value("site_title", "Initial Title")
+        result1 = await get_config_value("site_title")
         assert result1 == "Initial Title"
 
-        await set_config_value_async("site_title", "Updated Title")
-        _config_cache.clear()
-        result2 = await get_config_value_async("site_title")
+        await set_config_value("site_title", "Updated Title")
+        await clear_config_cache_async()
+        result2 = await get_config_value("site_title")
         assert result2 == "Updated Title"
 
     @pytest.mark.asyncio
-    async def test_set_config_value_async_create(self, temp_db: str):
-        from app.routers.config import (
-            set_config_value_async,
-            get_config_value_async,
-            _config_cache,
+    async def test_set_config_value_unsupported_key(self, temp_db: str):
+        from app.services.settings_service import (
+            clear_config_cache_async,
+            get_config_value,
+            set_config_value,
         )
 
-        _config_cache.clear()
-        await set_config_value_async("unsupported_config_key", "new_value")
-        _config_cache.clear()
-        result = await get_config_value_async("unsupported_config_key")
+        await clear_config_cache_async()
+        await set_config_value("unsupported_config_key", "new_value")
+        await clear_config_cache_async()
+        result = await get_config_value("unsupported_config_key")
         assert result is None

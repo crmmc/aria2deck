@@ -29,6 +29,11 @@ from app.db.schema import (
     user_storage_usage,
     users,
 )
+from app.services.settings_service import (
+    get_pack_compression_level as get_configured_pack_compression_level,
+    get_pack_format as get_configured_pack_format,
+)
+from app.services.task_broadcast import broadcast_task_update_to_subscribers
 from app.services.usage_service import get_usage, release_reserved, reserve_bytes
 
 logger = logging.getLogger(__name__)
@@ -390,23 +395,11 @@ class PackTaskManager:
 
     @classmethod
     def get_pack_format(cls) -> str:
-        from app.routers.config import get_config_value
-
-        val = get_config_value("pack_format")
-        if val == "7z":
-            return "tar.zst"
-        return val if val in SUPPORTED_FORMATS else "zip"
+        return get_configured_pack_format()
 
     @classmethod
     def get_compression_level(cls) -> int:
-        from app.routers.config import get_config_value
-
-        val = get_config_value("pack_compression_level")
-        try:
-            level = int(val) if val else 5
-            return max(0, min(9, level))
-        except ValueError:
-            return 5
+        return get_configured_pack_compression_level()
 
     @classmethod
     def is_any_task_running(cls) -> bool:
@@ -710,10 +703,6 @@ class PackTaskManager:
                                 )
                             )
                             if app_state and delete_result.affected_download_ids:
-                                from app.routers.tasks import (
-                                    broadcast_task_update_to_subscribers,
-                                )
-
                                 for download_id in delete_result.affected_download_ids:
                                     await broadcast_task_update_to_subscribers(
                                         app_state,

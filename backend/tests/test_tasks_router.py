@@ -737,7 +737,7 @@ class _FakeWebSocket:
 
 def test_broadcast_task_update_uses_live_speed(test_user: dict) -> None:
     from app.core.state import AppState
-    from app.routers.tasks import broadcast_task_update_to_subscribers
+    from app.services.task_broadcast import broadcast_task_update_to_subscribers
 
     client = AsyncMock()
     client.tell_status.return_value = {
@@ -768,7 +768,7 @@ def test_broadcast_task_update_uses_live_speed(test_user: dict) -> None:
     websocket = _FakeWebSocket()
     state.ws_connections[test_user["id"]] = {websocket}
 
-    with patch("app.routers.tasks.get_aria2_client", return_value=client):
+    with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
         asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
 
     task = websocket.messages[0]["task"]
@@ -780,7 +780,7 @@ def test_broadcast_task_update_fetches_live_status_once_for_shared_download(
     test_user: dict,
 ) -> None:
     from app.core.state import AppState
-    from app.routers.tasks import broadcast_task_update_to_subscribers
+    from app.services.task_broadcast import broadcast_task_update_to_subscribers
 
     second_user = asyncio.run(create_user_v0(username="broadcast-second-user"))
     client = AsyncMock()
@@ -816,7 +816,7 @@ def test_broadcast_task_update_fetches_live_status_once_for_shared_download(
     state.ws_connections[test_user["id"]] = {first_socket}
     state.ws_connections[second_user["id"]] = {second_socket}
 
-    with patch("app.routers.tasks.get_aria2_client", return_value=client):
+    with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
         asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
 
     client.tell_status.assert_awaited_once_with("gid-shared-broadcast")
@@ -828,7 +828,7 @@ def test_broadcast_task_update_reuses_live_status_cache_within_ttl(
     test_user: dict,
 ) -> None:
     from app.core.state import AppState
-    from app.routers.tasks import broadcast_task_update_to_subscribers
+    from app.services.task_broadcast import broadcast_task_update_to_subscribers
 
     client = AsyncMock()
     client.tell_status.side_effect = [
@@ -872,7 +872,7 @@ def test_broadcast_task_update_reuses_live_status_cache_within_ttl(
     websocket = _FakeWebSocket()
     state.ws_connections[test_user["id"]] = {websocket}
 
-    with patch("app.routers.tasks.get_aria2_client", return_value=client):
+    with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
         asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
         asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
         if hasattr(state, "live_status_cache"):
@@ -891,7 +891,7 @@ def test_broadcast_task_update_prunes_unrequested_stale_live_status_cache(
     test_user: dict,
 ) -> None:
     from app.core.state import AppState, LiveStatusCacheEntry
-    from app.routers.tasks import broadcast_task_update_to_subscribers
+    from app.services.task_broadcast import broadcast_task_update_to_subscribers
 
     client = AsyncMock()
     client.tell_status.return_value = {
@@ -927,7 +927,7 @@ def test_broadcast_task_update_prunes_unrequested_stale_live_status_cache(
     websocket = _FakeWebSocket()
     state.ws_connections[test_user["id"]] = {websocket}
 
-    with patch("app.routers.tasks.get_aria2_client", return_value=client):
+    with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
         asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
 
     assert "stale-unrequested-gid" not in state.live_status_cache

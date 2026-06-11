@@ -1005,7 +1005,7 @@ async def delete_file(
     logger.info("删除文件成功 user_id=%s file_hash=%s", user_id, file_hash)
 
     if delete_result.affected_download_ids:
-        from app.routers.tasks import broadcast_task_update_to_subscribers
+        from app.services.task_broadcast import broadcast_task_update_to_subscribers
 
         state = request.app.state.app_state
         for download_id in delete_result.affected_download_ids:

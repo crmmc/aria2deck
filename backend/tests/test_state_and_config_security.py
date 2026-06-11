@@ -95,15 +95,16 @@ def test_get_aria2_client_refreshes_request_client_when_cache_changed():
 
 @pytest.mark.asyncio
 async def test_refresh_aria2_config_preserves_empty_secret(monkeypatch):
-    async def fake_get_config_value_async(key: str):
+    async def fake_get_config_value(key: str):
         if key == "aria2_rpc_url":
             return "http://db:6800/jsonrpc"
         if key == "aria2_rpc_secret":
             return ""
         return None
 
-    from app.routers import config as config_router
-    monkeypatch.setattr(config_router, "get_config_value_async", fake_get_config_value_async)
+    from app.services import settings_service
+
+    monkeypatch.setattr(settings_service, "get_config_value", fake_get_config_value)
     monkeypatch.setattr(settings, "aria2_rpc_secret", "ENV_SECRET_SHOULD_NOT_APPLY")
 
     state = AppState()

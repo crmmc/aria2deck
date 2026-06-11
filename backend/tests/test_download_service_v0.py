@@ -6,13 +6,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 import app.services.download_service as download_service
-from app.routers.config import set_config_value_async
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
 from app.services.download_service import (
     cancel_user_task,
     create_user_download,
     create_user_torrent_download,
 )
+from app.services.settings_service import set_config_value
 from app.services.storage import get_store_path_for_hash
 from app.services.usage_service import get_usage
 from tests.helpers_v0 import (
@@ -100,7 +100,7 @@ async def test_submit_options_include_default_bt_stop_timeout(temp_db: str) -> N
 
 @pytest.mark.asyncio
 async def test_submit_options_use_configured_bt_stop_timeout(temp_db: str) -> None:
-    await set_config_value_async("aria2_bt_stop_timeout_seconds", "3600")
+    await set_config_value("aria2_bt_stop_timeout_seconds", "3600")
     user = await create_user_v0(username="bt_stop_configured")
     client = AsyncMock()
     client.add_uri.return_value = "gid-bt-stop-configured"

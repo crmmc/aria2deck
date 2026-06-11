@@ -36,6 +36,7 @@ from app.services.storage import (
     get_task_download_dir,
     safe_delete_path,
 )
+from app.services.settings_service import get_aria2_bt_stop_timeout_seconds
 from app.services.storage_index import build_entry_templates
 from app.services.usage_service import (
     release_reserved,
@@ -528,7 +529,6 @@ async def _ensure_download_submitted(
             return current
 
         task_dir = get_task_download_dir(current["id"])
-        from app.routers.config import get_aria2_bt_stop_timeout_seconds
 
         submit_options: dict[str, Any] = {
             "dir": str(task_dir),

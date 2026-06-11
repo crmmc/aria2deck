@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-from fastapi import WebSocket
 from sqlalchemy import select
 
 from app.aria2 import download_ops
@@ -33,6 +32,7 @@ from app.services.task_projection import (
     is_bt_resource_kind,
     is_metadata_phase_status,
 )
+from app.services.task_broadcast import broadcast_task_update_to_subscribers
 
 logger = logging.getLogger(__name__)
 
@@ -184,8 +184,6 @@ async def _list_v0_tracked_downloads() -> list[dict[str, Any]]:
 
 
 async def _broadcast_download_update(state: AppState, download_id: int) -> None:
-    from app.routers.tasks import broadcast_task_update_to_subscribers
-
     await broadcast_task_update_to_subscribers(state, download_id)
 
 
@@ -624,44 +622,3 @@ async def _cleanup_owned_stopped_results(
                 gid,
                 exc,
             )
-
-
-async def register_ws(state: AppState, user_id: int, ws: WebSocket) -> None:
-    async with state.lock:
-        state.ws_connections.setdefault(user_id, set()).add(ws)
-
-
-async def unregister_ws(state: AppState, user_id: int, ws: WebSocket) -> None:
-    async with state.lock:
-        sockets = state.ws_connections.get(user_id)
-        if sockets:
-            sockets.discard(ws)
-
-
-async def broadcast_notification(
-    state: AppState,
-    user_id: int,
-    message: str,
-    level: str = "info",
-) -> None:
-    async with state.lock:
-        sockets = list(state.ws_connections.get(user_id, set()))
-
-    notification = {"type": "notification", "message": message, "level": level}
-    failed_sockets = []
-
-    for ws in sockets:
-        try:
-            await ws.send_json(notification)
-        except Exception as exc:
-            logger.debug(
-                "[Sync] Notification send failed user_id=%s error=%s", user_id, exc
-            )
-            failed_sockets.append(ws)
-
-    if failed_sockets:
-        async with state.lock:
-            user_sockets = state.ws_connections.get(user_id)
-            if user_sockets:
-                for ws in failed_sockets:
-                    user_sockets.discard(ws)
