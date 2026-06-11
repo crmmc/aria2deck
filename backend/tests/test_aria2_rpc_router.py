@@ -435,20 +435,20 @@ class TestJsonrpcHandler:
 @pytest.mark.asyncio
 class TestGetUserByRpcSecret:
     async def test_get_user_valid_secret(self, temp_db: str, rpc_user: dict):
-        from app.routers.aria2_rpc import get_user_by_rpc_secret
+        from app.auth import get_user_by_rpc_secret
 
         user = await get_user_by_rpc_secret(rpc_user["rpc_secret"])
         assert user is not None
         assert user["username"] == "rpcuser"
 
     async def test_get_user_invalid_secret(self, temp_db: str):
-        from app.routers.aria2_rpc import get_user_by_rpc_secret
+        from app.auth import get_user_by_rpc_secret
 
         user = await get_user_by_rpc_secret("nonexistent_secret")
         assert user is None
 
     async def test_get_user_returns_quota_aliases(self, temp_db: str, rpc_user: dict):
-        from app.routers.aria2_rpc import get_user_by_rpc_secret
+        from app.auth import get_user_by_rpc_secret
 
         user = await get_user_by_rpc_secret(rpc_user["rpc_secret"])
 

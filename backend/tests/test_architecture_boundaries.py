@@ -5,6 +5,9 @@ from pathlib import Path
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "app"
+P1_MIGRATED_ROUTER_FILES = [
+    "routers/aria2_rpc.py",
+]
 
 
 def _python_files(*relative_dirs: str) -> list[Path]:
@@ -22,6 +25,18 @@ def _imports_router(node: ast.AST) -> str | None:
     if isinstance(node, ast.ImportFrom):
         module = node.module or ""
         if module == "app.routers" or module.startswith("app.routers."):
+            return module
+    return None
+
+
+def _imports_module(node: ast.AST, blocked_modules: set[str]) -> str | None:
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.name in blocked_modules:
+                return alias.name
+    if isinstance(node, ast.ImportFrom):
+        module = node.module or ""
+        if module in blocked_modules:
             return module
     return None
 
@@ -54,5 +69,24 @@ def test_ws_router_does_not_import_connection_helpers_from_aria2_sync() -> None:
         if blocked:
             relative = path.relative_to(APP_ROOT.parent)
             offenders.append(f"{relative}:{node.lineno} imports {sorted(blocked)}")
+
+    assert offenders == []
+
+
+def test_p1_migrated_routers_do_not_import_direct_db_modules() -> None:
+    offenders: list[str] = []
+    blocked_modules = {
+        "app.db.engine",
+        "app.db.schema",
+    }
+
+    for relative_path in P1_MIGRATED_ROUTER_FILES:
+        path = APP_ROOT / relative_path
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            imported = _imports_module(node, blocked_modules)
+            if imported is not None:
+                relative = path.relative_to(APP_ROOT.parent)
+                offenders.append(f"{relative}:{node.lineno} imports {imported}")
 
     assert offenders == []

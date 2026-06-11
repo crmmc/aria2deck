@@ -127,6 +127,18 @@ async def get_user_by_username(username: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+async def list_users_by_rpc_secret(secret: str, *, limit: int = 2) -> list[dict[str, Any]]:
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                select(users)
+                .where(users.c.rpc_secret == secret)
+                .limit(limit)
+            )
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 async def list_users() -> list[dict[str, Any]]:
     async with transaction() as conn:
         rows = (await conn.execute(select(users).order_by(users.c.id))).mappings().all()

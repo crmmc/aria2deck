@@ -10,61 +10,20 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import secrets
 from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
 
+from app.auth import get_user_by_rpc_secret
 from app.core.config import settings
 from app.core.rate_limit import rpc_limiter
 from app.core.rate_limit_config import rate_limit_config
 from app.core.state import get_aria2_client
-from app.db.engine import transaction
-from app.db.schema import users
 from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
 
 router = APIRouter(tags=["aria2-rpc"])
 logger = logging.getLogger(__name__)
-
-
-# ============================================================================
-# 用户认证
-# ============================================================================
-
-async def get_user_by_rpc_secret(secret: str) -> dict | None:
-    """通过 RPC Secret 获取用户信息（常量时间验证）
-
-    Args:
-        secret: RPC Secret
-
-    Returns:
-        用户信息字典，包含 id, username 等，无效 Secret 返回 None
-    """
-    async with transaction() as conn:
-        result = await conn.execute(select(users).where(users.c.rpc_secret == secret).limit(2))
-        rows = result.mappings().all()
-
-    if len(rows) != 1:
-        # 执行虚拟比较以保持时间一致，防止时序攻击
-        secrets.compare_digest(secret, "dummy_secret_placeholder_value")
-        if len(rows) > 1:
-            logger.error("RPC secret 冲突，拒绝鉴权 secret_prefix=%s***", secret[:8])
-        return None
-
-    user = rows[0]
-    if not secrets.compare_digest(secret, str(user["rpc_secret"] or "")):
-        return None
-
-    quota_bytes = int(user["quota_bytes"])
-    return {
-        "id": int(user["id"]),
-        "username": str(user["username"]),
-        "is_admin": bool(user["is_admin"]),
-        "quota": quota_bytes,
-        "quota_bytes": quota_bytes,
-    }
 
 
 def _build_rate_limit_response() -> JSONResponse:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import secrets
 import time
 from uuid import uuid4
 
@@ -52,6 +53,30 @@ def user_from_row(row: dict) -> AuthUser:
         rpc_secret_created_at_ms=row.get("rpc_secret_created_at_ms"),
         is_initial_password=bool(row["is_initial_password"]),
     )
+
+
+async def get_user_by_rpc_secret(secret: str) -> dict | None:
+    """Return an RPC-authenticated user shape for a valid RPC secret."""
+    rows = await auth_repo.list_users_by_rpc_secret(secret, limit=2)
+
+    if len(rows) != 1:
+        secrets.compare_digest(secret, "dummy_secret_placeholder_value")
+        if len(rows) > 1:
+            logger.error("RPC secret 冲突，拒绝鉴权 secret_prefix=%s***", secret[:8])
+        return None
+
+    user = rows[0]
+    if not secrets.compare_digest(secret, str(user["rpc_secret"] or "")):
+        return None
+
+    quota_bytes = int(user["quota_bytes"])
+    return {
+        "id": int(user["id"]),
+        "username": str(user["username"]),
+        "is_admin": bool(user["is_admin"]),
+        "quota": quota_bytes,
+        "quota_bytes": quota_bytes,
+    }
 
 
 async def create_session(user_id: int) -> str:
