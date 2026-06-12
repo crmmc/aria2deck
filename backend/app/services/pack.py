@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import os
 import shutil
@@ -14,10 +15,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 import zstandard as zstd
-from sqlalchemy import case, func, insert, select, update
+from sqlalchemy import case, delete, func, insert, select, update
 
 from app.core.config import settings
 from app.core.state import AppState
+from app.core.time_utils import ms_to_iso
 from app.db.engine import transaction
 from app.db.schema import (
     global_downloads,
@@ -29,10 +31,18 @@ from app.db.schema import (
     user_storage_usage,
     users,
 )
+from app.domain.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
+from app.domain.pack import (
+    PACK_ACTIVE_STATUSES,
+    PACK_TERMINAL_STATUSES,
+    is_pack_active_status,
+    is_pack_terminal_status,
+)
 from app.services.settings_service import (
     get_pack_compression_level as get_configured_pack_compression_level,
     get_pack_format as get_configured_pack_format,
 )
+from app.services.file_service import get_user_space_info, resolve_file_ids
 from app.services.task_broadcast import broadcast_task_update_to_subscribers
 from app.services.usage_service import get_usage, release_reserved, reserve_bytes
 
@@ -40,11 +50,21 @@ logger = logging.getLogger(__name__)
 
 _pack_queue_lock = asyncio.Lock()
 _running_tasks_lock = asyncio.Lock()
+_pack_create_lock: asyncio.Lock | None = None
+_pack_create_lock_loop: asyncio.AbstractEventLoop | None = None
 
 SUPPORTED_FORMATS = ("zip", "tar.zst")
 _ZSTD_LEVEL_MAP = [1, 2, 3, 5, 7, 9, 12, 15, 18, 22]
 _CHUNK_SIZE = 1024 * 1024
-PACK_ACTIVE_STATUSES = ("pending", "packing")
+
+
+def _get_pack_create_lock() -> asyncio.Lock:
+    global _pack_create_lock, _pack_create_lock_loop
+    loop = asyncio.get_running_loop()
+    if _pack_create_lock is None or _pack_create_lock_loop is not loop:
+        _pack_create_lock = asyncio.Lock()
+        _pack_create_lock_loop = loop
+    return _pack_create_lock
 
 
 def utc_now() -> str:
@@ -1106,3 +1126,303 @@ async def get_user_available_space_for_pack(user_id: int) -> int:
         - user_space["reserved_bytes"],
     )
     return min(server_available, user_quota_remaining)
+
+
+def pack_task_to_dict(task: dict[str, Any]) -> dict:
+    response_status = "done" if task["status"] == "completed" else task["status"]
+    return {
+        "id": task["id"],
+        "user_id": task["user_id"],
+        "owner_id": task["user_id"],
+        "source_user_file_ids": json.loads(task["source_user_file_ids_json"] or "[]"),
+        "source_user_file_ids_json": task["source_user_file_ids_json"],
+        "source_size_bytes": task["source_size_bytes"],
+        "folder_path": task["source_user_file_ids_json"],
+        "folder_size": task["source_size_bytes"],
+        "reserved_bytes": task["reserved_bytes"],
+        "reserved_space": task["reserved_bytes"],
+        "output_name": task["output_name"],
+        "output_stored_file_id": task["output_stored_file_id"],
+        "stored_file_id": task["output_stored_file_id"],
+        "delete_source": bool(task["delete_source"]),
+        "output_size": task.get("output_size"),
+        "output_path": None,
+        "status": response_status,
+        "progress": task["progress"],
+        "error_message": task["error_message"],
+        "created_at": ms_to_iso(task["created_at_ms"]),
+        "updated_at": ms_to_iso(task["updated_at_ms"]),
+        "finished_at": ms_to_iso(task["finished_at_ms"]),
+    }
+
+
+def _pack_task_select():
+    return select(
+        pack_tasks,
+        stored_files.c.size_bytes.label("output_size"),
+    ).select_from(
+        pack_tasks.outerjoin(
+            stored_files,
+            pack_tasks.c.output_stored_file_id == stored_files.c.id,
+        )
+    )
+
+
+async def calculate_user_files_size(user_id: int, file_ids: list[int]) -> int:
+    resolved = await resolve_file_ids(user_id, file_ids)
+    return sum(size for _, size, _ in resolved)
+
+
+async def clear_finished_pack_tasks(user_id: int) -> dict:
+    async with transaction() as conn:
+        result = await conn.execute(
+            delete(pack_tasks)
+            .where(
+                pack_tasks.c.user_id == user_id,
+                pack_tasks.c.status.in_(PACK_TERMINAL_STATUSES),
+            )
+            .returning(pack_tasks)
+        )
+        tasks = result.mappings().all()
+    return {"ok": True, "count": len(tasks)}
+
+
+async def cancel_or_delete_pack_task(
+    user_id: int,
+    quota_bytes: int,
+    task_id: int,
+) -> dict:
+    async with transaction() as conn:
+        task = (
+            (
+                await conn.execute(
+                    select(pack_tasks).where(
+                        pack_tasks.c.id == task_id, pack_tasks.c.user_id == user_id
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+
+    if not task:
+        raise NotFoundError("任务不存在")
+
+    task_status = task["status"]
+    if is_pack_active_status(str(task_status)):
+        await PackTaskManager.cancel_pack(task_id)
+        reserved_to_release = int(task["reserved_bytes"] or 0)
+        async with transaction() as conn:
+            result = await conn.execute(
+                update(pack_tasks)
+                .where(
+                    pack_tasks.c.id == task_id,
+                    pack_tasks.c.user_id == user_id,
+                    pack_tasks.c.status.in_(PACK_ACTIVE_STATUSES),
+                )
+                .values(
+                    status="cancelled",
+                    progress=0,
+                    reserved_bytes=0,
+                    updated_at_ms=now_ms(),
+                    finished_at_ms=now_ms(),
+                )
+                .returning(pack_tasks)
+            )
+            refreshed_task = result.mappings().first()
+            cancelled = bool(refreshed_task and refreshed_task["status"] == "cancelled")
+        if cancelled and reserved_to_release > 0:
+            await release_reserved(user_id, reserved_to_release, quota_bytes=quota_bytes)
+        if cancelled:
+            return {"ok": True, "message": "任务已取消"}
+
+        async with transaction() as conn:
+            task = (
+                (
+                    await conn.execute(
+                        select(pack_tasks).where(
+                            pack_tasks.c.id == task_id, pack_tasks.c.user_id == user_id
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if not task:
+            raise NotFoundError("任务不存在")
+        task_status = task["status"]
+
+    if is_pack_terminal_status(str(task_status)):
+        async with transaction() as conn:
+            await conn.execute(
+                delete(pack_tasks).where(
+                    pack_tasks.c.id == task_id, pack_tasks.c.user_id == user_id
+                )
+            )
+        return {"ok": True, "message": "任务已删除"}
+
+    raise BadRequestError("无法处理该任务状态")
+
+
+def _validate_output_name(output_name: str | None) -> None:
+    if not output_name:
+        return
+    if len(output_name) > 200:
+        raise BadRequestError("输出文件名不能超过 200 个字符")
+    invalid_chars = set('/\\:*?"<>|\0')
+    if invalid_chars & set(output_name):
+        raise BadRequestError("输出文件名包含非法字符")
+
+
+async def create_pack_task_from_user_files(
+    *,
+    user_id: int,
+    quota_bytes: int,
+    file_ids: list[int],
+    output_name: str | None,
+    delete_source: bool,
+    app_state: AppState | None,
+) -> dict:
+    resolved = await resolve_file_ids(user_id, file_ids)
+    abs_paths = [path for path, _, _ in resolved]
+    source_names = [name for _, _, name in resolved]
+    total_size = sum(size for _, size, _ in resolved)
+    if total_size == 0:
+        raise BadRequestError("选中的文件为空")
+
+    source_user_file_ids_json = json.dumps(sorted(file_ids))
+    reserved_bytes = total_size
+
+    if not output_name and len(resolved) == 1:
+        display_name = resolved[0][2]
+        output_name = Path(display_name).stem or display_name
+    _validate_output_name(output_name)
+
+    async with _get_pack_create_lock():
+        async with transaction() as conn:
+            done_tasks = (
+                (
+                    await conn.execute(
+                        select(pack_tasks).where(
+                            pack_tasks.c.user_id == user_id,
+                            pack_tasks.c.source_user_file_ids_json
+                            == source_user_file_ids_json,
+                            pack_tasks.c.status == "completed",
+                            pack_tasks.c.output_stored_file_id.is_not(None),
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            for done_task in done_tasks:
+                user_file = (
+                    await conn.execute(
+                        select(user_files.c.display_name).where(
+                            user_files.c.user_id == user_id,
+                            user_files.c.stored_file_id
+                            == done_task["output_stored_file_id"],
+                        )
+                    )
+                ).first()
+                if user_file:
+                    raise ConflictError(
+                        f"已存在打包完成的文件「{user_file[0] or '未知文件'}」"
+                    )
+
+        try:
+            await reserve_bytes(user_id, reserved_bytes, quota_bytes=quota_bytes)
+        except ValueError:
+            info = await get_user_space_info(user_id, quota_bytes)
+            raise ForbiddenError(
+                f"空间不足。需要: {reserved_bytes / 1024**3:.2f} GB, 可用: {info['available'] / 1024**3:.2f} GB"
+            ) from None
+
+        try:
+            async with transaction() as conn:
+                existing_result = await conn.execute(
+                    select(pack_tasks.c.id).where(
+                        pack_tasks.c.user_id == user_id,
+                        pack_tasks.c.source_user_file_ids_json
+                        == source_user_file_ids_json,
+                        pack_tasks.c.status.in_(PACK_ACTIVE_STATUSES),
+                    )
+                )
+                if existing_result.first() is not None:
+                    raise ConflictError("相同文件已有进行中的打包任务")
+
+                timestamp = now_ms()
+                task_row = (
+                    (
+                        await conn.execute(
+                            insert(pack_tasks)
+                            .values(
+                                user_id=user_id,
+                                source_user_file_ids_json=source_user_file_ids_json,
+                                source_size_bytes=total_size,
+                                reserved_bytes=reserved_bytes,
+                                output_name=output_name,
+                                delete_source=1 if delete_source else 0,
+                                status="pending",
+                                progress=0,
+                                created_at_ms=timestamp,
+                                updated_at_ms=timestamp,
+                            )
+                            .returning(pack_tasks)
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                task_id = int(task_row["id"])
+        except Exception:
+            await release_reserved(user_id, reserved_bytes, quota_bytes=quota_bytes)
+            raise
+
+    asyncio.create_task(
+        PackTaskManager.start_pack(
+            task_id,
+            user_id,
+            abs_paths,
+            file_ids,
+            output_name,
+            delete_source,
+            source_names=source_names,
+            app_state=app_state,
+        )
+    )
+    return pack_task_to_dict(dict(task_row))
+
+
+async def list_pack_tasks(user_id: int) -> list[dict]:
+    async with transaction() as conn:
+        tasks = (
+            (
+                await conn.execute(
+                    _pack_task_select()
+                    .where(pack_tasks.c.user_id == user_id)
+                    .order_by(pack_tasks.c.created_at_ms.desc())
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [pack_task_to_dict(dict(task)) for task in tasks]
+
+
+async def get_pack_task(user_id: int, task_id: int) -> dict:
+    async with transaction() as conn:
+        task = (
+            (
+                await conn.execute(
+                    _pack_task_select().where(
+                        pack_tasks.c.id == task_id, pack_tasks.c.user_id == user_id
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+    if not task:
+        raise NotFoundError("任务不存在")
+    return pack_task_to_dict(dict(task))

@@ -20,7 +20,7 @@ from app.db.schema import (
     user_files,
     user_storage_usage,
 )
-from app.routers.files import _delete_user_file_reference_v0
+from app.services.file_service import delete_user_file_reference_v0
 from app.routers.storage import BulkDeleteRequest, bulk_delete_files
 from tests.helpers_v0 import create_user_v0, now_ms
 
@@ -90,7 +90,7 @@ async def test_delete_user_file_keeps_shared_storage_until_last_reference(
     user_b = await create_user_v0(username="storage_ref_b")
     seeded = await _seed_shared_file([user_a["id"], user_b["id"]])
 
-    assert await _delete_user_file_reference_v0(
+    assert await delete_user_file_reference_v0(
         user_a["id"],
         seeded["user_file_ids"][0],
     )
@@ -123,7 +123,7 @@ async def test_delete_user_file_keeps_shared_storage_until_last_reference(
     assert len(refs_after_first) == 1
     assert seeded["path"].exists()
 
-    assert await _delete_user_file_reference_v0(
+    assert await delete_user_file_reference_v0(
         user_b["id"],
         seeded["user_file_ids"][1],
     )
@@ -151,8 +151,8 @@ async def test_concurrent_delete_same_user_file_deletes_once(temp_db: str) -> No
     seeded = await _seed_shared_file([user["id"]])
 
     results = await asyncio.gather(
-        _delete_user_file_reference_v0(user["id"], seeded["user_file_ids"][0]),
-        _delete_user_file_reference_v0(user["id"], seeded["user_file_ids"][0]),
+        delete_user_file_reference_v0(user["id"], seeded["user_file_ids"][0]),
+        delete_user_file_reference_v0(user["id"], seeded["user_file_ids"][0]),
     )
 
     async with transaction() as conn:
@@ -247,7 +247,7 @@ async def test_delete_last_reference_clears_download_and_pack_fk_and_usage(
             .values(used_bytes=6, updated_at_ms=timestamp)
         )
 
-    assert await _delete_user_file_reference_v0(
+    assert await delete_user_file_reference_v0(
         user["id"],
         seeded["user_file_ids"][0],
     )
@@ -284,7 +284,7 @@ async def test_delete_last_reference_clears_download_and_pack_fk_and_usage(
 async def test_delete_user_file_reference_result_reports_affected_downloads(
     temp_db: str,
 ) -> None:
-    from app.routers.files import _delete_user_file_reference_v0_result
+    from app.services.file_service import delete_user_file_reference_v0_result
 
     user = await create_user_v0(username="storage_broadcast_user")
     seeded = await _seed_shared_file([user["id"]])
@@ -325,7 +325,7 @@ async def test_delete_user_file_reference_result_reports_affected_downloads(
             )
         )
 
-    result = await _delete_user_file_reference_v0_result(
+    result = await delete_user_file_reference_v0_result(
         user["id"],
         seeded["user_file_ids"][0],
     )
@@ -338,13 +338,13 @@ async def test_delete_user_file_reference_result_reports_affected_downloads(
 async def test_delete_shared_non_final_reference_reports_no_affected_downloads(
     temp_db: str,
 ) -> None:
-    from app.routers.files import _delete_user_file_reference_v0_result
+    from app.services.file_service import delete_user_file_reference_v0_result
 
     user_a = await create_user_v0(username="storage_broadcast_a")
     user_b = await create_user_v0(username="storage_broadcast_b")
     seeded = await _seed_shared_file([user_a["id"], user_b["id"]])
 
-    result = await _delete_user_file_reference_v0_result(
+    result = await delete_user_file_reference_v0_result(
         user_a["id"],
         seeded["user_file_ids"][0],
     )
@@ -592,7 +592,7 @@ async def test_admin_bulk_delete_physical_cleanup_failure_still_broadcasts_commi
     def fail_delete_path(**_: object) -> None:
         raise OSError("simulated cleanup failure")
 
-    monkeypatch.setattr("app.routers.storage.safe_delete_path", fail_delete_path)
+    monkeypatch.setattr("app.services.storage_admin_service.safe_delete_path", fail_delete_path)
     state = AppState()
     ws = AsyncMock()
     state.ws_connections[admin["id"]] = {ws}

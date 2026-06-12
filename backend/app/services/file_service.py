@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+import logging
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from app.core.config import settings
+from app.core.time_utils import ms_to_iso
+from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
+from app.repositories import files as files_repo
+from app.services.storage import get_store_dir, safe_delete_path
+from app.services.usage_service import get_usage, visible_space_from_usage
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class DeleteUserFileReferenceResult:
+    deleted: bool
+    affected_download_ids: list[int]
+
+
+def file_row_to_dict(row: dict[str, Any]) -> dict:
+    return {
+        "id": row["user_file_id"],
+        "content_hash": row["content_hash"],
+        "name": row["display_name"],
+        "size": row["size_bytes"],
+        "is_directory": bool(row["is_directory"]),
+        "created_at": ms_to_iso(row["user_file_created_at_ms"]) or "",
+    }
+
+
+def normalize_entry_parent(path: str) -> str:
+    candidate = (path or "").strip().replace("\\", "/").strip("/")
+    if not candidate:
+        return ""
+    parts = [part for part in candidate.split("/") if part]
+    if any(part in {".", ".."} for part in parts):
+        raise ForbiddenError("无权访问此路径")
+    return "/".join(parts)
+
+
+def validate_subpath(base_path: Path, subpath: str) -> Path:
+    if not subpath:
+        return base_path.resolve()
+
+    resolved_base = base_path.resolve()
+    target = (resolved_base / subpath).resolve()
+    try:
+        target.relative_to(resolved_base)
+    except ValueError:
+        raise ForbiddenError("无权访问此路径") from None
+    return target
+
+
+async def get_user_file_by_hash(
+    user_id: int, content_hash: str
+) -> dict[str, Any] | None:
+    return await files_repo.get_user_file_by_hash(user_id, content_hash)
+
+
+async def directory_entries(
+    stored_file_id: int, parent_path: str
+) -> list[dict[str, Any]]:
+    parent_is_dir, rows = await files_repo.directory_entries(stored_file_id, parent_path)
+    if parent_is_dir is None:
+        raise NotFoundError("路径不存在")
+    if parent_is_dir is False:
+        raise BadRequestError("路径不是文件夹")
+    return [
+        {
+            "name": row["name"],
+            "path": row["relative_path"],
+            "size": row["size_bytes"],
+            "is_dir": bool(row["is_dir"]),
+            "is_directory": bool(row["is_dir"]),
+            "modified_at": row["mtime_ms"],
+        }
+        for row in rows
+    ]
+
+
+async def get_user_space_info(user_id: int, quota_bytes: int) -> dict[str, int]:
+    usage = await get_usage(user_id, quota_bytes)
+    download_path = Path(settings.download_dir)
+    download_path.mkdir(parents=True, exist_ok=True)
+    disk = shutil.disk_usage(download_path)
+    visible = visible_space_from_usage(usage, machine_free=int(disk.free))
+    return {
+        "quota": int(visible["quota"]),
+        "used": int(visible["used"]),
+        "frozen": int(visible["frozen"]),
+        "available": int(visible["available"]),
+        "total": int(visible["total"]),
+    }
+
+
+async def list_files(
+    user_id: int,
+    quota_bytes: int,
+    *,
+    page: int,
+    page_size: int,
+) -> dict[str, Any]:
+    if page_size not in (10, 20, 30, 50, 100):
+        page_size = 10
+    if page < 1:
+        page = 1
+    offset = (page - 1) * page_size
+    total, rows = await files_repo.list_user_file_rows(
+        user_id,
+        offset=offset,
+        limit=page_size,
+    )
+    space_info = await get_user_space_info(user_id, quota_bytes)
+    return {
+        "files": [file_row_to_dict(row) for row in rows],
+        "total": total,
+        "space": {
+            "used": space_info["used"],
+            "frozen": space_info["frozen"],
+            "available": space_info["available"],
+        },
+    }
+
+
+async def browse_file(user_id: int, file_hash: str, path: str = "") -> list[dict]:
+    row = await get_user_file_by_hash(user_id, file_hash)
+    if not row:
+        raise NotFoundError("文件不存在")
+    if not row["is_directory"]:
+        raise BadRequestError("此文件不是文件夹")
+    return await directory_entries(
+        int(row["stored_file_id"]),
+        normalize_entry_parent(path),
+    )
+
+
+async def resolve_download_target(
+    user_id: int,
+    file_hash: str,
+    path: str = "",
+) -> tuple[Path, str]:
+    row = await get_user_file_by_hash(user_id, file_hash)
+    if not row:
+        raise NotFoundError("文件不存在")
+    base_path = Path(str(row["real_path"]))
+    if not base_path.exists():
+        raise NotFoundError("文件不存在")
+    if path:
+        if not row["is_directory"]:
+            raise BadRequestError("此文件不是文件夹，不支持路径参数")
+        target_path = validate_subpath(base_path, path)
+    else:
+        target_path = base_path
+    if not target_path.exists():
+        raise NotFoundError("文件不存在")
+    if target_path.is_dir():
+        raise BadRequestError("不能直接下载文件夹，请选择具体文件")
+    return target_path, target_path.name if path else str(row["display_name"])
+
+
+async def resolve_file_ids(
+    user_id: int, file_ids: list[int]
+) -> list[tuple[str, int, str]]:
+    if not file_ids:
+        raise BadRequestError("文件列表不能为空")
+    requested_ids = list(dict.fromkeys(file_ids))
+    rows = await files_repo.resolve_user_file_ids(user_id, requested_ids)
+    by_id = {int(row["user_file_id"]): row for row in rows}
+    if len(by_id) != len(requested_ids):
+        raise NotFoundError("部分文件不存在或无权访问")
+    return [
+        (
+            str(by_id[file_id]["real_path"]),
+            int(by_id[file_id]["size_bytes"]),
+            str(by_id[file_id]["display_name"] or "未命名"),
+        )
+        for file_id in requested_ids
+    ]
+
+
+async def delete_user_file_reference_v0_result(
+    user_id: int, user_file_id: int
+) -> DeleteUserFileReferenceResult:
+    deleted, affected_download_ids, real_path = await files_repo.delete_user_file_reference(
+        user_id, user_file_id
+    )
+    if not deleted:
+        return DeleteUserFileReferenceResult(False, [])
+    if real_path:
+        path = Path(real_path)
+        try:
+            safe_delete_path(
+                base_dir=get_store_dir(),
+                target=path,
+                recursive=path.is_dir(),
+                allow_missing=True,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to delete unreferenced stored path=%s", path, exc_info=True
+            )
+    return DeleteUserFileReferenceResult(True, affected_download_ids)
+
+
+async def delete_user_file_reference_v0(user_id: int, user_file_id: int) -> bool:
+    return (await delete_user_file_reference_v0_result(user_id, user_file_id)).deleted
+
+
+async def delete_file_by_hash(user_id: int, file_hash: str) -> DeleteUserFileReferenceResult:
+    row = await get_user_file_by_hash(user_id, file_hash)
+    if not row:
+        raise NotFoundError("文件不存在")
+    if await files_repo.count_active_shares_for_user_file(int(row["user_file_id"])) > 0:
+        raise ForbiddenError("该文件有活跃的分享链接，请先失效所有分享后再删除")
+    result = await delete_user_file_reference_v0_result(user_id, int(row["user_file_id"]))
+    if not result.deleted:
+        raise NotFoundError("文件不存在")
+    return result
+
+
+def validate_display_name(name: str) -> str:
+    normalized = name.strip()
+    if not normalized:
+        raise BadRequestError("名称不能为空")
+    if "/" in normalized or "\\" in normalized:
+        raise BadRequestError("名称不能包含路径分隔符")
+    if normalized in {".", ".."}:
+        raise BadRequestError("名称不合法")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in normalized):
+        raise BadRequestError("名称包含非法字符")
+    return normalized
+
+
+async def rename_file(user_id: int, file_hash: str, name: str) -> None:
+    normalized = validate_display_name(name)
+    if not await files_repo.rename_user_file_by_hash(user_id, file_hash, normalized):
+        raise NotFoundError("文件不存在")

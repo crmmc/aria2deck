@@ -10,6 +10,10 @@ from app.db.engine import transaction
 from app.db.schema import api_tokens, pack_tasks, sessions, user_files, user_storage_usage, user_tasks, users
 
 
+class DuplicateUserError(Exception):
+    pass
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -36,21 +40,24 @@ async def create_user(
 ) -> dict[str, Any]:
     timestamp = now_ms()
     async with transaction() as conn:
-        row = (
-            await conn.execute(
-                insert(users)
-                .values(
-                    username=username,
-                    password_hash=password_hash,
-                    is_admin=1 if is_admin else 0,
-                    quota_bytes=quota_bytes,
-                    is_initial_password=1 if is_initial_password else 0,
-                    created_at_ms=timestamp,
-                    updated_at_ms=timestamp,
+        try:
+            row = (
+                await conn.execute(
+                    insert(users)
+                    .values(
+                        username=username,
+                        password_hash=password_hash,
+                        is_admin=1 if is_admin else 0,
+                        quota_bytes=quota_bytes,
+                        is_initial_password=1 if is_initial_password else 0,
+                        created_at_ms=timestamp,
+                        updated_at_ms=timestamp,
+                    )
+                    .returning(users)
                 )
-                .returning(users)
-            )
-        ).mappings().one()
+            ).mappings().one()
+        except IntegrityError:
+            raise DuplicateUserError from None
         await conn.execute(
             insert(user_storage_usage).values(
                 user_id=row["id"],
@@ -160,9 +167,12 @@ async def update_user(user_id: int, **fields: Any) -> dict[str, Any] | None:
 
     values["updated_at_ms"] = now_ms()
     async with transaction() as conn:
-        row = (
-            await conn.execute(update(users).where(users.c.id == user_id).values(**values).returning(users))
-        ).mappings().first()
+        try:
+            row = (
+                await conn.execute(update(users).where(users.c.id == user_id).values(**values).returning(users))
+            ).mappings().first()
+        except IntegrityError:
+            raise DuplicateUserError from None
     return dict(row) if row else None
 
 

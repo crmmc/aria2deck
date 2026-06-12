@@ -6,7 +6,6 @@ import secrets
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy.exc import IntegrityError
 
 from app.auth import AuthUser, require_admin, require_user
 from app.core.request_rate_guard import client_ip_from_request, ensure_account_security_allowed
@@ -118,7 +117,7 @@ async def create_user(payload: UserCreate, request: Request) -> dict:
                     request_id,
                 )
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-    except IntegrityError:
+    except auth_repo.DuplicateUserError:
         logger.warning("创建用户冲突 username=%s request_id=%s", payload.username, request_id)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户名已存在") from None
 
@@ -247,7 +246,7 @@ async def update_user(
 
     try:
         updated = await auth_repo.update_user(user_id, **changes)
-    except IntegrityError:
+    except auth_repo.DuplicateUserError:
         logger.warning(
             "更新用户冲突 actor_id=%s target_user_id=%s request_id=%s",
             admin.id,
