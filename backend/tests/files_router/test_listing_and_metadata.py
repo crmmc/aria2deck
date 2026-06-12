@@ -84,7 +84,7 @@ class TestSpaceEndpoints:
         disk_usage = SimpleNamespace(free=8 * 1024**3)
 
         with (
-            patch("app.routers.stats.shutil.disk_usage", return_value=disk_usage),
+            patch("app.services.stats_service.shutil.disk_usage", return_value=disk_usage),
             patch("app.services.storage.shutil.disk_usage", return_value=disk_usage),
         ):
             stats_response = authenticated_client.get("/api/stats")

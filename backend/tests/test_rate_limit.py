@@ -117,7 +117,7 @@ class TestApiRateLimitIntegration:
         """测试创建任务频率限制"""
         client.cookies.set(settings.session_cookie_name, user_session)
 
-        with patch("app.routers.tasks.ensure_authenticated_allowed", new=AsyncMock(side_effect=HTTPException(429, "操作过于频繁，请稍后再试"))):
+        with patch("app.services.task_service.ensure_authenticated_allowed", new=AsyncMock(side_effect=HTTPException(429, "操作过于频繁，请稍后再试"))):
             response = client.post(
                 "/api/tasks",
                 json={"uri": "https://example.com/file.zip"}

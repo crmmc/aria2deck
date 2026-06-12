@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import HTTPException, status
 
 from app.domain.errors import (
+    BadGatewayError,
     BadRequestError,
     ConflictError,
     DomainError,
@@ -10,6 +11,7 @@ from app.domain.errors import (
     GoneError,
     InternalDomainError,
     NotFoundError,
+    PayloadTooLargeError,
     TooManyRequestsError,
     UnauthorizedError,
 )
@@ -23,6 +25,8 @@ _HTTP_STATUS_BY_ERROR_TYPE: dict[type[DomainError], int] = {
     ConflictError: status.HTTP_409_CONFLICT,
     GoneError: status.HTTP_410_GONE,
     TooManyRequestsError: status.HTTP_429_TOO_MANY_REQUESTS,
+    PayloadTooLargeError: status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+    BadGatewayError: status.HTTP_502_BAD_GATEWAY,
     InternalDomainError: status.HTTP_500_INTERNAL_SERVER_ERROR,
 }
 

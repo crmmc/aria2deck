@@ -146,7 +146,7 @@ class TestGetMachineStats:
         with (
             patch("shutil.disk_usage", return_value=_disk_usage()),
             patch(
-                "app.routers.stats._get_directory_size_bytes",
+                "app.services.stats_service.get_directory_size_bytes",
                 return_value=120 * 1024 * 1024 * 1024,
             ),
         ):
@@ -301,7 +301,7 @@ class TestGetStatsWithActiveTasks:
 
         with (
             patch("shutil.disk_usage", return_value=_disk_usage()),
-            patch("app.routers.stats.get_aria2_client", return_value=client),
+            patch("app.services.stats_service.get_aria2_client", return_value=client),
         ):
             response = authenticated_client.get("/api/stats")
 

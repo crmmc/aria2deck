@@ -108,7 +108,7 @@ class TestSSRFProtection:
         """
         # 8.8.8.8 是公网地址，mock HTTP 探测避免真实网络请求导致测试过慢
         with patch(
-            "app.routers.tasks.probe_url_with_get_fallback",
+            "app.services.task_service.probe_url_with_get_fallback",
             new_callable=AsyncMock,
         ) as mock_probe:
             mock_probe.return_value = type("ProbeResult", (), {
@@ -135,7 +135,7 @@ class TestSSRFProtection:
         """
         # mock HTTP 探测避免真实网络请求导致测试波动
         with patch(
-            "app.routers.tasks.probe_url_with_get_fallback",
+            "app.services.task_service.probe_url_with_get_fallback",
             new_callable=AsyncMock,
         ) as mock_probe, patch(
             "app.core.security.socket.getaddrinfo"

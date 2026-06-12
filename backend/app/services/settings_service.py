@@ -7,9 +7,14 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from time import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from app.core.download_limiter import download_config
+from app.core.rate_limit_config import rate_limit_config
 from app.repositories import settings as settings_repo
+
+if TYPE_CHECKING:
+    from app.core.state import AppState
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +366,120 @@ async def update_api_settings(payload: Mapping[str, Any]) -> SettingsUpdateResul
     return SettingsUpdateResult(
         settings=row_to_api_settings(row), changed_keys=changed_keys
     )
+
+
+DOWNLOAD_CONFIG_KEYS = {
+    "download_total_connections",
+    "download_authenticated_reserved_connections",
+    "download_authenticated_per_user_connections",
+    "download_authenticated_per_file_connections",
+    "download_anonymous_base_connections",
+    "download_anonymous_borrow_connections",
+    "download_anonymous_per_ip_connections",
+    "download_anonymous_per_file_connections",
+}
+
+RATE_LIMIT_KEYS = {
+    "rate_limit_account_security",
+    "rate_limit_authenticated_api",
+    "rate_limit_public_api",
+    "rate_limit_share_access",
+    "rate_limit_create_task",
+    "rate_limit_create_torrent",
+    "rate_limit_create_pack",
+    "rate_limit_aria2_test",
+    "rate_limit_rpc",
+}
+
+
+def merged_download_settings(payload: Mapping[str, Any]) -> dict[str, int]:
+    return {
+        "download_total_connections": int(
+            payload.get("download_total_connections")
+            if payload.get("download_total_connections") is not None
+            else download_config.total_connections
+        ),
+        "download_authenticated_reserved_connections": int(
+            payload.get("download_authenticated_reserved_connections")
+            if payload.get("download_authenticated_reserved_connections") is not None
+            else download_config.authenticated_reserved_connections
+        ),
+        "download_authenticated_per_user_connections": int(
+            payload.get("download_authenticated_per_user_connections")
+            if payload.get("download_authenticated_per_user_connections") is not None
+            else download_config.authenticated_per_user_connections
+        ),
+        "download_authenticated_per_file_connections": int(
+            payload.get("download_authenticated_per_file_connections")
+            if payload.get("download_authenticated_per_file_connections") is not None
+            else download_config.authenticated_per_file_connections
+        ),
+        "download_anonymous_base_connections": int(
+            payload.get("download_anonymous_base_connections")
+            if payload.get("download_anonymous_base_connections") is not None
+            else download_config.anonymous_base_connections
+        ),
+        "download_anonymous_borrow_connections": int(
+            payload.get("download_anonymous_borrow_connections")
+            if payload.get("download_anonymous_borrow_connections") is not None
+            else download_config.anonymous_borrow_connections
+        ),
+        "download_anonymous_per_ip_connections": int(
+            payload.get("download_anonymous_per_ip_connections")
+            if payload.get("download_anonymous_per_ip_connections") is not None
+            else download_config.anonymous_per_ip_connections
+        ),
+        "download_anonymous_per_file_connections": int(
+            payload.get("download_anonymous_per_file_connections")
+            if payload.get("download_anonymous_per_file_connections") is not None
+            else download_config.anonymous_per_file_connections
+        ),
+    }
+
+
+def validate_download_settings(settings_map: Mapping[str, int]) -> None:
+    from app.domain.errors import BadRequestError
+
+    total = settings_map["download_total_connections"]
+    if total <= 0:
+        return
+
+    allocated = (
+        settings_map["download_authenticated_reserved_connections"]
+        + settings_map["download_anonymous_base_connections"]
+        + settings_map["download_anonymous_borrow_connections"]
+    )
+    if allocated > total:
+        raise BadRequestError("下载并发配置无效：已登录保底与匿名配额总和不能超过系统总连接上限")
+
+
+async def update_api_settings_with_runtime_refresh(
+    payload: Mapping[str, Any],
+    app_state: "AppState | None",
+) -> SettingsUpdateResult:
+    if any(key in payload for key in DOWNLOAD_CONFIG_KEYS):
+        validate_download_settings(merged_download_settings(payload))
+
+    rate_limit_changed = any(key in payload for key in RATE_LIMIT_KEYS)
+    download_config_changed = any(key in payload for key in DOWNLOAD_CONFIG_KEYS)
+
+    result = await update_api_settings(payload)
+    changed_keys = result.changed_keys
+
+    await clear_config_cache_async()
+
+    if download_config_changed:
+        await download_config.refresh()
+    if rate_limit_changed:
+        await rate_limit_config.refresh()
+    if (
+        "aria2_rpc_url" in changed_keys or "aria2_rpc_secret" in changed_keys
+    ) and app_state is not None:
+        from app.core.state import refresh_aria2_config
+
+        await refresh_aria2_config(app_state)
+
+    return result
 
 
 async def get_config_value(key: str) -> str | None:

@@ -3,46 +3,25 @@
 from __future__ import annotations
 
 import logging
-import secrets
-import string
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import require_admin, require_user
-from app.core.download_limiter import download_config
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
-from app.core.rate_limit_config import rate_limit_config
-from app.repositories import auth as auth_repo
-from app.services import settings_service
+from app.domain.errors import DomainError
+from app.http.errors import raise_http
+from app.services import aria2_admin_service, settings_service, token_service
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 logger = logging.getLogger(__name__)
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-CONFIG_KEY_TO_COLUMN = settings_service.CONFIG_KEY_TO_COLUMN
-
-
-def _ms_to_iso(timestamp_ms: int | None) -> str | None:
-    if timestamp_ms is None:
-        return None
-    return datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc).isoformat()
-
-
 class ConfigUpdate(BaseModel):
-    """配置更新请求体"""
-
     model_config = ConfigDict(extra="forbid")
 
     max_task_size: int | None = Field(None, ge=0, description="单任务最大大小（字节）")
-    min_free_disk: int | None = Field(
-        None, ge=0, description="磁盘最小剩余空间（字节）"
-    )
+    min_free_disk: int | None = Field(None, ge=0, description="磁盘最小剩余空间（字节）")
     aria2_rpc_url: str | None = None
     aria2_rpc_secret: str | None = None
     aria2_bt_stop_timeout_seconds: int | None = Field(
@@ -53,165 +32,46 @@ class ConfigUpdate(BaseModel):
     )
     hidden_file_extensions: list[str] | None = None
     pack_format: str | None = None
-    pack_compression_level: int | None = Field(
-        None, ge=0, le=9, description="压缩等级 (0-9)"
-    )
-    # WebSocket 重连参数
-    ws_reconnect_max_delay: float | None = Field(
-        None, ge=1.0, le=300.0, description="最大重连延迟（秒）"
-    )
-    ws_reconnect_jitter: float | None = Field(
-        None, ge=0.0, le=1.0, description="抖动系数 (0-1)"
-    )
-    ws_reconnect_factor: float | None = Field(
-        None, ge=1.1, le=5.0, description="指数因子"
-    )
+    pack_compression_level: int | None = Field(None, ge=0, le=9, description="压缩等级 (0-9)")
+    ws_reconnect_max_delay: float | None = Field(None, ge=1.0, le=300.0, description="最大重连延迟（秒）")
+    ws_reconnect_jitter: float | None = Field(None, ge=0.0, le=1.0, description="抖动系数 (0-1)")
+    ws_reconnect_factor: float | None = Field(None, ge=1.1, le=5.0, description="指数因子")
     site_title: str | None = Field(None, max_length=50, description="网站标题")
-    # 请求频率限制
-    rate_limit_account_security: int | None = Field(
-        None, ge=1, le=100, description="账户安全限流（次/5分钟）"
-    )
-    rate_limit_authenticated_api: int | None = Field(
-        None, ge=0, le=10000, description="普通已登录 API 限流（次/分钟，0=不限制）"
-    )
-    rate_limit_public_api: int | None = Field(
-        None, ge=0, le=10000, description="普通匿名公开 API 限流（次/分钟，0=不限制）"
-    )
-    rate_limit_share_access: int | None = Field(
-        None, ge=1, le=10000, description="分享密码验证限流（次/分钟）"
-    )
-    rate_limit_create_task: int | None = Field(
-        None, ge=1, le=10000, description="创建任务限流（次/分钟）"
-    )
-    rate_limit_create_torrent: int | None = Field(
-        None, ge=1, le=10000, description="创建种子限流（次/分钟）"
-    )
-    rate_limit_create_pack: int | None = Field(
-        None, ge=1, le=10000, description="创建打包限流（次/分钟）"
-    )
-    rate_limit_aria2_test: int | None = Field(
-        None, ge=1, le=10000, description="aria2测试限流（次/分钟）"
-    )
-    rate_limit_rpc: int | None = Field(
-        None, ge=1, le=10000, description="JSON-RPC限流（次/分钟）"
-    )
-    # 下载并发限制
-    download_total_connections: int | None = Field(
-        None, ge=0, le=10000, description="系统总下载连接上限（0=不限制）"
-    )
-    download_authenticated_reserved_connections: int | None = Field(
-        None, ge=0, le=10000, description="已登录保底连接数"
-    )
-    download_authenticated_per_user_connections: int | None = Field(
-        None, ge=0, le=1000, description="已登录单用户最大并发（0=不限制）"
-    )
-    download_authenticated_per_file_connections: int | None = Field(
-        None, ge=0, le=100, description="已登录单文件最大并发（0=不限制）"
-    )
-    download_anonymous_base_connections: int | None = Field(
-        None, ge=0, le=10000, description="匿名基础连接数"
-    )
-    download_anonymous_borrow_connections: int | None = Field(
-        None, ge=0, le=10000, description="匿名可借用连接数"
-    )
-    download_anonymous_per_ip_connections: int | None = Field(
-        None, ge=0, le=1000, description="匿名单 IP 最大并发（0=不限制）"
-    )
-    download_anonymous_per_file_connections: int | None = Field(
-        None, ge=0, le=100, description="匿名单文件最大并发（0=不限制）"
-    )
+    rate_limit_account_security: int | None = Field(None, ge=1, le=100, description="账户安全限流（次/5分钟）")
+    rate_limit_authenticated_api: int | None = Field(None, ge=0, le=10000, description="普通已登录 API 限流（次/分钟，0=不限制）")
+    rate_limit_public_api: int | None = Field(None, ge=0, le=10000, description="普通匿名公开 API 限流（次/分钟，0=不限制）")
+    rate_limit_share_access: int | None = Field(None, ge=1, le=10000, description="分享密码验证限流（次/分钟）")
+    rate_limit_create_task: int | None = Field(None, ge=1, le=10000, description="创建任务限流（次/分钟）")
+    rate_limit_create_torrent: int | None = Field(None, ge=1, le=10000, description="创建种子限流（次/分钟）")
+    rate_limit_create_pack: int | None = Field(None, ge=1, le=10000, description="创建打包限流（次/分钟）")
+    rate_limit_aria2_test: int | None = Field(None, ge=1, le=10000, description="aria2测试限流（次/分钟）")
+    rate_limit_rpc: int | None = Field(None, ge=1, le=10000, description="JSON-RPC限流（次/分钟）")
+    download_total_connections: int | None = Field(None, ge=0, le=10000, description="系统总下载连接上限（0=不限制）")
+    download_authenticated_reserved_connections: int | None = Field(None, ge=0, le=10000, description="已登录保底连接数")
+    download_authenticated_per_user_connections: int | None = Field(None, ge=0, le=1000, description="已登录单用户最大并发（0=不限制）")
+    download_authenticated_per_file_connections: int | None = Field(None, ge=0, le=100, description="已登录单文件最大并发（0=不限制）")
+    download_anonymous_base_connections: int | None = Field(None, ge=0, le=10000, description="匿名基础连接数")
+    download_anonymous_borrow_connections: int | None = Field(None, ge=0, le=10000, description="匿名可借用连接数")
+    download_anonymous_per_ip_connections: int | None = Field(None, ge=0, le=1000, description="匿名单 IP 最大并发（0=不限制）")
+    download_anonymous_per_file_connections: int | None = Field(None, ge=0, le=100, description="匿名单文件最大并发（0=不限制）")
 
 
 class Aria2TestRequest(BaseModel):
-    """aria2 连接测试请求体"""
-
     aria2_rpc_url: str
     aria2_rpc_secret: str | None = None
 
 
-def _merged_download_settings(payload: ConfigUpdate) -> dict[str, int]:
-    """将当前并发配置与更新 payload 合并为最终值。"""
-    return {
-        "download_total_connections": (
-            payload.download_total_connections
-            if payload.download_total_connections is not None
-            else download_config.total_connections
-        ),
-        "download_authenticated_reserved_connections": (
-            payload.download_authenticated_reserved_connections
-            if payload.download_authenticated_reserved_connections is not None
-            else download_config.authenticated_reserved_connections
-        ),
-        "download_authenticated_per_user_connections": (
-            payload.download_authenticated_per_user_connections
-            if payload.download_authenticated_per_user_connections is not None
-            else download_config.authenticated_per_user_connections
-        ),
-        "download_authenticated_per_file_connections": (
-            payload.download_authenticated_per_file_connections
-            if payload.download_authenticated_per_file_connections is not None
-            else download_config.authenticated_per_file_connections
-        ),
-        "download_anonymous_base_connections": (
-            payload.download_anonymous_base_connections
-            if payload.download_anonymous_base_connections is not None
-            else download_config.anonymous_base_connections
-        ),
-        "download_anonymous_borrow_connections": (
-            payload.download_anonymous_borrow_connections
-            if payload.download_anonymous_borrow_connections is not None
-            else download_config.anonymous_borrow_connections
-        ),
-        "download_anonymous_per_ip_connections": (
-            payload.download_anonymous_per_ip_connections
-            if payload.download_anonymous_per_ip_connections is not None
-            else download_config.anonymous_per_ip_connections
-        ),
-        "download_anonymous_per_file_connections": (
-            payload.download_anonymous_per_file_connections
-            if payload.download_anonymous_per_file_connections is not None
-            else download_config.anonymous_per_file_connections
-        ),
-    }
-
-
-def _validate_download_settings(settings_map: dict[str, int]) -> None:
-    """校验下载并发配置的关键约束。"""
-    total = settings_map["download_total_connections"]
-    if total <= 0:
-        return
-
-    allocated = (
-        settings_map["download_authenticated_reserved_connections"]
-        + settings_map["download_anonymous_base_connections"]
-        + settings_map["download_anonymous_borrow_connections"]
-    )
-    if allocated > total:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="下载并发配置无效：已登录保底与匿名配额总和不能超过系统总连接上限",
-        )
+class TokenCreateRequest(BaseModel):
+    name: str | None = None
 
 
 @router.get("/public/site-info")
 async def get_public_site_info() -> dict:
-    """获取公开的网站信息（无需认证）"""
-    return {
-        "site_title": settings_service.get_site_title(),
-    }
+    return {"site_title": settings_service.get_site_title()}
 
 
 @router.get("")
 async def get_config(admin=Depends(require_admin)) -> dict:
-    """获取系统配置（管理员）
-
-    返回:
-    - max_task_size: 单任务最大允许大小（字节）
-    - min_free_disk: 磁盘最小剩余空间阈值（字节）
-    - aria2_rpc_url: aria2 RPC URL
-    - aria2_rpc_secret: aria2 RPC Secret（脱敏显示）
-    - hidden_file_extensions: 隐藏的文件后缀名列表
-    """
     logger.debug("获取系统配置 admin_id=%s", admin.id)
     return await settings_service.get_api_settings()
 
@@ -220,136 +80,40 @@ async def get_config(admin=Depends(require_admin)) -> dict:
 async def update_config(
     payload: ConfigUpdate, request: Request, admin=Depends(require_admin)
 ) -> dict:
-    """更新系统配置（管理员）
-
-    可更新字段:
-    - max_task_size: 单任务最大允许大小（字节）
-    - min_free_disk: 磁盘最小剩余空间阈值（字节）
-    - aria2_rpc_url: aria2 RPC URL
-    - aria2_rpc_secret: aria2 RPC Secret
-    - hidden_file_extensions: 隐藏的文件后缀名列表
-    """
     payload_values = {
         key: value for key, value in payload.model_dump().items() if value is not None
     }
-
-    # 下载并发限制
-    _download_config_keys = [
-        "download_total_connections",
-        "download_authenticated_reserved_connections",
-        "download_authenticated_per_user_connections",
-        "download_authenticated_per_file_connections",
-        "download_anonymous_base_connections",
-        "download_anonymous_borrow_connections",
-        "download_anonymous_per_ip_connections",
-        "download_anonymous_per_file_connections",
-    ]
-    _download_config_changed = any(
-        getattr(payload, key) is not None for key in _download_config_keys
-    )
-    if _download_config_changed:
-        _validate_download_settings(_merged_download_settings(payload))
-
-    # API 频率限制
-    _rate_limit_keys = [
-        "rate_limit_account_security",
-        "rate_limit_authenticated_api",
-        "rate_limit_public_api",
-        "rate_limit_share_access",
-        "rate_limit_create_task",
-        "rate_limit_create_torrent",
-        "rate_limit_create_pack",
-        "rate_limit_aria2_test",
-        "rate_limit_rpc",
-    ]
-    _rate_limit_changed = any(
-        getattr(payload, key) is not None for key in _rate_limit_keys
-    )
-
-    result = await settings_service.update_api_settings(payload_values)
-    changed_keys = result.changed_keys
-
-    await settings_service.clear_config_cache_async()
-
-    if _download_config_changed:
-        await download_config.refresh()
-    if _rate_limit_changed:
-        await rate_limit_config.refresh()
-    # 如果 aria2 配置变更，刷新缓存
-    if "aria2_rpc_url" in changed_keys or "aria2_rpc_secret" in changed_keys:
-        from app.core.state import refresh_aria2_config
-
-        if hasattr(request.app.state, "app_state"):
-            await refresh_aria2_config(request.app.state.app_state)
-
+    try:
+        result = await settings_service.update_api_settings_with_runtime_refresh(
+            payload_values,
+            getattr(request.app.state, "app_state", None),
+        )
+    except DomainError as exc:
+        raise_http(exc)
     logger.info(
         "更新系统配置成功 admin_id=%s changed_keys=%s",
         admin.id,
-        ",".join(changed_keys) if changed_keys else "none",
+        ",".join(result.changed_keys) if result.changed_keys else "none",
     )
     return result.settings
 
 
 @router.get("/aria2/version")
 async def get_aria2_version(admin=Depends(require_admin)) -> dict:
-    """获取当前连接的 aria2 版本信息（管理员）
-
-    返回:
-    - version: aria2 版本号
-    - enabled_features: 启用的功能列表
-    - connected: 是否成功连接
-    - error: 错误信息（如果连接失败）
-    """
-    from app.aria2.client import Aria2Client
-
-    aria2_rpc_url = (
-        await settings_service.get_config_value("aria2_rpc_url")
-        or "http://localhost:6800/jsonrpc"
-    )
-    aria2_rpc_secret = await settings_service.get_config_value("aria2_rpc_secret") or ""
-
-    client = Aria2Client(aria2_rpc_url, aria2_rpc_secret)
-
-    try:
-        version_info = await client.get_version()
-        logger.info("获取aria2版本成功 admin_id=%s", admin.id)
-        return {
-            "connected": True,
-            "version": version_info.get("version"),
-            "enabled_features": version_info.get("enabledFeatures", []),
-        }
-    except Exception as exc:
-        logger.warning("获取aria2版本失败 admin_id=%s error=%s", admin.id, exc)
-        return {
-            "connected": False,
-            "error": "无法连接到 aria2 服务",
-        }
+    return await aria2_admin_service.get_aria2_version(admin.id)
 
 
 @router.post("/aria2/test")
 async def test_aria2_connection(
     payload: Aria2TestRequest, admin=Depends(require_admin)
 ) -> dict:
-    """测试 aria2 连接（管理员）
-
-    参数:
-    - aria2_rpc_url: aria2 RPC URL
-    - aria2_rpc_secret: aria2 RPC Secret（可选）
-
-    返回:
-    - connected: 是否成功连接
-    - version: aria2 版本号（如果连接成功）
-    - enabled_features: 启用的功能列表（如果连接成功）
-    - error: 错误信息（如果连接失败）
-    """
     admin_id = admin.id
     if admin_id is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录")
-    admin_id_int = int(admin_id)
 
     try:
         await ensure_authenticated_allowed(
-            admin_id_int,
+            int(admin_id),
             RateLimitScope.ARIA2_TEST,
             detail="操作过于频繁，请稍后再试",
         )
@@ -357,140 +121,31 @@ async def test_aria2_connection(
         logger.warning("测试aria2连接被限流 admin_id=%s", admin.id)
         raise
 
-    from app.aria2.client import Aria2Client
-
-    if not payload.aria2_rpc_url:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="aria2 RPC URL 不能为空"
-        )
-
-    # secret 处理逻辑：
-    # - None: 前端发送 undefined，表示用户未修改（显示掩码），使用数据库密码
-    # - 以 * 开头: 掩码（兜底），使用数据库密码
-    # - 空字符串: 用户主动清空，用空密码测试
-    # - 其他: 用户输入的新密码
-    secret = payload.aria2_rpc_secret
-    if secret is None or (isinstance(secret, str) and secret.startswith("*")):
-        secret = await settings_service.get_config_value("aria2_rpc_secret") or ""
-
-    client = Aria2Client(payload.aria2_rpc_url, secret)
-
     try:
-        version_info = await client.get_version()
-        logger.info(
-            "测试aria2连接成功 admin_id=%s url=%s", admin.id, payload.aria2_rpc_url
+        return await aria2_admin_service.test_aria2_connection(
+            admin_id=admin.id,
+            aria2_rpc_url=payload.aria2_rpc_url,
+            aria2_rpc_secret=payload.aria2_rpc_secret,
         )
-        return {
-            "connected": True,
-            "version": version_info.get("version"),
-            "enabled_features": version_info.get("enabledFeatures", []),
-        }
-    except Exception as exc:
-        logger.warning(
-            "测试aria2连接失败 admin_id=%s url=%s error=%s",
-            admin.id,
-            payload.aria2_rpc_url,
-            exc,
-        )
-        return {
-            "connected": False,
-            "error": "无法连接到 aria2 服务",
-        }
-
-
-# ============================================================
-# Token 管理 API（登录用户）
-# ============================================================
-
-
-class TokenCreateRequest(BaseModel):
-    """Token 创建请求体"""
-
-    name: str | None = None  # Token 名称（可选）
-
-
-def generate_api_token() -> str:
-    """生成 API Token，格式: aria2_{24位随机字符}"""
-    chars = string.ascii_letters + string.digits
-    random_part = "".join(secrets.choice(chars) for _ in range(24))
-    return f"aria2_{random_part}"
+    except DomainError as exc:
+        raise_http(exc)
 
 
 @router.get("/tokens")
 async def list_tokens(user=Depends(require_user)) -> list[dict]:
-    """获取当前用户的 Token 列表
-
-    返回:
-    - id: Token ID
-    - name: Token 名称
-    - token: Token 值
-    - created_at: 创建时间
-    - last_used_at: 最后使用时间
-    """
-    rows = await auth_repo.list_api_tokens(user.id)
-    logger.debug("查询Token列表 user_id=%s count=%s", user.id, len(rows))
-    return [
-        {
-            "id": row["id"],
-            "name": row["name"],
-            "token": row["token"],
-            "created_at": _ms_to_iso(row["created_at_ms"]),
-            "last_used_at": _ms_to_iso(row["last_used_at_ms"]),
-        }
-        for row in rows
-    ]
+    return await token_service.list_tokens(user.id)
 
 
 @router.post("/tokens")
 async def create_token(
     payload: TokenCreateRequest | None = None, user=Depends(require_user)
 ) -> dict:
-    """生成新的 API Token
-
-    请求体（可选）:
-    - name: Token 名称
-
-    返回:
-    - id: Token ID
-    - name: Token 名称
-    - token: Token 值
-    - created_at: 创建时间
-    """
-    token = generate_api_token()
-    name = payload.name if payload else None
-    row = await auth_repo.create_api_token(user.id, token, name)
-    logger.info(
-        "创建API Token user_id=%s token_id=%s token_name=%s", user.id, row["id"], name
-    )
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "token": row["token"],
-        "created_at": _ms_to_iso(row["created_at_ms"]),
-    }
+    return await token_service.create_token(user.id, payload.name if payload else None)
 
 
 @router.delete("/tokens/{token_id}")
 async def delete_token(token_id: int, user=Depends(require_user)) -> dict:
-    """删除 API Token
-
-    路径参数:
-    - token_id: Token ID
-
-    返回:
-    - ok: 是否删除成功
-    """
-    deleted = await auth_repo.delete_api_token(user.id, token_id)
-    if not deleted:
-        logger.warning(
-            "删除Token失败 user_id=%s token_id=%s reason=not_found_or_forbidden",
-            user.id,
-            token_id,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Token 不存在"
-        )
-
-    logger.info("删除Token成功 user_id=%s token_id=%s", user.id, token_id)
-
-    return {"ok": True}
+    try:
+        return await token_service.delete_token(user.id, token_id)
+    except DomainError as exc:
+        raise_http(exc)

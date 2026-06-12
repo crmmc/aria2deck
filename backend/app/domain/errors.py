@@ -35,5 +35,13 @@ class TooManyRequestsError(DomainError):
     pass
 
 
+class PayloadTooLargeError(DomainError):
+    pass
+
+
+class BadGatewayError(DomainError):
+    pass
+
+
 class InternalDomainError(DomainError):
     pass

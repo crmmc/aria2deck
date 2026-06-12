@@ -55,7 +55,7 @@ class TestCancelTaskEndpoint:
         cancel_client = AsyncMock()
         cancel_client.force_remove.return_value = "gid-cancel-endpoint"
 
-        with patch("app.routers.tasks._get_client", return_value=cancel_client):
+        with patch("app.services.task_service._get_client", return_value=cancel_client):
             response = authenticated_client.delete(f"/api/tasks/{task['id']}")
 
         assert response.status_code == 200
@@ -115,7 +115,7 @@ class TestCancelTaskEndpoint:
         )
         cancel_client = AsyncMock()
 
-        with patch("app.routers.tasks._get_client", return_value=cancel_client):
+        with patch("app.services.task_service._get_client", return_value=cancel_client):
             response = authenticated_client.delete(f"/api/tasks/{first['id']}")
 
         assert response.status_code == 200
@@ -164,7 +164,7 @@ class TestCancelTaskEndpoint:
         cancel_client = AsyncMock()
         cancel_client.force_remove.side_effect = OSError("aria2 timeout")
 
-        with patch("app.routers.tasks._get_client", return_value=cancel_client):
+        with patch("app.services.task_service._get_client", return_value=cancel_client):
             response = authenticated_client.delete(f"/api/tasks/{task['id']}")
 
         assert response.status_code == 502

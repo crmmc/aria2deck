@@ -131,6 +131,8 @@ def test_routers_do_not_import_direct_db_or_sqlalchemy_modules() -> None:
         "app.db.engine",
         "app.db.schema",
         "sqlalchemy",
+        "app.repositories",
+        "app.aria2.client",
     }
 
     for path in _python_files("routers"):
@@ -140,6 +142,23 @@ def test_routers_do_not_import_direct_db_or_sqlalchemy_modules() -> None:
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
                 offenders.append(f"{relative}:{node.lineno} imports {imported}")
+
+    assert offenders == []
+
+
+def test_routers_do_not_construct_sqlalchemy_queries_or_transactions() -> None:
+    offenders: list[str] = []
+    blocked_names = {"select", "insert", "update", "delete", "transaction"}
+
+    for path in _python_files("routers"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else None
+                if name in blocked_names:
+                    relative = path.relative_to(APP_ROOT.parent)
+                    offenders.append(f"{relative}:{node.lineno} calls {name}()")
 
     assert offenders == []
 

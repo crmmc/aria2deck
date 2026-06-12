@@ -15,6 +15,7 @@ from sqlalchemy import update
 
 from app.db.engine import transaction
 from app.db.schema import global_downloads
+from app.domain.errors import BadRequestError
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
 from app.services.download_service import create_user_download
 from app.services.hash import get_uri_hash
@@ -108,81 +109,76 @@ class TestSSRFProtection:
 
     @pytest.mark.asyncio
     async def test_check_url_safety_localhost(self) -> None:
-        from app.routers.tasks import _check_url_safety
+        from app.services.task_service import check_url_safety
 
-        with pytest.raises(HTTPException) as exc_info:
-            await _check_url_safety("http://localhost/file.zip")
-        assert exc_info.value.status_code == 400
+        with pytest.raises(BadRequestError) as exc_info:
+            await check_url_safety("http://localhost/file.zip")
         assert "本机地址" in exc_info.value.detail
 
     @pytest.mark.asyncio
     async def test_check_url_safety_private_ip(self) -> None:
-        from app.routers.tasks import _check_url_safety
+        from app.services.task_service import check_url_safety
 
-        with pytest.raises(HTTPException) as exc_info:
-            await _check_url_safety("http://192.168.1.1/file.zip")
-        assert exc_info.value.status_code == 400
+        with pytest.raises(BadRequestError) as exc_info:
+            await check_url_safety("http://192.168.1.1/file.zip")
         assert "内网地址" in exc_info.value.detail
 
     @pytest.mark.asyncio
     async def test_check_url_safety_public_url(self) -> None:
-        from app.routers.tasks import _check_url_safety
+        from app.services.task_service import check_url_safety
 
         with patch("app.core.security.socket.getaddrinfo", return_value=_public_dns_result()):
-            await _check_url_safety("http://example.com/file.zip")
-            await _check_url_safety("https://github.com/file.zip")
+            await check_url_safety("http://example.com/file.zip")
+            await check_url_safety("https://github.com/file.zip")
 
     @pytest.mark.asyncio
     async def test_check_url_safety_magnet(self) -> None:
-        from app.routers.tasks import _check_url_safety
+        from app.services.task_service import check_url_safety
 
-        await _check_url_safety("magnet:?xt=urn:btih:abc123")
+        await check_url_safety("magnet:?xt=urn:btih:abc123")
 
     @pytest.mark.asyncio
     async def test_check_url_safety_no_hostname(self) -> None:
-        from app.routers.tasks import _check_url_safety
+        from app.services.task_service import check_url_safety
 
-        with pytest.raises(HTTPException) as exc_info:
-            await _check_url_safety("http:///file.zip")
-        assert exc_info.value.status_code == 400
+        with pytest.raises(BadRequestError) as exc_info:
+            await check_url_safety("http:///file.zip")
 
     @pytest.mark.asyncio
     async def test_check_url_safety_dns_resolves_to_private(self) -> None:
         import socket
 
-        from app.routers.tasks import _check_url_safety
+        from app.services.task_service import check_url_safety
 
         mock_result = [
             (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("192.168.1.100", 80))
         ]
 
         with patch("app.core.security.socket.getaddrinfo", return_value=mock_result):
-            with pytest.raises(HTTPException) as exc_info:
-                await _check_url_safety("http://evil.example.com/file.zip")
-        assert exc_info.value.status_code == 400
+            with pytest.raises(BadRequestError) as exc_info:
+                await check_url_safety("http://evil.example.com/file.zip")
         assert "内网地址" in exc_info.value.detail
 
     @pytest.mark.asyncio
     async def test_check_url_safety_dns_failure_rejected(self) -> None:
         import socket
 
-        from app.routers.tasks import _check_url_safety
+        from app.services.task_service import check_url_safety
 
         with patch(
             "app.core.security.socket.getaddrinfo",
             side_effect=socket.gaierror("DNS failed"),
         ):
-            with pytest.raises(HTTPException) as exc_info:
-                await _check_url_safety("http://nonexistent.example.com/file.zip")
-        assert exc_info.value.status_code == 400
+            with pytest.raises(BadRequestError) as exc_info:
+                await check_url_safety("http://nonexistent.example.com/file.zip")
         assert "无法解析" in exc_info.value.detail
 
 
 class TestHelperFunctions:
     def test_check_disk_space(self) -> None:
-        from app.routers.tasks import _check_disk_space
+        from app.services.task_service import check_disk_space
 
-        ok, free = _check_disk_space()
+        ok, free = check_disk_space()
         assert isinstance(ok, bool)
         assert isinstance(free, int)
         assert free > 0
@@ -219,7 +215,7 @@ class TestCreateTask:
         assert response.status_code == 400
         assert "无效的磁力链接" in response.json()["detail"]
 
-    @patch("app.routers.tasks.probe_url_with_get_fallback")
+    @patch("app.services.task_service.probe_url_with_get_fallback")
     def test_create_task_probe_failure(
         self,
         mock_probe: AsyncMock,
@@ -238,7 +234,7 @@ class TestCreateTask:
         assert response.status_code == 400
         assert "无法访问下载链接" in response.json()["detail"]
 
-    @patch("app.routers.tasks.probe_url_with_get_fallback")
+    @patch("app.services.task_service.probe_url_with_get_fallback")
     def test_create_task_rejects_credentialed_url(
         self,
         mock_probe: AsyncMock,
@@ -253,7 +249,7 @@ class TestCreateTask:
         assert "用户名或密码" in response.json()["detail"]
         mock_probe.assert_not_called()
 
-    @patch("app.routers.tasks._check_disk_space")
+    @patch("app.services.task_service.check_disk_space")
     def test_create_task_disk_full(
         self,
         mock_disk: MagicMock,
@@ -269,8 +265,8 @@ class TestCreateTask:
         assert response.status_code == 403
         assert "磁盘空间不足" in response.json()["detail"]
 
-    @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks.get_max_task_size")
+    @patch("app.services.task_service.probe_url_with_get_fallback")
+    @patch("app.services.task_service.get_max_task_size")
     def test_create_task_exceeds_max_size(
         self,
         mock_max_size: MagicMock,
@@ -293,10 +289,10 @@ class TestCreateTask:
         assert response.status_code == 403
         assert "超过系统限制" in response.json()["detail"]
 
-    @patch("app.routers.tasks.create_user_download")
-    @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks.get_usage")
-    @patch("app.routers.tasks.get_max_task_size")
+    @patch("app.services.task_service.create_user_download")
+    @patch("app.services.task_service.probe_url_with_get_fallback")
+    @patch("app.services.task_service.get_usage")
+    @patch("app.services.task_service.get_max_task_size")
     def test_create_task_exceeds_user_quota(
         self,
         mock_max_size: MagicMock,
@@ -328,10 +324,10 @@ class TestCreateTask:
         assert "超过可用空间" in response.json()["detail"]
         mock_create_download.assert_not_awaited()
 
-    @patch("app.routers.tasks.create_user_download")
-    @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks._get_client")
-    @patch("app.routers.tasks._check_disk_space")
+    @patch("app.services.task_service.create_user_download")
+    @patch("app.services.task_service.probe_url_with_get_fallback")
+    @patch("app.services.task_service._get_client")
+    @patch("app.services.task_service.check_disk_space")
     def test_create_task_service_errors_are_mapped(
         self,
         mock_disk: MagicMock,
@@ -364,9 +360,9 @@ class TestCreateTask:
             )
             assert response.status_code == expected_status
 
-    @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks._get_client")
-    @patch("app.routers.tasks._check_disk_space")
+    @patch("app.services.task_service.probe_url_with_get_fallback")
+    @patch("app.services.task_service._get_client")
+    @patch("app.services.task_service.check_disk_space")
     def test_create_task_rejects_path_like_out_option(
         self,
         mock_disk: MagicMock,
@@ -396,9 +392,9 @@ class TestCreateTask:
         assert "invalid out option" in response.json()["detail"]
         mock_aria2_client.add_uri.assert_not_awaited()
 
-    @patch("app.routers.tasks.probe_url_with_get_fallback")
-    @patch("app.routers.tasks._get_client")
-    @patch("app.routers.tasks._check_disk_space")
+    @patch("app.services.task_service.probe_url_with_get_fallback")
+    @patch("app.services.task_service._get_client")
+    @patch("app.services.task_service.check_disk_space")
     def test_create_task_success_creates_v0_user_task(
         self,
         mock_disk: MagicMock,
@@ -517,7 +513,7 @@ class TestCreateTorrentTask:
         assert response.status_code == 413
         assert "种子文件过大" in response.json()["detail"]
 
-    @patch("app.routers.tasks._check_disk_space")
+    @patch("app.services.task_service.check_disk_space")
     def test_create_torrent_disk_full(
         self,
         mock_disk: MagicMock,
@@ -534,8 +530,8 @@ class TestCreateTorrentTask:
         assert response.status_code == 403
         assert "磁盘空间不足" in response.json()["detail"]
 
-    @patch("app.routers.tasks.get_usage")
-    @patch("app.routers.tasks._check_disk_space")
+    @patch("app.services.task_service.get_usage")
+    @patch("app.services.task_service.check_disk_space")
     def test_create_torrent_insufficient_space(
         self,
         mock_disk: MagicMock,
@@ -559,9 +555,9 @@ class TestCreateTorrentTask:
         assert response.status_code == 403
         assert "超过可用空间" in response.json()["detail"]
 
-    @patch("app.routers.tasks.create_user_torrent_download")
-    @patch("app.routers.tasks.get_usage")
-    @patch("app.routers.tasks._check_disk_space")
+    @patch("app.services.task_service.create_user_torrent_download")
+    @patch("app.services.task_service.get_usage")
+    @patch("app.services.task_service.check_disk_space")
     def test_create_torrent_service_errors_are_mapped(
         self,
         mock_disk: MagicMock,
@@ -593,8 +589,8 @@ class TestCreateTorrentTask:
             )
             assert response.status_code == expected_status
 
-    @patch("app.routers.tasks._get_client")
-    @patch("app.routers.tasks._check_disk_space")
+    @patch("app.services.task_service._get_client")
+    @patch("app.services.task_service.check_disk_space")
     def test_create_torrent_success_creates_v0_task_and_calls_add_torrent(
         self,
         mock_disk: MagicMock,
@@ -636,8 +632,8 @@ class TestCreateTorrentTask:
         assert opts["dir"].endswith(f"/downloading/{global_download['id']}")
         assert opts["seed-time"] == "0"
 
-    @patch("app.routers.tasks._get_client")
-    @patch("app.routers.tasks._check_disk_space")
+    @patch("app.services.task_service._get_client")
+    @patch("app.services.task_service.check_disk_space")
     def test_create_torrent_partial_selection_sets_select_file_and_selected_size(
         self,
         mock_disk: MagicMock,
@@ -672,8 +668,8 @@ class TestCreateTorrentTask:
         assert opts["select-file"] == "1,3"
         assert opts["bt-tracker"] == "http://tracker.example.com/announce"
 
-    @patch("app.routers.tasks._get_client")
-    @patch("app.routers.tasks._check_disk_space")
+    @patch("app.services.task_service._get_client")
+    @patch("app.services.task_service.check_disk_space")
     def test_create_torrent_full_selection_keeps_info_hash_key_and_no_select_file(
         self,
         mock_disk: MagicMock,
@@ -979,7 +975,7 @@ class TestListTasks:
         assert data[0]["total_length"] == 1234
         assert data[0]["frozen_space"] == 1234
 
-    @patch("app.routers.tasks._get_client")
+    @patch("app.services.task_service._get_client")
     def test_list_tasks_uses_live_speed_for_active_rows(
         self,
         mock_get_client: MagicMock,
@@ -1219,7 +1215,7 @@ class TestCancelTask:
         cancel_client = AsyncMock()
         cancel_client.force_remove.return_value = "gid-cancel-basic"
 
-        with patch("app.routers.tasks._get_client", return_value=cancel_client):
+        with patch("app.services.task_service._get_client", return_value=cancel_client):
             response = authenticated_client.delete(f"/api/tasks/{task['id']}")
 
         assert response.status_code == 200
@@ -1310,7 +1306,7 @@ class TestClearHistory:
 
 
 class TestRateLimiting:
-    @patch("app.routers.tasks.ensure_authenticated_allowed")
+    @patch("app.services.task_service.ensure_authenticated_allowed")
     def test_create_task_rate_limited(
         self,
         mock_limiter: AsyncMock,
@@ -1326,7 +1322,7 @@ class TestRateLimiting:
         assert response.status_code == 429
         assert "操作过于频繁" in response.json()["detail"]
 
-    @patch("app.routers.tasks.ensure_authenticated_allowed")
+    @patch("app.services.task_service.ensure_authenticated_allowed")
     def test_create_torrent_rate_limited(
         self,
         mock_limiter: AsyncMock,
@@ -1342,7 +1338,7 @@ class TestRateLimiting:
         assert response.status_code == 429
         assert "操作过于频繁" in response.json()["detail"]
 
-    @patch("app.routers.tasks.ensure_authenticated_allowed")
+    @patch("app.services.task_service.ensure_authenticated_allowed")
     def test_torrent_preview_rate_limited(
         self,
         mock_limiter: AsyncMock,
