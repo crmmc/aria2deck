@@ -909,7 +909,7 @@ async def test_error_event_waits_for_inflight_completion_lock(
         return {"status": "completed", "entries_created": 0, "user_files_created": 1}
 
     monkeypatch.setattr(
-        "app.aria2.listener.complete_global_download",
+        "app.services.aria2_lifecycle_service.complete_global_download",
         fake_complete_global_download,
     )
 

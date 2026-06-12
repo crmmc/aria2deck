@@ -84,6 +84,89 @@ async def get_global_download_by_gid(gid: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+async def list_tracked_global_downloads(
+    statuses: Iterable[str],
+) -> list[dict[str, Any]]:
+    async with transaction() as conn:
+        rows = (
+            (
+                await conn.execute(
+                    select(global_downloads).where(
+                        global_downloads.c.aria2_gid.is_not(None),
+                        global_downloads.c.status.in_(tuple(statuses)),
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [dict(row) for row in rows]
+
+
+async def get_global_download_status_snapshot(
+    download_id: int,
+) -> dict[str, Any] | None:
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    select(
+                        global_downloads.c.status,
+                        global_downloads.c.completed_file_id,
+                        global_downloads.c.completed_bytes,
+                        global_downloads.c.total_bytes,
+                    ).where(global_downloads.c.id == download_id)
+                )
+            )
+            .mappings()
+            .first()
+        )
+    return dict(row) if row else None
+
+
+async def list_inconsistent_completed_download_ids(threshold_ms: int) -> list[int]:
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                select(global_downloads.c.id).where(
+                    global_downloads.c.status == "completed",
+                    global_downloads.c.completed_file_id.is_(None),
+                    global_downloads.c.updated_at_ms < threshold_ms,
+                )
+            )
+        ).all()
+    return [int(row[0]) for row in rows]
+
+
+async def list_stale_queued_download_ids(threshold_ms: int) -> list[int]:
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                select(global_downloads.c.id).where(
+                    global_downloads.c.status == "queued",
+                    global_downloads.c.aria2_gid.is_(None),
+                    global_downloads.c.updated_at_ms < threshold_ms,
+                )
+            )
+        ).all()
+    return [int(row[0]) for row in rows]
+
+
+async def get_representative_active_owner_id(download_id: int) -> int | None:
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                select(user_tasks.c.user_id)
+                .where(
+                    user_tasks.c.global_download_id == download_id,
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                )
+                .limit(1)
+            )
+        ).first()
+    return int(row[0]) if row else None
+
+
 async def create_global_download(values: dict[str, Any]) -> dict[str, Any]:
     timestamp = now_ms()
     row_values = {

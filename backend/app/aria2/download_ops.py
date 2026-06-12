@@ -11,13 +11,8 @@ if TYPE_CHECKING:
     from app.aria2.client import Aria2Client
 
 from app.core.security import sanitize_string
-from app.repositories.downloads import (
-    guarded_update_global_download,
-    update_active_user_tasks,
-)
 from app.services.task_projection import (
     METADATA_NAME_PREFIX,
-    is_bt_resource_kind,
     is_metadata_phase_status,
 )
 
@@ -106,68 +101,16 @@ async def switch_to_followed_download(
     display_name_fallback: str | None,
     log_prefix: str,
 ) -> bool:
-    download_id = int(download["id"])
-    logger.info(
-        "%s Metadata download complete, updating GID: %s -> %s",
-        log_prefix,
-        metadata_gid,
-        followed_gid,
+    from app.services.aria2_lifecycle_service import switch_to_followed_download
+
+    return await switch_to_followed_download(
+        client=client,
+        download=download,
+        metadata_gid=metadata_gid,
+        followed_gid=followed_gid,
+        display_name_fallback=display_name_fallback,
+        log_prefix=log_prefix,
     )
-
-    real_status: dict[str, Any] | None = None
-    try:
-        real_status = await client.tell_status(followed_gid)
-    except Exception as exc:
-        logger.debug(
-            "%s Failed to refresh followed download gid=%s error=%s",
-            log_prefix,
-            followed_gid,
-            exc,
-        )
-
-    global_values: dict[str, Any] = {
-        "aria2_gid": followed_gid,
-        "status": "active",
-    }
-    display_name: str | None = None
-
-    if real_status:
-        if first_followed_gid(real_status) is None:
-            global_values["status"] = map_aria2_status(real_status)
-        progress = map_progress_values(real_status, display_name_fallback)
-        global_values.update(progress)
-        display_name = progress.get("display_name")
-
-        bt_hash = bt_info_hash_from_status(real_status)
-        if bt_hash:
-            global_values["bt_info_hash"] = bt_hash
-
-    if not is_bt_resource_kind(download):
-        global_values["resource_kind"] = "torrent"
-
-    changed = await guarded_update_global_download(download_id, global_values)
-    if not changed:
-        return False
-
-    await update_active_user_tasks(
-        download_id,
-        status=str(global_values["status"]),
-        display_name=display_name,
-        force_display_name=True,
-    )
-
-    if metadata_gid and metadata_gid != followed_gid:
-        try:
-            await client.remove_download_result(metadata_gid)
-        except Exception as exc:
-            logger.debug(
-                "%s Failed to remove metadata result gid=%s error=%s",
-                log_prefix,
-                metadata_gid,
-                exc,
-            )
-
-    return True
 
 
 def first_followed_gid(aria2_status: dict[str, Any]) -> str | None:

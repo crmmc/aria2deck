@@ -5,10 +5,6 @@ from pathlib import Path
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "app"
-P3_MIGRATED_ARIA2_FILES = [
-    "aria2/download_ops.py",
-]
-
 
 def _python_files(*relative_dirs: str) -> list[Path]:
     files: list[Path] = []
@@ -176,21 +172,40 @@ def test_routers_do_not_import_other_router_modules() -> None:
     assert offenders == []
 
 
-def test_p3_migrated_aria2_modules_do_not_import_direct_db_or_sqlalchemy() -> None:
+def test_aria2_modules_do_not_import_db_repositories_sqlalchemy_or_routers() -> None:
     offenders: list[str] = []
     blocked_modules = {
+        "app.db",
         "app.db.engine",
         "app.db.schema",
+        "app.repositories",
+        "app.routers",
         "sqlalchemy",
     }
 
-    for relative_path in P3_MIGRATED_ARIA2_FILES:
-        path = APP_ROOT / relative_path
+    for path in _python_files("aria2"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             imported = _imports_blocked_module_prefix(node, blocked_modules)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
                 offenders.append(f"{relative}:{node.lineno} imports {imported}")
+
+    assert offenders == []
+
+
+def test_aria2_modules_do_not_construct_sqlalchemy_queries_or_transactions() -> None:
+    offenders: list[str] = []
+    blocked_names = {"select", "insert", "update", "delete", "transaction"}
+
+    for path in _python_files("aria2"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else None
+                if name in blocked_names:
+                    relative = path.relative_to(APP_ROOT.parent)
+                    offenders.append(f"{relative}:{node.lineno} calls {name}()")
 
     assert offenders == []

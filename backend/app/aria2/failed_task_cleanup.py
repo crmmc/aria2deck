@@ -5,12 +5,7 @@ from __future__ import annotations
 import logging
 from enum import Enum
 
-from sqlalchemy import select
-
 from app.aria2.client import Aria2Client
-from app.db.engine import transaction
-from app.db.schema import global_downloads, user_tasks
-from app.domain.downloads import ACTIVE_USER_TASK_STATUSES, FAILED_DOWNLOAD_STATUSES
 from app.services.storage import cleanup_task_download_dir, get_downloading_dir
 
 logger = logging.getLogger(__name__)
@@ -26,18 +21,9 @@ class CleanupErrorType(str, Enum):
 
 async def get_representative_owner_id(task_id: int) -> int | None:
     """Get an active owner_id for a global download for logging."""
-    async with transaction() as conn:
-        row = (
-            await conn.execute(
-                select(user_tasks.c.user_id)
-                .where(
-                    user_tasks.c.global_download_id == task_id,
-                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
-                )
-                .limit(1)
-            )
-        ).first()
-    return int(row[0]) if row else None
+    from app.services.aria2_lifecycle_service import get_representative_owner_id
+
+    return await get_representative_owner_id(task_id)
 
 
 async def cleanup_failed_task_artifacts(
@@ -69,45 +55,39 @@ async def cleanup_failed_task_artifacts(
     Idempotency: Safe to call multiple times; missing files are skipped.
     Status check: Returns True immediately if task is not in failed state.
     """
-    path = str(get_downloading_dir() / str(task_id))
-
-    # Status validation (unless caller already verified)
     if not skip_status_check:
-        async with transaction() as conn:
-            row = (
-                await conn.execute(
-                    select(global_downloads.c.status).where(
-                        global_downloads.c.id == task_id
-                    )
-                )
-            ).first()
+        from app.services.aria2_lifecycle_service import (
+            cleanup_failed_download_artifacts,
+        )
 
-        if row is None:
-            logger.debug(
-                "[CLEANUP] skipped %s task_id=%s owner_id=%s gid=%s "
-                "path=%s reason=task_not_found",
-                log_prefix,
-                task_id,
-                owner_id,
-                gid,
-                path,
-            )
-            return True  # Already cleaned or never existed
+        return await cleanup_failed_download_artifacts(
+            client=client,
+            task_id=task_id,
+            gid=gid,
+            owner_id=owner_id,
+            log_prefix=log_prefix,
+            validate_status=True,
+        )
 
-        status = row[0]
-        if status not in FAILED_DOWNLOAD_STATUSES:
-            logger.debug(
-                "[CLEANUP] skipped %s task_id=%s owner_id=%s gid=%s "
-                "path=%s error_type=%s status=%s",
-                log_prefix,
-                task_id,
-                owner_id,
-                gid,
-                path,
-                CleanupErrorType.STATUS_CONFLICT.value,
-                status,
-            )
-            return True  # Not a failed task, no cleanup needed
+    return await cleanup_failed_task_artifacts_unchecked(
+        client=client,
+        task_id=task_id,
+        gid=gid,
+        owner_id=owner_id,
+        log_prefix=log_prefix,
+    )
+
+
+async def cleanup_failed_task_artifacts_unchecked(
+    client: Aria2Client,
+    task_id: int,
+    gid: str | None,
+    owner_id: int | None,
+    *,
+    log_prefix: str,
+) -> bool:
+    """Cleanup aria2 and filesystem artifacts after service validation."""
+    path = str(get_downloading_dir() / str(task_id))
 
     # RPC cleanup (best effort, continue on failure)
     if gid:
