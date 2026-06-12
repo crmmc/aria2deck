@@ -5,25 +5,13 @@ import shutil
 from typing import Any
 
 from app.core.config import settings
+from app.domain.quota import usage_with_available, visible_space_from_quota
 
 from app.repositories.usage import (
     apply_usage_delta,
     get_usage_row,
     reserve_usage_bytes_if_within_quota,
 )
-
-
-def _with_available(row: dict[str, Any], quota_bytes: int) -> dict[str, int]:
-    used = int(row["used_bytes"])
-    reserved = int(row["reserved_bytes"])
-    available = max(0, quota_bytes - used - reserved)
-    return {
-        "user_id": int(row["user_id"]),
-        "quota_bytes": quota_bytes,
-        "used_bytes": used,
-        "reserved_bytes": reserved,
-        "available_bytes": available,
-    }
 
 
 async def _resolve_quota(user_id: int, quota_bytes: int | None) -> int:
@@ -37,7 +25,7 @@ async def _resolve_quota(user_id: int, quota_bytes: int | None) -> int:
 
 
 async def get_usage(user_id: int, quota_bytes: int) -> dict[str, int]:
-    return _with_available(await get_usage_row(user_id), int(quota_bytes))
+    return usage_with_available(await get_usage_row(user_id), int(quota_bytes))
 
 
 def visible_space_from_usage(
@@ -45,21 +33,12 @@ def visible_space_from_usage(
     *,
     machine_free: int,
 ) -> dict[str, int | bool]:
-    used = int(usage["used_bytes"])
-    reserved = int(usage["reserved_bytes"])
-    quota = int(usage["quota_bytes"])
-    quota_available = max(0, quota - used - reserved)
-    limited = int(machine_free) < quota_available
-    available = max(0, int(machine_free) if limited else quota_available)
-    total = used + reserved + available if limited else quota
-    return {
-        "quota": quota,
-        "used": used,
-        "frozen": reserved,
-        "available": available,
-        "total": total,
-        "limited": limited,
-    }
+    return visible_space_from_quota(
+        quota_bytes=int(usage["quota_bytes"]),
+        used_bytes=int(usage["used_bytes"]),
+        reserved_bytes=int(usage["reserved_bytes"]),
+        machine_free=int(machine_free),
+    )
 
 
 async def get_visible_space(user_id: int, quota_bytes: int) -> dict[str, int | bool]:
@@ -83,7 +62,7 @@ async def reserve_bytes(
     if row is None:
         raise ValueError("quota exceeded")
 
-    return _with_available(row, quota)
+    return usage_with_available(row, quota)
 
 
 async def release_reserved(
@@ -94,7 +73,7 @@ async def release_reserved(
 
     row = await apply_usage_delta(user_id, reserved_delta=-amount)
     quota = await _resolve_quota(user_id, quota_bytes)
-    return _with_available(row, quota)
+    return usage_with_available(row, quota)
 
 
 async def update_used_bytes(
@@ -102,4 +81,4 @@ async def update_used_bytes(
 ) -> dict[str, int]:
     row = await apply_usage_delta(user_id, used_delta=amount_delta)
     quota = await _resolve_quota(user_id, quota_bytes)
-    return _with_available(row, quota)
+    return usage_with_available(row, quota)

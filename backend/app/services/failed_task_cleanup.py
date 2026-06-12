@@ -5,7 +5,12 @@ from __future__ import annotations
 import logging
 from enum import Enum
 
-from app.aria2.client import Aria2Client
+from app.aria2.protocol import Aria2Gateway
+from app.domain.status import FAILED_DOWNLOAD_STATUSES
+from app.repositories.downloads import (
+    get_global_download_status_snapshot,
+    get_representative_active_owner_id,
+)
 from app.services.storage import cleanup_task_download_dir, get_downloading_dir
 
 logger = logging.getLogger(__name__)
@@ -21,13 +26,11 @@ class CleanupErrorType(str, Enum):
 
 async def get_representative_owner_id(task_id: int) -> int | None:
     """Get an active owner_id for a global download for logging."""
-    from app.services.aria2_lifecycle_service import get_representative_owner_id
-
-    return await get_representative_owner_id(task_id)
+    return await get_representative_active_owner_id(task_id)
 
 
 async def cleanup_failed_task_artifacts(
-    client: Aria2Client,
+    client: Aria2Gateway,
     task_id: int,
     gid: str | None,
     owner_id: int | None,
@@ -56,18 +59,34 @@ async def cleanup_failed_task_artifacts(
     Status check: Returns True immediately if task is not in failed state.
     """
     if not skip_status_check:
-        from app.services.aria2_lifecycle_service import (
-            cleanup_failed_download_artifacts,
-        )
-
-        return await cleanup_failed_download_artifacts(
-            client=client,
-            task_id=task_id,
-            gid=gid,
-            owner_id=owner_id,
-            log_prefix=log_prefix,
-            validate_status=True,
-        )
+        snapshot = await get_global_download_status_snapshot(task_id)
+        if snapshot is None:
+            path = str(get_downloading_dir() / str(task_id))
+            logger.debug(
+                "[CLEANUP] skipped %s task_id=%s owner_id=%s gid=%s "
+                "path=%s reason=task_not_found",
+                log_prefix,
+                task_id,
+                owner_id,
+                gid,
+                path,
+            )
+            return True
+        status = str(snapshot["status"])
+        if status not in FAILED_DOWNLOAD_STATUSES:
+            path = str(get_downloading_dir() / str(task_id))
+            logger.debug(
+                "[CLEANUP] skipped %s task_id=%s owner_id=%s gid=%s "
+                "path=%s error_type=%s status=%s",
+                log_prefix,
+                task_id,
+                owner_id,
+                gid,
+                path,
+                CleanupErrorType.STATUS_CONFLICT.value,
+                status,
+            )
+            return True
 
     return await cleanup_failed_task_artifacts_unchecked(
         client=client,
@@ -79,7 +98,7 @@ async def cleanup_failed_task_artifacts(
 
 
 async def cleanup_failed_task_artifacts_unchecked(
-    client: Aria2Client,
+    client: Aria2Gateway,
     task_id: int,
     gid: str | None,
     owner_id: int | None,

@@ -10,12 +10,13 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_files, user_storage_usage, user_tasks
-from app.domain.downloads import (
+from app.domain.status import (
     ACTIVE_GLOBAL_DOWNLOAD_STATUSES,
     ACTIVE_USER_TASK_STATUSES,
     FAILABLE_GLOBAL_DOWNLOAD_STATUSES,
     TERMINAL_USER_TASK_STATUSES,
 )
+from app.repositories.errors import RepositoryConflictError
 
 
 def now_ms() -> int:
@@ -136,6 +137,23 @@ async def list_inconsistent_completed_download_ids(threshold_ms: int) -> list[in
             )
         ).all()
     return [int(row[0]) for row in rows]
+
+
+async def list_completed_downloads_without_file() -> list[dict[str, Any]]:
+    async with transaction() as conn:
+        rows = (
+            (
+                await conn.execute(
+                    select(global_downloads).where(
+                        global_downloads.c.status == "completed",
+                        global_downloads.c.completed_file_id.is_(None),
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [dict(row) for row in rows]
 
 
 async def list_stale_queued_download_ids(threshold_ms: int) -> list[int]:
@@ -359,16 +377,19 @@ async def create_user_task(values: dict[str, Any]) -> dict[str, Any]:
         "updated_at_ms": timestamp,
         **values,
     }
-    async with transaction() as conn:
-        row = (
-            (
-                await conn.execute(
-                    insert(user_tasks).values(**row_values).returning(user_tasks)
+    try:
+        async with transaction() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        insert(user_tasks).values(**row_values).returning(user_tasks)
+                    )
                 )
+                .mappings()
+                .one()
             )
-            .mappings()
-            .one()
-        )
+    except IntegrityError as exc:
+        raise RepositoryConflictError(str(exc)) from exc
     return dict(row)
 
 

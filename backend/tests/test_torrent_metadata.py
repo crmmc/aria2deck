@@ -5,7 +5,7 @@ import hashlib
 
 import pytest
 
-from app.services.torrent_metadata import (
+from app.domain.torrent_metadata import (
     MAX_TORRENT_FILE_COUNT,
     TorrentMetadataError,
     build_selection_resource_key,

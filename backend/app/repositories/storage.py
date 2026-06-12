@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from sqlalchemy import delete, func, select, update
 
-from app.core.time_utils import now_ms
 from app.db.engine import transaction
 from app.db.schema import (
     global_downloads,
@@ -15,6 +15,10 @@ from app.db.schema import (
     user_tasks,
     users,
 )
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 async def list_stored_files(search: str, orphan_only: bool) -> list[dict[str, Any]]:

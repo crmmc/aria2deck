@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.domain.downloads import (
+from app.domain.status import (
     ACTIVE_LIKE_DOWNLOAD_STATUSES,
     TERMINAL_DOWNLOAD_STATUSES,
+)
+from app.domain.task_policy import (
     is_current,
 )
 from app.repositories.downloads import list_user_tasks

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -10,7 +9,6 @@ from sqlalchemy import insert, select
 
 from app.auth import user_from_row
 from app.core.config import settings
-from app.core.state import AppState
 from app.db.engine import transaction
 from app.db.schema import (
     global_downloads,
@@ -21,18 +19,13 @@ from app.db.schema import (
     user_storage_usage,
 )
 from app.services.file_service import delete_user_file_reference_v0
+from app.services.task_broadcast import (
+    clear_connections,
+    remove_connections_for_user,
+    set_connections_for_user,
+)
 from app.routers.storage import BulkDeleteRequest, bulk_delete_files
 from tests.helpers_v0 import create_user_v0, now_ms
-
-
-def _request_stub(app_state: AppState | None = None) -> SimpleNamespace:
-    return SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                app_state=app_state if app_state is not None else AppState()
-            )
-        )
-    )
 
 
 async def _seed_shared_file(user_ids: list[int]) -> dict:
@@ -362,9 +355,8 @@ def test_delete_file_endpoint_broadcasts_affected_task_update(
     seeded = asyncio.run(_seed_shared_file([test_user["id"]]))
     timestamp = now_ms()
     async_mock = AsyncMock()
-    authenticated_client.app.state.app_state.ws_connections[test_user["id"]] = {
-        async_mock
-    }
+    asyncio.run(clear_connections())
+    asyncio.run(set_connections_for_user(test_user["id"], {async_mock}))
 
     async def _seed_download() -> int:
         async with transaction() as conn:
@@ -417,9 +409,7 @@ def test_delete_file_endpoint_broadcasts_affected_task_update(
     try:
         response = authenticated_client.delete("/api/files/shared_hash")
     finally:
-        authenticated_client.app.state.app_state.ws_connections.pop(
-            test_user["id"], None
-        )
+        asyncio.run(remove_connections_for_user(test_user["id"]))
 
     assert response.status_code == 200
     async_mock.send_json.assert_awaited_once()
@@ -489,7 +479,6 @@ async def test_admin_bulk_delete_orphan_clears_download_and_pack_fks(
 
     response = await bulk_delete_files(
         BulkDeleteRequest(file_ids=[stored["id"]]),
-        http_request=_request_stub(),
         admin=user_from_row(admin),
     )
 
@@ -593,13 +582,12 @@ async def test_admin_bulk_delete_physical_cleanup_failure_still_broadcasts_commi
         raise OSError("simulated cleanup failure")
 
     monkeypatch.setattr("app.services.storage_admin_service.safe_delete_path", fail_delete_path)
-    state = AppState()
     ws = AsyncMock()
-    state.ws_connections[admin["id"]] = {ws}
+    await clear_connections()
+    await set_connections_for_user(admin["id"], {ws})
 
     response = await bulk_delete_files(
         BulkDeleteRequest(file_ids=[stored["id"]]),
-        http_request=_request_stub(state),
         admin=user_from_row(admin),
     )
 
@@ -638,7 +626,8 @@ def test_admin_bulk_delete_endpoint_broadcasts_affected_task_update(
     path.write_bytes(b"orphan")
     timestamp = now_ms()
     async_mock = AsyncMock()
-    client.app.state.app_state.ws_connections[test_admin["id"]] = {async_mock}
+    asyncio.run(clear_connections())
+    asyncio.run(set_connections_for_user(test_admin["id"], {async_mock}))
 
     async def _seed_download() -> tuple[int, int]:
         async with transaction() as conn:
@@ -714,7 +703,7 @@ def test_admin_bulk_delete_endpoint_broadcasts_affected_task_update(
             json={"file_ids": [stored_id]},
         )
     finally:
-        client.app.state.app_state.ws_connections.pop(test_admin["id"], None)
+        asyncio.run(remove_connections_for_user(test_admin["id"]))
 
     assert response.status_code == 200
     assert response.json()["deleted_count"] == 1

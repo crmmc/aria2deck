@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import aiohttp
 
-from app.aria2 import download_ops
-from app.aria2.errors import prefer_aria2_error_message
-from app.aria2.failed_task_cleanup import cleanup_failed_task_artifacts_unchecked
+from app.aria2.protocol import Aria2Gateway
 from app.core.security import sanitize_string
-from app.core.state import AppState, get_task_complete_lock
-from app.domain.downloads import ACTIVE_USER_TASK_STATUSES, FAILED_DOWNLOAD_STATUSES
+from app.domain.status import ACTIVE_USER_TASK_STATUSES
 from app.repositories.downloads import (
     get_global_download_by_gid,
     get_global_download_status_snapshot,
@@ -29,7 +27,10 @@ from app.repositories.downloads import (
     update_active_user_tasks,
     update_global_download,
 )
+from app.services import download_ops
 from app.services.download_service import complete_global_download
+from app.services.failed_task_cleanup import cleanup_failed_task_artifacts
+from app.services.aria2_error_messages import prefer_aria2_error_message
 from app.services.storage import get_downloading_dir
 from app.services.task_broadcast import broadcast_task_update_to_subscribers
 from app.services.task_projection import (
@@ -41,6 +42,22 @@ from app.services.task_projection import (
 )
 
 logger = logging.getLogger(__name__)
+_completion_locks: dict[tuple[int, int], asyncio.Lock] = {}
+_completion_locks_guard = threading.Lock()
+
+
+def _loop_id() -> int:
+    return id(asyncio.get_running_loop())
+
+
+async def get_task_complete_lock(download_id: int) -> asyncio.Lock:
+    key = (_loop_id(), download_id)
+    with _completion_locks_guard:
+        lock = _completion_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _completion_locks[key] = lock
+        return lock
 
 COMPLETE_SOURCE_RETRY_COUNT = 4
 COMPLETE_SOURCE_RETRY_INTERVAL = 0.5
@@ -63,12 +80,6 @@ TRANSIENT_RPC_ERROR_KEYWORDS = (
     "timed out",
 )
 V0_SYNC_TRACKED_STATUSES = ACTIVE_USER_TASK_STATUSES
-
-
-class Aria2LifecycleClient(Protocol):
-    async def tell_status(self, gid: str) -> dict: ...
-    async def remove_download_result(self, gid: str) -> str: ...
-    async def force_remove(self, gid: str) -> str: ...
 
 
 def _sanitize_path(file_path: str | None, task_id: int) -> str | None:
@@ -176,8 +187,8 @@ async def list_v0_tracked_downloads() -> list[dict[str, Any]]:
     return await list_tracked_global_downloads(V0_SYNC_TRACKED_STATUSES)
 
 
-async def _broadcast_download_update(state: AppState, download_id: int) -> None:
-    await broadcast_task_update_to_subscribers(state, download_id)
+async def _broadcast_download_update(download_id: int) -> None:
+    await broadcast_task_update_to_subscribers(download_id)
 
 
 async def get_representative_owner_id(download_id: int) -> int | None:
@@ -186,63 +197,33 @@ async def get_representative_owner_id(download_id: int) -> int | None:
 
 async def cleanup_failed_download_artifacts(
     *,
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     task_id: int,
     gid: str | None,
     owner_id: int | None,
     log_prefix: str,
     validate_status: bool = True,
 ) -> bool:
-    if validate_status:
-        snapshot = await get_global_download_status_snapshot(task_id)
-        if snapshot is None:
-            path = str(get_downloading_dir() / str(task_id))
-            logger.debug(
-                "[CLEANUP] skipped %s task_id=%s owner_id=%s gid=%s "
-                "path=%s reason=task_not_found",
-                log_prefix,
-                task_id,
-                owner_id,
-                gid,
-                path,
-            )
-            return True
-        status = str(snapshot["status"])
-        if status not in FAILED_DOWNLOAD_STATUSES:
-            path = str(get_downloading_dir() / str(task_id))
-            logger.debug(
-                "[CLEANUP] skipped %s task_id=%s owner_id=%s gid=%s "
-                "path=%s error_type=%s status=%s",
-                log_prefix,
-                task_id,
-                owner_id,
-                gid,
-                path,
-                "STATUS_CONFLICT",
-                status,
-            )
-            return True
-
-    return await cleanup_failed_task_artifacts_unchecked(
+    return await cleanup_failed_task_artifacts(
         client=client,
         task_id=task_id,
         gid=gid,
         owner_id=owner_id,
         log_prefix=log_prefix,
+        skip_status_check=not validate_status,
     )
 
 
 async def fail_v0_download_and_cleanup(
     *,
-    state: AppState,
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     download_id: int,
     gid: str | None,
     message: str,
     error_code: str | None,
     log_prefix: str,
 ) -> None:
-    completion_lock = await get_task_complete_lock(state, download_id)
+    completion_lock = await get_task_complete_lock(download_id)
     async with completion_lock:
         owner_id = await get_representative_owner_id(download_id)
         failed_download = await mark_global_download_failed(
@@ -262,7 +243,7 @@ async def fail_v0_download_and_cleanup(
             log_prefix=log_prefix,
             validate_status=False,
         )
-        await _broadcast_download_update(state, download_id)
+        await _broadcast_download_update(download_id)
 
 
 def _list_task_dir_entries(task_dir: Path) -> list[Path]:
@@ -405,7 +386,7 @@ async def resolve_complete_source_with_retry(
     task_dir: Path,
     files: list[dict[str, Any]],
     task_name: str | None,
-    client: Aria2LifecycleClient | None,
+    client: Aria2Gateway | None,
 ) -> Path | None:
     latest_files = files
 
@@ -438,7 +419,7 @@ async def resolve_complete_source_with_retry(
 
 
 async def _remove_download_result_best_effort(
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     gid: str,
     log_prefix: str,
 ) -> None:
@@ -483,7 +464,7 @@ async def update_download_and_active_user_tasks(
 
 async def switch_to_followed_download(
     *,
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     download: dict[str, Any],
     metadata_gid: str | None,
     followed_gid: str,
@@ -570,7 +551,7 @@ async def resolve_download_for_gid(
 
 
 async def _refresh_followed_gid(
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     gid: str | None,
     log_prefix: str,
 ) -> str | None:
@@ -601,7 +582,7 @@ async def _refresh_followed_gid(
 
 async def switch_to_late_followed_download_if_supported(
     *,
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     download: dict[str, Any],
     metadata_gid: str | None,
     display_name_fallback: str | None,
@@ -623,7 +604,7 @@ async def switch_to_late_followed_download_if_supported(
 
 async def defer_metadata_completion_if_handoff_pending(
     *,
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     download: dict[str, Any],
     aria2_status: dict[str, Any],
     metadata_gid: str | None,
@@ -658,8 +639,7 @@ async def defer_metadata_completion_if_handoff_pending(
 
 async def handle_v0_download_complete(
     *,
-    state: AppState,
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     download: dict[str, Any],
     aria2_status: dict[str, Any],
     completion_gid: str | None,
@@ -667,7 +647,7 @@ async def handle_v0_download_complete(
     allow_metadata_handoff_defer: bool = True,
 ) -> bool:
     download_id = int(download["id"])
-    lock = await get_task_complete_lock(state, download_id)
+    lock = await get_task_complete_lock(download_id)
     async with lock:
         current = await update_global_download(download_id, {})
         if current is None:
@@ -814,8 +794,7 @@ async def handle_v0_download_complete(
 
 async def handle_aria2_event(
     *,
-    state: AppState,
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     gid: str,
     event: str,
     aria2_status: dict[str, Any],
@@ -857,7 +836,6 @@ async def handle_aria2_event(
         else:
             completion_gid = str(download.get("aria2_gid") or gid)
             await handle_v0_download_complete(
-                state=state,
                 client=client,
                 download=download,
                 aria2_status=aria2_status,
@@ -881,7 +859,6 @@ async def handle_aria2_event(
             await _guarded_update_global_download(download_id, progress_values)
 
         await fail_v0_download_and_cleanup(
-            state=state,
             client=client,
             download_id=download_id,
             gid=gid,
@@ -893,7 +870,7 @@ async def handle_aria2_event(
         logger.debug("[WS] Ignoring unsupported aria2 event=%s gid=%s", event, gid)
         return
 
-    await _broadcast_download_update(state, download_id)
+    await _broadcast_download_update(download_id)
     logger.debug(
         "[WS] Event handled gid=%s event=%s download_id=%s", gid, event, download_id
     )
@@ -901,15 +878,13 @@ async def handle_aria2_event(
 
 async def complete_v0_download_from_sync(
     *,
-    state: AppState,
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     download: dict[str, Any],
     aria2_status: dict[str, Any],
     completion_gid: str,
     allow_metadata_handoff_defer: bool = True,
 ) -> None:
     completed = await handle_v0_download_complete(
-        state=state,
         client=client,
         download=download,
         aria2_status=aria2_status,
@@ -918,13 +893,12 @@ async def complete_v0_download_from_sync(
         allow_metadata_handoff_defer=allow_metadata_handoff_defer,
     )
     if completed:
-        await _broadcast_download_update(state, int(download["id"]))
+        await _broadcast_download_update(int(download["id"]))
 
 
 async def update_v0_download_from_aria2(
     *,
-    state: AppState,
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     download: dict[str, Any],
     status: dict[str, Any],
 ) -> None:
@@ -949,7 +923,7 @@ async def update_v0_download_from_aria2(
             log_prefix="[Sync]",
         )
         if switched:
-            await _broadcast_download_update(state, int(download["id"]))
+            await _broadcast_download_update(int(download["id"]))
         return
 
     if download_ops.is_metadata_handoff_pending(download, status):
@@ -975,7 +949,7 @@ async def update_v0_download_from_aria2(
                 log_prefix="[Sync]",
             )
             if switched:
-                await _broadcast_download_update(state, int(download["id"]))
+                await _broadcast_download_update(int(download["id"]))
             return
 
         logger.info(
@@ -992,7 +966,6 @@ async def update_v0_download_from_aria2(
 
     if mapped["raw_status"] == "complete":
         await complete_v0_download_from_sync(
-            state=state,
             client=client,
             download=download,
             aria2_status=status,
@@ -1002,7 +975,6 @@ async def update_v0_download_from_aria2(
 
     if _is_effectively_complete_active_bt_status(status, download):
         await complete_v0_download_from_sync(
-            state=state,
             client=client,
             download=download,
             aria2_status=status,
@@ -1023,7 +995,6 @@ async def update_v0_download_from_aria2(
             message,
         )
         await fail_v0_download_and_cleanup(
-            state=state,
             client=client,
             download_id=download_id,
             gid=gid,
@@ -1059,7 +1030,7 @@ async def update_v0_download_from_aria2(
         status=mapped["status"],
         display_name=mapped["display_name"] if not is_metadata else None,
     )
-    await _broadcast_download_update(state, download_id)
+    await _broadcast_download_update(download_id)
 
 
 async def repair_inconsistent_completed_downloads_v0() -> None:
@@ -1076,21 +1047,10 @@ async def repair_inconsistent_completed_downloads_v0() -> None:
 
 
 async def cleanup_stale_queued_downloads_v0(
-    state: AppState,
     grace_seconds: float = STALE_QUEUED_GRACE_SECONDS,
 ) -> None:
     threshold_ms = now_ms() - int(grace_seconds * 1000)
     for download_id in await list_stale_queued_download_ids(threshold_ms):
-        async with state.lock:
-            submit_lock = state.task_submit_locks.get(download_id)
-            locked = submit_lock is not None and submit_lock.locked()
-        if locked:
-            logger.debug(
-                "[Sync] skipped stale v0 queued download_id=%s reason=submit_in_progress",
-                download_id,
-            )
-            continue
-
         logger.warning("[Sync] Cleaning stale v0 queued download_id=%s", download_id)
         failed_download = await mark_global_download_failed(
             download_id,
@@ -1098,13 +1058,12 @@ async def cleanup_stale_queued_downloads_v0(
             error_code="submit_timeout",
         )
         if failed_download is not None and failed_download["status"] == "failed":
-            await _broadcast_download_update(state, download_id)
+            await _broadcast_download_update(download_id)
 
 
 async def handle_missing_gid(
     *,
-    state: AppState,
-    client: Aria2LifecycleClient,
+    client: Aria2Gateway,
     download: dict[str, Any],
     gid: str,
 ) -> None:
@@ -1143,7 +1102,6 @@ async def handle_missing_gid(
         "completedLength": completed_bytes or 0,
     }
     await complete_v0_download_from_sync(
-        state=state,
         client=client,
         download=download,
         aria2_status=fake_aria2_status,

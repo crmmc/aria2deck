@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.state import AppState
 from app.repositories.downloads import list_user_tasks
 from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
 from app.services.download_service import create_user_download
@@ -31,7 +30,7 @@ async def test_rpc_tell_active_uses_user_tasks(temp_db: str) -> None:
         aria2_client=client,
     )
 
-    handler = Aria2RpcHandler(user["id"], client, AppState())
+    handler = Aria2RpcHandler(user["id"], client)
     rows = await handler.handle("aria2.tellActive", [])
     owned = await list_user_tasks(user["id"])
 
@@ -46,7 +45,7 @@ async def test_rpc_purge_download_result_deletes_terminal_user_task(
 ) -> None:
     user = await create_user_v0(username="rpc_stopped")
     client = AsyncMock()
-    handler = Aria2RpcHandler(user["id"], client, AppState())
+    handler = Aria2RpcHandler(user["id"], client)
 
     result = await handler.handle("aria2.purgeDownloadResult", [])
 
@@ -58,7 +57,7 @@ async def test_rpc_add_uri_creates_v0_task_and_returns_gid(temp_db: str) -> None
     user = await create_user_v0(username="rpc_add_uri")
     client = AsyncMock()
     client.add_uri.return_value = "gid-rpc-add-uri"
-    handler = Aria2RpcHandler(user["id"], client, AppState())
+    handler = Aria2RpcHandler(user["id"], client)
 
     result = await handler.handle(
         "aria2.addUri",
@@ -94,7 +93,7 @@ async def test_rpc_add_uri_rejects_path_like_out_option(temp_db: str) -> None:
     user = await create_user_v0(username="rpc_add_uri_bad_out")
     client = AsyncMock()
     client.add_uri.return_value = "gid-rpc-bad-out"
-    handler = Aria2RpcHandler(user["id"], client, AppState())
+    handler = Aria2RpcHandler(user["id"], client)
 
     with pytest.raises(RpcError) as exc_info:
         await handler.handle(
@@ -113,7 +112,7 @@ async def test_rpc_add_torrent_creates_v0_task_and_returns_gid(temp_db: str) -> 
     user = await create_user_v0(username="rpc_add_torrent")
     client = AsyncMock()
     client.add_torrent.return_value = "gid-rpc-add-torrent"
-    handler = Aria2RpcHandler(user["id"], client, AppState())
+    handler = Aria2RpcHandler(user["id"], client)
     torrent_data = base64.b64encode(b"d4:infod4:name4:testee").decode()
 
     result = await handler.handle(

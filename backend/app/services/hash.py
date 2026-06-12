@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from app.services.torrent_metadata import TorrentMetadataError, parse_torrent_bytes
+from app.domain.torrent_metadata import TorrentMetadataError, parse_torrent_bytes
 
 logger = logging.getLogger(__name__)
 

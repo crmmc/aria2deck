@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from app.aria2.client import Aria2Client
+from typing import Any
 
 from app.core.security import sanitize_string
 from app.services.task_projection import (
     METADATA_NAME_PREFIX,
     is_metadata_phase_status,
 )
-
-logger = logging.getLogger(__name__)
 
 INFO_HASH_HEX_PATTERN = re.compile(r"^[a-fA-F0-9]{40}$")
 ARIA2_TO_V0_STATUS = {
@@ -90,27 +84,6 @@ def map_progress_values(
         values["total_bytes"] = safe_int(aria2_status.get("totalLength"))
     values["completed_bytes"] = safe_int(aria2_status.get("completedLength"))
     return values
-
-
-async def switch_to_followed_download(
-    *,
-    client: "Aria2Client",
-    download: dict[str, Any],
-    metadata_gid: str | None,
-    followed_gid: str,
-    display_name_fallback: str | None,
-    log_prefix: str,
-) -> bool:
-    from app.services.aria2_lifecycle_service import switch_to_followed_download
-
-    return await switch_to_followed_download(
-        client=client,
-        download=download,
-        metadata_gid=metadata_gid,
-        followed_gid=followed_gid,
-        display_name_fallback=display_name_fallback,
-        log_prefix=log_prefix,
-    )
 
 
 def first_followed_gid(aria2_status: dict[str, Any]) -> str | None:

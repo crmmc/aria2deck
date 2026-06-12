@@ -1,4 +1,4 @@
-from app.domain.downloads import REST_TASK_STATUS_FILTERS
+from app.domain.status import REST_TASK_STATUS_FILTERS
 from app.services.task_projection import (
     BT_TRACKER_PLACEHOLDER,
     METADATA_NAME_PREFIX,

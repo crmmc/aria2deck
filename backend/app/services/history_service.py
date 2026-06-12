@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from app.core.time_utils import ms_to_iso
-from app.domain.downloads import TERMINAL_USER_TASK_STATUSES
+from app.domain.status import TERMINAL_USER_TASK_STATUSES
 from app.domain.errors import NotFoundError
 from app.repositories.downloads import (
     clear_terminal_user_tasks,

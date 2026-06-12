@@ -6,11 +6,10 @@ import shutil
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
-from sqlalchemy.exc import IntegrityError
-
-from app.domain.downloads import (
+from app.aria2.protocol import Aria2Gateway
+from app.domain.task_policy import (
     CANCELABLE_TASK_STATUSES,
     RETRYABLE_DOWNLOAD_STATUSES,
     RETRYABLE_TASK_STATUSES,
@@ -28,6 +27,7 @@ from app.repositories.downloads import (
     update_global_download,
     update_user_task,
 )
+from app.repositories.errors import RepositoryConflictError
 from app.repositories.files import (
     create_stored_file_with_entries,
     delete_stored_file,
@@ -58,21 +58,6 @@ _ALLOWED_USER_OPTIONS = frozenset(
         "bt-tracker",
     )
 )
-
-
-class Aria2SubmitClient(Protocol):
-    async def add_uri(
-        self, uris: list[str], options: Mapping[str, Any] | None = None
-    ) -> str: ...
-
-    async def add_torrent(
-        self,
-        torrent: str,
-        uris: list[str] | None = None,
-        options: Mapping[str, Any] | None = None,
-    ) -> str: ...
-
-    async def force_remove(self, gid: str) -> str: ...
 
 
 _download_locks: dict[tuple[int, int], asyncio.Lock] = {}
@@ -139,7 +124,7 @@ async def _release_task_reservation(
     await update_user_task(task["id"], {"reserved_bytes": 0})
 
 
-async def _remove_submitted_gid(aria2_client: Aria2SubmitClient, gid: str) -> None:
+async def _remove_submitted_gid(aria2_client: Aria2Gateway, gid: str) -> None:
     try:
         await aria2_client.force_remove(gid)
     except Exception:
@@ -253,7 +238,7 @@ async def complete_global_download(
                         entry_templates,
                     )
                     created_stored_file = True
-                except IntegrityError:
+                except RepositoryConflictError:
                     existing = await get_stored_file_by_content_hash(content_hash)
                     if existing is None:
                         if moved_source:
@@ -301,7 +286,7 @@ async def create_user_download(
     resource_kind: str,
     display_name: str | None,
     total_bytes: int,
-    aria2_client: Aria2SubmitClient,
+    aria2_client: Aria2Gateway,
     options: Mapping[str, Any] | None = None,
     submit_uris: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -332,7 +317,7 @@ async def create_user_torrent_download(
     source_uri: str,
     display_name: str | None,
     total_bytes: int,
-    aria2_client: Aria2SubmitClient,
+    aria2_client: Aria2Gateway,
     options: Mapping[str, Any] | None = None,
     server_options: Mapping[str, Any] | None = None,
     uris: list[str] | None = None,
@@ -368,7 +353,7 @@ async def _create_user_download_with_submit(
     resource_kind: str,
     display_name: str | None,
     total_bytes: int,
-    aria2_client: Aria2SubmitClient,
+    aria2_client: Aria2Gateway,
     options: Mapping[str, Any] | None,
     server_options: Mapping[str, Any] | None = None,
     submit_download: Callable[[Mapping[str, Any] | None], Awaitable[str]],
@@ -459,7 +444,7 @@ async def _create_user_download_with_submit(
                             **task_values,
                         }
                     )
-            except IntegrityError:
+            except RepositoryConflictError:
                 if reservation_made:
                     await release_reserved(
                         user_id, reserved_bytes, quota_bytes=quota_bytes
@@ -509,7 +494,7 @@ async def _ensure_download_submitted(
     global_download: dict[str, Any],
     options: Mapping[str, Any] | None,
     server_options: Mapping[str, Any] | None,
-    aria2_client: Aria2SubmitClient,
+    aria2_client: Aria2Gateway,
     submit_download: Callable[[Mapping[str, Any] | None], Awaitable[str]],
 ) -> dict[str, Any]:
     if global_download.get("aria2_gid") or global_download["status"] != "queued":
@@ -569,7 +554,7 @@ async def cancel_user_task(
     user_id: int,
     user_task_id: int,
     quota_bytes: int,
-    aria2_client: Aria2SubmitClient,
+    aria2_client: Aria2Gateway,
 ) -> dict[str, Any]:
     task = await get_user_task_by_id(user_id, user_task_id)
     if task is None:

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from app.domain.downloads import (
+from app.domain.status import (
     ACTIVE_LIKE_DOWNLOAD_STATUSES,
-    CANCELABLE_TASK_STATUSES,
     ERROR_DOWNLOAD_STATUSES,
     REST_TASK_STATUS_FILTERS,
-    RETRYABLE_DOWNLOAD_STATUSES,
     TERMINAL_DOWNLOAD_STATUSES,
+)
+from app.domain.task_policy import (
+    CANCELABLE_TASK_STATUSES,
+    RETRYABLE_DOWNLOAD_STATUSES,
     InvalidTaskStatusFilter,
     aria2_status,
     effective_status,

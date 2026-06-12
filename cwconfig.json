@@ -1,0 +1,31 @@
+{
+  "indexing": {
+    "includePatterns": [
+      "main.py",
+      "backend/app/**/*.py",
+      "backend/tests/**/*.py",
+      "frontend/app/**/*.ts",
+      "frontend/app/**/*.tsx",
+      "frontend/components/**/*.ts",
+      "frontend/components/**/*.tsx",
+      "frontend/hooks/**/*.ts",
+      "frontend/hooks/**/*.tsx",
+      "frontend/lib/**/*.ts",
+      "frontend/lib/**/*.tsx",
+      "frontend/__mocks__/**/*.ts",
+      "frontend/__tests__/**/*.ts",
+      "frontend/__tests__/**/*.tsx",
+      "frontend/*.ts",
+      "frontend/*.mjs",
+      "frontend/*.cjs"
+    ],
+    "ignorePatterns": [
+      "**/*.d.ts",
+      "**/*.tsbuildinfo",
+      "**/__pycache__/**",
+      "**/.next/**",
+      "**/node_modules/**",
+      "**/.pytest_cache/**"
+    ]
+  }
+}

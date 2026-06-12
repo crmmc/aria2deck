@@ -229,18 +229,18 @@ def _parse_value(data: bytes, pos: int, depth: int) -> tuple[Any, int, dict[tupl
         return _parse_int(data, pos), _parse_int_end(data, pos), {}
     if token == b"l":
         values: list[Any] = []
-        spans: dict[tuple[int, bytes], tuple[int, int]] = {}
+        list_spans: dict[tuple[int, bytes], tuple[int, int]] = {}
         pos += 1
         while pos < len(data) and data[pos : pos + 1] != b"e":
             value, pos, child_spans = _parse_value(data, pos, depth + 1)
             values.append(value)
-            spans.update(child_spans)
+            list_spans.update(child_spans)
         if pos >= len(data):
             raise TorrentMetadataError("unterminated list")
-        return values, pos + 1, spans
+        return values, pos + 1, list_spans
     if token == b"d":
         result: dict[bytes, Any] = {}
-        spans: dict[tuple[int, bytes], tuple[int, int]] = {}
+        dict_spans: dict[tuple[int, bytes], tuple[int, int]] = {}
         pos += 1
         while pos < len(data) and data[pos : pos + 1] != b"e":
             key, pos, _ = _parse_value(data, pos, depth + 1)
@@ -251,11 +251,11 @@ def _parse_value(data: bytes, pos: int, depth: int) -> tuple[Any, int, dict[tupl
             value_start = pos
             value, pos, child_spans = _parse_value(data, pos, depth + 1)
             result[key] = value
-            spans[(depth, key)] = (value_start, pos)
-            spans.update(child_spans)
+            dict_spans[(depth, key)] = (value_start, pos)
+            dict_spans.update(child_spans)
         if pos >= len(data):
             raise TorrentMetadataError("unterminated dictionary")
-        return result, pos + 1, spans
+        return result, pos + 1, dict_spans
     if token.isdigit():
         return _parse_bytes(data, pos)
     raise TorrentMetadataError("invalid bencode token")

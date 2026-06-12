@@ -1,12 +1,10 @@
 """Tests for state cache semantics and secret key safety checks."""
-import asyncio
-import gc
-import weakref
 from types import SimpleNamespace
 
 import pytest
 
 from app.aria2.client import Aria2Client
+from app.aria2.gateway import get_aria2_client, update_cached_aria2_config
 from app.core.config import (
     DEFAULT_SECRET_KEY,
     LEGACY_SHARE_JWT_SECRET_ENV,
@@ -15,7 +13,7 @@ from app.core.config import (
     check_secret_key,
     settings,
 )
-from app.core.state import AppState, get_aria2_client, get_task_complete_lock, get_user_space_lock, refresh_aria2_config
+from app.services.settings_service import refresh_aria2_config
 
 
 def test_check_secret_key_raises_on_default_in_non_debug(monkeypatch):
@@ -62,29 +60,30 @@ def test_settings_accepts_legacy_share_jwt_secret_env(monkeypatch):
 
 
 def test_get_aria2_client_preserves_empty_cached_secret(monkeypatch):
-    state = AppState()
-    state._cached_rpc_url = "http://cached:6800/jsonrpc"
-    state._cached_rpc_secret = ""
+    update_cached_aria2_config(
+        rpc_url="http://cached:6800/jsonrpc",
+        rpc_secret="",
+    )
 
     monkeypatch.setattr(settings, "aria2_rpc_url", "http://env:6800/jsonrpc")
     monkeypatch.setattr(settings, "aria2_rpc_secret", "ENV_SECRET_SHOULD_NOT_APPLY")
 
-    client = get_aria2_client(state=state)
+    client = get_aria2_client()
 
     assert client._rpc_url == "http://cached:6800/jsonrpc"
     assert client._secret == ""
 
 
 def test_get_aria2_client_refreshes_request_client_when_cache_changed():
-    state = AppState()
-    state._cached_rpc_url = "http://new-rpc:6800/jsonrpc"
-    state._cached_rpc_secret = "new-secret"
-
-    app_state = SimpleNamespace(
-        aria2_client=Aria2Client("http://old-rpc:6800/jsonrpc", "old-secret"),
-        app_state=state,
+    update_cached_aria2_config(
+        rpc_url="http://new-rpc:6800/jsonrpc",
+        rpc_secret="new-secret",
     )
-    request = SimpleNamespace(app=SimpleNamespace(state=app_state))
+
+    state_namespace = SimpleNamespace(
+        aria2_client=Aria2Client("http://old-rpc:6800/jsonrpc", "old-secret"),
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state_namespace))
 
     client = get_aria2_client(request=request)
 
@@ -107,34 +106,8 @@ async def test_refresh_aria2_config_preserves_empty_secret(monkeypatch):
     monkeypatch.setattr(settings_service, "get_config_value", fake_get_config_value)
     monkeypatch.setattr(settings, "aria2_rpc_secret", "ENV_SECRET_SHOULD_NOT_APPLY")
 
-    state = AppState()
-    await refresh_aria2_config(state)
+    await refresh_aria2_config()
+    client = get_aria2_client()
 
-    assert state._cached_rpc_url == "http://db:6800/jsonrpc"
-    assert state._cached_rpc_secret == ""
-
-
-@pytest.mark.asyncio
-async def test_lock_maps_use_weak_refs_for_cleanup():
-    state = AppState()
-
-    user_lock = await get_user_space_lock(state, 123)
-    complete_lock = await get_task_complete_lock(state, 456)
-    submit_lock = asyncio.Lock()
-    state.task_submit_locks[789] = submit_lock
-
-    user_ref = weakref.ref(user_lock)
-    complete_ref = weakref.ref(complete_lock)
-    submit_ref = weakref.ref(submit_lock)
-
-    del user_lock
-    del complete_lock
-    del submit_lock
-    gc.collect()
-
-    assert user_ref() is None
-    assert complete_ref() is None
-    assert submit_ref() is None
-    assert 123 not in state.user_space_locks
-    assert 456 not in state.task_complete_locks
-    assert 789 not in state.task_submit_locks
+    assert client._rpc_url == "http://db:6800/jsonrpc"
+    assert client._secret == ""

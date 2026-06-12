@@ -13,28 +13,14 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 
-SCHEMA_VERSION = 2
+from app.domain.status import (
+    GLOBAL_DOWNLOAD_STATUSES,
+    PACK_TASK_STATUSES,
+    SHARE_STATUSES,
+    USER_TASK_STATUSES,
+)
 
-GLOBAL_DOWNLOAD_STATUSES = (
-    "queued",
-    "active",
-    "waiting",
-    "paused",
-    "completed",
-    "failed",
-    "cancelled",
-)
-USER_TASK_STATUSES = (
-    "queued",
-    "active",
-    "waiting",
-    "paused",
-    "completed",
-    "failed",
-    "cancelled",
-)
-PACK_TASK_STATUSES = ("pending", "packing", "completed", "failed", "cancelled")
-SHARE_STATUSES = ("active", "revoked")
+SCHEMA_VERSION = 2
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
 
 metadata = MetaData()

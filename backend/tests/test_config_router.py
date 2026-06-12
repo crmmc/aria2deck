@@ -275,7 +275,7 @@ class TestAria2Version:
             "enabledFeatures": ["BitTorrent", "GZip"],
         }
 
-        with patch("app.aria2.client.Aria2Client", return_value=mock_client):
+        with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client):
             response = admin_client.get("/api/config/aria2/version")
 
         assert response.status_code == 200
@@ -288,7 +288,7 @@ class TestAria2Version:
         mock_client = AsyncMock()
         mock_client.get_version.side_effect = Exception("Connection refused")
 
-        with patch("app.aria2.client.Aria2Client", return_value=mock_client):
+        with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client):
             response = admin_client.get("/api/config/aria2/version")
 
         assert response.status_code == 200
@@ -309,7 +309,7 @@ class TestAria2Test:
             "enabledFeatures": ["BitTorrent"],
         }
 
-        with patch("app.aria2.client.Aria2Client", return_value=mock_client):
+        with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client):
             response = admin_client.post(
                 "/api/config/aria2/test",
                 json={
@@ -327,7 +327,7 @@ class TestAria2Test:
         mock_client = AsyncMock()
         mock_client.get_version.side_effect = Exception("Connection refused")
 
-        with patch("app.aria2.client.Aria2Client", return_value=mock_client):
+        with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client):
             response = admin_client.post(
                 "/api/config/aria2/test",
                 json={"aria2_rpc_url": "http://localhost:6800/jsonrpc"},
@@ -431,15 +431,20 @@ class TestTokens:
 
 
 class TestConfigHelperFunctions:
-    def test_get_config_value_exception(self, temp_db: str):
+    def test_get_config_value_sync_unknown_key(self, temp_db: str):
         from app.services.settings_service import clear_config_cache, get_config_value_sync
-        import sqlite3
 
         clear_config_cache()
 
-        with patch.object(sqlite3, "connect", side_effect=Exception("DB error")):
-            result = get_config_value_sync("nonexistent_key")
-            assert result is None
+        result = get_config_value_sync("nonexistent_key")
+        assert result is None
+
+    def test_get_config_value_sync_default_before_runtime_load(self, temp_db: str):
+        from app.services.settings_service import clear_config_cache, get_config_value_sync
+
+        clear_config_cache()
+
+        assert get_config_value_sync("site_title") == "Aria2 控制器"
 
     @pytest.mark.asyncio
     async def test_get_config_value_cache_hit(self, temp_db: str):

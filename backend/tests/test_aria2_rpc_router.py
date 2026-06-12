@@ -345,10 +345,12 @@ class TestJsonrpcHandler:
         self, client: TestClient, rpc_user: dict, monkeypatch
     ):
         from app.aria2.client import Aria2Client
+        from app.aria2.gateway import update_cached_aria2_config
 
-        app_state = client.app.state.app_state
-        app_state._cached_rpc_url = "http://new-rpc:6800/jsonrpc"
-        app_state._cached_rpc_secret = "new-secret"
+        update_cached_aria2_config(
+            rpc_url="http://new-rpc:6800/jsonrpc",
+            rpc_secret="new-secret",
+        )
         client.app.state.aria2_client = Aria2Client(
             "http://old-rpc:6800/jsonrpc", "old-secret"
         )

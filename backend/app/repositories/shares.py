@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from app.db.engine import transaction
 from app.db.schema import share_links, stored_files, user_files
 from app.domain.shares import SHARE_ACTIVE_STATUS, SHARE_REVOKED_STATUS
+from app.repositories.errors import RepositoryConflictError
 
 
 def share_select():
@@ -89,7 +90,7 @@ async def create_share_with_retry(
                 return await create_share_row_in_existing_conn(conn, values_factory())
             except IntegrityError:
                 if attempt == max_attempts - 1:
-                    raise
+                    raise RepositoryConflictError("share code collision") from None
     return None
 
 

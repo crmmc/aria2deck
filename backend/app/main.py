@@ -70,10 +70,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.aria2.client import Aria2Client
+from app.aria2.gateway import update_cached_aria2_config
 from app.aria2.listener import listen_aria2_events
 from app.aria2.sync import sync_tasks
 from app.core.config import settings
-from app.core.state import AppState
 from app.db.bootstrap import bootstrap_database
 from app.db.engine import check_database_integrity, check_wal_integrity, dispose_engine
 from app.repositories.auth import create_user, get_user_by_username, update_user
@@ -154,20 +154,11 @@ async def lifespan(app: FastAPI):
 
     check_secret_key()
 
-    # Refresh aria2 config cache from DB
-    from app.core.state import refresh_aria2_config
+    from app.services.settings_service import load_runtime_config, refresh_aria2_config
 
-    await refresh_aria2_config(app.state.app_state)
-
-    # 加载下载配置到内存
-    from app.core.download_limiter import download_config
-
-    await download_config.load_from_db()
-
-    # 加载频率限制配置到内存
-    from app.core.rate_limit_config import rate_limit_config
-
-    await rate_limit_config.load_from_db()
+    # Refresh runtime config caches from DB.
+    await refresh_aria2_config()
+    await load_runtime_config()
 
     # Ensure default admin exists
     await ensure_default_admin_v0()
@@ -197,10 +188,8 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(safe_startup_maintenance())
 
-    sync_task = asyncio.create_task(
-        sync_tasks(app.state.app_state, settings.aria2_poll_interval)
-    )
-    listener_task = asyncio.create_task(listen_aria2_events(app.state.app_state))
+    sync_task = asyncio.create_task(sync_tasks(settings.aria2_poll_interval))
+    listener_task = asyncio.create_task(listen_aria2_events())
     yield
     # Shutdown
     sync_task.cancel()
@@ -220,7 +209,10 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name, debug=settings.debug, lifespan=lifespan)
-    app.state.app_state = AppState()
+    update_cached_aria2_config(
+        rpc_url=settings.aria2_rpc_url,
+        rpc_secret=settings.aria2_rpc_secret,
+    )
     app.state.aria2_client = Aria2Client(
         settings.aria2_rpc_url, settings.aria2_rpc_secret
     )

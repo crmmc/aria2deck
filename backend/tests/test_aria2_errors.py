@@ -6,7 +6,7 @@
 3. 错误消息模式匹配
 """
 
-from app.aria2.errors import ERROR_CODE_MAP, get_error_message, parse_error_message
+from app.services.aria2_error_messages import ERROR_CODE_MAP, get_error_message, parse_error_message
 
 
 class TestGetErrorMessage:
@@ -75,19 +75,19 @@ class TestPreferAria2ErrorMessage:
     """aria2 明确返回 errorMessage 时优先保留原始原因。"""
 
     def test_keeps_specific_aria2_error_message(self):
-        from app.aria2.errors import prefer_aria2_error_message
+        from app.services.aria2_error_messages import prefer_aria2_error_message
 
         msg = "CUID#7 - Download aborted. URI=https://example.com/file.iso"
         assert prefer_aria2_error_message("7", msg) == f"aria2: {msg}"
 
     def test_does_not_duplicate_aria2_prefix(self):
-        from app.aria2.errors import prefer_aria2_error_message
+        from app.services.aria2_error_messages import prefer_aria2_error_message
 
         msg = "aria2: CUID#7 - Download aborted. URI=https://example.com/file.iso"
         assert prefer_aria2_error_message("7", msg) == msg
 
     def test_describes_max_file_not_found_as_upstream_source_failure(self):
-        from app.aria2.errors import prefer_aria2_error_message
+        from app.services.aria2_error_messages import prefer_aria2_error_message
 
         assert (
             prefer_aria2_error_message("4", "Reached max-file-not-found count=10")
@@ -95,7 +95,7 @@ class TestPreferAria2ErrorMessage:
         )
 
     def test_falls_back_to_code_when_message_is_empty(self):
-        from app.aria2.errors import prefer_aria2_error_message
+        from app.services.aria2_error_messages import prefer_aria2_error_message
 
         assert prefer_aria2_error_message("9", "") == "aria2: 磁盘空间不足"
 

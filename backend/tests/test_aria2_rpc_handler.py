@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import delete, insert
 
-from app.aria2.client import Aria2Client
-from app.core.state import AppState
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks, users
 from app.repositories.downloads import get_user_task_by_id, list_user_tasks
@@ -116,13 +114,7 @@ def mock_aria2_client() -> AsyncMock:
 
 @pytest.fixture
 def handler(test_user: dict, mock_aria2_client: AsyncMock) -> Aria2RpcHandler:
-    return Aria2RpcHandler(test_user["id"], mock_aria2_client, AppState())
-
-
-def test_aria2_rpc_handler_requires_app_state() -> None:
-    client = Aria2Client("http://localhost:6800/jsonrpc")
-    with pytest.raises(RuntimeError):
-        Aria2RpcHandler(user_id=1, aria2_client=client, app_state=cast(AppState, None))
+    return Aria2RpcHandler(test_user["id"], mock_aria2_client)
 
 
 def test_rpc_error_to_dict() -> None:

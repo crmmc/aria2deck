@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy import case, delete, func, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.db.engine import transaction
 from app.db.schema import (
@@ -18,6 +19,7 @@ from app.db.schema import (
     user_tasks,
 )
 from app.domain.shares import SHARE_ACTIVE_STATUS
+from app.repositories.errors import RepositoryConflictError
 
 
 def now_ms() -> int:
@@ -32,18 +34,21 @@ async def create_stored_file_with_entries(
         "created_at_ms": now_ms(),
         **values,
     }
-    async with transaction() as conn:
-        row = (
-            await conn.execute(
-                insert(stored_files).values(**row_values).returning(stored_files)
-            )
-        ).mappings().one()
-        entries = [
-            {"stored_file_id": row["id"], **entry}
-            for entry in entry_templates
-        ]
-        if entries:
-            await conn.execute(insert(stored_file_entries), entries)
+    try:
+        async with transaction() as conn:
+            row = (
+                await conn.execute(
+                    insert(stored_files).values(**row_values).returning(stored_files)
+                )
+            ).mappings().one()
+            entries = [
+                {"stored_file_id": row["id"], **entry}
+                for entry in entry_templates
+            ]
+            if entries:
+                await conn.execute(insert(stored_file_entries), entries)
+    except IntegrityError as exc:
+        raise RepositoryConflictError(str(exc)) from exc
     return dict(row), len(entry_templates)
 
 
@@ -67,6 +72,112 @@ async def get_stored_file_by_content_hash(content_hash: str) -> dict[str, Any] |
             )
         ).mappings().first()
     return dict(row) if row else None
+
+
+async def list_stored_file_content_hashes() -> set[str]:
+    async with transaction() as conn:
+        rows = (await conn.execute(select(stored_files.c.content_hash))).all()
+    return {str(row[0]) for row in rows}
+
+
+async def stored_file_exists_by_content_hash(content_hash: str) -> bool:
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                select(stored_files.c.id).where(
+                    stored_files.c.content_hash == content_hash
+                )
+            )
+        ).first()
+    return row is not None
+
+
+async def list_stored_file_rows() -> list[dict[str, Any]]:
+    async with transaction() as conn:
+        rows = (await conn.execute(select(stored_files))).mappings().all()
+    return [dict(row) for row in rows]
+
+
+async def list_stored_file_real_paths() -> set[str]:
+    async with transaction() as conn:
+        rows = (await conn.execute(select(stored_files.c.real_path))).all()
+    return {str(row[0]) for row in rows}
+
+
+async def ensure_stored_file_with_user_ref(
+    *,
+    user_id: int,
+    content_hash: str,
+    real_path: str,
+    size_bytes: int,
+    is_directory: bool,
+    original_name: str,
+    entry_templates: Sequence[dict[str, Any]],
+) -> tuple[int, int | None]:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        stored = (
+            (
+                await conn.execute(
+                    select(stored_files).where(
+                        stored_files.c.content_hash == content_hash
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if stored is None:
+            stored = (
+                (
+                    await conn.execute(
+                        insert(stored_files)
+                        .values(
+                            content_hash=content_hash,
+                            real_path=real_path,
+                            size_bytes=size_bytes,
+                            is_directory=1 if is_directory else 0,
+                            original_name=original_name,
+                            created_at_ms=timestamp,
+                        )
+                        .returning(stored_files)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            entries = [
+                {"stored_file_id": stored["id"], **entry}
+                for entry in entry_templates
+            ]
+            if entries:
+                await conn.execute(insert(stored_file_entries), entries)
+
+        existing_ref = (
+            await conn.execute(
+                select(user_files.c.id).where(
+                    user_files.c.user_id == user_id,
+                    user_files.c.stored_file_id == stored["id"],
+                )
+            )
+        ).first()
+        if existing_ref:
+            return int(stored["id"]), None
+
+        user_file = (
+            await conn.execute(
+                insert(user_files)
+                .values(
+                    user_id=user_id,
+                    stored_file_id=stored["id"],
+                    display_name=original_name,
+                    created_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                )
+                .returning(user_files.c.id)
+            )
+        ).first()
+    return int(stored["id"]), int(user_file[0]) if user_file else None
 
 
 async def delete_user_file(user_id: int, user_file_id: int) -> dict[str, Any] | None:
@@ -212,6 +323,8 @@ async def resolve_user_file_ids(
 async def delete_user_file_reference(
     user_id: int,
     user_file_id: int,
+    *,
+    adjust_usage: bool = True,
 ) -> tuple[bool, list[int], str | None]:
     async with transaction() as conn:
         row = (
@@ -248,15 +361,16 @@ async def delete_user_file_reference(
         if not deleted.rowcount:
             return False, [], None
 
-        used_expr = user_storage_usage.c.used_bytes - int(row["size_bytes"] or 0)
-        await conn.execute(
-            update(user_storage_usage)
-            .where(user_storage_usage.c.user_id == user_id)
-            .values(
-                used_bytes=case((used_expr < 0, 0), else_=used_expr),
-                updated_at_ms=now_ms(),
+        if adjust_usage:
+            used_expr = user_storage_usage.c.used_bytes - int(row["size_bytes"] or 0)
+            await conn.execute(
+                update(user_storage_usage)
+                .where(user_storage_usage.c.user_id == user_id)
+                .values(
+                    used_bytes=case((used_expr < 0, 0), else_=used_expr),
+                    updated_at_ms=now_ms(),
+                )
             )
-        )
         refs = (
             await conn.execute(
                 select(func.count())

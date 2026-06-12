@@ -10,14 +10,16 @@ from sqlalchemy import select, update
 from app.aria2.sync import (
     STALE_QUEUED_GRACE_SECONDS,
     _cleanup_owned_stopped_results,
-    _cleanup_stale_queued_downloads_v0,
-    _fail_v0_download_and_cleanup,
-    _repair_inconsistent_completed_downloads_v0,
     sync_tasks,
-    _update_v0_download_from_aria2,
+)
+from app.services.aria2_lifecycle_service import (
+    cleanup_stale_queued_downloads_v0,
+    fail_v0_download_and_cleanup,
+    get_task_complete_lock,
+    repair_inconsistent_completed_downloads_v0,
+    update_v0_download_from_aria2,
 )
 from app.core.config import settings
-from app.core.state import AppState, get_task_complete_lock
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_files, user_tasks
 from app.repositories.downloads import now_ms
@@ -132,7 +134,7 @@ async def test_stale_queued_download_without_gid_becomes_failed_after_grace_peri
             .values(updated_at_ms=old_timestamp)
         )
 
-    await _cleanup_stale_queued_downloads_v0(AppState())
+    await cleanup_stale_queued_downloads_v0()
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -161,8 +163,7 @@ async def test_active_aria2_status_updates_global_bytes_and_active_user_task_sta
     )
     client = AsyncMock()
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -206,8 +207,7 @@ async def test_error_aria2_result_marks_active_user_tasks_failed(
     client.force_remove.return_value = "OK"
     client.remove_download_result.return_value = "OK"
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -255,8 +255,7 @@ async def test_error_aria2_result_preserves_specific_aria2_error_message(
     client.force_remove.return_value = "OK"
     raw_error = "CUID#12 - Download aborted. URI=https://example.com/file.iso"
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -307,8 +306,7 @@ async def test_metadata_followed_by_refreshes_real_task_progress_and_name(
     }
     client.remove_download_result.return_value = "OK"
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -363,8 +361,7 @@ async def test_metadata_followed_by_preserves_real_waiting_status(
     }
     client.remove_download_result.return_value = "OK"
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -409,8 +406,7 @@ async def test_torrent_synthetic_task_name_is_replaced_with_real_name(
     )
     client = AsyncMock()
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -451,8 +447,7 @@ async def test_torrent_prefixed_user_task_name_is_not_overwritten_for_http_downl
     )
     client = AsyncMock()
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -494,8 +489,7 @@ async def test_http_download_ignores_noisy_bittorrent_name_without_live_evidence
     )
     client = AsyncMock()
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -540,8 +534,7 @@ async def test_http_torrent_live_infohash_upgrades_resource_kind_and_name(
     )
     client = AsyncMock()
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -601,8 +594,7 @@ async def test_http_torrent_followed_by_handoff_upgrades_resource_kind(
     }
     client.remove_download_result.return_value = "OK"
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -679,8 +671,7 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
     ]
     client.remove_download_result.return_value = "OK"
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -750,8 +741,7 @@ async def test_active_aria2_status_does_not_overwrite_completed_download(
     )
     client = AsyncMock()
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -801,8 +791,7 @@ async def test_active_bt_status_with_full_bytes_completes_v0_download(
     client = AsyncMock()
     client.remove_download_result.return_value = "OK"
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -861,8 +850,7 @@ async def test_active_full_bytes_without_real_file_name_stays_active(
     )
     client = AsyncMock()
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -921,8 +909,7 @@ async def test_active_full_bytes_with_verify_integrity_pending_stays_active(
     source_file.write_bytes(b"payload")
     client = AsyncMock()
 
-    await _update_v0_download_from_aria2(
-        state=AppState(),
+    await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -980,7 +967,7 @@ async def test_repair_inconsistent_completed_download_marks_failed_and_releases_
             .values(updated_at_ms=old_timestamp)
         )
 
-    await _repair_inconsistent_completed_downloads_v0()
+    await repair_inconsistent_completed_downloads_v0()
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -1013,16 +1000,14 @@ async def test_sync_failure_cleanup_waits_for_completion_lock(
         status="active",
         reserved_bytes=100,
     )
-    state = AppState()
-    completion_lock = await get_task_complete_lock(state, download["id"])
+    completion_lock = await get_task_complete_lock(download["id"])
     await completion_lock.acquire()
     client = AsyncMock()
     client.force_remove.return_value = "OK"
     client.remove_download_result.return_value = "OK"
 
     failure_task = asyncio.create_task(
-        _fail_v0_download_and_cleanup(
-            state=state,
+        fail_v0_download_and_cleanup(
             client=client,
             download_id=download["id"],
             gid="gid-sync-failure-lock",
@@ -1092,7 +1077,7 @@ async def test_sync_missing_gid_recovers_completed_file_from_disk(
     def get_client(*args: object, **kwargs: object) -> AsyncMock:
         return client
 
-    monkeypatch.setattr("app.core.state.get_aria2_client", get_client)
+    monkeypatch.setattr("app.aria2.sync.get_aria2_client", get_client)
 
     async def stop_after_first_sleep(_interval: float) -> None:
         raise asyncio.CancelledError
@@ -1100,7 +1085,7 @@ async def test_sync_missing_gid_recovers_completed_file_from_disk(
     monkeypatch.setattr("app.aria2.sync.asyncio.sleep", stop_after_first_sleep)
 
     with pytest.raises(asyncio.CancelledError):
-        await sync_tasks(AppState(), interval=0.01)
+        await sync_tasks(interval=0.01)
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])

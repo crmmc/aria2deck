@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from app.domain.downloads import (
+from app.domain.status import (
     ACTIVE_LIKE_DOWNLOAD_STATUSES,
     REST_TASK_STATUS_FILTERS,
     TERMINAL_DOWNLOAD_STATUSES,
+)
+from app.domain.task_policy import (
     InvalidTaskStatusFilter,
     aria2_status,
     effective_status,

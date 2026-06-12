@@ -12,16 +12,17 @@ import asyncio
 import hashlib
 import logging
 import shutil
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Sequence
 from urllib.parse import unquote, urlsplit
 
+from app.aria2.protocol import Aria2Gateway
 from app.core.config import settings
-from app.core.state import AppState
-from app.domain.downloads import (
+from app.domain.status import (
     ACTIVE_LIKE_DOWNLOAD_STATUSES,
     ACTIVE_USER_TASK_STATUSES,
+)
+from app.domain.task_policy import (
     is_current,
     stat_counts,
 )
@@ -68,29 +69,6 @@ ALLOWED_STATUS_VALUES = {
     "complete",
     "removed",
 }
-
-
-class RpcBackendClient(Protocol):
-    async def add_uri(
-        self, uris: list[str], options: Mapping[str, Any] | None = None
-    ) -> str: ...
-    async def add_torrent(
-        self,
-        torrent: str,
-        uris: list[str] | None = None,
-        options: Mapping[str, Any] | None = None,
-    ) -> str: ...
-    async def tell_status(self, gid: str) -> dict: ...
-    async def tell_active(self) -> list[dict]: ...
-    async def tell_waiting(self, offset: int = 0, num: int = 1000) -> list[dict]: ...
-    async def remove_download_result(self, gid: str) -> str: ...
-    async def force_remove(self, gid: str) -> str: ...
-    async def get_global_stat(self) -> dict: ...
-    async def get_files(self, gid: str) -> list[dict]: ...
-    async def get_uris(self, gid: str) -> list[dict]: ...
-    async def get_peers(self, gid: str) -> list[dict]: ...
-    async def get_servers(self, gid: str) -> list[dict]: ...
-    async def get_version(self) -> dict: ...
 
 
 # JSON-RPC 2.0 错误码
@@ -163,14 +141,9 @@ class Aria2RpcHandler:
         "system.multicall",
     ]
 
-    def __init__(
-        self, user_id: int, aria2_client: RpcBackendClient, app_state: AppState
-    ):
+    def __init__(self, user_id: int, aria2_client: Aria2Gateway):
         self.user_id = user_id
         self.client = aria2_client
-        if app_state is None:
-            raise RuntimeError("AppState is required for Aria2RpcHandler")
-        self.app_state: AppState = app_state
         self._multicall_depth: int = 0
 
     async def handle(self, method: str, params: list) -> Any:

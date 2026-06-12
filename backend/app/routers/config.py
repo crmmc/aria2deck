@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import require_admin, require_user
@@ -78,7 +78,7 @@ async def get_config(admin=Depends(require_admin)) -> dict:
 
 @router.put("")
 async def update_config(
-    payload: ConfigUpdate, request: Request, admin=Depends(require_admin)
+    payload: ConfigUpdate, admin=Depends(require_admin)
 ) -> dict:
     payload_values = {
         key: value for key, value in payload.model_dump().items() if value is not None
@@ -86,7 +86,6 @@ async def update_config(
     try:
         result = await settings_service.update_api_settings_with_runtime_refresh(
             payload_values,
-            getattr(request.app.state, "app_state", None),
         )
     except DomainError as exc:
         raise_http(exc)

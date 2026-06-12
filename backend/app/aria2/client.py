@@ -1,6 +1,7 @@
 import asyncio
 
 import aiohttp
+from collections.abc import Mapping
 from typing import Any, cast
 
 
@@ -57,7 +58,9 @@ class Aria2Client:
                 raise RuntimeError(data["error"])
             return data["result"]
 
-    async def add_uri(self, uris: list[str], options: dict | None = None) -> str:
+    async def add_uri(
+        self, uris: list[str], options: Mapping[str, Any] | None = None
+    ) -> str:
         params: list[object] = [uris]
         if options:
             params.append(options)
@@ -67,7 +70,7 @@ class Aria2Client:
         self,
         torrent: str,
         uris: list[str] | None = None,
-        options: dict | None = None,
+        options: Mapping[str, Any] | None = None,
     ) -> str:
         """添加种子任务
 
@@ -85,8 +88,8 @@ class Aria2Client:
             params.append(options)
         return cast(str, await self._call("aria2.addTorrent", params))
 
-    async def tell_status(self, gid: str) -> dict:
-        return cast(dict, await self._call("aria2.tellStatus", [gid]))
+    async def tell_status(self, gid: str) -> dict[str, Any]:
+        return cast(dict[str, Any], await self._call("aria2.tellStatus", [gid]))
 
     async def pause(self, gid: str) -> str:
         return cast(str, await self._call("aria2.pause", [gid]))
@@ -100,36 +103,44 @@ class Aria2Client:
     async def remove_download_result(self, gid: str) -> str:
         return cast(str, await self._call("aria2.removeDownloadResult", [gid]))
 
-    async def get_global_stat(self) -> dict:
-        return cast(dict, await self._call("aria2.getGlobalStat", []))
+    async def get_global_stat(self) -> dict[str, Any]:
+        return cast(dict[str, Any], await self._call("aria2.getGlobalStat", []))
 
-    async def get_files(self, gid: str) -> list[dict]:
-        return cast(list[dict], await self._call("aria2.getFiles", [gid]))
+    async def get_files(self, gid: str) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], await self._call("aria2.getFiles", [gid]))
 
-    async def get_uris(self, gid: str) -> list[dict]:
-        return cast(list[dict], await self._call("aria2.getUris", [gid]))
+    async def get_uris(self, gid: str) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], await self._call("aria2.getUris", [gid]))
 
-    async def get_peers(self, gid: str) -> list[dict]:
-        return cast(list[dict], await self._call("aria2.getPeers", [gid]))
+    async def get_peers(self, gid: str) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], await self._call("aria2.getPeers", [gid]))
 
-    async def get_servers(self, gid: str) -> list[dict]:
-        return cast(list[dict], await self._call("aria2.getServers", [gid]))
+    async def get_servers(self, gid: str) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], await self._call("aria2.getServers", [gid]))
 
-    async def tell_active(self) -> list[dict]:
-        return cast(list[dict], await self._call("aria2.tellActive", []))
+    async def tell_active(self) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], await self._call("aria2.tellActive", []))
 
-    async def tell_waiting(self, offset: int = 0, num: int = 1000) -> list[dict]:
-        return cast(list[dict], await self._call("aria2.tellWaiting", [offset, num]))
+    async def tell_waiting(
+        self, offset: int = 0, num: int = 1000
+    ) -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]], await self._call("aria2.tellWaiting", [offset, num])
+        )
 
-    async def tell_stopped(self, offset: int = 0, num: int = 1000) -> list[dict]:
-        return cast(list[dict], await self._call("aria2.tellStopped", [offset, num]))
+    async def tell_stopped(
+        self, offset: int = 0, num: int = 1000
+    ) -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]], await self._call("aria2.tellStopped", [offset, num])
+        )
 
     async def force_remove(self, gid: str) -> str:
         return cast(str, await self._call("aria2.forceRemove", [gid]))
 
-    async def get_version(self) -> dict:
+    async def get_version(self) -> dict[str, Any]:
         """获取 aria2 版本信息"""
-        return cast(dict, await self._call("aria2.getVersion", []))
+        return cast(dict[str, Any], await self._call("aria2.getVersion", []))
 
     async def change_position(self, gid: str, pos: int, how: str) -> int:
         """调整任务在队列中的位置

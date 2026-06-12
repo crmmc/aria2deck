@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import jwt
-from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.core.security import hash_password, verify_password
@@ -27,6 +26,7 @@ from app.domain.shares import (
     is_share_expired,
 )
 from app.repositories import shares as shares_repo
+from app.repositories.errors import RepositoryConflictError
 from app.services.file_service import directory_entries, normalize_entry_parent, validate_subpath
 
 SHARE_TOKEN_EXPIRE_MINUTES = 30
@@ -107,7 +107,7 @@ async def create_share(
             values_factory=values_factory,
             max_attempts=5,
         )
-    except IntegrityError:
+    except RepositoryConflictError:
         raise InternalDomainError("分享码生成失败，请重试") from None
     if share is None:
         raise InternalDomainError("分享创建失败")

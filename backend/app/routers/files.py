@@ -14,7 +14,6 @@ from app.domain.errors import DomainError
 from app.http.errors import raise_http
 from app.http.file_response import range_file_response, tracked_response
 from app.services import file_service, pack as pack_service
-from app.services.task_broadcast import broadcast_task_update_to_subscribers
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -167,19 +166,16 @@ async def cancel_or_delete_pack_task(
 @router.delete("/{file_hash}")
 async def delete_file(
     file_hash: str,
-    request: Request,
     user: AuthUser = Depends(require_user),
 ) -> dict:
     user_id = _require_user_id(user)
     try:
-        delete_result = await file_service.delete_file_by_hash(user_id, file_hash)
+        await file_service.delete_file_by_hash(user_id, file_hash)
     except DomainError as exc:
         logger.warning("删除文件失败 user_id=%s file_hash=%s error=%s", user_id, file_hash, exc.detail)
         raise_http(exc)
 
     logger.info("删除文件成功 user_id=%s file_hash=%s", user_id, file_hash)
-    for download_id in delete_result.affected_download_ids:
-        await broadcast_task_update_to_subscribers(request.app.state.app_state, download_id)
     return {"ok": True}
 
 
@@ -237,7 +233,6 @@ async def get_pack_available_space(user: AuthUser = Depends(require_user)) -> di
 @router.post("/pack", status_code=status.HTTP_201_CREATED)
 async def create_pack_task(
     payload: PackRequest,
-    request: Request,
     user: AuthUser = Depends(require_user),
 ) -> dict:
     user_id = _require_user_id(user)
@@ -249,7 +244,6 @@ async def create_pack_task(
             file_ids=payload.file_ids,
             output_name=payload.output_name,
             delete_source=payload.delete_source,
-            app_state=request.app.state.app_state,
         )
     except DomainError as exc:
         logger.warning("创建打包任务失败 user_id=%s error=%s", user_id, exc.detail)

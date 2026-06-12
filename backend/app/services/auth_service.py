@@ -10,8 +10,8 @@ from app.auth import (
     user_from_row,
 )
 from app.core.config import settings
-from app.core.request_rate_guard import (
-    RateLimitScope,
+from app.services.rate_limit_service import (
+    ACCOUNT_SECURITY_SCOPE,
     clear_account_security_failures,
     ensure_account_security_allowed,
     ensure_authenticated_allowed,
@@ -110,7 +110,7 @@ async def change_password(
     try:
         await ensure_authenticated_allowed(
             int(user_id),
-            RateLimitScope.ACCOUNT_SECURITY,
+            ACCOUNT_SECURITY_SCOPE,
             detail="操作过于频繁，请稍后再试",
         )
     except Exception:

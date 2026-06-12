@@ -8,7 +8,6 @@ import pytest
 from sqlalchemy import insert, select
 
 from app.core.config import settings
-from app.core.state import AppState
 from app.db.engine import transaction
 from app.db.schema import (
     global_downloads,
@@ -18,6 +17,7 @@ from app.db.schema import (
     user_tasks,
 )
 from app.services.pack import PackTaskManager, calculate_folder_size, get_reserved_space
+from app.services.task_broadcast import clear_connections, set_connections_for_user
 import app.services.pack as pack_service
 from tests.helpers_v0 import create_user_file_v0, create_user_v0, now_ms
 
@@ -299,9 +299,9 @@ async def test_pack_delete_source_broadcasts_cancelled_download_update(
         status="pending",
         output_name="packed-broadcast",
     )
-    state = AppState()
     ws = AsyncMock()
-    state.ws_connections[user["id"]] = {ws}
+    await clear_connections()
+    await set_connections_for_user(user["id"], {ws})
 
     await PackTaskManager.start_pack(
         task_id=pack_task["id"],
@@ -311,7 +311,6 @@ async def test_pack_delete_source_broadcasts_cancelled_download_update(
         output_name="packed-broadcast",
         delete_source=True,
         source_names=["broadcast-source.txt"],
-        app_state=state,
     )
 
     ws.send_json.assert_awaited_once()

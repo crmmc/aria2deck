@@ -9,10 +9,10 @@ from sqlalchemy import func, select, update
 
 from app.aria2.listener import handle_aria2_event
 from app.core.config import settings
-from app.core.state import AppState
 from app.db.engine import transaction
 from app.db.schema import global_downloads, stored_files, user_files, user_tasks
 from app.repositories.downloads import mark_global_download_failed
+from app.services import aria2_lifecycle_service
 from app.services.usage_service import get_usage, reserve_bytes
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -26,7 +26,7 @@ def _patch_aria2_client(monkeypatch: pytest.MonkeyPatch, client: AsyncMock) -> N
     def get_client(*args: object, **kwargs: object) -> AsyncMock:
         return client
 
-    monkeypatch.setattr("app.core.state.get_aria2_client", get_client)
+    monkeypatch.setattr("app.aria2.listener.get_aria2_client", get_client)
 
 
 async def _fetch_global(download_id: int) -> dict:
@@ -96,10 +96,9 @@ async def test_duplicate_completion_creates_one_stored_file_and_user_file_per_ac
     client.remove_download_result.return_value = "OK"
     _patch_aria2_client(monkeypatch, client)
 
-    state = AppState()
     await asyncio.gather(
-        handle_aria2_event(state, "gid-listener-complete", "complete"),
-        handle_aria2_event(state, "gid-listener-complete", "complete"),
+        handle_aria2_event("gid-listener-complete", "complete"),
+        handle_aria2_event("gid-listener-complete", "complete"),
     )
 
     updated = await _fetch_global(download["id"])
@@ -153,7 +152,7 @@ async def test_completion_with_followed_by_changes_gid_without_creating_files(
     client.remove_download_result.return_value = "OK"
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-metadata", "complete")
+    await handle_aria2_event("gid-metadata", "complete")
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -203,7 +202,7 @@ async def test_event_for_followed_task_uses_following_to_update_original_gid(
     }
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-real", "start")
+    await handle_aria2_event("gid-real", "start")
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -257,7 +256,7 @@ async def test_completion_with_followed_by_refreshes_real_task_name_and_size(
     client.remove_download_result.return_value = "OK"
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-metadata", "complete")
+    await handle_aria2_event("gid-metadata", "complete")
 
     updated = await _fetch_global(download["id"])
 
@@ -299,7 +298,7 @@ async def test_start_event_replaces_exact_torrent_synthetic_task_name(
     }
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-listener-torrent-placeholder", "start")
+    await handle_aria2_event("gid-listener-torrent-placeholder", "start")
 
     updated_task = await _fetch_user_task(task["id"])
 
@@ -336,7 +335,7 @@ async def test_start_event_preserves_torrent_prefixed_http_user_task_name(
     }
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-listener-http-torrent-prefix", "start")
+    await handle_aria2_event("gid-listener-http-torrent-prefix", "start")
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -412,7 +411,7 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
     client.remove_download_result.return_value = "OK"
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-metadata", "complete")
+    await handle_aria2_event("gid-metadata", "complete")
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -478,7 +477,7 @@ async def test_metadata_completion_without_followed_by_does_not_index_metadata_f
     client.remove_download_result.return_value = "OK"
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-metadata", "complete")
+    await handle_aria2_event("gid-metadata", "complete")
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -532,7 +531,7 @@ async def test_completed_download_missing_task_dir_uses_directory_error(
     client.remove_download_result.return_value = "OK"
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-missing-dir", "complete")
+    await handle_aria2_event("gid-missing-dir", "complete")
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -579,7 +578,7 @@ async def test_completed_download_existing_task_dir_missing_file_uses_file_error
     client.remove_download_result.return_value = "OK"
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-missing-file", "complete")
+    await handle_aria2_event("gid-missing-file", "complete")
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -633,7 +632,7 @@ async def test_completed_download_with_short_file_fails_size_validation(
     client.remove_download_result.return_value = "OK"
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-size-mismatch", "complete")
+    await handle_aria2_event("gid-size-mismatch", "complete")
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -659,20 +658,18 @@ async def test_complete_source_resolution_probes_four_times_every_half_second(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.aria2 import listener
-
     sleep_intervals: list[float] = []
 
     async def fake_sleep(interval: float) -> None:
         sleep_intervals.append(interval)
 
-    monkeypatch.setattr(listener.asyncio, "sleep", fake_sleep)
-    source = await listener._resolve_complete_source_with_retry(
+    monkeypatch.setattr(aria2_lifecycle_service.asyncio, "sleep", fake_sleep)
+    source = await aria2_lifecycle_service.resolve_complete_source_with_retry(
         completion_gid=None,
         task_dir=tmp_path / "missing",
         files=[],
         task_name=None,
-        state=AppState(),
+        client=None,
     )
 
     assert source is None
@@ -716,7 +713,7 @@ async def test_error_event_marks_global_and_user_tasks_failed_and_releases_reser
     client.remove_download_result.return_value = "OK"
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-error", "error")
+    await handle_aria2_event("gid-error", "error")
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -815,7 +812,7 @@ async def test_late_completion_does_not_overwrite_failed_download(
     }
     _patch_aria2_client(monkeypatch, client)
 
-    await handle_aria2_event(AppState(), "gid-late-complete", "complete")
+    await handle_aria2_event("gid-late-complete", "complete")
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
@@ -935,14 +932,13 @@ async def test_error_event_waits_for_inflight_completion_lock(
     client.remove_download_result.return_value = "OK"
     client.force_remove.return_value = "OK"
     _patch_aria2_client(monkeypatch, client)
-    state = AppState()
 
     completion_task = asyncio.create_task(
-        handle_aria2_event(state, "gid-race-complete", "complete")
+        handle_aria2_event("gid-race-complete", "complete")
     )
     await completion_started.wait()
     error_task = asyncio.create_task(
-        handle_aria2_event(state, "gid-race-complete", "error")
+        handle_aria2_event("gid-race-complete", "error")
     )
     await asyncio.sleep(0.05)
 

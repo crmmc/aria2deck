@@ -3,24 +3,33 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from time import time
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from app.aria2.gateway import update_cached_aria2_config
 from app.core.download_limiter import download_config
 from app.core.rate_limit_config import rate_limit_config
 from app.repositories import settings as settings_repo
-
-if TYPE_CHECKING:
-    from app.core.state import AppState
 
 logger = logging.getLogger(__name__)
 
 _config_cache: dict[str, tuple[str | None, float]] = {}
 _config_cache_lock = asyncio.Lock()
 _CACHE_TTL = 60.0
+_SYNC_DEFAULTS: dict[str, str] = {
+    "max_task_size": str(10 * 1024 * 1024 * 1024),
+    "min_free_disk": str(1 * 1024 * 1024 * 1024),
+    "aria2_bt_stop_timeout_seconds": str(7 * 24 * 60 * 60),
+    "hidden_file_extensions": "[]",
+    "pack_format": "zip",
+    "pack_compression_level": "5",
+    "ws_reconnect_max_delay": "60",
+    "ws_reconnect_jitter": "0.2",
+    "ws_reconnect_factor": "2.0",
+    "site_title": "Aria2 控制器",
+}
 
 CONFIG_KEY_TO_COLUMN: dict[str, str] = {
     "max_task_size": "max_task_size_bytes",
@@ -104,28 +113,6 @@ def _column_for_key(key: str) -> str | None:
     return CONFIG_KEY_TO_COLUMN.get(key)
 
 
-def _read_config_value_sync(column_name: str) -> str | None:
-    from app.core.config import settings
-
-    conn: sqlite3.Connection | None = None
-    cur: sqlite3.Cursor | None = None
-    try:
-        conn = sqlite3.connect(settings.database_path)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute(f"SELECT {column_name} AS value FROM app_settings WHERE id = 1")
-        row = cur.fetchone()
-        return serialize_config_value(row["value"]) if row else None
-    except Exception as exc:
-        logger.warning("读取配置失败 column=%s error=%s", column_name, exc)
-        return None
-    finally:
-        if cur is not None:
-            cur.close()
-        if conn is not None:
-            conn.close()
-
-
 def clear_config_cache() -> None:
     _config_cache.clear()
 
@@ -133,6 +120,16 @@ def clear_config_cache() -> None:
 async def clear_config_cache_async() -> None:
     async with _config_cache_lock:
         _config_cache.clear()
+
+
+def _cache_settings_row(
+    row: Mapping[str, Any] | None, timestamp: float | None = None
+) -> None:
+    if row is None:
+        return
+    ts = time() if timestamp is None else timestamp
+    for key, column_name in CONFIG_KEY_TO_COLUMN.items():
+        _config_cache[key] = (serialize_config_value(row.get(column_name)), ts)
 
 
 def get_config_value_sync(key: str) -> str | None:
@@ -143,12 +140,7 @@ def get_config_value_sync(key: str) -> str | None:
         if now - ts < _CACHE_TTL:
             return value
 
-    column_name = _column_for_key(key)
-    if column_name is None:
-        _config_cache[key] = (None, now)
-        return None
-
-    value = _read_config_value_sync(column_name)
+    value = _SYNC_DEFAULTS.get(key)
     _config_cache[key] = (value, now)
     return value
 
@@ -363,6 +355,8 @@ async def update_api_settings(payload: Mapping[str, Any]) -> SettingsUpdateResul
     row = await settings_repo.update_settings_row(values)
     if row is None:
         raise RuntimeError("app_settings row is missing")
+    async with _config_cache_lock:
+        _cache_settings_row(row)
     return SettingsUpdateResult(
         settings=row_to_api_settings(row), changed_keys=changed_keys
     )
@@ -392,47 +386,54 @@ RATE_LIMIT_KEYS = {
 }
 
 
+def _int_payload_value(payload: Mapping[str, Any], key: str, default: int) -> int:
+    value = payload.get(key)
+    if value is None:
+        return default
+    return int(value)
+
+
 def merged_download_settings(payload: Mapping[str, Any]) -> dict[str, int]:
     return {
-        "download_total_connections": int(
-            payload.get("download_total_connections")
-            if payload.get("download_total_connections") is not None
-            else download_config.total_connections
+        "download_total_connections": _int_payload_value(
+            payload,
+            "download_total_connections",
+            download_config.total_connections,
         ),
-        "download_authenticated_reserved_connections": int(
-            payload.get("download_authenticated_reserved_connections")
-            if payload.get("download_authenticated_reserved_connections") is not None
-            else download_config.authenticated_reserved_connections
+        "download_authenticated_reserved_connections": _int_payload_value(
+            payload,
+            "download_authenticated_reserved_connections",
+            download_config.authenticated_reserved_connections,
         ),
-        "download_authenticated_per_user_connections": int(
-            payload.get("download_authenticated_per_user_connections")
-            if payload.get("download_authenticated_per_user_connections") is not None
-            else download_config.authenticated_per_user_connections
+        "download_authenticated_per_user_connections": _int_payload_value(
+            payload,
+            "download_authenticated_per_user_connections",
+            download_config.authenticated_per_user_connections,
         ),
-        "download_authenticated_per_file_connections": int(
-            payload.get("download_authenticated_per_file_connections")
-            if payload.get("download_authenticated_per_file_connections") is not None
-            else download_config.authenticated_per_file_connections
+        "download_authenticated_per_file_connections": _int_payload_value(
+            payload,
+            "download_authenticated_per_file_connections",
+            download_config.authenticated_per_file_connections,
         ),
-        "download_anonymous_base_connections": int(
-            payload.get("download_anonymous_base_connections")
-            if payload.get("download_anonymous_base_connections") is not None
-            else download_config.anonymous_base_connections
+        "download_anonymous_base_connections": _int_payload_value(
+            payload,
+            "download_anonymous_base_connections",
+            download_config.anonymous_base_connections,
         ),
-        "download_anonymous_borrow_connections": int(
-            payload.get("download_anonymous_borrow_connections")
-            if payload.get("download_anonymous_borrow_connections") is not None
-            else download_config.anonymous_borrow_connections
+        "download_anonymous_borrow_connections": _int_payload_value(
+            payload,
+            "download_anonymous_borrow_connections",
+            download_config.anonymous_borrow_connections,
         ),
-        "download_anonymous_per_ip_connections": int(
-            payload.get("download_anonymous_per_ip_connections")
-            if payload.get("download_anonymous_per_ip_connections") is not None
-            else download_config.anonymous_per_ip_connections
+        "download_anonymous_per_ip_connections": _int_payload_value(
+            payload,
+            "download_anonymous_per_ip_connections",
+            download_config.anonymous_per_ip_connections,
         ),
-        "download_anonymous_per_file_connections": int(
-            payload.get("download_anonymous_per_file_connections")
-            if payload.get("download_anonymous_per_file_connections") is not None
-            else download_config.anonymous_per_file_connections
+        "download_anonymous_per_file_connections": _int_payload_value(
+            payload,
+            "download_anonymous_per_file_connections",
+            download_config.anonymous_per_file_connections,
         ),
     }
 
@@ -455,7 +456,6 @@ def validate_download_settings(settings_map: Mapping[str, int]) -> None:
 
 async def update_api_settings_with_runtime_refresh(
     payload: Mapping[str, Any],
-    app_state: "AppState | None",
 ) -> SettingsUpdateResult:
     if any(key in payload for key in DOWNLOAD_CONFIG_KEYS):
         validate_download_settings(merged_download_settings(payload))
@@ -467,19 +467,31 @@ async def update_api_settings_with_runtime_refresh(
     changed_keys = result.changed_keys
 
     await clear_config_cache_async()
+    await load_runtime_config()
 
-    if download_config_changed:
-        await download_config.refresh()
-    if rate_limit_changed:
-        await rate_limit_config.refresh()
-    if (
-        "aria2_rpc_url" in changed_keys or "aria2_rpc_secret" in changed_keys
-    ) and app_state is not None:
-        from app.core.state import refresh_aria2_config
-
-        await refresh_aria2_config(app_state)
+    if not download_config_changed and not rate_limit_changed:
+        logger.debug("运行配置缓存已刷新 changed_keys=%s", changed_keys)
+    if "aria2_rpc_url" in changed_keys or "aria2_rpc_secret" in changed_keys:
+        await refresh_aria2_config()
 
     return result
+
+
+async def load_runtime_config() -> None:
+    row = await settings_repo.get_settings_row()
+    download_config.load_from_settings(row)
+    rate_limit_config.load_from_settings(row)
+    async with _config_cache_lock:
+        _cache_settings_row(row)
+
+
+async def refresh_aria2_config() -> None:
+    rpc_url = await get_config_value("aria2_rpc_url")
+    rpc_secret = await get_config_value("aria2_rpc_secret")
+    update_cached_aria2_config(
+        rpc_url=rpc_url,
+        rpc_secret=rpc_secret,
+    )
 
 
 async def get_config_value(key: str) -> str | None:
@@ -501,7 +513,10 @@ async def get_config_value(key: str) -> str | None:
     value = serialize_config_value(row.get(column_name)) if row else None
 
     async with _config_cache_lock:
-        _config_cache[key] = (value, now)
+        if row is not None:
+            _cache_settings_row(row, now)
+        else:
+            _config_cache[key] = (value, now)
     return value
 
 
@@ -513,6 +528,9 @@ async def set_config_value(key: str, value: str) -> None:
         return
 
     coerced = coerce_raw_config_value(column_name, value)
-    await settings_repo.update_settings_row({column_name: coerced})
+    row = await settings_repo.update_settings_row({column_name: coerced})
     async with _config_cache_lock:
-        _config_cache[key] = (value, time())
+        if row is not None:
+            _cache_settings_row(row)
+        else:
+            _config_cache[key] = (value, time())

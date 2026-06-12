@@ -4,12 +4,12 @@ import logging
 import secrets
 
 from app.auth import AuthUser
-from app.core.request_rate_guard import ensure_account_security_allowed
 from app.core.security import hash_password
 from app.core.time_utils import ms_to_iso, now_ms
 from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.repositories import auth as auth_repo
 from app.schemas import RpcAccessStatus, UserCreate, UserUpdate
+from app.services.rate_limit_service import ensure_account_security_allowed
 
 logger = logging.getLogger(__name__)
 

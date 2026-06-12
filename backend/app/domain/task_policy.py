@@ -3,19 +3,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from app.domain.status import (
+    ACTIVE_LIKE_DOWNLOAD_STATUSES,
+    ACTIVE_USER_TASK_STATUSES,
+    ERROR_DOWNLOAD_STATUSES,
+    REST_TASK_STATUS_FILTERS,
+    TERMINAL_DOWNLOAD_STATUSES,
+)
 
-ACTIVE_LIKE_DOWNLOAD_STATUSES = ("queued", "active", "waiting", "paused")
-ACTIVE_USER_TASK_STATUSES = ACTIVE_LIKE_DOWNLOAD_STATUSES
-ACTIVE_GLOBAL_DOWNLOAD_STATUSES = ACTIVE_LIKE_DOWNLOAD_STATUSES
-TERMINAL_DOWNLOAD_STATUSES = ("completed", "failed", "cancelled")
-TERMINAL_USER_TASK_STATUSES = TERMINAL_DOWNLOAD_STATUSES
-ERROR_DOWNLOAD_STATUSES = ("failed", "cancelled")
-FAILED_DOWNLOAD_STATUSES = frozenset(ERROR_DOWNLOAD_STATUSES)
 RETRYABLE_DOWNLOAD_STATUSES = frozenset(ERROR_DOWNLOAD_STATUSES)
 RETRYABLE_TASK_STATUSES = frozenset(ERROR_DOWNLOAD_STATUSES)
 CANCELABLE_TASK_STATUSES = frozenset(ACTIVE_USER_TASK_STATUSES)
-FAILABLE_GLOBAL_DOWNLOAD_STATUSES = (*ACTIVE_GLOBAL_DOWNLOAD_STATUSES, "completed")
-REST_TASK_STATUS_FILTERS = frozenset(("active", "current", "complete", "error"))
 
 
 class InvalidTaskStatusFilter(ValueError):
@@ -57,6 +55,14 @@ def is_user_terminal(row: Mapping[str, Any]) -> bool:
 
 def is_current(row: Mapping[str, Any]) -> bool:
     return effective_status(row) in ACTIVE_LIKE_DOWNLOAD_STATUSES
+
+
+def can_cancel(status: str) -> bool:
+    return status in CANCELABLE_TASK_STATUSES
+
+
+def can_retry(status: str) -> bool:
+    return status in RETRYABLE_TASK_STATUSES
 
 
 def filter_rows_for_status(

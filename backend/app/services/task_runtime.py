@@ -2,24 +2,65 @@ from __future__ import annotations
 
 import logging
 import time
+import asyncio
+from dataclasses import dataclass
 from typing import Any
 
-from app.core.state import AppState, LiveStatusCacheEntry
 from app.services.task_projection import is_current
 
 
 LIVE_STATUS_CACHE_TTL_SECONDS = 0.5
 
 
-async def _prune_expired_live_status_cache(state: AppState, now: float) -> None:
-    async with state.lock:
+@dataclass
+class LiveStatusCacheEntry:
+    status: dict[str, Any]
+    fetched_at: float
+
+
+_live_status_cache: dict[str, LiveStatusCacheEntry] = {}
+_live_status_cache_lock = asyncio.Lock()
+
+
+async def clear_live_status_cache() -> None:
+    async with _live_status_cache_lock:
+        _live_status_cache.clear()
+
+
+async def force_expire_live_status_cache_entry(gid: str) -> None:
+    async with _live_status_cache_lock:
+        entry = _live_status_cache.get(gid)
+        if entry is not None:
+            entry.fetched_at = -1_000_000.0
+
+
+async def live_status_cache_keys() -> set[str]:
+    async with _live_status_cache_lock:
+        return set(_live_status_cache)
+
+
+async def set_live_status_cache_entry(
+    gid: str,
+    *,
+    status: dict[str, Any],
+    fetched_at: float,
+) -> None:
+    async with _live_status_cache_lock:
+        _live_status_cache[gid] = LiveStatusCacheEntry(
+            status=status,
+            fetched_at=fetched_at,
+        )
+
+
+async def _prune_expired_live_status_cache(now: float) -> None:
+    async with _live_status_cache_lock:
         expired_gids = [
             gid
-            for gid, entry in state.live_status_cache.items()
+            for gid, entry in _live_status_cache.items()
             if now - entry.fetched_at > LIVE_STATUS_CACHE_TTL_SECONDS
         ]
         for gid in expired_gids:
-            state.live_status_cache.pop(gid, None)
+            _live_status_cache.pop(gid, None)
 
 
 async def fetch_active_live_statuses_by_gid(
@@ -57,12 +98,11 @@ async def fetch_active_live_statuses_by_gid(
 async def fetch_cached_live_status_for_row(
     row: dict[str, Any],
     aria2_client: Any,
-    state: AppState,
     logger: logging.Logger,
     local_cache: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     now = time.monotonic()
-    await _prune_expired_live_status_cache(state, now)
+    await _prune_expired_live_status_cache(now)
 
     if not is_current(row):
         return None
@@ -74,8 +114,8 @@ async def fetch_cached_live_status_for_row(
     if local_status is not None:
         return local_status
 
-    async with state.lock:
-        entry = state.live_status_cache.get(gid)
+    async with _live_status_cache_lock:
+        entry = _live_status_cache.get(gid)
         if entry is not None:
             local_cache[gid] = entry.status
             return entry.status
@@ -95,8 +135,8 @@ async def fetch_cached_live_status_for_row(
 
     fetched_at = time.monotonic()
     local_cache[gid] = status
-    async with state.lock:
-        state.live_status_cache[gid] = LiveStatusCacheEntry(
+    async with _live_status_cache_lock:
+        _live_status_cache[gid] = LiveStatusCacheEntry(
             status=status,
             fetched_at=fetched_at,
         )

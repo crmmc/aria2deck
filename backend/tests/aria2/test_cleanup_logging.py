@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.aria2.failed_task_cleanup import (
+from app.services.failed_task_cleanup import (
     CleanupErrorType,
     cleanup_failed_task_artifacts,
     get_representative_owner_id,
@@ -27,9 +27,9 @@ async def test_cleanup_logs_success_with_all_fields(mock_client, caplog):
     """Verify successful cleanup logs all required fields."""
     with (
         patch(
-            "app.aria2.failed_task_cleanup.cleanup_task_download_dir"
+            "app.services.failed_task_cleanup.cleanup_task_download_dir"
         ) as mock_cleanup,
-        patch("app.aria2.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
     ):
         mock_cleanup.return_value = None
         mock_dir.return_value.joinpath = lambda x: f"/downloads/{x}"
@@ -60,9 +60,9 @@ async def test_cleanup_logs_rpc_failure(mock_client, caplog):
 
     with (
         patch(
-            "app.aria2.failed_task_cleanup.cleanup_task_download_dir"
+            "app.services.failed_task_cleanup.cleanup_task_download_dir"
         ) as mock_cleanup,
-        patch("app.aria2.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
     ):
         mock_cleanup.return_value = None
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
@@ -88,9 +88,9 @@ async def test_cleanup_logs_fs_failure(mock_client, caplog):
     """Verify filesystem failures are logged with error_type."""
     with (
         patch(
-            "app.aria2.failed_task_cleanup.cleanup_task_download_dir"
+            "app.services.failed_task_cleanup.cleanup_task_download_dir"
         ) as mock_cleanup,
-        patch("app.aria2.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
     ):
         mock_cleanup.side_effect = RuntimeError("Path boundary violation")
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
@@ -127,9 +127,9 @@ async def test_cleanup_idempotent_repeated_calls(mock_client):
     """Verify repeated cleanup calls are idempotent."""
     with (
         patch(
-            "app.aria2.failed_task_cleanup.cleanup_task_download_dir"
+            "app.services.failed_task_cleanup.cleanup_task_download_dir"
         ) as mock_cleanup,
-        patch("app.aria2.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
     ):
         mock_cleanup.return_value = None
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
@@ -169,9 +169,9 @@ async def test_cleanup_skips_non_failed_status(mock_client, caplog, temp_db):
 
     with (
         patch(
-            "app.aria2.failed_task_cleanup.cleanup_task_download_dir"
+            "app.services.failed_task_cleanup.cleanup_task_download_dir"
         ) as mock_cleanup,
-        patch("app.aria2.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
     ):
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
 
@@ -196,9 +196,9 @@ async def test_cleanup_handles_missing_task(mock_client, caplog, temp_db):
     """Verify cleanup handles task not found gracefully."""
     with (
         patch(
-            "app.aria2.failed_task_cleanup.cleanup_task_download_dir"
+            "app.services.failed_task_cleanup.cleanup_task_download_dir"
         ) as mock_cleanup,
-        patch("app.aria2.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
     ):
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
 
@@ -228,9 +228,9 @@ async def test_cleanup_proceeds_for_failed_status(mock_client, temp_db):
 
     with (
         patch(
-            "app.aria2.failed_task_cleanup.cleanup_task_download_dir"
+            "app.services.failed_task_cleanup.cleanup_task_download_dir"
         ) as mock_cleanup,
-        patch("app.aria2.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
     ):
         mock_cleanup.return_value = None
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
@@ -258,9 +258,9 @@ async def test_cleanup_proceeds_for_cancelled_status(mock_client, temp_db):
 
     with (
         patch(
-            "app.aria2.failed_task_cleanup.cleanup_task_download_dir"
+            "app.services.failed_task_cleanup.cleanup_task_download_dir"
         ) as mock_cleanup,
-        patch("app.aria2.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
     ):
         mock_cleanup.return_value = None
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
@@ -315,9 +315,9 @@ async def test_cleanup_without_gid_skips_rpc(mock_client):
     """Verify cleanup without GID skips RPC calls."""
     with (
         patch(
-            "app.aria2.failed_task_cleanup.cleanup_task_download_dir"
+            "app.services.failed_task_cleanup.cleanup_task_download_dir"
         ) as mock_cleanup,
-        patch("app.aria2.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
     ):
         mock_cleanup.return_value = None
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"

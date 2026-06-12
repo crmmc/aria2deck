@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 
 from app.auth import AuthUser, require_admin, require_user
 from app.services import stats_service
@@ -12,13 +12,11 @@ router = APIRouter(prefix="/api/stats", tags=["stats"])
 
 @router.get("")
 async def get_stats(
-    request: Request,
     user: AuthUser = Depends(require_user),
 ) -> dict:
     return await stats_service.get_user_stats(
         user_id=user.id,
         quota_bytes=user.quota_bytes,
-        app_state=getattr(request.app.state, "app_state", None),
     )
 
 

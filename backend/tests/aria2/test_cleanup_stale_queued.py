@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-from asyncio import Lock
 from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select, update
 
-from app.aria2.sync import (
-    STALE_QUEUED_GRACE_SECONDS,
-    _cleanup_stale_queued_downloads_v0,
-)
-from app.core.state import AppState
+from app.aria2.sync import STALE_QUEUED_GRACE_SECONDS
+from app.services.aria2_lifecycle_service import cleanup_stale_queued_downloads_v0
+from app.services.task_broadcast import clear_connections, set_connections_for_user
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
 from app.repositories.downloads import now_ms
@@ -58,7 +55,7 @@ async def _age_download(download_id: int, *, seconds: float) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stale_queued_download_with_held_submit_lock_remains_queued(
+async def test_stale_queued_download_without_gid_becomes_failed_after_grace_period(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="cleanup_lock")
@@ -74,20 +71,14 @@ async def test_stale_queued_download_with_held_submit_lock_remains_queued(
     )
     await _age_download(download["id"], seconds=STALE_QUEUED_GRACE_SECONDS + 1)
 
-    submit_lock = Lock()
-    await submit_lock.acquire()
-    state = AppState()
-    state.task_submit_locks[download["id"]] = submit_lock
-    try:
-        await _cleanup_stale_queued_downloads_v0(state)
-    finally:
-        submit_lock.release()
+    await cleanup_stale_queued_downloads_v0()
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
 
-    assert updated["status"] == "queued"
-    assert updated_task["status"] == "queued"
+    assert updated["status"] == "failed"
+    assert updated["error_code"] == "submit_timeout"
+    assert updated_task["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -106,11 +97,11 @@ async def test_stale_queued_download_cleanup_broadcasts_after_failure(
         status="queued",
     )
     await _age_download(download["id"], seconds=STALE_QUEUED_GRACE_SECONDS + 1)
-    state = AppState()
     ws = AsyncMock()
-    state.ws_connections[user["id"]] = {ws}
+    await clear_connections()
+    await set_connections_for_user(user["id"], {ws})
 
-    await _cleanup_stale_queued_downloads_v0(state)
+    await cleanup_stale_queued_downloads_v0()
 
     updated = await _fetch_global(download["id"])
     assert updated["status"] == "failed"
@@ -136,7 +127,7 @@ async def test_recent_queued_download_without_gid_remains_queued(temp_db: str) -
     )
     await _age_download(download["id"], seconds=STALE_QUEUED_GRACE_SECONDS - 1)
 
-    await _cleanup_stale_queued_downloads_v0(AppState())
+    await cleanup_stale_queued_downloads_v0()
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +55,7 @@ class RateLimitConfig:
         self.share_access: int = 5
         self.rpc: int = 300
 
-    async def load_from_db(self) -> None:
-        """启动时从数据库加载配置。"""
-        from app.repositories.settings import get_settings_row
-
-        row = await get_settings_row()
-
+    def load_from_settings(self, row: Mapping[str, Any] | None) -> None:
         for db_key, (attr, default, _legacy_keys) in self._DB_KEY_MAP.items():
             value = row.get(db_key, default) if row else default
             try:
@@ -82,10 +78,6 @@ class RateLimitConfig:
             self.share_access,
             self.rpc,
         )
-
-    async def refresh(self) -> None:
-        """管理员更新配置后主动刷新。"""
-        await self.load_from_db()
 
     def defaults(self) -> dict[str, str]:
         """返回新配置键的默认值字符串。"""

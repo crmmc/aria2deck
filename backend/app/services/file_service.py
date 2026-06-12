@@ -11,6 +11,7 @@ from app.core.time_utils import ms_to_iso
 from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.repositories import files as files_repo
 from app.services.storage import get_store_dir, safe_delete_path
+from app.services.task_broadcast import broadcast_task_update_to_subscribers
 from app.services.usage_service import get_usage, visible_space_from_usage
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,8 @@ async def delete_file_by_hash(user_id: int, file_hash: str) -> DeleteUserFileRef
     result = await delete_user_file_reference_v0_result(user_id, int(row["user_file_id"]))
     if not result.deleted:
         raise NotFoundError("文件不存在")
+    for download_id in result.affected_download_ids:
+        await broadcast_task_update_to_subscribers(download_id)
     return result
 
 

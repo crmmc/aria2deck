@@ -5,8 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from app.aria2.gateway import get_aria2_client
 from app.core.config import settings
-from app.core.state import AppState, get_aria2_client
 from app.repositories.downloads import list_user_tasks
 from app.services.task_projection import speed_totals, stat_counts
 from app.services.task_runtime import fetch_active_live_statuses_by_gid
@@ -33,7 +33,6 @@ async def get_user_stats(
     *,
     user_id: int,
     quota_bytes: int,
-    app_state: AppState | None,
 ) -> dict:
     usage = await get_usage(user_id, quota_bytes)
     used_space = int(usage["used_bytes"])
@@ -46,7 +45,7 @@ async def get_user_stats(
 
     rows = await list_user_tasks(user_id)
     counts = stat_counts(rows)
-    client: Any = get_aria2_client(state=app_state)
+    client: Any = get_aria2_client()
     live_by_gid = await fetch_active_live_statuses_by_gid(rows, client, logger)
     speeds = speed_totals(rows, live_by_gid)
     active_count = counts["current"]

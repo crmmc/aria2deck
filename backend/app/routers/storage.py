@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.auth import AuthUser, require_admin
@@ -92,15 +92,11 @@ async def get_file_users(
 @router.delete("/files", response_model=BulkDeleteResponse)
 async def bulk_delete_files(
     payload: BulkDeleteRequest,
-    http_request: Request,
     admin: AuthUser = Depends(require_admin),
 ) -> BulkDeleteResponse:
     del admin
     return BulkDeleteResponse(
-        **await storage_admin_service.bulk_delete_files(
-            payload.file_ids,
-            http_request.app.state.app_state,
-        )
+        **await storage_admin_service.bulk_delete_files(payload.file_ids)
     )
 
 

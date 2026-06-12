@@ -15,11 +15,11 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from app.aria2.gateway import get_aria2_client
 from app.auth import get_user_by_rpc_secret
 from app.core.config import settings
 from app.core.rate_limit import rpc_limiter
 from app.core.rate_limit_config import rate_limit_config
-from app.core.state import get_aria2_client
 from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
 
 router = APIRouter(tags=["aria2-rpc"])
@@ -376,8 +376,6 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
         )
 
     aria2_client = get_aria2_client(request=request)
-    app_state = request.app.state.app_state
-
     if isinstance(body, list):
         responses = []
         for item in body:
@@ -415,7 +413,7 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
                     responses.append(response)
                     continue
 
-                handler = Aria2RpcHandler(user["id"], aria2_client, app_state)
+                handler = Aria2RpcHandler(user["id"], aria2_client)
                 response = await process_single_request(item, handler, remaining_params)
                 _log_rpc_method_response(
                     method=_extract_rpc_method(item),
@@ -476,7 +474,7 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
             status_code=200,
         )
 
-    handler = Aria2RpcHandler(user["id"], aria2_client, app_state)
+    handler = Aria2RpcHandler(user["id"], aria2_client)
     logger.info("RPC请求通过鉴权 user_id=%s ip=%s request_id=%s", user["id"], client_ip, request_id)
 
     response = await process_single_request(body, handler, remaining_params)

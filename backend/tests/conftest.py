@@ -135,8 +135,9 @@ def temp_db() -> Generator[str, None, None]:
 
     reset_engine()
     asyncio.run(bootstrap_database())
-    asyncio.run(download_config.load_from_db())
-    asyncio.run(rate_limit_config.load_from_db())
+    from app.services.settings_service import load_runtime_config
+
+    asyncio.run(load_runtime_config())
 
     yield db_path
 

@@ -4,7 +4,6 @@ import asyncio
 import logging
 from pathlib import Path
 
-from app.core.state import AppState
 from app.core.time_utils import ms_to_iso
 from app.domain.errors import NotFoundError
 from app.repositories import storage as storage_repo
@@ -50,7 +49,7 @@ async def get_file_users(file_id: int) -> dict:
     }
 
 
-async def bulk_delete_files(file_ids: list[int], state: AppState) -> dict:
+async def bulk_delete_files(file_ids: list[int]) -> dict:
     deleted_count = 0
     failed_ids: list[int] = []
     errors: list[str] = []
@@ -80,7 +79,7 @@ async def bulk_delete_files(file_ids: list[int], state: AppState) -> dict:
                         exc_info=True,
                     )
             for download_id in affected_download_ids:
-                await broadcast_task_update_to_subscribers(state, download_id)
+                await broadcast_task_update_to_subscribers(download_id)
             deleted_count += 1
             logger.info("管理员删除存储文件: %s", content_hash)
         except Exception as exc:

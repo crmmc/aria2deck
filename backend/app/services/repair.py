@@ -7,12 +7,17 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
-
-from app.db.engine import transaction
-from app.db.schema import global_downloads, stored_files
-from app.repositories.downloads import now_ms, repair_completed_download_with_stored_file
-from app.repositories.files import create_stored_file_with_entries
+from app.repositories.downloads import (
+    list_completed_downloads_without_file,
+    now_ms,
+    repair_completed_download_with_stored_file,
+)
+from app.repositories.files import (
+    create_stored_file_with_entries,
+    list_stored_file_content_hashes,
+    list_stored_file_rows,
+    stored_file_exists_by_content_hash,
+)
 from app.services.hash import calculate_content_hash_async
 from app.services.storage import get_store_dir
 from app.services.storage_index import build_entry_templates
@@ -88,9 +93,7 @@ async def scan_and_create_stored_files() -> dict:
 
 
 async def _get_existing_content_hashes() -> set[str]:
-    async with transaction() as conn:
-        result = await conn.execute(select(stored_files.c.content_hash))
-        return {str(row[0]) for row in result.all()}
+    return await list_stored_file_content_hashes()
 
 
 async def _create_stored_file_for_path(path: Path, content_hash: str) -> bool:
@@ -115,17 +118,9 @@ async def _create_stored_file_for_path(path: Path, content_hash: str) -> bool:
         size = path.stat().st_size
     original_name = path.name
 
-    async with transaction() as conn:
-        existing = (
-            await conn.execute(
-                select(stored_files.c.id).where(
-                    stored_files.c.content_hash == content_hash
-                )
-            )
-        ).first()
-        if existing:
-            logger.debug(f"StoredFile already exists for {content_hash}")
-            return False
+    if await stored_file_exists_by_content_hash(content_hash):
+        logger.debug(f"StoredFile already exists for {content_hash}")
+        return False
 
     try:
         await create_stored_file_with_entries(
@@ -146,42 +141,27 @@ async def _create_stored_file_for_path(path: Path, content_hash: str) -> bool:
 
 
 async def repair_task_associations() -> int:
-    async with transaction() as conn:
-        orphan_tasks = (
-            (
-                await conn.execute(
-                    select(global_downloads).where(
-                        global_downloads.c.status == "completed",
-                        global_downloads.c.completed_file_id.is_(None),
-                    )
-                )
-            )
-            .mappings()
-            .all()
-        )
+    orphan_tasks = await list_completed_downloads_without_file()
+    if not orphan_tasks:
+        logger.info("No orphan tasks to repair")
+        return 0
 
-        if not orphan_tasks:
-            logger.info("No orphan tasks to repair")
-            return 0
+    logger.info(f"Found {len(orphan_tasks)} orphan tasks to repair")
 
-        logger.info(f"Found {len(orphan_tasks)} orphan tasks to repair")
+    all_stored_files = await list_stored_file_rows()
+    sf_by_name_size = _build_stored_file_lookup_by_name_size(all_stored_files)
 
-        all_stored_files = (await conn.execute(select(stored_files))).mappings().all()
-        # 构建按 (name, size) 的精确匹配索引
-        sf_by_name_size = _build_stored_file_lookup_by_name_size(all_stored_files)
+    repair_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for task in orphan_tasks:
+        task_name = task["display_name"]
+        if not task_name:
+            continue
 
-        repair_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        for task in orphan_tasks:
-            task_name = task["display_name"]
-            if not task_name:
-                continue
-
-            # 优先用 name + size 双重匹配，避免同名文件错绑
-            lookup_key = (str(task_name).lower(), int(task["total_bytes"] or 0))
-            matched_sf = sf_by_name_size.get(lookup_key)
-            if not matched_sf:
-                continue
-            repair_candidates.append((dict(task), dict(matched_sf)))
+        lookup_key = (str(task_name).lower(), int(task["total_bytes"] or 0))
+        matched_sf = sf_by_name_size.get(lookup_key)
+        if not matched_sf:
+            continue
+        repair_candidates.append((dict(task), dict(matched_sf)))
 
     repaired_count = 0
     for task, matched_sf in repair_candidates:

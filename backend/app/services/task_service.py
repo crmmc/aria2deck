@@ -7,9 +7,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from app.core.config import settings
-from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
 from app.core.security import check_url_ssrf, mask_url_credentials
-from app.core.state import AppState, get_aria2_client
+from app.aria2.gateway import get_aria2_client
 from app.domain.errors import (
     BadGatewayError,
     BadRequestError,
@@ -42,7 +41,7 @@ from app.services.task_projection import (
     filter_rows_for_status,
 )
 from app.services.task_runtime import fetch_active_live_statuses_by_gid
-from app.services.torrent_metadata import (
+from app.domain.torrent_metadata import (
     MAX_TORRENT_FILE_COUNT,
     TorrentMetadata,
     TorrentMetadataError,
@@ -144,8 +143,8 @@ def list_task_response(row: dict, live: dict | None = None) -> dict:
     return build_rest_task_response(row, live)
 
 
-def _get_client(app_state: AppState | None) -> Any:
-    return get_aria2_client(state=app_state)
+def _get_client() -> Any:
+    return get_aria2_client()
 
 
 async def create_task(
@@ -154,18 +153,7 @@ async def create_task(
     quota_bytes: int,
     uri: str,
     options: dict | None,
-    app_state: AppState | None,
 ) -> dict:
-    try:
-        await ensure_authenticated_allowed(
-            user_id,
-            RateLimitScope.CREATE_TASK,
-            detail="操作过于频繁，请稍后再试",
-        )
-    except Exception:
-        logger.warning("创建任务被限流 user_id=%s", user_id)
-        raise
-
     await check_url_safety(uri)
     if has_url_credentials(uri):
         raise BadRequestError("下载链接不支持用户名或密码")
@@ -257,7 +245,7 @@ async def create_task(
             ),
             display_name=name,
             total_bytes=total_length,
-            aria2_client=_get_client(app_state),
+            aria2_client=_get_client(),
             options=options,
         )
     except ValueError as exc:
@@ -281,16 +269,6 @@ async def create_task(
 
 
 async def preview_torrent_task(*, user_id: int, torrent: str) -> dict:
-    try:
-        await ensure_authenticated_allowed(
-            user_id,
-            RateLimitScope.CREATE_TORRENT,
-            detail="操作过于频繁，请稍后再试",
-        )
-    except Exception:
-        logger.warning("预览种子任务被限流 user_id=%s", user_id)
-        raise
-
     if len(torrent) > MAX_TORRENT_BASE64_LENGTH:
         logger.warning("预览种子任务失败 user_id=%s reason=torrent_too_large", user_id)
         raise PayloadTooLargeError("种子文件过大，最大支持 10MB")
@@ -306,18 +284,7 @@ async def create_torrent_task(
     torrent: str,
     selected_file_indexes: list[object] | None,
     options: dict | None,
-    app_state: AppState | None,
 ) -> dict:
-    try:
-        await ensure_authenticated_allowed(
-            user_id,
-            RateLimitScope.CREATE_TORRENT,
-            detail="操作过于频繁，请稍后再试",
-        )
-    except Exception:
-        logger.warning("创建种子任务被限流 user_id=%s", user_id)
-        raise
-
     if len(torrent) > MAX_TORRENT_BASE64_LENGTH:
         logger.warning("创建种子任务失败 user_id=%s reason=torrent_too_large", user_id)
         raise PayloadTooLargeError("种子文件过大，最大支持 10MB")
@@ -391,7 +358,7 @@ async def create_torrent_task(
             source_uri=magnet_uri,
             display_name=metadata.name,
             total_bytes=selected_size,
-            aria2_client=_get_client(app_state),
+            aria2_client=_get_client(),
             options=options,
             server_options=server_options,
         )
@@ -419,14 +386,13 @@ async def list_tasks(
     *,
     user_id: int,
     status_filter: str | None,
-    app_state: AppState | None,
 ) -> list[dict]:
     rows = await list_user_tasks(user_id)
     try:
         rows = filter_rows_for_status(rows, status_filter)
     except InvalidTaskStatusFilter as exc:
         raise BadRequestError(f"Unsupported status_filter: {exc.args[0]}") from exc
-    live_by_gid = await fetch_active_live_statuses_by_gid(rows, _get_client(app_state), logger)
+    live_by_gid = await fetch_active_live_statuses_by_gid(rows, _get_client(), logger)
 
     logger.debug(
         "查询任务列表 user_id=%s status_filter=%s count=%s",
@@ -446,14 +412,13 @@ async def cancel_task(
     user_id: int,
     user_task_id: int,
     quota_bytes: int,
-    app_state: AppState | None,
 ) -> dict:
     try:
         await cancel_user_task(
             user_id=user_id,
             user_task_id=user_task_id,
             quota_bytes=quota_bytes,
-            aria2_client=_get_client(app_state),
+            aria2_client=_get_client(),
         )
     except LookupError as exc:
         logger.warning(

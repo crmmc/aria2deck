@@ -732,8 +732,12 @@ class _FakeWebSocket:
 
 
 def test_broadcast_task_update_uses_live_speed(test_user: dict) -> None:
-    from app.core.state import AppState
-    from app.services.task_broadcast import broadcast_task_update_to_subscribers
+    from app.services.task_broadcast import (
+        broadcast_task_update_to_subscribers,
+        clear_connections,
+        set_connections_for_user,
+    )
+    from app.services.task_runtime import clear_live_status_cache
 
     client = AsyncMock()
     client.tell_status.return_value = {
@@ -760,12 +764,13 @@ def test_broadcast_task_update_uses_live_speed(test_user: dict) -> None:
             display_name="broadcast-speed.bin",
         )
     )
-    state = AppState()
     websocket = _FakeWebSocket()
-    state.ws_connections[test_user["id"]] = {websocket}
+    asyncio.run(clear_connections())
+    asyncio.run(clear_live_status_cache())
+    asyncio.run(set_connections_for_user(test_user["id"], {websocket}))
 
     with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
-        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
+        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
 
     task = websocket.messages[0]["task"]
     assert task["download_speed"] == 16384
@@ -775,8 +780,12 @@ def test_broadcast_task_update_uses_live_speed(test_user: dict) -> None:
 def test_broadcast_task_update_fetches_live_status_once_for_shared_download(
     test_user: dict,
 ) -> None:
-    from app.core.state import AppState
-    from app.services.task_broadcast import broadcast_task_update_to_subscribers
+    from app.services.task_broadcast import (
+        broadcast_task_update_to_subscribers,
+        clear_connections,
+        set_connections_for_user,
+    )
+    from app.services.task_runtime import clear_live_status_cache
 
     second_user = asyncio.run(create_user_v0(username="broadcast-second-user"))
     client = AsyncMock()
@@ -806,14 +815,15 @@ def test_broadcast_task_update_fetches_live_status_once_for_shared_download(
             )
         )
 
-    state = AppState()
     first_socket = _FakeWebSocket()
     second_socket = _FakeWebSocket()
-    state.ws_connections[test_user["id"]] = {first_socket}
-    state.ws_connections[second_user["id"]] = {second_socket}
+    asyncio.run(clear_connections())
+    asyncio.run(clear_live_status_cache())
+    asyncio.run(set_connections_for_user(test_user["id"], {first_socket}))
+    asyncio.run(set_connections_for_user(second_user["id"], {second_socket}))
 
     with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
-        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
+        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
 
     client.tell_status.assert_awaited_once_with("gid-shared-broadcast")
     assert first_socket.messages[0]["task"]["download_speed"] == 2048
@@ -823,8 +833,15 @@ def test_broadcast_task_update_fetches_live_status_once_for_shared_download(
 def test_broadcast_task_update_reuses_live_status_cache_within_ttl(
     test_user: dict,
 ) -> None:
-    from app.core.state import AppState
-    from app.services.task_broadcast import broadcast_task_update_to_subscribers
+    from app.services.task_broadcast import (
+        broadcast_task_update_to_subscribers,
+        clear_connections,
+        set_connections_for_user,
+    )
+    from app.services.task_runtime import (
+        clear_live_status_cache,
+        force_expire_live_status_cache_entry,
+    )
 
     client = AsyncMock()
     client.tell_status.side_effect = [
@@ -864,16 +881,16 @@ def test_broadcast_task_update_reuses_live_status_cache_within_ttl(
         )
     )
 
-    state = AppState()
     websocket = _FakeWebSocket()
-    state.ws_connections[test_user["id"]] = {websocket}
+    asyncio.run(clear_connections())
+    asyncio.run(clear_live_status_cache())
+    asyncio.run(set_connections_for_user(test_user["id"], {websocket}))
 
     with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
-        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
-        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
-        if hasattr(state, "live_status_cache"):
-            state.live_status_cache["gid-cache-broadcast"].fetched_at = -1_000_000.0
-        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
+        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
+        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
+        asyncio.run(force_expire_live_status_cache_entry("gid-cache-broadcast"))
+        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
 
     assert client.tell_status.await_count == 2
     assert [message["task"]["download_speed"] for message in websocket.messages] == [
@@ -886,8 +903,16 @@ def test_broadcast_task_update_reuses_live_status_cache_within_ttl(
 def test_broadcast_task_update_prunes_unrequested_stale_live_status_cache(
     test_user: dict,
 ) -> None:
-    from app.core.state import AppState, LiveStatusCacheEntry
-    from app.services.task_broadcast import broadcast_task_update_to_subscribers
+    from app.services.task_broadcast import (
+        broadcast_task_update_to_subscribers,
+        clear_connections,
+        set_connections_for_user,
+    )
+    from app.services.task_runtime import (
+        clear_live_status_cache,
+        live_status_cache_keys,
+        set_live_status_cache_entry,
+    )
 
     client = AsyncMock()
     client.tell_status.return_value = {
@@ -915,19 +940,22 @@ def test_broadcast_task_update_prunes_unrequested_stale_live_status_cache(
         )
     )
 
-    state = AppState()
-    state.live_status_cache["stale-unrequested-gid"] = LiveStatusCacheEntry(
+    asyncio.run(clear_connections())
+    asyncio.run(clear_live_status_cache())
+    asyncio.run(set_live_status_cache_entry(
+        "stale-unrequested-gid",
         status={"gid": "stale-unrequested-gid"},
         fetched_at=-1_000_000.0,
-    )
+    ))
     websocket = _FakeWebSocket()
-    state.ws_connections[test_user["id"]] = {websocket}
+    asyncio.run(set_connections_for_user(test_user["id"], {websocket}))
 
     with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
-        asyncio.run(broadcast_task_update_to_subscribers(state, global_download["id"]))
+        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
 
-    assert "stale-unrequested-gid" not in state.live_status_cache
-    assert "gid-cache-prune" in state.live_status_cache
+    cache_keys = asyncio.run(live_status_cache_keys())
+    assert "stale-unrequested-gid" not in cache_keys
+    assert "gid-cache-prune" in cache_keys
 
 
 class TestListTasks:
@@ -1306,7 +1334,7 @@ class TestClearHistory:
 
 
 class TestRateLimiting:
-    @patch("app.services.task_service.ensure_authenticated_allowed")
+    @patch("app.routers.tasks.ensure_authenticated_allowed")
     def test_create_task_rate_limited(
         self,
         mock_limiter: AsyncMock,
@@ -1322,7 +1350,7 @@ class TestRateLimiting:
         assert response.status_code == 429
         assert "操作过于频繁" in response.json()["detail"]
 
-    @patch("app.services.task_service.ensure_authenticated_allowed")
+    @patch("app.routers.tasks.ensure_authenticated_allowed")
     def test_create_torrent_rate_limited(
         self,
         mock_limiter: AsyncMock,
@@ -1338,7 +1366,7 @@ class TestRateLimiting:
         assert response.status_code == 429
         assert "操作过于频繁" in response.json()["detail"]
 
-    @patch("app.services.task_service.ensure_authenticated_allowed")
+    @patch("app.routers.tasks.ensure_authenticated_allowed")
     def test_torrent_preview_rate_limited(
         self,
         mock_limiter: AsyncMock,

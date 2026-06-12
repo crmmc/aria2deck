@@ -29,9 +29,8 @@ async def task_ws(websocket: WebSocket) -> None:
         return
 
     await websocket.accept()
-    state = websocket.app.state.app_state
     logger.info("WebSocket 连接建立: path=/ws/tasks user_id=%s ip=%s", user_id, client_ip)
-    await register_ws(state, user_id, websocket)
+    await register_ws(user_id, websocket)
 
     try:
         while True:
@@ -44,7 +43,7 @@ async def task_ws(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        await unregister_ws(state, user_id, websocket)
+        await unregister_ws(user_id, websocket)
         logger.info("WebSocket 连接关闭: path=/ws/tasks user_id=%s ip=%s", user_id, client_ip)
 
 

@@ -56,7 +56,6 @@ class TestCreateApp:
         app = create_app()
 
         assert isinstance(app, FastAPI)
-        assert hasattr(app.state, "app_state")
         assert hasattr(app.state, "aria2_client")
 
     def test_create_app_includes_routers(self):
@@ -384,17 +383,8 @@ class TestLifespan:
             reset_engine()
 
 
-class TestAppState:
-    """Tests for application state initialization."""
-
-    def test_app_state_initialized(self):
-        """Test AppState is properly initialized."""
-        from app.main import create_app
-        from app.core.state import AppState
-
-        app = create_app()
-
-        assert isinstance(app.state.app_state, AppState)
+class TestApplicationState:
+    """Tests for runtime integration state initialization."""
 
     def test_aria2_client_initialized(self):
         """Test Aria2Client is properly initialized."""

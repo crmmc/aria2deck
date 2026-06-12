@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +82,7 @@ class DownloadConfig:
         self.anonymous_per_ip_connections: int = 4
         self.anonymous_per_file_connections: int = 2
 
-    async def load_from_db(self) -> None:
-        """启动时从数据库加载配置。"""
-        from app.repositories.settings import get_settings_row
-
-        row = await get_settings_row()
-
+    def load_from_settings(self, row: Mapping[str, Any] | None) -> None:
         for db_key, (attr, default, _legacy_keys) in self._DB_KEY_MAP.items():
             value = row.get(db_key, default) if row else default
             try:
@@ -107,10 +104,6 @@ class DownloadConfig:
             self.anonymous_per_ip_connections,
             self.anonymous_per_file_connections,
         )
-
-    async def refresh(self) -> None:
-        """管理员更新配置后主动刷新。"""
-        await self.load_from_db()
 
     def defaults(self) -> dict[str, str]:
         """返回新配置键的默认值字符串。"""
@@ -183,6 +176,8 @@ class DownloadAcquireResult:
             DownloadRejectReason.ANONYMOUS_PER_IP: "当前来源的下载连接数已达上限，请稍后再试",
             DownloadRejectReason.ANONYMOUS_PER_FILE: "当前文件的匿名下载连接数已达上限，请稍后再试",
         }
+        if self.reason is None:
+            return "下载连接数已达上限，请稍后再试"
         return mapping.get(self.reason, "下载连接数已达上限，请稍后再试")
 
 

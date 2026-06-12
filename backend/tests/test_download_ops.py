@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.aria2.download_ops import (
+from app.services.download_ops import (
     bt_info_hash_from_status,
     extract_display_name,
     is_metadata_handoff_pending,
@@ -299,7 +299,7 @@ async def test_update_active_user_tasks_respects_refreshable(
 
 from unittest.mock import AsyncMock
 
-from app.aria2.download_ops import switch_to_followed_download
+from app.services.aria2_lifecycle_service import switch_to_followed_download
 
 
 @pytest.mark.asyncio

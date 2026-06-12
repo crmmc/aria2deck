@@ -6,10 +6,7 @@
 
 import logging
 
-from sqlalchemy import select
-
-from app.db.engine import transaction
-from app.db.schema import stored_files
+from app.repositories.files import list_stored_file_real_paths
 from app.services.storage import get_store_dir, safe_delete_path
 
 logger = logging.getLogger(__name__)
@@ -28,10 +25,7 @@ async def cleanup_orphan_files() -> int:
         logger.debug("Store directory does not exist, skipping orphan cleanup")
         return 0
 
-    # 获取数据库中所有 StoredFile 的 real_path
-    async with transaction() as conn:
-        result = await conn.execute(select(stored_files.c.real_path))
-        db_paths = {str(row[0]) for row in result.all()}
+    db_paths = await list_stored_file_real_paths()
 
     # 扫描 store 目录：结构为 /store/{prefix}/{content_hash}
     # 只删除 hash 级别的目录/文件，不删除 prefix 目录
