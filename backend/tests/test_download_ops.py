@@ -179,7 +179,7 @@ class TestIsMetadataHandoffPending:
 
 from sqlalchemy import select
 
-from app.aria2.download_ops import (
+from app.repositories.downloads import (
     guarded_update_global_download,
     update_active_user_tasks,
 )

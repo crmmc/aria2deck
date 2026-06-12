@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 import time
-from typing import Any
+from typing import Any, Literal, overload
 
-from sqlalchemy import case, delete, func, insert, or_, select, update
+from sqlalchemy import case, delete, exists, func, insert, literal, or_, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_files, user_storage_usage, user_tasks
@@ -28,6 +29,27 @@ def _effective_terminal_user_task_condition():
             select(global_downloads.c.id).where(
                 global_downloads.c.status.in_(TERMINAL_USER_TASK_STATUSES)
             )
+        ),
+    )
+
+
+def refreshable_user_task_display_name_condition() -> ColumnElement[bool]:
+    """Return rows whose user task name is still a system placeholder."""
+    synthetic_torrent_name = literal("torrent-") + func.substr(
+        global_downloads.c.resource_key,
+        1,
+        12,
+    )
+    return or_(
+        user_tasks.c.display_name.is_(None),
+        user_tasks.c.display_name == "",
+        user_tasks.c.display_name.startswith("magnet:"),
+        user_tasks.c.display_name.startswith("torrent:"),
+        user_tasks.c.display_name.startswith("[METADATA]"),
+        exists().where(
+            global_downloads.c.id == user_tasks.c.global_download_id,
+            global_downloads.c.resource_kind == "torrent",
+            user_tasks.c.display_name == synthetic_torrent_name,
         ),
     )
 
@@ -300,6 +322,94 @@ async def update_global_download(
             .first()
         )
     return dict(row) if row else None
+
+
+@overload
+async def guarded_update_global_download(
+    download_id: int,
+    values: dict[str, Any],
+    *,
+    return_row: Literal[False] = False,
+) -> bool: ...
+
+
+@overload
+async def guarded_update_global_download(
+    download_id: int,
+    values: dict[str, Any],
+    *,
+    return_row: Literal[True],
+) -> dict[str, Any] | None: ...
+
+
+async def guarded_update_global_download(
+    download_id: int,
+    values: dict[str, Any],
+    *,
+    return_row: bool = False,
+) -> dict[str, Any] | bool | None:
+    if not values:
+        return None if return_row else False
+
+    row_values = {**values}
+    row_values.setdefault("updated_at_ms", now_ms())
+    stmt = (
+        update(global_downloads)
+        .where(
+            global_downloads.c.id == download_id,
+            global_downloads.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            global_downloads.c.completed_file_id.is_(None),
+        )
+        .values(**row_values)
+    )
+    if return_row:
+        stmt = stmt.returning(global_downloads)
+    else:
+        stmt = stmt.returning(global_downloads.c.id)
+
+    async with transaction() as conn:
+        row = (await conn.execute(stmt)).mappings().first()
+
+    if return_row:
+        return dict(row) if row else None
+    return row is not None
+
+
+async def update_active_user_tasks(
+    download_id: int,
+    *,
+    status: str | None = None,
+    display_name: str | None = None,
+    force_display_name: bool = False,
+) -> None:
+    timestamp = now_ms()
+    base_condition = [
+        user_tasks.c.global_download_id == download_id,
+        user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+    ]
+    async with transaction() as conn:
+        if status is not None:
+            await conn.execute(
+                update(user_tasks)
+                .where(*base_condition)
+                .values(status=status, updated_at_ms=timestamp)
+            )
+        if display_name:
+            if force_display_name:
+                await conn.execute(
+                    update(user_tasks)
+                    .where(*base_condition)
+                    .values(display_name=display_name, updated_at_ms=timestamp)
+                )
+            else:
+                await conn.execute(
+                    update(user_tasks)
+                    .where(
+                        *base_condition,
+                        refreshable_user_task_display_name_condition(),
+                    )
+                    .values(display_name=display_name, updated_at_ms=timestamp)
+                )
 
 
 async def update_user_task(

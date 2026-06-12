@@ -20,7 +20,9 @@ from app.aria2.failed_task_cleanup import (
 from app.domain.downloads import ACTIVE_USER_TASK_STATUSES
 from app.repositories.downloads import (
     get_global_download_by_gid,
+    guarded_update_global_download,
     mark_global_download_failed,
+    update_active_user_tasks,
     update_global_download,
 )
 from app.services.download_service import complete_global_download
@@ -308,9 +310,7 @@ async def _guarded_update_global_download(
     download_id: int,
     values: dict[str, Any],
 ) -> dict[str, Any] | None:
-    return await download_ops.guarded_update_global_download(
-        download_id, values, return_row=True
-    )
+    return await guarded_update_global_download(download_id, values, return_row=True)
 
 
 async def _update_download_and_active_user_tasks(
@@ -325,7 +325,7 @@ async def _update_download_and_active_user_tasks(
 
     new_display_name = global_values.get("display_name")
     if user_status is not None or new_display_name:
-        await download_ops.update_active_user_tasks(
+        await update_active_user_tasks(
             download_id,
             status=user_status,
             display_name=new_display_name,

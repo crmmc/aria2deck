@@ -23,8 +23,10 @@ from app.db.engine import transaction
 from app.db.schema import global_downloads
 from app.domain.downloads import ACTIVE_USER_TASK_STATUSES
 from app.repositories.downloads import (
+    guarded_update_global_download,
     mark_global_download_failed,
     now_ms,
+    update_active_user_tasks,
 )
 from app.services.task_projection import (
     has_live_bt_evidence,
@@ -307,11 +309,11 @@ async def _update_v0_download_from_aria2(
             download_id,
             gid,
         )
-        await download_ops.guarded_update_global_download(
+        await guarded_update_global_download(
             download_id,
             {"status": "active"},
         )
-        await download_ops.update_active_user_tasks(download_id, status="active")
+        await update_active_user_tasks(download_id, status="active")
         return
 
     if mapped["raw_status"] == "complete":
@@ -376,11 +378,11 @@ async def _update_v0_download_from_aria2(
         if mapped["display_name"]:
             global_values["display_name"] = mapped["display_name"]
 
-    changed = await download_ops.guarded_update_global_download(download_id, global_values)
+    changed = await guarded_update_global_download(download_id, global_values)
     if not changed:
         return
 
-    await download_ops.update_active_user_tasks(
+    await update_active_user_tasks(
         download_id,
         status=mapped["status"],
         display_name=mapped["display_name"] if not is_metadata else None,
