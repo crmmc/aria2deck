@@ -10,8 +10,12 @@ from typing import Any, Protocol
 
 from sqlalchemy.exc import IntegrityError
 
+from app.domain.downloads import (
+    CANCELABLE_TASK_STATUSES,
+    RETRYABLE_DOWNLOAD_STATUSES,
+    RETRYABLE_TASK_STATUSES,
+)
 from app.repositories.downloads import (
-    ACTIVE_USER_TASK_STATUSES,
     attach_completed_file_to_user,
     cancel_active_user_task,
     complete_active_user_tasks_for_stored_file,
@@ -44,9 +48,6 @@ from app.services.usage_service import (
 )
 
 logger = logging.getLogger(__name__)
-RETRYABLE_DOWNLOAD_STATUSES = {"failed", "cancelled"}
-RETRYABLE_TASK_STATUSES = {"failed", "cancelled"}
-CANCELABLE_TASK_STATUSES = set(ACTIVE_USER_TASK_STATUSES)
 _ALLOWED_USER_OPTIONS = frozenset(
     (
         "out",

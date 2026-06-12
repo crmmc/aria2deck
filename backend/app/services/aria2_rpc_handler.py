@@ -19,9 +19,14 @@ from urllib.parse import unquote, urlsplit
 
 from app.core.config import settings
 from app.core.state import AppState
+from app.domain.downloads import (
+    ACTIVE_LIKE_DOWNLOAD_STATUSES,
+    ACTIVE_USER_TASK_STATUSES,
+    is_current,
+    stat_counts,
+)
 from app.repositories import auth as auth_repo
 from app.repositories.downloads import (
-    ACTIVE_USER_TASK_STATUSES,
     delete_all_terminal_user_tasks,
     delete_terminal_user_task,
     delete_terminal_user_task_by_gid,
@@ -38,14 +43,11 @@ from app.services.download_service import (
 from app.services.hash import extract_info_hash_from_torrent_base64, get_uri_hash
 from app.services.settings_service import get_min_free_disk
 from app.services.task_projection import (
-    ACTIVE_LIKE_STATUSES,
     build_bittorrent_payload,
     has_bittorrent_payload,
     has_live_bt_evidence,
     has_real_file_path,
-    is_current,
     speed_totals,
-    stat_counts,
 )
 from app.services.usage_service import get_usage
 
@@ -261,7 +263,7 @@ class Aria2RpcHandler:
         return gids
 
     async def _get_current_rows_by_gid(self) -> dict[str, dict[str, Any]]:
-        rows = await list_user_tasks(self.user_id, ACTIVE_LIKE_STATUSES)
+        rows = await list_user_tasks(self.user_id, ACTIVE_LIKE_DOWNLOAD_STATUSES)
         result: dict[str, dict[str, Any]] = {}
         for row in rows:
             gid = row.get("aria2_gid")

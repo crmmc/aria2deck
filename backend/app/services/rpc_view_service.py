@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.repositories.downloads import list_user_tasks
-from app.services.task_projection import (
-    ACTIVE_LIKE_STATUSES,
-    TERMINAL_STATUSES,
-    build_aria2_status,
+from app.domain.downloads import (
+    ACTIVE_LIKE_DOWNLOAD_STATUSES,
+    TERMINAL_DOWNLOAD_STATUSES,
     is_current,
 )
+from app.repositories.downloads import list_user_tasks
+from app.services.task_projection import build_aria2_status
 
 
 def status_from_task(
@@ -21,7 +21,7 @@ async def list_active_statuses(
     user_id: int,
     live_by_gid: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    rows = await list_user_tasks(user_id, ACTIVE_LIKE_STATUSES)
+    rows = await list_user_tasks(user_id, ACTIVE_LIKE_DOWNLOAD_STATUSES)
     live_by_gid = live_by_gid or {}
     return [
         status_from_task(row, live_by_gid.get(str(row.get("aria2_gid"))))
@@ -31,7 +31,7 @@ async def list_active_statuses(
 
 
 async def list_waiting_statuses(user_id: int) -> list[dict[str, Any]]:
-    rows = await list_user_tasks(user_id, ACTIVE_LIKE_STATUSES)
+    rows = await list_user_tasks(user_id, ACTIVE_LIKE_DOWNLOAD_STATUSES)
     return [
         status_from_task(row)
         for row in rows
@@ -44,6 +44,6 @@ async def list_stopped_statuses(user_id: int) -> list[dict[str, Any]]:
     return [
         status_from_task(row)
         for row in rows
-        if str(row.get("status")) in TERMINAL_STATUSES
-        or str(row.get("global_status")) in TERMINAL_STATUSES
+        if str(row.get("status")) in TERMINAL_DOWNLOAD_STATUSES
+        or str(row.get("global_status")) in TERMINAL_DOWNLOAD_STATUSES
     ]

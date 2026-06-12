@@ -16,7 +16,8 @@ from app.aria2.display_name import refreshable_user_task_display_name_condition
 from app.core.security import sanitize_string
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
-from app.repositories.downloads import ACTIVE_USER_TASK_STATUSES, now_ms
+from app.domain.downloads import ACTIVE_USER_TASK_STATUSES
+from app.repositories.downloads import now_ms
 from app.services.task_projection import (
     METADATA_NAME_PREFIX,
     is_bt_resource_kind,

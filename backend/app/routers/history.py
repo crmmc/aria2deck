@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.auth import AuthUser, require_user
+from app.domain.downloads import TERMINAL_USER_TASK_STATUSES
 from app.repositories.downloads import (
-    TERMINAL_USER_TASK_STATUSES,
     clear_terminal_user_tasks,
     delete_terminal_user_task,
     list_user_tasks,

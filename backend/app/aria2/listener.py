@@ -17,8 +17,8 @@ from app.aria2.failed_task_cleanup import (
     cleanup_failed_task_artifacts,
     get_representative_owner_id,
 )
+from app.domain.downloads import ACTIVE_USER_TASK_STATUSES
 from app.repositories.downloads import (
-    ACTIVE_USER_TASK_STATUSES,
     get_global_download_by_gid,
     mark_global_download_failed,
     update_global_download,

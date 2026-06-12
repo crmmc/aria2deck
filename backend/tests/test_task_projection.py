@@ -1,8 +1,8 @@
+from app.domain.downloads import REST_TASK_STATUS_FILTERS
 from app.services.task_projection import (
     BT_TRACKER_PLACEHOLDER,
     METADATA_NAME_PREFIX,
     InvalidTaskStatusFilter,
-    REST_TASK_STATUS_FILTERS,
     build_aria2_status,
     build_rest_task_response,
     effective_status,

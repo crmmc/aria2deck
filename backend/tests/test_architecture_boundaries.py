@@ -41,6 +41,28 @@ def _imports_module(node: ast.AST, blocked_modules: set[str]) -> str | None:
     return None
 
 
+def _imports_blocked_module_prefix(
+    node: ast.AST, blocked_modules: set[str]
+) -> str | None:
+    def blocked(name: str) -> str | None:
+        for module in blocked_modules:
+            if name == module or name.startswith(f"{module}."):
+                return module
+        return None
+
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            match = blocked(alias.name)
+            if match is not None:
+                return alias.name
+    if isinstance(node, ast.ImportFrom):
+        module = node.module or ""
+        match = blocked(module)
+        if match is not None:
+            return module
+    return None
+
+
 def test_non_router_layers_do_not_import_router_modules() -> None:
     offenders: list[str] = []
     for path in _python_files("aria2", "services", "core"):
@@ -69,6 +91,35 @@ def test_ws_router_does_not_import_connection_helpers_from_aria2_sync() -> None:
         if blocked:
             relative = path.relative_to(APP_ROOT.parent)
             offenders.append(f"{relative}:{node.lineno} imports {sorted(blocked)}")
+
+    assert offenders == []
+
+
+def test_domain_modules_do_not_import_outer_layers_or_frameworks() -> None:
+    domain_root = APP_ROOT / "domain"
+    if not domain_root.exists():
+        raise AssertionError("backend/app/domain must exist for P2 domain extraction")
+
+    blocked_modules = {
+        "app.routers",
+        "app.services",
+        "app.repositories",
+        "app.db",
+        "app.aria2",
+        "app.core",
+        "fastapi",
+        "sqlalchemy",
+        "pydantic",
+    }
+    offenders: list[str] = []
+
+    for path in sorted(domain_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            imported = _imports_blocked_module_prefix(node, blocked_modules)
+            if imported is not None:
+                relative = path.relative_to(APP_ROOT.parent)
+                offenders.append(f"{relative}:{node.lineno} imports {imported}")
 
     assert offenders == []
 

@@ -6,59 +6,28 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-ACTIVE_LIKE_STATUSES = ("queued", "active", "waiting", "paused")
-TERMINAL_STATUSES = ("completed", "failed", "cancelled")
-ERROR_STATUSES = ("failed", "cancelled")
-REST_TASK_STATUS_FILTERS = frozenset(("active", "current", "complete", "error"))
+from app.domain.downloads import (
+    ACTIVE_LIKE_DOWNLOAD_STATUSES,
+    REST_TASK_STATUS_FILTERS,
+    TERMINAL_DOWNLOAD_STATUSES,
+    InvalidTaskStatusFilter,
+    aria2_status,
+    effective_status,
+    filter_rows_for_status,
+    is_current,
+    is_user_terminal,
+    legacy_rest_status,
+    stat_counts,
+)
+
 BT_TRACKER_PLACEHOLDER = "http://aria2deck.invalid/announce"
 INFO_HASH_HEX_PATTERN = re.compile(r"^[a-fA-F0-9]{40}$")
-
-
-class InvalidTaskStatusFilter(ValueError):
-    pass
 
 
 def ms_to_iso(timestamp_ms: int | None) -> str | None:
     if timestamp_ms is None:
         return None
     return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat()
-
-
-def effective_status(row: dict[str, Any]) -> str:
-    user_status = str(row.get("status") or "")
-    if user_status in TERMINAL_STATUSES:
-        return user_status
-
-    global_status = str(row.get("global_status") or user_status)
-    if global_status in TERMINAL_STATUSES:
-        return global_status
-    return user_status
-
-
-def legacy_rest_status(status: str) -> str:
-    if status == "completed":
-        return "complete"
-    if status in ERROR_STATUSES:
-        return "error"
-    return status
-
-
-def aria2_status(status: str) -> str:
-    if status == "completed":
-        return "complete"
-    if status in ERROR_STATUSES:
-        return "error"
-    if status == "queued":
-        return "waiting"
-    return status
-
-
-def is_user_terminal(row: dict[str, Any]) -> bool:
-    return str(row.get("status") or "") in TERMINAL_STATUSES
-
-
-def is_current(row: dict[str, Any]) -> bool:
-    return effective_status(row) in ACTIVE_LIKE_STATUSES
 
 
 def display_name(row: dict[str, Any]) -> str:
@@ -204,7 +173,7 @@ def build_aria2_status(
     live = live or {}
     effective = effective_status(row)
     status = aria2_status(effective)
-    if live and effective not in TERMINAL_STATUSES:
+    if live and effective not in TERMINAL_DOWNLOAD_STATUSES:
         status = str(live.get("status") or status)
 
     gid = f"task-{row['id']}"
@@ -253,7 +222,7 @@ def projected_speeds(
     row: dict[str, Any],
     live: dict[str, Any] | None = None,
 ) -> tuple[int, int]:
-    if effective_status(row) not in ACTIVE_LIKE_STATUSES:
+    if effective_status(row) not in ACTIVE_LIKE_DOWNLOAD_STATUSES:
         return 0, 0
     live = live or {}
     return _safe_int(live.get("downloadSpeed")), _safe_int(live.get("uploadSpeed"))
@@ -316,7 +285,7 @@ def build_rest_task_response(
 
     # Prefer live aria2 data for active tasks — fresher and avoids
     # stale/polluted DB values (e.g. during metadata download phase).
-    if live and effective_status(row) in ACTIVE_LIKE_STATUSES:
+    if live and effective_status(row) in ACTIVE_LIKE_DOWNLOAD_STATUSES:
         project_bt = should_project_bittorrent(row, live)
         if project_bt:
             live_name = _extract_live_display_name(live)
@@ -347,40 +316,4 @@ def build_rest_task_response(
         "created_at": ms_to_iso(row.get("created_at_ms")),
         "updated_at": ms_to_iso(row.get("updated_at_ms")),
         "frozen_space": _safe_int(row.get("reserved_bytes")),
-    }
-
-
-def filter_rows_for_status(
-    rows: list[dict[str, Any]], status_filter: str | None
-) -> list[dict[str, Any]]:
-    if status_filter is None:
-        return rows
-    if status_filter not in REST_TASK_STATUS_FILTERS:
-        raise InvalidTaskStatusFilter(status_filter)
-    if status_filter in {"active", "current"}:
-        return [row for row in rows if is_current(row)]
-    if status_filter == "complete":
-        return [row for row in rows if effective_status(row) == "completed"]
-    if status_filter == "error":
-        return [row for row in rows if effective_status(row) in ERROR_STATUSES]
-    return rows
-
-
-def stat_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
-    active = 0
-    waiting = 0
-    stopped = 0
-    for row in rows:
-        status = effective_status(row)
-        if status == "active":
-            active += 1
-        elif status in {"queued", "waiting", "paused"}:
-            waiting += 1
-        elif status in TERMINAL_STATUSES:
-            stopped += 1
-    return {
-        "active": active,
-        "waiting": waiting,
-        "stopped": stopped,
-        "current": active + waiting,
     }

@@ -21,8 +21,8 @@ from app.core.security import sanitize_string
 from app.core.state import AppState
 from app.db.engine import transaction
 from app.db.schema import global_downloads
+from app.domain.downloads import ACTIVE_USER_TASK_STATUSES
 from app.repositories.downloads import (
-    ACTIVE_USER_TASK_STATUSES,
     mark_global_download_failed,
     now_ms,
 )

@@ -10,14 +10,10 @@ from sqlalchemy import select
 from app.aria2.client import Aria2Client
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
+from app.domain.downloads import ACTIVE_USER_TASK_STATUSES, FAILED_DOWNLOAD_STATUSES
 from app.services.storage import cleanup_task_download_dir, get_downloading_dir
 
 logger = logging.getLogger(__name__)
-
-# Valid failed states that trigger cleanup
-FAILED_STATES = frozenset({"failed", "cancelled"})
-ACTIVE_USER_TASK_STATUSES = ("queued", "active", "waiting", "paused")
-
 
 class CleanupErrorType(str, Enum):
     """Error classification for cleanup operations."""
@@ -99,7 +95,7 @@ async def cleanup_failed_task_artifacts(
             return True  # Already cleaned or never existed
 
         status = row[0]
-        if status not in FAILED_STATES:
+        if status not in FAILED_DOWNLOAD_STATUSES:
             logger.debug(
                 "[CLEANUP] skipped %s task_id=%s owner_id=%s gid=%s "
                 "path=%s error_type=%s status=%s",

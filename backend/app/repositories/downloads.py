@@ -1,20 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 import time
 from typing import Any
-
-from collections.abc import Iterable
 
 from sqlalchemy import case, delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_files, user_storage_usage, user_tasks
-
-ACTIVE_USER_TASK_STATUSES = ("queued", "active", "waiting", "paused")
-ACTIVE_GLOBAL_DOWNLOAD_STATUSES = ACTIVE_USER_TASK_STATUSES
-FAILABLE_GLOBAL_DOWNLOAD_STATUSES = (*ACTIVE_GLOBAL_DOWNLOAD_STATUSES, "completed")
-TERMINAL_USER_TASK_STATUSES = ("completed", "failed", "cancelled")
+from app.domain.downloads import (
+    ACTIVE_GLOBAL_DOWNLOAD_STATUSES,
+    ACTIVE_USER_TASK_STATUSES,
+    FAILABLE_GLOBAL_DOWNLOAD_STATUSES,
+    TERMINAL_USER_TASK_STATUSES,
+)
 
 
 def now_ms() -> int:
