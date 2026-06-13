@@ -41,9 +41,9 @@ export default function StatsWidget() {
   return (
     <div className="card row stats-widget">
       <div className="stats-section">
-        <h3 className="stats-label">空间使用</h3>
+        <h3 className="stats-label">可用空间</h3>
         <div className="flex items-baseline gap-2">
-          <span className="stats-value">{formatBytes(stats.disk_used_space)}</span>
+          <span className="stats-value">{formatBytes(stats.disk_total_space - stats.disk_used_space - frozenSpace)}</span>
           <span className="stats-unit">/ {formatBytes(stats.disk_total_space)}</span>
           {stats.disk_space_limited && (
             <span

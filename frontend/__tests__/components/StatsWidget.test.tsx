@@ -36,8 +36,8 @@ describe("StatsWidget", () => {
 
     render(<StatsWidget />);
 
-    expect(await screen.findByText("空间使用")).toBeInTheDocument();
-    expect(screen.getByText("80.0 GB")).toBeInTheDocument();
+    expect(await screen.findByText("可用空间")).toBeInTheDocument();
+    expect(screen.getByText("15.0 GB")).toBeInTheDocument();
     expect(screen.getByText("/ 100.0 GB")).toBeInTheDocument();
     expect(
       screen.getByTitle("当前机器空间受限，您的可用空间已被调整，请联系管理员")

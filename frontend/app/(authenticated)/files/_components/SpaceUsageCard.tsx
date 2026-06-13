@@ -28,9 +28,9 @@ export function SpaceUsageCard({ space }: SpaceUsageCardProps) {
     <div className="card mb-6">
       <div className="flex-between mb-3">
         <div>
-          <h3 className="stats-label">存储使用情况</h3>
+          <h3 className="stats-label">可用空间</h3>
           <div className="flex items-baseline gap-2">
-            <span className="stats-value">{formatBytes(space.used)}</span>
+            <span className="stats-value">{formatBytes(space.available)}</span>
             <span className="muted">
               / {formatBytes(space.used + space.frozen + space.available)}
             </span>
