@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 from urllib.parse import quote
 
@@ -8,6 +7,7 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from starlette.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from app.core.download_limiter import DownloadLease
 
@@ -87,6 +87,30 @@ def range_file_response(request: Request, file_path: Path, filename: str):
     )
 
 
+class _LeaseStreamingResponse(StreamingResponse):
+    """从 ASGI response 生命周期释放下载 lease。
+
+    Starlette 0.37.2 在 http.disconnect 时取消 stream_response 但不关闭
+    body_iterator，async-generator 的 finally 不保证执行，会泄漏 lease。
+    """
+
+    def __init__(self, response: StreamingResponse, lease: DownloadLease) -> None:
+        super().__init__(
+            response.body_iterator,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+            background=response.background,
+        )
+        self._lease = lease
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._lease.release()
+
+
 def tracked_response(
     response: FileResponse | StreamingResponse,
     lease: DownloadLease | None,
@@ -95,43 +119,20 @@ def tracked_response(
     if lease is None:
         return response
 
-    if isinstance(response, StreamingResponse) and response.body_iterator is not None:
-        original_iter = response.body_iterator
+    if isinstance(response, StreamingResponse):
+        return _LeaseStreamingResponse(response, lease)
 
-        if inspect.isasyncgen(original_iter):
+    async def _release():
+        await lease.release()
 
-            async def _releasing_iter():
-                try:
-                    async for chunk in original_iter:  # type: ignore[union-attr]
-                        yield chunk
-                finally:
-                    await lease.release()
+    if response.background:
+        original_bg = response.background
 
-            response.body_iterator = _releasing_iter()
-        else:
-            sync_iter = original_iter
+        async def _chained():
+            await original_bg()  # type: ignore[misc]
+            await _release()
 
-            async def _sync_releasing_iter():
-                try:
-                    for chunk in sync_iter:  # type: ignore[union-attr]
-                        yield chunk
-                finally:
-                    await lease.release()
-
-            response.body_iterator = _sync_releasing_iter()
+        response.background = BackgroundTask(_chained)
     else:
-
-        async def _release():
-            await lease.release()
-
-        if response.background:
-            original_bg = response.background
-
-            async def _chained():
-                await original_bg()  # type: ignore[misc]
-                await _release()
-
-            response.background = BackgroundTask(_chained)
-        else:
-            response.background = BackgroundTask(_release)
+        response.background = BackgroundTask(_release)
     return response
