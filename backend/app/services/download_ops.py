@@ -105,7 +105,10 @@ def following_gid(aria2_status: dict[str, Any]) -> str | None:
 
 
 def _is_magnet_download(download: dict[str, Any]) -> bool:
-    if str(download.get("resource_kind") or "").lower() == "magnet":
+    kind = str(download.get("resource_kind") or "").lower()
+    if kind == "torrent":
+        return False
+    if kind == "magnet":
         return True
     return str(download.get("source_uri") or "").lower().startswith("magnet:")
 
@@ -160,13 +163,12 @@ def is_metadata_handoff_pending(
         return False
     if not _is_magnet_download(download):
         return False
-    if not _has_unresolved_magnet_display_name(download):
-        return False
     if first_followed_gid(aria2_status) is not None:
         return False
     if following_gid(aria2_status) is not None:
         return False
 
-    return not _has_bittorrent_payload_info(
-        aria2_status
-    ) and not _has_payload_like_file_path(aria2_status)
+    # A magnet's metadata GID can briefly look like a completed payload before
+    # aria2 exposes followedBy. Do not let display names or file-path heuristics
+    # turn that metadata completion into final artifact validation.
+    return True

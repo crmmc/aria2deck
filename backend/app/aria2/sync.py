@@ -60,6 +60,8 @@ async def sync_tasks(interval: float) -> None:
                 status=status,
             )
             if str(status.get("status") or "") in {"complete", "error", "removed"}:
+                if lifecycle.should_defer_stopped_result_cleanup(download, status):
+                    return
                 removable_stopped_gids.add(gid)
 
         results = await asyncio.gather(

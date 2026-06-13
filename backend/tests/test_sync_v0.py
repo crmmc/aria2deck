@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from app.aria2.sync import (
     STALE_QUEUED_GRACE_SECONDS,
@@ -21,7 +21,7 @@ from app.services.aria2_lifecycle_service import (
 )
 from app.core.config import settings
 from app.db.engine import transaction
-from app.db.schema import global_downloads, user_files, user_tasks
+from app.db.schema import global_downloads, stored_files, user_files, user_tasks
 from app.repositories.downloads import now_ms
 from app.services.usage_service import get_usage, reserve_bytes
 from tests.helpers_v0 import (
@@ -108,6 +108,65 @@ async def test_tracked_stopped_gid_is_not_removed_without_cleanup_eligibility() 
         max_actions=10,
     )
 
+    client.remove_download_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_remove_metadata_result_while_handoff_pending(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="sync_metadata_cleanup_guard")
+    download = await create_global_download_v0(
+        resource_key="sync:metadata-cleanup-guard",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:cleanupguard",
+        status="active",
+        aria2_gid="gid-metadata",
+        display_name="Real Torrent",
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+    )
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-metadata",
+        "status": "complete",
+        "totalLength": "9",
+        "completedLength": "9",
+        "bittorrent": {"info": {"name": "Real Torrent"}},
+        "files": [{"path": "/downloads/Real Torrent/movie.mkv", "length": "9"}],
+    }
+    client.tell_active.return_value = []
+    client.tell_waiting.return_value = []
+    client.tell_stopped.return_value = [{"gid": "gid-metadata"}]
+    client.remove_download_result.return_value = "OK"
+
+    def get_client(*args: object, **kwargs: object) -> AsyncMock:
+        return client
+
+    monkeypatch.setattr("app.aria2.sync.get_aria2_client", get_client)
+    monkeypatch.setattr(
+        "app.services.aria2_lifecycle_service.COMPLETE_SOURCE_RETRY_COUNT", 1
+    )
+
+    async def stop_after_first_sleep(_interval: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("app.aria2.sync.asyncio.sleep", stop_after_first_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await sync_tasks(interval=0.01)
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+
+    assert updated["aria2_gid"] == "gid-metadata"
+    assert updated["status"] == "active"
+    assert updated["completed_file_id"] is None
+    assert updated_task["status"] == "active"
     client.remove_download_result.assert_not_awaited()
 
 
@@ -380,6 +439,80 @@ async def test_metadata_followed_by_preserves_real_waiting_status(
     assert updated["aria2_gid"] == "gid-real-waiting"
     assert updated["status"] == "waiting"
     assert updated_task["status"] == "waiting"
+
+
+@pytest.mark.asyncio
+async def test_metadata_followed_by_complete_real_status_is_indexed(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_followed_complete")
+    await reserve_bytes(user["id"], 5, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="sync:followed-complete",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:followedcomplete",
+        status="active",
+        aria2_gid="gid-metadata-complete",
+        display_name="magnet:?xt=urn:btih:followedcomplete",
+        total_bytes=0,
+        completed_bytes=0,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=5,
+        display_name="magnet:?xt=urn:btih:followedcomplete",
+    )
+    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
+    task_dir.mkdir(parents=True)
+    source_file = task_dir / "payload.bin"
+    source_file.write_bytes(b"abcde")
+
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-real-complete",
+        "status": "complete",
+        "following": "gid-metadata-complete",
+        "totalLength": "5",
+        "completedLength": "5",
+        "bittorrent": {"info": {"name": "payload.bin"}},
+        "files": [{"path": str(source_file), "length": "5"}],
+    }
+    client.remove_download_result.return_value = "OK"
+
+    await update_v0_download_from_aria2(
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-metadata-complete",
+            "status": "complete",
+            "followedBy": ["gid-real-complete"],
+            "totalLength": "0",
+            "completedLength": "0",
+            "files": [],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+    async with transaction() as conn:
+        stored_count = (
+            await conn.execute(select(func.count()).select_from(stored_files))
+        ).scalar_one()
+        user_file_count = (
+            await conn.execute(select(func.count()).select_from(user_files))
+        ).scalar_one()
+
+    assert updated["status"] == "completed"
+    assert updated["completed_file_id"] is not None
+    assert updated["aria2_gid"] is None
+    assert updated_task["status"] == "completed"
+    assert updated_task["reserved_bytes"] == 0
+    assert usage["reserved_bytes"] == 0
+    assert stored_count == 1
+    assert user_file_count == 1
 
 
 @pytest.mark.asyncio

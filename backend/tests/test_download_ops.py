@@ -146,7 +146,7 @@ class TestIsMetadataHandoffPending:
 
         assert is_metadata_handoff_pending(download, status) is True
 
-    def test_real_bittorrent_name_is_not_pending(self) -> None:
+    def test_real_bittorrent_name_does_not_disable_pending(self) -> None:
         download = {
             "resource_kind": "magnet",
             "source_uri": "magnet:?xt=urn:btih:" + "b" * 40,
@@ -158,9 +158,9 @@ class TestIsMetadataHandoffPending:
             "files": [],
         }
 
-        assert is_metadata_handoff_pending(download, status) is False
+        assert is_metadata_handoff_pending(download, status) is True
 
-    def test_payload_file_path_is_not_pending(self) -> None:
+    def test_payload_file_path_does_not_disable_pending(self) -> None:
         download = {
             "resource_kind": "magnet",
             "source_uri": "magnet:?xt=urn:btih:" + "c" * 40,
@@ -172,19 +172,33 @@ class TestIsMetadataHandoffPending:
             "files": [{"path": "/downloads/movie.mkv"}],
         }
 
+        assert is_metadata_handoff_pending(download, status) is True
+
+    def test_torrent_resource_kind_is_not_pending(self) -> None:
+        download = {
+            "resource_kind": "torrent",
+            "source_uri": "magnet:?xt=urn:btih:" + "d" * 40,
+            "display_name": "Real Torrent",
+        }
+        status = {
+            "status": "complete",
+            "bittorrent": {"info": {"name": "Real Torrent"}},
+            "files": [{"path": "/downloads/Real Torrent/movie.mkv"}],
+        }
+
         assert is_metadata_handoff_pending(download, status) is False
 
 
 # --- DB operation tests ---
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.repositories.downloads import (
     guarded_update_global_download,
     update_active_user_tasks,
 )
 from app.db.engine import transaction
-from app.db.schema import global_downloads, user_tasks
+from app.db.schema import global_downloads, stored_files, user_files, user_tasks
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_task_v0,
@@ -422,8 +436,78 @@ async def test_switch_to_followed_uses_real_status(temp_db: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_switch_to_followed_magnet_no_kind_upgrade(temp_db: str) -> None:
-    """Magnet→torrent: resource_kind stays as-is (already BT type)."""
+async def test_switch_to_followed_complete_status_does_not_mark_completed_without_indexing(
+    temp_db: str,
+) -> None:
+    """A complete followed task must not become completed without file indexing."""
+    user = await create_user_v0(username="complete-switcher")
+    dl = await create_global_download_v0(
+        resource_key="complete-followed-key",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:" + "fa" * 20,
+        status="active",
+        aria2_gid="meta-gid-complete",
+        display_name="magnet:?xt=urn:btih:" + "fa" * 20,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=dl["id"],
+        status="active",
+        display_name="magnet:?xt=urn:btih:" + "fa" * 20,
+    )
+
+    mock_client = AsyncMock()
+    mock_client.tell_status.return_value = {
+        "gid": "real-gid-complete",
+        "status": "complete",
+        "following": "meta-gid-complete",
+        "bittorrent": {"info": {"name": "Complete Torrent"}},
+        "infoHash": "fa" * 20,
+        "totalLength": "1234",
+        "completedLength": "1234",
+        "files": [{"path": "/downloads/Complete Torrent/file.bin", "length": "1234"}],
+    }
+    mock_client.remove_download_result = AsyncMock()
+
+    result = await switch_to_followed_download(
+        client=mock_client,
+        download=dl,
+        metadata_gid="meta-gid-complete",
+        followed_gid="real-gid-complete",
+        display_name_fallback=dl["display_name"],
+        log_prefix="[Test]",
+    )
+
+    assert result is True
+
+    async with transaction() as conn:
+        g_row = (
+            await conn.execute(
+                select(global_downloads).where(global_downloads.c.id == dl["id"])
+            )
+        ).mappings().one()
+        t_row = (
+            await conn.execute(select(user_tasks).where(user_tasks.c.id == task["id"]))
+        ).mappings().one()
+        stored_count = (
+            await conn.execute(select(func.count()).select_from(stored_files))
+        ).scalar_one()
+        user_file_count = (
+            await conn.execute(select(func.count()).select_from(user_files))
+        ).scalar_one()
+
+    assert g_row["aria2_gid"] == "real-gid-complete"
+    assert g_row["resource_kind"] == "torrent"
+    assert g_row["status"] == "active"
+    assert g_row["completed_file_id"] is None
+    assert t_row["status"] == "active"
+    assert stored_count == 0
+    assert user_file_count == 0
+
+
+@pytest.mark.asyncio
+async def test_switch_to_followed_magnet_upgrades_kind(temp_db: str) -> None:
+    """Magnet metadata handoff switches tracking to the real torrent task."""
     user = await create_user_v0(username="magnet-user")
     dl = await create_global_download_v0(
         resource_key="magnet-key",
@@ -466,8 +550,7 @@ async def test_switch_to_followed_magnet_no_kind_upgrade(temp_db: str) -> None:
                 select(global_downloads).where(global_downloads.c.id == dl["id"])
             )
         ).mappings().one()
-    # magnet is already BT kind, should NOT be overwritten to "torrent"
-    assert g_row["resource_kind"] == "magnet"
+    assert g_row["resource_kind"] == "torrent"
 
 
 @pytest.mark.asyncio

@@ -470,6 +470,7 @@ async def switch_to_followed_download(
     followed_gid: str,
     display_name_fallback: str | None,
     log_prefix: str,
+    complete_if_followed_complete: bool = False,
 ) -> bool:
     download_id = int(download["id"])
     logger.info(
@@ -495,9 +496,14 @@ async def switch_to_followed_download(
         "status": "active",
     }
     display_name: str | None = None
+    followed_is_complete = False
 
     if real_status:
-        if download_ops.first_followed_gid(real_status) is None:
+        followed_is_complete = str(real_status.get("status") or "") == "complete"
+        if (
+            download_ops.first_followed_gid(real_status) is None
+            and not followed_is_complete
+        ):
             global_values["status"] = download_ops.map_aria2_status(real_status)
         progress = download_ops.map_progress_values(real_status, display_name_fallback)
         global_values.update(progress)
@@ -507,11 +513,11 @@ async def switch_to_followed_download(
         if bt_hash:
             global_values["bt_info_hash"] = bt_hash
 
-    if not is_bt_resource_kind(download):
+    if str(download.get("resource_kind") or "").lower() != "torrent":
         global_values["resource_kind"] = "torrent"
 
-    changed = await guarded_update_global_download(download_id, global_values)
-    if not changed:
+    updated_download = await _guarded_update_global_download(download_id, global_values)
+    if updated_download is None:
         return False
 
     await update_active_user_tasks(
@@ -523,6 +529,16 @@ async def switch_to_followed_download(
 
     if metadata_gid and metadata_gid != followed_gid:
         await _remove_download_result_best_effort(client, metadata_gid, log_prefix)
+
+    if followed_is_complete and complete_if_followed_complete and real_status:
+        await handle_v0_download_complete(
+            client=client,
+            download=updated_download,
+            aria2_status=real_status,
+            completion_gid=followed_gid,
+            log_prefix=log_prefix,
+            allow_metadata_handoff_defer=False,
+        )
 
     return True
 
@@ -544,10 +560,58 @@ async def resolve_download_for_gid(
         return None
 
     logger.info("[WS] Updating followed download GID: %s -> %s", following_gid, gid)
-    updated = await _guarded_update_global_download(
-        int(download["id"]), {"aria2_gid": gid}
-    )
+    values: dict[str, Any] = {"aria2_gid": gid}
+    if str(download.get("resource_kind") or "").lower() != "torrent":
+        values["resource_kind"] = "torrent"
+    updated = await _guarded_update_global_download(int(download["id"]), values)
     return updated or download
+
+
+def _followed_gid_from_rows(
+    rows: list[dict[str, Any]],
+    metadata_gid: str,
+) -> str | None:
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if download_ops.following_gid(row) != metadata_gid:
+            continue
+
+        gid = row.get("gid")
+        if isinstance(gid, (str, int)) and str(gid):
+            return str(gid)
+    return None
+
+
+async def _find_followed_gid_by_following(
+    client: Aria2Gateway,
+    metadata_gid: str,
+    log_prefix: str,
+) -> str | None:
+    list_calls = (
+        ("active", client.tell_active, ()),
+        ("waiting", client.tell_waiting, (0, 1000)),
+        ("stopped", client.tell_stopped, (0, 1000)),
+    )
+    for label, call, args in list_calls:
+        try:
+            rows = await call(*args)
+        except Exception as exc:
+            logger.debug(
+                "%s Failed to scan aria2 %s tasks for following=%s error=%s",
+                log_prefix,
+                label,
+                metadata_gid,
+                exc,
+            )
+            continue
+        if not isinstance(rows, list):
+            continue
+
+        followed_gid = _followed_gid_from_rows(rows, metadata_gid)
+        if followed_gid is not None:
+            return followed_gid
+    return None
 
 
 async def _refresh_followed_gid(
@@ -568,9 +632,12 @@ async def _refresh_followed_gid(
                 gid,
                 exc,
             )
-            return None
+        else:
+            followed_gid = download_ops.first_followed_gid(status)
+            if followed_gid is not None:
+                return followed_gid
 
-        followed_gid = download_ops.first_followed_gid(status)
+        followed_gid = await _find_followed_gid_by_following(client, gid, log_prefix)
         if followed_gid is not None:
             return followed_gid
 
@@ -587,6 +654,7 @@ async def switch_to_late_followed_download_if_supported(
     metadata_gid: str | None,
     display_name_fallback: str | None,
     log_prefix: str,
+    complete_if_followed_complete: bool = False,
 ) -> bool:
     followed_gid = await _refresh_followed_gid(client, metadata_gid, log_prefix)
     if followed_gid is None:
@@ -599,6 +667,7 @@ async def switch_to_late_followed_download_if_supported(
         followed_gid=followed_gid,
         display_name_fallback=display_name_fallback,
         log_prefix=log_prefix,
+        complete_if_followed_complete=complete_if_followed_complete,
     )
 
 
@@ -635,6 +704,13 @@ async def defer_metadata_completion_if_handoff_pending(
         user_status="active",
     )
     return True
+
+
+def should_defer_stopped_result_cleanup(
+    download: dict[str, Any],
+    aria2_status: dict[str, Any],
+) -> bool:
+    return download_ops.is_metadata_handoff_pending(download, aria2_status)
 
 
 async def handle_v0_download_complete(
@@ -832,6 +908,7 @@ async def handle_aria2_event(
                 followed_gid=followed_gid,
                 display_name_fallback=display_name_fallback,
                 log_prefix="[WS]",
+                complete_if_followed_complete=True,
             )
         else:
             completion_gid = str(download.get("aria2_gid") or gid)
@@ -921,35 +998,23 @@ async def update_v0_download_from_aria2(
             followed_gid=str(followed_by[0]),
             display_name_fallback=str(download.get("display_name") or ""),
             log_prefix="[Sync]",
+            complete_if_followed_complete=True,
         )
         if switched:
             await _broadcast_download_update(int(download["id"]))
         return
 
     if download_ops.is_metadata_handoff_pending(download, status):
-        followed_gid = None
-        try:
-            refreshed_status = await client.tell_status(gid)
-            followed_by = refreshed_status.get("followedBy") or []
-            if followed_by:
-                followed_gid = str(followed_by[0])
-        except Exception as exc:
-            logger.debug(
-                "[Sync] Failed to refresh metadata handoff gid=%s error=%s",
-                gid,
-                exc,
-            )
-        if followed_gid:
-            switched = await switch_to_followed_download(
-                client=client,
-                download=download,
-                metadata_gid=gid,
-                followed_gid=followed_gid,
-                display_name_fallback=str(download.get("display_name") or ""),
-                log_prefix="[Sync]",
-            )
-            if switched:
-                await _broadcast_download_update(int(download["id"]))
+        switched = await switch_to_late_followed_download_if_supported(
+            client=client,
+            download=download,
+            metadata_gid=gid,
+            display_name_fallback=str(download.get("display_name") or ""),
+            log_prefix="[Sync]",
+            complete_if_followed_complete=True,
+        )
+        if switched:
+            await _broadcast_download_update(int(download["id"]))
             return
 
         logger.info(
