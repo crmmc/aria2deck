@@ -48,6 +48,7 @@ from app.services.usage_service import (
 )
 
 logger = logging.getLogger(__name__)
+DUPLICATE_TASK_MESSAGE = "任务已存在"
 _ALLOWED_USER_OPTIONS = frozenset(
     (
         "out",
@@ -58,6 +59,21 @@ _ALLOWED_USER_OPTIONS = frozenset(
         "bt-tracker",
     )
 )
+
+
+class DuplicateTaskError(Exception):
+    """Raised when a user already owns a non-retryable task for a resource."""
+
+
+def _is_non_retryable_user_task(task: dict[str, Any] | None) -> bool:
+    if task is None:
+        return False
+    return str(task.get("status") or "") not in RETRYABLE_TASK_STATUSES
+
+
+def _raise_if_duplicate_user_task(task: dict[str, Any] | None) -> None:
+    if _is_non_retryable_user_task(task):
+        raise DuplicateTaskError(DUPLICATE_TASK_MESSAGE)
 
 
 _download_locks: dict[tuple[int, int], asyncio.Lock] = {}
@@ -386,6 +402,9 @@ async def _create_user_download_with_submit(
                 raise LookupError("global download not found")
             global_download = updated_global
 
+        existing_task = await get_user_task(user_id, global_download["id"])
+        _raise_if_duplicate_user_task(existing_task)
+
         effective_total_bytes = max(
             requested_total_bytes,
             max(0, int(global_download.get("total_bytes") or 0)),
@@ -406,15 +425,10 @@ async def _create_user_download_with_submit(
                 finished_at_ms=int(global_download["completed_at_ms"] or now_ms()),
             )
 
-        existing_task = await get_user_task(user_id, global_download["id"])
-        if existing_task and existing_task["status"] not in RETRYABLE_TASK_STATUSES:
-            return existing_task
-
         lock = await _get_user_task_lock(user_id, global_download["id"])
         async with lock:
             existing_task = await get_user_task(user_id, global_download["id"])
-            if existing_task and existing_task["status"] not in RETRYABLE_TASK_STATUSES:
-                return existing_task
+            _raise_if_duplicate_user_task(existing_task)
 
             reserved_bytes = effective_total_bytes
             reservation_made = False
@@ -451,6 +465,7 @@ async def _create_user_download_with_submit(
                     )
                 existing_task = await get_user_task(user_id, global_download["id"])
                 if existing_task:
+                    _raise_if_duplicate_user_task(existing_task)
                     return existing_task
                 raise
             except Exception:

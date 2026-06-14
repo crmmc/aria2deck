@@ -81,7 +81,8 @@ def parse_torrent_bytes(raw: bytes) -> TorrentMetadata:
 
 
 def validate_selected_indexes(
-    metadata: TorrentMetadata, selected_file_indexes: list[int] | tuple[int, ...] | None
+    metadata: TorrentMetadata,
+    selected_file_indexes: list[object] | tuple[object, ...] | None,
 ) -> tuple[int, ...]:
     if selected_file_indexes is None:
         return tuple(file.index for file in metadata.files)

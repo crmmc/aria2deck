@@ -8,6 +8,7 @@ import pytest
 import app.services.download_service as download_service
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
 from app.services.download_service import (
+    DuplicateTaskError,
     cancel_user_task,
     create_user_download,
     create_user_torrent_download,
@@ -156,7 +157,7 @@ async def test_create_download_rejects_path_like_out_option_before_submit(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_same_user_create_keeps_single_reservation(
+async def test_concurrent_same_user_create_rejects_duplicate_and_keeps_single_reservation(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="same_user_race_down", quota_bytes=500)
@@ -187,10 +188,155 @@ async def test_concurrent_same_user_create_keeps_single_reservation(
         return_exceptions=True,
     )
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+    successes = [result for result in results if not isinstance(result, Exception)]
+    duplicates = [
+        result for result in results if isinstance(result, DuplicateTaskError)
+    ]
 
-    assert all(not isinstance(result, Exception) for result in results)
-    assert results[0]["id"] == results[1]["id"]
+    assert len(successes) == 1
+    assert len(duplicates) == 1
     assert usage["reserved_bytes"] == 500
+    client.add_uri.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    ["queued", "active", "waiting", "paused", "completed"],
+)
+async def test_same_user_non_retryable_task_rejects_duplicate(
+    temp_db: str, status: str
+) -> None:
+    user = await create_user_v0(username=f"duplicate_{status}", quota_bytes=1000)
+    resource_key = f"http:duplicate-{status}"
+    global_download = await create_global_download_v0(
+        resource_key=resource_key,
+        resource_kind="http",
+        source_uri=f"https://example.com/{status}.bin",
+        status=status,
+        aria2_gid=None if status == "queued" else f"gid-duplicate-{status}",
+        display_name="original.bin",
+        total_bytes=10,
+        completed_bytes=10 if status == "completed" else 0,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=global_download["id"],
+        status=status,
+        display_name="original.bin",
+    )
+    client = AsyncMock()
+
+    with pytest.raises(DuplicateTaskError, match="任务已存在"):
+        await create_user_download(
+            user_id=user["id"],
+            quota_bytes=user["quota_bytes"],
+            uri=f"https://example.com/{status}.bin",
+            resource_key=resource_key,
+            resource_kind="http",
+            display_name="replacement.bin",
+            total_bytes=10,
+            aria2_client=client,
+        )
+
+    task = await get_user_task(user["id"], global_download["id"])
+    assert task is not None
+    assert task["display_name"] == "original.bin"
+    client.add_uri.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_completed_download_does_not_overwrite_existing_task_name(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="duplicate_completed_file", quota_bytes=1000)
+    store_path = get_store_path_for_hash("duplicate_completed_hash")
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    store_path.write_bytes(b"completed")
+    user_file = await create_user_file_v0(
+        user_id=user["id"],
+        real_path=store_path,
+        content_hash="duplicate_completed_hash",
+        display_name="real-name.bin",
+        size_bytes=9,
+    )
+    global_download = await create_global_download_v0(
+        resource_key="magnet:duplicate-completed",
+        resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:duplicate-completed",
+        status="completed",
+        display_name="real-name.bin",
+        total_bytes=9,
+        completed_bytes=9,
+        completed_file_id=user_file["stored_file_id"],
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=global_download["id"],
+        status="completed",
+        display_name="real-name.bin",
+    )
+    client = AsyncMock()
+
+    with pytest.raises(DuplicateTaskError, match="任务已存在"):
+        await create_user_download(
+            user_id=user["id"],
+            quota_bytes=user["quota_bytes"],
+            uri="magnet:?xt=urn:btih:duplicate-completed&dn=wrong-name",
+            resource_key="magnet:duplicate-completed",
+            resource_kind="magnet",
+            display_name="magnet:?xt=urn:btih:duplicate-completed&dn=wrong-name",
+            total_bytes=0,
+            aria2_client=client,
+        )
+
+    task = await get_user_task(user["id"], global_download["id"])
+    assert task is not None
+    assert task["display_name"] == "real-name.bin"
+    client.add_uri.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_user_task_can_be_recreated(temp_db: str) -> None:
+    user = await create_user_v0(username="retry_cancelled_down", quota_bytes=1000)
+    global_download = await create_global_download_v0(
+        resource_key="http:retry-cancelled",
+        resource_kind="http",
+        source_uri="https://example.com/retry-cancelled.bin",
+        status="cancelled",
+        display_name="retry-cancelled.bin",
+        total_bytes=200,
+    )
+    cancelled_task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=global_download["id"],
+        status="cancelled",
+        reserved_bytes=0,
+        display_name="retry-cancelled.bin",
+    )
+    client = AsyncMock()
+    client.add_uri.return_value = "gid-retry-cancelled"
+
+    task = await create_user_download(
+        user_id=user["id"],
+        quota_bytes=user["quota_bytes"],
+        uri="https://example.com/retry-cancelled.bin",
+        resource_key="http:retry-cancelled",
+        resource_kind="http",
+        display_name="retry-cancelled.bin",
+        total_bytes=200,
+        aria2_client=client,
+    )
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+    stored_global = await get_global_by_resource_key("http:retry-cancelled")
+
+    assert task["id"] == cancelled_task["id"]
+    assert task["status"] == "active"
+    assert task["reserved_bytes"] == 200
+    assert usage["reserved_bytes"] == 200
+    assert stored_global is not None
+    assert stored_global["status"] == "active"
+    assert stored_global["aria2_gid"] == "gid-retry-cancelled"
     client.add_uri.assert_awaited_once()
 
 

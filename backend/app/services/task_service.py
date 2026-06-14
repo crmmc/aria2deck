@@ -23,6 +23,7 @@ from app.repositories.downloads import (
     list_user_tasks,
 )
 from app.services.download_service import (
+    DuplicateTaskError,
     cancel_user_task,
     create_user_download,
     create_user_torrent_download,
@@ -248,6 +249,8 @@ async def create_task(
             aria2_client=_get_client(),
             options=options,
         )
+    except DuplicateTaskError as exc:
+        raise ConflictError(str(exc)) from exc
     except ValueError as exc:
         if str(exc) == "quota exceeded":
             raise ForbiddenError("空间不足") from exc
@@ -362,6 +365,8 @@ async def create_torrent_task(
             options=options,
             server_options=server_options,
         )
+    except DuplicateTaskError as exc:
+        raise ConflictError(str(exc)) from exc
     except ValueError as exc:
         if str(exc) == "quota exceeded":
             raise ForbiddenError("空间不足") from exc

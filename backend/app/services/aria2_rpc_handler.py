@@ -37,6 +37,7 @@ from app.repositories.downloads import (
 )
 from app.services import rpc_view_service
 from app.services.download_service import (
+    DuplicateTaskError,
     cancel_user_task,
     create_user_download,
     create_user_torrent_download,
@@ -82,6 +83,7 @@ class RpcErrorCode:
     TASK_NOT_FOUND = 1
     PERMISSION_DENIED = 2
     QUOTA_EXCEEDED = 3
+    TASK_EXISTS = 4
 
 
 class RpcError(Exception):
@@ -740,6 +742,15 @@ class Aria2RpcHandler:
             return "http"
         return "other"
 
+    @staticmethod
+    def _resource_key_for_uri(uri: str) -> str:
+        resource_key = get_uri_hash(uri)
+        if resource_key:
+            return resource_key
+        if uri.lower().startswith("magnet:"):
+            raise RpcError(RpcErrorCode.INVALID_PARAMS, "无效的磁力链接")
+        return hashlib.sha256(uri.encode()).hexdigest()
+
     async def _gid_for_created_task(
         self,
         task: dict[str, Any],
@@ -751,6 +762,8 @@ class Aria2RpcHandler:
     def _raise_create_download_error(exc: Exception) -> None:
         if isinstance(exc, RpcError):
             raise exc
+        if isinstance(exc, DuplicateTaskError):
+            raise RpcError(RpcErrorCode.TASK_EXISTS, str(exc)) from exc
         if isinstance(exc, ValueError):
             message = str(exc)
             if message == "quota exceeded":
@@ -776,7 +789,7 @@ class Aria2RpcHandler:
         await self._check_quota_and_disk()
         submit_uris = [str(item) for item in uris]
         uri = submit_uris[0]
-        resource_key = get_uri_hash(uri) or hashlib.sha256(uri.encode()).hexdigest()
+        resource_key = self._resource_key_for_uri(uri)
         task_name = self._extract_name_from_uri(uri) or uri
 
         try:
@@ -977,7 +990,7 @@ class Aria2RpcHandler:
         rows_by_gid = await self._get_current_rows_by_gid()
         live_by_gid: dict[str, dict[str, Any]] = {}
         try:
-            all_active = await self.client.tell_active()
+            all_active: object = await self.client.tell_active()
         except Exception as exc:
             logger.warning(
                 "aria2.tellActive failed for getGlobalStat user_id=%s, fallback to zero speed",
