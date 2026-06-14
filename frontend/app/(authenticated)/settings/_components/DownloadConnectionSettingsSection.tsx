@@ -1,3 +1,4 @@
+import { NumberSettingField } from "./NumberSettingField";
 import type { SettingsFormState } from "../settingsState";
 
 type DownloadConnectionSettingsSectionProps = {
@@ -10,7 +11,7 @@ type DownloadConnectionSettingsSectionProps = {
   onFieldChange: <K extends keyof SettingsFormState>(field: K, value: SettingsFormState[K]) => void;
 };
 
-type ConnectionField = {
+type ConnectionFieldDef = {
   id: string;
   label: string;
   description: string;
@@ -19,7 +20,7 @@ type ConnectionField = {
   max: number;
 };
 
-const connectionFields: ConnectionField[] = [
+const connectionFields: ConnectionFieldDef[] = [
   { id: "settings-conn-total", label: "系统总下载连接上限", description: "所有用户的总并发下载连接数上限（0 = 不限制）", field: "downloadTotalConnections", min: 0, max: 10000 },
   { id: "settings-conn-auth-reserved", label: "已登录保底连接数", description: "为已登录下载预留的最小可用连接数", field: "downloadAuthenticatedReservedConnections", min: 0, max: 10000 },
   { id: "settings-conn-user-max", label: "已登录单用户最大并发", description: "单个已登录用户的并发下载连接数上限（0 = 不限制）", field: "downloadAuthenticatedPerUserConnections", min: 0, max: 1000 },
@@ -36,21 +37,16 @@ export function DownloadConnectionSettingsSection({ form, onFieldChange }: Downl
       <h2 className="section-title mt-7">下载并发限制</h2>
       <p className="muted text-sm mb-4">控制已登录下载保底与匿名分享下载的可借用容量，保证已登录用户体验优先。</p>
       {connectionFields.map(({ id, label, description, field, min, max }) => (
-        <div key={id} className="mb-7">
-          <label className="form-label-lg" htmlFor={id}>{label}</label>
-          <p className="muted text-sm mb-3">{description}</p>
-          <input
-            id={id}
-            type="number"
-            min={min}
-            max={max}
-            value={form[field as keyof typeof form] as number}
-            onChange={(e) => onFieldChange(field, Math.max(min, Math.min(max, parseInt(e.target.value) || min)))}
-            className="input"
-            style={{ maxWidth: 200 }}
-            aria-label={label}
-          />
-        </div>
+        <NumberSettingField
+          key={id}
+          id={id}
+          label={label}
+          description={description}
+          value={form[field as keyof typeof form] as number}
+          min={min}
+          max={max}
+          onChange={(value) => onFieldChange(field, value)}
+        />
       ))}
     </>
   );

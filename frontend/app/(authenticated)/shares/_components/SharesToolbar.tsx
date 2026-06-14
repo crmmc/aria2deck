@@ -1,3 +1,4 @@
+import { ToolbarGroup, ToolbarSearchInput, ToolbarShell } from "@/components/ui/Toolbar";
 import type { ShareFilterStatus } from "../shareState";
 
 type SharesToolbarProps = {
@@ -28,8 +29,8 @@ export function SharesToolbar({
   onSearchKeywordChange,
 }: SharesToolbarProps) {
   return (
-    <div className="card filter-toolbar inline-filter-toolbar">
-      <div className="filter-group toolbar-actions-group">
+    <ToolbarShell>
+      <ToolbarGroup className="toolbar-actions-group">
         <button
           type="button"
           className="button secondary btn-sm"
@@ -64,9 +65,9 @@ export function SharesToolbar({
             一键失效全部
           </button>
         )}
-      </div>
+      </ToolbarGroup>
 
-      <div className="filter-group toolbar-select-group">
+      <ToolbarGroup className="toolbar-select-group">
         <span className="muted text-sm">筛选:</span>
         <select
           value={filterStatus}
@@ -78,18 +79,16 @@ export function SharesToolbar({
           <option value="expired">已过期</option>
           <option value="revoked">已失效</option>
         </select>
-      </div>
+      </ToolbarGroup>
 
-      <div className="filter-group toolbar-search-group">
-        <input
-          type="text"
+      <ToolbarGroup className="toolbar-search-group">
+        <ToolbarSearchInput
           placeholder="搜索分享..."
           value={searchKeyword}
-          onChange={(e) => onSearchKeywordChange(e.target.value)}
-          className="search-input"
-          aria-label="搜索分享"
+          onChange={onSearchKeywordChange}
+          ariaLabel="搜索分享"
         />
-      </div>
-    </div>
+      </ToolbarGroup>
+    </ToolbarShell>
   );
 }

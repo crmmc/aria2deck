@@ -4,22 +4,11 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/AuthContext";
 import { useToast } from "@/components/Toast";
+import { useSelection } from "@/hooks/useSelection";
 import { ModalOverlay } from "@/components/ModalOverlay";
 import { api } from "@/lib/api";
+import { formatBytes } from "@/lib/utils";
 import type { StoredFileInfo, FileUserInfo } from "@/types";
-
-function formatSize(bytes: number): string {
-  if (bytes >= 1024 * 1024 * 1024) {
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
-  }
-  if (bytes >= 1024 * 1024) {
-    return (bytes / (1024 * 1024)).toFixed(2) + " MB";
-  }
-  if (bytes >= 1024) {
-    return (bytes / 1024).toFixed(2) + " KB";
-  }
-  return bytes + " B";
-}
 
 export default function StoragePage() {
   const { user } = useAuth();
@@ -30,7 +19,7 @@ export default function StoragePage() {
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [search, setSearch] = useState("");
   const [orphanOnly, setOrphanOnly] = useState(false);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const { selected, selectedCount, setItemSelected, selectAll, clear } = useSelection<number>();
   const [deleting, setDeleting] = useState(false);
   const loading = !initialLoadDone;
 
@@ -70,24 +59,14 @@ export default function StoragePage() {
 
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
-      setSelected(new Set(files.map((f) => f.id)));
+      selectAll(files.map((f) => f.id));
     } else {
-      setSelected(new Set());
+      clear();
     }
-  };
-
-  const handleSelect = (id: number, checked: boolean) => {
-    const newSet = new Set(selected);
-    if (checked) {
-      newSet.add(id);
-    } else {
-      newSet.delete(id);
-    }
-    setSelected(newSet);
   };
 
   const handleDelete = async () => {
-    if (selected.size === 0) return;
+    if (selectedCount === 0) return;
     setDeleting(true);
     try {
       const res = await api.bulkDeleteStoredFiles(Array.from(selected));
@@ -96,7 +75,7 @@ export default function StoragePage() {
         if (res.errors.length > 0) {
           showToast(res.errors[0], "error");
         }
-        setSelected(new Set());
+        clear();
         loadFiles();
       }
     } catch {
@@ -163,9 +142,9 @@ export default function StoragePage() {
               type="button"
               className="button danger"
               onClick={handleDelete}
-              disabled={selected.size === 0 || deleting}
+              disabled={selectedCount === 0 || deleting}
             >
-              {deleting ? "删除中..." : `删除选中 (${selected.size})`}
+              {deleting ? "删除中..." : `删除选中 (${selectedCount})`}
             </button>
           </div>
         </div>
@@ -178,7 +157,7 @@ export default function StoragePage() {
                   <th className="table-cell" style={{ width: 40 }}>
                     <input
                       type="checkbox"
-                      checked={files.length > 0 && selected.size === files.length}
+                      checked={files.length > 0 && selectedCount === files.length}
                       onChange={(e) => handleSelectAll(e.target.checked)}
                       aria-label="全选"
                     />
@@ -198,14 +177,14 @@ export default function StoragePage() {
                     <input
                       type="checkbox"
                       checked={selected.has(f.id)}
-                      onChange={(e) => handleSelect(f.id, e.target.checked)}
+                      onChange={(e) => setItemSelected(f.id, e.target.checked)}
                       aria-label={`选择 ${f.original_name}`}
                     />
                   </td>
                   <td className="table-cell font-medium" title={f.original_name}>
                     {f.is_directory ? "📁 " : ""}{f.original_name}
                   </td>
-                  <td className="table-cell">{formatSize(f.size)}</td>
+                  <td className="table-cell">{formatBytes(f.size)}</td>
                   <td className="table-cell muted" title={f.content_hash}>
                     {f.content_hash.slice(0, 8)}...
                   </td>

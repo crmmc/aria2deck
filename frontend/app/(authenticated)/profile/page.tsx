@@ -10,6 +10,7 @@ import {
 } from "@/lib/notification";
 import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
+import { useClipboard } from "@/hooks/useClipboard";
 import { useAuth } from "@/lib/AuthContext";
 import { RpcAccessStatus } from "@/types";
 import { InitialPasswordAlert } from "./_components/InitialPasswordAlert";
@@ -20,6 +21,7 @@ import { RpcAccessSection } from "./_components/RpcAccessSection";
 export default function ProfilePage() {
   const { showToast, showConfirm } = useToast();
   const { user, refreshUser } = useAuth();
+  const copyToClipboard = useClipboard();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const mounted = useMounted();
@@ -112,17 +114,18 @@ export default function ProfilePage() {
 
   const copySecret = () => {
     if (rpcAccess?.secret) {
-      navigator.clipboard.writeText(rpcAccess.secret).then(() => {
-        if (!mountedRef.current) return;
-        setCopiedSecret(true);
-        const t = setTimeout(() => {
+      copyToClipboard(rpcAccess.secret, {
+        successMessage: "已复制",
+        onSuccess: () => {
           if (!mountedRef.current) return;
-          setCopiedSecret(false);
-          copyTimers.current.delete(t);
-        }, 2000);
-        copyTimers.current.add(t);
-      }).catch(() => {
-        showToast("复制失败", "error");
+          setCopiedSecret(true);
+          const t = setTimeout(() => {
+            if (!mountedRef.current) return;
+            setCopiedSecret(false);
+            copyTimers.current.delete(t);
+          }, 2000);
+          copyTimers.current.add(t);
+        },
       });
     }
   };
@@ -130,17 +133,18 @@ export default function ProfilePage() {
   const copyRpcUrl = () => {
     const url = getRpcUrl();
     if (url) {
-      navigator.clipboard.writeText(url).then(() => {
-        if (!mountedRef.current) return;
-        setCopiedUrl(true);
-        const t = setTimeout(() => {
+      copyToClipboard(url, {
+        successMessage: "已复制",
+        onSuccess: () => {
           if (!mountedRef.current) return;
-          setCopiedUrl(false);
-          copyTimers.current.delete(t);
-        }, 2000);
-        copyTimers.current.add(t);
-      }).catch(() => {
-        showToast("复制失败", "error");
+          setCopiedUrl(true);
+          const t = setTimeout(() => {
+            if (!mountedRef.current) return;
+            setCopiedUrl(false);
+            copyTimers.current.delete(t);
+          }, 2000);
+          copyTimers.current.add(t);
+        },
       });
     }
   };

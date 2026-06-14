@@ -1,6 +1,5 @@
 import "./globals.css";
 import { Providers } from "@/components/Providers";
-import LiquidGlassFilter from "@/components/LiquidGlassFilter";
 
 export const metadata = {
   title: "aria2 控制器",
@@ -49,7 +48,6 @@ export default function RootLayout({
         <style>{loadingStyles}</style>
       </head>
       <body>
-        <LiquidGlassFilter id="liquid-glass" width={1280} height={720} />
         <div id="app-loading">
           <div className="spinner" />
           <div className="brand">加载中…</div>

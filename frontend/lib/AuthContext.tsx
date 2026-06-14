@@ -16,13 +16,11 @@ import type { User } from "@/types";
 type AuthContextType = {
   user: User | null;
   loading: boolean;
-  error: string | null;  // 非 401 错误信息
+  error: string | null;
   siteTitle: string;
-  sidebarExpanded: boolean;
-  setSidebarExpanded: (expanded: boolean) => void;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
-  retryAuth: () => void;  // 重试认证
+  retryAuth: () => void;
 };
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -44,9 +42,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     error: null,
     siteTitle: DEFAULT_SITE_TITLE,
   });
-  const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const initializedRef = useRef(false);
-  const isUnauthorizedRef = useRef(false);
   const mountedRef = useRef(false);
   const pathnameRef = useRef(pathname);
   pathnameRef.current = pathname;
@@ -103,7 +99,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (userResult.ok) {
-        isUnauthorizedRef.current = false;
         setAuthState({
           user: userResult.user,
           error: null,
@@ -116,7 +111,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (err instanceof ApiError) {
           if (err.isUnauthorized) {
             // 401: 未登录或会话过期
-            isUnauthorizedRef.current = true;
             if (shouldRedirectToLogin()) {
               push("/login");
             }
@@ -142,7 +136,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [push, shouldRedirectToLogin]);
 
   const retryAuth = useCallback(() => {
-    isUnauthorizedRef.current = false;
     initializedRef.current = false;
     setAuthState((prev) => ({ ...prev, error: null, loading: true }));
     void initializeAuth();
@@ -155,7 +148,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // 监听 401 错误，自动跳转登录页
   useEffect(() => {
     return authEvents.onUnauthorized(() => {
-      isUnauthorizedRef.current = true;
       setAuthState((prev) => ({ ...prev, user: null }));
       if (shouldRedirectToLogin()) {
         push("/login");
@@ -175,7 +167,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (err) {
       console.error("退出登录请求失败，已执行本地登出", err);
     }
-    isUnauthorizedRef.current = true;
     setAuthState((prev) => ({ ...prev, user: null }));
     push("/login");
   }, [push]);
@@ -186,15 +177,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       loading: authState.loading,
       error: authState.error,
       siteTitle: authState.siteTitle,
-      sidebarExpanded,
-      setSidebarExpanded,
       logout,
       refreshUser,
       retryAuth,
     }),
     [
       authState,
-      sidebarExpanded,
       logout,
       refreshUser,
       retryAuth,

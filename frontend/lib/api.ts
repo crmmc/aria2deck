@@ -32,6 +32,32 @@ function getApiBase(): string {
   return "";
 }
 
+type QueryValue = string | number | boolean | null | undefined;
+
+function buildQuery(params: Record<string, QueryValue>): string {
+  const searchParams = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") {
+      searchParams.set(key, String(value));
+    }
+  });
+  const query = searchParams.toString();
+  return query ? `?${query}` : "";
+}
+
+function withQuery(path: string, params: Record<string, QueryValue>): string {
+  return `${path}${buildQuery(params)}`;
+}
+
+function downloadUrl(path: string, params: Record<string, QueryValue> = {}): string {
+  return `${getApiBase()}${withQuery(path, params)}`;
+}
+
+const removePackTask = (id: number) =>
+  request<{ ok: boolean; message: string }>(`/api/files/pack/${id}`, {
+    method: "DELETE",
+  });
+
 // 401 错误事件，用于通知 AuthContext 会话过期
 export const authEvents = {
   listeners: new Set<() => void>(),
@@ -132,7 +158,7 @@ export const api = {
 
   // Tasks (subscription-based)
   listTasks: (statusFilter?: string) =>
-    request<Task[]>(`/api/tasks${statusFilter ? `?status_filter=${statusFilter}` : ""}`),
+    request<Task[]>(withQuery("/api/tasks", { status_filter: statusFilter })),
   createTask: (uri: string) =>
     request<Task>("/api/tasks", {
       method: "POST",
@@ -235,16 +261,13 @@ export const api = {
 
   // Files (UserFile-based)
   listFiles: (page = 1, pageSize = 10) =>
-    request<FileListResponse>(`/api/files?page=${page}&page_size=${pageSize}`),
+    request<FileListResponse>(withQuery("/api/files", { page, page_size: pageSize })),
   browseFile: (fileHash: string, path?: string) =>
     request<BrowseFileInfo[]>(
-      `/api/files/${fileHash}/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`
+      withQuery(`/api/files/${fileHash}/browse`, { path })
     ),
-  downloadFileUrl: (fileHash: string, path?: string) => {
-    const base = getApiBase();
-    const pathParam = path ? `?path=${encodeURIComponent(path)}` : "";
-    return `${base}/api/files/${fileHash}/download${pathParam}`;
-  },
+  downloadFileUrl: (fileHash: string, path?: string) =>
+    downloadUrl(`/api/files/${fileHash}/download`, { path }),
   deleteFile: (fileHash: string) =>
     request<{ ok: boolean }>(`/api/files/${fileHash}`, {
       method: "DELETE",
@@ -276,30 +299,21 @@ export const api = {
     ),
 
   cancelPackTask: (id: number) =>
-    request<{ ok: boolean; message: string }>(`/api/files/pack/${id}`, {
-      method: "DELETE",
-    }),
+    removePackTask(id),
 
   // 删除打包任务记录（与 cancelPackTask 共用后端端点）
   deletePackTask: (id: number) =>
-    request<{ ok: boolean; message: string }>(`/api/files/pack/${id}`, {
-      method: "DELETE",
-    }),
+    removePackTask(id),
 
   clearPackTasks: () =>
     request<{ ok: boolean; count: number }>("/api/files/pack", {
       method: "DELETE",
     }),
 
-  listStoredFiles: (search?: string, orphanOnly?: boolean) => {
-    const params = new URLSearchParams();
-    if (search) params.set("search", search);
-    if (orphanOnly) params.set("orphan_only", "true");
-    const query = params.toString();
-    return request<StoredFileListResponse>(
-      `/api/admin/storage/files${query ? `?${query}` : ""}`
-    );
-  },
+  listStoredFiles: (search?: string, orphanOnly?: boolean) =>
+    request<StoredFileListResponse>(
+      withQuery("/api/admin/storage/files", { search, orphan_only: orphanOnly || undefined })
+    ),
 
   getFileUsers: (fileId: number) =>
     request<FileUsersResponse>(`/api/admin/storage/files/${fileId}/users`),
@@ -337,20 +351,11 @@ export const api = {
       body: JSON.stringify({ password }),
     }),
   shareDownloadUrl: (code: string, token?: string, subpath?: string) => {
-    const base = getApiBase();
-    const params = new URLSearchParams();
-    if (token) params.set("token", token);
-    if (subpath) params.set("subpath", subpath);
-    const query = params.toString();
-    return `${base}/api/s/${code}/download${query ? `?${query}` : ""}`;
+    return downloadUrl(`/api/s/${code}/download`, { token, subpath });
   },
   browseShare: (code: string, token?: string, subpath?: string) => {
-    const params = new URLSearchParams();
-    if (token) params.set("token", token);
-    if (subpath) params.set("subpath", subpath);
-    const query = params.toString();
     return request<Array<{ name: string; is_dir: boolean; size: number; path: string }>>(
-      `/api/s/${code}/browse${query ? `?${query}` : ""}`
+      withQuery(`/api/s/${code}/browse`, { token, subpath })
     );
   },
   // 公开 API（无需认证）

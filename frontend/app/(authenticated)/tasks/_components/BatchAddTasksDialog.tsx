@@ -1,4 +1,4 @@
-import { ModalOverlay } from "@/components/ModalOverlay";
+import { DialogShell } from "@/components/ui/DialogShell";
 
 type BatchAddTasksDialogProps = {
   batchUris: string;
@@ -16,7 +16,7 @@ export function BatchAddTasksDialog({
   onCancel,
 }: BatchAddTasksDialogProps) {
   return (
-    <ModalOverlay
+    <DialogShell
       onClose={onCancel}
       contentClassName="batch-modal-content"
     >
@@ -60,6 +60,6 @@ export function BatchAddTasksDialog({
           {isBatchAdding ? "添加中..." : "添加任务"}
         </button>
       </div>
-    </ModalOverlay>
+    </DialogShell>
   );
 }

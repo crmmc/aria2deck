@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
@@ -55,7 +55,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
 
     if (hasActiveTasks) {
       const interval = setInterval(() => {
-        loadTasks();
+        if (!document.hidden) loadTasks();
       }, 2000);
       return () => clearInterval(interval);
     }
@@ -104,12 +104,14 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
     timersRef.current.add(hideTimer);
   };
 
-  const activeTasks = tasks.filter(
-    (t) => t.status === "pending" || t.status === "packing"
+  const activeTasks = useMemo(
+    () => tasks.filter((t) => t.status === "pending" || t.status === "packing"),
+    [tasks]
   );
 
-  const terminalTasks = tasks.filter(
-    (t) => t.status === "done" || t.status === "failed" || t.status === "cancelled"
+  const terminalTasks = useMemo(
+    () => tasks.filter((t) => t.status === "done" || t.status === "failed" || t.status === "cancelled"),
+    [tasks]
   );
 
   const handleClearAll = async () => {

@@ -17,9 +17,12 @@ export default function StatsWidget() {
 
   useEffect(() => {
     let cancelled = false;
+    let isFetching = false;
     api.getStats().then((s) => { if (!cancelled) setStats(s); }).catch(console.error);
     const interval = setInterval(() => {
-      api.getStats().then((s) => { if (!cancelled) setStats(s); }).catch(console.error);
+      if (document.hidden || isFetching) return;
+      isFetching = true;
+      api.getStats().then((s) => { if (!cancelled) setStats(s); }).catch(console.error).finally(() => { isFetching = false; });
     }, 5000);
     return () => {
       cancelled = true;

@@ -1,3 +1,5 @@
+import { ToolbarGroup, ToolbarSearchInput, ToolbarShell } from "@/components/ui/Toolbar";
+
 type TaskToolbarProps = {
   selectedCount: number;
   filteredCount: number;
@@ -28,8 +30,8 @@ export function TaskToolbar({
   onSearchKeywordChange,
 }: TaskToolbarProps) {
   return (
-    <div className="card filter-toolbar inline-filter-toolbar">
-      <div className="filter-group toolbar-actions-group">
+    <ToolbarShell>
+      <ToolbarGroup className="toolbar-actions-group">
         <button
           type="button"
           className="button secondary btn-sm"
@@ -56,9 +58,9 @@ export function TaskToolbar({
             )}
           </>
         )}
-      </div>
+      </ToolbarGroup>
 
-      <div className="filter-group toolbar-select-group">
+      <ToolbarGroup className="toolbar-select-group">
         <span className="muted text-sm">筛选:</span>
         <select
           value={filterStatus}
@@ -69,9 +71,9 @@ export function TaskToolbar({
           <option value="all">当前任务</option>
           <option value="active">进行中</option>
         </select>
-      </div>
+      </ToolbarGroup>
 
-      <div className="filter-group toolbar-select-group">
+      <ToolbarGroup className="toolbar-select-group">
         <span className="muted text-sm">排序:</span>
         <select
           value={sortBy}
@@ -83,18 +85,16 @@ export function TaskToolbar({
           <option value="speed">下载速度</option>
           <option value="progress">下载进度</option>
         </select>
-      </div>
+      </ToolbarGroup>
 
-      <div className="filter-group toolbar-search-group">
-        <input
-          type="text"
+      <ToolbarGroup className="toolbar-search-group">
+        <ToolbarSearchInput
           placeholder="搜索任务..."
           value={searchKeyword}
-          onChange={(e) => onSearchKeywordChange(e.target.value)}
-          className="search-input"
-          aria-label="搜索任务"
+          onChange={onSearchKeywordChange}
+          ariaLabel="搜索任务"
         />
-      </div>
-    </div>
+      </ToolbarGroup>
+    </ToolbarShell>
   );
 }

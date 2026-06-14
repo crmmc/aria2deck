@@ -47,7 +47,7 @@ const mockUseTaskWebSocket = useTaskWebSocket as jest.MockedFunction<typeof useT
 let intervalCallbacks: Map<number, () => void>;
 let intervalId = 0;
 
-const activeTask = {
+const activeTask: Task = {
   id: 1,
   name: "ubuntu.iso",
   uri: "https://example.com/ubuntu.iso",
@@ -157,8 +157,7 @@ describe("TasksPage", () => {
   });
 
   afterEach(() => {
-    (global.setInterval as jest.Mock).mockRestore?.();
-    (global.clearInterval as jest.Mock).mockRestore?.();
+    jest.restoreAllMocks();
   });
 
   test("renders current tasks and creates a new task", async () => {
@@ -332,7 +331,7 @@ describe("TasksPage", () => {
   test("previews torrent and creates selected torrent task", async () => {
     const readAsDataURL = jest
       .spyOn(FileReader.prototype, "readAsDataURL")
-      .mockImplementation(function () {
+      .mockImplementation(function (this: FileReader) {
         Object.defineProperty(this, "result", {
           configurable: true,
           value: "data:application/x-bittorrent;base64,dG9ycmVudA==",
@@ -379,7 +378,7 @@ describe("TasksPage", () => {
   test("torrent search filters rows without changing selection", async () => {
     const readAsDataURL = jest
       .spyOn(FileReader.prototype, "readAsDataURL")
-      .mockImplementation(function () {
+      .mockImplementation(function (this: FileReader) {
         Object.defineProperty(this, "result", {
           configurable: true,
           value: "data:application/x-bittorrent;base64,dG9ycmVudA==",
@@ -416,7 +415,7 @@ describe("TasksPage", () => {
   test("torrent cancel asks for confirmation", async () => {
     const readAsDataURL = jest
       .spyOn(FileReader.prototype, "readAsDataURL")
-      .mockImplementation(function () {
+      .mockImplementation(function (this: FileReader) {
         Object.defineProperty(this, "result", {
           configurable: true,
           value: "data:application/x-bittorrent;base64,dG9ycmVudA==",

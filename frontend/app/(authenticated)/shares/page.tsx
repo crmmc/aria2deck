@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
 import { api } from "@/lib/api";
 import { useToast } from "@/components/Toast";
+import { useClipboard } from "@/hooks/useClipboard";
 import { sharesReducer, initialSharesState, filterRecords } from "./shareState";
 import type { ShareFilterStatus } from "./shareState";
 import { SharesToolbar } from "./_components/SharesToolbar";
@@ -33,19 +34,13 @@ export default function SharesPage() {
     return () => { mountedRef.current = false; };
   }, [loadShares]);
 
+  const copy = useClipboard();
   const copyLink = useCallback(
     (shareCode: string) => {
       const link = `${window.location.origin}/s/${shareCode}`;
-      navigator.clipboard
-        .writeText(link)
-        .then(() => {
-          showToast("链接已复制", "success");
-        })
-        .catch(() => {
-          showToast("复制失败", "error");
-        });
+      copy(link);
     },
-    [showToast]
+    [copy]
   );
 
   const revokeShare = useCallback(

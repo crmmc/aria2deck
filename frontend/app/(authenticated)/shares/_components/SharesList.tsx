@@ -1,4 +1,5 @@
 import type { ShareLink } from "@/types";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { ShareCard } from "./ShareCard";
 
 type SharesListProps = {
@@ -30,8 +31,8 @@ export function SharesList({
 
   if (filteredRecords.length === 0) {
     return (
-      <div className="empty-state">
-        <div className="empty-state-icon">
+      <EmptyState
+        icon={
           <svg
             width="48"
             height="48"
@@ -48,10 +49,10 @@ export function SharesList({
             <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
             <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
           </svg>
-        </div>
-        <p className="font-medium mb-1">暂无分享记录</p>
-        <p className="muted text-base">你创建的文件分享链接将显示在这里</p>
-      </div>
+        }
+        title="暂无分享记录"
+        description="你创建的文件分享链接将显示在这里"
+      />
     );
   }
 

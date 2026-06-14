@@ -8,11 +8,6 @@ jest.mock("@/components/Providers", () => ({
   Providers: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
-jest.mock("@/components/LiquidGlassFilter", () => ({
-  __esModule: true,
-  default: () => null,
-}));
-
 describe("RootLayout", () => {
   test("renders loading styles without escaped quotes", () => {
     const { renderToStaticMarkup } = jest.requireActual<typeof import("react-dom/server")>(

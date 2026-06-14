@@ -9,6 +9,8 @@ import type { User } from "@/types";
 
 type SidebarProps = {
   user: User | null;
+  sidebarExpanded: boolean;
+  setSidebarExpanded: (expanded: boolean) => void;
 };
 
 // Icons as components for reuse
@@ -185,9 +187,9 @@ const MoreIcon = () => (
   </svg>
 );
 
-function SidebarContent({ user }: SidebarProps) {
+function SidebarContent({ user, sidebarExpanded, setSidebarExpanded }: SidebarProps) {
   const pathname = usePathname();
-  const { logout, sidebarExpanded, setSidebarExpanded, siteTitle } = useAuth();
+  const { logout, siteTitle } = useAuth();
   const [showMoreMenu, setShowMoreMenu] = useState(false);
 
 

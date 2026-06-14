@@ -1,156 +1,28 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/lib/api";
 import type { TaskHistory } from "@/types";
 import { useToast } from "@/components/Toast";
-import { formatBytes } from "@/lib/utils";
-
-interface HistoryCardProps {
-  record: TaskHistory;
-  isSelected: boolean;
-  onToggleSelection: (id: number) => void;
-  onCopyUri: (uri: string) => void;
-  onRetry: (record: TaskHistory) => void;
-}
-
-const HistoryCard = memo(function HistoryCard({
-  record,
-  isSelected,
-  onToggleSelection,
-  onCopyUri,
-  onRetry,
-}: HistoryCardProps) {
-  const handleCardClick = useCallback(() => {
-    if (record.uri) {
-      onCopyUri(record.uri);
-    }
-  }, [record.uri, onCopyUri]);
-
-  const handleCheckboxChange = useCallback(() => {
-    onToggleSelection(record.id);
-  }, [record.id, onToggleSelection]);
-
-  const handleCopyClick = useCallback(() => {
-    onCopyUri(record.uri!);
-  }, [record.uri, onCopyUri]);
-
-  const handleRetryClick = useCallback(() => {
-    onRetry(record);
-  }, [record, onRetry]);
-
-  const statusText =
-    record.result === "completed"
-      ? "已完成"
-      : record.result === "cancelled"
-        ? "已取消"
-        : "失败";
-
-  const statusClass =
-    record.result === "completed"
-      ? "task-status-complete"
-      : record.result === "cancelled"
-        ? "task-status-cancelled"
-        : "task-status-error";
-
-  const interactiveProps = record.uri
-    ? {
-        role: "button",
-        tabIndex: 0,
-        onClick: handleCardClick,
-        onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            handleCardClick();
-          }
-        },
-        "aria-label": `复制历史任务链接 ${record.task_name}`,
-      }
-    : {};
-
-  return (
-    <div
-      className={`task-card-inner${isSelected ? " selected" : ""}${record.uri ? " cursor-pointer" : ""}`}
-      {...interactiveProps}
-    >
-      <div>
-        <div className="space-between flex-start mb-3">
-          <div className="task-card-header">
-            <input
-              type="checkbox"
-              aria-label={`选择 ${record.task_name}`}
-              checked={isSelected}
-              onChange={handleCheckboxChange}
-              onClick={(e) => e.stopPropagation()}
-              className="checkbox-sm mt-2 cursor-pointer"
-            />
-            <div className="overflow-hidden flex-1">
-              <h3 className="task-name" title={record.task_name}>
-                {record.task_name}
-              </h3>
-              <div className="muted tabular-nums text-sm">
-                {formatBytes(record.total_length)}
-              </div>
-            </div>
-          </div>
-          <span
-            className={`task-status ${statusClass}`}
-            style={{ marginLeft: "auto" }}
-          >
-            {statusText}
-          </span>
-        </div>
-
-        {record.reason && (
-          <div
-            className={`text-sm mb-3 ${record.result === "failed" ? "text-danger" : "muted"}`}
-            title={record.reason}
-          >
-            {record.reason}
-          </div>
-        )}
-      </div>
-
-      <div className="task-card-footer" role="presentation" onClick={(e) => e.stopPropagation()}>
-        <div className="task-footer-left">
-          <span className="muted text-sm" suppressHydrationWarning>
-            {new Date(record.finished_at).toLocaleString()}
-          </span>
-        </div>
-
-        <div className="task-footer-right">
-          {record.uri && (
-            <button type="button"
-              className="button secondary btn-task"
-              onClick={handleCopyClick}
-              title="复制链接"
-            >
-              复制
-            </button>
-          )}
-          {record.result === "failed" && record.uri && (
-            <button type="button"
-              className="button secondary btn-task"
-              onClick={handleRetryClick}
-              title="重新下载"
-            >
-              重试
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-});
+import { EmptyState } from "@/components/ui/EmptyState";
+import { ToolbarGroup, ToolbarSearchInput, ToolbarShell } from "@/components/ui/Toolbar";
+import { useClipboard } from "@/hooks/useClipboard";
+import { useSelection } from "@/hooks/useSelection";
+import { HistoryCard } from "./_components/HistoryCard";
 
 export default function HistoryPage() {
   const { showToast, showConfirm } = useToast();
+  const copyToClipboard = useClipboard();
   const [records, setRecords] = useState<TaskHistory[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedRecords, setSelectedRecords] = useState<Set<number>>(
-    new Set()
-  );
+  const {
+    selected: selectedRecords,
+    selectedCount,
+    setSelected: setSelectedRecords,
+    toggle: toggleRecordSelection,
+    toggleAll: toggleAllRecords,
+  } = useSelection<number>();
   const [filterStatus, setFilterStatus] = useState<string>("all");
   const [searchKeyword, setSearchKeyword] = useState("");
   const [isBatchOperating, setIsBatchOperating] = useState(false);
@@ -179,16 +51,9 @@ export default function HistoryPage() {
 
   const copyUri = useCallback(
     (uri: string) => {
-      navigator.clipboard
-        .writeText(uri)
-        .then(() => {
-          showToast("链接已复制", "success");
-        })
-        .catch(() => {
-          showToast("复制失败", "error");
-        });
+      void copyToClipboard(uri);
     },
-    [showToast]
+    [copyToClipboard]
   );
 
   const retryTask = useCallback(
@@ -263,18 +128,6 @@ export default function HistoryPage() {
     }
   }
 
-  const toggleRecordSelection = useCallback((id: number) => {
-    setSelectedRecords((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
   const filteredRecords = useMemo(() => {
     let filtered = records;
 
@@ -297,12 +150,8 @@ export default function HistoryPage() {
   }, [records, searchKeyword, filterStatus]);
 
   const toggleSelectAll = useCallback(() => {
-    if (selectedRecords.size === filteredRecords.length) {
-      setSelectedRecords(new Set());
-    } else {
-      setSelectedRecords(new Set(filteredRecords.map((r) => r.id)));
-    }
-  }, [selectedRecords.size, filteredRecords]);
+    toggleAllRecords(filteredRecords.map((r) => r.id));
+  }, [toggleAllRecords, filteredRecords]);
 
   return (
     <div className="glass-frame full-height animate-in">
@@ -313,21 +162,20 @@ export default function HistoryPage() {
         </div>
       </div>
 
-      <div className="card filter-toolbar inline-filter-toolbar">
-        <div className="filter-group toolbar-actions-group">
+      <ToolbarShell>
+        <ToolbarGroup className="toolbar-actions-group">
           <button type="button"
             className="button secondary btn-sm"
             onClick={toggleSelectAll}
           >
-            {selectedRecords.size === filteredRecords.length &&
-            filteredRecords.length > 0
+            {selectedCount === filteredRecords.length && filteredRecords.length > 0
               ? "取消全选"
               : "全选"}
           </button>
-          {selectedRecords.size > 0 && (
+          {selectedCount > 0 && (
             <>
               <span className="muted text-sm">
-                已选 {selectedRecords.size} 项
+                已选 {selectedCount} 项
               </span>
               <button type="button"
                 className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
@@ -347,9 +195,9 @@ export default function HistoryPage() {
               清空历史
             </button>
           )}
-        </div>
+        </ToolbarGroup>
 
-        <div className="filter-group toolbar-select-group">
+        <ToolbarGroup className="toolbar-select-group">
           <span className="muted text-sm">筛选:</span>
           <select
             value={filterStatus}
@@ -362,19 +210,17 @@ export default function HistoryPage() {
             <option value="cancelled">已取消</option>
             <option value="failed">失败</option>
           </select>
-        </div>
+        </ToolbarGroup>
 
-        <div className="filter-group toolbar-search-group">
-          <input
-            type="text"
-            aria-label="搜索历史"
+        <ToolbarGroup className="toolbar-search-group">
+          <ToolbarSearchInput
+            ariaLabel="搜索历史"
             placeholder="搜索任务..."
             value={searchKeyword}
-            onChange={(e) => setSearchKeyword(e.target.value)}
-            className="search-input"
+            onChange={setSearchKeyword}
           />
-        </div>
-      </div>
+        </ToolbarGroup>
+      </ToolbarShell>
 
       <div className="task-list">
         {loading ? (
@@ -382,8 +228,8 @@ export default function HistoryPage() {
             <p className="muted">加载中...</p>
           </div>
         ) : filteredRecords.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon">
+          <EmptyState
+            icon={
               <svg
                 width="48"
                 height="48"
@@ -397,10 +243,10 @@ export default function HistoryPage() {
                 <circle cx="12" cy="12" r="10" />
                 <polyline points="12 6 12 12 16 14" />
               </svg>
-            </div>
-            <p className="font-medium mb-1">暂无历史记录</p>
-            <p className="muted text-base">完成的下载任务将显示在这里</p>
-          </div>
+            }
+            title="暂无历史记录"
+            description="完成的下载任务将显示在这里"
+          />
         ) : (
           <div className="card task-card-container">
             {filteredRecords.map((record) => (

@@ -7,6 +7,8 @@ import { api } from "@/lib/api";
 import type { Task, TorrentPreview } from "@/types";
 import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
+import { useClipboard } from "@/hooks/useClipboard";
+import { useSelection } from "@/hooks/useSelection";
 import StatsWidget from "@/components/StatsWidget";
 import { useTaskWebSocket } from "@/hooks/useTaskWebSocket";
 import {
@@ -39,7 +41,8 @@ export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [uri, setUri] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [selectedTasks, setSelectedTasks] = useState<Set<number>>(new Set());
+  const { selected: selectedTasks, toggle: toggleTaskSelection, setItemSelected, clear: clearSelection, toggleAll } = useSelection<number>();
+  const copyUri = useClipboard();
   const [filterStatus, setFilterStatus] = useState<string>(() => {
     if (typeof window !== "undefined") {
       try {
@@ -105,9 +108,12 @@ export default function TasksPage() {
   }, [showToast]);
 
   useEffect(() => {
+    let isFetching = false;
     const pollInterval = setInterval(() => {
       if (wsConnectedRef.current) return;
+      if (document.hidden || isFetching) return;
 
+      isFetching = true;
       api
         .listTasks("active")
         .then((activeTasks) => {
@@ -154,7 +160,8 @@ export default function TasksPage() {
         })
         .catch((err: unknown) => {
           console.warn("轮询活动任务失败", err);
-        });
+        })
+        .finally(() => { isFetching = false; });
     }, 5000);
 
     return () => clearInterval(pollInterval);
@@ -373,11 +380,7 @@ export default function TasksPage() {
         await api.cancelTask(id);
         deletedTaskIdsRef.current.add(id);
         setTasks((prev) => prev.filter((t) => t.id !== id));
-        setSelectedTasks((prev) => {
-          const next = new Set(prev);
-          next.delete(id);
-          return next;
-        });
+        setItemSelected(id, false);
       } catch (err) {
         showToast((isFailedTask ? "删除" : "取消") + "失败：" + (err as Error).message, "error");
       } finally {
@@ -435,7 +438,7 @@ export default function TasksPage() {
       const cancelledIds = new Set(activeTasks.map((t) => t.id));
       cancelledIds.forEach((id) => deletedTaskIdsRef.current.add(id));
       setTasks((prev) => prev.filter((t) => !cancelledIds.has(t.id)));
-      setSelectedTasks(new Set());
+      clearSelection();
       showToast(`已取消 ${activeTasks.length} 个任务`, "success");
     } catch (err) {
       showToast("批量取消失败：" + (err as Error).message, "error");
@@ -443,20 +446,6 @@ export default function TasksPage() {
       setIsBatchOperating(false);
     }
   }, [selectedTasks, isBatchOperating, showConfirm, showToast]);
-
-  const copyUri = useCallback(
-    (uri: string) => {
-      navigator.clipboard
-        .writeText(uri)
-        .then(() => {
-          showToast("链接已复制", "success");
-        })
-        .catch(() => {
-          showToast("复制失败", "error");
-        });
-    },
-    [showToast]
-  );
 
   const batchAddTasks = useCallback(async () => {
     if (isBatchAdding) return;
@@ -513,18 +502,6 @@ export default function TasksPage() {
     setBatchUris("");
   }, []);
 
-  const toggleTaskSelection = useCallback((id: number) => {
-    setSelectedTasks((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
   const filteredTasks = useMemo(() => {
     let filtered = tasks;
 
@@ -552,12 +529,8 @@ export default function TasksPage() {
   }, [tasks, searchKeyword, filterStatus, sortBy]);
 
   const toggleSelectAll = useCallback(() => {
-    if (selectedTasks.size === filteredTasks.length) {
-      setSelectedTasks(new Set());
-    } else {
-      setSelectedTasks(new Set(filteredTasks.map((t) => t.id)));
-    }
-  }, [selectedTasks.size, filteredTasks]);
+    toggleAll(filteredTasks.map((t) => t.id));
+  }, [toggleAll, filteredTasks]);
 
   const hasActiveTasks = useMemo(
     () =>
@@ -623,18 +596,15 @@ export default function TasksPage() {
         </div>
       </div>
 
-      {mounted &&
-        showBatchAddModal &&
-        createPortal(
+      {showBatchAddModal && (
           <BatchAddTasksDialog
             batchUris={batchUris}
             isBatchAdding={isBatchAdding}
             onBatchUrisChange={setBatchUris}
             onSubmit={batchAddTasks}
             onCancel={cancelBatchAdd}
-          />,
-          document.body
-        )}
+          />
+      )}
       {mounted && torrentWizard
         ? createPortal(
             <TorrentCreateWizard

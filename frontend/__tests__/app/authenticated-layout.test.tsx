@@ -14,7 +14,6 @@ const authState = {
   loading: false,
   error: null as string | null,
   retryAuth: retryAuthMock,
-  sidebarExpanded: false,
 };
 
 jest.mock("@/lib/AuthContext", () => ({
@@ -42,7 +41,6 @@ describe("AuthenticatedLayout", () => {
     authState.user = null;
     authState.loading = false;
     authState.error = null;
-    authState.sidebarExpanded = false;
   });
 
   test("shows the loading skeleton while auth is resolving", () => {
@@ -65,7 +63,7 @@ describe("AuthenticatedLayout", () => {
     expect(retryAuthMock).toHaveBeenCalled();
   });
 
-  test("renders authenticated shell content and expanded layout class", () => {
+  test("renders authenticated shell content", () => {
     authState.user = {
       id: 1,
       username: "admin",
@@ -73,13 +71,12 @@ describe("AuthenticatedLayout", () => {
       quota: 1024,
       is_initial_password: false,
     };
-    authState.sidebarExpanded = true;
 
     render(<AuthenticatedLayout><div>content</div></AuthenticatedLayout>);
 
     expect(screen.getByTestId("sidebar")).toHaveTextContent("admin");
     expect(screen.getByTestId("password-banner")).toHaveTextContent("admin");
     expect(screen.getByText("content")).toBeInTheDocument();
-    expect(document.querySelector(".main-content")).toHaveClass("sidebar-expanded");
+    expect(document.querySelector(".main-content")).not.toHaveClass("sidebar-expanded");
   });
 });

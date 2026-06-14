@@ -1,11 +1,13 @@
 "use client";
 
+import { useState } from "react";
 import { useAuth } from "@/lib/AuthContext";
 import Sidebar from "@/components/Sidebar";
 import PasswordWarningBanner from "@/components/PasswordWarningBanner";
 
 export default function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
-  const { user, loading, error, retryAuth, sidebarExpanded } = useAuth();
+  const { user, loading, error, retryAuth } = useAuth();
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
 
   if (loading) {
     return (
@@ -60,7 +62,7 @@ export default function AuthenticatedLayout({ children }: { children: React.Reac
 
   return (
     <>
-      <Sidebar user={user} />
+      <Sidebar user={user} sidebarExpanded={sidebarExpanded} setSidebarExpanded={setSidebarExpanded} />
       <PasswordWarningBanner user={user} />
       <div className={`main-content${sidebarExpanded ? " sidebar-expanded" : ""}`}>
         <div className="auth-container">

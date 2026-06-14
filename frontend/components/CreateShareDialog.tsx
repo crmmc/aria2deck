@@ -1,11 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
-import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
-import { ModalOverlay } from "@/components/ModalOverlay";
+import { useClipboard } from "@/hooks/useClipboard";
+import { DialogShell } from "@/components/ui/DialogShell";
 import type { ShareLink } from "@/types";
 
 interface CreateShareDialogProps {
@@ -56,22 +55,11 @@ export default function CreateShareDialog({
   const shareUrl = createdShare && typeof window !== "undefined"
     ? `${window.location.origin}/s/${createdShare.share_code}`
     : "";
-  const copyLink = () => {
-    navigator.clipboard.writeText(shareUrl).then(
-      () => showToast("链接已复制", "success"),
-      () => showToast("复制失败", "error"),
-    );
-  };
+  const copy = useClipboard();
+  const copyLink = () => { copy(shareUrl); };
 
-  const mounted = useMounted();
-
-  if (!mounted) return null;
-
-  return createPortal(
-    <ModalOverlay
-      onClose={onClose}
-      contentClassName="modal-content max-w-400"
-    >
+  return (
+    <DialogShell onClose={onClose} contentClassName="modal-content max-w-400">
         <div className="modal-header">
           <h3 className="modal-title">创建分享</h3>
           <button type="button" className="modal-close-btn" onClick={onClose}>
@@ -183,7 +171,6 @@ export default function CreateShareDialog({
             </div>
           )}
         </div>
-    </ModalOverlay>,
-    document.body
+    </DialogShell>
   );
 }

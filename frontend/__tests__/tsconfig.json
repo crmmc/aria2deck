@@ -7,8 +7,10 @@
       "@/app/*": ["app/*"],
       "@/components/*": ["components/*"],
       "@/lib/*": ["lib/*"],
+      "@/hooks/*": ["hooks/*"],
       "@/types": ["types.ts"]
     }
   },
-  "include": ["./**/*.ts", "./**/*.tsx", "../jest.setup.ts"]
+  "include": ["./**/*.ts", "./**/*.tsx", "../jest.setup.ts"],
+  "exclude": ["../node_modules"]
 }

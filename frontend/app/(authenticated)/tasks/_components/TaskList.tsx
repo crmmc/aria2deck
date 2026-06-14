@@ -1,4 +1,5 @@
 import type { Task } from "@/types";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { TaskCard } from "./TaskCard";
 
 type TaskListProps = {
@@ -22,8 +23,8 @@ export function TaskList({
 }: TaskListProps) {
   if (filteredTasks.length === 0) {
     return (
-      <div className="empty-state">
-        <div className="empty-state-icon">
+      <EmptyState
+        icon={
           <svg
             width="48"
             height="48"
@@ -37,12 +38,10 @@ export function TaskList({
             <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
             <polyline points="13 2 13 9 20 9" />
           </svg>
-        </div>
-        <p className="font-medium mb-1">暂无活动任务</p>
-        <p className="muted text-base">
-          添加新任务开始下载，已完成的文件请前往文件页面查看
-        </p>
-      </div>
+        }
+        title="暂无活动任务"
+        description="添加新任务开始下载，已完成的文件请前往文件页面查看"
+      />
     );
   }
 
