@@ -69,6 +69,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.http.request_body_limit import (
+    MAX_HTTP_REQUEST_BODY_BYTES,
+    RequestBodyLimitMiddleware,
+)
+
 from app.aria2.client import Aria2Client
 from app.aria2.gateway import update_cached_aria2_config
 from app.aria2.listener import listen_aria2_events
@@ -217,6 +222,10 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name, debug=settings.debug, lifespan=lifespan)
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_body_bytes=MAX_HTTP_REQUEST_BODY_BYTES,
+    )
     update_cached_aria2_config(
         rpc_url=settings.aria2_rpc_url,
         rpc_secret=settings.aria2_rpc_secret,
