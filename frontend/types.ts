@@ -216,6 +216,8 @@ export type StoredFileInfo = {
 export type StoredFileListResponse = {
   files: StoredFileInfo[];
   total: number;
+  page: number;
+  page_size: number;
 };
 
 export type FileUserInfo = {

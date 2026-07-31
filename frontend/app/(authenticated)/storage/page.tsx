@@ -10,23 +10,71 @@ import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
 import type { StoredFileInfo, FileUserInfo } from "@/types";
 
+const PAGE_SIZE = 20;
+const EMPTY_FILE_IDS: number[] = [];
+
+type StoragePaginationProps = {
+  page: number;
+  totalPages: number;
+  total: number;
+  onPageChange: (page: number) => void;
+};
+
+function StoragePagination({
+  page,
+  totalPages,
+  total,
+  onPageChange,
+}: StoragePaginationProps) {
+  return (
+    <div className="flex items-center justify-end gap-2 py-3 px-2">
+      <span className="text-sm muted">
+        第 {page} / {totalPages} 页，共 {total} 项
+      </span>
+      <button
+        type="button"
+        className="button secondary btn-sm"
+        aria-label="上一页"
+        disabled={page <= 1}
+        onClick={() => onPageChange(Math.max(1, page - 1))}
+      >
+        上一页
+      </button>
+      <button
+        type="button"
+        className="button secondary btn-sm"
+        aria-label="下一页"
+        disabled={page >= totalPages}
+        onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+      >
+        下一页
+      </button>
+    </div>
+  );
+}
+
 export default function StoragePage() {
   const { user } = useAuth();
   const { replace } = useRouter();
   const { showToast } = useToast();
 
   const [files, setFiles] = useState<StoredFileInfo[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [search, setSearch] = useState("");
   const [orphanOnly, setOrphanOnly] = useState(false);
-  const { selected, selectedCount, setItemSelected, selectAll, clear } = useSelection<number>();
+  const { selected, selectedCount, setItemSelected, selectAll, clear } =
+    useSelection<number>(EMPTY_FILE_IDS);
   const [deleting, setDeleting] = useState(false);
   const loading = !initialLoadDone;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const [userModalFile, setUserModalFile] = useState<StoredFileInfo | null>(null);
   const [userModalUsers, setUserModalUsers] = useState<FileUserInfo[]>([]);
   const [userModalLoading, setUserModalLoading] = useState(false);
   const mountedRef = useRef(true);
+  const requestIdRef = useRef(0);
 
   useEffect(() => {
     if (user && !user.is_admin) {
@@ -35,20 +83,39 @@ export default function StoragePage() {
   }, [user, replace]);
 
   const loadFiles = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     try {
-      const res = await api.listStoredFiles(search || undefined, orphanOnly);
-      if (mountedRef.current) setFiles(res.files);
+      const res = await api.listStoredFiles(
+        page,
+        PAGE_SIZE,
+        search || undefined,
+        orphanOnly,
+      );
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      const lastPage = Math.max(1, Math.ceil(res.total / res.page_size));
+      if (res.page > lastPage) {
+        setPage(lastPage);
+        return;
+      }
+      setFiles(res.files);
+      setTotal(res.total);
+      clear();
     } catch {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
       showToast("加载存储文件失败", "error");
     } finally {
-      if (mountedRef.current) setInitialLoadDone(true);
+      if (mountedRef.current && requestId === requestIdRef.current) {
+        setInitialLoadDone(true);
+      }
     }
-  }, [search, orphanOnly, showToast]);
+  }, [page, search, orphanOnly, clear, showToast]);
 
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+      requestIdRef.current += 1;
+    };
   }, []);
 
   useEffect(() => {
@@ -56,6 +123,16 @@ export default function StoragePage() {
       loadFiles();
     }
   }, [user, loadFiles]);
+
+  const handlePageChange = useCallback(
+    (nextPage: number) => {
+      if (nextPage === page) return;
+      requestIdRef.current += 1;
+      clear();
+      setPage(nextPage);
+    },
+    [page, clear],
+  );
 
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
@@ -76,7 +153,16 @@ export default function StoragePage() {
           showToast(res.errors[0], "error");
         }
         clear();
-        loadFiles();
+        const remainingTotal = Math.max(0, total - res.deleted_count);
+        const targetPage = Math.min(
+          page,
+          Math.max(1, Math.ceil(remainingTotal / PAGE_SIZE)),
+        );
+        if (targetPage !== page) {
+          setPage(targetPage);
+        } else {
+          void loadFiles();
+        }
       }
     } catch {
       if (!mountedRef.current) return;
@@ -118,7 +204,12 @@ export default function StoragePage() {
               className="input"
               placeholder="搜索文件名..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                requestIdRef.current += 1;
+                setSearch(e.target.value);
+                setPage(1);
+                clear();
+              }}
               style={{ width: 240 }}
               aria-label="搜索文件名"
             />
@@ -126,7 +217,12 @@ export default function StoragePage() {
               <input
                 type="checkbox"
                 checked={orphanOnly}
-                onChange={(e) => setOrphanOnly(e.target.checked)}
+                onChange={(e) => {
+                  requestIdRef.current += 1;
+                  setOrphanOnly(e.target.checked);
+                  setPage(1);
+                  clear();
+                }}
                 aria-label="仅显示孤立文件"
               />
               <span className="text-base">仅显示孤立文件</span>
@@ -220,6 +316,12 @@ export default function StoragePage() {
             </tbody>
             </table>
           </div>
+          <StoragePagination
+            page={page}
+            totalPages={totalPages}
+            total={total}
+            onPageChange={handlePageChange}
+          />
         </div>
       </div>
 

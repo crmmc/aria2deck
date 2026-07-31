@@ -21,7 +21,13 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-async def list_stored_files(search: str, orphan_only: bool) -> list[dict[str, Any]]:
+async def list_stored_files(
+    search: str,
+    orphan_only: bool,
+    *,
+    offset: int,
+    limit: int,
+) -> tuple[int, list[dict[str, Any]]]:
     ref_counts = (
         select(
             user_files.c.stored_file_id.label("stored_file_id"),
@@ -30,25 +36,29 @@ async def list_stored_files(search: str, orphan_only: bool) -> list[dict[str, An
         .group_by(user_files.c.stored_file_id)
         .subquery()
     )
-    stmt = (
-        select(
-            stored_files, func.coalesce(ref_counts.c.ref_count, 0).label("ref_count")
-        )
-        .select_from(
-            stored_files.outerjoin(
-                ref_counts, stored_files.c.id == ref_counts.c.stored_file_id
-            )
-        )
-        .order_by(stored_files.c.created_at_ms.desc())
+    ref_count = func.coalesce(ref_counts.c.ref_count, 0)
+    source = stored_files.outerjoin(
+        ref_counts, stored_files.c.id == ref_counts.c.stored_file_id
     )
+    filters = []
     if search:
-        stmt = stmt.where(stored_files.c.original_name.contains(search))
+        filters.append(stored_files.c.original_name.contains(search))
     if orphan_only:
-        stmt = stmt.where(func.coalesce(ref_counts.c.ref_count, 0) <= 0)
+        filters.append(ref_count <= 0)
 
+    count_stmt = select(func.count()).select_from(source).where(*filters)
+    page_stmt = (
+        select(stored_files, ref_count.label("ref_count"))
+        .select_from(source)
+        .where(*filters)
+        .order_by(stored_files.c.created_at_ms.desc(), stored_files.c.id.desc())
+        .offset(offset)
+        .limit(limit)
+    )
     async with transaction() as conn:
-        rows = (await conn.execute(stmt)).mappings().all()
-    return [dict(row) for row in rows]
+        total = int((await conn.execute(count_stmt)).scalar_one() or 0)
+        rows = (await conn.execute(page_stmt)).mappings().all()
+    return total, [dict(row) for row in rows]
 
 
 async def stored_file_exists(file_id: int) -> bool:

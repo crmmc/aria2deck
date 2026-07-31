@@ -28,6 +28,8 @@ class StoredFileInfo(BaseModel):
 class StoredFileListResponse(BaseModel):
     files: list[StoredFileInfo]
     total: int
+    page: int
+    page_size: int
 
 
 class FileUserInfo(BaseModel):
@@ -69,10 +71,17 @@ async def list_stored_files(
     admin: AuthUser = Depends(require_admin),
     search: str = Query(default="", description="搜索文件名"),
     orphan_only: bool = Query(default=False, description="仅显示无引用的孤立文件"),
+    page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页条数"),
 ) -> StoredFileListResponse:
     del admin
     return StoredFileListResponse(
-        **await storage_admin_service.list_stored_files(search, orphan_only)
+        **await storage_admin_service.list_stored_files(
+            search,
+            orphan_only,
+            page=page,
+            page_size=page_size,
+        )
     )
 
 

@@ -13,8 +13,25 @@ from app.services.task_broadcast import broadcast_task_update_to_subscribers
 logger = logging.getLogger(__name__)
 
 
-async def list_stored_files(search: str, orphan_only: bool) -> dict:
-    rows = await storage_repo.list_stored_files(search, orphan_only)
+DEFAULT_PAGE_SIZE = 20
+MAX_PAGE_SIZE = 100
+
+
+async def list_stored_files(
+    search: str,
+    orphan_only: bool,
+    *,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> dict:
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    total, rows = await storage_repo.list_stored_files(
+        search,
+        orphan_only,
+        offset=(page - 1) * page_size,
+        limit=page_size,
+    )
     files = [
         {
             "id": int(row["id"]),
@@ -29,7 +46,12 @@ async def list_stored_files(search: str, orphan_only: bool) -> dict:
         }
         for row in rows
     ]
-    return {"files": files, "total": len(files)}
+    return {
+        "files": files,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 async def get_file_users(file_id: int) -> dict:
