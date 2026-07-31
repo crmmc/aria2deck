@@ -32,7 +32,7 @@ export function BatchAddTasksDialog({
       </div>
 
       <p className="muted text-sm mb-3">
-        每行输入一个链接，支持磁力链接、HTTP 或 FTP URL
+        每行输入一个链接，最多 30 个；空行和重复链接将被忽略
       </p>
 
       <textarea

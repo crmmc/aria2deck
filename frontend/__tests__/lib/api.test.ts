@@ -227,6 +227,21 @@ describe("api methods", () => {
         })
       );
     });
+
+    it("passes an abort signal to fetch", async () => {
+      const controller = new AbortController();
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ id: 1 }),
+      });
+
+      await api.createTask("https://example.com/file", controller.signal);
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/api/tasks"),
+        expect.objectContaining({ signal: controller.signal })
+      );
+    });
   });
 
   describe("api.cancelTask", () => {
