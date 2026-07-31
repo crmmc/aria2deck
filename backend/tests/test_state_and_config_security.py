@@ -7,6 +7,7 @@ from app.aria2.client import Aria2Client
 from app.aria2.gateway import get_aria2_client, update_cached_aria2_config
 from app.core.config import (
     DEFAULT_SECRET_KEY,
+    INITIAL_ADMIN_PASSWORD_ENV,
     LEGACY_SHARE_JWT_SECRET_ENV,
     SHARE_JWT_SECRET_ENV,
     Settings,
@@ -19,6 +20,14 @@ from app.services.settings_service import refresh_aria2_config
 def test_check_secret_key_raises_on_default_in_non_debug(monkeypatch):
     monkeypatch.setattr(settings, "debug", False)
     monkeypatch.setattr(settings, "secret_key", DEFAULT_SECRET_KEY)
+
+    with pytest.raises(RuntimeError):
+        check_secret_key()
+
+
+def test_check_secret_key_raises_on_empty_value_in_non_debug(monkeypatch):
+    monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "secret_key", "")
 
     with pytest.raises(RuntimeError):
         check_secret_key()
@@ -57,6 +66,14 @@ def test_settings_accepts_legacy_share_jwt_secret_env(monkeypatch):
     configured = Settings()
 
     assert configured.secret_key == "legacy-secret"
+
+
+def test_settings_reads_initial_admin_password_from_explicit_env(monkeypatch):
+    monkeypatch.setenv(INITIAL_ADMIN_PASSWORD_ENV, "configured admin passphrase")
+
+    configured = Settings()
+
+    assert configured.initial_admin_password == "configured admin passphrase"
 
 
 def test_get_aria2_client_preserves_empty_cached_secret(monkeypatch):

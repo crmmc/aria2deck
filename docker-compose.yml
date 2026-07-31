@@ -1,19 +1,18 @@
 services:
   aria2:
-    image: p3terx/aria2-pro:latest
+    image: p3terx/aria2-pro@sha256:086d1a37c586edb07ec0fb956bf9edd89d1d38d138ad5309ff96d510c8c9a011
     container_name: aria2
     restart: unless-stopped
     environment:
       - PUID=1000
       - PGID=1000
-      - RPC_SECRET=${ARIA2_RPC_SECRET:-changeme}
+      - "RPC_SECRET=${ARIA2_RPC_SECRET:?ARIA2_RPC_SECRET is required}"
       - RPC_PORT=6800
       - LISTEN_PORT=6888
     volumes:
       - ./data/aria2-config:/config
       - ./data/downloads:/downloads
     ports:
-      - "6800:6800"
       - "6888:6888"
       - "6888:6888/udp"
     logging:
@@ -29,7 +28,9 @@ services:
       - aria2
     environment:
       - ARIA2C_ARIA2_RPC_URL=http://aria2:6800/jsonrpc
-      - ARIA2C_ARIA2_RPC_SECRET=${ARIA2_RPC_SECRET:-changeme}
+      - "ARIA2C_ARIA2_RPC_SECRET=${ARIA2_RPC_SECRET:?ARIA2_RPC_SECRET is required}"
+      - "ARIA2DECK_SHARE_JWT_SECRET=${ARIA2DECK_SHARE_JWT_SECRET:?ARIA2DECK_SHARE_JWT_SECRET is required}"
+      - "ARIA2DECK_INITIAL_ADMIN_PASSWORD=${ARIA2DECK_INITIAL_ADMIN_PASSWORD:-}"
       - ARIA2C_DOWNLOAD_DIR=/app/backend/downloads
       - ARIA2C_DATABASE_PATH=/app/backend/data/app.db
       - ARIA2C_DEBUG=false
@@ -37,7 +38,7 @@ services:
       - ./data/app:/app/backend/data
       - ./data/downloads:/app/backend/downloads
     ports:
-      - "8001:8001"
+      - "${ARIA2DECK_BIND_ADDRESS:-127.0.0.1}:${ARIA2DECK_PORT:-8001}:8001"
     logging:
       driver: json-file
       options:

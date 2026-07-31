@@ -53,19 +53,28 @@
 ```bash
 git clone https://github.com/crmmc/aria2deck.git
 cd aria2deck
+export ARIA2_RPC_SECRET="$(openssl rand -hex 32)"
+export ARIA2DECK_SHARE_JWT_SECRET="$(openssl rand -hex 32)"
+read -rsp "初始管理员密码（至少 16 个字符）: " ARIA2DECK_INITIAL_ADMIN_PASSWORD
+export ARIA2DECK_INITIAL_ADMIN_PASSWORD
+printf '\n'
 make docker-up
 ```
 
-浏览器打开 `http://localhost:8001`，默认账号 `admin` / `123456`。
-
-> 首次登录后请**立即修改密码**。
+浏览器打开 `http://localhost:8001`，使用账号 `admin` 和上面设置的初始密码登录。已有管理员的升级部署可不设置 `ARIA2DECK_INITIAL_ADMIN_PASSWORD`。
 
 ### 独立 Docker 运行
+
+先按上文设置三个 secret 环境变量；已有管理员时可省略 `ARIA2DECK_INITIAL_ADMIN_PASSWORD`。
 
 ```bash
 docker run -d \
   --name aria2deck \
   --network host \
+  -e ARIA2C_HOST=127.0.0.1 \
+  -e ARIA2C_ARIA2_RPC_SECRET="$ARIA2_RPC_SECRET" \
+  -e ARIA2DECK_SHARE_JWT_SECRET \
+  -e ARIA2DECK_INITIAL_ADMIN_PASSWORD \
   -e ARIA2C_DOWNLOAD_DIR=/Downloads/aria2deck \
   -v /your/data:/app/backend/data \
   -v /Downloads/aria2deck:/Downloads/aria2deck \
@@ -76,7 +85,7 @@ docker run -d \
 
 ## 使用流程
 
-1. 管理员登录，修改默认密码
+1. 管理员使用配置的初始密码登录并修改密码
 2. 粘贴下载链接、上传种子文件（可选择性下载部分文件）或添加磁力链接
 3. 下载完成后，在文件页面浏览和管理
 4. 需要多人使用时，在用户管理创建新账号
@@ -107,7 +116,8 @@ docker run -d \
 | `ARIA2C_DATABASE_PATH` | 数据库文件路径 | `./data/app.db` |
 | `ARIA2C_SESSION_TTL_SECONDS` | 登录会话有效期（秒） | `43200` |
 | `ARIA2C_ARIA2_POLL_INTERVAL` | aria2 状态轮询间隔（秒） | `2.0` |
-| `ARIA2DECK_SHARE_JWT_SECRET` | 分享链接签名密钥 | - |
+| `ARIA2DECK_SHARE_JWT_SECRET` | 分享链接签名密钥，非 debug 模式必填 | - |
+| `ARIA2DECK_INITIAL_ADMIN_PASSWORD` | 首次创建管理员时使用，至少 16 个字符 | - |
 | `ARIA2C_EXTRA_CORS_ORIGINS` | 额外允许的 CORS 域名 | - |
 
 </details>
@@ -127,9 +137,9 @@ Docker 部署时需要挂载两个目录：
 <details>
 <summary><strong>安全建议</strong></summary>
 
-- 修改默认管理员密码
-- 设置强随机的 `ARIA2C_ARIA2_RPC_SECRET` 和 `ARIA2DECK_SHARE_JWT_SECRET`
-- 生产环境请通过反向代理（Nginx 等）访问，不要直接暴露到公网
+- 使用强随机的 `ARIA2C_ARIA2_RPC_SECRET` 和 `ARIA2DECK_SHARE_JWT_SECRET`
+- Compose 默认仅在 `127.0.0.1:8001` 提供 Web 服务，且不会向宿主机发布 aria2 RPC 6800
+- 远程访问必须使用提供 TLS 的反向代理；客户端 PBKDF2 结果仍是可重放的密码等价物，不能替代传输加密
 - 定期备份 `data/` 目录
 
 </details>
@@ -146,7 +156,9 @@ cp backend/env.example backend/.env
 
 # 三个终端分别启动
 make dev-aria2    # aria2 后端
-make dev-back     # API 后端（开发模式，自动重置 admin 密码为 123456）
+read -rsp "开发管理员密码（至少 16 个字符）: " ARIA2DECK_INITIAL_ADMIN_PASSWORD
+export ARIA2DECK_INITIAL_ADMIN_PASSWORD
+make dev-back     # API 后端（开发模式，按配置重置 admin 密码）
 make dev-front    # 前端开发服务器（http://localhost:3000）
 ```
 

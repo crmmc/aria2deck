@@ -20,12 +20,12 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
-          version: "latest"
+          version: "0.8.12"
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.13"
 
       - name: Install dependencies
         run: uv sync
@@ -42,7 +42,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.11
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -106,17 +106,17 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
-          version: "latest"
+          version: "0.8.12"
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.13"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.11
 
       - name: Install backend dependencies
         run: uv sync --no-dev
@@ -145,7 +145,7 @@ jobs:
           # Install uv if not present
           if ! command -v uv &> /dev/null; then
               echo "Installing uv..."
-              curl -LsSf https://astral.sh/uv/install.sh | sh
+              curl -LsSf https://astral.sh/uv/0.8.12/install.sh | sh
               export PATH="$HOME/.local/bin:$PATH"
           fi
 
@@ -156,7 +156,7 @@ jobs:
           mkdir -p data downloads
 
           # Start server
-          PYTHONPATH=. uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
+          PYTHONPATH=. uv run uvicorn app.main:app --host ${ARIA2C_HOST:-127.0.0.1} --port 8001
           EOF
           chmod +x dist/aria2deck/start.sh
 
