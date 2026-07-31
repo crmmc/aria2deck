@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.core.config import settings
+from app.core.config import INITIAL_ADMIN_PASSWORD_ENV, settings
 from app.core.security import hash_password
 from app.db.engine import transaction
 from app.db.schema import users
 from app.main import ensure_default_admin_v0, reset_admin_password_for_dev_v0
+from app.repositories.auth import get_user_by_username
 from tests.helpers_v0 import create_session_v0, create_user_v0, get_user_v0
 
 
@@ -222,16 +224,49 @@ class TestMeEndpoint:
 
 
 class TestDefaultAdminBootstrap:
-    def test_default_admin_can_login_with_frontend_hash(
-        self, client: TestClient, temp_db: str
+    def test_missing_initial_admin_password_fails_closed(
+        self, temp_db: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setattr(settings, "initial_admin_password", "")
+
+        with pytest.raises(RuntimeError, match=INITIAL_ADMIN_PASSWORD_ENV):
+            asyncio.run(ensure_default_admin_v0())
+
+        assert asyncio.run(get_user_by_username("admin")) is None
+
+    def test_weak_initial_admin_password_fails_closed(
+        self, temp_db: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "initial_admin_password", "123456")
+
+        with pytest.raises(RuntimeError, match="长度不足"):
+            asyncio.run(ensure_default_admin_v0())
+
+    def test_existing_admin_does_not_require_initial_password(
+        self, temp_db: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _create_user(username="existing-admin", password="stored-hash", is_admin=True)
+        monkeypatch.setattr(settings, "initial_admin_password", "")
+
+        asyncio.run(ensure_default_admin_v0())
+
+        assert asyncio.run(get_user_by_username("admin")) is None
+
+    def test_configured_admin_can_login_with_frontend_hash(
+        self,
+        client: TestClient,
+        temp_db: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        initial_password = "correct horse battery staple"
+        monkeypatch.setattr(settings, "initial_admin_password", initial_password)
         asyncio.run(ensure_default_admin_v0())
 
         response = client.post(
             "/api/auth/login",
             json={
                 "username": "admin",
-                "password": _client_hash("123456", "admin"),
+                "password": _client_hash(initial_password, "admin"),
             },
         )
 
@@ -240,8 +275,13 @@ class TestDefaultAdminBootstrap:
         assert response.json()["is_initial_password"] is True
 
     def test_dev_reset_admin_password_takes_effect_immediately(
-        self, client: TestClient, temp_db: str
+        self,
+        client: TestClient,
+        temp_db: str,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        initial_password = "local development admin password"
+        monkeypatch.setattr(settings, "initial_admin_password", initial_password)
         asyncio.run(ensure_default_admin_v0())
         _set_password(
             "admin",
@@ -255,7 +295,7 @@ class TestDefaultAdminBootstrap:
             "/api/auth/login",
             json={
                 "username": "admin",
-                "password": _client_hash("123456", "admin"),
+                "password": _client_hash(initial_password, "admin"),
             },
         )
 

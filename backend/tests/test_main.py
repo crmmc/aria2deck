@@ -8,6 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+TEST_INITIAL_ADMIN_PASSWORD = "test initial admin password"
+
+
 def _client_password_hash(password: str, username: str) -> str:
     salt = hashlib.sha256(username.lower().encode("utf-8")).digest()
     digest = hashlib.pbkdf2_hmac(
@@ -165,14 +168,18 @@ class TestLifespan:
         assert "sessions" in tables
 
     @pytest.mark.asyncio
-    async def test_lifespan_ensures_default_admin(self, temp_db):
+    async def test_lifespan_ensures_default_admin(self, temp_db, monkeypatch):
         """Test lifespan creates default admin user."""
         from sqlalchemy import select
 
+        from app.core.config import settings
         from app.db.engine import transaction
         from app.db.schema import users
         from app.main import ensure_default_admin_v0
 
+        monkeypatch.setattr(
+            settings, "initial_admin_password", TEST_INITIAL_ADMIN_PASSWORD
+        )
         await ensure_default_admin_v0()
 
         async with transaction() as conn:
@@ -185,7 +192,9 @@ class TestLifespan:
         assert admin["is_admin"] == 1
         assert admin["is_initial_password"] == 1
 
-    def test_app_startup_bootstraps_database_and_default_admin(self, tmp_path):
+    def test_app_startup_bootstraps_database_and_default_admin(
+        self, tmp_path, monkeypatch
+    ):
         """Test real FastAPI lifespan creates latest schema and default admin."""
         import sqlite3
 
@@ -204,6 +213,9 @@ class TestLifespan:
         settings.database_path = str(db_path)
         settings.download_dir = str(download_dir)
         settings.debug = True
+        monkeypatch.setattr(
+            settings, "initial_admin_password", TEST_INITIAL_ADMIN_PASSWORD
+        )
         reset_engine()
         try:
             with (
@@ -219,7 +231,9 @@ class TestLifespan:
                     "/api/auth/login",
                     json={
                         "username": "admin",
-                        "password": _client_password_hash("123456", "admin"),
+                        "password": _client_password_hash(
+                            TEST_INITIAL_ADMIN_PASSWORD, "admin"
+                        ),
                     },
                 )
                 assert login_response.status_code == 200
@@ -248,12 +262,18 @@ class TestLifespan:
             reset_engine()
 
     @pytest.mark.asyncio
-    async def test_dev_reset_admin_password_uses_frontend_hash(self, temp_db):
+    async def test_dev_reset_admin_password_uses_frontend_hash(
+        self, temp_db, monkeypatch
+    ):
         """Test dev reset keeps default admin compatible with frontend login hashing."""
+        from app.core.config import settings
         from app.core.security import hash_password, verify_password
         from app.main import ensure_default_admin_v0, reset_admin_password_for_dev_v0
         from app.repositories.auth import get_user_by_username, update_user
 
+        monkeypatch.setattr(
+            settings, "initial_admin_password", TEST_INITIAL_ADMIN_PASSWORD
+        )
         await ensure_default_admin_v0()
         admin = await get_user_by_username("admin")
         assert admin is not None
@@ -268,7 +288,8 @@ class TestLifespan:
         reset_admin = await get_user_by_username("admin")
         assert reset_admin is not None
         assert verify_password(
-            _client_password_hash("123456", "admin"), reset_admin["password_hash"]
+            _client_password_hash(TEST_INITIAL_ADMIN_PASSWORD, "admin"),
+            reset_admin["password_hash"],
         )
         assert reset_admin["is_initial_password"] == 1
 

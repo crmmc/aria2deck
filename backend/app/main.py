@@ -76,7 +76,12 @@ from app.aria2.sync import sync_tasks
 from app.core.config import settings
 from app.db.bootstrap import bootstrap_database
 from app.db.engine import check_database_integrity, check_wal_integrity, dispose_engine
-from app.repositories.auth import create_user, get_user_by_username, update_user
+from app.repositories.auth import (
+    count_admins,
+    create_user,
+    get_user_by_username,
+    update_user,
+)
 from app.routers import (
     aria2_rpc,
     auth,
@@ -96,12 +101,12 @@ from app.services.storage import verify_download_dir_writable
 
 
 async def ensure_default_admin_v0() -> None:
+    from app.core.config import get_initial_admin_password
     from app.core.security import derive_client_password_hash, hash_password
 
-    existing = await get_user_by_username("admin")
-    if existing:
+    if await count_admins() > 0:
         return
-    client_hash = derive_client_password_hash("123456", "admin")
+    client_hash = derive_client_password_hash(get_initial_admin_password(), "admin")
     await create_user(
         username="admin",
         password_hash=hash_password(client_hash),
@@ -112,12 +117,15 @@ async def ensure_default_admin_v0() -> None:
 
 
 async def reset_admin_password_for_dev_v0() -> bool:
+    from app.core.config import get_initial_admin_password
     from app.core.security import derive_client_password_hash, hash_password
 
     existing = await get_user_by_username("admin")
     if not existing:
         return False
-    client_hash = derive_client_password_hash("123456", str(existing["username"]))
+    client_hash = derive_client_password_hash(
+        get_initial_admin_password(), str(existing["username"])
+    )
     await update_user(
         existing["id"],
         password_hash=hash_password(client_hash),
@@ -160,7 +168,7 @@ async def lifespan(app: FastAPI):
     await refresh_aria2_config()
     await load_runtime_config()
 
-    # Ensure default admin exists
+    # Ensure an initial admin exists
     await ensure_default_admin_v0()
 
     # Development mode helper: reset admin password without clearing DB
