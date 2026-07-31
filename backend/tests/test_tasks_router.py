@@ -16,6 +16,7 @@ from sqlalchemy import update
 from app.db.engine import transaction
 from app.db.schema import global_downloads
 from app.domain.errors import BadRequestError
+from app.domain.torrent_metadata import MAX_TORRENT_BASE64_LENGTH
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
 from app.services.download_service import create_user_download
 from app.services.hash import get_uri_hash
@@ -503,7 +504,7 @@ class TestCreateTorrentTask:
         assert "无效的种子文件" in response.json()["detail"]
 
     def test_create_torrent_too_large(self, authenticated_client: TestClient) -> None:
-        large_torrent = base64.b64encode(b"x" * (15 * 1024 * 1024)).decode()
+        large_torrent = "x" * (MAX_TORRENT_BASE64_LENGTH + 1)
 
         response = authenticated_client.post(
             "/api/tasks/torrent",
