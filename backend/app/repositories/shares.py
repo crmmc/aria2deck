@@ -59,22 +59,28 @@ async def get_owned_file(user_id: int, user_file_id: int) -> dict[str, Any] | No
     return dict(row) if row else None
 
 
+def _effective_active_conditions(user_file_id: int, timestamp_ms: int) -> tuple[Any, ...]:
+    return (
+        share_links.c.user_file_id == user_file_id,
+        share_links.c.status == SHARE_ACTIVE_STATUS,
+        (
+            share_links.c.expires_at_ms.is_(None)
+            | (share_links.c.expires_at_ms > timestamp_ms)
+        ),
+        (
+            share_links.c.max_downloads.is_(None)
+            | (share_links.c.download_count < share_links.c.max_downloads)
+        ),
+    )
+
+
 async def count_effective_active_shares(user_file_id: int, timestamp_ms: int) -> int:
     async with transaction() as conn:
         value = (
             await conn.execute(
-                select(func.count()).select_from(share_links).where(
-                    share_links.c.user_file_id == user_file_id,
-                    share_links.c.status == SHARE_ACTIVE_STATUS,
-                    (
-                        share_links.c.expires_at_ms.is_(None)
-                        | (share_links.c.expires_at_ms > timestamp_ms)
-                    ),
-                    (
-                        share_links.c.max_downloads.is_(None)
-                        | (share_links.c.download_count < share_links.c.max_downloads)
-                    ),
-                )
+                select(func.count())
+                .select_from(share_links)
+                .where(*_effective_active_conditions(user_file_id, timestamp_ms))
             )
         ).scalar_one()
     return int(value or 0)
@@ -128,21 +134,9 @@ async def create_share_with_retry(
                 raise ShareTargetInactiveError
             active_count = (
                 await conn.execute(
-                    select(func.count()).select_from(share_links).where(
-                        share_links.c.user_file_id == user_file_id,
-                        share_links.c.status == SHARE_ACTIVE_STATUS,
-                        (
-                            share_links.c.expires_at_ms.is_(None)
-                            | (share_links.c.expires_at_ms > timestamp_ms)
-                        ),
-                        (
-                            share_links.c.max_downloads.is_(None)
-                            | (
-                                share_links.c.download_count
-                                < share_links.c.max_downloads
-                            )
-                        ),
-                    )
+                    select(func.count())
+                    .select_from(share_links)
+                    .where(*_effective_active_conditions(user_file_id, timestamp_ms))
                 )
             ).scalar_one()
             if int(active_count or 0) >= max_active_shares:
@@ -164,6 +158,7 @@ async def create_share_with_retry(
         except BaseException:
             await conn.rollback()
             raise
+
     return None
 
 
@@ -238,10 +233,11 @@ async def get_share_with_file(code: str) -> tuple[dict[str, Any] | None, bool]:
     return None, existing is not None
 
 
-async def consume_share_download(
+async def touch_and_maybe_count_download(
     share_id: int,
     *,
     timestamp_ms: int,
+    should_count_download: bool,
 ) -> bool:
     active_target = exists(
         select(user_files.c.id)
@@ -256,6 +252,9 @@ async def consume_share_download(
             users.c.pending_delete == 0,
         )
     )
+    values: dict[str, Any] = {"last_accessed_at_ms": timestamp_ms}
+    if should_count_download:
+        values["download_count"] = share_links.c.download_count + 1
     async with transaction() as conn:
         result = await conn.execute(
             update(share_links)
@@ -272,13 +271,21 @@ async def consume_share_download(
                     | (share_links.c.download_count < share_links.c.max_downloads)
                 ),
             )
-            .values(
-                last_accessed_at_ms=timestamp_ms,
-                download_count=share_links.c.download_count + 1,
-            )
+            .values(**values)
         )
     return bool(result.rowcount)
 
+
+async def consume_share_download(
+    share_id: int,
+    *,
+    timestamp_ms: int,
+) -> bool:
+    return await touch_and_maybe_count_download(
+        share_id,
+        timestamp_ms=timestamp_ms,
+        should_count_download=True,
+    )
 
 async def touch_share(share_id: int, timestamp_ms: int) -> None:
     async with transaction() as conn:

@@ -9,7 +9,7 @@ jest.mock("@/lib/api", () => ({
     getShareInfo: jest.fn(),
     accessShare: jest.fn(),
     browseShare: jest.fn(),
-    shareDownloadUrl: jest.fn(),
+    downloadShare: jest.fn(),
   },
 }));
 
@@ -29,7 +29,6 @@ describe("SharePageClient", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockApi.getSiteInfo.mockResolvedValue({ site_title: "Share Site" } as never);
-    mockApi.shareDownloadUrl.mockReturnValue("http://localhost/download");
     jest.spyOn(console, "warn").mockImplementation(() => {});
   });
 
@@ -69,11 +68,8 @@ describe("SharePageClient", () => {
     await waitFor(() => {
       expect(mockApi.accessShare).toHaveBeenCalledWith("abc123", "1234");
     });
-    const openSpy = jest.spyOn(window, "open").mockImplementation(() => null);
     fireEvent.click(await screen.findByRole("button", { name: "下载文件" }));
-    expect(mockApi.shareDownloadUrl).toHaveBeenCalledWith("abc123", "token-1");
-    expect(openSpy).toHaveBeenCalledWith("http://localhost/download", "_blank");
-    openSpy.mockRestore();
+    expect(mockApi.downloadShare).toHaveBeenCalledWith("abc123", "token-1");
   });
 
   test("loads directory items for non-password share", async () => {
@@ -201,7 +197,6 @@ describe("SharePageClient", () => {
         { name: "nested", is_dir: true, size: 0, path: "nested" },
       ] as never);
 
-    const openSpy = jest.spyOn(window, "open").mockImplementation(() => null);
     render(<SharePageClient />);
 
     expect(await screen.findByText("加载目录中...")).toBeInTheDocument();
@@ -213,7 +208,7 @@ describe("SharePageClient", () => {
 
     expect(await screen.findByText("nested")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "下载" }));
-    expect(openSpy).toHaveBeenCalledWith("http://localhost/download", "_blank");
+    expect(mockApi.downloadShare).toHaveBeenCalledWith("dirnav", undefined, "root.txt");
 
     fireEvent.click(screen.getByText("nested"));
     expect(await screen.findByRole("button", { name: "↵ 返回上级" })).toBeInTheDocument();
@@ -221,8 +216,6 @@ describe("SharePageClient", () => {
     fireEvent.click(screen.getByRole("button", { name: "↵ 返回上级" }));
     expect(await screen.findByText("root.txt")).toBeInTheDocument();
     expect(mockApi.browseShare).toHaveBeenLastCalledWith("dirnav", undefined, undefined);
-
-    openSpy.mockRestore();
   });
 
   test("uses access token when browsing and downloading an unlocked directory", async () => {
@@ -245,7 +238,6 @@ describe("SharePageClient", () => {
         { name: "inside.txt", is_dir: false, size: 10, path: "nested/inside.txt" },
       ] as never);
 
-    const openSpy = jest.spyOn(window, "open").mockImplementation(() => null);
     render(<SharePageClient />);
 
     fireEvent.change(await screen.findByPlaceholderText("请输入提取码"), {
@@ -258,12 +250,11 @@ describe("SharePageClient", () => {
     expect(mockApi.browseShare).toHaveBeenCalledWith("secret-folder", "dir-token", undefined);
 
     fireEvent.click(screen.getByRole("button", { name: "下载" }));
-    expect(mockApi.shareDownloadUrl).toHaveBeenCalledWith(
+    expect(mockApi.downloadShare).toHaveBeenCalledWith(
       "secret-folder",
       "dir-token",
       "locked.txt"
     );
-    expect(openSpy).toHaveBeenCalledWith("http://localhost/download", "_blank");
 
     fireEvent.click(screen.getByText("nested"));
     expect(await screen.findByText("inside.txt")).toBeInTheDocument();
@@ -272,8 +263,6 @@ describe("SharePageClient", () => {
       "dir-token",
       "nested"
     );
-
-    openSpy.mockRestore();
   });
 
   test("logs warning when site info loading fails", async () => {

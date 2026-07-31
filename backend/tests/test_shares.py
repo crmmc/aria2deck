@@ -1,10 +1,13 @@
 """Tests for file sharing feature."""
 import asyncio
+import logging
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import insert, select
 
+from app.core.config import settings
 from app.core.download_limiter import download_config
 from app.core.rate_limit_config import rate_limit_config
 from app.db.engine import transaction
@@ -13,7 +16,7 @@ from app.domain.errors import BadRequestError
 from app.domain.shares import MAX_ACTIVE_SHARES_PER_FILE
 from app.repositories import shares as shares_repo
 from app.services import share_service
-from tests.helpers_v0 import now_ms
+from tests.helpers_v0 import create_user_file_v0, now_ms
 
 
 def _insert_share_v0(
@@ -163,6 +166,7 @@ class TestShareManagement:
         assert sum(isinstance(result, dict) for result in results) == MAX_ACTIVE_SHARES_PER_FILE
         assert sum(isinstance(result, BadRequestError) for result in results) == 2
 
+
     def test_list_shares(self, authenticated_client, user_file):
         _create_share(authenticated_client, user_file["id"])
         _create_share(authenticated_client, user_file["id"])
@@ -241,6 +245,81 @@ class TestPublicShareAccess:
         )
         assert resp.status_code == 410
 
+    def test_browse_uses_bearer_and_rejects_query_token(
+        self, authenticated_client, client, test_user, monkeypatch
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        directory_path = Path(settings.download_dir) / "store" / "shared-directory"
+        directory_path.mkdir(parents=True)
+        (directory_path / "nested file.txt").write_bytes(b"nested")
+        directory = asyncio.run(
+            create_user_file_v0(
+                user_id=test_user["id"],
+                real_path=directory_path,
+                content_hash="shared-directory-hash",
+                display_name="shared-directory",
+                size_bytes=0,
+                is_directory=True,
+            )
+        )
+        share = _create_share(
+            authenticated_client,
+            directory["id"],
+            password="secret",
+        )
+        token = client.post(
+            f"/api/s/{share['share_code']}/access",
+            json={"password": "secret"},
+        ).json()["access_token"]
+        url = f"/api/s/{share['share_code']}/browse"
+
+        assert client.get(url, params={"token": token}).status_code == 403
+        response = client.get(url, headers={"Authorization": f"Bearer {token}"})
+
+        assert response.status_code == 200
+        assert response.json() == []
+        download = client.post(
+            f"/api/s/{share['share_code']}/download",
+            data={"token": token, "subpath": "nested file.txt"},
+        )
+        assert download.status_code == 200
+        assert download.content == b"nested"
+
+    def test_download_token_uses_header_or_form_body_and_is_redacted(
+        self, authenticated_client, client, user_file, monkeypatch, caplog
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        share = _create_share(
+            authenticated_client,
+            user_file["id"],
+            password="secret",
+        )
+        token = client.post(
+            f"/api/s/{share['share_code']}/access",
+            json={"password": "secret"},
+        ).json()["access_token"]
+        url = f"/api/s/{share['share_code']}/download"
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="app.main"):
+            query_response = client.get(url, params={"token": token})
+            header_response = client.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            form_response = client.post(url, data={"token": token})
+
+        assert query_response.status_code == 403
+        assert header_response.status_code == 200
+        assert form_response.status_code == 200
+        audit_logs = "\n".join(
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "app.main"
+        )
+        assert token not in audit_logs
+        assert "token=" not in audit_logs
+
     def test_full_download_increments_download_count_once(
         self, authenticated_client, client, user_file, monkeypatch
     ):
@@ -270,7 +349,45 @@ class TestPublicShareAccess:
         assert sorted(asyncio.run(consume_twice())) == [False, True]
         assert _share_download_count(share["share_code"]) == 1
 
-    def test_range_download_increments_download_count_once(
+
+    @pytest.mark.parametrize(
+        "range_header",
+        ["bytes=0-", "bytes=0-1023", "bytes=-1024"],
+    )
+    def test_complete_range_counts_as_full_download(
+        self,
+        authenticated_client,
+        client,
+        user_file,
+        monkeypatch,
+        range_header,
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+        url = f"/api/s/{share['share_code']}/download"
+
+        response = client.get(url, headers={"Range": range_header})
+
+        assert response.status_code == 206
+        assert response.content == b"x" * 1024
+        assert _share_download_count(share["share_code"]) == 1
+        assert client.get(url, headers={"Range": range_header}).status_code == 410
+
+    def test_invalid_range_is_rejected_without_counting(
+        self, authenticated_client, client, user_file, monkeypatch
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+
+        response = client.get(
+            f"/api/s/{share['share_code']}/download",
+            headers={"Range": "bytes=invalid"},
+        )
+
+        assert response.status_code == 416
+        assert _share_download_count(share["share_code"]) == 0
+
+    def test_range_download_does_not_increment_download_count(
         self, authenticated_client, client, user_file, monkeypatch
     ):
         _allow_anonymous_downloads(monkeypatch)
@@ -283,10 +400,11 @@ class TestPublicShareAccess:
 
         assert range_resp.status_code == 206
         assert range_resp.content == b"x" * 10
-        assert _share_download_count(share["share_code"]) == 1
+        assert _share_download_count(share["share_code"]) == 0
 
-        exhausted = client.get(f"/api/s/{share['share_code']}/download")
-        assert exhausted.status_code == 410
+        full_resp = client.get(f"/api/s/{share['share_code']}/download")
+        assert full_resp.status_code == 200
+        assert _share_download_count(share["share_code"]) == 1
 
     @pytest.mark.parametrize(
         "range_header",
@@ -317,6 +435,10 @@ class TestPublicShareAccess:
             headers={"Range": "bytes=0-0"},
         )
         assert valid.status_code == 206
+        assert _share_download_count(share["share_code"]) == 0
+
+        full = client.get(f"/api/s/{share['share_code']}/download")
+        assert full.status_code == 200
         assert _share_download_count(share["share_code"]) == 1
 
     @pytest.mark.parametrize("range_header", ["items=0-9", "bytes=0-9,20-29"])
@@ -362,7 +484,7 @@ class TestPublicShareAccess:
         self, authenticated_client, client, user_file, monkeypatch
     ):
         _allow_anonymous_downloads(monkeypatch)
-        share = _create_share(authenticated_client, user_file["id"], max_downloads=2)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
         original_limit = rate_limit_config.public_api
         rate_limit_config.public_api = 1
         try:
@@ -381,7 +503,7 @@ class TestPublicShareAccess:
         assert first.content == b"x" * 10
         assert second.status_code == 206
         assert second.content == b"x" * 10
-        assert _share_download_count(share["share_code"]) == 2
+        assert _share_download_count(share["share_code"]) == 0
 
     def test_empty_range_header_counts_as_full_download(
         self, authenticated_client, client, user_file, monkeypatch

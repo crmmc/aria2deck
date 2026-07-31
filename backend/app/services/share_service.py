@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -81,8 +82,10 @@ async def create_share(
     if not user_file:
         raise NotFoundError("文件不存在")
 
+    password_hash = (
+        await asyncio.to_thread(hash_password, password) if password else None
+    )
     timestamp = now_ms()
-    password_hash = hash_password(password) if password else None
 
     def values_factory() -> dict[str, Any]:
         return {
@@ -184,7 +187,11 @@ async def access_share(code: str, password: str) -> dict:
         raise GoneError("分享已失效")
     if not share["password_hash"]:
         raise BadRequestError("该分享无需密码")
-    if not verify_password(password, share["password_hash"]):
+    if not await asyncio.to_thread(
+        verify_password,
+        password,
+        share["password_hash"],
+    ):
         raise ForbiddenError("密码错误")
     return {"access_token": create_access_token(code)}
 
@@ -220,20 +227,29 @@ async def resolve_shared_download_target(
             raise NotFoundError("子文件不存在")
         if target.is_dir():
             raise BadRequestError("不能下载目录")
-        filename = target.name
-    else:
-        if share["is_directory"]:
-            raise BadRequestError("请指定子文件路径")
-        target = base_path
-        filename = share["file_name"] or "download"
-
-    return target, filename
-
+        return target, target.name
+    if share["is_directory"]:
+        raise BadRequestError("请指定子文件路径")
+    return base_path, share["file_name"] or "download"
 
 async def consume_share_download(share_id: int) -> None:
     updated = await shares_repo.consume_share_download(
         share_id,
         timestamp_ms=now_ms(),
+    )
+    if not updated:
+        raise GoneError("分享已失效或下载次数已用完")
+
+
+async def record_shared_download(
+    share: dict[str, Any],
+    *,
+    should_count_download: bool,
+) -> None:
+    updated = await shares_repo.touch_and_maybe_count_download(
+        int(share["id"]),
+        timestamp_ms=now_ms(),
+        should_count_download=should_count_download,
     )
     if not updated:
         raise GoneError("分享已失效或下载次数已用完")

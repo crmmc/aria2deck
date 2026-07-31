@@ -18,6 +18,7 @@ class RateLimitConfig:
         "create_task": 60,
         "create_torrent": 60,
         "create_pack": 60,
+        "create_share": 60,
         "aria2_test": 60,
         "public_api": 60,
         "share_access": 60,
@@ -50,6 +51,7 @@ class RateLimitConfig:
         self.create_task: int = 30
         self.create_torrent: int = 20
         self.create_pack: int = 5
+        self.create_share: int = 10
         self.aria2_test: int = 10
         self.public_api: int = 60
         self.share_access: int = 5
@@ -66,13 +68,14 @@ class RateLimitConfig:
 
         logger.info(
             "频率限制配置已加载 account_security=%s authenticated_api=%s "
-            "create_task=%s create_torrent=%s create_pack=%s aria2_test=%s "
-            "public_api=%s share_access=%s rpc=%s",
+            "create_task=%s create_torrent=%s create_pack=%s create_share=%s "
+            "aria2_test=%s public_api=%s share_access=%s rpc=%s",
             self.account_security,
             self.authenticated_api,
             self.create_task,
             self.create_torrent,
             self.create_pack,
+            self.create_share,
             self.aria2_test,
             self.public_api,
             self.share_access,
