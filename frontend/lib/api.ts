@@ -310,9 +310,14 @@ export const api = {
       method: "DELETE",
     }),
 
-  listStoredFiles: (search?: string, orphanOnly?: boolean) =>
+  listStoredFiles: (page = 1, pageSize = 20, search?: string, orphanOnly?: boolean) =>
     request<StoredFileListResponse>(
-      withQuery("/api/admin/storage/files", { search, orphan_only: orphanOnly || undefined })
+      withQuery("/api/admin/storage/files", {
+        page,
+        page_size: pageSize,
+        search,
+        orphan_only: orphanOnly || undefined,
+      })
     ),
 
   getFileUsers: (fileId: number) =>

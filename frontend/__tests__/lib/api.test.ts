@@ -337,6 +337,29 @@ describe("api methods", () => {
     });
   });
 
+  describe("api.listStoredFiles", () => {
+    it("sends the pagination and filter contract", async () => {
+      const response = {
+        files: [],
+        total: 0,
+        page: 2,
+        page_size: 50,
+      };
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(response),
+      });
+
+      await expect(api.listStoredFiles(2, 50, "movie", true)).resolves.toEqual(response);
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "/api/admin/storage/files?page=2&page_size=50&search=movie&orphan_only=true"
+        ),
+        expect.objectContaining({ credentials: "include" })
+      );
+    });
+  });
+
   describe("api.previewTorrent", () => {
     it("previews torrent metadata", async () => {
       const preview = {
