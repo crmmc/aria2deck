@@ -159,10 +159,11 @@ export const api = {
   // Tasks (subscription-based)
   listTasks: (statusFilter?: string) =>
     request<Task[]>(withQuery("/api/tasks", { status_filter: statusFilter })),
-  createTask: (uri: string) =>
+  createTask: (uri: string, signal?: AbortSignal) =>
     request<Task>("/api/tasks", {
       method: "POST",
       body: JSON.stringify({ uri }),
+      signal,
     }),
   previewTorrent: (torrent: string) =>
     request<TorrentPreview>("/api/tasks/torrent/preview", {

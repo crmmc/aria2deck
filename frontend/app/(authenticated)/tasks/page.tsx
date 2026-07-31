@@ -36,6 +36,14 @@ function getTaskDisplayName(task: Task): string {
   return task.name || "未知文件";
 }
 
+const MAX_TORRENT_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_BATCH_TASKS = 30;
+const BATCH_TASK_CONCURRENCY = 3;
+
+function parseBatchUris(value: string): string[] {
+  return [...new Set(value.split("\n").map((line) => line.trim()).filter(Boolean))];
+}
+
 export default function TasksPage() {
   const { showToast, showConfirm } = useToast();
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -70,6 +78,14 @@ export default function TasksPage() {
     new Set()
   );
   const wsConnectedRef = useRef(false);
+  const batchAddControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      batchAddControllerRef.current?.abort();
+      batchAddControllerRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (showBatchAddModal) {
@@ -297,6 +313,11 @@ export default function TasksPage() {
         setError("请选择 .torrent 文件");
         return;
       }
+      if (file.size > MAX_TORRENT_FILE_SIZE) {
+        setError("种子文件过大，最大支持 10 MB");
+        event.target.value = "";
+        return;
+      }
 
       try {
         const base64Content = await new Promise<string>((resolve, reject) => {
@@ -449,38 +470,62 @@ export default function TasksPage() {
 
   const batchAddTasks = useCallback(async () => {
     if (isBatchAdding) return;
-    const uris = batchUris.split("\n").reduce<string[]>((acc, line) => {
-      const trimmed = line.trim();
-      if (trimmed) acc.push(trimmed);
-      return acc;
-    }, []);
+    const uris = parseBatchUris(batchUris);
 
     if (uris.length === 0) {
       showToast("请输入至少一个链接", "warning");
       return;
     }
+    if (uris.length > MAX_BATCH_TASKS) {
+      showToast(`一次最多添加 ${MAX_BATCH_TASKS} 个任务`, "warning");
+      return;
+    }
 
+    const controller = new AbortController();
+    batchAddControllerRef.current = controller;
     setIsBatchAdding(true);
     setError(null);
+    let nextIndex = 0;
     let successCount = 0;
     let failCount = 0;
+    const createdTasks: Task[] = [];
 
-    try {
-      const results = await Promise.allSettled(
-        uris.map((uri) => api.createTask(uri))
-      );
-      for (const result of results) {
-        if (result.status === "fulfilled") {
-          const task = result.value;
-          if (task.status === "active" || task.status === "queued") {
-            setTasks((prev) => upsertTaskById(prev, task));
-          }
+    const worker = async () => {
+      while (!controller.signal.aborted) {
+        const index = nextIndex++;
+        if (index >= uris.length) return;
+        try {
+          const task = await api.createTask(uris[index], controller.signal);
+          if (controller.signal.aborted) return;
+          createdTasks.push(task);
           successCount++;
-        } else {
+        } catch {
+          if (controller.signal.aborted) return;
           failCount++;
         }
       }
+    };
 
+    try {
+      await Promise.all(
+        Array.from(
+          { length: Math.min(BATCH_TASK_CONCURRENCY, uris.length) },
+          () => worker()
+        )
+      );
+      if (
+        controller.signal.aborted ||
+        batchAddControllerRef.current !== controller
+      ) return;
+
+      const visibleTasks = createdTasks.filter(
+        (task) => task.status === "active" || task.status === "queued"
+      );
+      if (visibleTasks.length > 0) {
+        setTasks((prev) =>
+          visibleTasks.reduce(upsertTaskById, prev)
+        );
+      }
       setBatchUris("");
       setShowBatchAddModal(false);
 
@@ -493,11 +538,17 @@ export default function TasksPage() {
         showToast(`成功添加 ${successCount} 个任务`, "success");
       }
     } finally {
-      setIsBatchAdding(false);
+      if (batchAddControllerRef.current === controller) {
+        batchAddControllerRef.current = null;
+        setIsBatchAdding(false);
+      }
     }
   }, [batchUris, showToast, isBatchAdding]);
 
   const cancelBatchAdd = useCallback(() => {
+    batchAddControllerRef.current?.abort();
+    batchAddControllerRef.current = null;
+    setIsBatchAdding(false);
     setShowBatchAddModal(false);
     setBatchUris("");
   }, []);

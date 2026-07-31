@@ -35,7 +35,7 @@ jest.mock("@/lib/api", () => ({
   __esModule: true,
   api: {
     listTasks: jest.fn<Promise<Task[]>, [string?]>(),
-    createTask: jest.fn<Promise<Task>, [string]>(),
+    createTask: jest.fn<Promise<Task>, [string, AbortSignal?]>(),
     previewTorrent: jest.fn<Promise<TorrentPreview>, [string]>(),
     uploadTorrent: jest.fn<Promise<Task>, [string, UploadTorrentRequest?]>(),
     cancelTask: jest.fn<Promise<{ ok: boolean }>, [number]>(),
@@ -226,14 +226,159 @@ describe("TasksPage", () => {
     });
 
     fireEvent.change(screen.getByPlaceholderText(/magnet:\?xt=urn:btih/), {
-      target: { value: "https://example.com/a\nhttps://example.com/b" },
+      target: {
+        value:
+          "https://example.com/a\n\nhttps://example.com/a\nhttps://example.com/b",
+      },
     });
     fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
 
     await waitFor(() => {
-      expect(mockApi.createTask).toHaveBeenCalledWith("https://example.com/a");
-      expect(mockApi.createTask).toHaveBeenCalledWith("https://example.com/b");
+      expect(mockApi.createTask).toHaveBeenCalledWith(
+        "https://example.com/a",
+        expect.anything()
+      );
+      expect(mockApi.createTask).toHaveBeenCalledWith(
+        "https://example.com/b",
+        expect.anything()
+      );
+      expect(mockApi.createTask).toHaveBeenCalledTimes(2);
     });
+  });
+
+  test("rejects batch input over 30 unique links without requests", async () => {
+    render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
+
+    const uris = Array.from(
+      { length: 31 },
+      (_, index) => `https://example.com/${index}`
+    ).join("\n");
+    fireEvent.change(screen.getByLabelText("批量下载链接"), {
+      target: { value: uris },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith(
+        "一次最多添加 30 个任务",
+        "warning"
+      );
+    });
+    expect(mockApi.createTask).not.toHaveBeenCalled();
+  });
+
+  test("limits batch concurrency and reports partial failures", async () => {
+    let activeRequests = 0;
+    let maxActiveRequests = 0;
+    let releaseGate = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    mockApi.createTask.mockImplementation(async (uri) => {
+      activeRequests++;
+      maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+      try {
+        await gate;
+        if (uri.includes("fail")) throw new Error("failed");
+        return {
+          ...activeTask,
+          id: mockApi.createTask.mock.calls.length + 10,
+          name: uri,
+          uri,
+        };
+      } finally {
+        activeRequests--;
+      }
+    });
+
+    render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
+    fireEvent.change(screen.getByLabelText("批量下载链接"), {
+      target: {
+        value: [
+          "https://example.com/1",
+          "https://example.com/fail-2",
+          "https://example.com/3",
+          "https://example.com/4",
+          "https://example.com/5",
+          "https://example.com/fail-6",
+          "https://example.com/7",
+        ].join("\n"),
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
+
+    await waitFor(() => expect(mockApi.createTask).toHaveBeenCalledTimes(3));
+    expect(maxActiveRequests).toBe(3);
+    releaseGate();
+
+    await waitFor(() => {
+      expect(mockApi.createTask).toHaveBeenCalledTimes(7);
+      expect(showToastMock).toHaveBeenCalledWith(
+        "添加完成：成功 5 个，失败 2 个",
+        "warning"
+      );
+    });
+    expect(maxActiveRequests).toBeLessThanOrEqual(3);
+  });
+
+  test("stops scheduling batch tasks when cancelled", async () => {
+    const signals: AbortSignal[] = [];
+    mockApi.createTask.mockImplementation((_uri, signal) => {
+      if (!signal) throw new Error("missing abort signal");
+      signals.push(signal);
+      return new Promise<Task>((_resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true }
+        );
+      });
+    });
+
+    render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
+    fireEvent.change(screen.getByLabelText("批量下载链接"), {
+      target: {
+        value: Array.from(
+          { length: 8 },
+          (_, index) => `https://example.com/${index}`
+        ).join("\n"),
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
+
+    await waitFor(() => expect(mockApi.createTask).toHaveBeenCalledTimes(3));
+    const cancelButtons = screen.getAllByRole("button", { name: "取消" });
+    fireEvent.click(cancelButtons[cancelButtons.length - 1]);
+
+    await waitFor(() => expect(signals.every((signal) => signal.aborted)).toBe(true));
+    expect(mockApi.createTask).toHaveBeenCalledTimes(3);
+    expect(screen.queryByLabelText("批量下载链接")).not.toBeInTheDocument();
+  });
+
+  test("rejects torrent over 10 MiB before reading it", async () => {
+    const readAsDataURL = jest.spyOn(FileReader.prototype, "readAsDataURL");
+    render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+
+    const file = new File(["torrent"], "large.torrent", {
+      type: "application/x-bittorrent",
+    });
+    Object.defineProperty(file, "size", { value: 10 * 1024 * 1024 + 1 });
+    fireEvent.change(screen.getByLabelText("上传种子文件"), {
+      target: { files: [file] },
+    });
+
+    expect(
+      await screen.findByText("种子文件过大，最大支持 10 MB")
+    ).toBeInTheDocument();
+    expect(readAsDataURL).not.toHaveBeenCalled();
+    expect(mockApi.previewTorrent).not.toHaveBeenCalled();
   });
 
   test("keeps error task in list after websocket update", async () => {
