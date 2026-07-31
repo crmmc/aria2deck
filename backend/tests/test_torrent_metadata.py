@@ -100,9 +100,6 @@ def test_extracts_all_torrent_network_endpoints() -> None:
     announce = b"udp://8.8.8.8:6969/announce"
     tracker_a = b"https://8.8.4.4/announce"
     tracker_b = b"udp://1.1.1.1:6969/announce"
-    webseed_a = b"https://8.8.8.8/file"
-    webseed_b = b"ftp://8.8.4.4/file"
-    httpseed = b"http://1.1.1.1/seed"
     torrent = bdict(
         [
             (b"announce", bstr(announce)),
@@ -110,8 +107,6 @@ def test_extracts_all_torrent_network_endpoints() -> None:
                 b"announce-list",
                 blist([blist([bstr(tracker_a), bstr(tracker_b)])]),
             ),
-            (b"url-list", blist([bstr(webseed_a), bstr(webseed_b)])),
-            (b"httpseeds", bstr(httpseed)),
             (b"info", single_file_info()),
         ]
     )
@@ -123,11 +118,7 @@ def test_extracts_all_torrent_network_endpoints() -> None:
         tracker_a.decode(),
         tracker_b.decode(),
     )
-    assert metadata.webseed_urls == (
-        webseed_a.decode(),
-        webseed_b.decode(),
-        httpseed.decode(),
-    )
+    assert metadata.webseed_urls == ()
 
 
 def test_parse_multi_file_torrent_metadata() -> None:
@@ -142,6 +133,19 @@ def test_parse_multi_file_torrent_metadata() -> None:
     assert metadata.files[1].path == ("Fedora Workstation", "docs", "release-notes.pdf")
     assert metadata.tree[0]["type"] == "directory"
     assert metadata.tree[0]["children"][1]["name"] == "docs"
+
+
+@pytest.mark.parametrize("key", [b"url-list", b"httpseeds"])
+def test_parse_rejects_embedded_webseeds(key: bytes) -> None:
+    torrent = bdict(
+        [
+            (b"info", single_file_info()),
+            (key, bstr(b"http://127.0.0.1/private")),
+        ]
+    )
+
+    with pytest.raises(TorrentMetadataError, match="webseeds"):
+        parse_torrent_base64(base64.b64encode(torrent).decode("ascii"))
 
 
 @pytest.mark.parametrize(

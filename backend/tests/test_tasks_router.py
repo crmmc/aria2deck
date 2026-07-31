@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import logging
 import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,12 +15,20 @@ from fastapi.testclient import TestClient
 from sqlalchemy import update
 
 from app.db.engine import transaction
+from app.core.config import get_internal_base_url
 from app.db.schema import global_downloads
 from app.domain.errors import BadRequestError
 from app.domain.torrent_metadata import MAX_TORRENT_BASE64_LENGTH
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
 from app.services.download_service import create_user_download
 from app.services.hash import get_uri_hash
+from app.services.http_probe import ProbeResult
+from app.services.internal_fetch import (
+    CAPABILITY_HEADER,
+    http_resource_identity,
+    source_request_options,
+    verify_capability,
+)
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_task_v0,
@@ -80,6 +89,13 @@ def _multi_file_torrent_payload() -> tuple[str, str]:
 
 def _public_dns_result() -> list[tuple]:
     return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("8.8.8.8", 80))]
+
+
+def _response_context(response: MagicMock) -> AsyncMock:
+    return AsyncMock(
+        __aenter__=AsyncMock(return_value=response),
+        __aexit__=AsyncMock(return_value=None),
+    )
 
 
 async def _set_global_error_message(download_id: int, error_message: str) -> None:
@@ -226,6 +242,45 @@ class TestCreateTask:
         assert response.status_code == 400
         assert "无效的磁力链接" in response.json()["detail"]
 
+    @patch("app.services.task_service._get_client")
+    @patch("app.services.task_service.check_disk_space")
+    def test_create_task_canonicalizes_magnet_before_submit(
+        self,
+        mock_disk: MagicMock,
+        mock_get_client: MagicMock,
+        authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_get_client.return_value = mock_aria2_client
+        info_hash = "0123456789ABCDEF0123456789ABCDEF01234567"
+        normalized_hash = info_hash.lower()
+        canonical_uri = f"magnet:?xt=urn:btih:{normalized_hash}"
+        markers = (
+            "rest-tracker-secret.example",
+            "rest-webseed-secret.example",
+            "rest-acceptable-secret.example",
+            "rest-source-secret.example",
+        )
+        magnet_uri = (
+            f"magnet:?xt=urn:btih:{info_hash}&tr=https://{markers[0]}/announce"
+            f"&ws=https://{markers[1]}/payload&as=https://{markers[2]}/payload"
+            f"&xs=https://{markers[3]}/metadata&dn=unsafe-name"
+        )
+
+        response = authenticated_client.post("/api/tasks", json={"uri": magnet_uri})
+
+        assert response.status_code == 201
+        assert response.json()["uri"] == canonical_uri
+        submitted_uris = mock_aria2_client.add_uri.await_args.args[0]
+        stored = asyncio.run(get_global_by_resource_key(normalized_hash))
+        assert submitted_uris == [canonical_uri]
+        assert stored is not None and stored["source_uri"] == canonical_uri
+        assert all(
+            marker not in repr(mock_aria2_client.add_uri.await_args)
+            for marker in markers
+        )
+
     @patch("app.services.task_service.probe_url_with_get_fallback")
     def test_create_task_probe_failure(
         self,
@@ -244,6 +299,84 @@ class TestCreateTask:
 
         assert response.status_code == 400
         assert "无法访问下载链接" in response.json()["detail"]
+
+    def test_create_task_rejects_private_get_redirect_before_transport(
+        self,
+        authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
+    ) -> None:
+        original_url = "http://example.com/download"
+        private_url = "http://127.0.0.1/admin"
+        redirect = MagicMock(
+            status=302,
+            url=original_url,
+            reason="Found",
+            headers={"Location": private_url},
+        )
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.get = MagicMock(
+            return_value=_response_context(redirect)
+        )
+
+        with patch(
+            "app.services.http_probe.probe_http_url",
+            new=AsyncMock(
+                return_value=ProbeResult(
+                    success=True,
+                    final_url=original_url,
+                    content_length=1024,
+                    filename="download.bin",
+                )
+            ),
+        ), patch("aiohttp.ClientSession", return_value=mock_session), patch(
+            "app.services.task_service._get_client",
+            return_value=mock_aria2_client,
+        ):
+            response = authenticated_client.post(
+                "/api/tasks",
+                json={"uri": original_url},
+            )
+
+        assert response.status_code == 400
+        assert "重定向目标不安全" in response.json()["detail"]
+        mock_session.get.assert_called_once_with(
+            original_url,
+            allow_redirects=False,
+            read_until_eof=False,
+        )
+        mock_aria2_client.add_uri.assert_not_awaited()
+
+    @patch("app.services.task_service.create_user_download")
+    @patch("app.services.task_service.probe_url_with_get_fallback")
+    def test_create_task_admits_unknown_content_length_as_unknown_size(
+        self,
+        mock_probe: AsyncMock,
+        mock_create_download: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
+        mock_result = MagicMock()
+        mock_result.success = True
+        mock_result.final_url = "http://example.com/stream"
+        mock_result.filename = "stream.bin"
+        mock_result.content_length = None
+        mock_probe.return_value = mock_result
+        mock_create_download.return_value = {
+            "id": 1,
+            "global_download_id": 999,
+            "status": "active",
+            "display_name": "stream.bin",
+        }
+
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={"uri": "http://example.com/stream"},
+        )
+
+        assert response.status_code == 201
+        assert response.json()["total_length"] == 0
+        assert mock_create_download.await_args.kwargs["size_known"] is False
 
     @patch("app.services.task_service.probe_url_with_get_fallback")
     def test_create_task_rejects_credentialed_url(
@@ -403,6 +536,84 @@ class TestCreateTask:
         assert "invalid out option" in response.json()["detail"]
         mock_aria2_client.add_uri.assert_not_awaited()
 
+    def test_create_task_submits_get_verified_final_url(
+        self,
+        authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
+        test_user: dict,
+    ) -> None:
+        original_url = "http://example.com/download"
+        final_url = "http://example.com/files/final.zip"
+        redirect = MagicMock(
+            status=302,
+            url=original_url,
+            reason="Found",
+            headers={"Location": "/files/final.zip"},
+        )
+        final = MagicMock(
+            status=200,
+            url=final_url,
+            reason="OK",
+            headers={
+                "Content-Length": "1024",
+                "Content-Disposition": 'attachment; filename="final.zip"',
+            },
+        )
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.get = MagicMock(
+            side_effect=[_response_context(redirect), _response_context(final)]
+        )
+
+        with patch(
+            "app.services.http_probe.probe_http_url",
+            new=AsyncMock(
+                return_value=ProbeResult(
+                    success=True,
+                    final_url=original_url,
+                    content_length=1024,
+                )
+            ),
+        ), patch("aiohttp.ClientSession", return_value=mock_session), patch(
+            "app.services.task_service._get_client",
+            return_value=mock_aria2_client,
+        ):
+            response = authenticated_client.post(
+                "/api/tasks",
+                json={"uri": original_url},
+            )
+
+        assert response.status_code == 201
+        assert response.json()["uri"] == final_url
+        assert [call.args[0] for call in mock_session.get.call_args_list] == [
+            original_url,
+            final_url,
+        ]
+        global_download = asyncio.run(
+            get_global_by_resource_key(get_uri_hash(final_url))
+        )
+        assert global_download is not None
+        assert global_download["source_uri"] == final_url
+        task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
+        assert task is not None
+        mock_aria2_client.add_uri.assert_awaited_once()
+        uris, options = mock_aria2_client.add_uri.await_args.args
+        assert uris == [
+            f"{get_internal_base_url()}/_internal/fetch/{global_download['id']}/0"
+        ]
+        assert "max-http-redirections" not in options
+        capability_header = options["header"]
+        assert isinstance(capability_header, list)
+        header_name, capability = capability_header[0].split(": ", 1)
+        assert header_name == CAPABILITY_HEADER
+        verified = verify_capability(
+            capability,
+            int(global_download["id"]),
+            final_url,
+        )
+        assert verified.headers == ()
+
     @patch("app.services.task_service.probe_url_with_get_fallback")
     @patch("app.services.task_service._get_client")
     @patch("app.services.task_service.check_disk_space")
@@ -428,7 +639,16 @@ class TestCreateTask:
 
         response = authenticated_client.post(
             "/api/tasks",
-            json={"uri": initial_url},
+            json={
+                "uri": initial_url,
+                "options": {
+                    "out": "user-selected.bin",
+                    "header": "X-Upstream-Key: source-secret",
+                    "http-user": "alice",
+                    "http-passwd": "password",
+                    "max-connection-per-server": "9",
+                },
+            },
         )
 
         assert response.status_code == 201
@@ -439,22 +659,107 @@ class TestCreateTask:
         assert data["total_length"] == 100 * 1024 * 1024
         assert data["frozen_space"] == 100 * 1024 * 1024
 
-        resource_key = get_uri_hash(final_url)
-        assert resource_key is not None
-        global_download = asyncio.run(
-            get_global_by_resource_key(resource_key)
+        base_resource_key = get_uri_hash(final_url)
+        assert base_resource_key is not None
+        resource_key = http_resource_identity(
+            base_resource_key,
+            source_request_options(
+                {
+                    "header": "X-Upstream-Key: source-secret",
+                    "http-user": "alice",
+                    "http-passwd": "password",
+                }
+            ),
         )
+        global_download = asyncio.run(get_global_by_resource_key(resource_key))
         assert global_download is not None
+        assert "source-secret" not in global_download["resource_key"]
+        assert "alice" not in global_download["resource_key"]
+        assert global_download["source_uri"] == "http://cdn.example.com/file.zip"
         task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
         assert task is not None
         assert data["id"] == task["id"]
         mock_aria2_client.add_uri.assert_awaited_once()
-        call_args = mock_aria2_client.add_uri.call_args
-        assert call_args[0][0] == [final_url]
-        opts = call_args[0][1]
-        assert "dir" in opts
+        uris, opts = mock_aria2_client.add_uri.await_args.args
+        assert uris == [
+            f"{get_internal_base_url()}/_internal/fetch/{global_download['id']}/0"
+        ]
+        assert final_url not in uris
         assert opts["dir"].endswith(f"/downloading/{global_download['id']}")
         assert opts["seed-time"] == "0"
+        assert opts["out"] == "payload"
+        assert opts["split"] == "1"
+        assert opts["max-connection-per-server"] == "1"
+        assert "max-http-redirections" not in opts
+        assert "http-user" not in opts
+        assert "http-passwd" not in opts
+        header_name, capability = opts["header"][0].split(": ", 1)
+        assert header_name == CAPABILITY_HEADER
+        verified = verify_capability(
+            capability,
+            int(global_download["id"]),
+            str(global_download["source_uri"]),
+        )
+        assert verified.headers == (("x-upstream-key", "source-secret"),)
+        assert verified.username == "alice"
+        assert verified.password == "password"
+
+    @patch("app.services.task_service.probe_url_with_get_fallback")
+    @patch("app.services.task_service._get_client")
+    @patch("app.services.task_service.check_disk_space")
+    def test_gateway_capability_is_not_persisted_or_logged_on_submit_failure(
+        self,
+        mock_disk: MagicMock,
+        mock_get_client: MagicMock,
+        mock_probe: AsyncMock,
+        authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
+        test_user: dict,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024**3)
+        mock_get_client.return_value = mock_aria2_client
+        mock_probe.return_value = ProbeResult(
+            success=True,
+            final_url="https://cdn.example.com/protected.bin",
+            content_length=8,
+            filename="protected.bin",
+        )
+        captured: list[str] = []
+
+        async def reject_submission(_uris, options):
+            capability = options["header"][0].split(": ", 1)[1]
+            captured.append(capability)
+            raise RuntimeError(capability)
+
+        mock_aria2_client.add_uri.side_effect = reject_submission
+        with caplog.at_level(logging.WARNING):
+            response = authenticated_client.post(
+                "/api/tasks",
+                json={
+                    "uri": "https://example.com/protected.bin",
+                    "options": {"header": "X-Api-Key: source-secret"},
+                },
+            )
+
+        assert response.status_code == 502
+        assert len(captured) == 1
+        capability = captured[0]
+        assert capability not in response.text
+        assert capability not in caplog.text
+        base_key = get_uri_hash("https://cdn.example.com/protected.bin")
+        assert base_key is not None
+        resource_key = http_resource_identity(
+            base_key,
+            source_request_options({"header": "X-Api-Key: source-secret"}),
+        )
+        global_download = asyncio.run(get_global_by_resource_key(resource_key))
+        assert global_download is not None
+        task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
+        assert task is not None
+        assert task["error_message"] == "内部下载任务提交失败"
+        assert capability not in repr(global_download)
+        assert capability not in repr(task)
 
 
 class TestTorrentPreview:
@@ -539,7 +844,8 @@ class TestCreateTorrentTask:
         )
 
         assert response.status_code == 400
-        assert "内网地址" in response.json()["detail"]
+        expected = "内网地址" if field == b"announce" else "webseeds"
+        assert expected in response.json()["detail"]
         mock_aria2_client.add_torrent.assert_not_awaited()
 
     def test_create_torrent_invalid_base64(
@@ -703,7 +1009,7 @@ class TestCreateTorrentTask:
             json={
                 "torrent": torrent_data,
                 "selected_file_indexes": [3, 1],
-                "options": {"select-file": "2", "bt-tracker": "http://tracker.example.com/announce"},
+                "options": {"select-file": "2"},
             },
         )
 
@@ -718,7 +1024,31 @@ class TestCreateTorrentTask:
         call_args = mock_aria2_client.add_torrent.call_args
         opts = call_args[0][2]
         assert opts["select-file"] == "1,3"
-        assert opts["bt-tracker"] == "http://tracker.example.com/announce"
+
+    @patch("app.services.task_service._get_client")
+    @patch("app.services.task_service.check_disk_space")
+    def test_create_torrent_rejects_bt_tracker_before_submit(
+        self,
+        mock_disk: MagicMock,
+        mock_get_client: MagicMock,
+        authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_get_client.return_value = mock_aria2_client
+        torrent_data, _ = _valid_torrent_payload()
+
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={
+                "torrent": torrent_data,
+                "options": {"bt-tracker": "http://127.0.0.1/announce"},
+            },
+        )
+
+        assert response.status_code == 400
+        assert "bt-tracker" in response.json()["detail"]
+        mock_aria2_client.add_torrent.assert_not_awaited()
 
     @patch("app.services.task_service._get_client")
     @patch("app.services.task_service.check_disk_space")

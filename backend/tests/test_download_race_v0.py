@@ -122,7 +122,7 @@ async def test_failed_submit_releases_user_reservation(temp_db: str) -> None:
     client = AsyncMock()
     client.add_uri.side_effect = RuntimeError("aria2 unavailable")
 
-    with pytest.raises(RuntimeError, match="aria2 unavailable"):
+    with pytest.raises(RuntimeError, match="内部下载任务提交失败"):
         await create_user_download(
             user_id=user["id"],
             quota_bytes=user["quota_bytes"],
@@ -451,11 +451,12 @@ async def test_cancel_wins_handoff_and_removes_followed_gid(
     user = await create_user_v0(username="race_cancel_handoff", quota_bytes=1000)
     client = AsyncMock()
     client.add_uri.return_value = "gid-handoff-g1"
+    info_hash = "c" * 40
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
-        uri="magnet:?xt=urn:btih:cancelhandoff",
-        resource_key="magnet:cancel-handoff",
+        uri=f"magnet:?xt=urn:btih:{info_hash}",
+        resource_key=info_hash,
         resource_kind="magnet",
         display_name="cancel-handoff",
         total_bytes=100,
@@ -502,7 +503,7 @@ async def test_cancel_wins_handoff_and_removes_followed_gid(
     release_tell.set()
     switched = await handoff
 
-    stored = await get_global_by_resource_key("magnet:cancel-handoff")
+    stored = await get_global_by_resource_key(info_hash)
     assert cancelled["status"] == "cancelled"
     assert switched is False
     assert stored is not None
@@ -519,13 +520,14 @@ async def test_stale_handoff_stops_followed_without_deleting_shared_directory(
     user = await create_user_v0(username="stale_handoff_dir", quota_bytes=1000)
     client = AsyncMock()
     client.add_uri.return_value = "gid-current-generation"
+    info_hash = "d" * 40
     task = await create_user_download(
         user_id=user["id"], quota_bytes=user["quota_bytes"],
-        uri="magnet:?xt=urn:btih:stalehandoffdir",
-        resource_key="magnet:stale-handoff-dir", resource_kind="magnet",
+        uri=f"magnet:?xt=urn:btih:{info_hash}",
+        resource_key=info_hash, resource_kind="magnet",
         display_name="stale-handoff", total_bytes=100, aria2_client=client,
     )
-    stored = await get_global_by_resource_key("magnet:stale-handoff-dir")
+    stored = await get_global_by_resource_key(info_hash)
     assert stored is not None
     task_dir = get_task_download_dir(task["global_download_id"])
     sentinel = task_dir / "current-generation.bin"
@@ -541,7 +543,7 @@ async def test_stale_handoff_stops_followed_without_deleting_shared_directory(
         log_prefix="[Test]",
     )
 
-    latest = await get_global_by_resource_key("magnet:stale-handoff-dir")
+    latest = await get_global_by_resource_key(info_hash)
     assert latest is not None
     assert switched is False
     assert latest["aria2_gid"] == "gid-current-generation"

@@ -283,6 +283,20 @@ async def get_global_by_resource_key(resource_key: str) -> dict[str, Any] | None
     return dict(row) if row else None
 
 
+async def get_global_download_by_id(download_id: int) -> dict[str, Any] | None:
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    select(global_downloads).where(global_downloads.c.id == download_id)
+                )
+            )
+            .mappings()
+            .first()
+        )
+    return dict(row) if row else None
+
+
 async def get_global_download_by_gid(gid: str) -> dict[str, Any] | None:
     async with transaction() as conn:
         row = (
@@ -303,6 +317,19 @@ async def list_active_global_downloads() -> list[dict[str, Any]]:
             await conn.execute(
                 select(global_downloads).where(
                     global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES)
+                )
+            )
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+async def list_active_like_http_downloads() -> list[dict[str, Any]]:
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                select(global_downloads).where(
+                    global_downloads.c.resource_kind == "http",
+                    global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
                 )
             )
         ).mappings().all()

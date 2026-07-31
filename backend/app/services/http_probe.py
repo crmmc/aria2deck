@@ -14,10 +14,11 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
-from app.core.security import (
-    HTTP_URI_SCHEMES,
-    check_url_ssrf,
-    redact_url_for_log,
+from app.core.security import redact_url_for_log
+from app.http.safe_client import (
+    UnsafeTargetError,
+    create_public_connector,
+    normalize_public_http_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,13 @@ DEFAULT_TIMEOUT = 30
 # Maximum number of redirects to follow
 MAX_REDIRECTS = 10
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+GET_FALLBACK_ERROR_PREFIXES = (
+    "Connection error:",
+    "Request timeout",
+    "Unexpected error:",
+    "HTTP 405:",
+    "HTTP 501:",
+)
 
 
 @dataclass
@@ -110,10 +118,16 @@ def _extract_filename_from_url(url: str) -> str | None:
     return None
 
 
-def _probe_result_from_response(
+def _result_from_response(
     response: aiohttp.ClientResponse,
     final_url: str,
 ) -> ProbeResult:
+    if 300 <= response.status < 400:
+        return ProbeResult(
+            success=False,
+            final_url=final_url,
+            error=f"HTTP {response.status}: 不支持的重定向响应",
+        )
     if response.status >= 400:
         return ProbeResult(
             success=False,
@@ -122,17 +136,19 @@ def _probe_result_from_response(
         )
 
     content_length = None
-    if "Content-Length" in response.headers:
+    raw_content_length = response.headers.get("Content-Length")
+    if raw_content_length is not None:
         try:
-            content_length = int(response.headers["Content-Length"])
-        except ValueError:
+            parsed_length = int(raw_content_length)
+            if parsed_length >= 0:
+                content_length = parsed_length
+        except (TypeError, ValueError):
             pass
 
     filename = None
-    if "Content-Disposition" in response.headers:
-        filename = _parse_content_disposition(
-            response.headers["Content-Disposition"]
-        )
+    content_disposition = response.headers.get("Content-Disposition")
+    if content_disposition:
+        filename = _parse_content_disposition(content_disposition)
     if not filename:
         filename = _extract_filename_from_url(final_url)
 
@@ -145,52 +161,56 @@ def _probe_result_from_response(
     )
 
 
-async def _probe_with_method(
+async def _probe_request(
     session: aiohttp.ClientSession,
-    url: str,
     method: str,
+    url: str,
     max_redirects: int,
 ) -> ProbeResult:
-    current_url = url
+    try:
+        current_url = normalize_public_http_url(url)
+    except UnsafeTargetError as exc:
+        return ProbeResult(success=False, error=str(exc))
     redirect_count = 0
 
     while True:
-        ssrf_error = await check_url_ssrf(
-            current_url,
-            allowed_schemes=HTTP_URI_SCHEMES,
-        )
-        if ssrf_error:
-            prefix = "重定向目标不安全: " if redirect_count else ""
-            return ProbeResult(
-                success=False,
-                final_url=current_url,
-                error=f"{prefix}{ssrf_error}",
+        if method == "HEAD":
+            response_context = session.head(current_url, allow_redirects=False)
+        else:
+            response_context = session.get(
+                current_url,
+                allow_redirects=False,
+                read_until_eof=False,
             )
-
-        request = (
-            session.head(current_url, allow_redirects=False)
-            if method == "HEAD"
-            else session.get(current_url, allow_redirects=False)
-        )
-        async with request as response:
+        async with response_context as response:
+            response_url = str(response.url)
             if response.status not in REDIRECT_STATUSES:
-                return _probe_result_from_response(response, current_url)
+                return _result_from_response(response, response_url)
 
             location = response.headers.get("Location")
             if not location:
                 return ProbeResult(
                     success=False,
-                    final_url=current_url,
-                    error="重定向响应缺少 Location",
+                    final_url=response_url,
+                    error=f"HTTP {response.status}: 重定向响应缺少 Location",
                 )
             if redirect_count >= max_redirects:
                 return ProbeResult(
                     success=False,
-                    final_url=current_url,
-                    error="重定向次数过多",
+                    final_url=response_url,
+                    error="重定向次数超过限制",
                 )
 
-            current_url = urljoin(current_url, location)
+            try:
+                next_url = normalize_public_http_url(urljoin(response_url, location))
+            except UnsafeTargetError as exc:
+                return ProbeResult(
+                    success=False,
+                    final_url=response_url,
+                    error=f"重定向目标不安全: {exc}",
+                )
+
+            current_url = next_url
             redirect_count += 1
 
 
@@ -216,34 +236,41 @@ async def probe_http_url(
     """
     try:
         client_timeout = aiohttp.ClientTimeout(total=timeout)
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            return await _probe_with_method(session, url, "HEAD", max_redirects)
 
-    except aiohttp.ClientError as exc:
+        async with aiohttp.ClientSession(
+            timeout=client_timeout,
+            connector=create_public_connector(),
+        ) as session:
+            return await _probe_request(session, "HEAD", url, max_redirects)
+
+    except aiohttp.ClientError as e:
+        safe_url = redact_url_for_log(url)
         logger.warning(
-            "HTTP probe failed url=%s error_type=%s",
-            redact_url_for_log(url),
-            type(exc).__name__,
+            "HTTP probe failed url=%s error=%s",
+            safe_url,
+            type(e).__name__,
         )
         return ProbeResult(
             success=False,
-            error=f"Connection error: {type(exc).__name__}",
+            error=f"Connection error: {type(e).__name__}",
         )
     except TimeoutError:
-        logger.warning("HTTP probe timeout url=%s", redact_url_for_log(url))
+        safe_url = redact_url_for_log(url)
+        logger.warning(f"HTTP probe timeout for {safe_url}")
         return ProbeResult(
             success=False,
             error="Request timeout",
         )
-    except Exception as exc:
+    except Exception as e:
+        safe_url = redact_url_for_log(url)
         logger.warning(
-            "HTTP probe unexpected error url=%s error_type=%s",
-            redact_url_for_log(url),
-            type(exc).__name__,
+            "HTTP probe unexpected error url=%s error=%s",
+            safe_url,
+            type(e).__name__,
         )
         return ProbeResult(
             success=False,
-            error=f"Unexpected error: {type(exc).__name__}",
+            error=f"Unexpected error: {type(e).__name__}",
         )
 
 
@@ -252,42 +279,37 @@ async def probe_url_with_get_fallback(
     timeout: int = DEFAULT_TIMEOUT,
     max_redirects: int = MAX_REDIRECTS,
 ) -> ProbeResult:
-    """Probe URL with GET fallback if HEAD fails.
+    """Validate the HEAD and GET redirect chains and return GET metadata.
 
-    Some servers don't support HEAD requests properly.
-    Falls back to GET with immediate close if HEAD fails.
-
-    Args:
-        url: The URL to probe
-        timeout: Request timeout in seconds
-        max_redirects: Maximum redirects to follow
-
-    Returns:
-        ProbeResult with metadata or error information
+    The GET response body is not consumed; the response context is closed as
+    soon as the final headers are available.
     """
     # Try HEAD first
     result = await probe_http_url(url, timeout, max_redirects)
 
-    fallback_errors = (
-        "Connection error:",
-        "Request timeout",
-        "Unexpected error:",
-        "HTTP 405:",
-        "HTTP 501:",
-    )
-    if result.success or not (result.error or "").startswith(fallback_errors):
+    if not result.success and (
+        not result.error
+        or not result.error.startswith(GET_FALLBACK_ERROR_PREFIXES)
+    ):
         return result
 
     try:
         client_timeout = aiohttp.ClientTimeout(total=timeout)
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            return await _probe_with_method(session, url, "GET", max_redirects)
 
-    except Exception as exc:
-        # Return original HEAD error if GET also fails
+        async with aiohttp.ClientSession(
+            timeout=client_timeout,
+            connector=create_public_connector(),
+        ) as session:
+            return await _probe_request(session, "GET", url, max_redirects)
+
+    except Exception as e:
+        safe_url = redact_url_for_log(url)
         logger.warning(
-            "GET fallback failed url=%s error_type=%s",
-            redact_url_for_log(url),
-            type(exc).__name__,
+            "GET probe failed url=%s error=%s",
+            safe_url,
+            type(e).__name__,
         )
-        return result
+        return ProbeResult(
+            success=False,
+            error=f"GET 验证失败: {type(e).__name__}",
+        )

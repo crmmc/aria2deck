@@ -1,13 +1,15 @@
 """Tests for aria2 RPC router."""
 
 import asyncio
+import logging
 from typing import cast
-
-from fastapi import FastAPI
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+from app.core.config import settings
 from app.core.security import credential_digest, credential_prefix
 from app.repositories import auth as auth_repo
 from tests.helpers_v0 import create_user_v0, now_ms
@@ -479,7 +481,11 @@ class TestJsonrpcHandler:
             )
 
         assert response.status_code == 200
-        assert response.json() == {"jsonrpc": "2.0", "result": {"ok": True}, "id": None}
+        assert response.json() == {
+            "jsonrpc": "2.0",
+            "result": {"ok": True},
+            "id": None,
+        }
 
     def test_all_notification_batch_returns_no_content(
         self, client: TestClient, rpc_user: dict
@@ -520,6 +526,38 @@ class TestJsonrpcHandler:
 
         assert response.status_code == 204
         assert response.content == b""
+
+    def test_rpc_query_audit_never_logs_sensitive_params(
+        self,
+        client: TestClient,
+        rpc_user: dict,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        capability = "raw-gateway-capability-payload.signature"
+        monkeypatch.setattr(settings, "debug", True)
+
+        with caplog.at_level(logging.DEBUG):
+            response = client.post(
+                "/aria2/jsonrpc",
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "aria2.getOption",
+                    "id": "audit-sensitive-request",
+                    "params": [f"token:{rpc_user['rpc_secret']}", capability],
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["error"]["code"] == 1
+        app_logs = "\n".join(
+            record.getMessage()
+            for record in caplog.records
+            if record.name.startswith("app.")
+        )
+        assert capability not in app_logs
+        assert rpc_user["rpc_secret"] not in app_logs
+        assert "/aria2/jsonrpc?" not in app_logs
 
     def test_uses_refreshed_aria2_client_config(
         self, client: TestClient, rpc_user: dict, monkeypatch

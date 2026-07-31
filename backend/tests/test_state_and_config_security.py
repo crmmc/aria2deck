@@ -9,12 +9,14 @@ from app.core.config import (
     CREDENTIAL_PEPPER_ENV,
     DEFAULT_SECRET_KEY,
     INITIAL_ADMIN_PASSWORD_ENV,
+    INTERNAL_BASE_URL_ENV,
     LEGACY_SHARE_JWT_SECRET_ENV,
     MIN_SECRET_KEY_BYTES,
     PREVIOUS_CREDENTIAL_PEPPER_ENV,
     SHARE_JWT_SECRET_ENV,
     Settings,
     check_secret_key,
+    get_internal_base_url,
     settings,
 )
 from app.services.settings_service import refresh_aria2_config
@@ -140,6 +142,40 @@ def test_settings_reads_initial_admin_password_from_explicit_env(monkeypatch):
     configured = Settings()
 
     assert configured.initial_admin_password == "configured admin passphrase"
+
+
+def test_internal_base_url_defaults_to_loopback_running_port(monkeypatch):
+    monkeypatch.setattr(settings, "internal_base_url", "")
+    monkeypatch.setattr(settings, "port", 8123)
+
+    assert get_internal_base_url() == "http://127.0.0.1:8123"
+
+
+def test_settings_reads_explicit_internal_base_url(monkeypatch):
+    monkeypatch.setenv(INTERNAL_BASE_URL_ENV, "http://app:8001")
+
+    configured = Settings()
+
+    assert configured.internal_base_url == "http://app:8001"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ftp://app:8001",
+        "http://user:password@app:8001",
+        "http://public.example.com:8001",
+        "http://0.0.0.0:8001",
+        "http://app:0",
+        "http://app:8001/prefix",
+        "http://app:8001?token=secret",
+    ],
+)
+def test_internal_base_url_rejects_unsafe_values(monkeypatch, value: str):
+    monkeypatch.setattr(settings, "internal_base_url", value)
+
+    with pytest.raises(RuntimeError, match=INTERNAL_BASE_URL_ENV):
+        get_internal_base_url()
 
 
 def test_get_aria2_client_preserves_empty_cached_secret(monkeypatch):

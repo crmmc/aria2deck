@@ -12,14 +12,14 @@ import asyncio
 import hashlib
 import logging
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from app.aria2.protocol import Aria2Gateway
 from app.core.config import settings
 from app.core.security import (
-    DOWNLOAD_URI_SCHEMES,
     MAX_DOWNLOAD_URI_COUNT,
     WEBSEED_URI_SCHEMES,
     check_torrent_network_endpoints,
@@ -59,7 +59,7 @@ from app.services.download_service import (
     create_user_download,
     create_user_torrent_download,
 )
-from app.services.hash import get_uri_hash
+from app.services.hash import extract_info_hash_from_magnet, get_uri_hash
 from app.services.settings_service import get_max_task_size, get_min_free_disk
 from app.services.task_projection import (
     build_bittorrent_payload,
@@ -70,6 +70,8 @@ from app.services.task_projection import (
 )
 from app.services.usage_service import get_usage
 
+SAFE_INTERNAL_ERROR_MESSAGE = "Internal error"
+RPC_ADD_URI_SCHEMES = frozenset({"http", "https", "magnet"})
 
 logger = logging.getLogger(__name__)
 
@@ -230,10 +232,10 @@ class Aria2RpcHandler:
             return self._sanitize_status(await self.client.tell_status(real_gid))
         except Exception as exc:
             logger.debug(
-                "live tellStatus failed for task=%s user_id=%s",
+                "live tellStatus failed for task=%s user_id=%s error_type=%s",
                 row.get("id"),
                 self.user_id,
-                exc_info=exc,
+                type(exc).__name__,
             )
             return None
 
@@ -570,7 +572,10 @@ class Aria2RpcHandler:
         result["errorCode"] = self._status_str(
             status.get("errorCode"), DEFAULT_ERROR_CODE
         )
-        result["errorMessage"] = self._status_str(status.get("errorMessage"), "")
+        raw_error_message = status.get("errorMessage")
+        result["errorMessage"] = (
+            "aria2 下载失败" if isinstance(raw_error_message, str) and raw_error_message else ""
+        )
         result["dir"] = ""
         result["files"] = self._sanitize_files(status.get("files"))
         if has_live_bt_evidence(status) or has_bittorrent_payload(status):
@@ -837,13 +842,25 @@ class Aria2RpcHandler:
                     RpcErrorCode.INVALID_PARAMS,
                     f"{name}[{index}] must be a string",
                 )
-            error = await check_url_ssrf(item, allowed_schemes=allowed_schemes)
+            normalized_item = item
+            if urlsplit(item).scheme.lower() == "magnet":
+                info_hash = extract_info_hash_from_magnet(item)
+                if not info_hash:
+                    raise RpcError(
+                        RpcErrorCode.INVALID_PARAMS,
+                        f"{name}[{index}]: 无效的磁力链接",
+                    )
+                normalized_item = f"magnet:?xt=urn:btih:{info_hash}"
+            error = await check_url_ssrf(
+                normalized_item,
+                allowed_schemes=allowed_schemes,
+            )
             if error:
                 raise RpcError(
                     RpcErrorCode.INVALID_PARAMS,
                     f"{name}[{index}]: {error}",
                 )
-            uris.append(item)
+            uris.append(normalized_item)
         return uris
 
     def _raise_create_download_error(self, exc: Exception) -> None:
@@ -873,16 +890,16 @@ class Aria2RpcHandler:
                 raise RpcError(
                     RpcErrorCode.QUOTA_EXCEEDED, "Your quota has been exceeded"
                 ) from exc
-            if message.startswith(
-                ("invalid out option:", "不安全的 bt-tracker 参数:")
-            ):
-                raise RpcError(RpcErrorCode.INVALID_PARAMS, message) from exc
-        logger.error(
-            "RPC创建下载任务内部异常 user_id=%s",
+            raise RpcError(RpcErrorCode.INVALID_PARAMS, message) from exc
+        logger.warning(
+            "RPC创建下载任务内部异常 user_id=%s error_type=%s",
             self.user_id,
-            exc_info=exc,
+            type(exc).__name__,
         )
-        raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Internal server error") from exc
+        raise RpcError(
+            RpcErrorCode.INTERNAL_ERROR,
+            SAFE_INTERNAL_ERROR_MESSAGE,
+        ) from exc
 
     # ========== 完整实现的方法 ==========
     async def _handle_add_uri(self, params: list) -> str:
@@ -892,7 +909,7 @@ class Aria2RpcHandler:
         submit_uris = await self._validate_uri_list(
             params[0],
             name="uris",
-            allowed_schemes=DOWNLOAD_URI_SCHEMES,
+            allowed_schemes=RPC_ADD_URI_SCHEMES,
             allow_empty=False,
         )
         if len(submit_uris) > 1 and any(
@@ -945,6 +962,11 @@ class Aria2RpcHandler:
             allowed_schemes=WEBSEED_URI_SCHEMES,
             allow_empty=True,
         )
+        if webseed_uris:
+            raise RpcError(
+                RpcErrorCode.INVALID_PARAMS,
+                "Torrent webseed URIs are not allowed",
+            )
         try:
             metadata = await parse_torrent_base64_async(torrent_data)
         except TorrentMetadataError as exc:
@@ -961,6 +983,8 @@ class Aria2RpcHandler:
         options = (
             dict(params[2]) if len(params) > 2 and isinstance(params[2], dict) else {}
         )
+        if "bt-tracker" in options:
+            raise RpcError(RpcErrorCode.INVALID_PARAMS, "bt-tracker option is not allowed")
         selected_indexes = self._selected_torrent_indexes(
             metadata, options.pop("select-file", None)
         )
@@ -1041,9 +1065,9 @@ class Aria2RpcHandler:
             all_active = await self.client.tell_active()
         except Exception as exc:
             logger.warning(
-                "aria2.tellActive failed for user_id=%s",
+                "aria2.tellActive failed for user_id=%s error_type=%s",
                 self.user_id,
-                exc_info=exc,
+                type(exc).__name__,
             )
             fallback_statuses = await rpc_view_service.list_active_statuses(
                 self.user_id
@@ -1098,9 +1122,9 @@ class Aria2RpcHandler:
             )
         except Exception as exc:
             logger.warning(
-                "aria2.tellWaiting failed for user_id=%s",
+                "aria2.tellWaiting failed for user_id=%s error_type=%s",
                 self.user_id,
-                exc_info=exc,
+                type(exc).__name__,
             )
             fallback_statuses = await rpc_view_service.list_waiting_statuses(
                 self.user_id
@@ -1142,9 +1166,10 @@ class Aria2RpcHandler:
             all_active: object = await self.client.tell_active()
         except Exception as exc:
             logger.warning(
-                "aria2.tellActive failed for getGlobalStat user_id=%s, fallback to zero speed",
+                "aria2.tellActive failed for getGlobalStat user_id=%s "
+                "error_type=%s, fallback to zero speed",
                 self.user_id,
-                exc_info=exc,
+                type(exc).__name__,
             )
         else:
             if isinstance(all_active, list):
@@ -1181,10 +1206,10 @@ class Aria2RpcHandler:
                     return sanitized
             except Exception as exc:
                 logger.warning(
-                    "aria2.getFiles failed for task=%s user_id=%s",
+                    "aria2.getFiles failed for task=%s user_id=%s error_type=%s",
                     row.get("id"),
                     self.user_id,
-                    exc_info=exc,
+                    type(exc).__name__,
                 )
         return self._sanitize_files(rpc_view_service.status_from_task(row).get("files"))
 
@@ -1202,10 +1227,10 @@ class Aria2RpcHandler:
                 return self._sanitize_uris(await self.client.get_uris(real_gid))
             except Exception as exc:
                 logger.warning(
-                    "aria2.getUris failed for task=%s user_id=%s",
+                    "aria2.getUris failed for task=%s user_id=%s error_type=%s",
                     row.get("id"),
                     self.user_id,
-                    exc_info=exc,
+                    type(exc).__name__,
                 )
         source_uri = row.get("source_uri")
         return (
@@ -1220,9 +1245,9 @@ class Aria2RpcHandler:
             version_info = await self.client.get_version()
         except Exception as exc:
             logger.warning(
-                "aria2.getVersion failed for user_id=%s",
+                "aria2.getVersion failed for user_id=%s error_type=%s",
                 self.user_id,
-                exc_info=exc,
+                type(exc).__name__,
             )
             version_info = {}
         return self._sanitize_version(version_info)
@@ -1271,6 +1296,11 @@ class Aria2RpcHandler:
         raise RpcError(1, "Unpause is not supported")
 
     async def _handle_get_option(self, params: list) -> dict:
+        if not params:
+            raise RpcError(RpcErrorCode.INVALID_PARAMS, "gid is required")
+        gid = str(params[0])
+        if await self._resolve_owned_row(gid) is None:
+            raise RpcError(RpcErrorCode.TASK_NOT_FOUND, "Task not found")
         return {}
 
     async def _handle_get_global_option(self, params: list) -> dict:
@@ -1280,7 +1310,10 @@ class Aria2RpcHandler:
         return 0
 
     async def _handle_change_uri(self, params: list) -> list:
-        return [0, 0]
+        raise RpcError(
+            RpcErrorCode.PERMISSION_DENIED,
+            "URI mutation is not supported",
+        )
 
     async def _handle_get_peers(self, params: list) -> list:
         if not params:
@@ -1297,10 +1330,10 @@ class Aria2RpcHandler:
                 return sanitized
             except Exception as exc:
                 logger.warning(
-                    "aria2.getPeers failed for task=%s user_id=%s",
+                    "aria2.getPeers failed for task=%s user_id=%s error_type=%s",
                     row.get("id"),
                     self.user_id,
-                    exc_info=exc,
+                    type(exc).__name__,
                 )
         return []
 
@@ -1322,10 +1355,10 @@ class Aria2RpcHandler:
                     return sanitized
             except Exception as exc:
                 logger.warning(
-                    "aria2.getServers failed for task=%s user_id=%s",
+                    "aria2.getServers failed for task=%s user_id=%s error_type=%s",
                     row.get("id"),
                     self.user_id,
-                    exc_info=exc,
+                    type(exc).__name__,
                 )
             try:
                 files = await self.client.get_files(real_gid)
@@ -1381,20 +1414,26 @@ class Aria2RpcHandler:
                 try:
                     result = await self.handle(method_name, method_params)
                     results.append([result])
-                except RpcError as e:
-                    results.append({"faultCode": e.code, "faultString": e.message})
+                except RpcError as exc:
+                    fault_string = (
+                        SAFE_INTERNAL_ERROR_MESSAGE
+                        if exc.code == RpcErrorCode.INTERNAL_ERROR
+                        else exc.message
+                    )
+                    results.append(
+                        {"faultCode": exc.code, "faultString": fault_string}
+                    )
                 except Exception as exc:
-                    logger.error(
-                        "RPC multicall内部异常 method=%s user_id=%s index=%s",
-                        method_name,
+                    logger.warning(
+                        "system.multicall method failed user_id=%s index=%s error_type=%s",
                         self.user_id,
                         index,
-                        exc_info=exc,
+                        type(exc).__name__,
                     )
                     results.append(
                         {
                             "faultCode": RpcErrorCode.INTERNAL_ERROR,
-                            "faultString": "Internal server error",
+                            "faultString": SAFE_INTERNAL_ERROR_MESSAGE,
                         }
                     )
             return results

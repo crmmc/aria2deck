@@ -11,6 +11,7 @@ LEGACY_SHARE_JWT_SECRET_ENV = "ARIA2C_SECRET_KEY"
 INITIAL_ADMIN_PASSWORD_ENV = "ARIA2DECK_INITIAL_ADMIN_PASSWORD"
 CREDENTIAL_PEPPER_ENV = "ARIA2DECK_CREDENTIAL_PEPPER"
 PREVIOUS_CREDENTIAL_PEPPER_ENV = "ARIA2DECK_PREVIOUS_CREDENTIAL_PEPPER"
+INTERNAL_BASE_URL_ENV = "ARIA2DECK_INTERNAL_BASE_URL"
 MIN_INITIAL_ADMIN_PASSWORD_LENGTH = 16
 MIN_SECRET_KEY_BYTES = 32
 
@@ -30,6 +31,10 @@ class Settings(BaseSettings):
     download_dir: str = str(BASE_DIR / "downloads")
     host: str = "0.0.0.0"
     port: int = 8001
+    internal_base_url: str = Field(
+        default="",
+        validation_alias=INTERNAL_BASE_URL_ENV,
+    )
     secret_key: str = Field(
         default=DEFAULT_SECRET_KEY,
         validation_alias=AliasChoices(SHARE_JWT_SECRET_ENV, LEGACY_SHARE_JWT_SECRET_ENV),
@@ -70,6 +75,57 @@ def credential_peppers() -> tuple[str, str | None]:
     if previous == current:
         raise RuntimeError("当前与旧 credential pepper 不能相同。")
     return current, previous
+
+
+def get_internal_base_url() -> str:
+    from ipaddress import ip_address
+    from urllib.parse import urlsplit, urlunsplit
+
+    raw_url = settings.internal_base_url.strip() or f"http://127.0.0.1:{settings.port}"
+    try:
+        parsed = urlsplit(raw_url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError(f"{INTERNAL_BASE_URL_ENV} 格式无效") from exc
+    if port is not None and port <= 0:
+        raise RuntimeError(f"{INTERNAL_BASE_URL_ENV} 端口无效")
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise RuntimeError(f"{INTERNAL_BASE_URL_ENV} 必须是无凭据、无路径的 HTTP(S) 地址")
+    if parsed.scheme == "http":
+        try:
+            address = ip_address(hostname)
+        except ValueError:
+            if "." in hostname and hostname.lower() != "localhost":
+                raise RuntimeError(
+                    f"{INTERNAL_BASE_URL_ENV} 使用 HTTP 时必须指向 loopback、内网 IP 或单标签服务名"
+                )
+        else:
+            if (
+                address.is_unspecified
+                or address.is_link_local
+                or address.is_multicast
+                or address.is_reserved
+            ):
+                raise RuntimeError(
+                    f"{INTERNAL_BASE_URL_ENV} 指向不可用的主机地址"
+                )
+            if not (address.is_loopback or address.is_private):
+                raise RuntimeError(
+                    f"{INTERNAL_BASE_URL_ENV} 使用公网地址时必须启用 HTTPS"
+                )
+    netloc = f"[{hostname}]" if ":" in hostname else hostname
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urlunsplit((parsed.scheme, netloc, "", "", ""))
 
 
 def get_initial_admin_password() -> str:

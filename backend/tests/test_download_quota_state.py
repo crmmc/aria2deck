@@ -159,11 +159,12 @@ async def test_magnet_followed_stays_paused_until_size_admission(temp_db: str) -
     user = await create_user_v0(username="magnet_admit", quota_bytes=1000)
     client = AsyncMock()
     client.add_uri.return_value = "gid-meta"
+    info_hash = "0123456789abcdef0123456789abcdef01234567"
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
-        uri="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-        resource_key="quota:magnet",
+        uri=f"magnet:?xt=urn:btih:{info_hash}",
+        resource_key=info_hash,
         resource_kind="magnet",
         display_name=None,
         total_bytes=0,
@@ -178,7 +179,7 @@ async def test_magnet_followed_stays_paused_until_size_admission(temp_db: str) -
         "files": [{"path": str(get_task_download_dir(task["global_download_id"]) / "payload"), "length": "500", "selected": "true"}],
         "bittorrent": {"info": {"name": "payload"}},
     }
-    download = await _required_download("quota:magnet")
+    download = await _required_download(info_hash)
 
     changed = await switch_to_followed_download(
         client=client,
