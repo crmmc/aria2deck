@@ -17,6 +17,10 @@ from app.services.rate_limit_service import (
     ensure_authenticated_allowed,
     record_account_security_failure,
 )
+from app.services.task_broadcast import (
+    remove_connections_for_session,
+    remove_connections_for_user,
+)
 from app.core.security import hash_password, verify_password, verify_password_constant_time
 from app.domain.errors import BadRequestError, NotFoundError, UnauthorizedError
 from app.repositories import auth as auth_repo
@@ -75,6 +79,7 @@ async def login(
     await clear_account_security_failures(client_ip)
     if old_session_id:
         await clear_session(old_session_id)
+        await remove_connections_for_session(old_session_id)
 
     session_id = await create_session(user.id)
     logger.info(
@@ -95,6 +100,7 @@ async def logout(
 ) -> dict:
     if session_id:
         await clear_session(session_id)
+        await remove_connections_for_session(session_id)
     logger.info("用户登出 user_id=%s request_id=%s", user_id, request_id)
     return {"ok": True}
 
@@ -138,6 +144,7 @@ async def change_password(
         raise NotFoundError("用户不存在")
 
     await clear_user_sessions(user.id)
+    await remove_connections_for_user(user.id)
     session_id = await create_session(user.id)
     logger.info("修改密码成功 user_id=%s request_id=%s", user.id, request_id)
     return {"ok": True, "message": "密码修改成功"}, session_id

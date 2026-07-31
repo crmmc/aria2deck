@@ -10,6 +10,7 @@ from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.repositories import auth as auth_repo
 from app.schemas import RpcAccessStatus, UserCreate, UserUpdate
 from app.services.rate_limit_service import ensure_account_security_allowed
+from app.services.task_broadcast import remove_connections_for_user
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,7 @@ async def delete_user(*, actor: AuthUser, user_id: int, request_id: str) -> dict
         raise NotFoundError("用户不存在")
 
     await auth_repo.delete_user_owned_rows(user_id)
+    await remove_connections_for_user(user_id)
     await auth_repo.delete_user(user_id)
 
     logger.info("删除用户成功 actor_id=%s target_user_id=%s request_id=%s", actor.id, user_id, request_id)
@@ -219,6 +221,7 @@ async def update_user(
 
     if payload.password is not None:
         await auth_repo.delete_user_sessions(user_id)
+        await remove_connections_for_user(user_id)
 
     logger.info(
         "更新用户成功 actor_id=%s target_user_id=%s set_username=%s set_password=%s set_is_admin=%s set_quota=%s request_id=%s",
