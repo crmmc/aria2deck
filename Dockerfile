@@ -24,7 +24,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     unzip \
-    && curl -sL "https://github.com/mcmilk/7-Zip-zstd/releases/download/v25.01-v1.5.7-R4/linux-gcc-x64.zip" -o /tmp/7z.zip \
+    && curl --fail --show-error --location --proto '=https' --tlsv1.2 "https://github.com/mcmilk/7-Zip-zstd/releases/download/v25.01-v1.5.7-R4/linux-gcc-x64.zip" -o /tmp/7z.zip \
+    && echo "b7526802535bf98d6268ce1960de7e36cf8ed6b4004c9ba3ac09db9e14d9a20d  /tmp/7z.zip" | sha256sum -c - \
     && unzip -q /tmp/7z.zip 7zz -d /usr/local/bin \
     && chmod +x /usr/local/bin/7zz \
     && rm /tmp/7z.zip \
@@ -61,7 +62,7 @@ EXPOSE 8001
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${ARIA2C_PORT:-8001}/api/health || exit 1
+    CMD curl -f http://localhost:${ARIA2C_PORT:-8001}/api/health/ready || exit 1
 
 # Run application
-CMD ["sh", "-c", "uv run uvicorn app.main:app --host ${ARIA2C_HOST:-0.0.0.0} --port ${ARIA2C_PORT:-8001}"]
+CMD ["sh", "-c", "uv run uvicorn app.main:app --host ${ARIA2C_HOST:-0.0.0.0} --port ${ARIA2C_PORT:-8001} --no-access-log"]

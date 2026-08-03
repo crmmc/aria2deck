@@ -39,8 +39,7 @@ build:
 # Run backend with standard logs (compatibility target)
 run:
 	@echo "Starting backend with standard logs..."
-	@echo "Hook Secret: $(DEV_HOOK_SECRET)"
-	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=false ARIA2C_DEV_RESET_ADMIN_PASSWORD=false ARIA2C_HOOK_SECRET=$(DEV_HOOK_SECRET) ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --log-level info
+	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=false ARIA2C_DEV_RESET_ADMIN_PASSWORD=false ARIA2C_HOOK_SECRET=$(DEV_HOOK_SECRET) ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --log-level info --no-access-log
 
 # Frontend development mode
 # Use this when developing UI pages/components
@@ -57,11 +56,10 @@ dev-front:
 
 dev-back:
 	@echo "Starting backend dev mode with verbose logs..."
-	@echo "Hook Secret: $(DEV_HOOK_SECRET)"
 	@echo "ARIA2C_DEBUG=$(DEV_BACK_DEBUG)"
 	@echo "ARIA2C_DEV_RESET_ADMIN_PASSWORD=$(DEV_BACK_RESET_ADMIN_PASSWORD)"
 	@echo "Dev mode will reset the admin password from ARIA2DECK_INITIAL_ADMIN_PASSWORD when ARIA2C_DEV_RESET_ADMIN_PASSWORD=true."
-	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=$(DEV_BACK_DEBUG) ARIA2C_DEV_RESET_ADMIN_PASSWORD=$(DEV_BACK_RESET_ADMIN_PASSWORD) ARIA2C_HOOK_SECRET=$(DEV_HOOK_SECRET) ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --log-level debug
+	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=$(DEV_BACK_DEBUG) ARIA2C_DEV_RESET_ADMIN_PASSWORD=$(DEV_BACK_RESET_ADMIN_PASSWORD) ARIA2C_HOOK_SECRET=$(DEV_HOOK_SECRET) ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --log-level debug --no-access-log
 
 # Local aria2 backend for testing (foreground)
 # Keep this running in another terminal while using dev-back/dev-front

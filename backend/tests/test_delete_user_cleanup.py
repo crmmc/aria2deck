@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from app.core.config import settings
 from app.db.engine import transaction
 from app.db.schema import pack_tasks, user_tasks
+from app.services.deletion_cleanup import DeletionCleanupManager
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_pack_task_v0,
@@ -71,7 +72,13 @@ class TestDeleteUserCleanup:
         assert asyncio.run(_count_rows(user_tasks, user_id)) == 1
 
         response = client.delete(f"/api/users/{user_id}")
-        assert response.status_code == 200
+        assert response.status_code == 202
+        assert response.json() == {
+            "ok": True,
+            "state": "pending",
+            "accepted": True,
+        }
+        asyncio.run(DeletionCleanupManager.run_once())
 
         assert asyncio.run(_count_rows(user_tasks, user_id)) == 0
 
@@ -92,7 +99,8 @@ class TestDeleteUserCleanup:
         assert asyncio.run(_count_rows(pack_tasks, user_id)) == 1
 
         response = client.delete(f"/api/users/{user_id}")
-        assert response.status_code == 200
+        assert response.status_code == 202
+        asyncio.run(DeletionCleanupManager.run_once())
 
         assert asyncio.run(_count_rows(pack_tasks, user_id)) == 0
 
@@ -124,6 +132,7 @@ class TestDeleteUserCleanup:
         assert asyncio.run(_count_rows(user_tasks, user_id)) == 5
 
         response = client.delete(f"/api/users/{user_id}")
-        assert response.status_code == 200
+        assert response.status_code == 202
+        asyncio.run(DeletionCleanupManager.run_once())
 
         assert asyncio.run(_count_rows(user_tasks, user_id)) == 0

@@ -82,19 +82,14 @@ async def create_share(
         raise NotFoundError("文件不存在")
 
     timestamp = now_ms()
-    active_count = await shares_repo.count_effective_active_shares(
-        user_file_id,
-        timestamp,
-    )
-    if active_count >= MAX_ACTIVE_SHARES_PER_FILE:
-        raise BadRequestError(f"每个文件最多 {MAX_ACTIVE_SHARES_PER_FILE} 个活跃分享")
+    password_hash = hash_password(password) if password else None
 
     def values_factory() -> dict[str, Any]:
         return {
             "share_code": generate_share_code(),
             "owner_id": user_id,
             "user_file_id": user_file_id,
-            "password_hash": hash_password(password) if password else None,
+            "password_hash": password_hash,
             "expires_at_ms": timestamp + expires_in * 1000 if expires_in else None,
             "max_downloads": max_downloads,
             "download_count": 0,
@@ -104,13 +99,18 @@ async def create_share(
 
     try:
         share = await shares_repo.create_share_with_retry(
+            user_file_id=user_file_id,
+            timestamp_ms=timestamp,
+            max_active_shares=MAX_ACTIVE_SHARES_PER_FILE,
             values_factory=values_factory,
             max_attempts=5,
         )
+    except shares_repo.ShareTargetInactiveError:
+        raise NotFoundError("文件不存在") from None
     except RepositoryConflictError:
         raise InternalDomainError("分享码生成失败，请重试") from None
     if share is None:
-        raise InternalDomainError("分享创建失败")
+        raise BadRequestError(f"每个文件最多 {MAX_ACTIVE_SHARES_PER_FILE} 个活跃分享")
     return share_to_out(
         share,
         user_file["display_name"] or "未命名",
@@ -208,7 +208,6 @@ async def resolve_shared_download_target(
     share: dict[str, Any],
     *,
     subpath: str | None,
-    should_count_download: bool,
 ) -> tuple[Path, str]:
     base_path = Path(share["real_path"])
     if not base_path.exists():
@@ -228,15 +227,16 @@ async def resolve_shared_download_target(
         target = base_path
         filename = share["file_name"] or "download"
 
-    updated = await shares_repo.touch_and_maybe_count_download(
-        int(share["id"]),
+    return target, filename
+
+
+async def consume_share_download(share_id: int) -> None:
+    updated = await shares_repo.consume_share_download(
+        share_id,
         timestamp_ms=now_ms(),
-        max_downloads=share["max_downloads"],
-        should_count_download=should_count_download,
     )
     if not updated:
         raise GoneError("分享已失效或下载次数已用完")
-    return target, filename
 
 
 async def browse_shared_directory(code: str, token: str | None, subpath: str) -> list[dict]:
