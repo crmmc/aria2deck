@@ -60,6 +60,14 @@ class TestSSRFProtection:
         assert response.status_code == 400
         assert "内网地址" in response.json()["detail"]
 
+    def test_block_shared_network_100_64(self, authenticated_client):
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={"uri": "http://100.64.0.1/file.zip"},
+        )
+        assert response.status_code == 400
+        assert "内网地址" in response.json()["detail"]
+
     def test_block_private_network_172(self, authenticated_client):
         """测试阻止 172.16-31.x.x 私有网络"""
         response = authenticated_client.post(

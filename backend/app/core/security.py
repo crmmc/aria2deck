@@ -7,9 +7,20 @@ import logging
 import os
 import re
 import socket
-from urllib.parse import urlparse, urlunparse
+from collections.abc import Mapping, Sequence
+from urllib.parse import parse_qsl, unquote, urlparse, urlunparse
+
+from app.core.config import credential_peppers
 
 logger = logging.getLogger(__name__)
+
+MAX_DOWNLOAD_URI_LENGTH = 8192
+MAX_DOWNLOAD_URI_COUNT = 16
+MAX_EMBEDDED_NETWORK_URI_COUNT = 64
+HTTP_URI_SCHEMES = frozenset({"http", "https"})
+WEBSEED_URI_SCHEMES = frozenset({"http", "https", "ftp"})
+TRACKER_URI_SCHEMES = frozenset({"http", "https", "udp"})
+DOWNLOAD_URI_SCHEMES = WEBSEED_URI_SCHEMES | {"magnet"}
 
 
 def hash_password(password: str, salt: bytes | None = None) -> str:
@@ -29,6 +40,40 @@ def derive_client_password_hash(password: str, username: str) -> str:
         10000,
     )
     return digest.hex()
+
+
+CREDENTIAL_DIGEST_DOMAINS = frozenset({"api-token", "rpc-secret"})
+
+
+def _credential_digest(kind: str, secret: str, pepper: str) -> str:
+    return hmac.new(
+        pepper.encode("utf-8"),
+        f"aria2deck:{kind}:v1\0{secret}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def credential_digest(kind: str, secret: str) -> str:
+    """Return the current domain-separated HMAC digest for a credential."""
+    if kind not in CREDENTIAL_DIGEST_DOMAINS:
+        raise ValueError("不支持的凭证类型")
+    current, _ = credential_peppers()
+    return _credential_digest(kind, secret, current)
+
+
+def credential_digest_candidates(kind: str, secret: str) -> tuple[str, str | None]:
+    """Return current and optional previous digests during pepper rotation."""
+    if kind not in CREDENTIAL_DIGEST_DOMAINS:
+        raise ValueError("不支持的凭证类型")
+    current, previous = credential_peppers()
+    return (
+        _credential_digest(kind, secret, current),
+        _credential_digest(kind, secret, previous) if previous else None,
+    )
+
+
+def credential_prefix(secret: str) -> str:
+    return secret[:16]
 
 
 def verify_password(password: str, encoded: str) -> bool:
@@ -135,36 +180,108 @@ def mask_url_credentials(url: str) -> str:
         return url
 
 
+def redact_url_for_log(url: str) -> str:
+    """返回不含凭证、查询参数或片段的 URL 日志视图。"""
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.hostname:
+            return "<redacted-url>"
+        hostname = parsed.hostname
+        port = parsed.port
+    except (AttributeError, TypeError, ValueError):
+        return "<redacted-url>"
+
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = f"{host}:{port}" if port is not None else host
+    path = parsed.path
+    decoded_path = unquote(path)
+    if _SENSITIVE_URL_PATH_RE.search(decoded_path) or any(
+        len(segment) >= 64 for segment in decoded_path.split("/")
+    ):
+        path = "/<redacted>"
+    return urlunparse((parsed.scheme.lower(), netloc, path, "", "", ""))
+
+
+_SENSITIVE_URL_PATH_RE = re.compile(
+    r"token|signature|secret|password|passwd|credential|api[-_]?key|auth|session",
+    re.IGNORECASE,
+)
+
+
 def is_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """检查 IP 是否为私有/内网地址"""
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-    )
+    """检查 IP 是否不适合作为公网下载目标。"""
+    return not ip.is_global
 
 
-async def check_url_ssrf(url: str) -> str | None:
-    """检查 URL 是否存在 SSRF 风险。
+def _has_invalid_uri_chars(value: str) -> bool:
+    return any(
+        char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value
+    ) or re.search(r"%(?![0-9A-Fa-f]{2})", value) is not None
 
-    Args:
-        url: 要检查的 URL
 
-    Returns:
-        如果安全返回 None，否则返回错误信息
-    """
+async def _check_magnet_network_params(query: str) -> str | None:
+    try:
+        params = parse_qsl(
+            query,
+            keep_blank_values=True,
+            strict_parsing=True,
+            max_num_fields=MAX_EMBEDDED_NETWORK_URI_COUNT,
+        )
+    except ValueError:
+        return "无效的磁力链接参数"
+
+    for raw_key, value in params:
+        key = raw_key.lower()
+        if key not in {"tr", "ws", "xs", "as"}:
+            continue
+        if not value or len(value) > MAX_DOWNLOAD_URI_LENGTH:
+            return f"磁力链接参数 {key} 无效"
+
+        parsed_value = urlparse(value)
+        if key in {"xs", "as"} and parsed_value.scheme.lower() == "urn":
+            if parsed_value.netloc or not parsed_value.path or _has_invalid_uri_chars(value):
+                return f"磁力链接参数 {key} 无效"
+            continue
+
+        allowed_schemes = (
+            TRACKER_URI_SCHEMES if key == "tr" else WEBSEED_URI_SCHEMES
+        )
+        error = await check_url_ssrf(value, allowed_schemes=allowed_schemes)
+        if error:
+            return f"磁力链接参数 {key} 不安全: {error}"
+    return None
+
+
+async def check_url_ssrf(
+    url: str,
+    *,
+    allowed_schemes: frozenset[str] = DOWNLOAD_URI_SCHEMES,
+) -> str | None:
+    """检查下载 URI 的协议、凭据和 SSRF 风险。"""
+    if not url:
+        return "无效的下载链接"
+    if len(url) > MAX_DOWNLOAD_URI_LENGTH:
+        return "下载链接过长"
+    if _has_invalid_uri_chars(url):
+        return "下载链接包含非法字符"
+
     try:
         parsed = urlparse(url)
         scheme = parsed.scheme.lower()
+        if scheme not in allowed_schemes:
+            return "不支持的下载链接协议"
+
+        if scheme == "magnet":
+            if not parsed.query:
+                return "无效的磁力链接"
+            return await _check_magnet_network_params(parsed.query)
+
         hostname = parsed.hostname
-
-        if scheme not in ("http", "https", "ftp"):
-            return None
-
+        _ = parsed.port
         if not hostname:
             return "无效的下载链接"
+        if parsed.username is not None or parsed.password is not None:
+            return "下载链接不支持用户名或密码"
 
         blocked_hosts = {
             "localhost",
@@ -177,33 +294,78 @@ async def check_url_ssrf(url: str) -> str | None:
         if hostname.lower() in blocked_hosts:
             return "不允许下载本机地址"
 
-        # 检查是否为 IP 地址
         try:
             ip = ipaddress.ip_address(hostname)
-            if is_private_ip(ip):
-                return "不允许下载内网地址"
-            return None
         except ValueError:
-            pass
+            ip = None
+        if ip is not None:
+            return "不允许下载内网地址" if is_private_ip(ip) else None
 
-        # 域名解析检查
         try:
             loop = asyncio.get_running_loop()
             addr_infos = await loop.run_in_executor(
                 None, socket.getaddrinfo, hostname, None
             )
-            for addr_info in addr_infos:
-                ip_str = addr_info[4][0]
-                try:
-                    ip = ipaddress.ip_address(ip_str)
-                    if is_private_ip(ip):
-                        return f"域名 {hostname} 解析到内网地址，禁止下载"
-                except ValueError:
-                    continue
         except socket.gaierror:
             return f"域名 {hostname} 无法解析"
 
+        if not addr_infos:
+            return f"域名 {hostname} 无法安全解析"
+        for addr_info in addr_infos:
+            try:
+                resolved_ip = ipaddress.ip_address(addr_info[4][0])
+            except (IndexError, TypeError, ValueError):
+                return f"域名 {hostname} 无法安全解析"
+            if is_private_ip(resolved_ip):
+                return f"域名 {hostname} 解析到非公网或内网地址，禁止下载"
+    except (TypeError, ValueError):
+        return "无效的下载链接"
     except Exception as exc:
-        logger.warning("SSRF 校验异常 url=%s error=%s", mask_url_credentials(url), exc)
+        logger.warning(
+            "SSRF 校验异常 url=%s error_type=%s",
+            redact_url_for_log(url),
+            type(exc).__name__,
+        )
+        return "下载链接安全校验失败"
 
+    return None
+
+
+async def check_torrent_network_endpoints(
+    tracker_urls: Sequence[str],
+    webseed_urls: Sequence[str],
+) -> str | None:
+    if len(tracker_urls) + len(webseed_urls) > MAX_EMBEDDED_NETWORK_URI_COUNT:
+        return "种子文件包含过多网络地址"
+
+    for label, urls, schemes in (
+        ("tracker", tracker_urls, TRACKER_URI_SCHEMES),
+        ("webseed", webseed_urls, WEBSEED_URI_SCHEMES),
+    ):
+        for index, url in enumerate(urls):
+            error = await check_url_ssrf(url, allowed_schemes=schemes)
+            if error:
+                return f"种子文件 {label}[{index}] 不安全: {error}"
+    return None
+
+
+async def check_bt_tracker_option(
+    options: Mapping[str, object] | None,
+) -> str | None:
+    if not options or "bt-tracker" not in options:
+        return None
+    value = options["bt-tracker"]
+    if not isinstance(value, str):
+        return "bt-tracker 必须是字符串"
+
+    trackers = value.split(",")
+    if not trackers or len(trackers) > MAX_DOWNLOAD_URI_COUNT:
+        return "bt-tracker 数量无效"
+    for index, tracker in enumerate(trackers):
+        error = await check_url_ssrf(
+            tracker,
+            allowed_schemes=TRACKER_URI_SCHEMES,
+        )
+        if error:
+            return f"bt-tracker[{index}] 不安全: {error}"
     return None

@@ -18,6 +18,13 @@ from urllib.parse import unquote, urlsplit
 
 from app.aria2.protocol import Aria2Gateway
 from app.core.config import settings
+from app.core.security import (
+    DOWNLOAD_URI_SCHEMES,
+    MAX_DOWNLOAD_URI_COUNT,
+    WEBSEED_URI_SCHEMES,
+    check_torrent_network_endpoints,
+    check_url_ssrf,
+)
 from app.domain.status import (
     ACTIVE_LIKE_DOWNLOAD_STATUSES,
     ACTIVE_USER_TASK_STATUSES,
@@ -25,6 +32,15 @@ from app.domain.status import (
 from app.domain.task_policy import (
     is_current,
     stat_counts,
+)
+from app.domain.torrent_metadata import (
+    TorrentMetadata,
+    TorrentMetadataError,
+    build_select_file_option,
+    build_selection_resource_key,
+    parse_torrent_base64_async,
+    selected_total_size,
+    validate_selected_indexes,
 )
 from app.repositories import auth as auth_repo
 from app.repositories.downloads import (
@@ -37,13 +53,14 @@ from app.repositories.downloads import (
 )
 from app.services import rpc_view_service
 from app.services.download_service import (
+    DownloadAdmissionError,
     DuplicateTaskError,
     cancel_user_task,
     create_user_download,
     create_user_torrent_download,
 )
-from app.services.hash import extract_info_hash_from_torrent_base64, get_uri_hash
-from app.services.settings_service import get_min_free_disk
+from app.services.hash import get_uri_hash
+from app.services.settings_service import get_max_task_size, get_min_free_disk
 from app.services.task_projection import (
     build_bittorrent_payload,
     has_bittorrent_payload,
@@ -751,6 +768,43 @@ class Aria2RpcHandler:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "无效的磁力链接")
         return hashlib.sha256(uri.encode()).hexdigest()
 
+    @staticmethod
+    def _selected_torrent_indexes(
+        metadata: TorrentMetadata, value: Any
+    ) -> tuple[int, ...]:
+        if value is None or value == "":
+            return validate_selected_indexes(metadata, None)
+        if not isinstance(value, str):
+            raise RpcError(
+                RpcErrorCode.INVALID_PARAMS, "select-file 必须是字符串"
+            )
+        indexes: list[int] = []
+        file_count = metadata.file_count
+        try:
+            for part in value.split(","):
+                token = part.strip()
+                if not token:
+                    raise ValueError
+                if "-" not in token:
+                    index = int(token)
+                    if not 1 <= index <= file_count or len(indexes) >= file_count:
+                        raise ValueError
+                    indexes.append(index)
+                    continue
+                start_text, end_text = token.split("-", 1)
+                start, end = int(start_text), int(end_text)
+                if not 1 <= start <= end <= file_count:
+                    raise ValueError
+                if len(indexes) + end - start + 1 > file_count:
+                    raise ValueError
+                indexes.extend(range(start, end + 1))
+            selected_values: list[object] = list(indexes)
+            return validate_selected_indexes(metadata, selected_values)
+        except (ValueError, TorrentMetadataError) as exc:
+            raise RpcError(
+                RpcErrorCode.INVALID_PARAMS, "select-file 参数无效"
+            ) from exc
+
     async def _gid_for_created_task(
         self,
         task: dict[str, Any],
@@ -758,36 +812,100 @@ class Aria2RpcHandler:
     ) -> str:
         return f"task-{task['id']}"
 
-    @staticmethod
-    def _raise_create_download_error(exc: Exception) -> None:
+    async def _validate_uri_list(
+        self,
+        value: Any,
+        *,
+        name: str,
+        allowed_schemes: frozenset[str],
+        allow_empty: bool,
+    ) -> list[str]:
+        if not isinstance(value, list):
+            raise RpcError(RpcErrorCode.INVALID_PARAMS, f"{name} must be an array")
+        if not value and not allow_empty:
+            raise RpcError(RpcErrorCode.INVALID_PARAMS, f"{name} list is empty")
+        if len(value) > MAX_DOWNLOAD_URI_COUNT:
+            raise RpcError(
+                RpcErrorCode.INVALID_PARAMS,
+                f"Too many {name}, max {MAX_DOWNLOAD_URI_COUNT}",
+            )
+
+        uris: list[str] = []
+        for index, item in enumerate(value):
+            if not isinstance(item, str):
+                raise RpcError(
+                    RpcErrorCode.INVALID_PARAMS,
+                    f"{name}[{index}] must be a string",
+                )
+            error = await check_url_ssrf(item, allowed_schemes=allowed_schemes)
+            if error:
+                raise RpcError(
+                    RpcErrorCode.INVALID_PARAMS,
+                    f"{name}[{index}]: {error}",
+                )
+            uris.append(item)
+        return uris
+
+    def _raise_create_download_error(self, exc: Exception) -> None:
         if isinstance(exc, RpcError):
             raise exc
         if isinstance(exc, DuplicateTaskError):
             raise RpcError(RpcErrorCode.TASK_EXISTS, str(exc)) from exc
+        if isinstance(exc, DownloadAdmissionError):
+            if exc.reason == "unknown_size":
+                raise RpcError(
+                    RpcErrorCode.INVALID_PARAMS,
+                    "无法获取可信文件大小，任务未开始下载",
+                ) from exc
+            messages = {
+                "max_task_size": "任务大小超过系统限制",
+                "disk_budget": "磁盘可用空间不足",
+                "quota": "用户空间不足",
+                "no_subscribers": "没有满足配额要求的订阅用户",
+            }
+            raise RpcError(
+                RpcErrorCode.QUOTA_EXCEEDED,
+                messages.get(exc.reason, "任务状态已变化，请重试"),
+            ) from exc
         if isinstance(exc, ValueError):
             message = str(exc)
             if message == "quota exceeded":
                 raise RpcError(
                     RpcErrorCode.QUOTA_EXCEEDED, "Your quota has been exceeded"
                 ) from exc
-            raise RpcError(RpcErrorCode.INVALID_PARAMS, message) from exc
-        if isinstance(exc, LookupError):
-            raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc)) from exc
-        raise RpcError(RpcErrorCode.INTERNAL_ERROR, str(exc)) from exc
+            if message.startswith(
+                ("invalid out option:", "不安全的 bt-tracker 参数:")
+            ):
+                raise RpcError(RpcErrorCode.INVALID_PARAMS, message) from exc
+        logger.error(
+            "RPC创建下载任务内部异常 user_id=%s",
+            self.user_id,
+            exc_info=exc,
+        )
+        raise RpcError(RpcErrorCode.INTERNAL_ERROR, "Internal server error") from exc
 
     # ========== 完整实现的方法 ==========
     async def _handle_add_uri(self, params: list) -> str:
         """aria2.addUri(uris[, options[, position]])"""
-        if not params or not isinstance(params[0], list):
+        if not params:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "uris is required")
-        uris = params[0]
-        if not uris:
-            raise RpcError(RpcErrorCode.INVALID_PARAMS, "uris list is empty")
+        submit_uris = await self._validate_uri_list(
+            params[0],
+            name="uris",
+            allowed_schemes=DOWNLOAD_URI_SCHEMES,
+            allow_empty=False,
+        )
+        if len(submit_uris) > 1 and any(
+            urlsplit(item).scheme.lower() == "magnet" for item in submit_uris
+        ):
+            raise RpcError(
+                RpcErrorCode.INVALID_PARAMS,
+                "magnet URI does not support mirrors",
+            )
         options = (
             dict(params[1]) if len(params) > 1 and isinstance(params[1], dict) else {}
         )
         await self._check_quota_and_disk()
-        submit_uris = [str(item) for item in uris]
         uri = submit_uris[0]
         resource_key = self._resource_key_for_uri(uri)
         task_name = self._extract_name_from_uri(uri) or uri
@@ -801,6 +919,9 @@ class Aria2RpcHandler:
                 resource_kind=self._resource_kind_for_uri(uri),
                 display_name=task_name,
                 total_bytes=0,
+                size_known=False,
+                size_limit_bytes=get_max_task_size(),
+                disk_available_bytes=None,
                 aria2_client=self.client,
                 options=options,
                 submit_uris=submit_uris,
@@ -818,19 +939,43 @@ class Aria2RpcHandler:
         # 限制 torrent 文件大小（10MB）
         if len(torrent_data) > 10 * 1024 * 1024:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, "Torrent data too large")
+        webseed_uris = await self._validate_uri_list(
+            params[1] if len(params) > 1 else [],
+            name="uris",
+            allowed_schemes=WEBSEED_URI_SCHEMES,
+            allow_empty=True,
+        )
+        try:
+            metadata = await parse_torrent_base64_async(torrent_data)
+        except TorrentMetadataError as exc:
+            raise RpcError(
+                RpcErrorCode.INVALID_PARAMS,
+                f"无效的种子文件: {exc}",
+            ) from exc
+        endpoint_error = await check_torrent_network_endpoints(
+            metadata.tracker_urls,
+            metadata.webseed_urls,
+        )
+        if endpoint_error:
+            raise RpcError(RpcErrorCode.INVALID_PARAMS, endpoint_error)
         options = (
             dict(params[2]) if len(params) > 2 and isinstance(params[2], dict) else {}
         )
-        webseed_uris = (
-            [str(item) for item in params[1]]
-            if len(params) > 1 and isinstance(params[1], list)
-            else []
+        selected_indexes = self._selected_torrent_indexes(
+            metadata, options.pop("select-file", None)
         )
+        selected_size = selected_total_size(metadata, selected_indexes)
+        select_file = build_select_file_option(
+            selected_indexes, metadata.file_count
+        )
+        server_options = {"select-file": select_file} if select_file else None
         await self._check_quota_and_disk()
-        info_hash = extract_info_hash_from_torrent_base64(torrent_data)
-        resource_key = info_hash or hashlib.sha256(torrent_data.encode()).hexdigest()
-        task_uri = f"magnet:?xt=urn:btih:{resource_key}"
-        task_name = f"torrent-{resource_key[:12]}"
+        resource_key = build_selection_resource_key(
+            metadata.info_hash,
+            selected_indexes,
+            total_file_count=metadata.file_count,
+        )
+        task_uri = f"magnet:?xt=urn:btih:{metadata.info_hash}"
 
         try:
             task = await create_user_torrent_download(
@@ -839,10 +984,14 @@ class Aria2RpcHandler:
                 torrent_data=torrent_data,
                 resource_key=resource_key,
                 source_uri=task_uri,
-                display_name=task_name,
-                total_bytes=0,
+                display_name=metadata.name,
+                total_bytes=selected_size,
+                size_known=True,
+                size_limit_bytes=get_max_task_size(),
+                disk_available_bytes=None,
                 aria2_client=self.client,
                 options=options,
+                server_options=server_options,
                 uris=webseed_uris,
             )
         except Exception as exc:
@@ -1234,9 +1383,19 @@ class Aria2RpcHandler:
                     results.append([result])
                 except RpcError as e:
                     results.append({"faultCode": e.code, "faultString": e.message})
-                except Exception as e:
+                except Exception as exc:
+                    logger.error(
+                        "RPC multicall内部异常 method=%s user_id=%s index=%s",
+                        method_name,
+                        self.user_id,
+                        index,
+                        exc_info=exc,
+                    )
                     results.append(
-                        {"faultCode": RpcErrorCode.INTERNAL_ERROR, "faultString": str(e)}
+                        {
+                            "faultCode": RpcErrorCode.INTERNAL_ERROR,
+                            "faultString": "Internal server error",
+                        }
                     )
             return results
         finally:

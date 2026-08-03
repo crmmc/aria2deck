@@ -11,10 +11,14 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
-from app.core.security import check_url_ssrf, mask_url_credentials
+from app.core.security import (
+    HTTP_URI_SCHEMES,
+    check_url_ssrf,
+    redact_url_for_log,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,7 @@ DEFAULT_TIMEOUT = 30
 
 # Maximum number of redirects to follow
 MAX_REDIRECTS = 10
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 @dataclass
@@ -105,6 +110,90 @@ def _extract_filename_from_url(url: str) -> str | None:
     return None
 
 
+def _probe_result_from_response(
+    response: aiohttp.ClientResponse,
+    final_url: str,
+) -> ProbeResult:
+    if response.status >= 400:
+        return ProbeResult(
+            success=False,
+            final_url=final_url,
+            error=f"HTTP {response.status}: {response.reason}",
+        )
+
+    content_length = None
+    if "Content-Length" in response.headers:
+        try:
+            content_length = int(response.headers["Content-Length"])
+        except ValueError:
+            pass
+
+    filename = None
+    if "Content-Disposition" in response.headers:
+        filename = _parse_content_disposition(
+            response.headers["Content-Disposition"]
+        )
+    if not filename:
+        filename = _extract_filename_from_url(final_url)
+
+    return ProbeResult(
+        success=True,
+        final_url=final_url,
+        content_length=content_length,
+        filename=filename,
+        content_type=response.headers.get("Content-Type"),
+    )
+
+
+async def _probe_with_method(
+    session: aiohttp.ClientSession,
+    url: str,
+    method: str,
+    max_redirects: int,
+) -> ProbeResult:
+    current_url = url
+    redirect_count = 0
+
+    while True:
+        ssrf_error = await check_url_ssrf(
+            current_url,
+            allowed_schemes=HTTP_URI_SCHEMES,
+        )
+        if ssrf_error:
+            prefix = "重定向目标不安全: " if redirect_count else ""
+            return ProbeResult(
+                success=False,
+                final_url=current_url,
+                error=f"{prefix}{ssrf_error}",
+            )
+
+        request = (
+            session.head(current_url, allow_redirects=False)
+            if method == "HEAD"
+            else session.get(current_url, allow_redirects=False)
+        )
+        async with request as response:
+            if response.status not in REDIRECT_STATUSES:
+                return _probe_result_from_response(response, current_url)
+
+            location = response.headers.get("Location")
+            if not location:
+                return ProbeResult(
+                    success=False,
+                    final_url=current_url,
+                    error="重定向响应缺少 Location",
+                )
+            if redirect_count >= max_redirects:
+                return ProbeResult(
+                    success=False,
+                    final_url=current_url,
+                    error="重定向次数过多",
+                )
+
+            current_url = urljoin(current_url, location)
+            redirect_count += 1
+
+
 async def probe_http_url(
     url: str,
     timeout: int = DEFAULT_TIMEOUT,
@@ -127,85 +216,34 @@ async def probe_http_url(
     """
     try:
         client_timeout = aiohttp.ClientTimeout(total=timeout)
-
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            # Use HEAD request with redirect following
-            async with session.head(
-                url,
-                allow_redirects=True,
-                max_redirects=max_redirects,
-            ) as response:
-                # Get final URL after redirects
-                final_url = str(response.url)
+            return await _probe_with_method(session, url, "HEAD", max_redirects)
 
-                # SSRF 防护：检查重定向后的最终 URL
-                if final_url != url:
-                    ssrf_error = await check_url_ssrf(final_url)
-                    if ssrf_error:
-                        return ProbeResult(
-                            success=False,
-                            final_url=final_url,
-                            error=f"重定向目标不安全: {ssrf_error}",
-                        )
-
-                # Check for successful response
-                if response.status >= 400:
-                    return ProbeResult(
-                        success=False,
-                        final_url=final_url,
-                        error=f"HTTP {response.status}: {response.reason}",
-                    )
-
-                # Extract Content-Length
-                content_length = None
-                if "Content-Length" in response.headers:
-                    try:
-                        content_length = int(response.headers["Content-Length"])
-                    except ValueError:
-                        pass
-
-                # Extract filename
-                filename = None
-                if "Content-Disposition" in response.headers:
-                    filename = _parse_content_disposition(
-                        response.headers["Content-Disposition"]
-                    )
-
-                # Fallback to URL path
-                if not filename:
-                    filename = _extract_filename_from_url(final_url)
-
-                # Get content type
-                content_type = response.headers.get("Content-Type")
-
-                return ProbeResult(
-                    success=True,
-                    final_url=final_url,
-                    content_length=content_length,
-                    filename=filename,
-                    content_type=content_type,
-                )
-
-    except aiohttp.ClientError as e:
-        safe_url = mask_url_credentials(url)
-        logger.warning(f"HTTP probe failed for {safe_url}: {e}")
+    except aiohttp.ClientError as exc:
+        logger.warning(
+            "HTTP probe failed url=%s error_type=%s",
+            redact_url_for_log(url),
+            type(exc).__name__,
+        )
         return ProbeResult(
             success=False,
-            error=f"Connection error: {type(e).__name__}",
+            error=f"Connection error: {type(exc).__name__}",
         )
     except TimeoutError:
-        safe_url = mask_url_credentials(url)
-        logger.warning(f"HTTP probe timeout for {safe_url}")
+        logger.warning("HTTP probe timeout url=%s", redact_url_for_log(url))
         return ProbeResult(
             success=False,
             error="Request timeout",
         )
-    except Exception as e:
-        safe_url = mask_url_credentials(url)
-        logger.warning(f"HTTP probe unexpected error for {safe_url}: {e}")
+    except Exception as exc:
+        logger.warning(
+            "HTTP probe unexpected error url=%s error_type=%s",
+            redact_url_for_log(url),
+            type(exc).__name__,
+        )
         return ProbeResult(
             success=False,
-            error=f"Unexpected error: {type(e).__name__}",
+            error=f"Unexpected error: {type(exc).__name__}",
         )
 
 
@@ -230,68 +268,26 @@ async def probe_url_with_get_fallback(
     # Try HEAD first
     result = await probe_http_url(url, timeout, max_redirects)
 
-    # If HEAD succeeded or returned a clear error, return it
-    if result.success or (result.error and "HTTP" in result.error):
+    fallback_errors = (
+        "Connection error:",
+        "Request timeout",
+        "Unexpected error:",
+        "HTTP 405:",
+        "HTTP 501:",
+    )
+    if result.success or not (result.error or "").startswith(fallback_errors):
         return result
 
-    # Try GET as fallback (some servers don't support HEAD)
     try:
         client_timeout = aiohttp.ClientTimeout(total=timeout)
-
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async with session.get(
-                url,
-                allow_redirects=True,
-                max_redirects=max_redirects,
-            ) as response:
-                # Get final URL after redirects
-                final_url = str(response.url)
+            return await _probe_with_method(session, url, "GET", max_redirects)
 
-                # SSRF 防护：检查重定向后的最终 URL
-                if final_url != url:
-                    ssrf_error = await check_url_ssrf(final_url)
-                    if ssrf_error:
-                        return ProbeResult(
-                            success=False,
-                            final_url=final_url,
-                            error=f"重定向目标不安全: {ssrf_error}",
-                        )
-
-                if response.status >= 400:
-                    return ProbeResult(
-                        success=False,
-                        final_url=final_url,
-                        error=f"HTTP {response.status}: {response.reason}",
-                    )
-
-                # Extract headers (same as HEAD)
-                content_length = None
-                if "Content-Length" in response.headers:
-                    try:
-                        content_length = int(response.headers["Content-Length"])
-                    except ValueError:
-                        pass
-
-                filename = None
-                if "Content-Disposition" in response.headers:
-                    filename = _parse_content_disposition(
-                        response.headers["Content-Disposition"]
-                    )
-                if not filename:
-                    filename = _extract_filename_from_url(final_url)
-
-                content_type = response.headers.get("Content-Type")
-
-                return ProbeResult(
-                    success=True,
-                    final_url=final_url,
-                    content_length=content_length,
-                    filename=filename,
-                    content_type=content_type,
-                )
-
-    except Exception as e:
+    except Exception as exc:
         # Return original HEAD error if GET also fails
-        safe_url = mask_url_credentials(url)
-        logger.warning(f"GET fallback also failed for {safe_url}: {e}")
+        logger.warning(
+            "GET fallback failed url=%s error_type=%s",
+            redact_url_for_log(url),
+            type(exc).__name__,
+        )
         return result

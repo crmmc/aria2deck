@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import threading
 
 import pytest
 
+from app.domain import torrent_metadata
 from app.domain.torrent_metadata import (
+    MAX_BENCODE_CONTAINER_WIDTH,
+    MAX_BENCODE_NUMBER_DIGITS,
     MAX_TORRENT_FILE_COUNT,
     TorrentMetadataError,
     build_selection_resource_key,
     parse_torrent_base64,
+    parse_torrent_bytes,
     validate_selected_indexes,
 )
 
@@ -90,6 +96,40 @@ def test_parse_single_file_torrent_metadata() -> None:
     assert metadata.tree[0]["name"] == "ubuntu.iso"
 
 
+def test_extracts_all_torrent_network_endpoints() -> None:
+    announce = b"udp://8.8.8.8:6969/announce"
+    tracker_a = b"https://8.8.4.4/announce"
+    tracker_b = b"udp://1.1.1.1:6969/announce"
+    webseed_a = b"https://8.8.8.8/file"
+    webseed_b = b"ftp://8.8.4.4/file"
+    httpseed = b"http://1.1.1.1/seed"
+    torrent = bdict(
+        [
+            (b"announce", bstr(announce)),
+            (
+                b"announce-list",
+                blist([blist([bstr(tracker_a), bstr(tracker_b)])]),
+            ),
+            (b"url-list", blist([bstr(webseed_a), bstr(webseed_b)])),
+            (b"httpseeds", bstr(httpseed)),
+            (b"info", single_file_info()),
+        ]
+    )
+
+    metadata = parse_torrent_base64(base64.b64encode(torrent).decode("ascii"))
+
+    assert metadata.tracker_urls == (
+        announce.decode(),
+        tracker_a.decode(),
+        tracker_b.decode(),
+    )
+    assert metadata.webseed_urls == (
+        webseed_a.decode(),
+        webseed_b.decode(),
+        httpseed.decode(),
+    )
+
+
 def test_parse_multi_file_torrent_metadata() -> None:
     info = multi_file_info()
     metadata = parse_torrent_base64(torrent_b64(info))
@@ -116,6 +156,60 @@ def test_parse_multi_file_torrent_metadata() -> None:
 def test_parse_rejects_invalid_torrent(payload: str) -> None:
     with pytest.raises(TorrentMetadataError):
         parse_torrent_base64(payload)
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        blist([b"0:"] * (MAX_BENCODE_CONTAINER_WIDTH + 1)),
+        b"d"
+        + b"".join(
+            bstr(f"key-{index}".encode()) + b"0:"
+            for index in range(MAX_BENCODE_CONTAINER_WIDTH + 1)
+        )
+        + b"e",
+    ],
+    ids=["list", "dictionary"],
+)
+def test_parse_rejects_wide_bencode_containers(info: bytes) -> None:
+    with pytest.raises(TorrentMetadataError, match="container too wide"):
+        parse_torrent_bytes(b"d4:info" + info + b"e")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"d4:infoi" + b"1" * (MAX_BENCODE_NUMBER_DIGITS + 1) + b"ee",
+        b"d" + b"9" * (MAX_BENCODE_NUMBER_DIGITS + 1) + b":",
+    ],
+    ids=["integer", "length"],
+)
+def test_parse_rejects_long_bencode_numbers(payload: bytes) -> None:
+    with pytest.raises(TorrentMetadataError, match="too long"):
+        parse_torrent_bytes(payload)
+
+
+def test_parse_enforces_decoded_raw_byte_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    prefix = b"d4:info" + single_file_info() + b"7:padding"
+    padding_size = 1024
+    while True:
+        raw = prefix + bstr(b"x" * padding_size) + b"e"
+        delta = 1024 - len(raw)
+        if delta == 0:
+            break
+        padding_size += delta
+
+    monkeypatch.setattr(torrent_metadata, "MAX_TORRENT_RAW_LENGTH", len(raw))
+    assert parse_torrent_base64(base64.b64encode(raw).decode()).name == "ubuntu.iso"
+    with pytest.raises(TorrentMetadataError, match="torrent bytes too large"):
+        parse_torrent_base64(base64.b64encode(raw + b"x").decode())
+
+
+def test_parse_enforces_shared_node_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torrent_metadata, "MAX_BENCODE_NODES", 4)
+
+    with pytest.raises(TorrentMetadataError, match="too many bencode nodes"):
+        parse_torrent_bytes(b"d4:infod4:name4:test6:lengthi1eee")
 
 
 @pytest.mark.parametrize(
@@ -161,6 +255,38 @@ def test_parse_rejects_too_many_files() -> None:
 
     with pytest.raises(TorrentMetadataError, match="too many files"):
         parse_torrent_base64(torrent_b64(info))
+
+
+@pytest.mark.asyncio
+async def test_async_parser_keeps_event_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = parse_torrent_base64(torrent_b64(single_file_info()))
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_parser(_: str):
+        started.set()
+        if not release.wait(timeout=1):
+            raise TimeoutError("parser thread was not released")
+        return expected
+
+    monkeypatch.setattr(torrent_metadata, "parse_torrent_base64", blocking_parser)
+    task = asyncio.create_task(torrent_metadata.parse_torrent_base64_async("torrent"))
+    try:
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        assert started.is_set()
+
+        heartbeat = asyncio.Event()
+        asyncio.get_running_loop().call_soon(heartbeat.set)
+        await asyncio.wait_for(heartbeat.wait(), timeout=0.1)
+    finally:
+        release.set()
+
+    assert await task is expected
 
 
 def test_validate_selected_indexes() -> None:

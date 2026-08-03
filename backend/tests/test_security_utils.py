@@ -6,7 +6,18 @@
 3. URL 凭证被正确脱敏
 """
 
-from app.core.security import sanitize_string, mask_url_credentials
+import logging
+from unittest.mock import patch
+
+import pytest
+
+from app.core.security import (
+    MAX_DOWNLOAD_URI_LENGTH,
+    check_url_ssrf,
+    mask_url_credentials,
+    redact_url_for_log,
+    sanitize_string,
+)
 
 
 class TestSanitizeString:
@@ -53,6 +64,92 @@ class TestSanitizeString:
         assert "[CRITICAL]" in result  # 文本保留
         assert "\x1b" not in result  # 转义序列移除
         assert "\r" not in result  # 回车移除
+
+
+class TestDownloadUriValidation:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("uri", "expected"),
+        [
+            ("file:///etc/passwd", "不支持的下载链接协议"),
+            ("http://user:secret@example.com/file", "用户名或密码"),
+            ("http://example.com/file\nnext", "非法字符"),
+            ("x" * (MAX_DOWNLOAD_URI_LENGTH + 1), "下载链接过长"),
+        ],
+    )
+    async def test_rejects_malformed_or_unsafe_uri(
+        self,
+        uri: str,
+        expected: str,
+    ) -> None:
+        assert expected in (await check_url_ssrf(uri) or "")
+
+    @pytest.mark.asyncio
+    async def test_rejects_shared_address_space(self) -> None:
+        error = await check_url_ssrf("http://100.64.0.1/file")
+
+        assert error is not None
+        assert "内网地址" in error
+
+    @pytest.mark.asyncio
+    async def test_checks_every_repeated_magnet_tracker(self) -> None:
+        uri = (
+            "magnet:?xt=urn:btih:" + "a" * 40
+            + "&tr=udp://8.8.8.8:6969/announce"
+            + "&tr=udp://100.64.0.1:6969/announce"
+        )
+
+        error = await check_url_ssrf(uri)
+
+        assert error is not None
+        assert "参数 tr" in error
+        assert "内网地址" in error
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("key", ["ws", "xs", "as"])
+    async def test_rejects_private_magnet_network_sources(self, key: str) -> None:
+        uri = (
+            "magnet:?xt=urn:btih:" + "b" * 40
+            + f"&{key}=http://100.64.0.2/source"
+        )
+
+        error = await check_url_ssrf(uri)
+
+        assert error is not None
+        assert f"参数 {key}" in error
+        assert "内网地址" in error
+
+    @pytest.mark.asyncio
+    async def test_udp_tracker_dns_must_resolve_to_global_ip(self) -> None:
+        dns_result = [(None, None, None, None, ("100.64.0.3", 6969))]
+        uri = "magnet:?xt=urn:btih:" + "c" * 40 + (
+            "&tr=udp://tracker.example/announce"
+        )
+
+        with patch(
+            "app.core.security.socket.getaddrinfo",
+            return_value=dns_result,
+        ):
+            error = await check_url_ssrf(uri)
+
+        assert error is not None
+        assert "非公网" in error
+
+    @pytest.mark.asyncio
+    async def test_unexpected_ssrf_error_logs_redacted_url(self, caplog):
+        url = "https://example.com/download?token=probe-token&signature=probe-signature#probe-fragment"
+        exception_url = "https://probe-user:probe-password@example.com/download?token=probe-token&signature=probe-signature#probe-fragment"
+
+        with patch(
+            "app.core.security.socket.getaddrinfo",
+            side_effect=RuntimeError(exception_url),
+        ), caplog.at_level(logging.WARNING, logger="app.core.security"):
+            error = await check_url_ssrf(url)
+
+        assert error == "下载链接安全校验失败"
+        assert "https://example.com/download" in caplog.text
+        for secret in ("probe-user", "probe-password", "probe-token", "probe-signature", "probe-fragment"):
+            assert secret not in caplog.text
 
 
 class TestMaskUrlCredentials:
@@ -120,3 +217,18 @@ class TestMaskUrlCredentials:
         masked = mask_url_credentials(url)
         assert "***:***@" in masked
         assert "p%40ss" not in masked
+
+
+class TestRedactUrlForLog:
+    def test_removes_credentials_query_and_fragment(self):
+        url = "https://probe-user:probe-password@example.com:8443/files/report.zip?token=probe-token&signature=probe-signature#probe-fragment"
+
+        redacted = redact_url_for_log(url)
+
+        assert redacted == "https://example.com:8443/files/report.zip"
+        for secret in ("probe-user", "probe-password", "probe-token", "probe-signature", "probe-fragment"):
+            assert secret not in redacted
+
+    def test_minimizes_sensitive_or_unparseable_paths(self):
+        assert redact_url_for_log("https://example.com/download/access-token-value") == "https://example.com/<redacted>"
+        assert redact_url_for_log("magnet:?xt=urn:btih:secret") == "<redacted-url>"

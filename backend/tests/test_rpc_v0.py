@@ -62,10 +62,24 @@ async def test_rpc_purge_download_result_deletes_terminal_user_task(
 
 
 @pytest.mark.asyncio
-async def test_rpc_add_uri_creates_v0_task_and_returns_gid(temp_db: str) -> None:
+async def test_rpc_add_uri_creates_v0_task_and_returns_gid(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.core.security.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(None, None, None, None, ("93.184.216.34", 443))],
+    )
     user = await create_user_v0(username="rpc_add_uri")
     client = AsyncMock()
     client.add_uri.return_value = "gid-rpc-add-uri"
+    client.tell_status.return_value = {
+        "gid": "gid-rpc-add-uri",
+        "status": "paused",
+        "totalLength": "128",
+        "completedLength": "0",
+        "files": [{"length": "128", "selected": "true"}],
+    }
     handler = Aria2RpcHandler(user["id"], client)
 
     result = await handler.handle(
@@ -94,7 +108,9 @@ async def test_rpc_add_uri_creates_v0_task_and_returns_gid(temp_db: str) -> None
     opts = call_args[0][1]
     assert opts["out"] == "add.bin"
     assert opts["seed-time"] == "0"
+    assert opts["pause"] == "true"
     assert "dir" in opts
+    client.unpause.assert_awaited_once_with("gid-rpc-add-uri")
 
 
 @pytest.mark.asyncio
@@ -170,7 +186,9 @@ async def test_rpc_add_torrent_creates_v0_task_and_returns_gid(temp_db: str) -> 
     client = AsyncMock()
     client.add_torrent.return_value = "gid-rpc-add-torrent"
     handler = Aria2RpcHandler(user["id"], client)
-    torrent_data = base64.b64encode(b"d4:infod4:name4:testee").decode()
+    torrent_data = base64.b64encode(
+        b"d4:infod6:lengthi10e4:name4:testee"
+    ).decode()
 
     result = await handler.handle(
         "aria2.addTorrent",
@@ -200,7 +218,9 @@ async def test_rpc_add_torrent_rejects_duplicate_torrent(temp_db: str) -> None:
     client = AsyncMock()
     client.add_torrent.return_value = "gid-rpc-duplicate-torrent"
     handler = Aria2RpcHandler(user["id"], client)
-    torrent_data = base64.b64encode(b"d4:infod4:name9:duplicatee").decode()
+    torrent_data = base64.b64encode(
+        b"d4:infod6:lengthi10e4:name9:duplicateee"
+    ).decode()
 
     first_gid = await handler.handle("aria2.addTorrent", [torrent_data])
     with pytest.raises(RpcError) as exc_info:

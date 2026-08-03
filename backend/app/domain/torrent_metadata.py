@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -7,15 +8,40 @@ from dataclasses import dataclass
 from typing import Any
 
 MAX_TORRENT_BASE64_LENGTH = 14 * 1024 * 1024
+MAX_TORRENT_RAW_LENGTH = 10 * 1024 * 1024
 MAX_TORRENT_FILE_COUNT = 5000
 MAX_BENCODE_DEPTH = 64
+MAX_BENCODE_NODES = 100_000
+MAX_BENCODE_CONTAINER_WIDTH = 10_000
+MAX_BENCODE_NUMBER_DIGITS = 20
 MAX_PATH_DEPTH = 32
 MAX_PATH_COMPONENT_LENGTH = 255
 MAX_RELATIVE_PATH_LENGTH = 4096
+MAX_TORRENT_NETWORK_ENDPOINTS = 64
 
 
 class TorrentMetadataError(ValueError):
     pass
+
+
+@dataclass
+class _BencodeBudget:
+    decoded_raw_bytes: int
+    node_count: int = 0
+
+    def __post_init__(self) -> None:
+        if self.decoded_raw_bytes > MAX_TORRENT_RAW_LENGTH:
+            raise TorrentMetadataError("torrent bytes too large")
+
+    def consume_node(self) -> None:
+        self.node_count += 1
+        if self.node_count > MAX_BENCODE_NODES:
+            raise TorrentMetadataError("too many bencode nodes")
+
+    @staticmethod
+    def check_container_width(width: int) -> None:
+        if width > MAX_BENCODE_CONTAINER_WIDTH:
+            raise TorrentMetadataError("bencode container too wide")
 
 
 @dataclass(frozen=True)
@@ -31,6 +57,8 @@ class TorrentMetadata:
     name: str
     files: tuple[TorrentFile, ...]
     tree: list[dict[str, Any]]
+    tracker_urls: tuple[str, ...]
+    webseed_urls: tuple[str, ...]
 
     @property
     def file_count(self) -> int:
@@ -51,14 +79,18 @@ def parse_torrent_base64(torrent_base64: str) -> TorrentMetadata:
     return parse_torrent_bytes(raw)
 
 
+async def parse_torrent_base64_async(torrent_base64: str) -> TorrentMetadata:
+    return await asyncio.to_thread(parse_torrent_base64, torrent_base64)
+
+
 def parse_torrent_bytes(raw: bytes) -> TorrentMetadata:
-    value, end, spans = _parse_value(raw, 0, 0)
+    budget = _BencodeBudget(len(raw))
+    value, end, info_span = _parse_value(raw, 0, 0, budget)
     if end != len(raw):
         raise TorrentMetadataError("trailing bencode data")
     if not isinstance(value, dict):
         raise TorrentMetadataError("torrent root must be a dictionary")
     info = value.get(b"info")
-    info_span = spans.get((0, b"info"))
     if not isinstance(info, dict) or info_span is None:
         raise TorrentMetadataError("missing info dictionary")
 
@@ -72,11 +104,14 @@ def parse_torrent_bytes(raw: bytes) -> TorrentMetadata:
     if len(files) > MAX_TORRENT_FILE_COUNT:
         raise TorrentMetadataError("too many files")
 
+    tracker_urls, webseed_urls = _extract_network_endpoints(value)
     return TorrentMetadata(
         info_hash=info_hash,
         name=name,
         files=tuple(files),
         tree=_build_tree(files),
+        tracker_urls=tracker_urls,
+        webseed_urls=webseed_urls,
     )
 
 
@@ -125,6 +160,57 @@ def build_selection_resource_key(
         :32
     ]
     return f"{info_hash}:files:{digest}"
+
+
+def _decode_network_url(value: Any, *, field: str) -> str:
+    if not isinstance(value, bytes):
+        raise TorrentMetadataError(f"invalid {field} URL")
+    try:
+        url = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TorrentMetadataError(f"invalid {field} URL encoding") from exc
+    if not url:
+        raise TorrentMetadataError(f"empty {field} URL")
+    return url
+
+
+def _extract_network_endpoints(
+    root: dict[bytes, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    trackers: list[str] = []
+    webseeds: list[str] = []
+
+    if b"announce" in root:
+        trackers.append(_decode_network_url(root[b"announce"], field="announce"))
+
+    announce_list = root.get(b"announce-list")
+    if announce_list is not None:
+        if not isinstance(announce_list, list):
+            raise TorrentMetadataError("announce-list must be a list")
+        for tier in announce_list:
+            if not isinstance(tier, list):
+                raise TorrentMetadataError("announce-list tier must be a list")
+            trackers.extend(
+                _decode_network_url(item, field="announce-list") for item in tier
+            )
+
+    for key in (b"url-list", b"httpseeds"):
+        value = root.get(key)
+        if value is None:
+            continue
+        field = key.decode("ascii")
+        if isinstance(value, bytes):
+            webseeds.append(_decode_network_url(value, field=field))
+        elif isinstance(value, list):
+            webseeds.extend(
+                _decode_network_url(item, field=field) for item in value
+            )
+        else:
+            raise TorrentMetadataError(f"{field} must be a string or list")
+
+    if len(trackers) + len(webseeds) > MAX_TORRENT_NETWORK_ENDPOINTS:
+        raise TorrentMetadataError("too many torrent network endpoints")
+    return tuple(trackers), tuple(webseeds)
 
 
 def _extract_files(root_name: str, info: dict[bytes, Any]) -> list[TorrentFile]:
@@ -220,72 +306,78 @@ def _serialize_node(node: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _parse_value(data: bytes, pos: int, depth: int) -> tuple[Any, int, dict[tuple[int, bytes], tuple[int, int]]]:
+def _parse_value(
+    data: bytes,
+    pos: int,
+    depth: int,
+    budget: _BencodeBudget,
+) -> tuple[Any, int, tuple[int, int] | None]:
     if depth > MAX_BENCODE_DEPTH:
         raise TorrentMetadataError("bencode too deep")
     if pos >= len(data):
         raise TorrentMetadataError("unexpected end of bencode")
+    budget.consume_node()
     token = data[pos : pos + 1]
     if token == b"i":
-        return _parse_int(data, pos), _parse_int_end(data, pos), {}
+        integer, end = _parse_int(data, pos)
+        return integer, end, None
     if token == b"l":
         values: list[Any] = []
-        list_spans: dict[tuple[int, bytes], tuple[int, int]] = {}
         pos += 1
         while pos < len(data) and data[pos : pos + 1] != b"e":
-            value, pos, child_spans = _parse_value(data, pos, depth + 1)
+            budget.check_container_width(len(values) + 1)
+            value, pos, _ = _parse_value(data, pos, depth + 1, budget)
             values.append(value)
-            list_spans.update(child_spans)
         if pos >= len(data):
             raise TorrentMetadataError("unterminated list")
-        return values, pos + 1, list_spans
+        return values, pos + 1, None
     if token == b"d":
         result: dict[bytes, Any] = {}
-        dict_spans: dict[tuple[int, bytes], tuple[int, int]] = {}
+        info_span: tuple[int, int] | None = None
         pos += 1
         while pos < len(data) and data[pos : pos + 1] != b"e":
-            key, pos, _ = _parse_value(data, pos, depth + 1)
+            budget.check_container_width(len(result) + 1)
+            key, pos, _ = _parse_value(data, pos, depth + 1, budget)
             if not isinstance(key, bytes):
                 raise TorrentMetadataError("dictionary key must be bytes")
             if key in result:
                 raise TorrentMetadataError("duplicate dictionary key")
             value_start = pos
-            value, pos, child_spans = _parse_value(data, pos, depth + 1)
+            value, pos, _ = _parse_value(data, pos, depth + 1, budget)
             result[key] = value
-            dict_spans[(depth, key)] = (value_start, pos)
-            dict_spans.update(child_spans)
+            if depth == 0 and key == b"info":
+                info_span = (value_start, pos)
         if pos >= len(data):
             raise TorrentMetadataError("unterminated dictionary")
-        return result, pos + 1, dict_spans
+        return result, pos + 1, info_span
     if token.isdigit():
-        return _parse_bytes(data, pos)
+        value, end = _parse_bytes(data, pos)
+        return value, end, None
     raise TorrentMetadataError("invalid bencode token")
 
 
-def _parse_int(data: bytes, pos: int) -> int:
-    end = data.find(b"e", pos + 1)
-    if end == -1:
-        raise TorrentMetadataError("unterminated integer")
+def _find_number_end(data: bytes, start: int, terminator: bytes, label: str) -> int:
+    end = data.find(terminator, start, start + MAX_BENCODE_NUMBER_DIGITS + 1)
+    if end != -1:
+        return end
+    if start + MAX_BENCODE_NUMBER_DIGITS < len(data):
+        raise TorrentMetadataError(f"{label} too long")
+    raise TorrentMetadataError(f"unterminated {label}")
+
+
+def _parse_int(data: bytes, pos: int) -> tuple[int, int]:
+    end = _find_number_end(data, pos + 1, b"e", "integer")
     raw = data[pos + 1 : end]
     if not raw or raw in {b"-0", b"+0"}:
         raise TorrentMetadataError("invalid integer")
     try:
-        return int(raw)
+        return int(raw), end + 1
     except ValueError as exc:
         raise TorrentMetadataError("invalid integer") from exc
 
 
-def _parse_int_end(data: bytes, pos: int) -> int:
-    end = data.find(b"e", pos + 1)
-    if end == -1:
-        raise TorrentMetadataError("unterminated integer")
-    return end + 1
-
-
-def _parse_bytes(data: bytes, pos: int) -> tuple[bytes, int, dict[tuple[int, bytes], tuple[int, int]]]:
-    colon = data.find(b":", pos)
-    if colon == -1:
-        raise TorrentMetadataError("invalid string")
+def _parse_bytes(data: bytes, pos: int) -> tuple[bytes, int]:
+    colon = _find_number_end(data, pos, b":", "string length")
     raw_length = data[pos:colon]
     if not raw_length or (len(raw_length) > 1 and raw_length.startswith(b"0")):
         raise TorrentMetadataError("invalid string length")
@@ -295,6 +387,6 @@ def _parse_bytes(data: bytes, pos: int) -> tuple[bytes, int, dict[tuple[int, byt
         raise TorrentMetadataError("invalid string length") from exc
     start = colon + 1
     end = start + length
-    if length < 0 or end > len(data):
+    if end > len(data):
         raise TorrentMetadataError("string exceeds input")
-    return data[start:end], end, {}
+    return data[start:end], end
