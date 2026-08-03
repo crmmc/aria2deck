@@ -24,6 +24,20 @@ class RateLimitScope(StrEnum):
 scoped_rate_limiter = RateLimiter(max_requests=0, window_seconds=60)
 
 
+def _rate_limit_headers(retry_after: int | None) -> dict[str, str] | None:
+    if retry_after is None:
+        return None
+    return {"Retry-After": str(retry_after)}
+
+
+def _raise_rate_limited(detail: str, retry_after: int | None) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=detail,
+        headers=_rate_limit_headers(retry_after),
+    )
+
+
 def client_ip_from_request(request: Request) -> str:
     """从请求对象中提取客户端 IP。"""
     return request.client.host if request.client and request.client.host else "unknown"
@@ -35,8 +49,16 @@ async def ensure_account_security_allowed(
 ) -> None:
     """校验账户安全相关请求限流。"""
     limit = rate_limit_config.limit_for(RateLimitScope.ACCOUNT_SECURITY.value)
-    if await login_limiter.is_blocked(client_ip, limit=limit):
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
+    if limit <= 0:
+        return
+
+    retry_after = await login_limiter.retry_after(
+        client_ip,
+        limit=limit,
+        window_seconds=rate_limit_config.window_for(RateLimitScope.ACCOUNT_SECURITY.value),
+    )
+    if retry_after is not None:
+        _raise_rate_limited(detail, retry_after)
 
 
 async def record_account_security_failure(client_ip: str) -> None:
@@ -59,13 +81,14 @@ async def ensure_authenticated_allowed(
     if limit <= 0:
         return
 
-    if not await api_limiter.is_allowed(
+    allowed, retry_after = await api_limiter.check(
         user_id,
         scope.value,
         limit=limit,
         window_seconds=rate_limit_config.window_for(scope.value),
-    ):
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
+    )
+    if not allowed:
+        _raise_rate_limited(detail, retry_after)
 
 
 async def ensure_public_allowed(
@@ -78,12 +101,13 @@ async def ensure_public_allowed(
     if limit <= 0:
         return
 
-    if not await scoped_rate_limiter.is_allowed(
+    allowed, retry_after = await scoped_rate_limiter.check(
         f"{scope.value}:{client_ip}",
         limit=limit,
         window_seconds=rate_limit_config.window_for(scope.value),
-    ):
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
+    )
+    if not allowed:
+        _raise_rate_limited(detail, retry_after)
 
 
 async def ensure_share_access_allowed(
@@ -97,21 +121,21 @@ async def ensure_share_access_allowed(
         return
 
     window = rate_limit_config.window_for(RateLimitScope.SHARE_ACCESS.value)
-    ip_allowed = await scoped_rate_limiter.is_allowed(
+    ip_allowed, ip_retry_after = await scoped_rate_limiter.check(
         f"{RateLimitScope.SHARE_ACCESS.value}:ip:{client_ip}",
         limit=limit,
         window_seconds=window,
     )
     if not ip_allowed:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
+        _raise_rate_limited(detail, ip_retry_after)
 
-    code_allowed = await scoped_rate_limiter.is_allowed(
+    code_allowed, code_retry_after = await scoped_rate_limiter.check(
         f"{RateLimitScope.SHARE_ACCESS.value}:code:{share_code}",
         limit=limit,
         window_seconds=window,
     )
     if not code_allowed:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
+        _raise_rate_limited(detail, code_retry_after)
 
 
 async def ensure_rpc_allowed(
@@ -123,9 +147,10 @@ async def ensure_rpc_allowed(
     if limit <= 0:
         return
 
-    if not await rpc_limiter.is_allowed(
+    allowed, retry_after = await rpc_limiter.check(
         client_ip,
         limit=limit,
         window_seconds=rate_limit_config.window_for(RateLimitScope.RPC.value),
-    ):
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
+    )
+    if not allowed:
+        _raise_rate_limited(detail, retry_after)

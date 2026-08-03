@@ -9,6 +9,8 @@ from uuid import uuid4
 from fastapi import Depends, HTTPException, Request, Response, status
 
 from app.core.config import settings
+from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
+from app.core.security import credential_digest_candidates
 from app.repositories import auth as auth_repo
 
 
@@ -23,9 +25,6 @@ class AuthUser:
     is_admin: bool
     quota: int
     quota_bytes: int
-    rpc_secret: str | None
-    rpc_secret_created_at: str | None
-    rpc_secret_created_at_ms: int | None
     is_initial_password: bool
 
 
@@ -48,27 +47,42 @@ def user_from_row(row: dict) -> AuthUser:
         is_admin=bool(row["is_admin"]),
         quota=quota_bytes,
         quota_bytes=quota_bytes,
-        rpc_secret=row.get("rpc_secret"),
-        rpc_secret_created_at=ms_to_iso(row.get("rpc_secret_created_at_ms")),
-        rpc_secret_created_at_ms=row.get("rpc_secret_created_at_ms"),
         is_initial_password=bool(row["is_initial_password"]),
     )
 
 
 async def get_user_by_rpc_secret(secret: str) -> dict | None:
-    """Return an RPC-authenticated user shape for a valid RPC secret."""
-    rows = await auth_repo.list_users_by_rpc_secret(secret, limit=2)
-
+    """Return an RPC-authenticated user shape for a valid ``token:<secret>`` value."""
+    current_digest, previous_digest = credential_digest_candidates("rpc-secret", secret)
+    rows = await auth_repo.list_users_by_rpc_secret_digests(
+        current_digest, previous_digest, limit=2
+    )
     if len(rows) != 1:
-        secrets.compare_digest(secret, "dummy_secret_placeholder_value")
+        secrets.compare_digest(current_digest, "0" * len(current_digest))
         if len(rows) > 1:
-            logger.error("RPC secret 冲突，拒绝鉴权 secret_prefix=%s***", secret[:8])
+            logger.error("RPC secret 摘要冲突，拒绝鉴权")
         return None
 
     user = rows[0]
-    if not secrets.compare_digest(secret, str(user["rpc_secret"] or "")):
+    stored_digest = str(user["rpc_secret_digest"] or "")
+    if secrets.compare_digest(stored_digest, current_digest):
+        pass
+    elif previous_digest and secrets.compare_digest(stored_digest, previous_digest):
+        try:
+            promoted = await auth_repo.promote_rpc_secret_digest(
+                int(user["id"]), previous_digest, current_digest
+            )
+        except auth_repo.DuplicateCredentialError:
+            return None
+        if not promoted:
+            current_rows = await auth_repo.list_users_by_rpc_secret_digests(
+                current_digest, None, limit=2
+            )
+            if len(current_rows) != 1 or current_rows[0]["id"] != user["id"]:
+                return None
+            user = current_rows[0]
+    else:
         return None
-
     quota_bytes = int(user["quota_bytes"])
     return {
         "id": int(user["id"]),
@@ -115,17 +129,69 @@ async def get_user_by_session(session_id: str | None) -> AuthUser | None:
     return user_from_row(row)
 
 
-async def require_user(request: Request) -> AuthUser:
+def _set_request_auth_state(request: Request, user: AuthUser | None, method: str | None) -> None:
+    request.state.auth_user_id = user.id if user else None
+    request.state.auth_method = method
+    request.state.auth_token_id = None
+
+
+async def require_session_user(request: Request) -> AuthUser:
     session_id = request.cookies.get(settings.session_cookie_name)
     user = await get_user_by_session(session_id)
     if not user:
-        request.state.auth_user_id = None
+        _set_request_auth_state(request, None, None)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录")
-    request.state.auth_user_id = user.id
+    _set_request_auth_state(request, user, "session")
     return user
 
 
-async def require_admin(user: AuthUser = Depends(require_user)) -> AuthUser:
+async def require_api_user(request: Request) -> AuthUser:
+    authorization = request.headers.get("authorization")
+    if authorization is None:
+        return await require_session_user(request)
+    scheme, separator, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not separator or not token or any(char.isspace() for char in token):
+        _set_request_auth_state(request, None, None)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API Token 无效")
+    current_digest, previous_digest = credential_digest_candidates("api-token", token)
+    row = await auth_repo.use_api_token_digests(current_digest, previous_digest)
+    if not row or bool(row["is_admin"]):
+        _set_request_auth_state(request, None, None)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API Token 无效")
+    user = user_from_row(row)
+    _set_request_auth_state(request, user, "bearer")
+    request.state.auth_token_id = int(row["api_token_id"])
+    return user
+
+
+async def require_limited_api_user(request: Request) -> AuthUser:
+    """Authenticate a JSON API caller and apply the shared user request bucket."""
+    user = await require_api_user(request)
+    await ensure_authenticated_allowed(user.id, RateLimitScope.AUTHENTICATED_API)
+    return user
+
+
+async def require_limited_session_user(request: Request) -> AuthUser:
+    """Authenticate a session-only JSON caller and apply the shared user bucket."""
+    user = await require_session_user(request)
+    await ensure_authenticated_allowed(user.id, RateLimitScope.AUTHENTICATED_API)
+    return user
+
+
+async def require_limited_admin(request: Request) -> AuthUser:
+    """Require an administrator session after applying the shared user bucket."""
+    user = await require_limited_session_user(request)
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
+    return user
+
+
+async def require_user(request: Request) -> AuthUser:
+    """Backward-compatible user dependency: Cookie session or restricted Bearer API Token."""
+    return await require_api_user(request)
+
+
+async def require_admin(user: AuthUser = Depends(require_session_user)) -> AuthUser:
     if not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user

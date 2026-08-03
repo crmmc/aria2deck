@@ -2,19 +2,16 @@ from __future__ import annotations
 
 import logging
 import secrets
-import string
-
+from app.core.security import credential_digest, credential_prefix
 from app.core.time_utils import ms_to_iso
-from app.domain.errors import NotFoundError
+from app.domain.errors import BadRequestError, NotFoundError
 from app.repositories import auth as auth_repo
 
 logger = logging.getLogger(__name__)
 
 
 def generate_api_token() -> str:
-    chars = string.ascii_letters + string.digits
-    random_part = "".join(secrets.choice(chars) for _ in range(24))
-    return f"aria2_{random_part}"
+    return "aria2_" + secrets.token_urlsafe(32)
 
 
 async def list_tokens(user_id: int) -> list[dict]:
@@ -24,7 +21,7 @@ async def list_tokens(user_id: int) -> list[dict]:
         {
             "id": row["id"],
             "name": row["name"],
-            "token": row["token"],
+            "prefix": row["token_prefix"],
             "created_at": ms_to_iso(row["created_at_ms"]),
             "last_used_at": ms_to_iso(row["last_used_at_ms"]),
         }
@@ -33,17 +30,32 @@ async def list_tokens(user_id: int) -> list[dict]:
 
 
 async def create_token(user_id: int, name: str | None) -> dict:
-    token = generate_api_token()
-    row = await auth_repo.create_api_token(user_id, token, name)
-    logger.info(
-        "创建API Token user_id=%s token_id=%s token_name=%s", user_id, row["id"], name
-    )
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "token": row["token"],
-        "created_at": ms_to_iso(row["created_at_ms"]),
-    }
+    for _ in range(20):
+        token = generate_api_token()
+        try:
+            row = await auth_repo.create_api_token(
+                user_id,
+                credential_digest("api-token", token),
+                credential_prefix(token),
+                name,
+            )
+        except auth_repo.DuplicateCredentialError:
+            continue
+        logger.info(
+            "创建API Token user_id=%s token_id=%s token_name=%s",
+            user_id,
+            row["id"],
+            name,
+        )
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "prefix": row["token_prefix"],
+            "token": token,
+            "created_at": ms_to_iso(row["created_at_ms"]),
+            "last_used_at": None,
+        }
+    raise BadRequestError("生成 API Token 失败，请稍后重试")
 
 
 async def delete_token(user_id: int, token_id: int) -> dict:

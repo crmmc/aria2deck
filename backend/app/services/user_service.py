@@ -4,11 +4,11 @@ import logging
 import secrets
 
 from app.auth import AuthUser
-from app.core.security import hash_password
+from app.core.security import credential_digest, credential_prefix, hash_password
 from app.core.time_utils import ms_to_iso, now_ms
 from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.repositories import auth as auth_repo
-from app.schemas import RpcAccessStatus, UserCreate, UserUpdate
+from app.schemas import RpcAccessIssued, RpcAccessStatus, UserCreate, UserUpdate
 from app.services.rate_limit_service import ensure_account_security_allowed
 from app.services.task_broadcast import remove_connections_for_user
 
@@ -41,6 +41,8 @@ async def create_user(
     has_users = await has_any_user()
 
     if not has_users:
+        if not payload.is_admin:
+            raise BadRequestError("首个用户必须是管理员")
         try:
             await ensure_account_security_allowed(
                 client_ip,
@@ -67,6 +69,7 @@ async def create_user(
             raise BadRequestError("用户名已存在")
 
     quota = payload.quota if payload.quota is not None else DEFAULT_QUOTA_BYTES
+    user: dict | None
     try:
         if has_users:
             user = await auth_repo.create_user(
@@ -80,7 +83,7 @@ async def create_user(
             user = await auth_repo.create_first_user_if_none(
                 username=payload.username,
                 password_hash=hash_password(payload.password),
-                is_admin=payload.is_admin,
+                is_admin=True,
                 is_initial_password=True,
                 quota_bytes=quota,
             )
@@ -124,17 +127,42 @@ async def list_users(admin_id: int | None) -> list[dict]:
 
 
 async def delete_user(*, actor: AuthUser, user_id: int, request_id: str) -> dict:
-    if user_id == actor.id:
+    if actor.id == user_id:
+        raise BadRequestError("不能删除自己")
+    target = await auth_repo.get_user_by_id_any(user_id)
+    if target is None:
+        raise NotFoundError("用户不存在")
+    if bool(target["pending_delete"]):
+        from app.services.deletion_cleanup import DeletionCleanupManager
+
+        DeletionCleanupManager.wake()
+        return {"ok": True, "state": "pending", "accepted": True}
+    if bool(target["is_admin"]):
+        users = await auth_repo.list_users()
+        if sum(bool(user["is_admin"]) for user in users) <= 1:
+            raise BadRequestError("不能删除最后一个管理员")
+
+    try:
+        deleted = await auth_repo.delete_user_as_admin(
+            actor_id=actor.id,
+            user_id=user_id,
+        )
+    except auth_repo.AdminActorInvalidError:
+        raise ForbiddenError("需要管理员权限") from None
+    except auth_repo.CannotMutateSelfError:
         logger.warning(
             "删除用户失败 actor_id=%s target_user_id=%s reason=self_delete request_id=%s",
             actor.id,
             user_id,
             request_id,
         )
-        raise BadRequestError("不能删除自己")
+        raise BadRequestError("不能删除自己") from None
+    except auth_repo.LastAdminError:
+        raise BadRequestError("不能删除最后一个管理员") from None
+    except auth_repo.AdminMutationConflictError:
+        raise BadRequestError("用户状态已变化，请重试") from None
 
-    user = await auth_repo.get_user_by_id(user_id)
-    if not user:
+    if deleted is None:
         logger.warning(
             "删除用户失败 actor_id=%s target_user_id=%s reason=not_found request_id=%s",
             actor.id,
@@ -143,12 +171,17 @@ async def delete_user(*, actor: AuthUser, user_id: int, request_id: str) -> dict
         )
         raise NotFoundError("用户不存在")
 
-    await auth_repo.delete_user_owned_rows(user_id)
     await remove_connections_for_user(user_id)
-    await auth_repo.delete_user(user_id)
+    from app.services.deletion_cleanup import DeletionCleanupManager
 
-    logger.info("删除用户成功 actor_id=%s target_user_id=%s request_id=%s", actor.id, user_id, request_id)
-    return {"ok": True}
+    DeletionCleanupManager.wake()
+    logger.info(
+        "删除用户已受理 actor_id=%s target_user_id=%s request_id=%s",
+        actor.id,
+        user_id,
+        request_id,
+    )
+    return {"ok": True, "state": "pending", "accepted": True}
 
 
 async def get_user(*, actor_id: int | None, user_id: int) -> dict:
@@ -176,6 +209,13 @@ async def update_user(
         )
         raise NotFoundError("用户不存在")
 
+    if (
+        payload.username is not None
+        and payload.username.lower() != str(user["username"]).lower()
+        and payload.password is None
+    ):
+        raise BadRequestError("修改用户名时必须同时提供按新用户名派生的密码")
+
     changes: dict = {}
     if payload.username is not None:
         existing = await auth_repo.get_user_by_username(payload.username)
@@ -196,17 +236,18 @@ async def update_user(
     if payload.is_admin is not None:
         if user_id == actor.id and not payload.is_admin:
             raise BadRequestError("不能取消自己的管理员权限")
-        if bool(user["is_admin"]) and not payload.is_admin:
-            admin_count = await auth_repo.count_admins()
-            if admin_count <= 1:
-                raise BadRequestError("不能降级最后一个管理员")
         changes["is_admin"] = payload.is_admin
 
     if payload.quota is not None:
         changes["quota_bytes"] = payload.quota
 
     try:
-        updated = await auth_repo.update_user(user_id, **changes)
+        updated = await auth_repo.update_user_as_admin(
+            actor_id=actor.id,
+            user_id=user_id,
+            expected_username=str(user["username"]),
+            **changes,
+        )
     except auth_repo.DuplicateUserError:
         logger.warning(
             "更新用户冲突 actor_id=%s target_user_id=%s request_id=%s",
@@ -215,12 +256,25 @@ async def update_user(
             request_id,
         )
         raise BadRequestError("用户名已被占用") from None
+    except auth_repo.AdminActorInvalidError:
+        raise ForbiddenError("需要管理员权限") from None
+    except auth_repo.CannotMutateSelfError:
+        raise BadRequestError("不能取消自己的管理员权限") from None
+    except auth_repo.LastAdminError:
+        raise BadRequestError("不能降级最后一个管理员") from None
+    except auth_repo.UsernamePasswordRequiredError:
+        raise BadRequestError(
+            "修改用户名时必须同时提供按新用户名派生的密码"
+        ) from None
+    except auth_repo.QuotaBelowUsageError:
+        raise BadRequestError("用户配额不能低于当前已用空间与冻结空间之和") from None
+    except auth_repo.AdminMutationConflictError:
+        raise BadRequestError("用户状态已变化，请重试") from None
 
     if updated is None:
         raise NotFoundError("用户不存在")
 
     if payload.password is not None:
-        await auth_repo.delete_user_sessions(user_id)
         await remove_connections_for_user(user_id)
 
     logger.info(
@@ -236,23 +290,48 @@ async def update_user(
     return user_out(updated)
 
 
-async def generate_unique_rpc_secret(max_attempts: int = 20) -> str:
-    for _ in range(max_attempts):
-        return "aria2_" + secrets.token_urlsafe(32)
-    raise BadRequestError("生成 RPC 密钥失败，请稍后重试")
-
-
 async def get_rpc_access(user_id: int) -> RpcAccessStatus:
     db_user = await auth_repo.get_user_by_id(user_id)
     if not db_user:
         raise NotFoundError("用户不存在")
-
-    logger.debug("查询RPC访问状态 user_id=%s enabled=%s", user_id, db_user["rpc_secret"] is not None)
+    enabled = db_user["rpc_secret_digest"] is not None
+    logger.debug("查询RPC访问状态 user_id=%s enabled=%s", user_id, enabled)
     return RpcAccessStatus(
-        enabled=db_user["rpc_secret"] is not None,
-        secret=db_user["rpc_secret"],
+        enabled=enabled,
+        secret_prefix=db_user["rpc_secret_prefix"] if enabled else None,
         created_at=ms_to_iso(db_user["rpc_secret_created_at_ms"]),
     )
+
+
+async def _issue_rpc_secret(
+    *, user_id: int, request_id: str, require_enabled: bool
+) -> RpcAccessIssued:
+    for _ in range(20):
+        secret = "aria2_" + secrets.token_urlsafe(32)
+        created_at_ms = now_ms()
+        try:
+            updated = await auth_repo.set_rpc_secret(
+                user_id,
+                credential_digest("rpc-secret", secret),
+                credential_prefix(secret),
+                created_at_ms,
+                require_enabled=require_enabled,
+            )
+        except auth_repo.DuplicateCredentialError:
+            continue
+        if not updated:
+            db_user = await auth_repo.get_user_by_id(user_id)
+            if db_user is None:
+                raise NotFoundError("用户不存在")
+            raise BadRequestError("RPC 访问未开启，请先开启后再刷新")
+        logger.info("签发RPC密钥 user_id=%s request_id=%s", user_id, request_id)
+        return RpcAccessIssued(
+            enabled=True,
+            secret_prefix=secret[:16],
+            secret=secret,
+            created_at=ms_to_iso(created_at_ms),
+        )
+    raise BadRequestError("生成 RPC 密钥失败，请稍后重试")
 
 
 async def set_rpc_access(
@@ -260,36 +339,24 @@ async def set_rpc_access(
     user_id: int,
     enabled: bool,
     request_id: str,
-) -> RpcAccessStatus:
-    db_user = await auth_repo.get_user_by_id(user_id)
-    if not db_user:
-        raise NotFoundError("用户不存在")
-
+) -> RpcAccessStatus | RpcAccessIssued:
     if enabled:
-        new_secret = await generate_unique_rpc_secret()
-        created_at_ms = now_ms()
-        await auth_repo.update_user(
-            user_id, rpc_secret=new_secret, rpc_secret_created_at_ms=created_at_ms
+        return await _issue_rpc_secret(
+            user_id=user_id, request_id=request_id, require_enabled=False
         )
-        logger.info("开启RPC访问 user_id=%s request_id=%s", user_id, request_id)
-        return RpcAccessStatus(enabled=True, secret=new_secret, created_at=ms_to_iso(created_at_ms))
-
-    await auth_repo.update_user(user_id, rpc_secret=None, rpc_secret_created_at_ms=None)
+    updated = await auth_repo.set_rpc_secret(user_id, None, None, None)
+    if not updated:
+        raise NotFoundError("用户不存在")
     logger.info("关闭RPC访问 user_id=%s request_id=%s", user_id, request_id)
-    return RpcAccessStatus(enabled=False, secret=None, created_at=None)
+    return RpcAccessStatus(enabled=False)
 
 
-async def refresh_rpc_secret(*, user_id: int, request_id: str) -> RpcAccessStatus:
+async def refresh_rpc_secret(*, user_id: int, request_id: str) -> RpcAccessIssued:
     db_user = await auth_repo.get_user_by_id(user_id)
     if not db_user:
         raise NotFoundError("用户不存在")
-    if db_user["rpc_secret"] is None:
+    if db_user["rpc_secret_digest"] is None:
         raise BadRequestError("RPC 访问未开启，请先开启后再刷新")
-
-    new_secret = await generate_unique_rpc_secret()
-    created_at_ms = now_ms()
-    await auth_repo.update_user(
-        user_id, rpc_secret=new_secret, rpc_secret_created_at_ms=created_at_ms
+    return await _issue_rpc_secret(
+        user_id=user_id, request_id=request_id, require_enabled=True
     )
-    logger.info("刷新RPC密钥 user_id=%s request_id=%s", user_id, request_id)
-    return RpcAccessStatus(enabled=True, secret=new_secret, created_at=ms_to_iso(created_at_ms))

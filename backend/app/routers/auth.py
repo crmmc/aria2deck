@@ -2,7 +2,12 @@ import logging
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from app.auth import AuthUser, require_user, set_session_cookie
+from app.auth import (
+    AuthUser,
+    require_limited_api_user,
+    require_limited_session_user,
+    set_session_cookie,
+)
 from app.core.config import settings
 from app.core.request_rate_guard import client_ip_from_request
 from app.domain.errors import DomainError
@@ -33,7 +38,7 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
 
 @router.post("/logout")
 async def logout(
-    request: Request, response: Response, user: AuthUser = Depends(require_user)
+    request: Request, response: Response, user: AuthUser = Depends(require_limited_session_user)
 ) -> dict:
     result = await auth_service.logout(
         session_id=request.cookies.get(settings.session_cookie_name),
@@ -45,7 +50,7 @@ async def logout(
 
 
 @router.get("/me", response_model=UserOut)
-async def me(user: AuthUser = Depends(require_user)) -> dict:
+async def me(user: AuthUser = Depends(require_limited_api_user)) -> dict:
     logger.debug("获取当前用户信息 user_id=%s", user.id)
     return auth_service.user_response(user)
 
@@ -55,7 +60,7 @@ async def change_password(
     payload: ChangePasswordRequest,
     request: Request,
     response: Response,
-    user: AuthUser = Depends(require_user),
+    user: AuthUser = Depends(require_limited_session_user),
 ) -> dict:
     try:
         result, session_id = await auth_service.change_password(

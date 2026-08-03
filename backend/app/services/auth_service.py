@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 import logging
+from uuid import uuid4
 
 from app.auth import (
     AuthUser,
     clear_session,
-    clear_user_sessions,
     create_session,
+    now_ms,
     user_from_row,
 )
 from app.core.config import settings
 from app.services.rate_limit_service import (
     ACCOUNT_SECURITY_SCOPE,
-    clear_account_security_failures,
-    ensure_account_security_allowed,
+    clear_login_failures,
     ensure_authenticated_allowed,
-    record_account_security_failure,
+    ensure_login_allowed,
+    record_login_failure,
 )
 from app.services.task_broadcast import (
     remove_connections_for_session,
@@ -47,7 +48,8 @@ async def login(
     request_id: str,
 ) -> tuple[dict, str, int]:
     try:
-        await ensure_account_security_allowed(
+        await ensure_login_allowed(
+            username,
             client_ip,
             detail="登录尝试次数过多，请稍后再试",
         )
@@ -64,7 +66,7 @@ async def login(
     password_hash = user_row["password_hash"] if user_row else None
 
     if not verify_password_constant_time(password, password_hash):
-        await record_account_security_failure(client_ip)
+        await record_login_failure(username, client_ip)
         logger.warning(
             "登录失败 username=%s ip=%s request_id=%s",
             username,
@@ -76,7 +78,7 @@ async def login(
     assert user_row is not None
     user = user_from_row(user_row)
 
-    await clear_account_security_failures(client_ip)
+    await clear_login_failures(username)
     if old_session_id:
         await clear_session(old_session_id)
         await remove_connections_for_session(old_session_id)
@@ -135,16 +137,19 @@ async def change_password(
         if old_password == new_password:
             raise BadRequestError("新密码不能与旧密码相同")
 
-    db_user = await auth_repo.update_user(
-        user.id,
-        password_hash=hash_password(new_password),
-        is_initial_password=False,
+    session_id = uuid4().hex
+    changed = await auth_repo.change_password_and_replace_session(
+        user_id=user.id,
+        expected_password_hash=user.password_hash,
+        new_password_hash=hash_password(new_password),
+        session_id=session_id,
+        expires_at_ms=now_ms() + settings.session_ttl_seconds * 1000,
     )
-    if not db_user:
-        raise NotFoundError("用户不存在")
+    if not changed:
+        if await auth_repo.get_user_by_id(user.id) is None:
+            raise NotFoundError("用户不存在")
+        raise BadRequestError("密码已发生变化，请重新登录后再试")
 
-    await clear_user_sessions(user.id)
     await remove_connections_for_user(user.id)
-    session_id = await create_session(user.id)
     logger.info("修改密码成功 user_id=%s request_id=%s", user.id, request_id)
     return {"ok": True, "message": "密码修改成功"}, session_id

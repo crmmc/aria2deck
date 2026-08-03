@@ -3,6 +3,7 @@ import asyncio
 import pytest
 from unittest.mock import MagicMock
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.auth import (
     create_session,
@@ -12,9 +13,10 @@ from app.auth import (
     set_session_cookie,
 )
 from app.core.config import settings
-from app.core.security import hash_password
+from app.core.security import hash_password, verify_password
 from app.db.engine import transaction
 from app.db.schema import sessions, users
+from app.repositories import auth as auth_repo
 from tests.helpers_v0 import create_session_v0, now_ms
 
 
@@ -141,6 +143,61 @@ class TestSetSessionCookie:
         )
 
 
+class TestAtomicPasswordChange:
+    @pytest.mark.asyncio
+    async def test_password_hash_cas_allows_one_concurrent_change(
+        self, test_user: dict, user_session: str
+    ):
+        expected_hash = str(test_user["password_hash"])
+
+        async def change(new_password: str, session_id: str) -> bool:
+            return await auth_repo.change_password_and_replace_session(
+                user_id=test_user["id"],
+                expected_password_hash=expected_hash,
+                new_password_hash=hash_password(new_password),
+                session_id=session_id,
+                expires_at_ms=now_ms() + 60_000,
+            )
+
+        results = await asyncio.gather(
+            change("new-password-a", "replacement-a"),
+            change("new-password-b", "replacement-b"),
+        )
+
+        assert sorted(results) == [False, True]
+        user = await auth_repo.get_user_by_id(test_user["id"])
+        assert user is not None
+        assert verify_password("new-password-a", user["password_hash"]) != verify_password(
+            "new-password-b", user["password_hash"]
+        )
+        current_sessions = await list_user_sessions(test_user["id"])
+        assert len(current_sessions) == 1
+        assert current_sessions[0]["id"] in {"replacement-a", "replacement-b"}
+
+    @pytest.mark.asyncio
+    async def test_session_insert_failure_rolls_back_password_and_revocation(
+        self,
+        test_user: dict,
+        user_session: str,
+        test_admin: dict,
+    ):
+        await create_session_v0(test_admin["id"], "conflicting-session")
+
+        with pytest.raises(IntegrityError):
+            await auth_repo.change_password_and_replace_session(
+                user_id=test_user["id"],
+                expected_password_hash=test_user["password_hash"],
+                new_password_hash=hash_password("new-password"),
+                session_id="conflicting-session",
+                expires_at_ms=now_ms() + 60_000,
+            )
+
+        user = await auth_repo.get_user_by_id(test_user["id"])
+        assert user is not None
+        assert user["password_hash"] == test_user["password_hash"]
+        assert await fetch_session(user_session) is not None
+
+
 class TestAuthRouterEndpoints:
 
     def test_login_success(self, client, test_user: dict):
@@ -263,9 +320,12 @@ class TestLoginRateLimit:
     async def test_login_blocked_after_many_failures(self, client, temp_db: str, test_user: dict):
         from app.core.rate_limit import login_limiter
         from app.core.rate_limit_config import rate_limit_config
+        from app.services.rate_limit_service import login_account_key
 
+        key = login_account_key("testuser")
+        assert key == "login:account:testuser"
         for _ in range(rate_limit_config.account_security):
-            await login_limiter.record_failure("testclient")
+            await login_limiter.record_failure(key)
 
         response = client.post(
             "/api/auth/login",
@@ -273,6 +333,91 @@ class TestLoginRateLimit:
         )
         assert response.status_code == 429
         assert response.json()["detail"] == "登录尝试次数过多，请稍后再试"
+
+    def test_login_bucket_normalizes_username(
+        self, client, temp_db: str, test_user: dict
+    ):
+        from app.core.rate_limit_config import rate_limit_config
+
+        for _ in range(rate_limit_config.account_security):
+            response = client.post(
+                "/api/auth/login",
+                json={"username": "TESTUSER", "password": "wrong"},
+            )
+            assert response.status_code == 401
+
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "testuser", "password": "testpass"},
+        )
+        assert response.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_account_bucket_blocks_rotating_ips(self, temp_db: str):
+        from app.core.rate_limit_config import rate_limit_config
+        from app.domain.errors import TooManyRequestsError
+        from app.services.rate_limit_service import (
+            ensure_login_allowed,
+            record_login_failure,
+        )
+
+        for index in range(rate_limit_config.account_security):
+            await record_login_failure("TestUser", f"192.0.2.{index}")
+
+        with pytest.raises(TooManyRequestsError):
+            await ensure_login_allowed("testuser", "198.51.100.1")
+
+    @pytest.mark.asyncio
+    async def test_disabled_login_limit_leaves_no_keys(self, temp_db: str):
+        from app.core.rate_limit import login_limiter
+        from app.core.rate_limit_config import rate_limit_config
+        from app.services.rate_limit_service import (
+            clear_login_failures,
+            ensure_account_security_allowed,
+            ensure_login_allowed,
+            record_login_failure,
+        )
+
+        original_limit = rate_limit_config.account_security
+        rate_limit_config.account_security = 0
+        try:
+            await ensure_login_allowed("testuser", "192.0.2.1")
+            await record_login_failure("testuser", "192.0.2.1")
+            await clear_login_failures("testuser")
+            await ensure_account_security_allowed("192.0.2.1")
+            assert not login_limiter._requests
+        finally:
+            rate_limit_config.account_security = original_limit
+
+    def test_success_only_clears_current_account_bucket(
+        self, client, test_user: dict, test_admin: dict
+    ):
+        from app.core.rate_limit_config import rate_limit_config
+
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "wrong"},
+        )
+        assert response.status_code == 401
+
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "testuser", "password": "testpass"},
+        )
+        assert response.status_code == 200
+
+        for index in range(rate_limit_config.account_security - 1):
+            response = client.post(
+                "/api/auth/login",
+                json={"username": f"missing_{index}", "password": "wrong"},
+            )
+            assert response.status_code == 401
+
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "adminpass"},
+        )
+        assert response.status_code == 429
 
 
 class TestChangePasswordRateLimit:

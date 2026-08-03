@@ -13,6 +13,20 @@ class TestFirstUserFlow:
         assert response.json()["username"] == "firstuser"
         assert response.json()["is_admin"] is True
 
+    def test_create_first_user_rejects_non_admin(
+        self, client: TestClient, temp_db: str
+    ):
+        response = client.post(
+            "/api/users",
+            json={
+                "username": "firstuser",
+                "password": "password123",
+                "is_admin": False,
+            },
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == "首个用户必须是管理员"
+
     @pytest.mark.parametrize(
         ("payload", "expected_quota"),
         [
@@ -62,8 +76,12 @@ class TestFirstUserFlow:
         from app.core.rate_limit import login_limiter
         from app.core.rate_limit_config import rate_limit_config
 
+        from app.services.rate_limit_service import login_ip_key
+
+        key = login_ip_key("testclient")
+        assert key == "login:ip:testclient"
         for _ in range(rate_limit_config.account_security):
-            await login_limiter.record_failure("testclient")
+            await login_limiter.record_failure(key)
 
         response = client.post("/api/users", json={
             "username": "firstuser",
@@ -89,6 +107,22 @@ class TestFirstUserFlow:
             "is_admin": False,
         })
         assert response2.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_first_user_repository_forces_admin(self, temp_db: str):
+        from app.core.security import hash_password
+        from app.repositories import auth as auth_repo
+
+        created = await auth_repo.create_first_user_if_none(
+            username="firstuser",
+            password_hash=hash_password("password123"),
+            is_admin=False,
+            quota_bytes=107374182400,
+            is_initial_password=True,
+        )
+
+        assert created is not None
+        assert created["is_admin"] == 1
 
     @pytest.mark.asyncio
     async def test_first_user_repository_insert_is_atomic(self, temp_db: str):

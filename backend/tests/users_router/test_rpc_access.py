@@ -6,7 +6,7 @@ class TestRpcAccess:
         response = authenticated_client.get("/api/users/me/rpc-access")
         assert response.status_code == 200
         assert response.json()["enabled"] is False
-        assert response.json()["secret"] is None
+        assert "secret" not in response.json()
 
     def test_enable_rpc_access(self, authenticated_client: TestClient):
         response = authenticated_client.put("/api/users/me/rpc-access", json={"enabled": True})
@@ -19,7 +19,7 @@ class TestRpcAccess:
         response = authenticated_client.put("/api/users/me/rpc-access", json={"enabled": False})
         assert response.status_code == 200
         assert response.json()["enabled"] is False
-        assert response.json()["secret"] is None
+        assert "secret" not in response.json()
 
     def test_refresh_rpc_secret(self, authenticated_client: TestClient):
         enable_response = authenticated_client.put("/api/users/me/rpc-access", json={"enabled": True})
