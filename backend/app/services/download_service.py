@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from app.aria2.protocol import Aria2Gateway
-from app.core.config import settings
-from app.core.security import check_bt_tracker_option
+from app.core.config import get_internal_base_url, settings
+from app.http.safe_client import UnsafeTargetError, normalize_public_http_url
 from app.domain.task_policy import (
     CANCELABLE_TASK_STATUSES,
     RETRYABLE_DOWNLOAD_STATUSES,
@@ -48,6 +48,12 @@ from app.services.failed_task_cleanup import (
     cleanup_failed_task_artifacts,
     cleanup_terminal_download_generation,
 )
+from app.services.hash import extract_info_hash_from_magnet
+from app.services.internal_fetch import (
+    build_gateway_submission,
+    http_resource_identity,
+    source_request_options,
+)
 from app.services.storage import (
     get_downloading_dir,
     get_store_path_for_hash,
@@ -70,6 +76,7 @@ from app.services.storage_index import (
 
 logger = logging.getLogger(__name__)
 DUPLICATE_TASK_MESSAGE = "任务已存在"
+DOWNLOAD_SUBMISSION_FAILED_MESSAGE = "内部下载任务提交失败"
 _ALLOWED_USER_OPTIONS = frozenset(
     (
         "out",
@@ -77,7 +84,6 @@ _ALLOWED_USER_OPTIONS = frozenset(
         "max-connection-per-server",
         "http-user",
         "http-passwd",
-        "bt-tracker",
     )
 )
 
@@ -321,11 +327,10 @@ def _normalize_out_option(value: Any) -> str:
 async def _validate_submit_options(options: Mapping[str, Any] | None) -> None:
     if not options:
         return
+    if "bt-tracker" in options:
+        raise ValueError("bt-tracker option is not allowed")
     if "out" in options:
         _normalize_out_option(options["out"])
-    tracker_error = await check_bt_tracker_option(options)
-    if tracker_error:
-        raise ValueError(f"不安全的 bt-tracker 参数: {tracker_error}")
 
 
 async def complete_global_download(
@@ -539,8 +544,37 @@ async def create_user_download(
     options: Mapping[str, Any] | None = None,
     submit_uris: list[str] | None = None,
 ) -> dict[str, Any]:
-    async def submit_download(submit_options: Mapping[str, Any] | None) -> str:
-        return await aria2_client.add_uri(submit_uris or [uri], submit_options or {})
+    if resource_kind not in {"http", "magnet"}:
+        raise ValueError("unsupported download resource kind")
+    if resource_kind == "http":
+        get_internal_base_url()
+        try:
+            uri = normalize_public_http_url(uri)
+        except UnsafeTargetError as exc:
+            raise ValueError(str(exc)) from exc
+        source_options = source_request_options(
+            options, mirrors=(submit_uris or [])[1:]
+        )
+        resource_key = http_resource_identity(resource_key, source_options)
+    else:
+        info_hash = extract_info_hash_from_magnet(uri)
+        if not info_hash:
+            raise ValueError("invalid magnet URI")
+        uri = f"magnet:?xt=urn:btih:{info_hash}"
+        resource_key = info_hash
+        submit_uris = None
+
+    async def submit_download(
+        override_uris: list[str] | None,
+        submit_options: Mapping[str, Any] | None,
+    ) -> str:
+        if resource_kind == "http":
+            if not override_uris:
+                raise RuntimeError("内部下载网关地址不可用")
+            submission_uris = override_uris
+        else:
+            submission_uris = [uri]
+        return await aria2_client.add_uri(submission_uris, submit_options or {})
 
     return await _create_user_download_with_submit(
         user_id=user_id,
@@ -556,6 +590,7 @@ async def create_user_download(
         aria2_client=aria2_client,
         options=options,
         server_options=None,
+        gateway_source_uris=submit_uris if resource_kind == "http" else None,
         submit_download=submit_download,
     )
 
@@ -577,7 +612,13 @@ async def create_user_torrent_download(
     server_options: Mapping[str, Any] | None = None,
     uris: list[str] | None = None,
 ) -> dict[str, Any]:
-    async def submit_download(submit_options: Mapping[str, Any] | None) -> str:
+    if uris:
+        raise ValueError("torrent webseed URIs are not allowed")
+
+    async def submit_download(
+        _override_uris: list[str] | None,
+        submit_options: Mapping[str, Any] | None,
+    ) -> str:
         return await aria2_client.add_torrent(
             torrent_data,
             uris or [],
@@ -598,6 +639,7 @@ async def create_user_torrent_download(
         aria2_client=aria2_client,
         options=options,
         server_options=server_options,
+        gateway_source_uris=None,
         submit_download=submit_download,
     )
 
@@ -616,8 +658,11 @@ async def _create_user_download_with_submit(
     disk_available_bytes: int | None,
     aria2_client: Aria2Gateway,
     options: Mapping[str, Any] | None,
+    submit_download: Callable[
+        [list[str] | None, Mapping[str, Any] | None], Awaitable[str]
+    ],
     server_options: Mapping[str, Any] | None = None,
-    submit_download: Callable[[Mapping[str, Any] | None], Awaitable[str]],
+    gateway_source_uris: list[str] | None = None,
 ) -> dict[str, Any]:
     await _validate_submit_options(options)
     requested_total_bytes = max(0, int(total_bytes))
@@ -716,6 +761,7 @@ async def _create_user_download_with_submit(
             options=options,
             server_options=server_options,
             aria2_client=aria2_client,
+            gateway_source_uris=gateway_source_uris,
             submit_download=submit_download,
         )
 
@@ -776,7 +822,10 @@ async def _ensure_download_submitted(
     options: Mapping[str, Any] | None,
     server_options: Mapping[str, Any] | None,
     aria2_client: Aria2Gateway,
-    submit_download: Callable[[Mapping[str, Any] | None], Awaitable[str]],
+    gateway_source_uris: list[str] | None,
+    submit_download: Callable[
+        [list[str] | None, Mapping[str, Any] | None], Awaitable[str]
+    ],
 ) -> dict[str, Any]:
     if global_download.get("aria2_gid") or global_download["status"] != "queued":
         return global_download
@@ -802,18 +851,28 @@ async def _ensure_download_submitted(
             "seed-time": "0",
             "bt-stop-timeout": str(get_aria2_bt_stop_timeout_seconds()),
         }
-        if options:
-            for key in _ALLOWED_USER_OPTIONS:
-                if key in options:
-                    if key == "out":
-                        submit_options[key] = _normalize_out_option(options[key])
-                    else:
-                        submit_options[key] = str(options[key])
-        if server_options:
-            for key, value in server_options.items():
-                submit_options[str(key)] = str(value)
-
+        submission_uris: list[str] | None = None
         resource_kind = str(current.get("resource_kind") or "")
+        if resource_kind == "http":
+            gateway_uris, gateway_options = build_gateway_submission(
+                download_id=int(current["id"]),
+                source_uri=str(current["source_uri"]),
+                options=options,
+                source_uris=gateway_source_uris,
+            )
+            submission_uris = gateway_uris
+            submit_options.update(gateway_options)
+        else:
+            if options:
+                for key in _ALLOWED_USER_OPTIONS:
+                    if key in options:
+                        if key == "out":
+                            submit_options[key] = _normalize_out_option(options[key])
+                        else:
+                            submit_options[key] = str(options[key])
+            if server_options:
+                for key, value in server_options.items():
+                    submit_options[str(key)] = str(value)
         unknown_size = not bool(current.get("size_known"))
         if unknown_size and resource_kind == "magnet":
             submit_options["pause-metadata"] = "true"
@@ -821,14 +880,14 @@ async def _ensure_download_submitted(
             submit_options["pause"] = "true"
 
         try:
-            gid = await submit_download(submit_options)
+            gid = await submit_download(submission_uris, submit_options)
         except Exception as exc:
             await fail_user_task_submission(
                 task_id=task_id,
                 global_download_id=int(current["id"]),
-                message=str(exc),
+                message=DOWNLOAD_SUBMISSION_FAILED_MESSAGE,
             )
-            raise
+            raise RuntimeError(DOWNLOAD_SUBMISSION_FAILED_MESSAGE) from exc
 
         submitted_status = (
             "waiting" if unknown_size and resource_kind != "magnet" else "active"

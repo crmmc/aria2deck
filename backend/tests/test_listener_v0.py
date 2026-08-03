@@ -868,6 +868,140 @@ async def test_completed_download_with_short_file_fails_size_validation(
 
 
 @pytest.mark.asyncio
+async def test_completed_download_over_actual_size_limit_fails_and_cleans_up(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="listener_actual_size", quota_bytes=100)
+    await reserve_bytes(user["id"], 4, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="listener:actual-size",
+        resource_kind="http",
+        source_uri="https://example.com/payload.bin",
+        status="active",
+        aria2_gid="gid-actual-size",
+        display_name="payload.bin",
+        total_bytes=4,
+        completed_bytes=4,
+        size_limit_bytes=4,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=4,
+        display_name="payload.bin",
+    )
+    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
+    task_dir.mkdir(parents=True)
+    source_file = task_dir / "payload.bin"
+    source_file.write_bytes(b"12345")
+
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-actual-size",
+        "status": "complete",
+        "totalLength": "4",
+        "completedLength": "4",
+        "files": [{"path": str(source_file), "length": "4"}],
+    }
+    client.force_remove.return_value = "OK"
+    client.remove_download_result.return_value = "OK"
+    _patch_aria2_client(monkeypatch, client)
+
+    await handle_aria2_event("gid-actual-size", "complete")
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+    async with transaction() as conn:
+        stored_count = (
+            await conn.execute(select(func.count()).select_from(stored_files))
+        ).scalar_one()
+        user_file_count = (
+            await conn.execute(select(func.count()).select_from(user_files))
+        ).scalar_one()
+
+    assert updated["status"] == "failed"
+    assert updated["error_code"] == "max_task_size_exceeded"
+    assert updated["error_message"] == "任务大小超过系统限制"
+    assert updated_task["status"] == "failed"
+    assert updated_task["reserved_bytes"] == 0
+    assert usage["used_bytes"] == 0
+    assert usage["reserved_bytes"] == 0
+    assert stored_count == 0
+    assert user_file_count == 0
+    assert not task_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_completed_download_over_only_user_quota_leaves_no_stored_payload(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="listener_actual_quota", quota_bytes=5)
+    await reserve_bytes(user["id"], 4, quota_bytes=user["quota_bytes"])
+    download = await create_global_download_v0(
+        resource_key="listener:actual-quota",
+        resource_kind="http",
+        source_uri="https://example.com/quota.bin",
+        status="active",
+        aria2_gid="gid-actual-quota",
+        display_name="quota.bin",
+        total_bytes=4,
+        completed_bytes=4,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=4,
+        display_name="quota.bin",
+    )
+    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
+    task_dir.mkdir(parents=True)
+    source_file = task_dir / "quota.bin"
+    source_file.write_bytes(b"123456")
+
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "gid": "gid-actual-quota",
+        "status": "complete",
+        "totalLength": "4",
+        "completedLength": "4",
+        "files": [{"path": str(source_file), "length": "4"}],
+    }
+    client.force_remove.return_value = "OK"
+    client.remove_download_result.return_value = "OK"
+    _patch_aria2_client(monkeypatch, client)
+
+    await handle_aria2_event("gid-actual-quota", "complete")
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+    async with transaction() as conn:
+        stored_count = (
+            await conn.execute(select(func.count()).select_from(stored_files))
+        ).scalar_one()
+        user_file_count = (
+            await conn.execute(select(func.count()).select_from(user_files))
+        ).scalar_one()
+
+    assert updated["status"] == "cancelled"
+    assert updated["completed_file_id"] is None
+    assert updated["error_code"] == "no_eligible_subscribers"
+    assert updated["error_message"] == "没有满足配额要求的订阅用户"
+    assert updated_task["status"] == "failed"
+    assert updated_task["reserved_bytes"] == 0
+    assert usage["used_bytes"] == 0
+    assert usage["reserved_bytes"] == 0
+    assert stored_count == 0
+    assert user_file_count == 0
+    assert not task_dir.exists()
+
+
+@pytest.mark.asyncio
 async def test_complete_source_resolution_probes_four_times_every_half_second(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -12,6 +12,7 @@ from typing import Any
 import aiohttp
 
 from app.aria2.protocol import Aria2Gateway
+from app.core.config import get_internal_base_url
 from app.core.security import sanitize_string
 from app.domain.status import ACTIVE_USER_TASK_STATUSES
 from app.repositories.downloads import (
@@ -22,6 +23,7 @@ from app.repositories.downloads import (
     get_representative_active_owner_id,
     guarded_update_download_and_active_user_tasks,
     guarded_update_global_download,
+    list_active_like_http_downloads,
     list_inconsistent_completed_download_ids,
     list_stale_queued_download_ids,
     list_tracked_global_downloads,
@@ -76,6 +78,7 @@ COMPLETE_SOURCE_RETRY_COUNT = 4
 COMPLETE_SOURCE_RETRY_INTERVAL = 0.5
 COMPLETE_REPAIR_GRACE_SECONDS = 30.0
 STALE_QUEUED_GRACE_SECONDS = 300.0
+LEGACY_HTTP_STOP_ERROR = "无法安全停止遗留 HTTP 下载任务"
 DOWNLOAD_DIR_NOT_FOUND_MESSAGE = "下载完成但下载目录不存在"
 DOWNLOAD_FILE_NOT_FOUND_MESSAGE = "下载完成但下载文件未找到"
 COMPLETED_SIZE_MISMATCH_MESSAGE = "下载完成但文件大小不匹配"
@@ -368,6 +371,108 @@ async def fail_v0_download_and_cleanup(
             error_code=error_code,
             log_prefix=log_prefix,
         )
+
+
+def _has_only_internal_gateway_uris(
+    uris: object,
+    *,
+    internal_base: str,
+    download_id: int,
+) -> bool:
+    if not isinstance(uris, list) or not uris:
+        return False
+    prefix = f"{internal_base}/_internal/fetch/{download_id}/"
+    for item in uris:
+        uri = item.get("uri") if isinstance(item, dict) else None
+        index = (
+            uri[len(prefix) :]
+            if isinstance(uri, str) and uri.startswith(prefix)
+            else ""
+        )
+        if not index or not index.isascii() or not index.isdigit():
+            return False
+    return True
+
+
+async def _stop_legacy_http_job(
+    client: Aria2Gateway,
+    *,
+    download_id: int,
+    gid: str,
+) -> None:
+    try:
+        await client.force_remove(gid)
+    except Exception as exc:
+        if not is_missing_gid_error(exc):
+            logger.error(
+                "[Startup] Failed to stop legacy HTTP job download_id=%s "
+                "error_type=%s",
+                download_id,
+                type(exc).__name__,
+            )
+            raise RuntimeError(LEGACY_HTTP_STOP_ERROR) from None
+
+    try:
+        await client.remove_download_result(gid)
+    except Exception as exc:
+        logger.warning(
+            "[Startup] Failed to remove legacy HTTP result download_id=%s "
+            "error_type=%s",
+            download_id,
+            type(exc).__name__,
+        )
+
+
+async def reconcile_legacy_http_downloads_v0(client: Aria2Gateway) -> int:
+    internal_base = get_internal_base_url()
+    failed_count = 0
+    for download in await list_active_like_http_downloads():
+        download_id = int(download["id"])
+        gid = str(download.get("aria2_gid") or "")
+        uris: object = None
+        if gid:
+            try:
+                uris = await client.get_uris(gid)
+            except Exception as exc:
+                logger.warning(
+                    "[Startup] HTTP URI verification failed download_id=%s error_type=%s",
+                    download_id,
+                    type(exc).__name__,
+                )
+
+        valid = _has_only_internal_gateway_uris(
+            uris,
+            internal_base=internal_base,
+            download_id=download_id,
+        )
+        if valid:
+            continue
+
+        if gid:
+            await _stop_legacy_http_job(
+                client,
+                download_id=download_id,
+                gid=gid,
+            )
+        failed_download = await mark_global_download_failed(
+            download_id,
+            expected_gid=gid or None,
+            message="HTTP 下载未通过内部网关校验，已停止",
+            error_code="unsafe_http_download_uri",
+            clear_gid=bool(gid),
+        )
+        if failed_download is None:
+            continue
+        await cleanup_failed_download_artifacts(
+            client=client,
+            task_id=download_id,
+            gid=None,
+            owner_id=None,
+            log_prefix="[Startup]",
+            validate_status=False,
+        )
+        failed_count += 1
+    return failed_count
 
 
 def _list_task_dir_entries(task_dir: Path) -> list[Path]:
@@ -925,9 +1030,11 @@ async def resolve_download_for_gid(
 
 
 def _followed_gid_from_rows(
-    rows: list[dict[str, Any]],
+    rows: object,
     metadata_gid: str,
 ) -> str | None:
+    if not isinstance(rows, list):
+        return None
     for row in rows:
         if download_ops.following_gid(row) != metadata_gid:
             continue
@@ -1153,7 +1260,11 @@ async def handle_v0_download_complete(
             )
 
         original_name = task_name or source_path.name
-        if original_name.startswith(METADATA_NAME_PREFIX):
+        if str(current.get("resource_kind") or "") == "http" and current.get(
+            "display_name"
+        ):
+            original_name = str(current["display_name"])
+        elif original_name.startswith(METADATA_NAME_PREFIX):
             original_name = source_path.name
         expected_size = expected_completed_size(aria2_status, source_path)
         result = await complete_global_download(

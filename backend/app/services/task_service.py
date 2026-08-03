@@ -23,6 +23,7 @@ from app.domain.errors import (
 from app.repositories.downloads import (
     clear_terminal_user_tasks,
     get_global_by_resource_key,
+    get_global_download_by_id,
     list_user_tasks,
     list_user_tasks_page,
 )
@@ -174,6 +175,13 @@ async def create_task(
     uri: str,
     options: dict | None,
 ) -> dict:
+    if not (is_magnet_link(uri) or is_http_url(uri)):
+        raise BadRequestError("仅支持磁力链接和 HTTP(S) 下载链接")
+    if is_magnet_link(uri):
+        info_hash = extract_info_hash_from_magnet(uri)
+        if not info_hash:
+            raise BadRequestError("无效的磁力链接")
+        uri = f"magnet:?xt=urn:btih:{info_hash}"
     await check_url_safety(uri)
 
     disk_ok, disk_free = check_disk_space()
@@ -196,6 +204,7 @@ async def create_task(
         if not uri_hash:
             logger.warning("创建任务失败 user_id=%s reason=invalid_magnet", user_id)
             raise BadRequestError("无效的磁力链接")
+        submission_uri = f"magnet:?xt=urn:btih:{uri_hash}"
         if available_space < MAGNET_MIN_SPACE:
             logger.warning(
                 "创建任务失败 user_id=%s reason=space_low_for_magnet available=%s",
@@ -285,10 +294,16 @@ async def create_task(
     except LookupError as exc:
         raise ConflictError("任务状态已变化，请重试") from exc
     except Exception as exc:
-        logger.warning("添加下载任务失败 user_id=%s error=%s", user_id, exc)
+        logger.warning(
+            "添加下载任务失败 user_id=%s error_type=%s",
+            user_id,
+            type(exc).__name__,
+        )
         raise BadGatewayError("添加下载任务失败") from exc
 
-    global_download = await get_global_by_resource_key(uri_hash)
+    global_download = await get_global_download_by_id(
+        int(task_row["global_download_id"])
+    )
     return create_task_response(
         task_row=task_row,
         global_download=global_download,

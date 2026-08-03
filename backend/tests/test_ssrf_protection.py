@@ -5,8 +5,8 @@
 2. 阻止私有网络地址 (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
 3. 阻止 AWS 元数据接口 (169.254.169.254)
 4. 阻止解析到内网的域名
-5. 允许公网地址
-6. 允许非 HTTP 协议 (magnet, ed2k)
+5. 允许公网 HTTP(S) 地址
+6. 拒绝 FTP 和自定义协议
 """
 import pytest
 from unittest.mock import AsyncMock, patch
@@ -187,24 +187,15 @@ class TestSSRFProtection:
         assert response.status_code == 400
         assert "本机地址" in response.json()["detail"]
 
-    def test_allow_ftp_public(self, authenticated_client):
-        """测试 FTP 公网地址允许"""
-        with patch("app.core.security.socket.getaddrinfo") as mock_getaddrinfo:
-            mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
-            response = authenticated_client.post(
-                "/api/tasks",
-                json={"uri": "ftp://ftp.example.com/file.zip"}
-            )
-        # 应该通过 SSRF 检查
-        if response.status_code == 400:
-            detail = response.json().get("detail", "")
-            assert "内网" not in detail and "本机" not in detail
+    @pytest.mark.parametrize(
+        "uri",
+        ["ftp://ftp.example.com/file.zip", "ftp://192.168.1.1/file.zip", "custom:data"],
+    )
+    def test_reject_unsupported_scheme_before_aria2(self, authenticated_client, uri):
+        aria2_client = AsyncMock()
+        with patch("app.services.task_service._get_client", return_value=aria2_client):
+            response = authenticated_client.post("/api/tasks", json={"uri": uri})
 
-    def test_block_ftp_private(self, authenticated_client):
-        """测试 FTP 私有地址阻止"""
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "ftp://192.168.1.1/file.zip"}
-        )
         assert response.status_code == 400
-        assert "内网地址" in response.json()["detail"]
+        assert response.json()["detail"] == "仅支持磁力链接和 HTTP(S) 下载链接"
+        aria2_client.add_uri.assert_not_awaited()

@@ -103,6 +103,7 @@ from app.routers import (
     files,
     health,
     history,
+    internal_fetch,
     shares,
     stats,
     storage,
@@ -241,9 +242,10 @@ async def lifespan(app: FastAPI):
         singleton_lease = ApplicationSingletonLease.acquire()
         Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
         verify_download_dir_writable()
-        from app.core.config import check_secret_key
+        from app.core.config import check_secret_key, get_internal_base_url
 
         check_secret_key()
+        get_internal_base_url()
         await bootstrap_database()
 
         if not await check_database_integrity():
@@ -259,6 +261,13 @@ async def lifespan(app: FastAPI):
 
         await refresh_aria2_config()
         await load_runtime_config()
+
+        from app.services.aria2_lifecycle_service import (
+            reconcile_legacy_http_downloads_v0,
+        )
+
+        await reconcile_legacy_http_downloads_v0(get_aria2_client())
+
         await ensure_default_admin_v0()
 
         if settings.dev_reset_admin_password:
@@ -442,6 +451,7 @@ def create_app() -> FastAPI:
     app.include_router(storage.router)
     app.include_router(health.router)
     app.include_router(ws.router)
+    app.include_router(internal_fetch.router)
     app.include_router(aria2_rpc.router)
     app.include_router(shares.router)
 

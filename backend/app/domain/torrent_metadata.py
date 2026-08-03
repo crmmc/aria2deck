@@ -90,6 +90,8 @@ def parse_torrent_bytes(raw: bytes) -> TorrentMetadata:
         raise TorrentMetadataError("trailing bencode data")
     if not isinstance(value, dict):
         raise TorrentMetadataError("torrent root must be a dictionary")
+    if b"url-list" in value or b"httpseeds" in value:
+        raise TorrentMetadataError("torrent webseeds are not allowed")
     info = value.get(b"info")
     if not isinstance(info, dict) or info_span is None:
         raise TorrentMetadataError("missing info dictionary")

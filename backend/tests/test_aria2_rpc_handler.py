@@ -260,7 +260,8 @@ async def test_add_torrent_rejects_private_embedded_endpoint(
         await handler.handle("aria2.addTorrent", [torrent])
 
     assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
-    assert "内网地址" in exc_info.value.message
+    expected = "内网地址" if field == b"announce" else "webseeds"
+    assert expected in exc_info.value.message
     mock_aria2_client.add_torrent.assert_not_awaited()
 
 
@@ -302,8 +303,7 @@ async def test_add_uri_rejects_private_bt_tracker_option(
         )
 
     assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
-    assert "bt-tracker" in exc_info.value.message
-    assert "内网地址" in exc_info.value.message
+    assert exc_info.value.message == "bt-tracker option is not allowed"
     mock_aria2_client.add_uri.assert_not_awaited()
 
 
@@ -1189,14 +1189,36 @@ async def test_invalid_params_raise_rpc_errors(handler: Aria2RpcHandler) -> None
 
 @pytest.mark.asyncio
 async def test_static_compat_methods(handler: Aria2RpcHandler) -> None:
-    for method in ("aria2.pause", "aria2.forcePause", "aria2.unpause",
-                   "aria2.pauseAll", "aria2.forcePauseAll", "aria2.unpauseAll"):
+    task = await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-options",
+        status="active",
+        name="options.bin",
+    )
+    task_gid = f"task-{task['id']}"
+    for method in (
+        "aria2.pause",
+        "aria2.forcePause",
+        "aria2.unpause",
+        "aria2.pauseAll",
+        "aria2.forcePauseAll",
+        "aria2.unpauseAll",
+    ):
         with pytest.raises(RpcError) as exc_info:
-            await handler.handle(method, ["gid"])
+            await handler.handle(method, [task_gid])
         assert exc_info.value.code == 1
-    assert await handler.handle("aria2.getOption", ["gid"]) == {}
+    assert await handler.handle("aria2.getOption", [task_gid]) == {}
     assert await handler.handle("aria2.getGlobalOption", []) == {}
-    assert await handler.handle("aria2.changePosition", ["gid", 0, "POS_SET"]) == 0
+    assert await handler.handle(
+        "aria2.changePosition", [task_gid, 0, "POS_SET"]
+    ) == 0
+    with pytest.raises(RpcError) as exc_info:
+        await handler.handle(
+            "aria2.changeUri",
+            [task_gid, 1, [], ["https://attacker.example/payload"]],
+        )
+    assert exc_info.value.code == RpcErrorCode.PERMISSION_DENIED
+    assert "not supported" in exc_info.value.message
     assert await handler.handle("aria2.getSessionInfo", []) == {
         "sessionId": "aria2deck-proxy-session"
     }
@@ -1209,59 +1231,71 @@ async def test_static_compat_methods(handler: Aria2RpcHandler) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "internal_error",
-    [
-        RuntimeError("database password leaked"),
-        ValueError("database password leaked"),
-    ],
-)
-async def test_add_uri_internal_error_is_logged_and_redacted(
-    handler: Aria2RpcHandler,
-    caplog: pytest.LogCaptureFixture,
-    internal_error: Exception,
-) -> None:
-    caplog.set_level(logging.ERROR, logger="app.services.aria2_rpc_handler")
-    with patch(
-        "app.services.aria2_rpc_handler.create_user_download",
-        new_callable=AsyncMock,
-        side_effect=internal_error,
-    ):
-        with pytest.raises(RpcError) as exc_info:
-            await handler.handle("aria2.addUri", [["https://8.8.8.8/file"]])
-
-    assert exc_info.value.code == RpcErrorCode.INTERNAL_ERROR
-    assert exc_info.value.message == "Internal server error"
-    assert "password leaked" not in exc_info.value.message
-    assert "database password leaked" in caplog.text
-    assert "Traceback" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_system_multicall_internal_error_is_logged_and_redacted(
-    handler: Aria2RpcHandler,
+async def test_gateway_capability_is_omitted_from_rpc_views_and_logs(
+    temp_db: str,
+    mock_aria2_client: AsyncMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.ERROR, logger="app.services.aria2_rpc_handler")
-    with patch.object(
-        handler,
-        "handle",
-        new_callable=AsyncMock,
-        side_effect=RuntimeError("multicall secret leaked"),
-    ):
-        result = await handler._handle_system_multicall(
-            [[{"methodName": "aria2.getVersion", "params": []}]]
-        )
+    owner = await create_user_v0(username="rpc_capability_owner")
+    other = await create_user_v0(username="rpc_capability_other")
+    task = await create_rpc_task(
+        user_id=owner["id"],
+        gid="gid-capability",
+        status="active",
+        name="capability.bin",
+    )
+    task_gid = f"task-{task['id']}"
+    capability = "eyJwIjoic291cmNlLXNlY3JldCJ9.raw-capability-signature"
+    internal_uri = f"http://app:8001/_internal/fetch/1/0?token={capability}"
+    mock_aria2_client.tell_status.return_value = {
+        "gid": "gid-capability",
+        "status": "active",
+        "errorMessage": capability,
+        "header": capability,
+        "options": {"header": [f"X-Aria2Deck-Fetch-Capability: {capability}"]},
+        "files": [
+            {
+                "index": "1",
+                "path": "payload",
+                "length": "1",
+                "completedLength": "0",
+                "selected": "true",
+                "uris": [{"uri": internal_uri, "status": "used"}],
+            }
+        ],
+    }
+    mock_aria2_client.get_uris.side_effect = RuntimeError(capability)
+    mock_aria2_client.change_uri = AsyncMock()
+    owner_handler = Aria2RpcHandler(owner["id"], mock_aria2_client)
+    other_handler = Aria2RpcHandler(other["id"], mock_aria2_client)
 
-    assert result == [
-        {
-            "faultCode": RpcErrorCode.INTERNAL_ERROR,
-            "faultString": "Internal server error",
-        }
-    ]
-    assert "secret leaked" not in str(result)
-    assert "multicall secret leaked" in caplog.text
-    assert "Traceback" in caplog.text
+    with caplog.at_level(logging.DEBUG):
+        status = await owner_handler.handle("aria2.tellStatus", [task_gid])
+        uris = await owner_handler.handle("aria2.getUris", [task_gid])
+        options = await owner_handler.handle("aria2.getOption", [task_gid])
+        with pytest.raises(RpcError) as change_error:
+            await owner_handler.handle(
+                "aria2.changeUri",
+                [task_gid, 1, [], ["https://attacker.example/payload"]],
+            )
+        with pytest.raises(RpcError) as cross_user_error:
+            await other_handler.handle("aria2.getOption", [task_gid])
+
+    stored = await get_user_task_by_id(owner["id"], int(task["id"]))
+    assert capability not in repr(status)
+    assert capability not in repr(uris)
+    assert capability not in repr(options)
+    assert capability not in caplog.text
+    assert status["errorMessage"] == ""
+    assert status["files"][0]["uris"] == [{"uri": "", "status": "used"}]
+    assert uris == [{"uri": "", "status": "used"}]
+    assert options == {}
+    assert change_error.value.code == RpcErrorCode.PERMISSION_DENIED
+    assert cross_user_error.value.code == RpcErrorCode.TASK_NOT_FOUND
+    mock_aria2_client.change_uri.assert_not_awaited()
+    assert stored is not None
+    assert stored["source_uri"] == task["source_uri"]
+    assert stored["aria2_gid"] == "gid-capability"
 
 
 @pytest.mark.asyncio
@@ -1294,6 +1328,64 @@ async def test_system_multicall_rejects_nested_calls(handler: Aria2RpcHandler) -
             "faultString": "Nested multicall is not allowed",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_system_multicall_generic_error_does_not_disclose_exception(
+    handler: Aria2RpcHandler,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "fake-capability.secret-payload"
+    monkeypatch.setattr(
+        handler,
+        "_handle_get_version",
+        AsyncMock(side_effect=RuntimeError(secret)),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await handler.handle(
+            "system.multicall",
+            [[{"methodName": "aria2.getVersion", "params": []}]],
+        )
+
+    assert result == [
+        {
+            "faultCode": RpcErrorCode.INTERNAL_ERROR,
+            "faultString": "Internal error",
+        }
+    ]
+    assert secret not in str(result)
+    assert secret not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_system_multicall_redacts_explicit_internal_rpc_error(
+    handler: Aria2RpcHandler,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "explicit-internal-rpc-secret"
+    monkeypatch.setattr(
+        handler,
+        "_handle_get_version",
+        AsyncMock(
+            side_effect=RpcError(RpcErrorCode.INTERNAL_ERROR, secret)
+        ),
+    )
+
+    result = await handler.handle(
+        "system.multicall",
+        [[{"methodName": "aria2.getVersion", "params": []}]],
+    )
+
+    assert result == [
+        {
+            "faultCode": RpcErrorCode.INTERNAL_ERROR,
+            "faultString": "Internal error",
+        }
+    ]
+    assert secret not in repr(result)
 
 
 @pytest.mark.asyncio

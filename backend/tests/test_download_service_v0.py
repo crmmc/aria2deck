@@ -6,10 +6,18 @@ from unittest.mock import AsyncMock
 import pytest
 
 import app.services.download_service as download_service
-from app.repositories.downloads import get_global_by_resource_key, get_user_task
+from app.core.config import settings
+from app.repositories.downloads import (
+    get_global_by_resource_key,
+    get_global_download_by_id,
+    get_user_task,
+)
+from app.repositories.files import list_user_file_rows
 from app.services.download_service import (
+    DOWNLOAD_SUBMISSION_FAILED_MESSAGE,
     DuplicateTaskError,
     cancel_user_task,
+    complete_global_download,
     create_user_download,
     create_user_torrent_download,
 )
@@ -22,6 +30,10 @@ from tests.helpers_v0 import (
     create_user_task_v0,
     create_user_v0,
 )
+
+
+MAGNET_INFO_HASH = "0123456789abcdef0123456789abcdef01234567"
+CANONICAL_MAGNET_URI = f"magnet:?xt=urn:btih:{MAGNET_INFO_HASH}"
 
 
 @pytest.mark.asyncio
@@ -58,6 +70,70 @@ async def test_two_users_share_one_global_download(temp_db: str):
 
 
 @pytest.mark.asyncio
+async def test_http_credentials_isolate_completed_content_between_users(
+    temp_db: str,
+    tmp_path,
+) -> None:
+    user_a = await create_user_v0(username="credential_a", quota_bytes=1000)
+    user_b = await create_user_v0(username="credential_b", quota_bytes=1000)
+    client = AsyncMock()
+    client.add_uri.side_effect = ["gid-credential-a", "gid-credential-b"]
+    base_key = "http:credential-isolation"
+
+    task_a = await create_user_download(
+        user_id=user_a["id"],
+        quota_bytes=user_a["quota_bytes"],
+        uri="https://example.com/protected.bin",
+        resource_key=base_key,
+        resource_kind="http",
+        display_name="protected.bin",
+        total_bytes=8,
+        aria2_client=client,
+        options={
+            "header": "X-Api-Key: user-a-secret",
+            "http-user": "alice",
+            "http-passwd": "basic-secret",
+        },
+    )
+    source = tmp_path / "protected.bin"
+    source.write_bytes(b"A-secret")
+    await complete_global_download(
+        global_download_id=int(task_a["global_download_id"]),
+        expected_gid="gid-credential-a",
+        source_path=source,
+        original_name="protected.bin",
+    )
+
+    task_b = await create_user_download(
+        user_id=user_b["id"],
+        quota_bytes=user_b["quota_bytes"],
+        uri="https://example.com/protected.bin",
+        resource_key=base_key,
+        resource_kind="http",
+        display_name="protected.bin",
+        total_bytes=8,
+        aria2_client=client,
+    )
+
+    global_a = await get_global_download_by_id(task_a["global_download_id"])
+    global_b = await get_global_download_by_id(task_b["global_download_id"])
+    files_a, rows_a = await list_user_file_rows(user_a["id"], offset=0, limit=10)
+    files_b, rows_b = await list_user_file_rows(user_b["id"], offset=0, limit=10)
+
+    assert task_a["global_download_id"] != task_b["global_download_id"]
+    assert global_a is not None and global_b is not None
+    assert global_a["resource_key"] != base_key
+    assert global_b["resource_key"] == base_key
+    assert "user-a-secret" not in global_a["resource_key"]
+    assert "alice" not in global_a["resource_key"]
+    assert "basic-secret" not in global_a["resource_key"]
+    assert global_b["status"] == "active"
+    assert files_a == 1 and len(rows_a) == 1
+    assert files_b == 0 and rows_b == []
+    assert client.add_uri.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_create_download_reserves_user_space(temp_db: str):
     user = await create_user_v0(username="reserve_down", quota_bytes=1000)
     client = AsyncMock()
@@ -87,8 +163,8 @@ async def test_submit_options_include_default_bt_stop_timeout(temp_db: str) -> N
     await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
-        uri="magnet:?xt=urn:btih:0123456789abcdef",
-        resource_key="magnet:bt-stop-default",
+        uri=CANONICAL_MAGNET_URI,
+        resource_key=MAGNET_INFO_HASH,
         resource_kind="magnet",
         display_name=None,
         total_bytes=0,
@@ -109,8 +185,8 @@ async def test_submit_options_use_configured_bt_stop_timeout(temp_db: str) -> No
     await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
-        uri="magnet:?xt=urn:btih:abcdef0123456789",
-        resource_key="magnet:bt-stop-configured",
+        uri=CANONICAL_MAGNET_URI,
+        resource_key=MAGNET_INFO_HASH,
         resource_kind="magnet",
         display_name=None,
         total_bytes=0,
@@ -119,6 +195,80 @@ async def test_submit_options_use_configured_bt_stop_timeout(temp_db: str) -> No
 
     submit_options = client.add_uri.await_args.args[1]
     assert submit_options["bt-stop-timeout"] == "3600"
+
+
+@pytest.mark.asyncio
+async def test_magnet_sink_canonicalizes_uri_and_ignores_submit_uris(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="magnet_sink")
+    client = AsyncMock()
+    client.add_uri.return_value = "gid-magnet-sink"
+    markers = (
+        "tracker-secret.example",
+        "webseed-secret.example",
+        "acceptable-secret.example",
+        "source-secret.example",
+    )
+    source_uri = (
+        f"{CANONICAL_MAGNET_URI}&tr=https://{markers[0]}/announce"
+        f"&ws=https://{markers[1]}/payload"
+        f"&as=https://{markers[2]}/payload"
+        f"&xs=https://{markers[3]}/metadata"
+    )
+
+    await create_user_download(
+        user_id=user["id"],
+        quota_bytes=user["quota_bytes"],
+        uri=source_uri,
+        resource_key="caller-controlled-key",
+        resource_kind="magnet",
+        display_name=None,
+        total_bytes=0,
+        aria2_client=client,
+        submit_uris=[source_uri, "custom://direct-bypass"],
+    )
+
+    submitted_uris = client.add_uri.await_args.args[0]
+    stored = await get_global_by_resource_key(MAGNET_INFO_HASH)
+    assert submitted_uris == [CANONICAL_MAGNET_URI]
+    assert stored is not None and stored["source_uri"] == CANONICAL_MAGNET_URI
+    assert all(marker not in repr(client.add_uri.await_args) for marker in markers)
+    assert "custom://direct-bypass" not in repr(client.add_uri.await_args)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resource_kind", "uri", "resource_key"),
+    [
+        ("magnet", "magnet:?xt=invalid", "invalid-magnet-key"),
+        ("custom", "custom://direct-bypass", "custom-resource-key"),
+    ],
+)
+async def test_download_sink_rejects_invalid_resource_before_submit(
+    temp_db: str,
+    resource_kind: str,
+    uri: str,
+    resource_key: str,
+) -> None:
+    user = await create_user_v0(username=f"sink_reject_{resource_kind}")
+    client = AsyncMock()
+
+    with pytest.raises(ValueError):
+        await create_user_download(
+            user_id=user["id"],
+            quota_bytes=user["quota_bytes"],
+            uri=uri,
+            resource_key=resource_key,
+            resource_kind=resource_kind,
+            display_name=None,
+            total_bytes=0,
+            aria2_client=client,
+            submit_uris=["https://bypass.example/payload"],
+        )
+
+    client.add_uri.assert_not_awaited()
+    assert await get_global_by_resource_key(resource_key) is None
 
 
 @pytest.mark.asyncio
@@ -184,6 +334,31 @@ async def test_create_download_rejects_private_bt_tracker_before_submit(
 
     client.add_uri.assert_not_awaited()
     assert await get_global_by_resource_key(resource_key) is None
+
+
+@pytest.mark.asyncio
+async def test_http_download_fails_closed_when_internal_base_is_invalid(
+    temp_db: str,
+    monkeypatch,
+) -> None:
+    user = await create_user_v0(username="invalid_internal_base")
+    client = AsyncMock()
+    monkeypatch.setattr(settings, "internal_base_url", "ftp://app:8001")
+
+    with pytest.raises(RuntimeError, match="ARIA2DECK_INTERNAL_BASE_URL"):
+        await create_user_download(
+            user_id=user["id"],
+            quota_bytes=user["quota_bytes"],
+            uri="https://example.com/file.bin",
+            resource_key="http:invalid-internal-base",
+            resource_kind="http",
+            display_name="file.bin",
+            total_bytes=4,
+            aria2_client=client,
+        )
+
+    client.add_uri.assert_not_awaited()
+    assert await get_global_by_resource_key("http:invalid-internal-base") is None
 
 
 @pytest.mark.asyncio
@@ -291,9 +466,9 @@ async def test_duplicate_completed_download_does_not_overwrite_existing_task_nam
         size_bytes=9,
     )
     global_download = await create_global_download_v0(
-        resource_key="magnet:duplicate-completed",
+        resource_key=MAGNET_INFO_HASH,
         resource_kind="magnet",
-        source_uri="magnet:?xt=urn:btih:duplicate-completed",
+        source_uri=CANONICAL_MAGNET_URI,
         status="completed",
         display_name="real-name.bin",
         total_bytes=9,
@@ -312,10 +487,10 @@ async def test_duplicate_completed_download_does_not_overwrite_existing_task_nam
         await create_user_download(
             user_id=user["id"],
             quota_bytes=user["quota_bytes"],
-            uri="magnet:?xt=urn:btih:duplicate-completed&dn=wrong-name",
-            resource_key="magnet:duplicate-completed",
+            uri=f"{CANONICAL_MAGNET_URI}&dn=wrong-name",
+            resource_key=MAGNET_INFO_HASH,
             resource_kind="magnet",
-            display_name="magnet:?xt=urn:btih:duplicate-completed&dn=wrong-name",
+            display_name=f"{CANONICAL_MAGNET_URI}&dn=wrong-name",
             total_bytes=0,
             aria2_client=client,
         )
@@ -378,7 +553,7 @@ async def test_add_uri_failure_releases_reservation_and_marks_task_failed(
     client = AsyncMock()
     client.add_uri.side_effect = RuntimeError("aria2 unavailable")
 
-    with pytest.raises(RuntimeError, match="aria2 unavailable"):
+    with pytest.raises(RuntimeError, match="内部下载任务提交失败"):
         await create_user_download(
             user_id=user["id"],
             quota_bytes=user["quota_bytes"],
@@ -397,6 +572,7 @@ async def test_add_uri_failure_releases_reservation_and_marks_task_failed(
 
     assert task is not None
     assert task["status"] == "failed"
+    assert task["error_message"] == DOWNLOAD_SUBMISSION_FAILED_MESSAGE
     assert task["reserved_bytes"] == 0
     assert usage["reserved_bytes"] == 0
 
@@ -449,7 +625,7 @@ async def test_retry_failed_submit_reactivates_user_task(temp_db: str) -> None:
     client = AsyncMock()
     client.add_uri.side_effect = [RuntimeError("temporary rpc failure"), "gid-retry"]
 
-    with pytest.raises(RuntimeError, match="temporary rpc failure"):
+    with pytest.raises(RuntimeError, match="内部下载任务提交失败"):
         await create_user_download(
             user_id=user["id"],
             quota_bytes=user["quota_bytes"],
@@ -547,7 +723,6 @@ async def test_user_options_cannot_set_select_file(temp_db: str) -> None:
     client = AsyncMock()
     client.add_torrent.return_value = "gid-user-select-file"
 
-    tracker = "http://8.8.8.8/announce"
     await create_user_torrent_download(
         user_id=user["id"],
         quota_bytes=int(user["quota_bytes"]),
@@ -557,12 +732,45 @@ async def test_user_options_cannot_set_select_file(temp_db: str) -> None:
         display_name="select.torrent",
         total_bytes=10,
         aria2_client=client,
-        options={"select-file": "1,2", "bt-tracker": tracker},
+        options={"select-file": "1,2"},
     )
 
     opts = client.add_torrent.call_args[0][2]
     assert "select-file" not in opts
-    assert opts["bt-tracker"] == tracker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("options", "uris"),
+    [
+        ({"bt-tracker": "http://127.0.0.1/announce"}, None),
+        (None, ["https://seed.example.com/payload"]),
+    ],
+)
+async def test_torrent_bypass_inputs_are_rejected_before_submit(
+    temp_db: str,
+    options: dict[str, str] | None,
+    uris: list[str] | None,
+) -> None:
+    user = await create_user_v0(username=f"torrent_bypass_{bool(options)}")
+    client = AsyncMock()
+
+    with pytest.raises(ValueError):
+        await create_user_torrent_download(
+            user_id=user["id"],
+            quota_bytes=int(user["quota_bytes"]),
+            torrent_data="base64-torrent",
+            resource_key=f"torrent:bypass:{bool(options)}",
+            source_uri="magnet:?xt=urn:btih:bypass",
+            display_name="bypass.torrent",
+            total_bytes=10,
+            aria2_client=client,
+            options=options,
+            uris=uris,
+        )
+
+    client.add_torrent.assert_not_awaited()
+    assert await get_global_by_resource_key(f"torrent:bypass:{bool(options)}") is None
 
 
 @pytest.mark.asyncio
@@ -662,7 +870,7 @@ async def test_add_torrent_failure_releases_reservation_and_marks_task_failed(
     client = AsyncMock()
     client.add_torrent.side_effect = RuntimeError("aria2 unavailable")
 
-    with pytest.raises(RuntimeError, match="aria2 unavailable"):
+    with pytest.raises(RuntimeError, match=DOWNLOAD_SUBMISSION_FAILED_MESSAGE):
         await create_user_torrent_download(
             user_id=user["id"],
             quota_bytes=user["quota_bytes"],
@@ -681,6 +889,7 @@ async def test_add_torrent_failure_releases_reservation_and_marks_task_failed(
 
     assert task is not None
     assert task["status"] == "failed"
+    assert task["error_message"] == DOWNLOAD_SUBMISSION_FAILED_MESSAGE
     assert task["reserved_bytes"] == 0
     assert usage["reserved_bytes"] == 0
 
@@ -736,7 +945,7 @@ async def test_retry_failed_torrent_submit_reactivates_user_task(temp_db: str) -
         "gid-torrent-retry",
     ]
 
-    with pytest.raises(RuntimeError, match="temporary torrent rpc failure"):
+    with pytest.raises(RuntimeError, match=DOWNLOAD_SUBMISSION_FAILED_MESSAGE):
         await create_user_torrent_download(
             user_id=user["id"],
             quota_bytes=user["quota_bytes"],
