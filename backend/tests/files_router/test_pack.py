@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import insert
 
 from app.db.engine import transaction
-from app.db.schema import pack_tasks, stored_files
+from app.db.schema import pack_tasks, stored_files, user_storage_usage
 
 
 def _now_ms() -> int:
@@ -45,6 +45,17 @@ def _insert_pack_task_v0(
                     .returning(pack_tasks.c.id)
                 )
             ).one()
+            if status in {"pending", "packing"} and reserved_bytes:
+                await conn.execute(
+                    user_storage_usage.update()
+                    .where(user_storage_usage.c.user_id == user_id)
+                    .values(
+                        reserved_bytes=(
+                            user_storage_usage.c.reserved_bytes + reserved_bytes
+                        ),
+                        updated_at_ms=timestamp,
+                    )
+                )
         return int(row[0])
 
     return asyncio.run(seed())
@@ -237,9 +248,10 @@ class TestPackTaskCreate:
         ("output_name", "detail"),
         [
             ("a" * 201, "输出文件名不能超过 200 个字符"),
+            ("界" * 70, "输出文件名不能超过 200 个字节"),
             ("bad:name", "输出文件名包含非法字符"),
         ],
-        ids=["too-long", "invalid-char"],
+        ids=["too-long", "too-many-bytes", "invalid-char"],
     )
     def test_create_pack_task_rejects_invalid_output_name(
         self,
@@ -255,3 +267,16 @@ class TestPackTaskCreate:
 
         assert response.status_code == 400
         assert response.json()["detail"] == detail
+
+    def test_create_pack_task_rejects_duplicate_file_ids(
+        self,
+        authenticated_client: TestClient,
+        user_file: dict,
+    ):
+        response = authenticated_client.post(
+            "/api/files/pack",
+            json={"file_ids": [user_file["id"], user_file["id"]]},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "文件列表包含重复项"

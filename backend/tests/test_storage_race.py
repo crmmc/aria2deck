@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import Response
 from sqlalchemy import insert, select
 
 from app.auth import user_from_row
@@ -18,6 +21,7 @@ from app.db.schema import (
     user_files,
     user_storage_usage,
 )
+from app.services.deletion_cleanup import DeletionCleanupManager
 from app.services.file_service import delete_user_file_reference_v0
 from app.services.task_broadcast import (
     clear_connections,
@@ -73,6 +77,25 @@ async def _seed_shared_file(user_ids: list[int]) -> dict:
         "path": path,
         "user_file_ids": user_file_ids,
     }
+
+
+@pytest.mark.asyncio
+async def test_content_hash_lock_registry_releases_unused_locks(temp_db: str) -> None:
+    from app.services import storage_locks
+
+    locks = await asyncio.gather(
+        *(storage_locks.get_content_hash_lock("weak-lock") for _ in range(20))
+    )
+    assert all(lock is locks[0] for lock in locks)
+    key = (id(asyncio.get_running_loop()), "weak-lock")
+    assert key in storage_locks._content_hash_locks
+    lock_ref = weakref.ref(locks[0])
+    del locks
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    gc.collect()
+    assert lock_ref() is None
+    assert key not in storage_locks._content_hash_locks
 
 
 @pytest.mark.asyncio
@@ -134,7 +157,21 @@ async def test_delete_user_file_keeps_shared_storage_until_last_reference(
             .first()
         )
 
-    assert stored_after_last is None
+    assert stored_after_last is not None
+    assert stored_after_last["pending_delete"] == 1
+    assert seeded["path"].exists()
+
+    await DeletionCleanupManager.run_once()
+    async with transaction() as conn:
+        stored_after_cleanup = (
+            await conn.execute(
+                select(stored_files.c.id).where(
+                    stored_files.c.id == seeded["stored_file_id"]
+                )
+            )
+        ).first()
+
+    assert stored_after_cleanup is None
     assert not seeded["path"].exists()
 
 
@@ -174,7 +211,20 @@ async def test_concurrent_delete_same_user_file_deletes_once(temp_db: str) -> No
 
     assert sorted(results) == [False, True]
     assert refs == []
-    assert stored is None
+    assert stored is not None
+    assert stored["pending_delete"] == 1
+
+    await DeletionCleanupManager.run_once()
+    async with transaction() as conn:
+        stored_after_cleanup = (
+            await conn.execute(
+                select(stored_files.c.id).where(
+                    stored_files.c.id == seeded["stored_file_id"]
+                )
+            )
+        ).first()
+    assert stored_after_cleanup is None
+    assert not seeded["path"].exists()
 
 
 @pytest.mark.asyncio
@@ -270,6 +320,9 @@ async def test_delete_last_reference_clears_download_and_pack_fk_and_usage(
     assert user_task["status"] == "cancelled"
     assert pack_file_id is None
     assert usage["used_bytes"] == 0
+    assert seeded["path"].exists()
+
+    await DeletionCleanupManager.run_once()
     assert not seeded["path"].exists()
 
 
@@ -411,7 +464,12 @@ def test_delete_file_endpoint_broadcasts_affected_task_update(
     finally:
         asyncio.run(remove_connections_for_user(test_user["id"]))
 
-    assert response.status_code == 200
+    assert response.status_code == 202
+    assert response.json() == {
+        "ok": True,
+        "state": "pending",
+        "accepted": True,
+    }
     async_mock.send_json.assert_awaited_once()
     payload = async_mock.send_json.await_args.args[0]
     assert payload["type"] == "task_update"
@@ -477,32 +535,42 @@ async def test_admin_bulk_delete_orphan_clears_download_and_pack_fks(
             )
         )
 
+    raw_response = Response()
     response = await bulk_delete_files(
         BulkDeleteRequest(file_ids=[stored["id"]]),
+        raw_response,
         admin=user_from_row(admin),
     )
 
     async with transaction() as conn:
-        stored_after_delete = (
-            (
-                await conn.execute(
-                    select(stored_files).where(stored_files.c.id == stored["id"])
-                )
+        pending = (
+            await conn.execute(
+                select(stored_files).where(stored_files.c.id == stored["id"])
             )
-            .mappings()
-            .first()
-        )
+        ).mappings().one()
         download = (await conn.execute(select(global_downloads))).mappings().one()
         pack_file_id = (
             await conn.execute(select(pack_tasks.c.output_stored_file_id))
         ).scalar_one()
 
-    assert response.deleted_count == 1
+    assert raw_response.status_code == 202
+    assert response.deleted_count == 0
+    assert response.accepted_count == 1
     assert response.failed_ids == []
-    assert stored_after_delete is None
+    assert pending["pending_delete"] == 1
     assert download["completed_file_id"] is None
     assert download["status"] == "cancelled"
     assert pack_file_id is None
+    assert path.exists()
+
+    await DeletionCleanupManager.run_once()
+    async with transaction() as conn:
+        stored_after_delete = (
+            await conn.execute(
+                select(stored_files.c.id).where(stored_files.c.id == stored["id"])
+            )
+        ).first()
+    assert stored_after_delete is None
     assert not path.exists()
 
 
@@ -578,34 +646,40 @@ async def test_admin_bulk_delete_physical_cleanup_failure_still_broadcasts_commi
             .one()
         )
 
-    def fail_delete_path(**_: object) -> None:
+    def fail_delete_path(*_: object) -> None:
         raise OSError("simulated cleanup failure")
 
-    monkeypatch.setattr("app.services.storage_admin_service.safe_delete_path", fail_delete_path)
+    monkeypatch.setattr(
+        "app.services.deletion_cleanup._delete_stored_path", fail_delete_path
+    )
     ws = AsyncMock()
     await clear_connections()
     await set_connections_for_user(admin["id"], {ws})
 
+    raw_response = Response()
     response = await bulk_delete_files(
         BulkDeleteRequest(file_ids=[stored["id"]]),
+        raw_response,
         admin=user_from_row(admin),
     )
+    await DeletionCleanupManager.run_once()
 
     async with transaction() as conn:
-        stored_after_delete = (
-            (
-                await conn.execute(
-                    select(stored_files).where(stored_files.c.id == stored["id"])
-                )
+        pending = (
+            await conn.execute(
+                select(stored_files).where(stored_files.c.id == stored["id"])
             )
-            .mappings()
-            .first()
-        )
+        ).mappings().one()
 
-    assert response.deleted_count == 1
+    assert raw_response.status_code == 202
+    assert response.deleted_count == 0
+    assert response.accepted_count == 1
     assert response.failed_ids == []
     assert response.errors == []
-    assert stored_after_delete is None
+    assert pending["pending_delete"] == 1
+    assert pending["delete_attempts"] == 1
+    assert pending["delete_lease_token"] is None
+    assert pending["delete_error"].startswith("物理清理失败：OSError")
     assert path.exists()
     ws.send_json.assert_awaited_once()
     payload = ws.send_json.await_args.args[0]
@@ -705,8 +779,18 @@ def test_admin_bulk_delete_endpoint_broadcasts_affected_task_update(
     finally:
         asyncio.run(remove_connections_for_user(test_admin["id"]))
 
-    assert response.status_code == 200
-    assert response.json()["deleted_count"] == 1
+    assert response.status_code == 202
+    assert response.json()["deleted_count"] == 0
+    assert response.json()["accepted_count"] == 1
+    assert response.json()["results"] == [
+        {
+            "file_id": stored_id,
+            "ok": True,
+            "state": "pending",
+            "accepted": True,
+            "error": None,
+        }
+    ]
     async_mock.send_json.assert_awaited_once()
     payload = async_mock.send_json.await_args.args[0]
     assert payload["type"] == "task_update"
