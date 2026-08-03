@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import insert, select
@@ -9,7 +10,8 @@ from app.core.config import settings
 from app.db.engine import transaction
 from app.db.schema import global_downloads, stored_files, user_files
 from app.repositories.downloads import get_user_task_by_id
-from app.services.repair import repair_task_associations
+from app.services.repair import repair_task_associations, run_startup_repair
+from app.services.storage_index import StorageScan
 from app.services.usage_service import get_usage, reserve_bytes
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -47,7 +49,75 @@ async def _create_stored_file(name: str, size: int) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_repair_task_associations_completes_user_lifecycle(temp_db: str) -> None:
+async def test_startup_repair_without_candidates_is_safe(temp_db: str) -> None:
+    result = await run_startup_repair()
+
+    assert result["orphan_files_found"] == 0
+    assert result["unresolved_files"] == 0
+    assert result["errors"] == []
+    assert result["safe_for_cleanup"] is True
+
+
+@pytest.mark.asyncio
+async def test_startup_repair_reports_hash_mismatch_as_unresolved(
+    temp_db: str,
+) -> None:
+    content_hash = "a" * 64
+    candidate = (
+        Path(settings.download_dir) / "store" / content_hash[:2] / content_hash
+    )
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"does not match the path hash")
+
+    result = await run_startup_repair()
+
+    assert result["orphan_files_found"] == 1
+    assert result["stored_files_created"] == 0
+    assert result["unresolved_files"] == 1
+    assert result["errors"]
+    assert result["safe_for_cleanup"] is False
+    assert candidate.read_bytes() == b"does not match the path hash"
+
+
+@pytest.mark.asyncio
+async def test_startup_repair_reports_unconfirmed_registration_failure(
+    temp_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content_hash = "b" * 64
+    candidate = (
+        Path(settings.download_dir) / "store" / content_hash[:2] / content_hash
+    )
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"valid candidate")
+    lookup = AsyncMock(return_value=None)
+    create = AsyncMock(side_effect=RuntimeError("database write failed"))
+    monkeypatch.setattr(
+        "app.services.repair.scan_storage_path_async",
+        AsyncMock(
+            return_value=StorageScan(
+                content_hash=content_hash,
+                size_bytes=candidate.stat().st_size,
+                is_directory=False,
+                entry_templates=[],
+            )
+        ),
+    )
+    monkeypatch.setattr("app.services.repair.get_stored_file_by_content_hash", lookup)
+    monkeypatch.setattr("app.services.repair.create_stored_file_with_entries", create)
+
+    result = await run_startup_repair()
+
+    assert result["unresolved_files"] == 1
+    assert result["safe_for_cleanup"] is False
+    assert lookup.await_count == 2
+    create.assert_awaited_once()
+    assert candidate.read_bytes() == b"valid candidate"
+
+
+@pytest.mark.asyncio
+async def test_repair_does_not_bind_unique_name_size_without_content_identity(
+    temp_db: str,
+) -> None:
     user = await create_user_v0(username="repair_full", quota_bytes=1000)
     await reserve_bytes(user["id"], 7, quota_bytes=user["quota_bytes"])
     stored = await _create_stored_file("payload.bin", 7)
@@ -70,6 +140,7 @@ async def test_repair_task_associations_completes_user_lifecycle(temp_db: str) -
     )
 
     repaired = await repair_task_associations()
+    startup_result = await run_startup_repair()
 
     async with transaction() as conn:
         updated_download = (
@@ -98,14 +169,18 @@ async def test_repair_task_associations_completes_user_lifecycle(temp_db: str) -
     updated_task = await get_user_task_by_id(user["id"], task["id"])
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
 
-    assert repaired == 1
-    assert updated_download["completed_file_id"] == stored["id"]
+    assert repaired["repaired"] == 0
+    assert repaired["unresolved"] == 1
+    assert repaired["errors"]
+    assert startup_result["unresolved_files"] == 1
+    assert startup_result["safe_for_cleanup"] is False
+    assert updated_download["completed_file_id"] is None
     assert updated_task is not None
-    assert updated_task["status"] == "completed"
-    assert updated_task["reserved_bytes"] == 0
-    assert user_file is not None
-    assert usage["reserved_bytes"] == 0
-    assert usage["used_bytes"] == 7
+    assert updated_task["status"] == "active"
+    assert updated_task["reserved_bytes"] == 7
+    assert user_file is None
+    assert usage["reserved_bytes"] == 7
+    assert usage["used_bytes"] == 0
 
 
 @pytest.mark.asyncio
@@ -135,7 +210,8 @@ async def test_repair_task_associations_skips_unsafe_size_match(temp_db: str) ->
     updated_task = await get_user_task_by_id(user["id"], task["id"])
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
 
-    assert repaired == 0
+    assert repaired["repaired"] == 0
+    assert repaired["unresolved"] == 1
     assert updated_task is not None
     assert updated_task["status"] == "active"
     assert updated_task["reserved_bytes"] == 7
@@ -184,7 +260,8 @@ async def test_repair_task_associations_skips_ambiguous_name_size_match(
     updated_task = await get_user_task_by_id(user["id"], task["id"])
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
 
-    assert repaired == 0
+    assert repaired["repaired"] == 0
+    assert repaired["unresolved"] == 1
     assert updated_task is not None
     assert updated_task["status"] == "active"
     assert updated_task["reserved_bytes"] == 7

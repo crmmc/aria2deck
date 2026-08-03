@@ -53,6 +53,7 @@ class TestSessionFixationProtection:
         )
         assert response.status_code == 200
         first_session = response.cookies.get(settings.session_cookie_name)
+        assert first_session is not None
 
         # 确认第一个 session 有效
         client.cookies.set(settings.session_cookie_name, first_session)
@@ -66,6 +67,7 @@ class TestSessionFixationProtection:
         )
         assert response.status_code == 200
         second_session = response.cookies.get(settings.session_cookie_name)
+        assert second_session is not None
 
         # 新 session 应该有效
         client.cookies.set(settings.session_cookie_name, second_session)
@@ -81,7 +83,7 @@ class TestSessionFixationProtection:
         self, client: TestClient, test_user: dict
     ):
         """测试多次登录每次都获得新 session"""
-        sessions = []
+        sessions: list[str] = []
 
         for i in range(5):
             # 如果有旧 session，携带它登录

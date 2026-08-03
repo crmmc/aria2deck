@@ -7,12 +7,10 @@
 """
 from __future__ import annotations
 
-import base64
-import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from app.aria2.gateway import get_aria2_client
@@ -26,7 +24,39 @@ router = APIRouter(tags=["aria2-rpc"])
 logger = logging.getLogger(__name__)
 
 
-def _build_rate_limit_response() -> JSONResponse:
+def _all_notifications(request_body: Any) -> bool:
+    return _is_notification(request_body) or (
+        isinstance(request_body, list)
+        and bool(request_body)
+        and all(_is_notification(item) for item in request_body)
+    )
+
+
+def _multicall_cost(params: Any) -> int:
+    if not isinstance(params, list) or not params or not isinstance(params[0], list):
+        return 1
+
+    calls = params[0]
+    if len(calls) > 20:
+        return 1
+    return max(1, sum(isinstance(call, dict) for call in calls))
+
+
+def _rpc_request_cost(request_body: Any) -> int:
+    if not isinstance(request_body, dict):
+        return 1
+    if request_body.get("method") != "system.multicall":
+        return 1
+    return _multicall_cost(request_body.get("params"))
+
+
+def _rpc_rate_limit_cost(body: Any) -> int:
+    if not isinstance(body, list):
+        return _rpc_request_cost(body)
+    return max(1, sum(_rpc_request_cost(item) for item in body))
+
+
+def _build_rate_limit_response(retry_after: int) -> JSONResponse:
     return JSONResponse(
         content=build_jsonrpc_error(
             -32000,  # Server error
@@ -34,7 +64,15 @@ def _build_rate_limit_response() -> JSONResponse:
             None,
         ),
         status_code=200,
+        headers={"Retry-After": str(retry_after)},
     )
+
+
+def _rate_limit_response_or_no_content(body: Any, retry_after: int) -> Response:
+    headers = {"Retry-After": str(retry_after)}
+    if _all_notifications(body):
+        return Response(status_code=status.HTTP_204_NO_CONTENT, headers=headers)
+    return _build_rate_limit_response(retry_after)
 
 
 async def _authenticate_from_params(
@@ -197,58 +235,14 @@ def _log_rpc_method_response(
     logger.warning(log_message, method, rpc_id, user_id, request_id, error_code, error_message or "<empty>")
 
 
-def _decode_query_params(raw_params: str | None) -> list | None:
-    if raw_params is None:
-        return []
-
-    value = raw_params.strip()
-    if not value:
-        return []
-
-    try:
-        parsed = json.loads(value)
-        if isinstance(parsed, list):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-
-    padded = value + "=" * (-len(value) % 4)
-    for decoder in (base64.b64decode, base64.urlsafe_b64decode):
-        try:
-            decoded = decoder(padded.encode("utf-8"))
-            parsed = json.loads(decoded.decode("utf-8"))
-            if isinstance(parsed, list):
-                return parsed
-        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-
-    return None
+def _is_notification(request_body: Any) -> bool:
+    return isinstance(request_body, dict) and "id" not in request_body
 
 
-def _build_body_from_query(request: Request) -> tuple[dict | None, dict | None]:
-    method = request.query_params.get("method")
-    if not method:
-        return None, build_jsonrpc_error(
-            RpcErrorCode.INVALID_REQUEST,
-            "Method is required",
-            request.query_params.get("id"),
-        )
-
-    params = _decode_query_params(request.query_params.get("params"))
-    if params is None:
-        return None, build_jsonrpc_error(
-            RpcErrorCode.INVALID_PARAMS,
-            "Params must be JSON array or Base64-encoded JSON array",
-            request.query_params.get("id"),
-        )
-
-    body = {
-        "jsonrpc": request.query_params.get("jsonrpc", "2.0"),
-        "method": method,
-        "params": params,
-        "id": request.query_params.get("id"),
-    }
-    return body, None
+def _jsonrpc_response_or_no_content(request_body: Any, response: dict) -> Response:
+    if _is_notification(request_body):
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return JSONResponse(content=response, status_code=200)
 
 
 # ============================================================================
@@ -327,12 +321,17 @@ async def process_single_request(
 # 路由
 # ============================================================================
 
-async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONResponse:
+async def _handle_jsonrpc_request_body(request: Request, body: Any) -> Response:
     client_ip = request.client.host if request.client else "unknown"
     request_id = getattr(request.state, "request_id", "-")
-    if not await rpc_limiter.is_allowed(client_ip, limit=rate_limit_config.rpc):
+    allowed, retry_after = await rpc_limiter.check(
+        client_ip,
+        limit=rate_limit_config.rpc,
+        cost=_rpc_rate_limit_cost(body),
+    )
+    if not allowed:
         logger.warning("RPC请求被限流 ip=%s request_id=%s", client_ip, request_id)
-        return _build_rate_limit_response()
+        return _rate_limit_response_or_no_content(body, retry_after or 1)
 
     if isinstance(body, list):
         if not body:
@@ -361,10 +360,6 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
                 status_code=200,
             )
 
-        for _ in range(max(0, len(body) - 1)):
-            if not await rpc_limiter.is_allowed(client_ip, limit=rate_limit_config.rpc):
-                logger.warning("RPC批量请求被限流 ip=%s request_id=%s", client_ip, request_id)
-                return _build_rate_limit_response()
     elif not isinstance(body, dict):
         return JSONResponse(
             content=build_jsonrpc_error(
@@ -395,7 +390,8 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
                         request_id=request_id,
                         response=auth_error,
                     )
-                    responses.append(auth_error)
+                    if not _is_notification(item):
+                        responses.append(auth_error)
                     continue
                 if user is None or remaining_params is None:
                     response = build_jsonrpc_error(
@@ -410,7 +406,8 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
                         request_id=request_id,
                         response=response,
                     )
-                    responses.append(response)
+                    if not _is_notification(item):
+                        responses.append(response)
                     continue
 
                 handler = Aria2RpcHandler(user["id"], aria2_client)
@@ -422,7 +419,8 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
                     request_id=request_id,
                     response=response,
                 )
-                responses.append(response)
+                if not _is_notification(item):
+                    responses.append(response)
             else:
                 response = build_jsonrpc_error(
                     RpcErrorCode.INVALID_REQUEST,
@@ -438,6 +436,8 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
                 )
                 responses.append(response)
         logger.info("RPC批量请求完成 count=%s request_id=%s", len(responses), request_id)
+        if not responses:
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
         return JSONResponse(content=responses, status_code=200)
 
     user, remaining_params, auth_error = await _authenticate_from_params(
@@ -455,7 +455,7 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
             request_id=request_id,
             response=auth_error,
         )
-        return JSONResponse(content=auth_error, status_code=200)
+        return _jsonrpc_response_or_no_content(body, auth_error)
     if user is None or remaining_params is None:
         response = build_jsonrpc_error(
             RpcErrorCode.INTERNAL_ERROR,
@@ -469,10 +469,7 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
             request_id=request_id,
             response=response,
         )
-        return JSONResponse(
-            content=response,
-            status_code=200,
-        )
+        return _jsonrpc_response_or_no_content(body, response)
 
     handler = Aria2RpcHandler(user["id"], aria2_client)
     logger.info("RPC请求通过鉴权 user_id=%s ip=%s request_id=%s", user["id"], client_ip, request_id)
@@ -486,11 +483,11 @@ async def _handle_jsonrpc_request_body(request: Request, body: Any) -> JSONRespo
         response=response,
     )
     logger.info("RPC单请求完成 user_id=%s request_id=%s", user["id"], request_id)
-    return JSONResponse(content=response, status_code=200)
+    return _jsonrpc_response_or_no_content(body, response)
 
 
 @router.post("/aria2/jsonrpc")
-async def jsonrpc_handler(request: Request) -> JSONResponse:
+async def jsonrpc_handler(request: Request) -> Response:
     """aria2 JSON-RPC 兼容接口（POST body，使用 token:xxx 参数认证）
 
     接收标准的 aria2 JSON-RPC 请求，支持单个请求和批量请求。
@@ -533,8 +530,9 @@ async def jsonrpc_handler(request: Request) -> JSONResponse:
 
 
 @router.get("/aria2/jsonrpc")
-async def jsonrpc_handler_get(request: Request) -> JSONResponse:
-    body, error = _build_body_from_query(request)
-    if error is not None:
-        return JSONResponse(content=error, status_code=200)
-    return await _handle_jsonrpc_request_body(request, body)
+async def jsonrpc_handler_get() -> JSONResponse:
+    return JSONResponse(
+        content={"detail": "JSON-RPC 仅支持 POST 请求，请在请求体中传递 token。"},
+        status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+        headers={"Allow": "POST"},
+    )

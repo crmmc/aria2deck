@@ -6,6 +6,12 @@
 3. 事件映射
 """
 
+import asyncio
+import logging
+
+import pytest
+
+import app.aria2.listener as listener
 from app.aria2.listener import (
     _http_to_ws_url,
     _calculate_backoff,
@@ -197,3 +203,113 @@ class TestListenerHelpers:
     def test_calculate_backoff_large_attempt(self):
         delay = _calculate_backoff(1000, max_delay=60, jitter=0.2, factor=2.0)
         assert delay <= 60 * 1.2
+
+
+@pytest.mark.asyncio
+async def test_same_gid_events_run_in_receive_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    calls: list[str] = []
+
+    async def fake_handle(gid: str, event: str) -> None:
+        calls.append(f"{event}:start")
+        if event == "start":
+            first_started.set()
+            await release_first.wait()
+        calls.append(f"{event}:end")
+
+    monkeypatch.setattr(listener, "handle_aria2_event", fake_handle)
+    listener._schedule_event("ordered-gid", "start")
+    listener._schedule_event("ordered-gid", "pause")
+    tail = listener._event_tails["ordered-gid"]
+
+    await first_started.wait()
+    await asyncio.sleep(0)
+    assert calls == ["start:start"]
+
+    release_first.set()
+    await tail
+    assert calls == ["start:start", "start:end", "pause:start", "pause:end"]
+
+
+@pytest.mark.asyncio
+async def test_event_task_exception_is_logged(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def fail_handle(gid: str, event: str) -> None:
+        raise RuntimeError(f"failed {gid} {event}")
+
+    monkeypatch.setattr(listener, "handle_aria2_event", fail_handle)
+    with caplog.at_level(logging.ERROR, logger="app.aria2.listener"):
+        listener._schedule_event("failing-gid", "error")
+        task = listener._event_tails["failing-gid"]
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+    assert "Event task failed gid=failing-gid" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_listener_logs_redact_connection_and_client_error_urls(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rpc_url = (
+        "https://connection-user:connection-password@aria2.example:6800/jsonrpc"
+        "?connection-token=secret#connection-fragment"
+    )
+    error_url = (
+        "wss://error-user:error-password@error.example/socket"
+        "?error-token=secret#error-fragment"
+    )
+    attempted_urls: list[str] = []
+
+    class FailingConnection:
+        async def __aenter__(self) -> None:
+            raise listener.aiohttp.ClientError(error_url)
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    class FailingSession:
+        async def __aenter__(self) -> "FailingSession":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        def ws_connect(self, url: str) -> FailingConnection:
+            attempted_urls.append(url)
+            return FailingConnection()
+
+    async def cancel_after_reconnect(_: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(listener, "get_config_value_sync", lambda _: rpc_url)
+    monkeypatch.setattr(listener.aiohttp, "ClientSession", lambda **_: FailingSession())
+    monkeypatch.setattr(listener.asyncio, "sleep", cancel_after_reconnect)
+
+    with caplog.at_level(logging.INFO, logger="app.aria2.listener"):
+        with pytest.raises(asyncio.CancelledError):
+            await listener.listen_aria2_events()
+
+    assert attempted_urls == [
+        "wss://connection-user:connection-password@aria2.example:6800/jsonrpc"
+    ]
+    assert "wss://aria2.example:6800/jsonrpc" in caplog.text
+    assert "error_type=ClientError" in caplog.text
+    assert "Reconnecting url=wss://aria2.example:6800/jsonrpc" in caplog.text
+    for secret in (
+        "connection-user",
+        "connection-password",
+        "connection-token",
+        "connection-fragment",
+        "error-user",
+        "error-password",
+        "error-token",
+        "error-fragment",
+    ):
+        assert secret not in caplog.text

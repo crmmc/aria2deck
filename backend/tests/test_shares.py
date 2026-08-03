@@ -1,6 +1,7 @@
 """Tests for file sharing feature."""
 import asyncio
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import insert, select
 
@@ -8,7 +9,10 @@ from app.core.download_limiter import download_config
 from app.core.rate_limit_config import rate_limit_config
 from app.db.engine import transaction
 from app.db.schema import share_links
-from app.routers.shares import MAX_ACTIVE_SHARES_PER_FILE
+from app.domain.errors import BadRequestError
+from app.domain.shares import MAX_ACTIVE_SHARES_PER_FILE
+from app.repositories import shares as shares_repo
+from app.services import share_service
 from tests.helpers_v0 import now_ms
 
 
@@ -50,7 +54,7 @@ def _create_share(client: TestClient, user_file_id: int, **kwargs) -> dict:
     body = {"user_file_id": user_file_id, **kwargs}
     resp = client.post("/api/shares", json=body)
     assert resp.status_code == 201, resp.text
-    return resp.json()
+    return dict(resp.json())
 
 
 def _share_download_count(share_code: str) -> int:
@@ -135,6 +139,29 @@ class TestShareManagement:
         resp = authenticated_client.post("/api/shares", json={"user_file_id": user_file["id"]})
         assert resp.status_code == 400
         assert "最多" in resp.json()["detail"]
+
+    def test_concurrent_create_share_does_not_exceed_effective_limit(
+        self, user_file, temp_db
+    ):
+        async def create_all():
+            return await asyncio.gather(
+                *(
+                    share_service.create_share(
+                        user_id=1,
+                        user_file_id=user_file["id"],
+                        password=None,
+                        expires_in=None,
+                        max_downloads=None,
+                    )
+                    for _ in range(MAX_ACTIVE_SHARES_PER_FILE + 2)
+                ),
+                return_exceptions=True,
+            )
+
+        results = asyncio.run(create_all())
+
+        assert sum(isinstance(result, dict) for result in results) == MAX_ACTIVE_SHARES_PER_FILE
+        assert sum(isinstance(result, BadRequestError) for result in results) == 2
 
     def test_list_shares(self, authenticated_client, user_file):
         _create_share(authenticated_client, user_file["id"])
@@ -229,7 +256,21 @@ class TestPublicShareAccess:
         exhausted = client.get(f"/api/s/{share['share_code']}/download")
         assert exhausted.status_code == 410
 
-    def test_range_download_does_not_increment_download_count(
+    def test_concurrent_download_count_is_consumed_once(
+        self, authenticated_client, user_file
+    ):
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+
+        async def consume_twice() -> tuple[bool, bool]:
+            return await asyncio.gather(
+                shares_repo.consume_share_download(share["id"], timestamp_ms=now_ms()),
+                shares_repo.consume_share_download(share["id"], timestamp_ms=now_ms()),
+            )
+
+        assert sorted(asyncio.run(consume_twice())) == [False, True]
+        assert _share_download_count(share["share_code"]) == 1
+
+    def test_range_download_increments_download_count_once(
         self, authenticated_client, client, user_file, monkeypatch
     ):
         _allow_anonymous_downloads(monkeypatch)
@@ -237,22 +278,91 @@ class TestPublicShareAccess:
 
         range_resp = client.get(
             f"/api/s/{share['share_code']}/download",
-            headers={"Range": "bytes=0-9"},
+            headers={"Range": "BYTES=0-9"},
         )
 
         assert range_resp.status_code == 206
         assert range_resp.content == b"x" * 10
+        assert _share_download_count(share["share_code"]) == 1
+
+        exhausted = client.get(f"/api/s/{share['share_code']}/download")
+        assert exhausted.status_code == 410
+
+    @pytest.mark.parametrize(
+        "range_header",
+        ["invalid", "bytes=2000-3000", "bytes=0-1-2", "bytes=-0"],
+    )
+    def test_invalid_range_does_not_increment_download_count(
+        self,
+        authenticated_client,
+        client,
+        user_file,
+        monkeypatch,
+        range_header,
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+
+        invalid = client.get(
+            f"/api/s/{share['share_code']}/download",
+            headers={"Range": range_header},
+        )
+
+        assert invalid.status_code == 416
+        assert invalid.headers["Content-Range"] == "bytes */1024"
         assert _share_download_count(share["share_code"]) == 0
 
-        full_resp = client.get(f"/api/s/{share['share_code']}/download")
-        assert full_resp.status_code == 200
+        valid = client.get(
+            f"/api/s/{share['share_code']}/download",
+            headers={"Range": "bytes=0-0"},
+        )
+        assert valid.status_code == 206
         assert _share_download_count(share["share_code"]) == 1
+
+    @pytest.mark.parametrize("range_header", ["items=0-9", "bytes=0-9,20-29"])
+    def test_ignored_range_counts_as_full_download(
+        self,
+        authenticated_client,
+        client,
+        user_file,
+        monkeypatch,
+        range_header,
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+
+        response = client.get(
+            f"/api/s/{share['share_code']}/download",
+            headers={"Range": range_header},
+        )
+
+        assert response.status_code == 200
+        assert len(response.content) == 1024
+        assert "Content-Range" not in response.headers
+        assert _share_download_count(share["share_code"]) == 1
+
+        exhausted = client.get(f"/api/s/{share['share_code']}/download")
+        assert exhausted.status_code == 410
+
+    def test_invalid_target_does_not_increment_download_count(
+        self, authenticated_client, client, user_file, monkeypatch
+    ):
+        _allow_anonymous_downloads(monkeypatch)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+
+        invalid = client.get(
+            f"/api/s/{share['share_code']}/download",
+            params={"subpath": "other.bin"},
+        )
+
+        assert invalid.status_code == 400
+        assert _share_download_count(share["share_code"]) == 0
 
     def test_range_downloads_are_not_limited_by_public_api_rate_limit(
         self, authenticated_client, client, user_file, monkeypatch
     ):
         _allow_anonymous_downloads(monkeypatch)
-        share = _create_share(authenticated_client, user_file["id"], max_downloads=1)
+        share = _create_share(authenticated_client, user_file["id"], max_downloads=2)
         original_limit = rate_limit_config.public_api
         rate_limit_config.public_api = 1
         try:
@@ -271,7 +381,7 @@ class TestPublicShareAccess:
         assert first.content == b"x" * 10
         assert second.status_code == 206
         assert second.content == b"x" * 10
-        assert _share_download_count(share["share_code"]) == 0
+        assert _share_download_count(share["share_code"]) == 2
 
     def test_empty_range_header_counts_as_full_download(
         self, authenticated_client, client, user_file, monkeypatch
@@ -307,21 +417,34 @@ class TestPublicShareAccess:
         )
         assert range_resp.status_code == 410
 class TestDeleteProtection:
-    def test_delete_blocked_by_active_share(self, authenticated_client, user_file):
-        """File with active share cannot be deleted."""
-        _create_share(authenticated_client, user_file["id"])
-        resp = authenticated_client.delete("/api/files/hash_testfile")
-        assert resp.status_code == 403
-        assert "分享" in resp.json()["detail"]
+    @staticmethod
+    def assert_pending(resp) -> None:
+        assert resp.status_code == 202
+        assert resp.json() == {
+            "ok": True,
+            "state": "pending",
+            "accepted": True,
+        }
+
+    def test_delete_revokes_active_share(self, authenticated_client, user_file):
+        share = _create_share(authenticated_client, user_file["id"])
+        self.assert_pending(
+            authenticated_client.delete("/api/files/hash_testfile")
+        )
+
+        shared = authenticated_client.get(f"/api/s/{share['share_code']}")
+        assert shared.status_code == 404
+
     def test_delete_allowed_after_revoke(self, authenticated_client, user_file):
-        """File can be deleted after all shares are revoked."""
         share = _create_share(authenticated_client, user_file["id"])
         authenticated_client.put(f"/api/shares/{share['id']}/revoke")
-        resp = authenticated_client.delete("/api/files/hash_testfile")
-        assert resp.status_code == 200
+        self.assert_pending(
+            authenticated_client.delete("/api/files/hash_testfile")
+        )
 
-    def test_delete_allowed_after_share_downloads_exhausted(self, authenticated_client, user_file):
-        """File can be deleted after max-download share is exhausted."""
+    def test_delete_allowed_after_share_downloads_exhausted(
+        self, authenticated_client, user_file
+    ):
         _insert_share_v0(
             share_code="exhausted",
             owner_id=1,
@@ -329,12 +452,11 @@ class TestDeleteProtection:
             max_downloads=1,
             download_count=1,
         )
-
-        resp = authenticated_client.delete("/api/files/hash_testfile")
-
-        assert resp.status_code == 200
+        self.assert_pending(
+            authenticated_client.delete("/api/files/hash_testfile")
+        )
 
     def test_delete_allowed_no_shares(self, authenticated_client, user_file):
-        """File without shares can be deleted normally."""
-        resp = authenticated_client.delete("/api/files/hash_testfile")
-        assert resp.status_code == 200
+        self.assert_pending(
+            authenticated_client.delete("/api/files/hash_testfile")
+        )

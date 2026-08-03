@@ -1,5 +1,7 @@
 """Tests for config router endpoints."""
 
+import logging
+
 import pytest
 from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
@@ -33,6 +35,24 @@ def test_tokens_use_current_schema(authenticated_client: TestClient):
 def admin_client(client: TestClient, admin_session: str) -> TestClient:
     client.cookies.set(settings.session_cookie_name, admin_session)
     return client
+
+
+ARIA2_LOG_URL = (
+    "https://probe-user:probe-password@example.com/jsonrpc?token=probe-token"
+    "&signature=probe-signature#probe-fragment"
+)
+
+
+def assert_aria2_log_redacted(caplog):
+    assert "https://example.com/jsonrpc" in caplog.text
+    for secret in (
+        "probe-user",
+        "probe-password",
+        "probe-token",
+        "probe-signature",
+        "probe-fragment",
+    ):
+        assert secret not in caplog.text
 
 
 class TestGetConfig:
@@ -302,18 +322,20 @@ class TestAria2Version:
 
 
 class TestAria2Test:
-    def test_test_aria2_connection_success(self, admin_client: TestClient):
+    def test_test_aria2_connection_success(self, admin_client: TestClient, caplog):
         mock_client = AsyncMock()
         mock_client.get_version.return_value = {
             "version": "1.36.0",
             "enabledFeatures": ["BitTorrent"],
         }
 
-        with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client):
+        with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client), caplog.at_level(
+            logging.INFO, logger="app.services.aria2_admin_service"
+        ):
             response = admin_client.post(
                 "/api/config/aria2/test",
                 json={
-                    "aria2_rpc_url": "http://localhost:6800/jsonrpc",
+                    "aria2_rpc_url": ARIA2_LOG_URL,
                     "aria2_rpc_secret": "test_secret",
                 },
             )
@@ -322,20 +344,24 @@ class TestAria2Test:
         data = response.json()
         assert data["connected"] is True
         assert data["version"] == "1.36.0"
+        assert_aria2_log_redacted(caplog)
 
-    def test_test_aria2_connection_failed(self, admin_client: TestClient):
+    def test_test_aria2_connection_failed(self, admin_client: TestClient, caplog):
         mock_client = AsyncMock()
-        mock_client.get_version.side_effect = Exception("Connection refused")
+        mock_client.get_version.side_effect = RuntimeError(ARIA2_LOG_URL)
 
-        with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client):
+        with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client), caplog.at_level(
+            logging.WARNING, logger="app.services.aria2_admin_service"
+        ):
             response = admin_client.post(
                 "/api/config/aria2/test",
-                json={"aria2_rpc_url": "http://localhost:6800/jsonrpc"},
+                json={"aria2_rpc_url": ARIA2_LOG_URL},
             )
 
         assert response.status_code == 200
         data = response.json()
         assert data["connected"] is False
+        assert_aria2_log_redacted(caplog)
 
     def test_test_aria2_empty_url(self, admin_client: TestClient):
         response = admin_client.post(

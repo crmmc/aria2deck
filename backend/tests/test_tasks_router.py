@@ -35,6 +35,15 @@ def _valid_torrent_payload() -> tuple[str, str]:
     ).hexdigest()
 
 
+def _torrent_with_network_field(field: bytes, url: bytes) -> str:
+    def bstr(value: bytes) -> bytes:
+        return str(len(value)).encode("ascii") + b":" + value
+
+    info = b"d4:name4:test6:lengthi1e12:piece lengthi16384e6:pieces20:01234567890123456789e"
+    torrent = b"d" + bstr(field) + bstr(url) + b"4:info" + info + b"e"
+    return base64.b64encode(torrent).decode("ascii")
+
+
 def _multi_file_torrent_payload() -> tuple[str, str]:
     def bstr(value: bytes) -> bytes:
         return str(len(value)).encode("ascii") + b":" + value
@@ -99,6 +108,7 @@ class TestSSRFProtection:
         assert is_private_ip(ipaddress.ip_address("10.0.0.1")) is True
         assert is_private_ip(ipaddress.ip_address("172.16.0.1")) is True
         assert is_private_ip(ipaddress.ip_address("192.168.1.1")) is True
+        assert is_private_ip(ipaddress.ip_address("100.64.0.1")) is True
 
     def test_is_private_ip_public(self) -> None:
         import ipaddress
@@ -142,7 +152,7 @@ class TestSSRFProtection:
     async def test_check_url_safety_no_hostname(self) -> None:
         from app.services.task_service import check_url_safety
 
-        with pytest.raises(BadRequestError) as exc_info:
+        with pytest.raises(BadRequestError):
             await check_url_safety("http:///file.zip")
 
     @pytest.mark.asyncio
@@ -396,7 +406,7 @@ class TestCreateTask:
     @patch("app.services.task_service.probe_url_with_get_fallback")
     @patch("app.services.task_service._get_client")
     @patch("app.services.task_service.check_disk_space")
-    def test_create_task_success_creates_v0_user_task(
+    def test_create_task_submits_validated_final_url(
         self,
         mock_disk: MagicMock,
         mock_get_client: MagicMock,
@@ -405,30 +415,34 @@ class TestCreateTask:
         mock_aria2_client: AsyncMock,
         test_user: dict,
     ) -> None:
+        initial_url = "http://example.com/start"
+        final_url = "http://cdn.example.com/file.zip"
         mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
         mock_get_client.return_value = mock_aria2_client
         mock_result = MagicMock()
         mock_result.success = True
-        mock_result.final_url = "http://example.com/file.zip"
+        mock_result.final_url = final_url
         mock_result.filename = "file.zip"
         mock_result.content_length = 100 * 1024 * 1024
         mock_probe.return_value = mock_result
 
         response = authenticated_client.post(
             "/api/tasks",
-            json={"uri": "http://example.com/file.zip"},
+            json={"uri": initial_url},
         )
 
         assert response.status_code == 201
         data = response.json()
-        assert data["uri"] == "http://example.com/file.zip"
+        assert data["uri"] == final_url
         assert data["status"] == "active"
         assert data["name"] == "file.zip"
         assert data["total_length"] == 100 * 1024 * 1024
         assert data["frozen_space"] == 100 * 1024 * 1024
 
+        resource_key = get_uri_hash(final_url)
+        assert resource_key is not None
         global_download = asyncio.run(
-            get_global_by_resource_key(get_uri_hash("http://example.com/file.zip"))
+            get_global_by_resource_key(resource_key)
         )
         assert global_download is not None
         task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
@@ -436,7 +450,7 @@ class TestCreateTask:
         assert data["id"] == task["id"]
         mock_aria2_client.add_uri.assert_awaited_once()
         call_args = mock_aria2_client.add_uri.call_args
-        assert call_args[0][0] == ["http://example.com/file.zip"]
+        assert call_args[0][0] == [final_url]
         opts = call_args[0][1]
         assert "dir" in opts
         assert opts["dir"].endswith(f"/downloading/{global_download['id']}")
@@ -444,6 +458,14 @@ class TestCreateTask:
 
 
 class TestTorrentPreview:
+    @pytest.fixture(autouse=True)
+    def public_dns(self):
+        with patch(
+            "app.core.security.socket.getaddrinfo",
+            return_value=_public_dns_result(),
+        ):
+            yield
+
     def test_torrent_preview_unauthorized(self, client: TestClient) -> None:
         response = client.post("/api/tasks/torrent/preview", json={"torrent": "abc123"})
 
@@ -486,10 +508,39 @@ class TestTorrentPreview:
 
 
 class TestCreateTorrentTask:
+    @pytest.fixture(autouse=True)
+    def public_dns(self):
+        with patch(
+            "app.core.security.socket.getaddrinfo",
+            return_value=_public_dns_result(),
+        ):
+            yield
+
     def test_create_torrent_unauthorized(self, client: TestClient) -> None:
         response = client.post("/api/tasks/torrent", json={"torrent": "abc123"})
 
         assert response.status_code == 401
+
+    @pytest.mark.parametrize("field", [b"announce", b"url-list"])
+    def test_create_torrent_rejects_private_embedded_endpoint(
+        self,
+        field: bytes,
+        authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
+    ) -> None:
+        torrent = _torrent_with_network_field(
+            field,
+            b"http://100.64.0.4/private",
+        )
+
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={"torrent": torrent},
+        )
+
+        assert response.status_code == 400
+        assert "内网地址" in response.json()["detail"]
+        mock_aria2_client.add_torrent.assert_not_awaited()
 
     def test_create_torrent_invalid_base64(
         self,
@@ -1382,3 +1433,70 @@ class TestRateLimiting:
 
         assert response.status_code == 429
         assert "操作过于频繁" in response.json()["detail"]
+
+
+class TestV2TaskPagination:
+    def test_v2_tasks_paginate_filtered_rows_and_only_refresh_page(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+        test_admin: dict,
+    ) -> None:
+        task_ids = []
+        for index, status in enumerate(("active", "active", "completed")):
+            download = asyncio.run(
+                create_global_download_v0(
+                    resource_key=f"v2-tasks-{index}",
+                    resource_kind="http",
+                    status=status,
+                    aria2_gid=f"v2-gid-{index}",
+                    display_name=f"v2-{index}.bin",
+                )
+            )
+            task = asyncio.run(
+                create_user_task_v0(
+                    user_id=test_user["id"],
+                    global_download_id=download["id"],
+                    status=status,
+                    display_name=f"v2-{index}.bin",
+                )
+            )
+            task_ids.append(task["id"])
+
+        foreign_download = asyncio.run(
+            create_global_download_v0(
+                resource_key="v2-tasks-foreign",
+                resource_kind="http",
+                status="active",
+                display_name="foreign.bin",
+            )
+        )
+        asyncio.run(
+            create_user_task_v0(
+                user_id=test_admin["id"],
+                global_download_id=foreign_download["id"],
+                status="active",
+                display_name="foreign.bin",
+            )
+        )
+
+        with patch(
+            "app.services.task_service.fetch_active_live_statuses_by_gid",
+            new=AsyncMock(return_value={}),
+        ) as fetch_live:
+            response = authenticated_client.get(
+                "/api/v2/tasks?status_filter=current&page=1&page_size=1"
+            )
+
+        assert isinstance(authenticated_client.get("/api/tasks").json(), list)
+        assert response.status_code == 200
+        payload = response.json()
+        assert set(payload) == {"items", "total", "page", "page_size"}
+        assert payload["total"] == 2
+        assert payload["page"] == 1
+        assert payload["page_size"] == 1
+        assert payload["items"][0]["id"] == task_ids[1]
+        fetch_call = fetch_live.await_args
+        assert fetch_call is not None
+        assert len(fetch_call.args[0]) == 1
+        assert authenticated_client.get("/api/v2/tasks?page=9&page_size=1").json()["items"] == []

@@ -224,19 +224,19 @@ def safe_delete_path(
 
 
 def get_store_path_for_hash(content_hash: str) -> Path:
-    """Get the store path for a content hash.
+    from app.services.storage_index import CONTENT_HASH_V2, content_identity_from_content_hash
 
-    Uses first 2 characters as subdirectory for better filesystem distribution.
-
-    Args:
-        content_hash: The content hash (hex string)
-
-    Returns:
-        Path like /store/ab/abc123.../
-    """
-    prefix = content_hash[:2]
+    identity = content_identity_from_content_hash(content_hash)
     store_dir = get_store_dir()
-    return store_dir / prefix / content_hash
+    if identity.version == CONTENT_HASH_V2:
+        return store_dir / "v2" / identity.object_kind / identity.digest[:2] / identity.digest
+    if not content_hash or Path(content_hash).name != content_hash:
+        raise ValueError("invalid legacy content key")
+    return store_dir / content_hash[:2] / content_hash
+
+
+def is_canonical_store_path(path: Path, content_hash: str) -> bool:
+    return path.resolve(strict=False) == get_store_path_for_hash(content_hash).resolve(strict=False)
 
 
 async def cleanup_task_download_dir(task_id: int) -> None:

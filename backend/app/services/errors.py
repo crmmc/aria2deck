@@ -12,6 +12,19 @@ from app.domain.errors import (
     UnauthorizedError,
 )
 
+__all__ = [
+    "BadRequestError",
+    "ConflictError",
+    "DomainError",
+    "ForbiddenError",
+    "GoneError",
+    "InternalDomainError",
+    "InternalServiceError",
+    "NotFoundError",
+    "ServiceError",
+    "TooManyRequestsError",
+    "UnauthorizedError",
+]
 
 ServiceError = DomainError
 InternalServiceError = InternalDomainError

@@ -1,5 +1,6 @@
 """Tests for main.py application setup and lifespan."""
 
+import asyncio
 import hashlib
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -20,6 +21,19 @@ def _client_password_hash(password: str, username: str) -> str:
         10000,
     )
     return digest.hex()
+
+
+def _startup_repair_result(
+    *, safe_for_cleanup: bool = True, unresolved_files: int = 0
+) -> dict[str, object]:
+    return {
+        "orphan_files_found": unresolved_files,
+        "stored_files_created": 0,
+        "unresolved_files": unresolved_files,
+        "tasks_repaired": 0,
+        "errors": ["unresolved"] if unresolved_files else [],
+        "safe_for_cleanup": safe_for_cleanup,
+    }
 
 
 class TestSetupLogging:
@@ -83,21 +97,23 @@ class TestCreateApp:
         middleware_classes = [m.cls.__name__ for m in app.user_middleware]
         assert "CORSMiddleware" in middleware_classes
 
-    def test_aria2_rpc_allows_null_origin_preflight(self):
-        """Test aria2 RPC allows browser clients that send Origin: null."""
+    def test_aria2_rpc_null_origin_requires_explicit_setting(self, monkeypatch):
+        """Production rejects Origin: null unless the dedicated flag is enabled."""
+        from app.core.config import settings
         from app.main import create_app
 
-        app = create_app()
-        client = TestClient(app)
+        monkeypatch.setattr(settings, "debug", False)
+        monkeypatch.setattr(settings, "allow_null_origin", False)
+        monkeypatch.setattr(settings, "cors_origins", "")
+        headers = {
+            "Origin": "null",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        }
+        assert TestClient(create_app()).options("/aria2/jsonrpc", headers=headers).status_code == 400
 
-        response = client.options(
-            "/aria2/jsonrpc",
-            headers={
-                "Origin": "null",
-                "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "content-type",
-            },
-        )
+        monkeypatch.setattr(settings, "allow_null_origin", True)
+        response = TestClient(create_app()).options("/aria2/jsonrpc", headers=headers)
 
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == "null"
@@ -105,6 +121,20 @@ class TestCreateApp:
         assert "content-type" in response.headers[
             "access-control-allow-headers"
         ].lower()
+
+    def test_request_audit_omits_query_string(self, caplog):
+        """Test audit logs do not expose query-string credentials."""
+        import logging
+
+        from app.main import create_app
+
+        client = TestClient(create_app())
+        with caplog.at_level(logging.WARNING, logger="app.main"):
+            response = client.get("/api/not-found?token=super-secret-token")
+
+        assert response.status_code == 404
+        assert "GET /api/not-found -> 404" in caplog.text
+        assert "super-secret-token" not in caplog.text
 
 
 class TestStaticAliasMiddleware:
@@ -221,7 +251,10 @@ class TestLifespan:
             with (
                 patch("app.main.sync_tasks", new=AsyncMock()),
                 patch("app.main.listen_aria2_events", new=AsyncMock()),
-                patch("app.main.run_startup_repair", new=AsyncMock()),
+                patch(
+                    "app.main.run_startup_repair",
+                    new=AsyncMock(return_value=_startup_repair_result()),
+                ),
                 patch(
                     "app.services.orphan_cleanup.cleanup_orphan_files", new=AsyncMock()
                 ),
@@ -313,8 +346,12 @@ class TestLifespan:
 
         old_db_path = settings.database_path
         old_download_dir = settings.download_dir
+        old_secret_key = settings.secret_key
+        old_credential_pepper = settings.credential_pepper
         settings.database_path = str(db_path)
         settings.download_dir = str(tmp_path / "downloads")
+        settings.secret_key = "s" * 32
+        settings.credential_pepper = "p" * 32
         reset_engine()
         try:
             with pytest.raises(RuntimeError, match="Unsupported database schema"):
@@ -323,6 +360,8 @@ class TestLifespan:
         finally:
             settings.database_path = old_db_path
             settings.download_dir = old_download_dir
+            settings.secret_key = old_secret_key
+            settings.credential_pepper = old_credential_pepper
             reset_engine()
 
     def test_app_startup_rejects_unwritable_download_dir(self, tmp_path):
@@ -402,6 +441,210 @@ class TestLifespan:
             settings.download_dir = old_download_dir
             settings.debug = old_debug
             reset_engine()
+
+    @pytest.mark.asyncio
+    async def test_lifespan_waits_for_maintenance_and_always_cleans_up(
+        self, temp_db
+    ):
+        """Test maintenance precedes workers and shutdown survives app errors."""
+        from fastapi import FastAPI
+
+        from app.main import lifespan
+
+        events: list[str] = []
+
+        async def record_pack_recovery() -> None:
+            events.append("pack-recovery")
+
+        async def record_accounting(_client: object) -> dict[str, int]:
+            events.append("download-accounting")
+            return {"rebuilt": 0, "failed": 0}
+
+        async def record_repair() -> dict[str, object]:
+            events.append("repair")
+            return _startup_repair_result()
+
+        async def record_cleanup() -> None:
+            events.append("cleanup")
+
+        async def record_pack_submit() -> None:
+            events.append("pack-submit")
+
+        async def run_background(name: str) -> None:
+            events.append(name)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                events.append(f"{name}-stopped")
+
+        async def run_sync(_: float) -> None:
+            await run_background("sync")
+
+        async def run_listener() -> None:
+            await run_background("listener")
+
+        close_session = AsyncMock()
+        dispose = AsyncMock()
+        with (
+            patch("app.core.config.check_secret_key"),
+            patch("app.main.ensure_default_admin_v0", new=AsyncMock()),
+            patch(
+                "app.services.pack.PackTaskManager.recover_startup",
+                new=AsyncMock(side_effect=record_pack_recovery),
+            ),
+            patch(
+                "app.main.rebuild_active_download_accounting",
+                new=record_accounting,
+            ),
+            patch(
+                "app.services.pack.PackTaskManager.submit_pending",
+                new=AsyncMock(side_effect=record_pack_submit),
+            ),
+            patch("app.main.run_startup_repair", new=record_repair),
+            patch(
+                "app.services.orphan_cleanup.cleanup_orphan_files",
+                new=record_cleanup,
+            ),
+            patch("app.main.sync_tasks", new=run_sync),
+            patch("app.main.listen_aria2_events", new=run_listener),
+            patch("app.main.Aria2Client.close_session", close_session),
+            patch("app.main.dispose_engine", dispose),
+        ):
+            with pytest.raises(RuntimeError, match="application failure"):
+                async with lifespan(FastAPI()):
+                    assert events == [
+                        "pack-recovery",
+                        "download-accounting",
+                        "repair",
+                        "cleanup",
+                        "pack-submit",
+                    ]
+                    await asyncio.sleep(0)
+                    assert events[:5] == [
+                        "pack-recovery",
+                        "download-accounting",
+                        "repair",
+                        "cleanup",
+                        "pack-submit",
+                    ]
+                    assert {"sync", "listener"}.issubset(events)
+                    raise RuntimeError("application failure")
+
+        assert {"sync-stopped", "listener-stopped"}.issubset(events)
+        close_session.assert_awaited_once()
+        dispose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_lifespan_repair_exception_skips_orphan_cleanup(self, temp_db):
+        """A failed repair must not allow destructive orphan cleanup."""
+        from fastapi import FastAPI
+
+        from app.core.config import settings
+        from app.main import lifespan
+
+        candidate = (
+            Path(settings.download_dir) / "store" / "aa" / ("a" * 64)
+        )
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_bytes(b"keep")
+        cleanup = AsyncMock()
+        sync = AsyncMock()
+        listener = AsyncMock()
+        with (
+            patch("app.core.config.check_secret_key"),
+            patch("app.main.ensure_default_admin_v0", new=AsyncMock()),
+            patch(
+                "app.main.run_startup_repair",
+                new=AsyncMock(side_effect=RuntimeError("repair failed")),
+            ),
+            patch(
+                "app.services.orphan_cleanup.cleanup_orphan_files",
+                new=cleanup,
+            ),
+            patch("app.main.sync_tasks", sync),
+            patch("app.main.listen_aria2_events", listener),
+            patch("app.main.Aria2Client.close_session", new=AsyncMock()),
+            patch("app.main.dispose_engine", new=AsyncMock()),
+        ):
+            async with lifespan(FastAPI()):
+                await asyncio.sleep(0)
+
+        cleanup.assert_not_awaited()
+        assert candidate.read_bytes() == b"keep"
+        sync.assert_awaited_once()
+        listener.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_lifespan_unresolved_repair_skips_orphan_cleanup(self, temp_db):
+        """An unresolved repair candidate must remain on disk."""
+        from fastapi import FastAPI
+
+        from app.core.config import settings
+        from app.main import lifespan
+
+        candidate = (
+            Path(settings.download_dir) / "store" / "bb" / ("b" * 64)
+        )
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_bytes(b"keep")
+        cleanup = AsyncMock()
+        with (
+            patch("app.core.config.check_secret_key"),
+            patch("app.main.ensure_default_admin_v0", new=AsyncMock()),
+            patch(
+                "app.main.run_startup_repair",
+                new=AsyncMock(
+                    return_value=_startup_repair_result(
+                        safe_for_cleanup=False, unresolved_files=1
+                    )
+                ),
+            ),
+            patch(
+                "app.services.orphan_cleanup.cleanup_orphan_files",
+                new=cleanup,
+            ),
+            patch("app.main.sync_tasks", new=AsyncMock()),
+            patch("app.main.listen_aria2_events", new=AsyncMock()),
+            patch("app.main.Aria2Client.close_session", new=AsyncMock()),
+            patch("app.main.dispose_engine", new=AsyncMock()),
+        ):
+            async with lifespan(FastAPI()):
+                await asyncio.sleep(0)
+
+        cleanup.assert_not_awaited()
+        assert candidate.read_bytes() == b"keep"
+
+    @pytest.mark.asyncio
+    async def test_background_task_logs_unexpected_failure(self, caplog):
+        """Unexpected worker exits are logged immediately."""
+        import logging
+
+        from app.main import _run_background_task
+
+        async def fail() -> None:
+            raise RuntimeError("worker failed")
+
+        with caplog.at_level(logging.ERROR, logger="app.main"):
+            with pytest.raises(RuntimeError, match="worker failed"):
+                await _run_background_task("sync_tasks", fail())
+
+        assert "后台任务意外退出: sync_tasks" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_application_singleton_lease_rejects_second_instance(
+    temp_db: str,
+) -> None:
+    from app.services.singleton_lease import ApplicationSingletonLease
+
+    first = ApplicationSingletonLease.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="仅支持单 worker"):
+            ApplicationSingletonLease.acquire()
+    finally:
+        first.release()
+    replacement = ApplicationSingletonLease.acquire()
+    replacement.release()
 
 
 class TestApplicationState:

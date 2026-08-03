@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from app.auth import AuthUser, require_user
+from app.auth import AuthUser, require_limited_api_user, require_session_user
 from app.core.download_limiter import download_limiter
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
 from app.domain.errors import DomainError
 from app.http.errors import raise_http
-from app.http.file_response import range_file_response, tracked_response
+from app.http.file_response import (
+    range_file_response,
+    release_response_leases,
+    tracked_response,
+)
 from app.services import file_service, pack as pack_service
 
 logger = logging.getLogger(__name__)
@@ -54,24 +58,13 @@ def _require_user_id(user: AuthUser) -> int:
     return int(user.id)
 
 
-async def _ensure_authenticated(user_id: int, scope: RateLimitScope = RateLimitScope.AUTHENTICATED_API) -> None:
-    await ensure_authenticated_allowed(
-        user_id,
-        scope,
-        detail="请求过于频繁，请稍后再试"
-        if scope == RateLimitScope.AUTHENTICATED_API
-        else "操作过于频繁，请稍后再试",
-    )
-
-
 @router.get("", response_model=FileListResponse)
 async def list_files(
     page: int = 1,
     page_size: int = 10,
-    user: AuthUser = Depends(require_user),
+    user: AuthUser = Depends(require_limited_api_user),
 ) -> FileListResponse:
     user_id = _require_user_id(user)
-    await _ensure_authenticated(user_id)
     result = await file_service.list_files(
         user_id,
         user.quota,
@@ -92,10 +85,9 @@ async def list_files(
 async def browse_file(
     file_hash: str,
     path: str = "",
-    user: AuthUser = Depends(require_user),
+    user: AuthUser = Depends(require_limited_api_user),
 ) -> list[dict]:
     user_id = _require_user_id(user)
-    await _ensure_authenticated(user_id)
     try:
         files = await file_service.browse_file(user_id, file_hash, path)
     except DomainError as exc:
@@ -110,7 +102,7 @@ async def download_file(
     file_hash: str,
     request: Request,
     path: str = "",
-    user: AuthUser = Depends(require_user),
+    user: AuthUser = Depends(require_session_user),
 ):
     user_id = _require_user_id(user)
     acquire_result = await download_limiter.acquire_authenticated(user_id, file_hash)
@@ -121,69 +113,85 @@ async def download_file(
         )
 
     lease = acquire_result.lease
+    read_lease = None
+    response_transferred = False
     try:
-        target_path, download_name = await file_service.resolve_download_target(
-            user_id,
-            file_hash,
-            path,
+        target_path, download_name, read_lease = (
+            await file_service.resolve_download_target_with_read_lease(
+                user_id,
+                file_hash,
+                path,
+            )
         )
         logger.info("下载文件成功 user_id=%s file_hash=%s file=%s", user_id, file_hash, download_name)
-        return tracked_response(
+        response = tracked_response(
             range_file_response(request, target_path, download_name),
             lease,
+            read_lease,
         )
+        response_transferred = True
+        return response
     except DomainError as exc:
-        if lease is not None:
-            await lease.release()
         raise_http(exc)
-    except Exception:
-        if lease is not None:
-            await lease.release()
-        raise
+    finally:
+        if not response_transferred:
+            await release_response_leases(lease, read_lease)
 
 
 @router.delete("/pack")
 async def clear_finished_pack_tasks(
-    user: AuthUser = Depends(require_user),
+    user: AuthUser = Depends(require_limited_api_user),
 ) -> dict:
     return await pack_service.clear_finished_pack_tasks(_require_user_id(user))
 
 
 @router.delete("/pack/{task_id}")
 async def cancel_or_delete_pack_task(
-    task_id: int, user: AuthUser = Depends(require_user)
+    task_id: int, user: AuthUser = Depends(require_limited_api_user)
 ) -> dict:
     try:
         return await pack_service.cancel_or_delete_pack_task(
             _require_user_id(user),
-            user.quota,
             task_id,
         )
     except DomainError as exc:
         raise_http(exc)
+        raise AssertionError("unreachable")
 
 
 @router.delete("/{file_hash}")
 async def delete_file(
     file_hash: str,
-    user: AuthUser = Depends(require_user),
+    response: Response,
+    user: AuthUser = Depends(require_limited_api_user),
 ) -> dict:
     user_id = _require_user_id(user)
     try:
-        await file_service.delete_file_by_hash(user_id, file_hash)
+        result = await file_service.delete_file_by_hash(user_id, file_hash)
     except DomainError as exc:
         logger.warning("删除文件失败 user_id=%s file_hash=%s error=%s", user_id, file_hash, exc.detail)
         raise_http(exc)
 
-    logger.info("删除文件成功 user_id=%s file_hash=%s", user_id, file_hash)
-    return {"ok": True}
+    if result.accepted:
+        response.status_code = status.HTTP_202_ACCEPTED
+    logger.info(
+        "删除文件已受理 user_id=%s file_hash=%s state=%s",
+        user_id,
+        file_hash,
+        result.state,
+    )
+    return {
+        "ok": True,
+        "state": result.state,
+        "accepted": result.accepted,
+    }
 
 
 @router.put("/{file_hash}/rename")
 async def rename_file(
     file_hash: str,
     payload: RenameRequest,
-    user: AuthUser = Depends(require_user),
+    user: AuthUser = Depends(require_limited_api_user),
 ) -> dict:
     user_id = _require_user_id(user)
     try:
@@ -196,9 +204,8 @@ async def rename_file(
 
 
 @router.get("/space")
-async def get_space(user: AuthUser = Depends(require_user)) -> dict:
+async def get_space(user: AuthUser = Depends(require_limited_api_user)) -> dict:
     user_id = _require_user_id(user)
-    await _ensure_authenticated(user_id)
     space_info = await file_service.get_user_space_info(user_id, user.quota)
     logger.debug("查询空间信息 user_id=%s", user_id)
     return {
@@ -211,10 +218,9 @@ async def get_space(user: AuthUser = Depends(require_user)) -> dict:
 
 @router.post("/pack/calculate-size")
 async def calculate_paths_size(
-    payload: CalculateSizeRequest, user: AuthUser = Depends(require_user)
+    payload: CalculateSizeRequest, user: AuthUser = Depends(require_limited_api_user)
 ) -> dict:
     user_id = _require_user_id(user)
-    await _ensure_authenticated(user_id)
     try:
         total_size = await pack_service.calculate_user_files_size(user_id, payload.file_ids)
     except DomainError as exc:
@@ -223,20 +229,23 @@ async def calculate_paths_size(
 
 
 @router.get("/pack/available-space")
-async def get_pack_available_space(user: AuthUser = Depends(require_user)) -> dict:
+async def get_pack_available_space(user: AuthUser = Depends(require_limited_api_user)) -> dict:
     user_id = _require_user_id(user)
-    await _ensure_authenticated(user_id)
-    info = await file_service.get_user_space_info(user_id, user.quota)
-    return {"available": info["available"], "quota": info["quota"], "used": info["used"]}
+    info = await pack_service.get_pack_available_space_info(user_id)
+    return info
 
 
 @router.post("/pack", status_code=status.HTTP_201_CREATED)
 async def create_pack_task(
     payload: PackRequest,
-    user: AuthUser = Depends(require_user),
+    user: AuthUser = Depends(require_limited_api_user),
 ) -> dict:
     user_id = _require_user_id(user)
-    await _ensure_authenticated(user_id, RateLimitScope.CREATE_PACK)
+    await ensure_authenticated_allowed(
+        user_id,
+        RateLimitScope.CREATE_PACK,
+        detail="操作过于频繁，请稍后再试",
+    )
     try:
         result = await pack_service.create_pack_task_from_user_files(
             user_id=user_id,
@@ -253,18 +262,16 @@ async def create_pack_task(
 
 
 @router.get("/pack")
-async def list_pack_tasks(user: AuthUser = Depends(require_user)) -> list[dict]:
+async def list_pack_tasks(user: AuthUser = Depends(require_limited_api_user)) -> list[dict]:
     user_id = _require_user_id(user)
-    await _ensure_authenticated(user_id)
     tasks = await pack_service.list_pack_tasks(user_id)
     logger.debug("查询打包任务列表 user_id=%s count=%s", user_id, len(tasks))
     return tasks
 
 
 @router.get("/pack/{task_id}")
-async def get_pack_task(task_id: int, user: AuthUser = Depends(require_user)) -> dict:
+async def get_pack_task(task_id: int, user: AuthUser = Depends(require_limited_api_user)) -> dict:
     user_id = _require_user_id(user)
-    await _ensure_authenticated(user_id)
     try:
         task = await pack_service.get_pack_task(user_id, task_id)
     except DomainError as exc:
@@ -275,9 +282,8 @@ async def get_pack_task(task_id: int, user: AuthUser = Depends(require_user)) ->
 
 
 @router.get("/quota")
-async def get_quota(user: AuthUser = Depends(require_user)) -> dict:
+async def get_quota(user: AuthUser = Depends(require_limited_api_user)) -> dict:
     user_id = _require_user_id(user)
-    await _ensure_authenticated(user_id)
     space_info = await file_service.get_user_space_info(user_id, user.quota)
     total = space_info["total"]
     percentage = (space_info["used"] / total * 100) if total > 0 else 0

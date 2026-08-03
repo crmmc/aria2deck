@@ -6,6 +6,11 @@ from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "app"
 
+
+def _line_number(node: ast.AST) -> int:
+    lineno = getattr(node, "lineno", None)
+    return lineno if isinstance(lineno, int) else 0
+
 def _python_files(*relative_dirs: str) -> list[Path]:
     files: list[Path] = []
     for relative_dir in relative_dirs:
@@ -67,7 +72,7 @@ def test_non_router_layers_do_not_import_router_modules() -> None:
             imported = _imports_router(node)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -86,7 +91,7 @@ def test_ws_router_does_not_import_connection_helpers_from_aria2_sync() -> None:
         blocked = imported_names & {"register_ws", "unregister_ws"}
         if blocked:
             relative = path.relative_to(APP_ROOT.parent)
-            offenders.append(f"{relative}:{node.lineno} imports {sorted(blocked)}")
+            offenders.append(f"{relative}:{_line_number(node)} imports {sorted(blocked)}")
 
     assert offenders == []
 
@@ -115,7 +120,7 @@ def test_domain_modules_do_not_import_outer_layers_or_frameworks() -> None:
             imported = _imports_blocked_module_prefix(node, blocked_modules)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -137,7 +142,7 @@ def test_routers_do_not_import_direct_db_or_sqlalchemy_modules() -> None:
             imported = _imports_blocked_module_prefix(node, blocked_modules)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -154,7 +159,7 @@ def test_routers_do_not_construct_sqlalchemy_queries_or_transactions() -> None:
                 name = func.id if isinstance(func, ast.Name) else None
                 if name in blocked_names:
                     relative = path.relative_to(APP_ROOT.parent)
-                    offenders.append(f"{relative}:{node.lineno} calls {name}()")
+                    offenders.append(f"{relative}:{_line_number(node)} calls {name}()")
 
     assert offenders == []
 
@@ -167,7 +172,7 @@ def test_routers_do_not_import_other_router_modules() -> None:
             imported = _imports_router(node)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -189,7 +194,7 @@ def test_aria2_modules_do_not_import_db_repositories_sqlalchemy_or_routers() -> 
             imported = _imports_blocked_module_prefix(node, blocked_modules)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -206,7 +211,7 @@ def test_aria2_modules_do_not_construct_sqlalchemy_queries_or_transactions() -> 
                 name = func.id if isinstance(func, ast.Name) else None
                 if name in blocked_names:
                     relative = path.relative_to(APP_ROOT.parent)
-                    offenders.append(f"{relative}:{node.lineno} calls {name}()")
+                    offenders.append(f"{relative}:{_line_number(node)} calls {name}()")
 
     assert offenders == []
 
@@ -228,7 +233,7 @@ def test_core_modules_do_not_import_outer_layers_or_persistence() -> None:
             imported = _imports_blocked_module_prefix(node, blocked_modules)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -249,7 +254,7 @@ def test_services_do_not_import_direct_db_or_sqlalchemy_modules() -> None:
             imported = _imports_blocked_module_prefix(node, blocked_modules)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -264,7 +269,7 @@ def test_services_do_not_import_core_state() -> None:
             imported = _imports_blocked_module_prefix(node, blocked_modules)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -279,7 +284,7 @@ def test_services_do_not_import_http_rate_limit_guard() -> None:
             imported = _imports_blocked_module_prefix(node, blocked_modules)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -297,7 +302,7 @@ def test_services_only_import_aria2_gateway_or_protocol() -> None:
             if imported in allowed_modules:
                 continue
             relative = path.relative_to(APP_ROOT.parent)
-            offenders.append(f"{relative}:{node.lineno} imports {imported}")
+            offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -314,7 +319,7 @@ def test_services_do_not_construct_sqlalchemy_queries_or_transactions() -> None:
                 name = func.id if isinstance(func, ast.Name) else None
                 if name in blocked_names:
                     relative = path.relative_to(APP_ROOT.parent)
-                    offenders.append(f"{relative}:{node.lineno} calls {name}()")
+                    offenders.append(f"{relative}:{_line_number(node)} calls {name}()")
 
     assert offenders == []
 
@@ -330,7 +335,7 @@ def test_routers_do_not_import_task_broadcast_except_ws_registration() -> None:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name == "app.services.task_broadcast":
-                        offenders.append(f"{relative}:{node.lineno} imports {alias.name}")
+                        offenders.append(f"{relative}:{_line_number(node)} imports {alias.name}")
                 continue
 
             if not isinstance(node, ast.ImportFrom):
@@ -341,12 +346,12 @@ def test_routers_do_not_import_task_broadcast_except_ws_registration() -> None:
                 if path.name == "ws.py" and names <= allowed_ws_names:
                     continue
                 offenders.append(
-                    f"{relative}:{node.lineno} imports {module}.{sorted(names)}"
+                    f"{relative}:{_line_number(node)} imports {module}.{sorted(names)}"
                 )
             elif module == "app.services":
                 names = {alias.name for alias in node.names}
                 if "task_broadcast" in names:
-                    offenders.append(f"{relative}:{node.lineno} imports task_broadcast")
+                    offenders.append(f"{relative}:{_line_number(node)} imports task_broadcast")
 
     assert offenders == []
 
@@ -366,7 +371,7 @@ def test_repositories_do_not_import_higher_layers_or_aria2() -> None:
             imported = _imports_blocked_module_prefix(node, blocked_modules)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -381,7 +386,7 @@ def test_repositories_do_not_import_raw_sqlite_driver() -> None:
             imported = _imports_blocked_module_prefix(node, blocked_modules)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []
 
@@ -411,7 +416,7 @@ def test_aria2_sync_and_listener_do_not_define_forwarding_wrappers() -> None:
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 if node.name in blocked_names:
-                    offenders.append(f"{relative}:{node.lineno} defines {node.name}")
+                    offenders.append(f"{relative}:{_line_number(node)} defines {node.name}")
 
     assert offenders == []
 
@@ -429,11 +434,11 @@ def test_aria2_protocol_is_the_only_application_protocol_class() -> None:
                 if isinstance(base, ast.Name) and base.id == "Protocol":
                     if path != allowed:
                         relative = path.relative_to(APP_ROOT.parent)
-                        offenders.append(f"{relative}:{node.lineno} defines {node.name}")
+                        offenders.append(f"{relative}:{_line_number(node)} defines {node.name}")
                 if isinstance(base, ast.Attribute) and base.attr == "Protocol":
                     if path != allowed:
                         relative = path.relative_to(APP_ROOT.parent)
-                        offenders.append(f"{relative}:{node.lineno} defines {node.name}")
+                        offenders.append(f"{relative}:{_line_number(node)} defines {node.name}")
 
     assert offenders == []
 
@@ -473,7 +478,7 @@ def test_removed_layering_compatibility_modules_do_not_exist_or_get_imported() -
             imported = _imports_blocked_module_prefix(node, blocked_modules)
             if imported is not None:
                 relative = path.relative_to(APP_ROOT.parent)
-                offenders.append(f"{relative}:{node.lineno} imports {imported}")
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert existing == []
     assert offenders == []

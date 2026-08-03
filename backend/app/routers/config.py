@@ -7,10 +7,11 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import require_admin, require_user
+from app.auth import require_limited_admin, require_limited_session_user
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
 from app.domain.errors import DomainError
 from app.http.errors import raise_http
+from app.schemas import ApiTokenIssued, ApiTokenOut
 from app.services import aria2_admin_service, settings_service, token_service
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -71,14 +72,14 @@ async def get_public_site_info() -> dict:
 
 
 @router.get("")
-async def get_config(admin=Depends(require_admin)) -> dict:
+async def get_config(admin=Depends(require_limited_admin)) -> dict:
     logger.debug("获取系统配置 admin_id=%s", admin.id)
     return await settings_service.get_api_settings()
 
 
 @router.put("")
 async def update_config(
-    payload: ConfigUpdate, admin=Depends(require_admin)
+    payload: ConfigUpdate, admin=Depends(require_limited_admin)
 ) -> dict:
     payload_values = {
         key: value for key, value in payload.model_dump().items() if value is not None
@@ -98,13 +99,13 @@ async def update_config(
 
 
 @router.get("/aria2/version")
-async def get_aria2_version(admin=Depends(require_admin)) -> dict:
+async def get_aria2_version(admin=Depends(require_limited_admin)) -> dict:
     return await aria2_admin_service.get_aria2_version(admin.id)
 
 
 @router.post("/aria2/test")
 async def test_aria2_connection(
-    payload: Aria2TestRequest, admin=Depends(require_admin)
+    payload: Aria2TestRequest, admin=Depends(require_limited_admin)
 ) -> dict:
     admin_id = admin.id
     if admin_id is None:
@@ -130,20 +131,20 @@ async def test_aria2_connection(
         raise_http(exc)
 
 
-@router.get("/tokens")
-async def list_tokens(user=Depends(require_user)) -> list[dict]:
+@router.get("/tokens", response_model=list[ApiTokenOut])
+async def list_tokens(user=Depends(require_limited_session_user)) -> list[dict]:
     return await token_service.list_tokens(user.id)
 
 
-@router.post("/tokens")
+@router.post("/tokens", response_model=ApiTokenIssued)
 async def create_token(
-    payload: TokenCreateRequest | None = None, user=Depends(require_user)
+    payload: TokenCreateRequest | None = None, user=Depends(require_limited_session_user)
 ) -> dict:
     return await token_service.create_token(user.id, payload.name if payload else None)
 
 
 @router.delete("/tokens/{token_id}")
-async def delete_token(token_id: int, user=Depends(require_user)) -> dict:
+async def delete_token(token_id: int, user=Depends(require_limited_session_user)) -> dict:
     try:
         return await token_service.delete_token(user.id, token_id)
     except DomainError as exc:

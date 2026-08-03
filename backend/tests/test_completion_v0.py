@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -10,7 +12,11 @@ import app.services.download_service as download_service
 from app.core.config import settings
 from app.db.engine import transaction
 from app.db.schema import stored_file_entries, stored_files, user_files
-from app.repositories.downloads import get_global_by_resource_key, get_user_task
+from app.repositories.downloads import (
+    get_global_by_resource_key,
+    get_user_task,
+    update_global_download,
+)
 from app.services.download_service import (
     complete_global_download,
     create_user_download,
@@ -49,12 +55,15 @@ async def test_complete_global_download_indexes_stored_files_and_user_files(
 
     result = await complete_global_download(
         global_download_id=task["global_download_id"],
+        expected_gid="gid-complete",
         source_path=source_path,
         original_name="archive",
     )
 
     global_download = await get_global_by_resource_key("http:complete-v0")
     user_task = await get_user_task(user["id"], task["global_download_id"])
+    assert global_download is not None
+    assert user_task is not None
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
     async with transaction() as conn:
         stored = (
@@ -157,17 +166,23 @@ async def test_complete_global_download_reuses_existing_stored_file_for_same_con
 
     first_result = await complete_global_download(
         global_download_id=first_task["global_download_id"],
+        expected_gid="gid-reuse-a",
         source_path=first_source,
         original_name="one",
     )
     second_result = await complete_global_download(
         global_download_id=second_task["global_download_id"],
+        expected_gid="gid-reuse-b",
         source_path=second_source,
         original_name="two",
     )
+    assert first_result is not None
+    assert second_result is not None
 
     first_global = await get_global_by_resource_key("http:reuse-one")
     second_global = await get_global_by_resource_key("http:reuse-two")
+    assert first_global is not None
+    assert second_global is not None
     usage_a = await get_usage(user_a["id"], quota_bytes=user_a["quota_bytes"])
     usage_b = await get_usage(user_b["id"], quota_bytes=user_b["quota_bytes"])
     async with transaction() as conn:
@@ -218,6 +233,7 @@ async def test_create_user_download_attaches_late_subscriber_to_completed_file(
     (source_path / "done.txt").write_bytes(b"done")
     await complete_global_download(
         global_download_id=first_task["global_download_id"],
+        expected_gid="gid-late",
         source_path=source_path,
         original_name="done-a",
     )
@@ -234,6 +250,7 @@ async def test_create_user_download_attaches_late_subscriber_to_completed_file(
     )
 
     global_download = await get_global_by_resource_key("http:late-done")
+    assert global_download is not None
     usage_b = await get_usage(user_b["id"], quota_bytes=user_b["quota_bytes"])
     async with transaction() as conn:
         user_file = (
@@ -292,6 +309,7 @@ async def test_complete_global_download_restores_source_when_index_registration_
     with pytest.raises(RuntimeError, match="index registration failed"):
         await complete_global_download(
             global_download_id=task["global_download_id"],
+            expected_gid="gid-complete-fail",
             source_path=source_path,
             original_name="fail",
         )
@@ -315,3 +333,159 @@ async def test_complete_global_download_restores_source_when_index_registration_
     assert user_task["reserved_bytes"] == total_bytes
     assert usage["reserved_bytes"] == total_bytes
     assert usage["used_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_completion_generation_does_not_hash_or_touch_g2_source(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="complete_stale_generation", quota_bytes=1000)
+    client = AsyncMock()
+    client.add_uri.return_value = "gid-complete-g1"
+    task = await create_user_download(
+        user_id=user["id"],
+        quota_bytes=user["quota_bytes"],
+        uri="https://example.com/stale.bin",
+        resource_key="http:complete-stale-generation",
+        resource_kind="http",
+        display_name="stale.bin",
+        total_bytes=7,
+        aria2_client=client,
+    )
+    await update_global_download(
+        task["global_download_id"],
+        {"aria2_gid": "gid-complete-g2", "status": "active"},
+    )
+    source_path = Path(settings.download_dir) / "downloading" / str(
+        task["global_download_id"]
+    )
+    source_path.mkdir(parents=True, exist_ok=True)
+    source = source_path / "g2.bin"
+    source.write_bytes(b"g2-data")
+    result = await complete_global_download(
+        global_download_id=task["global_download_id"],
+        expected_gid="gid-complete-g1",
+        source_path=source_path,
+        original_name="stale.bin",
+    )
+
+    current = await get_global_by_resource_key("http:complete-stale-generation")
+    assert result is None
+    assert current is not None
+    assert current["aria2_gid"] == "gid-complete-g2"
+    assert current["status"] == "active"
+    assert source.read_bytes() == b"g2-data"
+
+
+@pytest.mark.asyncio
+async def test_completion_cancel_after_move_restores_source_and_temporary_db(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="complete_cancel_compensation", quota_bytes=1000)
+    client = AsyncMock()
+    client.add_uri.return_value = "gid-complete-cancel"
+    task = await create_user_download(
+        user_id=user["id"],
+        quota_bytes=user["quota_bytes"],
+        uri="https://example.com/cancel.bin",
+        resource_key="http:complete-cancel-compensation",
+        resource_kind="http",
+        display_name="cancel.bin",
+        total_bytes=4,
+        aria2_client=client,
+    )
+    source_path = Path(settings.download_dir) / "downloading" / str(
+        task["global_download_id"]
+    )
+    source_path.mkdir(parents=True, exist_ok=True)
+    (source_path / "payload.bin").write_bytes(b"data")
+    commit_started = asyncio.Event()
+
+    async def block_completion_commit(**kwargs: object) -> int:
+        commit_started.set()
+        await asyncio.Event().wait()
+        return 0
+
+    monkeypatch.setattr(
+        download_service,
+        "complete_active_user_tasks_for_stored_file",
+        block_completion_commit,
+    )
+    completion = asyncio.create_task(
+        complete_global_download(
+            global_download_id=task["global_download_id"],
+            expected_gid="gid-complete-cancel",
+            source_path=source_path,
+            original_name="cancel.bin",
+        )
+    )
+    await commit_started.wait()
+    assert not source_path.exists()
+
+    completion.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await completion
+
+    current = await get_global_by_resource_key("http:complete-cancel-compensation")
+    current_task = await get_user_task(user["id"], task["global_download_id"])
+    usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+    async with transaction() as conn:
+        stored_count = (
+            await conn.execute(select(func.count()).select_from(stored_files))
+        ).scalar_one()
+    assert current is not None
+    assert current["status"] == "active"
+    assert current["aria2_gid"] == "gid-complete-cancel"
+    assert current["disk_reserved_bytes"] == 4
+    assert current_task is not None
+    assert current_task["status"] == "active"
+    assert current_task["reserved_bytes"] == 4
+    assert usage["reserved_bytes"] == 4
+    assert stored_count == 0
+    assert (source_path / "payload.bin").read_bytes() == b"data"
+
+@pytest.mark.asyncio
+async def test_completion_cancellation_waits_for_scan_worker_before_move(
+    temp_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = await create_user_v0(username="scan_cancel", quota_bytes=1000)
+    client = AsyncMock()
+    client.add_uri.return_value = "gid-scan-cancel"
+    task = await create_user_download(
+        user_id=user["id"], quota_bytes=user["quota_bytes"],
+        uri="https://example.com/scan-cancel", resource_key="scan:cancel",
+        resource_kind="http", display_name="scan.bin", total_bytes=4, aria2_client=client,
+    )
+    source = Path(settings.download_dir) / "downloading" / str(task["global_download_id"])
+    source.mkdir(parents=True, exist_ok=True)
+    (source / "payload.bin").write_bytes(b"data")
+    started = threading.Event()
+
+    def blocking_scan(path: Path, event: threading.Event | None) -> object:
+        started.set()
+        assert event is not None and event.wait(2)
+        raise InterruptedError("storage scan cancelled")
+
+    monkeypatch.setattr(download_service, "scan_storage_path", blocking_scan)
+    completion = asyncio.create_task(
+        complete_global_download(
+            global_download_id=task["global_download_id"], expected_gid="gid-scan-cancel",
+            source_path=source, original_name="scan.bin",
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+    ticks = 0
+    for _ in range(3):
+        await asyncio.sleep(0)
+        ticks += 1
+    completion.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await completion
+
+    async with transaction() as conn:
+        count = (await conn.execute(select(func.count()).select_from(stored_files))).scalar_one()
+    assert ticks == 3
+    assert count == 0
+    assert (source / "payload.bin").read_bytes() == b"data"

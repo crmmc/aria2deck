@@ -149,13 +149,15 @@ class DownloadLease:
         self.subject_key = subject_key
         self.file_hash = file_hash
         self._released = False
+        self._release_lock = asyncio.Lock()
 
     async def release(self) -> None:
         """释放当前下载连接占用。"""
-        if self._released:
-            return
-        self._released = True
-        await self._manager.release(self)
+        async with self._release_lock:
+            if self._released:
+                return
+            await self._manager.release(self)
+            self._released = True
 
 
 @dataclass(slots=True)

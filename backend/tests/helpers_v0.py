@@ -151,9 +151,20 @@ async def create_global_download_v0(
     display_name: str | None = None,
     total_bytes: int = 0,
     completed_bytes: int = 0,
+    size_known: bool | None = None,
+    size_limit_bytes: int = 10 * 1024 * 1024 * 1024,
+    disk_reserved_bytes: int | None = None,
     completed_file_id: int | None = None,
 ) -> dict[str, Any]:
     timestamp = now_ms()
+    known = total_bytes > 0 if size_known is None else size_known
+    reserved = (
+        total_bytes
+        if disk_reserved_bytes is None
+        and known
+        and status in {"queued", "active", "waiting", "paused"}
+        else int(disk_reserved_bytes or 0)
+    )
     async with transaction() as conn:
         row = (
             (
@@ -168,6 +179,9 @@ async def create_global_download_v0(
                         status=status,
                         total_bytes=total_bytes,
                         completed_bytes=completed_bytes,
+                        size_known=1 if known else 0,
+                        size_limit_bytes=size_limit_bytes,
+                        disk_reserved_bytes=reserved,
                         completed_file_id=completed_file_id,
                         created_at_ms=timestamp,
                         updated_at_ms=timestamp,

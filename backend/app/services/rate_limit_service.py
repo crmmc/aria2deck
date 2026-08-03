@@ -7,21 +7,64 @@ from app.domain.errors import TooManyRequestsError
 ACCOUNT_SECURITY_SCOPE = "account_security"
 
 
+def login_account_key(username: str) -> str:
+    return f"login:account:{username.lower()}"
+
+
+def login_ip_key(client_ip: str) -> str:
+    return f"login:ip:{client_ip}"
+
+
+async def ensure_login_allowed(
+    username: str,
+    client_ip: str,
+    detail: str = "登录尝试次数过多，请稍后再试",
+) -> None:
+    limit = rate_limit_config.limit_for(ACCOUNT_SECURITY_SCOPE)
+    if limit <= 0:
+        return
+
+    window = rate_limit_config.window_for(ACCOUNT_SECURITY_SCOPE)
+    retries = (
+        await login_limiter.retry_after(
+            login_account_key(username), limit=limit, window_seconds=window
+        ),
+        await login_limiter.retry_after(
+            login_ip_key(client_ip), limit=limit, window_seconds=window
+        ),
+    )
+    retry_after = min(retry for retry in retries if retry is not None) if any(retries) else None
+    if retry_after is not None:
+        raise TooManyRequestsError(detail, retry_after=retry_after)
+
+
+async def record_login_failure(username: str, client_ip: str) -> None:
+    if rate_limit_config.limit_for(ACCOUNT_SECURITY_SCOPE) <= 0:
+        return
+    await login_limiter.record_failure(login_account_key(username))
+    await login_limiter.record_failure(login_ip_key(client_ip))
+
+
+async def clear_login_failures(username: str) -> None:
+    if rate_limit_config.limit_for(ACCOUNT_SECURITY_SCOPE) <= 0:
+        return
+    await login_limiter.clear(login_account_key(username))
+
+
 async def ensure_account_security_allowed(
     client_ip: str,
     detail: str = "请求过于频繁，请稍后再试",
 ) -> None:
     limit = rate_limit_config.limit_for(ACCOUNT_SECURITY_SCOPE)
-    if await login_limiter.is_blocked(client_ip, limit=limit):
-        raise TooManyRequestsError(detail)
-
-
-async def record_account_security_failure(client_ip: str) -> None:
-    await login_limiter.record_failure(client_ip)
-
-
-async def clear_account_security_failures(client_ip: str) -> None:
-    await login_limiter.clear(client_ip)
+    if limit <= 0:
+        return
+    retry_after = await login_limiter.retry_after(
+        login_ip_key(client_ip),
+        limit=limit,
+        window_seconds=rate_limit_config.window_for(ACCOUNT_SECURITY_SCOPE),
+    )
+    if retry_after is not None:
+        raise TooManyRequestsError(detail, retry_after=retry_after)
 
 
 async def ensure_authenticated_allowed(
@@ -33,10 +76,11 @@ async def ensure_authenticated_allowed(
     if limit <= 0:
         return
 
-    if not await api_limiter.is_allowed(
+    allowed, retry_after = await api_limiter.check(
         user_id,
         scope,
         limit=limit,
         window_seconds=rate_limit_config.window_for(scope),
-    ):
-        raise TooManyRequestsError(detail)
+    )
+    if not allowed:
+        raise TooManyRequestsError(detail, retry_after=retry_after)

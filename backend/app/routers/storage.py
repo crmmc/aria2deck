@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 
-from app.auth import AuthUser, require_admin
+from app.auth import AuthUser, require_limited_admin
 from app.domain.errors import DomainError
 from app.http.errors import raise_http
 from app.services import storage_admin_service
@@ -23,6 +23,10 @@ class StoredFileInfo(BaseModel):
     created_at: str
     real_path: str
     exists_on_disk: bool
+    cleanup_state: str
+    cleanup_attempts: int
+    cleanup_next_retry_at: str | None = None
+    cleanup_error: str | None = None
 
 
 class StoredFileListResponse(BaseModel):
@@ -47,28 +51,25 @@ class BulkDeleteRequest(BaseModel):
     file_ids: list[int] = Field(..., min_length=1, max_length=1000)
 
 
+class BulkDeleteItem(BaseModel):
+    file_id: int
+    ok: bool
+    state: str
+    accepted: bool
+    error: str | None = None
+
+
 class BulkDeleteResponse(BaseModel):
     deleted_count: int
+    accepted_count: int
     failed_ids: list[int]
     errors: list[str]
-
-
-class ScanResult(BaseModel):
-    scanned_dirs: int
-    new_records: int
-    already_exists: int
-    errors: list[str]
-
-
-class RepairResult(BaseModel):
-    tasks_checked: int
-    tasks_repaired: int
-    errors: list[str]
+    results: list[BulkDeleteItem]
 
 
 @router.get("/files", response_model=StoredFileListResponse)
 async def list_stored_files(
-    admin: AuthUser = Depends(require_admin),
+    admin: AuthUser = Depends(require_limited_admin),
     search: str = Query(default="", description="搜索文件名"),
     orphan_only: bool = Query(default=False, description="仅显示无引用的孤立文件"),
     page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
@@ -88,7 +89,7 @@ async def list_stored_files(
 @router.get("/files/{file_id}/users", response_model=FileUsersResponse)
 async def get_file_users(
     file_id: int,
-    admin: AuthUser = Depends(require_admin),
+    admin: AuthUser = Depends(require_limited_admin),
 ) -> FileUsersResponse:
     del admin
     try:
@@ -101,21 +102,29 @@ async def get_file_users(
 @router.delete("/files", response_model=BulkDeleteResponse)
 async def bulk_delete_files(
     payload: BulkDeleteRequest,
-    admin: AuthUser = Depends(require_admin),
+    response: Response,
+    admin: AuthUser = Depends(require_limited_admin),
 ) -> BulkDeleteResponse:
     del admin
-    return BulkDeleteResponse(
-        **await storage_admin_service.bulk_delete_files(payload.file_ids)
+    result = await storage_admin_service.bulk_delete_files(payload.file_ids)
+    if result["accepted_count"]:
+        response.status_code = status.HTTP_202_ACCEPTED
+    return BulkDeleteResponse(**result)
+
+
+@router.post("/scan", status_code=status.HTTP_501_NOT_IMPLEMENTED)
+async def scan_store(admin: AuthUser = Depends(require_limited_admin)) -> None:
+    del admin
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="存储扫描功能暂未实现",
     )
 
 
-@router.post("/scan", response_model=ScanResult)
-async def scan_store(admin: AuthUser = Depends(require_admin)) -> ScanResult:
+@router.post("/repair", status_code=status.HTTP_501_NOT_IMPLEMENTED)
+async def repair_storage(admin: AuthUser = Depends(require_limited_admin)) -> None:
     del admin
-    return ScanResult(scanned_dirs=0, new_records=0, already_exists=0, errors=[])
-
-
-@router.post("/repair", response_model=RepairResult)
-async def repair_storage(admin: AuthUser = Depends(require_admin)) -> RepairResult:
-    del admin
-    return RepairResult(tasks_checked=0, tasks_repaired=0, errors=[])
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="存储修复功能暂未实现",
+    )

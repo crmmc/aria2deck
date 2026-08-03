@@ -301,3 +301,44 @@ class TestHistoryListOrdering:
         assert data[0]["task_name"] == "file_2.zip"
         assert data[1]["task_name"] == "file_1.zip"
         assert data[2]["task_name"] == "file_0.zip"
+
+
+class TestV2HistoryPagination:
+    def test_v2_history_is_stable_paginated_and_keeps_old_array(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+        other_user_history: dict,
+        temp_db: str,
+    ) -> None:
+        records = []
+        for index, created_at_ms in enumerate((100, 300, 200)):
+            records.append(
+                asyncio.run(
+                    _create_user_task_row(
+                        user_id=test_user["id"],
+                        resource_key=f"v2-history-{index}",
+                        status="completed",
+                        name=f"v2-{index}.zip",
+                        uri=f"https://example.com/v2-{index}.zip",
+                        created_at_ms=created_at_ms,
+                        finished_at_ms=created_at_ms + 1,
+                    )
+                )
+            )
+
+        old = authenticated_client.get("/api/history")
+        first = authenticated_client.get("/api/v2/history?page=1&page_size=2")
+        second = authenticated_client.get("/api/v2/history?page=2&page_size=2")
+        empty = authenticated_client.get("/api/v2/history?page=9&page_size=2")
+
+        assert isinstance(old.json(), list)
+        assert [item["id"] for item in first.json()["items"]] == [
+            records[1]["id"],
+            records[2]["id"],
+        ]
+        assert first.json()["total"] == 3
+        assert first.json()["page"] == 1
+        assert second.json()["items"][0]["id"] == records[0]["id"]
+        assert empty.json() == {"items": [], "total": 3, "page": 9, "page_size": 2}
+        assert authenticated_client.get("/api/v2/history?page=0").status_code == 422

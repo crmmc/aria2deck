@@ -22,6 +22,15 @@ from app.domain.task_policy import (
     stat_counts,
 )
 
+_REEXPORTED_POLICY_SYMBOLS = (
+    InvalidTaskStatusFilter,
+    REST_TASK_STATUS_FILTERS,
+    filter_rows_for_status,
+    is_current,
+    is_user_terminal,
+    stat_counts,
+)
+
 BT_TRACKER_PLACEHOLDER = "http://aria2deck.invalid/announce"
 INFO_HASH_HEX_PATTERN = re.compile(r"^[a-fA-F0-9]{40}$")
 

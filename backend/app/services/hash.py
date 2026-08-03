@@ -13,10 +13,12 @@ import binascii
 import hashlib
 import logging
 import re
+import threading
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from app.domain.torrent_metadata import TorrentMetadataError, parse_torrent_bytes
+from app.services.storage_index import scan_storage_path, scan_storage_path_async
 
 logger = logging.getLogger(__name__)
 
@@ -186,85 +188,38 @@ def calculate_url_hash(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest().lower()
 
 
-def calculate_file_content_hash(file_path: Path) -> str:
-    """Calculate content hash for a single file.
-
-    Uses SHA256 for content hashing.
-
-    Args:
-        file_path: Path to the file
-
-    Returns:
-        Lowercase hex SHA256 hash (64 chars)
-    """
-    sha256 = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            sha256.update(chunk)
-    return sha256.hexdigest().lower()
+def calculate_file_content_hash(
+    file_path: Path, cancel_event: threading.Event | None = None
+) -> str:
+    """Calculate the SHA256 hash of one regular file."""
+    scan = scan_storage_path(file_path, cancel_event)
+    if scan.is_directory:
+        raise ValueError(f"Path is not a file: {file_path}")
+    return scan.content_hash
 
 
-def calculate_directory_content_hash(dir_path: Path) -> str:
-    """Calculate content hash for a directory.
-
-    Creates a deterministic hash based on:
-    - Sorted list of relative file paths
-    - Each file's content hash
-
-    Args:
-        dir_path: Path to the directory
-
-    Returns:
-        Lowercase hex SHA256 hash (64 chars)
-    """
-    sha256 = hashlib.sha256()
-
-    # Get all files sorted by relative path
-    files = sorted(dir_path.rglob("*"))
-
-    for file_path in files:
-        if file_path.is_file():
-            # Include relative path in hash
-            rel_path = file_path.relative_to(dir_path)
-            sha256.update(str(rel_path).encode("utf-8"))
-
-            # Include file content hash
-            file_hash = calculate_file_content_hash(file_path)
-            sha256.update(file_hash.encode("utf-8"))
-
-    return sha256.hexdigest().lower()
+def calculate_directory_content_hash(
+    dir_path: Path, cancel_event: threading.Event | None = None
+) -> str:
+    """Calculate the content hash of a directory under storage boundaries."""
+    scan = scan_storage_path(dir_path, cancel_event)
+    if not scan.is_directory:
+        raise ValueError(f"Path is not a directory: {dir_path}")
+    return scan.content_hash
 
 
-def calculate_content_hash(path: Path) -> str:
-    """Calculate content hash for a file or directory.
-
-    Args:
-        path: Path to file or directory
-
-    Returns:
-        Lowercase hex SHA256 hash (64 chars)
-    """
-    if path.is_file():
-        return calculate_file_content_hash(path)
-    elif path.is_dir():
-        return calculate_directory_content_hash(path)
-    else:
-        raise ValueError(f"Path does not exist or is not a file/directory: {path}")
+def calculate_content_hash(
+    path: Path, cancel_event: threading.Event | None = None
+) -> str:
+    """Calculate a file or directory hash using the storage scan contract."""
+    return scan_storage_path(path, cancel_event).content_hash
 
 
-async def calculate_content_hash_async(path: Path) -> str:
-    """异步计算文件或目录的内容哈希。
-
-    使用 asyncio.to_thread 避免阻塞事件循环，适用于大文件。
-
-    Args:
-        path: Path to file or directory
-
-    Returns:
-        Lowercase hex SHA256 hash (64 chars)
-    """
-    import asyncio
-    return await asyncio.to_thread(calculate_content_hash, path)
+async def calculate_content_hash_async(
+    path: Path, cancel_event: threading.Event | None = None
+) -> str:
+    """异步计算文件或目录内容哈希，并在取消时等待扫描线程退出。"""
+    return (await scan_storage_path_async(path, cancel_event)).content_hash
 
 
 def get_uri_hash(uri: str, torrent_base64: str | None = None) -> str | None:

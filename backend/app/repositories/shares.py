@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import delete, exists, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.db.engine import transaction
-from app.db.schema import share_links, stored_files, user_files
+from app.db.engine import get_engine, transaction
+from app.db.schema import share_links, stored_files, user_files, users
 from app.domain.shares import SHARE_ACTIVE_STATUS, SHARE_REVOKED_STATUS
 from app.repositories.errors import RepositoryConflictError
+
+
+class ShareTargetInactiveError(RuntimeError):
+    pass
 
 
 def share_select():
@@ -23,6 +28,10 @@ def share_select():
     ).select_from(
         share_links.join(user_files, share_links.c.user_file_id == user_files.c.id)
         .join(stored_files, user_files.c.stored_file_id == stored_files.c.id)
+        .join(users, users.c.id == share_links.c.owner_id)
+    ).where(
+        stored_files.c.pending_delete == 0,
+        users.c.pending_delete == 0,
     )
 
 
@@ -34,9 +43,16 @@ async def get_owned_file(user_id: int, user_file_id: int) -> dict[str, Any] | No
             stored_files.c.size_bytes,
         )
         .select_from(
-            user_files.join(stored_files, user_files.c.stored_file_id == stored_files.c.id)
+            user_files.join(
+                stored_files, user_files.c.stored_file_id == stored_files.c.id
+            ).join(users, users.c.id == user_files.c.user_id)
         )
-        .where(user_files.c.id == user_file_id, user_files.c.user_id == user_id)
+        .where(
+            user_files.c.id == user_file_id,
+            user_files.c.user_id == user_id,
+            stored_files.c.pending_delete == 0,
+            users.c.pending_delete == 0,
+        )
     )
     async with transaction() as conn:
         row = (await conn.execute(stmt)).mappings().first()
@@ -72,7 +88,10 @@ async def create_share_row(values: dict[str, Any]) -> dict[str, Any]:
     return dict(row)
 
 
-async def create_share_row_in_existing_conn(conn, values: dict[str, Any]) -> dict[str, Any]:
+async def create_share_row_in_existing_conn(
+    conn: AsyncConnection,
+    values: dict[str, Any],
+) -> dict[str, Any]:
     row = (
         await conn.execute(insert(share_links).values(**values).returning(share_links))
     ).mappings().one()
@@ -81,16 +100,70 @@ async def create_share_row_in_existing_conn(conn, values: dict[str, Any]) -> dic
 
 async def create_share_with_retry(
     *,
-    values_factory,
+    user_file_id: int,
+    timestamp_ms: int,
+    max_active_shares: int,
+    values_factory: Callable[[], dict[str, Any]],
     max_attempts: int,
 ) -> dict[str, Any] | None:
-    async with transaction() as conn:
-        for attempt in range(max_attempts):
-            try:
-                return await create_share_row_in_existing_conn(conn, values_factory())
-            except IntegrityError:
-                if attempt == max_attempts - 1:
-                    raise RepositoryConflictError("share code collision") from None
+    async with get_engine().connect() as conn:
+        await conn.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            owned = (
+                await conn.execute(
+                    select(user_files.c.id)
+                    .select_from(
+                        user_files.join(stored_files).join(
+                            users, users.c.id == user_files.c.user_id
+                        )
+                    )
+                    .where(
+                        user_files.c.id == user_file_id,
+                        stored_files.c.pending_delete == 0,
+                        users.c.pending_delete == 0,
+                    )
+                )
+            ).first()
+            if owned is None:
+                raise ShareTargetInactiveError
+            active_count = (
+                await conn.execute(
+                    select(func.count()).select_from(share_links).where(
+                        share_links.c.user_file_id == user_file_id,
+                        share_links.c.status == SHARE_ACTIVE_STATUS,
+                        (
+                            share_links.c.expires_at_ms.is_(None)
+                            | (share_links.c.expires_at_ms > timestamp_ms)
+                        ),
+                        (
+                            share_links.c.max_downloads.is_(None)
+                            | (
+                                share_links.c.download_count
+                                < share_links.c.max_downloads
+                            )
+                        ),
+                    )
+                )
+            ).scalar_one()
+            if int(active_count or 0) >= max_active_shares:
+                await conn.rollback()
+                return None
+
+            for attempt in range(max_attempts):
+                try:
+                    share = await create_share_row_in_existing_conn(
+                        conn, values_factory()
+                    )
+                    await conn.commit()
+                    return share
+                except IntegrityError:
+                    if attempt == max_attempts - 1:
+                        raise RepositoryConflictError(
+                            "share code collision"
+                        ) from None
+        except BaseException:
+            await conn.rollback()
+            raise
     return None
 
 
@@ -165,31 +238,44 @@ async def get_share_with_file(code: str) -> tuple[dict[str, Any] | None, bool]:
     return None, existing is not None
 
 
-async def touch_and_maybe_count_download(
+async def consume_share_download(
     share_id: int,
     *,
     timestamp_ms: int,
-    max_downloads: int | None,
-    should_count_download: bool,
 ) -> bool:
-    conditions = [
-        share_links.c.id == share_id,
-        share_links.c.status == SHARE_ACTIVE_STATUS,
-        (
-            share_links.c.expires_at_ms.is_(None)
-            | (share_links.c.expires_at_ms > timestamp_ms)
-        ),
-    ]
-    if max_downloads is not None:
-        conditions.append(share_links.c.download_count < share_links.c.max_downloads)
-
-    values: dict[str, Any] = {"last_accessed_at_ms": timestamp_ms}
-    if should_count_download:
-        values["download_count"] = share_links.c.download_count + 1
-
+    active_target = exists(
+        select(user_files.c.id)
+        .select_from(
+            user_files.join(stored_files).join(
+                users, users.c.id == user_files.c.user_id
+            )
+        )
+        .where(
+            user_files.c.id == share_links.c.user_file_id,
+            stored_files.c.pending_delete == 0,
+            users.c.pending_delete == 0,
+        )
+    )
     async with transaction() as conn:
         result = await conn.execute(
-            update(share_links).where(*conditions).values(**values)
+            update(share_links)
+            .where(
+                share_links.c.id == share_id,
+                share_links.c.status == SHARE_ACTIVE_STATUS,
+                active_target,
+                (
+                    share_links.c.expires_at_ms.is_(None)
+                    | (share_links.c.expires_at_ms > timestamp_ms)
+                ),
+                (
+                    share_links.c.max_downloads.is_(None)
+                    | (share_links.c.download_count < share_links.c.max_downloads)
+                ),
+            )
+            .values(
+                last_accessed_at_ms=timestamp_ms,
+                download_count=share_links.c.download_count + 1,
+            )
         )
     return bool(result.rowcount)
 

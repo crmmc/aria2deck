@@ -4,14 +4,18 @@ import asyncio
 import queue
 import threading
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import update
+from starlette.types import Message
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from app.core.config import settings
+from app.core.rate_limit import api_limiter
+from app.core.rate_limit_config import rate_limit_config
 from app.db.engine import transaction
 from app.db.schema import sessions
 from app.routers.ws import task_ws
@@ -48,7 +52,7 @@ async def _activate_test_socket(
     if reservation is None:
         return False
     try:
-        return await reservation.activate(websocket)
+        return cast(bool, await reservation.activate(websocket))
     finally:
         await reservation.release()
 
@@ -93,6 +97,24 @@ class TestTaskWebSocket:
             ) as websocket:
                 websocket.receive_text()
         assert exc_info.value.code == 4401
+
+    def test_websocket_does_not_consume_authenticated_api_bucket(
+        self, client: TestClient, user_session: str, test_user: dict
+    ) -> None:
+        original_limit = rate_limit_config.authenticated_api
+        rate_limit_config.authenticated_api = 1
+        try:
+            with client.websocket_connect(
+                "/ws/tasks",
+                cookies={settings.session_cookie_name: user_session},
+                headers={"origin": TRUSTED_ORIGIN},
+            ) as websocket:
+                websocket.send_text("ping")
+                assert websocket.receive_text() == "pong"
+        finally:
+            rate_limit_config.authenticated_api = original_limit
+
+        assert not api_limiter._requests
 
     def test_websocket_ping_pong(
         self, client: TestClient, user_session: str, test_user: dict
@@ -329,17 +351,17 @@ async def test_socket_is_not_broadcast_visible_before_accept_finishes(
     test_user: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    inbound: asyncio.Queue[dict] = asyncio.Queue()
+    inbound: asyncio.Queue[Message] = asyncio.Queue()
     await inbound.put({"type": "websocket.connect"})
     accept_started = asyncio.Event()
     release_accept = asyncio.Event()
     activated = asyncio.Event()
-    sent_messages: list[dict] = []
+    sent_messages: list[Message] = []
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         return await inbound.get()
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         sent_messages.append(message)
         if message["type"] == "websocket.accept":
             accept_started.set()
@@ -352,7 +374,7 @@ async def test_socket_is_not_broadcast_visible_before_accept_finishes(
         async def activate(self, websocket: WebSocket) -> bool:
             result = await self.inner.activate(websocket)
             activated.set()
-            return result
+            return cast(bool, result)
 
         async def release(self) -> None:
             await self.inner.release()
@@ -396,9 +418,9 @@ async def test_socket_is_not_broadcast_visible_before_accept_finishes(
 
     try:
         await asyncio.wait_for(accept_started.wait(), 1)
-        rejected_messages: list[dict] = []
+        rejected_messages: list[Message] = []
 
-        async def send_rejected(message: dict) -> None:
+        async def send_rejected(message: Message) -> None:
             rejected_messages.append(message)
 
         rejected = WebSocket(scope, receive, send_rejected)
@@ -567,7 +589,7 @@ def test_admin_delete_user_closes_existing_connection(
     ) as websocket:
         client.cookies.set(settings.session_cookie_name, admin_session)
         response = client.delete(f"/api/users/{user['id']}")
-        assert response.status_code == 200
+        assert response.status_code == 202
         with pytest.raises(WebSocketDisconnect) as exc_info:
             websocket.receive_text()
     assert exc_info.value.code == 4401

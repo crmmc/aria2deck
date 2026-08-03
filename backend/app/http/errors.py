@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import NoReturn
+
 from fastapi import HTTPException, status
 
 from app.domain.errors import (
@@ -37,5 +39,9 @@ def http_status_for_error(exc: DomainError) -> int:
     )
 
 
-def raise_http(exc: DomainError) -> None:
-    raise HTTPException(status_code=http_status_for_error(exc), detail=exc.detail) from exc
+def raise_http(exc: DomainError) -> NoReturn:
+    raise HTTPException(
+        status_code=http_status_for_error(exc),
+        detail=exc.detail,
+        headers=exc.headers,
+    ) from exc

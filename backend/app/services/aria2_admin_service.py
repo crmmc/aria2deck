@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 import app.aria2.gateway as aria2_gateway
+from app.core.security import redact_url_for_log
 from app.domain.errors import BadRequestError
 from app.services import settings_service
 
@@ -27,7 +28,11 @@ async def get_aria2_version(admin_id: int | None) -> dict:
             "enabled_features": version_info.get("enabledFeatures", []),
         }
     except Exception as exc:
-        logger.warning("获取aria2版本失败 admin_id=%s error=%s", admin_id, exc)
+        logger.warning(
+            "获取aria2版本失败 admin_id=%s error_type=%s",
+            admin_id,
+            type(exc).__name__,
+        )
         return {
             "connected": False,
             "error": "无法连接到 aria2 服务",
@@ -51,7 +56,11 @@ async def test_aria2_connection(
 
     try:
         version_info = await client.get_version()
-        logger.info("测试aria2连接成功 admin_id=%s url=%s", admin_id, aria2_rpc_url)
+        logger.info(
+            "测试aria2连接成功 admin_id=%s url=%s",
+            admin_id,
+            redact_url_for_log(aria2_rpc_url),
+        )
         return {
             "connected": True,
             "version": version_info.get("version"),
@@ -59,10 +68,10 @@ async def test_aria2_connection(
         }
     except Exception as exc:
         logger.warning(
-            "测试aria2连接失败 admin_id=%s url=%s error=%s",
+            "测试aria2连接失败 admin_id=%s url=%s error_type=%s",
             admin_id,
-            aria2_rpc_url,
-            exc,
+            redact_url_for_log(aria2_rpc_url),
+            type(exc).__name__,
         )
         return {
             "connected": False,

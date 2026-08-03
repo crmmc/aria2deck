@@ -6,9 +6,12 @@ import pytest
 from app.aria2.client import Aria2Client
 from app.aria2.gateway import get_aria2_client, update_cached_aria2_config
 from app.core.config import (
+    CREDENTIAL_PEPPER_ENV,
     DEFAULT_SECRET_KEY,
     INITIAL_ADMIN_PASSWORD_ENV,
     LEGACY_SHARE_JWT_SECRET_ENV,
+    MIN_SECRET_KEY_BYTES,
+    PREVIOUS_CREDENTIAL_PEPPER_ENV,
     SHARE_JWT_SECRET_ENV,
     Settings,
     check_secret_key,
@@ -30,6 +33,69 @@ def test_check_secret_key_raises_on_empty_value_in_non_debug(monkeypatch):
     monkeypatch.setattr(settings, "secret_key", "")
 
     with pytest.raises(RuntimeError):
+        check_secret_key()
+
+
+def test_check_secret_key_raises_on_whitespace_in_non_debug(monkeypatch):
+    monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "secret_key", " " * MIN_SECRET_KEY_BYTES)
+
+    with pytest.raises(RuntimeError):
+        check_secret_key()
+
+
+def test_check_secret_key_raises_below_minimum_bytes(monkeypatch):
+    monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "secret_key", "x" * (MIN_SECRET_KEY_BYTES - 1))
+
+    with pytest.raises(RuntimeError):
+        check_secret_key()
+
+
+def test_check_secret_key_accepts_minimum_bytes(monkeypatch):
+    monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "secret_key", "x" * MIN_SECRET_KEY_BYTES)
+    monkeypatch.setattr(settings, "credential_pepper", "p" * MIN_SECRET_KEY_BYTES)
+    monkeypatch.setattr(settings, "dev_reset_admin_password", False)
+
+    check_secret_key()
+
+
+def test_check_secret_key_counts_utf8_bytes(monkeypatch):
+    monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "secret_key", "密" * 11)
+    monkeypatch.setattr(settings, "credential_pepper", "p" * MIN_SECRET_KEY_BYTES)
+    monkeypatch.setattr(settings, "dev_reset_admin_password", False)
+
+    check_secret_key()
+
+
+def test_check_secret_key_requires_credential_pepper_in_non_debug(monkeypatch):
+    monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "secret_key", "x" * MIN_SECRET_KEY_BYTES)
+    monkeypatch.setattr(settings, "credential_pepper", "")
+
+    with pytest.raises(RuntimeError, match=CREDENTIAL_PEPPER_ENV):
+        check_secret_key()
+
+
+def test_check_secret_key_rejects_short_previous_credential_pepper(monkeypatch):
+    monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "secret_key", "s" * MIN_SECRET_KEY_BYTES)
+    monkeypatch.setattr(settings, "credential_pepper", "c" * MIN_SECRET_KEY_BYTES)
+    monkeypatch.setattr(settings, "previous_credential_pepper", "p" * 31)
+
+    with pytest.raises(RuntimeError, match=PREVIOUS_CREDENTIAL_PEPPER_ENV):
+        check_secret_key()
+
+
+def test_check_secret_key_rejects_dev_password_reset_in_non_debug(monkeypatch):
+    monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "secret_key", "x" * MIN_SECRET_KEY_BYTES)
+    monkeypatch.setattr(settings, "credential_pepper", "p" * MIN_SECRET_KEY_BYTES)
+    monkeypatch.setattr(settings, "dev_reset_admin_password", True)
+
+    with pytest.raises(RuntimeError, match="仅允许在调试模式"):
         check_secret_key()
 
 

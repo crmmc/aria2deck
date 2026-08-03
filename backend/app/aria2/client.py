@@ -97,6 +97,11 @@ class Aria2Client:
     async def unpause(self, gid: str) -> str:
         return cast(str, await self._call("aria2.unpause", [gid]))
 
+    async def change_option(
+        self, gid: str, options: Mapping[str, Any]
+    ) -> str:
+        return cast(str, await self._call("aria2.changeOption", [gid, options]))
+
     async def remove(self, gid: str) -> str:
         return cast(str, await self._call("aria2.remove", [gid]))
 

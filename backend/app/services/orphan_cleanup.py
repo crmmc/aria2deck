@@ -5,11 +5,16 @@
 """
 
 import logging
+from pathlib import Path
 
 from app.repositories.files import list_stored_file_real_paths
 from app.services.storage import get_store_dir, safe_delete_path
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_real_paths(paths: set[str]) -> set[str]:
+    return {str(Path(path).resolve(strict=False)) for path in paths}
 
 
 async def cleanup_orphan_files() -> int:
@@ -25,38 +30,43 @@ async def cleanup_orphan_files() -> int:
         logger.debug("Store directory does not exist, skipping orphan cleanup")
         return 0
 
-    db_paths = await list_stored_file_real_paths()
+    db_paths = _resolve_real_paths(await list_stored_file_real_paths())
 
-    # 扫描 store 目录：结构为 /store/{prefix}/{content_hash}
-    # 只删除 hash 级别的目录/文件，不删除 prefix 目录
-    orphan_count = 0
-    for prefix_dir in store_dir.iterdir():
-        if not prefix_dir.is_dir():
-            # 顶层不应有文件，跳过
+    candidates: list[Path] = []
+    for top_level in store_dir.iterdir():
+        if not top_level.is_dir():
             continue
-        # 扫描 prefix 目录下的 hash 目录
-        for hash_item in prefix_dir.iterdir():
-            item_path = str(hash_item.resolve())
-            if item_path not in db_paths:
-                try:
-                    deleted = safe_delete_path(
-                        base_dir=store_dir,
-                        target=hash_item,
-                        recursive=hash_item.is_dir(),
-                        allow_missing=True,
-                    )
-                    if deleted:
-                        orphan_count += 1
-                        logger.info("Deleted orphan file: %s", hash_item)
-                except Exception as e:
-                    logger.error("Failed to delete orphan file %s: %s", hash_item, e)
-        # 如果 prefix 目录变空，也删除它
+        if top_level.name != "v2":
+            candidates.extend(top_level.iterdir())
+            continue
+        for object_kind in top_level.iterdir():
+            if not object_kind.is_dir() or object_kind.name not in {"file", "directory"}:
+                continue
+            for prefix_dir in object_kind.iterdir():
+                if prefix_dir.is_dir():
+                    candidates.extend(prefix_dir.iterdir())
+
+    orphan_count = 0
+    for object_path in candidates:
+        item_path = str(object_path.resolve(strict=False))
+        if item_path in db_paths:
+            continue
+        current_db_paths = _resolve_real_paths(await list_stored_file_real_paths())
+        if item_path in current_db_paths:
+            logger.debug("Skipping newly registered stored file: %s", object_path)
+            continue
         try:
-            if prefix_dir.exists() and not any(prefix_dir.iterdir()):
-                prefix_dir.rmdir()
-                logger.debug("Removed empty prefix directory: %s", prefix_dir)
-        except OSError:
-            pass  # 目录非空或其他原因，忽略
+            deleted = safe_delete_path(
+                base_dir=store_dir,
+                target=object_path,
+                recursive=object_path.is_dir(),
+                allow_missing=True,
+            )
+            if deleted:
+                orphan_count += 1
+                logger.info("Deleted orphan file: %s", object_path)
+        except Exception as exc:
+            logger.error("Failed to delete orphan file %s: %s", object_path, exc)
 
     if orphan_count > 0:
         logger.info("Orphan cleanup completed: deleted %d files", orphan_count)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 import time
 from typing import Any, Literal, overload
 
@@ -9,18 +9,230 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.engine import transaction
-from app.db.schema import global_downloads, user_files, user_storage_usage, user_tasks
+from app.db.schema import (
+    global_downloads,
+    pack_tasks,
+    stored_files,
+    user_files,
+    user_storage_usage,
+    user_tasks,
+    users,
+)
 from app.domain.status import (
     ACTIVE_GLOBAL_DOWNLOAD_STATUSES,
     ACTIVE_USER_TASK_STATUSES,
+    ERROR_DOWNLOAD_STATUSES,
     FAILABLE_GLOBAL_DOWNLOAD_STATUSES,
+    REST_TASK_STATUS_FILTERS,
     TERMINAL_USER_TASK_STATUSES,
 )
 from app.repositories.errors import RepositoryConflictError
 
 
+class DownloadAdmissionError(ValueError):
+    def __init__(self, reason: str):
+        self.reason = reason
+        message = "quota exceeded" if reason == "quota" else reason
+        super().__init__(message)
+
+
+class SizeReconcileResult(dict[str, Any]):
+    @property
+    def admitted(self) -> bool:
+        return self.get("outcome") == "admitted"
+
+
+DiskAvailable = int | Callable[[], int]
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+async def _strict_adjust_usage_reserved(
+    conn: Any,
+    *,
+    user_id: int,
+    delta: int,
+    quota_bytes: int | None = None,
+    timestamp: int,
+) -> bool:
+    if delta == 0:
+        return True
+    reserved = user_storage_usage.c.reserved_bytes + delta
+    conditions = [user_storage_usage.c.user_id == user_id, reserved >= 0]
+    if delta > 0:
+        if quota_bytes is None:
+            raise ValueError("quota_bytes is required for reservation growth")
+        conditions.extend(
+            [
+                user_storage_usage.c.used_bytes + reserved <= quota_bytes,
+                exists(
+                    select(users.c.id).where(
+                        users.c.id == user_id,
+                        users.c.pending_delete == 0,
+                    )
+                ),
+            ]
+        )
+    row = (
+        await conn.execute(
+            update(user_storage_usage)
+            .where(*conditions)
+            .values(reserved_bytes=reserved, updated_at_ms=timestamp)
+            .returning(user_storage_usage.c.user_id)
+        )
+    ).first()
+    if row is None and delta < 0:
+        raise RepositoryConflictError("reserved usage drift")
+    return row is not None
+
+
+async def active_physical_commitment_bytes(conn: Any) -> int:
+    reserved_bytes = case(
+        (
+            global_downloads.c.status.in_(("failed", "cancelled"))
+            & global_downloads.c.aria2_gid.is_not(None),
+            global_downloads.c.total_bytes,
+        ),
+        else_=global_downloads.c.disk_reserved_bytes,
+    )
+    remaining = case(
+        (
+            reserved_bytes > global_downloads.c.completed_bytes,
+            reserved_bytes - global_downloads.c.completed_bytes,
+        ),
+        else_=0,
+    )
+    downloads_reserved = (
+        await conn.execute(
+            select(func.coalesce(func.sum(remaining), 0)).where(
+                or_(
+                    global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
+                    global_downloads.c.status.in_(("failed", "cancelled"))
+                    & global_downloads.c.aria2_gid.is_not(None),
+                )
+            )
+        )
+    ).scalar_one()
+    pack_remaining = case(
+        (
+            pack_tasks.c.reserved_bytes > pack_tasks.c.materialized_bytes,
+            pack_tasks.c.reserved_bytes - pack_tasks.c.materialized_bytes,
+        ),
+        else_=0,
+    )
+    packs_reserved = (
+        await conn.execute(
+            select(
+                func.coalesce(
+                    func.sum(pack_remaining + pack_tasks.c.install_reserved_bytes),
+                    0,
+                )
+            ).where(pack_tasks.c.status.in_(("pending", "packing")))
+        )
+    ).scalar_one()
+    return int(downloads_reserved or 0) + int(packs_reserved or 0)
+
+
+async def get_active_physical_commitment_bytes() -> int:
+    async with transaction() as conn:
+        return await active_physical_commitment_bytes(conn)
+
+
+def _remaining_disk_bytes(reserved: int, completed: int) -> int:
+    return max(0, reserved - completed)
+
+
+async def _lock_active_download(
+    conn: Any,
+    download_id: int,
+    *,
+    expected_gid: str | None,
+) -> dict[str, Any] | None:
+    gid_condition = (
+        global_downloads.c.aria2_gid.is_(None)
+        if expected_gid is None
+        else global_downloads.c.aria2_gid == expected_gid
+    )
+    row = (
+        await conn.execute(
+            update(global_downloads)
+            .where(
+                global_downloads.c.id == download_id,
+                gid_condition,
+                global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
+                global_downloads.c.completed_file_id.is_(None),
+            )
+            .values(updated_at_ms=global_downloads.c.updated_at_ms)
+            .returning(global_downloads)
+        )
+    ).mappings().first()
+    return dict(row) if row else None
+
+
+async def _fail_active_task_row(
+    conn: Any,
+    task: Any,
+    *,
+    message: str,
+    timestamp: int,
+) -> None:
+    reserved = int(task["reserved_bytes"] or 0)
+    if reserved:
+        await _strict_adjust_usage_reserved(
+            conn,
+            user_id=int(task["user_id"]),
+            delta=-reserved,
+            timestamp=timestamp,
+        )
+    await conn.execute(
+        update(user_tasks)
+        .where(
+            user_tasks.c.id == task["id"],
+            user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+        )
+        .values(
+            status="failed",
+            reserved_bytes=0,
+            error_message=message,
+            updated_at_ms=timestamp,
+            finished_at_ms=timestamp,
+        )
+    )
+
+
+async def _fail_download_rows(
+    conn: Any,
+    download: Mapping[str, Any],
+    *,
+    message: str,
+    error_code: str,
+    timestamp: int,
+) -> None:
+    tasks = (
+        await conn.execute(
+            select(user_tasks).where(
+                user_tasks.c.global_download_id == download["id"],
+                user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            )
+        )
+    ).mappings().all()
+    for task in tasks:
+        await _fail_active_task_row(
+            conn, task, message=message, timestamp=timestamp
+        )
+    await conn.execute(
+        update(global_downloads)
+        .where(global_downloads.c.id == download["id"])
+        .values(
+            status="failed",
+            disk_reserved_bytes=0,
+            error_code=error_code,
+            error_message=message,
+            updated_at_ms=timestamp,
+        )
+    )
 
 
 def _effective_terminal_user_task_condition():
@@ -85,6 +297,18 @@ async def get_global_download_by_gid(gid: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+async def list_active_global_downloads() -> list[dict[str, Any]]:
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                select(global_downloads).where(
+                    global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES)
+                )
+            )
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 async def list_tracked_global_downloads(
     statuses: Iterable[str],
 ) -> list[dict[str, Any]]:
@@ -113,6 +337,7 @@ async def get_global_download_status_snapshot(
                 await conn.execute(
                     select(
                         global_downloads.c.status,
+                        global_downloads.c.aria2_gid,
                         global_downloads.c.completed_file_id,
                         global_downloads.c.completed_bytes,
                         global_downloads.c.total_bytes,
@@ -125,18 +350,49 @@ async def get_global_download_status_snapshot(
     return dict(row) if row else None
 
 
-async def list_inconsistent_completed_download_ids(threshold_ms: int) -> list[int]:
+async def get_global_download_for_generation(
+    download_id: int, expected_gid: str
+) -> dict[str, Any] | None:
     async with transaction() as conn:
-        rows = (
-            await conn.execute(
-                select(global_downloads.c.id).where(
-                    global_downloads.c.status == "completed",
-                    global_downloads.c.completed_file_id.is_(None),
-                    global_downloads.c.updated_at_ms < threshold_ms,
+        row = (
+            (
+                await conn.execute(
+                    select(global_downloads).where(
+                        global_downloads.c.id == download_id,
+                        global_downloads.c.aria2_gid == expected_gid,
+                        global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
+                        global_downloads.c.completed_file_id.is_(None),
+                    )
                 )
             )
-        ).all()
-    return [int(row[0]) for row in rows]
+            .mappings()
+            .first()
+        )
+    return dict(row) if row else None
+
+
+async def list_inconsistent_completed_download_ids(
+    threshold_ms: int,
+) -> list[dict[str, Any]]:
+    async with transaction() as conn:
+        rows = (
+            (
+                await conn.execute(
+                    select(
+                        global_downloads.c.id,
+                        global_downloads.c.status,
+                        global_downloads.c.aria2_gid,
+                    ).where(
+                        global_downloads.c.status == "completed",
+                        global_downloads.c.completed_file_id.is_(None),
+                        global_downloads.c.updated_at_ms < threshold_ms,
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [dict(row) for row in rows]
 
 
 async def list_completed_downloads_without_file() -> list[dict[str, Any]]:
@@ -273,45 +529,74 @@ def _user_task_download_select():
     )
 
 
-async def get_user_task_by_id(user_id: int, user_task_id: int) -> dict[str, Any] | None:
+def _active_task_user():
+    return exists(
+        select(users.c.id).where(
+            users.c.id == user_tasks.c.user_id,
+            users.c.pending_delete == 0,
+        )
+    )
+
+
+def _rest_task_status_condition(status_filter: str | None):
+    if status_filter is None:
+        return None
+    if status_filter not in REST_TASK_STATUS_FILTERS:
+        raise ValueError(status_filter)
+
+    user_terminal = user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES)
+    global_terminal = global_downloads.c.status.in_(TERMINAL_USER_TASK_STATUSES)
+    active = user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES)
+    if status_filter in {"active", "current"}:
+        return (~user_terminal) & (~global_terminal) & active
+    if status_filter == "complete":
+        return (user_tasks.c.status == "completed") | (
+            (~user_terminal) & (global_downloads.c.status == "completed")
+        )
+    return user_tasks.c.status.in_(ERROR_DOWNLOAD_STATUSES) | (
+        (~user_terminal) & global_downloads.c.status.in_(ERROR_DOWNLOAD_STATUSES)
+    )
+
+
+async def get_user_task_by_id(
+    user_id: int, user_task_id: int, *, include_pending_user: bool = False
+) -> dict[str, Any] | None:
+    conditions = [
+        user_tasks.c.id == user_task_id,
+        user_tasks.c.user_id == user_id,
+    ]
+    if not include_pending_user:
+        conditions.append(_active_task_user())
     async with transaction() as conn:
         row = (
-            (
-                await conn.execute(
-                    _user_task_download_select().where(
-                        user_tasks.c.id == user_task_id,
-                        user_tasks.c.user_id == user_id,
-                    )
-                )
-            )
-            .mappings()
-            .first()
-        )
+            await conn.execute(_user_task_download_select().where(*conditions))
+        ).mappings().first()
     return dict(row) if row else None
 
 
 async def get_user_task_by_gid(user_id: int, gid: str) -> dict[str, Any] | None:
     async with transaction() as conn:
         row = (
-            (
-                await conn.execute(
-                    _user_task_download_select().where(
-                        user_tasks.c.user_id == user_id,
-                        global_downloads.c.aria2_gid == gid,
-                    )
+            await conn.execute(
+                _user_task_download_select().where(
+                    user_tasks.c.user_id == user_id,
+                    global_downloads.c.aria2_gid == gid,
+                    _active_task_user(),
                 )
             )
-            .mappings()
-            .first()
-        )
+        ).mappings().first()
     return dict(row) if row else None
 
 
 async def list_user_tasks(
     user_id: int,
     statuses: Iterable[str] | None = None,
+    *,
+    include_pending_user: bool = False,
 ) -> list[dict[str, Any]]:
     query = _user_task_download_select().where(user_tasks.c.user_id == user_id)
+    if not include_pending_user:
+        query = query.where(_active_task_user())
     if statuses is not None:
         query = query.where(user_tasks.c.status.in_(tuple(statuses)))
     query = query.order_by(user_tasks.c.updated_at_ms.desc(), user_tasks.c.id.desc())
@@ -319,6 +604,41 @@ async def list_user_tasks(
     async with transaction() as conn:
         rows = (await conn.execute(query)).mappings().all()
     return [dict(row) for row in rows]
+
+
+async def list_user_tasks_page(
+    user_id: int,
+    *,
+    page: int,
+    page_size: int,
+    status_filter: str | None = None,
+    statuses: Iterable[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    if page < 1 or page_size < 1:
+        raise ValueError("invalid page")
+
+    conditions = [user_tasks.c.user_id == user_id, _active_task_user()]
+    if statuses is not None:
+        conditions.append(user_tasks.c.status.in_(tuple(statuses)))
+    status_condition = _rest_task_status_condition(status_filter)
+    if status_condition is not None:
+        conditions.append(status_condition)
+
+    join = user_tasks.join(
+        global_downloads, user_tasks.c.global_download_id == global_downloads.c.id
+    )
+    query = (
+        _user_task_download_select()
+        .where(*conditions)
+        .order_by(user_tasks.c.created_at_ms.desc(), user_tasks.c.id.desc())
+        .limit(page_size)
+        .offset((page - 1) * page_size)
+    )
+    count_query = select(func.count()).select_from(join).where(*conditions)
+    async with transaction() as conn:
+        total = int((await conn.execute(count_query)).scalar_one())
+        rows = (await conn.execute(query)).mappings().all()
+    return [dict(row) for row in rows], total
 
 
 async def delete_all_terminal_user_tasks(user_id: int) -> int:
@@ -357,7 +677,8 @@ async def list_user_tasks_for_download(
     statuses: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     query = _user_task_download_select().where(
-        user_tasks.c.global_download_id == global_download_id
+        user_tasks.c.global_download_id == global_download_id,
+        _active_task_user(),
     )
     if statuses is not None:
         query = query.where(user_tasks.c.status.in_(tuple(statuses)))
@@ -366,6 +687,113 @@ async def list_user_tasks_for_download(
     async with transaction() as conn:
         rows = (await conn.execute(query)).mappings().all()
     return [dict(row) for row in rows]
+
+
+async def _resize_active_task(
+    conn: Any,
+    task: Mapping[str, Any],
+    *,
+    target_bytes: int,
+    timestamp: int,
+) -> bool:
+    current = int(task["reserved_bytes"] or 0)
+    delta = target_bytes - current
+    quota_row = (
+        await conn.execute(
+            select(users.c.quota_bytes).where(
+                users.c.id == task["user_id"],
+                users.c.pending_delete == 0,
+            )
+        )
+    ).first()
+    if quota_row is None:
+        return False
+    if not await _strict_adjust_usage_reserved(
+        conn,
+        user_id=int(task["user_id"]),
+        delta=delta,
+        quota_bytes=int(quota_row[0]),
+        timestamp=timestamp,
+    ):
+        return False
+    await conn.execute(
+        update(user_tasks)
+        .where(
+            user_tasks.c.id == task["id"],
+            user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+        )
+        .values(reserved_bytes=target_bytes, updated_at_ms=timestamp)
+    )
+    return True
+
+
+async def _disk_resize_fits(
+    conn: Any,
+    download: Mapping[str, Any],
+    *,
+    target_bytes: int,
+    disk_available_bytes: DiskAvailable,
+    target_completed_bytes: int | None = None,
+) -> bool:
+    completed = int(download["completed_bytes"] or 0)
+    target_completed = (
+        completed
+        if target_completed_bytes is None
+        else max(completed, target_completed_bytes)
+    )
+    current = _remaining_disk_bytes(
+        int(download["disk_reserved_bytes"] or 0), completed
+    )
+    target = _remaining_disk_bytes(target_bytes, target_completed)
+    growth = target - current
+    if growth <= 0:
+        return True
+    available = (
+        disk_available_bytes()
+        if callable(disk_available_bytes)
+        else disk_available_bytes
+    )
+    return await active_physical_commitment_bytes(conn) + growth <= max(0, available)
+
+
+async def reset_active_accounting_for_startup() -> None:
+    timestamp = now_ms()
+    used_subquery = (
+        select(func.coalesce(func.sum(stored_files.c.size_bytes), 0))
+        .select_from(
+            user_files.join(
+                stored_files, user_files.c.stored_file_id == stored_files.c.id
+            )
+        )
+        .where(user_files.c.user_id == user_storage_usage.c.user_id)
+        .scalar_subquery()
+    )
+    pack_subquery = (
+        select(func.coalesce(func.sum(pack_tasks.c.reserved_bytes), 0))
+        .where(
+            pack_tasks.c.user_id == user_storage_usage.c.user_id,
+            pack_tasks.c.status.in_(("pending", "packing")),
+        )
+        .scalar_subquery()
+    )
+    async with transaction() as conn:
+        await conn.execute(
+            update(global_downloads)
+            .where(global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES))
+            .values(disk_reserved_bytes=0, updated_at_ms=timestamp)
+        )
+        await conn.execute(
+            update(user_tasks)
+            .where(user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES))
+            .values(reserved_bytes=0, updated_at_ms=timestamp)
+        )
+        await conn.execute(
+            update(user_storage_usage).values(
+                used_bytes=used_subquery,
+                reserved_bytes=pack_subquery,
+                updated_at_ms=timestamp,
+            )
+        )
 
 
 async def create_user_task(values: dict[str, Any]) -> dict[str, Any]:
@@ -391,6 +819,414 @@ async def create_user_task(values: dict[str, Any]) -> dict[str, Any]:
     except IntegrityError as exc:
         raise RepositoryConflictError(str(exc)) from exc
     return dict(row)
+
+
+async def admit_user_task(
+    *,
+    user_id: int,
+    global_download_id: int,
+    expected_gid: str | None,
+    display_name: str | None,
+    total_bytes: int,
+    size_known: bool,
+    size_limit_bytes: int,
+    disk_available_bytes: DiskAvailable,
+) -> dict[str, Any]:
+    timestamp = now_ms()
+    admission_error: str | None = None
+    async with transaction() as conn:
+        download = await _lock_active_download(
+            conn, global_download_id, expected_gid=expected_gid
+        )
+        if download is None:
+            raise DownloadAdmissionError("stale")
+
+        limit = int(download["size_limit_bytes"] or size_limit_bytes)
+        known = bool(download["size_known"]) or size_known
+        target = (
+            int(download["total_bytes"] or 0)
+            if bool(download["size_known"])
+            else max(0, total_bytes)
+        )
+
+        task = (
+            await conn.execute(
+                select(user_tasks).where(
+                    user_tasks.c.user_id == user_id,
+                    user_tasks.c.global_download_id == global_download_id,
+                )
+            )
+        ).mappings().first()
+        if task is not None and task["status"] not in {"failed", "cancelled"}:
+            raise RepositoryConflictError("duplicate task")
+
+        quota_row = (
+            await conn.execute(
+                select(users.c.quota_bytes).where(
+                    users.c.id == user_id,
+                    users.c.pending_delete == 0,
+                )
+            )
+        ).first()
+        if quota_row is None:
+            raise DownloadAdmissionError("user_missing")
+        current_reserved = int(task["reserved_bytes"] or 0) if task else 0
+        if not known and not await _strict_adjust_usage_reserved(
+            conn,
+            user_id=user_id,
+            delta=-current_reserved,
+            quota_bytes=int(quota_row[0]),
+            timestamp=timestamp,
+        ):
+            raise DownloadAdmissionError("quota")
+
+        task_status = (
+            str(download["status"])
+            if download["status"] in {"active", "waiting", "paused"}
+            else "queued"
+        )
+        values = {
+            "status": task_status,
+            "reserved_bytes": current_reserved if known else 0,
+            "display_name": display_name,
+            "error_message": None,
+            "updated_at_ms": timestamp,
+            "finished_at_ms": None,
+        }
+        if task is None:
+            row = (
+                await conn.execute(
+                    insert(user_tasks)
+                    .values(
+                        user_id=user_id,
+                        global_download_id=global_download_id,
+                        created_at_ms=timestamp,
+                        **values,
+                    )
+                    .returning(user_tasks)
+                )
+            ).mappings().one()
+        else:
+            row = (
+                await conn.execute(
+                    update(user_tasks)
+                    .where(user_tasks.c.id == task["id"])
+                    .values(**values)
+                    .returning(user_tasks)
+                )
+            ).mappings().one()
+
+        if known:
+            result = await _reconcile_download_size_locked(
+                conn,
+                download,
+                candidate=target,
+                completed_bytes=int(download["completed_bytes"] or 0),
+                size_limit_bytes=limit,
+                disk_available_bytes=disk_available_bytes,
+                timestamp=timestamp,
+            )
+            refreshed = (
+                await conn.execute(
+                    select(user_tasks).where(user_tasks.c.id == row["id"])
+                )
+            ).mappings().one()
+            row = refreshed
+            if str(row["status"]) == "failed" and user_id in result.get(
+                "rejected_user_ids", []
+            ):
+                admission_error = "quota"
+            elif not result.admitted:
+                admission_error = str(result["outcome"])
+        else:
+            await conn.execute(
+                update(global_downloads)
+                .where(global_downloads.c.id == global_download_id)
+                .values(size_limit_bytes=limit, updated_at_ms=timestamp)
+            )
+    if admission_error is not None:
+        raise DownloadAdmissionError(admission_error)
+    return dict(row)
+
+
+async def _resize_subscribers(
+    conn: Any,
+    *,
+    download_id: int,
+    target_bytes: int,
+    timestamp: int,
+) -> tuple[int, list[int]]:
+    tasks = (
+        await conn.execute(
+            select(user_tasks)
+            .select_from(user_tasks.join(users, users.c.id == user_tasks.c.user_id))
+            .where(
+                user_tasks.c.global_download_id == download_id,
+                user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                users.c.pending_delete == 0,
+            )
+        )
+    ).mappings().all()
+    admitted = 0
+    rejected_users: list[int] = []
+    for task in tasks:
+        if await _resize_active_task(
+            conn, task, target_bytes=target_bytes, timestamp=timestamp
+        ):
+            admitted += 1
+            continue
+        rejected_users.append(int(task["user_id"]))
+        await _fail_active_task_row(
+            conn,
+            task,
+            message="空间不足，已取消该订阅任务",
+            timestamp=timestamp,
+        )
+    return admitted, rejected_users
+
+
+async def _cancel_download_without_subscribers(
+    conn: Any,
+    download_id: int,
+    *,
+    timestamp: int,
+) -> None:
+    await conn.execute(
+        update(global_downloads)
+        .where(global_downloads.c.id == download_id)
+        .values(
+            status="cancelled",
+            disk_reserved_bytes=0,
+            error_code="no_eligible_subscribers",
+            error_message="没有满足配额要求的订阅用户",
+            updated_at_ms=timestamp,
+        )
+    )
+
+
+async def _reconcile_download_size_locked(
+    conn: Any,
+    download: Mapping[str, Any],
+    *,
+    candidate: int,
+    completed_bytes: int,
+    size_limit_bytes: int,
+    disk_available_bytes: DiskAvailable,
+    timestamp: int,
+) -> SizeReconcileResult:
+    download_id = int(download["id"])
+    limit = int(download["size_limit_bytes"] or size_limit_bytes)
+    if candidate > limit:
+        await _fail_download_rows(
+            conn, download, message="任务大小超过系统限制",
+            error_code="max_task_size_exceeded", timestamp=timestamp,
+        )
+        return SizeReconcileResult(outcome="max_task_size", rejected_user_ids=[])
+
+    admitted, rejected = await _resize_subscribers(
+        conn, download_id=download_id, target_bytes=candidate, timestamp=timestamp
+    )
+    if admitted == 0:
+        await _cancel_download_without_subscribers(
+            conn, download_id, timestamp=timestamp
+        )
+        return SizeReconcileResult(
+            outcome="no_subscribers", rejected_user_ids=rejected
+        )
+    if not await _disk_resize_fits(
+        conn, download, target_bytes=candidate,
+        disk_available_bytes=disk_available_bytes,
+        target_completed_bytes=completed_bytes,
+    ):
+        await _fail_download_rows(
+            conn, download, message="磁盘可用空间不足",
+            error_code="disk_budget_exceeded", timestamp=timestamp,
+        )
+        return SizeReconcileResult(
+            outcome="disk_budget", rejected_user_ids=rejected
+        )
+
+    await conn.execute(
+        update(global_downloads)
+        .where(global_downloads.c.id == download_id)
+        .values(
+            total_bytes=candidate,
+            completed_bytes=max(0, completed_bytes),
+            size_known=1,
+            size_limit_bytes=limit,
+            disk_reserved_bytes=candidate,
+            updated_at_ms=timestamp,
+        )
+    )
+    return SizeReconcileResult(
+        outcome="admitted", rejected_user_ids=rejected, size_bytes=candidate
+    )
+
+
+async def reconcile_download_size(
+    *,
+    download_id: int,
+    expected_gid: str | None,
+    candidate_bytes: int,
+    completed_bytes: int,
+    size_limit_bytes: int,
+    disk_available_bytes: DiskAvailable,
+) -> SizeReconcileResult:
+    candidate = max(0, candidate_bytes, completed_bytes)
+    timestamp = now_ms()
+    async with transaction() as conn:
+        download = await _lock_active_download(
+            conn, download_id, expected_gid=expected_gid
+        )
+        if download is None:
+            return SizeReconcileResult(outcome="stale", rejected_user_ids=[])
+        return await _reconcile_download_size_locked(
+            conn,
+            download,
+            candidate=candidate,
+            completed_bytes=completed_bytes,
+            size_limit_bytes=size_limit_bytes,
+            disk_available_bytes=disk_available_bytes,
+            timestamp=timestamp,
+        )
+
+
+async def assign_submitted_gid(
+    *,
+    download_id: int,
+    gid: str,
+    status: str,
+) -> dict[str, Any] | None:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        download = await _lock_active_download(
+            conn, download_id, expected_gid=None
+        )
+        if download is None or download["status"] != "queued":
+            return None
+        row = (
+            await conn.execute(
+                update(global_downloads)
+                .where(
+                    global_downloads.c.id == download_id,
+                    global_downloads.c.aria2_gid.is_(None),
+                    global_downloads.c.status == "queued",
+                )
+                .values(
+                    aria2_gid=gid,
+                    status=status,
+                    updated_at_ms=timestamp,
+                )
+                .returning(global_downloads)
+            )
+        ).mappings().first()
+        if row is None:
+            return None
+        await conn.execute(
+            update(user_tasks)
+            .where(
+                user_tasks.c.global_download_id == download_id,
+                user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            )
+            .values(status=status, updated_at_ms=timestamp)
+        )
+    return dict(row)
+
+
+async def claim_submitted_gid_for_failure(
+    *,
+    download_id: int,
+    gid: str,
+    message: str,
+) -> dict[str, Any] | None:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                update(global_downloads)
+                .where(
+                    global_downloads.c.id == download_id,
+                    global_downloads.c.aria2_gid.is_(None),
+                    global_downloads.c.status == "queued",
+                    global_downloads.c.completed_file_id.is_(None),
+                )
+                .values(
+                    aria2_gid=gid,
+                    status="failed",
+                    disk_reserved_bytes=0,
+                    error_code="submit_failed",
+                    error_message=message,
+                    updated_at_ms=timestamp,
+                )
+                .returning(global_downloads)
+            )
+        ).mappings().first()
+        if row is None:
+            return None
+        tasks = (
+            await conn.execute(
+                select(user_tasks).where(
+                    user_tasks.c.global_download_id == download_id,
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                )
+            )
+        ).mappings().all()
+        for task in tasks:
+            await _fail_active_task_row(
+                conn, task, message=message, timestamp=timestamp
+            )
+    return dict(row)
+
+
+async def fail_user_task_submission(
+    *,
+    task_id: int,
+    global_download_id: int,
+    message: str,
+) -> None:
+    timestamp = now_ms()
+    async with transaction() as conn:
+        await conn.execute(
+            update(global_downloads)
+            .where(global_downloads.c.id == global_download_id)
+            .values(updated_at_ms=global_downloads.c.updated_at_ms)
+        )
+        task = (
+            await conn.execute(
+                select(user_tasks).where(
+                    user_tasks.c.id == task_id,
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                )
+            )
+        ).mappings().first()
+        if task is None:
+            return
+        await _fail_active_task_row(
+            conn, task, message=message, timestamp=timestamp
+        )
+        remaining = (
+            await conn.execute(
+                select(func.count()).select_from(user_tasks).where(
+                    user_tasks.c.global_download_id == global_download_id,
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                )
+            )
+        ).scalar_one()
+        if int(remaining) == 0:
+            await conn.execute(
+                update(global_downloads)
+                .where(
+                    global_downloads.c.id == global_download_id,
+                    global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
+                )
+                .values(
+                    status="failed",
+                    disk_reserved_bytes=0,
+                    error_code="submit_failed",
+                    error_message=message,
+                    updated_at_ms=timestamp,
+                )
+            )
 
 
 async def update_global_download(
@@ -433,6 +1269,7 @@ async def guarded_update_global_download(
     download_id: int,
     values: dict[str, Any],
     *,
+    expected_gid: str,
     return_row: Literal[False] = False,
 ) -> bool: ...
 
@@ -442,6 +1279,7 @@ async def guarded_update_global_download(
     download_id: int,
     values: dict[str, Any],
     *,
+    expected_gid: str,
     return_row: Literal[True],
 ) -> dict[str, Any] | None: ...
 
@@ -450,6 +1288,7 @@ async def guarded_update_global_download(
     download_id: int,
     values: dict[str, Any],
     *,
+    expected_gid: str,
     return_row: bool = False,
 ) -> dict[str, Any] | bool | None:
     if not values:
@@ -461,7 +1300,8 @@ async def guarded_update_global_download(
         update(global_downloads)
         .where(
             global_downloads.c.id == download_id,
-            global_downloads.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            global_downloads.c.aria2_gid == expected_gid,
+            global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
             global_downloads.c.completed_file_id.is_(None),
         )
         .values(**row_values)
@@ -479,9 +1319,73 @@ async def guarded_update_global_download(
     return row is not None
 
 
+async def guarded_update_download_and_active_user_tasks(
+    download_id: int,
+    global_values: dict[str, Any],
+    *,
+    expected_gid: str,
+    user_status: str | None = None,
+    display_name: str | None = None,
+    force_display_name: bool = False,
+) -> dict[str, Any] | None:
+    if not global_values:
+        return None
+
+    timestamp = now_ms()
+    row_values = {**global_values}
+    row_values.setdefault("updated_at_ms", timestamp)
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    update(global_downloads)
+                    .where(
+                        global_downloads.c.id == download_id,
+                        global_downloads.c.aria2_gid == expected_gid,
+                        global_downloads.c.status.in_(
+                            ACTIVE_GLOBAL_DOWNLOAD_STATUSES
+                        ),
+                        global_downloads.c.completed_file_id.is_(None),
+                    )
+                    .values(**row_values)
+                    .returning(global_downloads)
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            return None
+
+        base_condition = [
+            user_tasks.c.global_download_id == download_id,
+            user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+        ]
+        if user_status is not None:
+            await conn.execute(
+                update(user_tasks)
+                .where(*base_condition)
+                .values(status=user_status, updated_at_ms=timestamp)
+            )
+        if display_name:
+            name_update = update(user_tasks).where(*base_condition)
+            if not force_display_name:
+                name_update = name_update.where(
+                    refreshable_user_task_display_name_condition()
+                )
+            await conn.execute(
+                name_update.values(
+                    display_name=display_name,
+                    updated_at_ms=timestamp,
+                )
+            )
+    return dict(row)
+
+
 async def update_active_user_tasks(
     download_id: int,
     *,
+    expected_gid: str,
     status: str | None = None,
     display_name: str | None = None,
     force_display_name: bool = False,
@@ -490,6 +1394,12 @@ async def update_active_user_tasks(
     base_condition = [
         user_tasks.c.global_download_id == download_id,
         user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+        user_tasks.c.global_download_id.in_(
+            select(global_downloads.c.id).where(
+                global_downloads.c.id == download_id,
+                global_downloads.c.aria2_gid == expected_gid,
+            )
+        ),
     ]
     async with transaction() as conn:
         if status is not None:
@@ -561,12 +1471,39 @@ async def attach_completed_file_to_user(
 ) -> dict[str, Any]:
     timestamp = now_ms()
     async with transaction() as conn:
+        active_target = (
+            await conn.execute(
+                select(users.c.id).where(
+                    users.c.id == user_id,
+                    users.c.pending_delete == 0,
+                    exists(
+                        select(stored_files.c.id).where(
+                            stored_files.c.id == stored_file_id,
+                            stored_files.c.pending_delete == 0,
+                        )
+                    ),
+                )
+            )
+        ).first()
+        if active_target is None:
+            raise RepositoryConflictError("用户或存储文件正在删除")
         task = (
             (
                 await conn.execute(
-                    select(user_tasks).where(
+                    select(user_tasks)
+                    .select_from(
+                        user_tasks.join(users, users.c.id == user_tasks.c.user_id)
+                    )
+                    .where(
                         user_tasks.c.user_id == user_id,
                         user_tasks.c.global_download_id == global_download_id,
+                        users.c.pending_delete == 0,
+                        exists(
+                            select(stored_files.c.id).where(
+                                stored_files.c.id == stored_file_id,
+                                stored_files.c.pending_delete == 0,
+                            )
+                        ),
                     )
                 )
             )
@@ -588,7 +1525,12 @@ async def attach_completed_file_to_user(
                 user_storage_usage.c.used_bytes
                 + user_storage_usage.c.reserved_bytes
                 + size_bytes
-                <= quota_bytes
+                <= select(users.c.quota_bytes)
+                .where(
+                    users.c.id == user_id,
+                    users.c.pending_delete == 0,
+                )
+                .scalar_subquery()
             )
             usage = (
                 await conn.execute(
@@ -613,15 +1555,24 @@ async def attach_completed_file_to_user(
 
         reserved_bytes = int(task["reserved_bytes"] or 0) if task else 0
         if reserved_bytes > 0:
-            reserved_expr = user_storage_usage.c.reserved_bytes - reserved_bytes
-            await conn.execute(
-                update(user_storage_usage)
-                .where(user_storage_usage.c.user_id == user_id)
-                .values(
-                    reserved_bytes=case((reserved_expr < 0, 0), else_=reserved_expr),
-                    updated_at_ms=timestamp,
+            released = (
+                await conn.execute(
+                    update(user_storage_usage)
+                    .where(
+                        user_storage_usage.c.user_id == user_id,
+                        user_storage_usage.c.reserved_bytes >= reserved_bytes,
+                    )
+                    .values(
+                        reserved_bytes=(
+                            user_storage_usage.c.reserved_bytes - reserved_bytes
+                        ),
+                        updated_at_ms=timestamp,
+                    )
+                    .returning(user_storage_usage.c.user_id)
                 )
-            )
+            ).first()
+            if released is None:
+                raise RepositoryConflictError("reserved usage drift")
 
         task_values = {
             "status": "completed",
@@ -664,28 +1615,127 @@ async def attach_completed_file_to_user(
     return dict(row)
 
 
-async def complete_active_user_tasks_for_stored_file(
+async def _complete_user_task_with_file(
+    conn: Any,
+    task: Any,
     *,
-    global_download_id: int,
     stored_file_id: int,
     size_bytes: int,
     original_name: str,
     completed_at_ms: int,
-) -> int:
+    timestamp: int,
+) -> bool:
+    reserved = int(task["reserved_bytes"] or 0)
+    if reserved != size_bytes:
+        raise RepositoryConflictError("task reservation does not match actual size")
+    user_id = int(task["user_id"])
+    existing = (
+        await conn.execute(
+            select(user_files.c.id).where(
+                user_files.c.user_id == user_id,
+                user_files.c.stored_file_id == stored_file_id,
+            )
+        )
+    ).first()
+    values: dict[str, Any] = {
+        "reserved_bytes": user_storage_usage.c.reserved_bytes - reserved,
+        "updated_at_ms": timestamp,
+    }
+    if existing is None:
+        values["used_bytes"] = user_storage_usage.c.used_bytes + size_bytes
+    usage = (
+        await conn.execute(
+            update(user_storage_usage)
+            .where(
+                user_storage_usage.c.user_id == user_id,
+                user_storage_usage.c.reserved_bytes >= reserved,
+                user_storage_usage.c.used_bytes
+                + user_storage_usage.c.reserved_bytes
+                <= select(users.c.quota_bytes)
+                .where(
+                    users.c.id == user_id,
+                    users.c.pending_delete == 0,
+                )
+                .scalar_subquery(),
+            )
+            .values(**values)
+            .returning(user_storage_usage.c.user_id)
+        )
+    ).first()
+    if usage is None:
+        raise RepositoryConflictError("usage drift during completion")
+    display_name = str(task["display_name"] or original_name)
+    if existing is None:
+        await conn.execute(
+            insert(user_files).values(
+                user_id=user_id,
+                stored_file_id=stored_file_id,
+                display_name=display_name,
+                created_at_ms=timestamp,
+                updated_at_ms=timestamp,
+            )
+        )
+    await conn.execute(
+        update(user_tasks)
+        .where(
+            user_tasks.c.id == task["id"],
+            user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+        )
+        .values(
+            status="completed",
+            reserved_bytes=0,
+            error_message=None,
+            updated_at_ms=timestamp,
+            finished_at_ms=completed_at_ms,
+        )
+    )
+    return existing is None
+
+
+async def complete_active_user_tasks_for_stored_file(
+    *,
+    global_download_id: int,
+    expected_gid: str,
+    stored_file_id: int,
+    size_bytes: int,
+    original_name: str,
+    completed_at_ms: int,
+) -> int | None:
     timestamp = now_ms()
+    active_subscriber = exists(
+        select(user_tasks.c.id)
+        .select_from(user_tasks.join(users, users.c.id == user_tasks.c.user_id))
+        .where(
+            user_tasks.c.global_download_id == global_download_id,
+            user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            users.c.pending_delete == 0,
+        )
+    )
+    active_stored = exists(
+        select(stored_files.c.id).where(
+            stored_files.c.id == stored_file_id,
+            stored_files.c.pending_delete == 0,
+        )
+    )
     async with transaction() as conn:
         global_row = (
             await conn.execute(
                 update(global_downloads)
                 .where(
                     global_downloads.c.id == global_download_id,
+                    global_downloads.c.aria2_gid == expected_gid,
                     global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
                     global_downloads.c.completed_file_id.is_(None),
+                    active_subscriber,
+                    active_stored,
                 )
                 .values(
                     status="completed",
                     completed_file_id=stored_file_id,
+                    total_bytes=size_bytes,
                     completed_bytes=size_bytes,
+                    size_known=1,
+                    disk_reserved_bytes=0,
                     completed_at_ms=completed_at_ms,
                     aria2_gid=None,
                     error_code=None,
@@ -696,14 +1746,19 @@ async def complete_active_user_tasks_for_stored_file(
             )
         ).first()
         if global_row is None:
-            raise LookupError("global download is not active")
+            return None
 
         tasks = (
             (
                 await conn.execute(
-                    select(user_tasks).where(
+                    select(user_tasks)
+                    .select_from(
+                        user_tasks.join(users, users.c.id == user_tasks.c.user_id)
+                    )
+                    .where(
                         user_tasks.c.global_download_id == global_download_id,
                         user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                        users.c.pending_delete == 0,
                     )
                 )
             )
@@ -713,74 +1768,49 @@ async def complete_active_user_tasks_for_stored_file(
 
         user_files_created = 0
         for task in tasks:
-            user_id = int(task["user_id"])
-            display_name = str(task["display_name"] or original_name)
-            user_file = (
-                await conn.execute(
-                    select(user_files.c.id).where(
-                        user_files.c.user_id == user_id,
-                        user_files.c.stored_file_id == stored_file_id,
-                    )
-                )
-            ).first()
-            if user_file is None:
-                await conn.execute(
-                    insert(user_files).values(
-                        user_id=user_id,
-                        stored_file_id=stored_file_id,
-                        display_name=display_name,
-                        created_at_ms=timestamp,
-                        updated_at_ms=timestamp,
-                    )
-                )
-                await conn.execute(
-                    update(user_storage_usage)
-                    .where(user_storage_usage.c.user_id == user_id)
-                    .values(
-                        used_bytes=user_storage_usage.c.used_bytes + size_bytes,
-                        updated_at_ms=timestamp,
-                    )
-                )
-                user_files_created += 1
-
-            reserved_bytes = int(task["reserved_bytes"] or 0)
-            if reserved_bytes > 0:
-                reserved_expr = user_storage_usage.c.reserved_bytes - reserved_bytes
-                await conn.execute(
-                    update(user_storage_usage)
-                    .where(user_storage_usage.c.user_id == user_id)
-                    .values(
-                        reserved_bytes=case(
-                            (reserved_expr < 0, 0),
-                            else_=reserved_expr,
-                        ),
-                        updated_at_ms=timestamp,
-                    )
-                )
-
-            await conn.execute(
-                update(user_tasks)
-                .where(user_tasks.c.id == task["id"])
-                .values(
-                    status="completed",
-                    reserved_bytes=0,
-                    error_message=None,
-                    updated_at_ms=timestamp,
-                    finished_at_ms=completed_at_ms,
-                )
+            created = await _complete_user_task_with_file(
+                conn,
+                task,
+                stored_file_id=stored_file_id,
+                size_bytes=size_bytes,
+                original_name=original_name,
+                completed_at_ms=completed_at_ms,
+                timestamp=timestamp,
             )
+            user_files_created += int(created)
     return user_files_created
 
 
 async def repair_completed_download_with_stored_file(
     *,
     global_download_id: int,
+    expected_gid: str | None,
     stored_file_id: int,
     size_bytes: int,
     original_name: str,
     completed_at_ms: int,
 ) -> bool:
     timestamp = now_ms()
+    active_subscriber = exists(
+        select(user_tasks.c.id)
+        .select_from(user_tasks.join(users, users.c.id == user_tasks.c.user_id))
+        .where(
+            user_tasks.c.global_download_id == global_download_id,
+            user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            users.c.pending_delete == 0,
+        )
+    )
+    active_stored = exists(
+        select(stored_files.c.id).where(
+            stored_files.c.id == stored_file_id,
+            stored_files.c.pending_delete == 0,
+        )
+    )
+    gid_condition = (
+        global_downloads.c.aria2_gid.is_(None)
+        if expected_gid is None
+        else global_downloads.c.aria2_gid == expected_gid
+    )
     async with transaction() as conn:
         row = (
             await conn.execute(
@@ -789,10 +1819,16 @@ async def repair_completed_download_with_stored_file(
                     global_downloads.c.id == global_download_id,
                     global_downloads.c.status == "completed",
                     global_downloads.c.completed_file_id.is_(None),
+                    gid_condition,
+                    active_subscriber,
+                    active_stored,
                 )
                 .values(
                     completed_file_id=stored_file_id,
+                    total_bytes=size_bytes,
                     completed_bytes=size_bytes,
+                    size_known=1,
+                    disk_reserved_bytes=0,
                     completed_at_ms=completed_at_ms,
                     error_code=None,
                     error_message=None,
@@ -807,9 +1843,14 @@ async def repair_completed_download_with_stored_file(
         tasks = (
             (
                 await conn.execute(
-                    select(user_tasks).where(
+                    select(user_tasks)
+                    .select_from(
+                        user_tasks.join(users, users.c.id == user_tasks.c.user_id)
+                    )
+                    .where(
                         user_tasks.c.global_download_id == global_download_id,
                         user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                        users.c.pending_delete == 0,
                     )
                 )
             )
@@ -818,74 +1859,110 @@ async def repair_completed_download_with_stored_file(
         )
 
         for task in tasks:
-            user_id = int(task["user_id"])
-            display_name = str(task["display_name"] or original_name)
-            existing_file = (
-                await conn.execute(
-                    select(user_files.c.id).where(
-                        user_files.c.user_id == user_id,
-                        user_files.c.stored_file_id == stored_file_id,
-                    )
-                )
-            ).first()
-            if existing_file is None:
-                await conn.execute(
-                    insert(user_files).values(
-                        user_id=user_id,
-                        stored_file_id=stored_file_id,
-                        display_name=display_name,
-                        created_at_ms=timestamp,
-                        updated_at_ms=timestamp,
-                    )
-                )
-                await conn.execute(
-                    update(user_storage_usage)
-                    .where(user_storage_usage.c.user_id == user_id)
-                    .values(
-                        used_bytes=user_storage_usage.c.used_bytes + size_bytes,
-                        updated_at_ms=timestamp,
-                    )
-                )
-
-            reserved_bytes = int(task["reserved_bytes"] or 0)
-            if reserved_bytes > 0:
-                reserved_expr = user_storage_usage.c.reserved_bytes - reserved_bytes
-                await conn.execute(
-                    update(user_storage_usage)
-                    .where(user_storage_usage.c.user_id == user_id)
-                    .values(
-                        reserved_bytes=case(
-                            (reserved_expr < 0, 0),
-                            else_=reserved_expr,
-                        ),
-                        updated_at_ms=timestamp,
-                    )
-                )
-
-            await conn.execute(
-                update(user_tasks)
-                .where(user_tasks.c.id == task["id"])
-                .values(
-                    status="completed",
-                    reserved_bytes=0,
-                    error_message=None,
-                    updated_at_ms=timestamp,
-                    finished_at_ms=completed_at_ms,
-                )
+            await _complete_user_task_with_file(
+                conn,
+                task,
+                stored_file_id=stored_file_id,
+                size_bytes=size_bytes,
+                original_name=original_name,
+                completed_at_ms=completed_at_ms,
+                timestamp=timestamp,
             )
     return True
+
+
+async def replace_terminal_download_gid(
+    download_id: int,
+    *,
+    expected_gid: str,
+    residual_gid: str,
+) -> bool:
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                update(global_downloads)
+                .where(
+                    global_downloads.c.id == download_id,
+                    global_downloads.c.aria2_gid == expected_gid,
+                    global_downloads.c.status.in_(("failed", "cancelled")),
+                    global_downloads.c.completed_file_id.is_(None),
+                )
+                .values(aria2_gid=residual_gid, updated_at_ms=now_ms())
+                .returning(global_downloads.c.id)
+            )
+        ).first()
+    return row is not None
+
+
+async def clear_terminal_download_gid(
+    download_id: int,
+    *,
+    expected_gid: str,
+) -> bool:
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                update(global_downloads)
+                .where(
+                    global_downloads.c.id == download_id,
+                    global_downloads.c.aria2_gid == expected_gid,
+                    global_downloads.c.status.in_(("failed", "cancelled")),
+                    global_downloads.c.completed_file_id.is_(None),
+                )
+                .values(
+                    aria2_gid=None,
+                    disk_reserved_bytes=0,
+                    updated_at_ms=now_ms(),
+                )
+                .returning(global_downloads.c.id)
+            )
+        ).first()
+    return row is not None
+
+
+async def prepare_download_retry(download_id: int) -> dict[str, Any] | None:
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                update(global_downloads)
+                .where(
+                    global_downloads.c.id == download_id,
+                    global_downloads.c.aria2_gid.is_(None),
+                    global_downloads.c.status.in_(("failed", "cancelled")),
+                    global_downloads.c.completed_file_id.is_(None),
+                )
+                .values(
+                    status="queued",
+                    disk_reserved_bytes=0,
+                    error_code=None,
+                    error_message=None,
+                    completed_at_ms=None,
+                    updated_at_ms=now_ms(),
+                )
+                .returning(global_downloads)
+            )
+        ).mappings().first()
+    return dict(row) if row else None
 
 
 async def mark_global_download_failed(
     download_id: int,
     *,
+    expected_gid: str | None,
     message: str,
     error_code: str | None = None,
-    clear_gid: bool = True,
+    clear_gid: bool = False,
+    expected_statuses: Iterable[str] = FAILABLE_GLOBAL_DOWNLOAD_STATUSES,
 ) -> dict[str, Any] | None:
     timestamp = now_ms()
+    gid_condition = (
+        global_downloads.c.aria2_gid.is_(None)
+        if expected_gid is None
+        else global_downloads.c.aria2_gid == expected_gid
+    )
     global_values: dict[str, Any] = {
         "status": "failed",
+        "disk_reserved_bytes": 0,
         "error_code": error_code,
         "error_message": message,
         "updated_at_ms": timestamp,
@@ -900,9 +1977,8 @@ async def mark_global_download_failed(
                     update(global_downloads)
                     .where(
                         global_downloads.c.id == download_id,
-                        global_downloads.c.status.in_(
-                            FAILABLE_GLOBAL_DOWNLOAD_STATUSES
-                        ),
+                        gid_condition,
+                        global_downloads.c.status.in_(tuple(expected_statuses)),
                         global_downloads.c.completed_file_id.is_(None),
                     )
                     .values(**global_values)
@@ -913,18 +1989,7 @@ async def mark_global_download_failed(
             .first()
         )
         if row is None:
-            current = (
-                (
-                    await conn.execute(
-                        select(global_downloads).where(
-                            global_downloads.c.id == download_id
-                        )
-                    )
-                )
-                .mappings()
-                .first()
-            )
-            return dict(current) if current else None
+            return None
 
         active_tasks = (
             (
@@ -940,33 +2005,12 @@ async def mark_global_download_failed(
         )
 
         for task in active_tasks:
-            reserved_bytes = int(task["reserved_bytes"] or 0)
-            if reserved_bytes <= 0:
-                continue
-            reserved_expr = user_storage_usage.c.reserved_bytes - reserved_bytes
-            await conn.execute(
-                update(user_storage_usage)
-                .where(user_storage_usage.c.user_id == task["user_id"])
-                .values(
-                    reserved_bytes=case((reserved_expr < 0, 0), else_=reserved_expr),
-                    updated_at_ms=timestamp,
-                )
+            await _fail_active_task_row(
+                conn,
+                task,
+                message=message,
+                timestamp=timestamp,
             )
-
-        await conn.execute(
-            update(user_tasks)
-            .where(
-                user_tasks.c.global_download_id == download_id,
-                user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
-            )
-            .values(
-                status="failed",
-                reserved_bytes=0,
-                error_message=message,
-                updated_at_ms=timestamp,
-                finished_at_ms=timestamp,
-            )
-        )
     return dict(row)
 
 
@@ -997,17 +2041,11 @@ async def cancel_active_user_task(
 
         reserved_bytes = int(task["reserved_bytes"] or 0)
         if reserved_bytes > 0:
-            reserved_expr = user_storage_usage.c.reserved_bytes - reserved_bytes
-            await conn.execute(
-                update(user_storage_usage)
-                .where(user_storage_usage.c.user_id == user_id)
-                .values(
-                    reserved_bytes=case(
-                        (reserved_expr < 0, 0),
-                        else_=reserved_expr,
-                    ),
-                    updated_at_ms=timestamp,
-                )
+            await _strict_adjust_usage_reserved(
+                conn,
+                user_id=user_id,
+                delta=-reserved_bytes,
+                timestamp=timestamp,
             )
 
         row = (
@@ -1032,6 +2070,29 @@ async def cancel_active_user_task(
             .mappings()
             .first()
         )
+        remaining = (
+            await conn.execute(
+                select(func.count()).select_from(user_tasks).where(
+                    user_tasks.c.global_download_id == task["global_download_id"],
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                )
+            )
+        ).scalar_one()
+        if int(remaining) == 0:
+            await conn.execute(
+                update(global_downloads)
+                .where(
+                    global_downloads.c.id == task["global_download_id"],
+                    global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
+                )
+                .values(
+                    status="cancelled",
+                    aria2_gid=None,
+                    disk_reserved_bytes=0,
+                    error_message=error_message,
+                    updated_at_ms=timestamp,
+                )
+            )
     return dict(row) if row else None
 
 

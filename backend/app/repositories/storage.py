@@ -3,13 +3,12 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import func, select, update
 
 from app.db.engine import transaction
 from app.db.schema import (
     global_downloads,
     pack_tasks,
-    stored_file_entries,
     stored_files,
     user_files,
     user_tasks,
@@ -69,6 +68,14 @@ async def stored_file_exists(file_id: int) -> bool:
     return row is not None
 
 
+async def get_stored_file(file_id: int) -> dict[str, Any] | None:
+    async with transaction() as conn:
+        row = (
+            await conn.execute(select(stored_files).where(stored_files.c.id == file_id))
+        ).mappings().first()
+    return dict(row) if row else None
+
+
 async def list_file_users(file_id: int) -> list[dict[str, Any]]:
     async with transaction() as conn:
         rows = (
@@ -93,11 +100,22 @@ async def list_file_users(file_id: int) -> list[dict[str, Any]]:
 
 async def delete_orphan_stored_file(
     file_id: int,
+    *,
+    expected_content_hash: str | None = None,
 ) -> tuple[str, str, list[int]] | None:
     async with transaction() as conn:
         stored_file = (
             (
-                await conn.execute(select(stored_files).where(stored_files.c.id == file_id))
+                await conn.execute(
+                    select(stored_files).where(
+                        stored_files.c.id == file_id,
+                        *(
+                            (stored_files.c.content_hash == expected_content_hash,)
+                            if expected_content_hash is not None
+                            else ()
+                        ),
+                    )
+                )
             )
             .mappings()
             .first()
@@ -152,11 +170,20 @@ async def delete_orphan_stored_file(
             .values(output_stored_file_id=None, updated_at_ms=timestamp)
         )
         await conn.execute(
-            delete(stored_file_entries).where(
-                stored_file_entries.c.stored_file_id == file_id
+            update(stored_files)
+            .where(
+                stored_files.c.id == file_id,
+                stored_files.c.pending_delete == 0,
+            )
+            .values(
+                pending_delete=1,
+                delete_attempts=0,
+                delete_next_retry_at_ms=timestamp,
+                delete_lease_token=None,
+                delete_lease_expires_at_ms=None,
+                delete_error=None,
             )
         )
-        await conn.execute(delete(stored_files).where(stored_files.c.id == file_id))
         return (
             str(stored_file["content_hash"]),
             str(stored_file["real_path"]),

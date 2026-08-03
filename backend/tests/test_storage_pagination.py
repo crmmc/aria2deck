@@ -160,3 +160,19 @@ def test_storage_list_returns_stable_empty_page_contract(
     list_mock.assert_awaited_once_with(
         "none", False, page=4, page_size=20
     )
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "detail"),
+    [
+        ("/scan", "存储扫描功能暂未实现"),
+        ("/repair", "存储修复功能暂未实现"),
+    ],
+)
+def test_storage_maintenance_endpoints_report_not_implemented(
+    admin_client: TestClient, endpoint: str, detail: str
+) -> None:
+    response = admin_client.post(f"/api/admin/storage{endpoint}")
+
+    assert response.status_code == 501
+    assert response.json() == {"detail": detail}

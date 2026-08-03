@@ -19,9 +19,8 @@ os.environ["ARIA2C_DATABASE_PATH"] = _test_db
 os.environ["ARIA2C_DOWNLOAD_DIR"] = _test_download_dir
 
 from app.core.config import settings
-from app.core.download_limiter import download_config, download_limiter
+from app.core.download_limiter import download_limiter
 from app.core.rate_limit import api_limiter, login_limiter, rpc_limiter
-from app.core.rate_limit_config import rate_limit_config
 from app.core.request_rate_guard import scoped_rate_limiter
 from app.db.bootstrap import bootstrap_database
 from app.db.engine import dispose_engine, reset_engine, transaction

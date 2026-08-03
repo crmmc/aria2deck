@@ -416,6 +416,15 @@ class TestDownloadFileRealFiles:
             bytes(range(10)),
         ),
         (
+            "range_test_uppercase_unit",
+            "range_test_uppercase_unit.bin",
+            "BYTES=0-9",
+            206,
+            "bytes 0-9/100",
+            "10",
+            bytes(range(10)),
+        ),
+        (
             "range_test_start_only",
             "range_test_start_only.bin",
             "bytes=90-",
@@ -443,7 +452,7 @@ class TestDownloadFileRealFiles:
             bytes(range(90, 100)),
         ),
     ],
-    ids=["start-end", "start-only", "suffix", "end-exceeds-size"],
+    ids=["start-end", "uppercase-unit", "start-only", "suffix", "end-exceeds-size"],
 )
 def test_download_range_supported_cases(
     authenticated_client: TestClient,
@@ -473,10 +482,51 @@ def test_download_range_supported_cases(
 @pytest.mark.parametrize(
     ("content_hash", "filename", "range_header"),
     [
+        ("range_test_unknown_unit", "range_test_unknown_unit.bin", "items=0-9"),
+        ("range_test_multi", "range_test_multi.bin", "bytes=0-9,20-29"),
+    ],
+    ids=["unknown-unit", "multiple-ranges"],
+)
+def test_download_range_ignores_unsupported_requests(
+    authenticated_client: TestClient,
+    test_user: dict,
+    temp_db: str,
+    content_hash: str,
+    filename: str,
+    range_header: str,
+):
+    data = _create_range_file(test_user, content_hash, filename)
+
+    response = authenticated_client.get(
+        f"/api/files/{content_hash}/download",
+        headers={"Range": range_header},
+    )
+
+    assert response.status_code == 200
+    assert "Content-Range" not in response.headers
+    assert response.content == data
+
+
+@pytest.mark.parametrize(
+    ("content_hash", "filename", "range_header"),
+    [
         ("range_test_invalid", "range_test_invalid.bin", "invalid"),
         ("range_test_oob", "range_test_oob.bin", "bytes=200-300"),
+        ("range_test_hyphens", "range_test_hyphens.bin", "bytes=0-1-2"),
+        (
+            "range_test_malformed_multi",
+            "range_test_malformed_multi.bin",
+            "bytes=10-5,20-29",
+        ),
+        ("range_test_suffix_zero", "range_test_suffix_zero.bin", "bytes=-0"),
     ],
-    ids=["invalid-format", "out-of-bounds"],
+    ids=[
+        "invalid-format",
+        "out-of-bounds",
+        "multiple-hyphens",
+        "malformed-multiple-ranges",
+        "zero-length-suffix",
+    ],
 )
 def test_download_range_rejects_invalid_requests(
     authenticated_client: TestClient,
@@ -493,6 +543,7 @@ def test_download_range_rejects_invalid_requests(
         headers={"Range": range_header},
     )
     assert response.status_code == 416
+    assert response.headers["Content-Range"] == "bytes */100"
 
 
 def test_download_without_range_advertises_accept_ranges(

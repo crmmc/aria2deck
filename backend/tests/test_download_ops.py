@@ -2,7 +2,24 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
+from sqlalchemy import func, select
+
+from app.db.engine import transaction
+from app.db.schema import global_downloads, stored_files, user_files, user_tasks
+from app.repositories.downloads import (
+    guarded_update_global_download,
+    update_active_user_tasks,
+)
+from app.services.aria2_lifecycle_service import switch_to_followed_download
+from app.services.storage import get_task_download_dir
+from tests.helpers_v0 import (
+    create_global_download_v0,
+    create_user_task_v0,
+    create_user_v0,
+)
 
 from app.services.download_ops import (
     bt_info_hash_from_status,
@@ -191,20 +208,6 @@ class TestIsMetadataHandoffPending:
 
 # --- DB operation tests ---
 
-from sqlalchemy import func, select
-
-from app.repositories.downloads import (
-    guarded_update_global_download,
-    update_active_user_tasks,
-)
-from app.db.engine import transaction
-from app.db.schema import global_downloads, stored_files, user_files, user_tasks
-from tests.helpers_v0 import (
-    create_global_download_v0,
-    create_user_task_v0,
-    create_user_v0,
-)
-
 
 @pytest.mark.asyncio
 async def test_guarded_update_returns_bool(temp_db: str) -> None:
@@ -214,7 +217,9 @@ async def test_guarded_update_returns_bool(temp_db: str) -> None:
         aria2_gid="aaa111",
     )
     result = await guarded_update_global_download(
-        dl["id"], {"status": "active", "total_bytes": 999}
+        dl["id"],
+        {"status": "active", "total_bytes": 999},
+        expected_gid="aaa111",
     )
     assert result is True
 
@@ -227,7 +232,10 @@ async def test_guarded_update_returns_row(temp_db: str) -> None:
         aria2_gid="bbb222",
     )
     result = await guarded_update_global_download(
-        dl["id"], {"aria2_gid": "ccc333"}, return_row=True
+        dl["id"],
+        {"aria2_gid": "ccc333"},
+        expected_gid="bbb222",
+        return_row=True,
     )
     assert isinstance(result, dict)
     assert result["aria2_gid"] == "ccc333"
@@ -241,7 +249,7 @@ async def test_guarded_update_skips_completed(temp_db: str) -> None:
         aria2_gid="ddd444",
     )
     result = await guarded_update_global_download(
-        dl["id"], {"total_bytes": 100}
+        dl["id"], {"total_bytes": 100}, expected_gid="ddd444"
     )
     assert result is False
 
@@ -265,6 +273,7 @@ async def test_update_active_user_tasks_force_display_name(
     )
     await update_active_user_tasks(
         dl["id"],
+        expected_gid="eee555",
         display_name="Real BT Name",
         force_display_name=True,
     )
@@ -298,6 +307,7 @@ async def test_update_active_user_tasks_respects_refreshable(
     )
     await update_active_user_tasks(
         dl["id"],
+        expected_gid="fff666",
         display_name="New Name",
         force_display_name=False,
     )
@@ -309,11 +319,6 @@ async def test_update_active_user_tasks_respects_refreshable(
         ).mappings().one()
     # "file.bin" does not match refreshable condition, so unchanged
     assert row["display_name"] == "file.bin"
-
-
-from unittest.mock import AsyncMock
-
-from app.services.aria2_lifecycle_service import switch_to_followed_download
 
 
 @pytest.mark.asyncio
@@ -406,7 +411,7 @@ async def test_switch_to_followed_uses_real_status(temp_db: str) -> None:
         "infoHash": "ef" * 20,
         "totalLength": "1234",
         "completedLength": "0",
-        "files": [{"path": "/downloads/Queued Torrent/file.bin"}],
+        "files": [{"path": str(get_task_download_dir(dl["id"]) / "Queued Torrent" / "file.bin")}],
     }
     mock_client.remove_download_result = AsyncMock()
 
@@ -465,7 +470,7 @@ async def test_switch_to_followed_complete_status_does_not_mark_completed_withou
         "infoHash": "fa" * 20,
         "totalLength": "1234",
         "completedLength": "1234",
-        "files": [{"path": "/downloads/Complete Torrent/file.bin", "length": "1234"}],
+        "files": [{"path": str(get_task_download_dir(dl["id"]) / "Complete Torrent" / "file.bin"), "length": "1234"}],
     }
     mock_client.remove_download_result = AsyncMock()
 
@@ -531,7 +536,7 @@ async def test_switch_to_followed_magnet_upgrades_kind(temp_db: str) -> None:
         "infoHash": "dd" * 20,
         "totalLength": "3000000000",
         "completedLength": "0",
-        "files": [{"path": "/downloads/debian.iso"}],
+        "files": [{"path": str(get_task_download_dir(dl["id"]) / "debian.iso")}],
     }
     mock_client.remove_download_result = AsyncMock()
 
@@ -555,7 +560,7 @@ async def test_switch_to_followed_magnet_upgrades_kind(temp_db: str) -> None:
 
 @pytest.mark.asyncio
 async def test_switch_to_followed_tell_status_fails(temp_db: str) -> None:
-    """tell_status failure: still updates GID and resource_kind, no crash."""
+    """A followed task without a trustworthy status is failed closed."""
     user = await create_user_v0(username="fail-user")
     dl = await create_global_download_v0(
         resource_key="fail-key",
@@ -593,5 +598,39 @@ async def test_switch_to_followed_tell_status_fails(temp_db: str) -> None:
                 select(global_downloads).where(global_downloads.c.id == dl["id"])
             )
         ).mappings().one()
-    assert g_row["aria2_gid"] == "real-gid-3"
-    assert g_row["resource_kind"] == "torrent"
+    assert g_row["aria2_gid"] is None
+    assert g_row["status"] == "failed"
+    assert g_row["error_code"] == "unknown_followed_size"
+    mock_client.force_remove.assert_awaited_once_with("real-gid-3")
+
+@pytest.mark.asyncio
+async def test_magnet_handoff_rejects_oversized_metadata_layout(temp_db: str) -> None:
+    user = await create_user_v0(username="oversized-metadata")
+    download = await create_global_download_v0(
+        resource_key="oversized-layout", resource_kind="magnet",
+        source_uri="magnet:?xt=urn:btih:" + "aa" * 20,
+        status="active", aria2_gid="metadata-gid",
+    )
+    await create_user_task_v0(
+        user_id=user["id"], global_download_id=download["id"], status="active"
+    )
+    client = AsyncMock()
+    client.tell_status.return_value = {
+        "status": "paused", "totalLength": "1", "completedLength": "0",
+        "files": [{"path": str(get_task_download_dir(download["id"]) / "payload")}] * 5001,
+    }
+
+    changed = await switch_to_followed_download(
+        client=client, download=download, metadata_gid="metadata-gid",
+        followed_gid="payload-gid", display_name_fallback=None, log_prefix="[Test]",
+    )
+
+    async with transaction() as conn:
+        row = (await conn.execute(
+            select(global_downloads).where(global_downloads.c.id == download["id"])
+        )).mappings().one()
+    assert changed is True
+    assert row["status"] == "failed"
+    assert row["error_code"] == "invalid_followed_layout"
+    assert row["error_message"] == "磁力任务文件布局无效"
+    client.force_remove.assert_awaited_once_with("payload-gid")

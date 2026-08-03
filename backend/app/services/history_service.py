@@ -9,32 +9,44 @@ from app.repositories.downloads import (
     clear_terminal_user_tasks,
     delete_terminal_user_task,
     list_user_tasks,
+    list_user_tasks_page,
 )
 
 logger = logging.getLogger(__name__)
 
 
+def _history_response(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "task_name": row.get("display_name") or row.get("global_display_name") or "未知任务",
+        "uri": row.get("source_uri"),
+        "total_length": int(row.get("total_bytes") or 0),
+        "result": row["status"],
+        "reason": row.get("error_message") or row.get("global_error_message"),
+        "created_at": ms_to_iso(row.get("created_at_ms")),
+        "finished_at": ms_to_iso(row.get("finished_at_ms") or row.get("completed_at_ms")),
+    }
+
+
 async def list_history(user_id: int) -> list[dict]:
     records = await list_user_tasks(user_id, TERMINAL_USER_TASK_STATUSES)
     logger.debug("查询历史记录 user_id=%s count=%s", user_id, len(records))
+    return [_history_response(row) for row in records]
 
-    return [
-        {
-            "id": row["id"],
-            "task_name": row.get("display_name")
-            or row.get("global_display_name")
-            or "未知任务",
-            "uri": row.get("source_uri"),
-            "total_length": int(row.get("total_bytes") or 0),
-            "result": row["status"],
-            "reason": row.get("error_message") or row.get("global_error_message"),
-            "created_at": ms_to_iso(row.get("created_at_ms")),
-            "finished_at": ms_to_iso(
-                row.get("finished_at_ms") or row.get("completed_at_ms")
-            ),
-        }
-        for row in records
-    ]
+
+async def list_history_page(*, user_id: int, page: int, page_size: int) -> dict:
+    records, total = await list_user_tasks_page(
+        user_id,
+        page=page,
+        page_size=page_size,
+        statuses=TERMINAL_USER_TASK_STATUSES,
+    )
+    return {
+        "items": [_history_response(row) for row in records],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 async def delete_history(user_id: int, history_id: int) -> dict:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.auth import AuthUser, require_admin, require_user
+from app.auth import AuthUser, require_limited_admin, require_limited_api_user
 from app.services import stats_service
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/stats", tags=["stats"])
 
 @router.get("")
 async def get_stats(
-    user: AuthUser = Depends(require_user),
+    user: AuthUser = Depends(require_limited_api_user),
 ) -> dict:
     return await stats_service.get_user_stats(
         user_id=user.id,
@@ -21,5 +21,5 @@ async def get_stats(
 
 
 @router.get("/machine")
-async def get_machine_stats(user: AuthUser = Depends(require_admin)) -> dict:
+async def get_machine_stats(user: AuthUser = Depends(require_limited_admin)) -> dict:
     return await stats_service.get_machine_stats(user.id)

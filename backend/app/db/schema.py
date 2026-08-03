@@ -11,6 +11,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    text,
 )
 
 from app.domain.status import (
@@ -20,8 +21,16 @@ from app.domain.status import (
     USER_TASK_STATUSES,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 7
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
+PACK_SOURCE_CLEANUP_STATES = (
+    "retained",
+    "pending",
+    "cleaned",
+    "retained_output",
+    "identity_mismatch",
+    "unknown",
+)
 
 metadata = MetaData()
 
@@ -49,14 +58,30 @@ users = Table(
     Column("password_hash", Text, nullable=False),
     Column("is_admin", Integer, nullable=False, server_default="0"),
     Column("quota_bytes", Integer, nullable=False),
-    Column("rpc_secret", String(128), unique=True),
+    Column("rpc_secret_digest", String(64), unique=True),
+    Column("rpc_secret_prefix", String(24)),
     Column("rpc_secret_created_at_ms", Integer),
     Column("is_initial_password", Integer, nullable=False, server_default="0"),
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
+    Column("pending_delete", Integer, nullable=False, server_default="0"),
+    Column("delete_attempts", Integer, nullable=False, server_default="0"),
+    Column("delete_next_retry_at_ms", Integer),
+    Column("delete_lease_token", String(64)),
+    Column("delete_lease_expires_at_ms", Integer),
+    Column("delete_error", Text),
     CheckConstraint("is_admin IN (0, 1)", name="ck_users_is_admin_bool"),
     CheckConstraint(
         "is_initial_password IN (0, 1)", name="ck_users_initial_password_bool"
+    ),
+    CheckConstraint("pending_delete IN (0, 1)", name="ck_users_pending_delete_bool"),
+    CheckConstraint("delete_attempts >= 0", name="ck_users_delete_attempts_non_negative"),
+    Index(
+        "ix_users_delete_due",
+        "pending_delete",
+        "delete_next_retry_at_ms",
+        "delete_lease_expires_at_ms",
+        "id",
     ),
 )
 
@@ -80,7 +105,8 @@ api_tokens = Table(
     Column(
         "user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     ),
-    Column("token", String(128), nullable=False, unique=True),
+    Column("token_digest", String(64), nullable=False, unique=True),
+    Column("token_prefix", String(24), nullable=False),
     Column("name", String(200)),
     Column("created_at_ms", Integer, nullable=False),
     Column("last_used_at_ms", Integer),
@@ -133,12 +159,46 @@ stored_files = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("content_hash", String(128), nullable=False, unique=True),
+    Column("content_hash_version", String(8), nullable=False, server_default="v1"),
+    Column("content_object_kind", String(16), nullable=False, server_default="legacy"),
+    Column("content_digest", String(128)),
     Column("real_path", Text, nullable=False, unique=True),
     Column("size_bytes", Integer, nullable=False),
     Column("is_directory", Integer, nullable=False, server_default="0"),
     Column("original_name", Text, nullable=False),
     Column("created_at_ms", Integer, nullable=False),
+    Column("pending_delete", Integer, nullable=False, server_default="0"),
+    Column("delete_attempts", Integer, nullable=False, server_default="0"),
+    Column("delete_next_retry_at_ms", Integer),
+    Column("delete_lease_token", String(64)),
+    Column("delete_lease_expires_at_ms", Integer),
+    Column("delete_error", Text),
     CheckConstraint("is_directory IN (0, 1)", name="ck_stored_files_is_directory_bool"),
+    CheckConstraint(
+        "(content_hash_version = 'v1' AND content_object_kind = 'legacy' AND "
+        "(content_digest IS NULL OR content_digest = content_hash)) OR "
+        "(content_hash_version = 'v2' AND content_object_kind IN ('file', 'directory') "
+        "AND length(content_digest) = 64 AND content_digest NOT GLOB '*[^0-9a-f]*' "
+        "AND content_hash = 'v2:' || content_object_kind || ':' || content_digest)",
+        name="ck_stored_files_content_identity_shape",
+    ),
+    UniqueConstraint(
+        "content_hash_version", "content_object_kind", "content_digest",
+        name="uq_stored_files_content_identity",
+    ),
+    CheckConstraint(
+        "pending_delete IN (0, 1)", name="ck_stored_files_pending_delete_bool"
+    ),
+    CheckConstraint(
+        "delete_attempts >= 0", name="ck_stored_files_delete_attempts_non_negative"
+    ),
+    Index(
+        "ix_stored_files_delete_due",
+        "pending_delete",
+        "delete_next_retry_at_ms",
+        "delete_lease_expires_at_ms",
+        "id",
+    ),
 )
 
 global_downloads = Table(
@@ -154,6 +214,9 @@ global_downloads = Table(
     Column("status", String(16), nullable=False),
     Column("total_bytes", Integer, nullable=False, server_default="0"),
     Column("completed_bytes", Integer, nullable=False, server_default="0"),
+    Column("size_known", Integer, nullable=False, server_default="0"),
+    Column("size_limit_bytes", Integer, nullable=False, server_default="0"),
+    Column("disk_reserved_bytes", Integer, nullable=False, server_default="0"),
     Column("error_code", String(64)),
     Column("error_message", Text),
     Column("completed_file_id", Integer, ForeignKey("stored_files.id")),
@@ -167,7 +230,19 @@ global_downloads = Table(
     CheckConstraint(
         _in_check("status", GLOBAL_DOWNLOAD_STATUSES), name="ck_global_downloads_status"
     ),
+    CheckConstraint("size_known IN (0, 1)", name="ck_global_downloads_size_known_bool"),
+    CheckConstraint(
+        "size_limit_bytes >= 0", name="ck_global_downloads_size_limit_non_negative"
+    ),
+    CheckConstraint(
+        "disk_reserved_bytes >= 0", name="ck_global_downloads_disk_reserved_non_negative"
+    ),
     Index("ix_global_downloads_status_gid", "status", "aria2_gid"),
+    Index(
+        "ix_global_downloads_status_disk_reserved",
+        "status",
+        "disk_reserved_bytes",
+    ),
     Index("ix_global_downloads_completed_file_id", "completed_file_id"),
 )
 
@@ -284,21 +359,111 @@ pack_tasks = Table(
     Column("source_user_file_ids_json", Text, nullable=False),
     Column("source_size_bytes", Integer, nullable=False),
     Column("reserved_bytes", Integer, nullable=False),
+    Column("materialized_bytes", Integer, nullable=False, server_default="0"),
+    Column("install_reserved_bytes", Integer, nullable=False, server_default="0"),
+    Column("retry_count", Integer, nullable=False, server_default="0"),
+    Column("next_retry_at_ms", Integer),
     Column("output_name", Text),
     Column("output_stored_file_id", Integer, ForeignKey("stored_files.id")),
+    Column("prepared_content_hash", String(128)),
+    Column("prepared_size_bytes", Integer),
+    Column("prepared_filename", Text),
     Column("delete_source", Integer, nullable=False, server_default="0"),
+    Column("source_cleanup_pending", Integer, nullable=False, server_default="0"),
     Column("status", String(16), nullable=False),
     Column("progress", Integer, nullable=False, server_default="0"),
     Column("error_message", Text),
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
     Column("finished_at_ms", Integer),
+    CheckConstraint(
+        "materialized_bytes >= 0",
+        name="ck_pack_tasks_materialized_bytes_non_negative",
+    ),
+    CheckConstraint(
+        "install_reserved_bytes >= 0",
+        name="ck_pack_tasks_install_reserved_bytes_non_negative",
+    ),
+    CheckConstraint("retry_count >= 0", name="ck_pack_tasks_retry_count_non_negative"),
+    CheckConstraint(
+        "next_retry_at_ms IS NULL OR next_retry_at_ms >= 0",
+        name="ck_pack_tasks_next_retry_non_negative",
+    ),
     CheckConstraint("delete_source IN (0, 1)", name="ck_pack_tasks_delete_source_bool"),
+    CheckConstraint(
+        "source_cleanup_pending IN (0, 1)",
+        name="ck_pack_tasks_source_cleanup_pending_bool",
+    ),
+    CheckConstraint(
+        "prepared_size_bytes IS NULL OR prepared_size_bytes >= 0",
+        name="ck_pack_tasks_prepared_size_non_negative",
+    ),
+    CheckConstraint(
+        "(prepared_content_hash IS NULL AND prepared_size_bytes IS NULL "
+        "AND prepared_filename IS NULL) OR "
+        "(prepared_content_hash IS NOT NULL AND prepared_size_bytes IS NOT NULL "
+        "AND prepared_filename IS NOT NULL)",
+        name="ck_pack_tasks_prepared_fields_together",
+    ),
     CheckConstraint(
         _in_check("status", PACK_TASK_STATUSES), name="ck_pack_tasks_status"
     ),
     Index("ix_pack_tasks_user_status_created", "user_id", "status", "created_at_ms"),
     Index("ix_pack_tasks_output_stored_file_id", "output_stored_file_id"),
+    Index(
+        "ix_pack_tasks_recovery",
+        "status",
+        "source_cleanup_pending",
+        "prepared_content_hash",
+    ),
+    Index(
+        "ix_pack_tasks_dispatch",
+        "status",
+        "next_retry_at_ms",
+        "id",
+    ),
+    Index(
+        "uq_pack_tasks_active_sources",
+        "user_id",
+        "source_user_file_ids_json",
+        unique=True,
+        sqlite_where=text("status IN ('pending', 'packing')"),
+    ),
+)
+
+pack_task_sources = Table(
+    "pack_task_sources",
+    metadata,
+    Column(
+        "task_id",
+        Integer,
+        ForeignKey("pack_tasks.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("ordinal", Integer, primary_key=True),
+    Column("original_user_file_id", Integer, nullable=False),
+    Column("stored_file_id", Integer),
+    Column("user_file_created_at_ms", Integer),
+    Column("content_hash", String(128)),
+    Column("cleanup_state", String(32), nullable=False),
+    Column("cleanup_error", Text),
+    Column("cleanup_real_path", Text),
+    Column("cleaned_at_ms", Integer),
+    CheckConstraint("ordinal >= 0", name="ck_pack_task_sources_ordinal_non_negative"),
+    CheckConstraint(
+        _in_check("cleanup_state", PACK_SOURCE_CLEANUP_STATES),
+        name="ck_pack_task_sources_cleanup_state",
+    ),
+    UniqueConstraint(
+        "task_id", "original_user_file_id", name="uq_pack_task_sources_task_file"
+    ),
+    Index(
+        "ix_pack_task_sources_identity",
+        "original_user_file_id",
+        "stored_file_id",
+        "user_file_created_at_ms",
+    ),
+    Index("ix_pack_task_sources_task_cleanup", "task_id", "cleanup_state"),
 )
 
 user_storage_usage = Table(

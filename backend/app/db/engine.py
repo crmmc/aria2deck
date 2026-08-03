@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
+import os
+from pathlib import Path
+import shutil
 from typing import AsyncGenerator
 
 from sqlalchemy import event, text
@@ -13,6 +17,10 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import settings
+
+
+logger = logging.getLogger(__name__)
+CREDENTIAL_SCRUB_MARKER_SUFFIX = ".v6-credential-scrub"
 
 _engine: AsyncEngine | None = None
 _session_maker: async_sessionmaker[AsyncSession] | None = None
@@ -33,6 +41,7 @@ def get_engine() -> AsyncEngine:
             cursor = dbapi_connection.cursor()
             try:
                 cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute("PRAGMA secure_delete=ON")
                 cursor.execute("PRAGMA synchronous=NORMAL")
             finally:
                 cursor.close()
@@ -65,6 +74,7 @@ async def session_scope() -> AsyncGenerator[AsyncSession, None]:
 async def transaction() -> AsyncGenerator[AsyncConnection, None]:
     async with get_engine().begin() as conn:
         await conn.execute(text("PRAGMA foreign_keys=ON"))
+        await conn.execute(text("PRAGMA secure_delete=ON"))
         yield conn
 
 
@@ -73,6 +83,56 @@ async def apply_sqlite_pragmas() -> None:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
         await conn.execute(text("PRAGMA synchronous=NORMAL"))
         await conn.execute(text("PRAGMA foreign_keys=ON"))
+        await conn.execute(text("PRAGMA secure_delete=ON"))
+
+
+def credential_scrub_marker_path() -> Path:
+    database = Path(settings.database_path)
+    return database.with_name(database.name + CREDENTIAL_SCRUB_MARKER_SUFFIX)
+
+
+def mark_credential_scrub_pending() -> None:
+    marker = credential_scrub_marker_path()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    with marker.open("w", encoding="utf-8") as handle:
+        handle.write("v6 credential scrub pending\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def clear_credential_scrub_marker() -> None:
+    credential_scrub_marker_path().unlink(missing_ok=True)
+
+
+async def scrub_legacy_credential_pages() -> bool:
+    database = Path(settings.database_path)
+    try:
+        async with get_engine().connect() as conn:
+            checkpoint = (
+                await conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+            ).first()
+            if checkpoint is None or int(checkpoint[0]) != 0:
+                logger.warning("v6 凭证清理等待 WAL checkpoint 可用")
+                return False
+            await conn.commit()
+            required_free_bytes = max(1, database.stat().st_size)
+            available_bytes = shutil.disk_usage(database.parent).free
+            if available_bytes < required_free_bytes:
+                logger.warning("v6 凭证清理磁盘空间不足，保留清理标记")
+                return False
+            await conn.exec_driver_sql("VACUUM")
+            await conn.commit()
+            checkpoint = (
+                await conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+            ).first()
+            await conn.commit()
+    except (OSError, ValueError) as exc:
+        logger.warning("v6 凭证清理无法检查磁盘空间: %s", type(exc).__name__)
+        return False
+    except Exception:
+        logger.exception("v6 凭证清理失败，保留清理标记")
+        return False
+    return checkpoint is not None and int(checkpoint[0]) == 0
 
 
 async def check_database_integrity() -> bool:

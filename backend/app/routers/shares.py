@@ -6,7 +6,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from app.auth import AuthUser, require_user
+from app.auth import AuthUser, require_limited_api_user
 from app.core.download_limiter import download_limiter
 from app.core.request_rate_guard import (
     RateLimitScope,
@@ -15,9 +15,16 @@ from app.core.request_rate_guard import (
     ensure_share_access_allowed,
 )
 from app.domain.errors import DomainError
-from app.domain.shares import MAX_ACTIVE_SHARES_PER_FILE
 from app.http.errors import raise_http
-from app.http.file_response import range_file_response, tracked_response
+from app.http.file_response import (
+    range_file_response,
+    release_response_leases,
+    tracked_response,
+)
+from app.services.storage_locks import (
+    acquire_content_read_lease_locked,
+    get_content_hash_lock,
+)
 from app.schemas import (
     CreateShareRequest,
     ShareAccessRequest,
@@ -34,7 +41,7 @@ logger = logging.getLogger(__name__)
 @router.post("/api/shares", status_code=status.HTTP_201_CREATED)
 async def create_share(
     req: CreateShareRequest,
-    user: AuthUser = Depends(require_user),
+    user: AuthUser = Depends(require_limited_api_user),
 ) -> ShareLinkOut:
     try:
         result = await share_service.create_share(
@@ -51,14 +58,14 @@ async def create_share(
 
 
 @router.get("/api/shares")
-async def list_shares(user: AuthUser = Depends(require_user)) -> list[ShareLinkOut]:
+async def list_shares(user: AuthUser = Depends(require_limited_api_user)) -> list[ShareLinkOut]:
     return [ShareLinkOut(**item) for item in await share_service.list_shares(user.id)]
 
 
 @router.put("/api/shares/{share_id}/revoke")
 async def revoke_share(
     share_id: int,
-    user: AuthUser = Depends(require_user),
+    user: AuthUser = Depends(require_limited_api_user),
 ) -> dict:
     try:
         result = await share_service.revoke_share(share_id, user.id)
@@ -71,7 +78,7 @@ async def revoke_share(
 @router.delete("/api/shares/{share_id}")
 async def delete_share(
     share_id: int,
-    user: AuthUser = Depends(require_user),
+    user: AuthUser = Depends(require_limited_api_user),
 ) -> dict:
     try:
         result = await share_service.delete_share(share_id, user.id)
@@ -82,7 +89,7 @@ async def delete_share(
 
 
 @router.put("/api/shares/revoke-all")
-async def revoke_all_shares(user: AuthUser = Depends(require_user)) -> dict:
+async def revoke_all_shares(user: AuthUser = Depends(require_limited_api_user)) -> dict:
     result = await share_service.revoke_all_shares(user.id)
     logger.info("批量失效分享 user_id=%s count=%s", user.id, result["count"])
     return result
@@ -137,21 +144,27 @@ async def download_shared_file(
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, acquire_result.detail())
 
     lease = acquire_result.lease
+    read_lease = None
+    response_transferred = False
     try:
-        target, filename = await share_service.resolve_shared_download_target(
-            share,
-            subpath=subpath,
-            should_count_download=not request.headers.get("range"),
-        )
-        return tracked_response(range_file_response(request, target, filename), lease)
+        content_lock = await get_content_hash_lock(str(share["content_hash"]))
+        async with content_lock:
+            share = await share_service.check_share_access(code, token)
+            target, filename = await share_service.resolve_shared_download_target(
+                share,
+                subpath=subpath,
+            )
+            response = range_file_response(request, target, filename)
+            read_lease = acquire_content_read_lease_locked(str(share["content_hash"]))
+            await share_service.consume_share_download(int(share["id"]))
+        response = tracked_response(response, lease, read_lease)
+        response_transferred = True
+        return response
     except DomainError as exc:
-        if lease is not None:
-            await lease.release()
         raise_http(exc)
-    except Exception:
-        if lease is not None:
-            await lease.release()
-        raise
+    finally:
+        if not response_transferred:
+            await release_response_leases(lease, read_lease)
 
 
 @router.get("/api/s/{code}/browse")
@@ -170,3 +183,4 @@ async def browse_shared_directory(
         return await share_service.browse_shared_directory(code, token, subpath)
     except DomainError as exc:
         raise_http(exc)
+        raise AssertionError("unreachable")

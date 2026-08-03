@@ -74,10 +74,28 @@ class ChangePasswordRequest(BaseModel):
 
 
 class RpcAccessStatus(BaseModel):
-    """RPC 访问状态"""
+    """不含密钥的 RPC 访问状态。"""
     enabled: bool
-    secret: str | None = None
+    secret_prefix: str | None = None
     created_at: str | None = None
+
+
+class RpcAccessIssued(RpcAccessStatus):
+    """仅在开启或刷新时返回一次的 RPC 密钥。"""
+    secret: str
+
+
+class ApiTokenOut(BaseModel):
+    id: int
+    name: str | None = None
+    prefix: str
+    created_at: str
+    last_used_at: str | None = None
+
+
+class ApiTokenIssued(ApiTokenOut):
+    """仅在创建时返回一次的 API Token。"""
+    token: str
 
 
 class RpcAccessToggle(BaseModel):

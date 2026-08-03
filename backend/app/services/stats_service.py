@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
+from time import monotonic
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,9 @@ from app.services.task_runtime import fetch_active_live_statuses_by_gid
 from app.services.usage_service import get_usage, visible_space_from_usage
 
 logger = logging.getLogger(__name__)
+MACHINE_SIZE_CACHE_TTL_SECONDS = 5.0
+_machine_size_cache: tuple[str, float, int] | None = None
+_machine_size_lock = asyncio.Lock()
 
 
 def get_directory_size_bytes(path: Path) -> int:
@@ -27,6 +32,27 @@ def get_directory_size_bytes(path: Path) -> int:
             except Exception as exc:
                 logger.warning("统计目录大小失败 path=%s error=%s", entry, exc)
     return total
+
+
+async def _get_cached_directory_size(path: Path) -> int:
+    global _machine_size_cache
+
+    key = str(path)
+    now = monotonic()
+    if _machine_size_cache:
+        cached_key, expires_at, cached_size = _machine_size_cache
+        if cached_key == key and now < expires_at:
+            return cached_size
+
+    async with _machine_size_lock:
+        now = monotonic()
+        if _machine_size_cache:
+            cached_key, expires_at, cached_size = _machine_size_cache
+            if cached_key == key and now < expires_at:
+                return cached_size
+        size = await asyncio.to_thread(get_directory_size_bytes, path)
+        _machine_size_cache = (key, now + MACHINE_SIZE_CACHE_TTL_SECONDS, size)
+        return size
 
 
 async def get_user_stats(
@@ -67,7 +93,7 @@ async def get_machine_stats(admin_id: int | None) -> dict:
     download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
-    download_used = get_directory_size_bytes(download_path)
+    download_used = await _get_cached_directory_size(download_path)
     system_used = max(disk.used - download_used, 0)
 
     result = {

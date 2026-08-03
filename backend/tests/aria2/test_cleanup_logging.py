@@ -45,7 +45,8 @@ async def test_cleanup_logs_success_with_all_fields(mock_client, caplog):
                 skip_status_check=True,
             )
 
-        assert result is True
+        assert result.safe_to_reuse is True
+        assert result.result_removed is True
         assert "[CLEANUP]" in caplog.text
         assert "task_id=123" in caplog.text
         assert "owner_id=456" in caplog.text
@@ -77,10 +78,42 @@ async def test_cleanup_logs_rpc_failure(mock_client, caplog):
                 skip_status_check=True,
             )
 
-        assert result is True  # RPC failure doesn't fail cleanup
+        assert result.writer_stopped is False
+        assert result.directory_cleaned is False
+        assert result.safe_to_reuse is False
         assert "[CLEANUP]" in caplog.text
         assert CleanupErrorType.RPC_FAILURE.value in caplog.text
         assert "op=force_remove" in caplog.text
+        mock_cleanup.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_remove_result_failure_is_non_blocking_after_safe_cleanup(
+    mock_client, caplog
+):
+    mock_client.remove_download_result.side_effect = OSError("history unavailable")
+    with (
+        patch(
+            "app.services.failed_task_cleanup.cleanup_task_download_dir"
+        ),
+        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
+    ):
+        mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
+        with caplog.at_level(logging.WARNING):
+            result = await cleanup_failed_task_artifacts(
+                client=mock_client,
+                task_id=123,
+                gid="abc123",
+                owner_id=456,
+                log_prefix="[Test]",
+                skip_status_check=True,
+            )
+
+    assert result.writer_stopped is True
+    assert result.directory_cleaned is True
+    assert result.result_removed is False
+    assert result.safe_to_reuse is True
+    assert "op=remove_download_result" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -105,7 +138,9 @@ async def test_cleanup_logs_fs_failure(mock_client, caplog):
                 skip_status_check=True,
             )
 
-        assert result is False  # FS failure fails cleanup
+        assert result.writer_stopped is True
+        assert result.directory_cleaned is False
+        assert result.safe_to_reuse is False
         assert "[CLEANUP]" in caplog.text
         assert CleanupErrorType.FS_FAILURE.value in caplog.text
 
@@ -132,6 +167,10 @@ async def test_cleanup_idempotent_repeated_calls(mock_client):
         patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
     ):
         mock_cleanup.return_value = None
+        mock_client.force_remove.side_effect = [
+            "OK",
+            RuntimeError("GID abc123 is not found"),
+        ]
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
 
         # First call
@@ -154,8 +193,8 @@ async def test_cleanup_idempotent_repeated_calls(mock_client):
             skip_status_check=True,
         )
 
-        assert result1 is True
-        assert result2 is True
+        assert result1.safe_to_reuse is True
+        assert result2.safe_to_reuse is True
         assert mock_cleanup.call_count == 2
 
 
@@ -185,7 +224,7 @@ async def test_cleanup_skips_non_failed_status(mock_client, caplog, temp_db):
                 skip_status_check=False,  # Enable status check
             )
 
-        assert result is True  # Returns True (no cleanup needed)
+        assert result.skipped is True
         assert "[CLEANUP] skipped" in caplog.text
         assert "STATUS_CONFLICT" in caplog.text
         mock_cleanup.assert_not_called()
@@ -212,7 +251,7 @@ async def test_cleanup_handles_missing_task(mock_client, caplog, temp_db):
                 skip_status_check=False,
             )
 
-        assert result is True  # Returns True (already clean)
+        assert result.skipped is True
         assert "[CLEANUP] skipped" in caplog.text
         assert "task_not_found" in caplog.text
         mock_cleanup.assert_not_called()
@@ -244,7 +283,7 @@ async def test_cleanup_proceeds_for_failed_status(mock_client, temp_db):
             skip_status_check=False,
         )
 
-        assert result is True
+        assert result.safe_to_reuse is True
         mock_cleanup.assert_called_once()
 
 
@@ -274,7 +313,7 @@ async def test_cleanup_proceeds_for_cancelled_status(mock_client, temp_db):
             skip_status_check=False,
         )
 
-        assert result is True
+        assert result.safe_to_reuse is True
         mock_cleanup.assert_called_once()
 
 
@@ -331,7 +370,7 @@ async def test_cleanup_without_gid_skips_rpc(mock_client):
             skip_status_check=True,
         )
 
-        assert result is True
+        assert result.safe_to_reuse is True
         mock_client.force_remove.assert_not_called()
         mock_client.remove_download_result.assert_not_called()
         mock_cleanup.assert_called_once()

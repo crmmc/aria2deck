@@ -4,10 +4,13 @@ import logging
 import shutil
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from app.core.config import settings
-from app.core.security import check_url_ssrf, mask_url_credentials
+from app.core.security import (
+    check_torrent_network_endpoints,
+    check_url_ssrf,
+    mask_url_credentials,
+)
 from app.aria2.gateway import get_aria2_client
 from app.domain.errors import (
     BadGatewayError,
@@ -21,8 +24,10 @@ from app.repositories.downloads import (
     clear_terminal_user_tasks,
     get_global_by_resource_key,
     list_user_tasks,
+    list_user_tasks_page,
 )
 from app.services.download_service import (
+    DownloadAdmissionError,
     DuplicateTaskError,
     cancel_user_task,
     create_user_download,
@@ -48,7 +53,7 @@ from app.domain.torrent_metadata import (
     TorrentMetadataError,
     build_select_file_option,
     build_selection_resource_key,
-    parse_torrent_base64,
+    parse_torrent_base64_async,
     selected_total_size,
     validate_selected_indexes,
 )
@@ -66,19 +71,24 @@ async def check_url_safety(url: str) -> None:
         raise BadRequestError(error)
 
 
-def has_url_credentials(url: str) -> bool:
-    parsed = urlsplit(url)
-    if parsed.scheme.lower() not in {"http", "https", "ftp"}:
-        return False
-    return parsed.username is not None or parsed.password is not None
-
-
 def check_disk_space() -> tuple[bool, int]:
     download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
     min_free = get_min_free_disk()
     return disk.free > min_free, disk.free
+
+
+def raise_admission_error(exc: DownloadAdmissionError) -> None:
+    if exc.reason == "max_task_size":
+        raise ForbiddenError("任务大小超过系统限制") from exc
+    if exc.reason == "disk_budget":
+        raise ForbiddenError("磁盘可用空间不足") from exc
+    if exc.reason in {"quota", "no_subscribers"}:
+        raise ForbiddenError("空间不足") from exc
+    if exc.reason == "unknown_size":
+        raise BadRequestError("无法获取可信文件大小，任务未开始下载") from exc
+    raise ConflictError("任务状态已变化，请重试") from exc
 
 
 def torrent_preview_response(metadata: TorrentMetadata) -> dict:
@@ -101,11 +111,20 @@ def torrent_preview_response(metadata: TorrentMetadata) -> dict:
     }
 
 
-def parse_torrent_or_error(torrent: str) -> TorrentMetadata:
+async def parse_torrent_or_error(torrent: str) -> TorrentMetadata:
     try:
-        return parse_torrent_base64(torrent)
+        return await parse_torrent_base64_async(torrent)
     except TorrentMetadataError as exc:
         raise BadRequestError(f"无效的种子文件: {exc}") from exc
+
+
+async def check_torrent_network_safety(metadata: TorrentMetadata) -> None:
+    error = await check_torrent_network_endpoints(
+        metadata.tracker_urls,
+        metadata.webseed_urls,
+    )
+    if error:
+        raise BadRequestError(error)
 
 
 def create_task_response(
@@ -156,8 +175,6 @@ async def create_task(
     options: dict | None,
 ) -> dict:
     await check_url_safety(uri)
-    if has_url_credentials(uri):
-        raise BadRequestError("下载链接不支持用户名或密码")
 
     disk_ok, disk_free = check_disk_space()
     if not disk_ok:
@@ -167,10 +184,12 @@ async def create_task(
     usage_info = await get_usage(user_id, quota_bytes)
     available_space = min(usage_info["available_bytes"], disk_free)
 
-    masked_uri = mask_url_credentials(uri)
+    submission_uri = uri
     uri_hash: str | None = None
     name: str | None = None
     total_length: int = 0
+    size_known = False
+    max_task_size = get_max_task_size()
 
     if is_magnet_link(uri):
         uri_hash = extract_info_hash_from_magnet(uri)
@@ -196,12 +215,14 @@ async def create_task(
             raise BadRequestError(f"无法访问下载链接: {probe_result.error}")
 
         final_url = probe_result.final_url or uri
+        await check_url_safety(final_url)
+        submission_uri = final_url
         uri_hash = get_uri_hash(final_url)
         name = probe_result.filename
+        size_known = probe_result.content_length is not None
         total_length = probe_result.content_length or 0
 
-        if total_length > 0:
-            max_task_size = get_max_task_size()
+        if size_known:
             if total_length > max_task_size:
                 logger.warning(
                     "创建任务失败 user_id=%s reason=task_too_large size=%s limit=%s",
@@ -231,6 +252,7 @@ async def create_task(
         logger.warning("创建任务失败 user_id=%s reason=unsupported_uri_type", user_id)
         raise BadRequestError("无法识别的下载链接类型")
 
+    masked_uri = mask_url_credentials(submission_uri)
     try:
         task_row = await create_user_download(
             user_id=user_id,
@@ -239,18 +261,23 @@ async def create_task(
             resource_key=uri_hash,
             resource_kind=(
                 "magnet"
-                if is_magnet_link(uri)
+                if is_magnet_link(submission_uri)
                 else "http"
-                if is_http_url(uri)
+                if is_http_url(submission_uri)
                 else "other"
             ),
             display_name=name,
             total_bytes=total_length,
+            size_known=size_known,
+            size_limit_bytes=max_task_size,
+            disk_available_bytes=None,
             aria2_client=_get_client(),
             options=options,
         )
     except DuplicateTaskError as exc:
         raise ConflictError(str(exc)) from exc
+    except DownloadAdmissionError as exc:
+        raise_admission_error(exc)
     except ValueError as exc:
         if str(exc) == "quota exceeded":
             raise ForbiddenError("空间不足") from exc
@@ -276,7 +303,8 @@ async def preview_torrent_task(*, user_id: int, torrent: str) -> dict:
         logger.warning("预览种子任务失败 user_id=%s reason=torrent_too_large", user_id)
         raise PayloadTooLargeError("种子文件过大，最大支持 10MB")
 
-    metadata = parse_torrent_or_error(torrent)
+    metadata = await parse_torrent_or_error(torrent)
+    await check_torrent_network_safety(metadata)
     return torrent_preview_response(metadata)
 
 
@@ -292,12 +320,14 @@ async def create_torrent_task(
         logger.warning("创建种子任务失败 user_id=%s reason=torrent_too_large", user_id)
         raise PayloadTooLargeError("种子文件过大，最大支持 10MB")
 
+    metadata = await parse_torrent_or_error(torrent)
+    await check_torrent_network_safety(metadata)
+
     disk_ok, disk_free = check_disk_space()
     if not disk_ok:
         logger.warning("创建种子任务失败 user_id=%s reason=disk_insufficient free=%s", user_id, disk_free)
         raise ForbiddenError(f"磁盘空间不足，剩余 {disk_free / 1024 / 1024 / 1024:.2f} GB")
 
-    metadata = parse_torrent_or_error(torrent)
     uri_hash = metadata.info_hash
 
     usage_info = await get_usage(user_id, quota_bytes)
@@ -361,12 +391,17 @@ async def create_torrent_task(
             source_uri=magnet_uri,
             display_name=metadata.name,
             total_bytes=selected_size,
+            size_known=True,
+            size_limit_bytes=max_task_size,
+            disk_available_bytes=None,
             aria2_client=_get_client(),
             options=options,
             server_options=server_options,
         )
     except DuplicateTaskError as exc:
         raise ConflictError(str(exc)) from exc
+    except DownloadAdmissionError as exc:
+        raise_admission_error(exc)
     except ValueError as exc:
         if str(exc) == "quota exceeded":
             raise ForbiddenError("空间不足") from exc
@@ -410,6 +445,34 @@ async def list_tasks(
         list_task_response(row, live_by_gid.get(str(row.get("aria2_gid") or "")))
         for row in rows
     ]
+
+
+async def list_tasks_page(
+    *,
+    user_id: int,
+    status_filter: str | None,
+    page: int,
+    page_size: int,
+) -> dict:
+    try:
+        rows, total = await list_user_tasks_page(
+            user_id,
+            page=page,
+            page_size=page_size,
+            status_filter=status_filter,
+        )
+    except ValueError as exc:
+        raise BadRequestError(f"Unsupported status_filter: {exc.args[0]}") from exc
+    live_by_gid = await fetch_active_live_statuses_by_gid(rows, _get_client(), logger)
+    return {
+        "items": [
+            list_task_response(row, live_by_gid.get(str(row.get("aria2_gid") or "")))
+            for row in rows
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 async def cancel_task(

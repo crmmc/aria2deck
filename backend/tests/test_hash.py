@@ -1,10 +1,13 @@
 """Tests for hash utility functions."""
 
+import asyncio
 import base64
 import hashlib
+import threading
 import pytest
 from pathlib import Path
 
+import app.services.storage_index as storage_index
 from app.services.hash import (
     extract_info_hash_from_magnet,
     extract_info_hash_from_torrent,
@@ -14,6 +17,7 @@ from app.services.hash import (
     calculate_file_content_hash,
     calculate_directory_content_hash,
     calculate_content_hash,
+    calculate_content_hash_async,
     get_uri_hash,
     is_magnet_link,
     is_http_url,
@@ -269,8 +273,7 @@ class TestCalculateFileContentHash:
         file_path.write_bytes(content)
 
         result = calculate_file_content_hash(file_path)
-        expected = hashlib.sha256(content).hexdigest().lower()
-        assert result == expected
+        assert result.startswith("v2:file:")
 
     def test_empty_file(self, tmp_path: Path):
         """Test hash of empty file"""
@@ -278,8 +281,7 @@ class TestCalculateFileContentHash:
         file_path.write_bytes(b"")
 
         result = calculate_file_content_hash(file_path)
-        expected = hashlib.sha256(b"").hexdigest().lower()
-        assert result == expected
+        assert result.startswith("v2:file:")
 
     def test_large_file(self, tmp_path: Path):
         """Test hash of file larger than chunk size"""
@@ -289,8 +291,7 @@ class TestCalculateFileContentHash:
         file_path.write_bytes(content)
 
         result = calculate_file_content_hash(file_path)
-        expected = hashlib.sha256(content).hexdigest().lower()
-        assert result == expected
+        assert result.startswith("v2:file:")
 
     def test_same_content_same_hash(self, tmp_path: Path):
         """Test same content produces same hash"""
@@ -316,7 +317,7 @@ class TestCalculateDirectoryContentHash:
         (dir_path / "file2.txt").write_bytes(b"content2")
 
         result = calculate_directory_content_hash(dir_path)
-        assert len(result) == 64
+        assert result.startswith("v2:directory:")
 
     def test_empty_directory(self, tmp_path: Path):
         """Test hash of empty directory"""
@@ -324,9 +325,7 @@ class TestCalculateDirectoryContentHash:
         dir_path.mkdir()
 
         result = calculate_directory_content_hash(dir_path)
-        # Empty directory should produce hash of empty input
-        expected = hashlib.sha256(b"").hexdigest().lower()
-        assert result == expected
+        assert result.startswith("v2:directory:")
 
     def test_nested_directory(self, tmp_path: Path):
         """Test hash of nested directory structure"""
@@ -338,7 +337,7 @@ class TestCalculateDirectoryContentHash:
         (subdir / "file2.txt").write_bytes(b"content2")
 
         result = calculate_directory_content_hash(dir_path)
-        assert len(result) == 64
+        assert result.startswith("v2:directory:")
 
     def test_same_content_same_hash(self, tmp_path: Path):
         """Test directories with same content produce same hash"""
@@ -448,6 +447,29 @@ class TestGetUriHash:
         """Test unknown URI type returns None"""
         result = get_uri_hash("unknown://example.com/file")
         assert result is None
+
+
+@pytest.mark.asyncio
+async def test_content_hash_async_cancellation_stops_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "large.bin"
+    path.write_bytes(b"x" * (3 * 1024 * 1024))
+    cancel_event = threading.Event()
+    started = threading.Event()
+
+    def blocking_hash(file_path: Path, event: threading.Event | None) -> str:
+        started.set()
+        assert event is not None and event.wait(2)
+        raise InterruptedError("storage scan cancelled")
+
+    monkeypatch.setattr(storage_index, "_file_hash", blocking_hash)
+    task = asyncio.create_task(calculate_content_hash_async(path, cancel_event))
+    assert await asyncio.to_thread(started.wait, 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancel_event.is_set()
 
 
 class TestUriTypeChecks:

@@ -1,14 +1,15 @@
 """Tests for aria2 RPC router."""
 
 import asyncio
-import base64
-import json
+from typing import cast
+
+from fastapi import FastAPI
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import update
-
-from app.db.engine import transaction
-from app.db.schema import users
+from app.core.security import credential_digest, credential_prefix
+from app.repositories import auth as auth_repo
 from tests.helpers_v0 import create_user_v0, now_ms
 
 
@@ -16,16 +17,13 @@ from tests.helpers_v0 import create_user_v0, now_ms
 def rpc_user(temp_db: str) -> dict:
     async def create() -> dict:
         user = await create_user_v0(username="rpcuser")
-        async with transaction() as conn:
-            await conn.execute(
-                update(users)
-                .where(users.c.id == user["id"])
-                .values(
-                    rpc_secret="test_rpc_secret_123",
-                    rpc_secret_created_at_ms=now_ms(),
-                    updated_at_ms=now_ms(),
-                )
-            )
+        secret = "test_rpc_secret_123"
+        await auth_repo.set_rpc_secret(
+            user["id"],
+            credential_digest("rpc-secret", secret),
+            credential_prefix(secret),
+            now_ms(),
+        )
         return {**user, "rpc_secret": "test_rpc_secret_123"}
 
     return asyncio.run(create())
@@ -47,6 +45,144 @@ class TestRpcRateLimiter:
             },
         )
         assert response.status_code == 200
+
+    def test_batch_cost_matches_item_count(self, client: TestClient, rpc_user: dict):
+        from app.core.rate_limit_config import rate_limit_config
+        from app.routers.aria2_rpc import rpc_limiter
+
+        request = {
+            "jsonrpc": "2.0",
+            "method": "aria2.getVersion",
+            "params": [f"token:{rpc_user['rpc_secret']}"],
+            "id": "1",
+        }
+        original_limit = rate_limit_config.rpc
+        asyncio.run(rpc_limiter.clear_all())
+        rate_limit_config.rpc = 2
+        try:
+            with patch(
+                "app.routers.aria2_rpc.Aria2RpcHandler.handle",
+                new=AsyncMock(return_value={"ok": True}),
+            ) as handle:
+                response = client.post("/aria2/jsonrpc", json=[request, request])
+                blocked = client.post("/aria2/jsonrpc", json=request)
+
+            assert response.status_code == 200
+            assert handle.await_count == 2
+            assert blocked.status_code == 200
+            assert blocked.json()["error"]["code"] == -32000
+            assert int(blocked.headers["Retry-After"]) > 0
+        finally:
+            rate_limit_config.rpc = original_limit
+            asyncio.run(rpc_limiter.clear_all())
+
+    def test_oversized_batch_is_rejected_without_partial_execution(
+        self, client: TestClient, rpc_user: dict
+    ) -> None:
+        from app.core.rate_limit_config import rate_limit_config
+        from app.routers.aria2_rpc import rpc_limiter
+
+        request = {
+            "jsonrpc": "2.0",
+            "method": "aria2.getVersion",
+            "params": [f"token:{rpc_user['rpc_secret']}"],
+            "id": "1",
+        }
+        original_limit = rate_limit_config.rpc
+        asyncio.run(rpc_limiter.clear_all())
+        rate_limit_config.rpc = 2
+        try:
+            with patch(
+                "app.routers.aria2_rpc.Aria2RpcHandler.handle",
+                new=AsyncMock(return_value={"ok": True}),
+            ) as handle:
+                response = client.post("/aria2/jsonrpc", json=[request] * 3)
+
+            assert response.status_code == 200
+            assert response.json()["error"]["code"] == -32000
+            assert int(response.headers["Retry-After"]) > 0
+            handle.assert_not_awaited()
+            assert not rpc_limiter._requests
+        finally:
+            rate_limit_config.rpc = original_limit
+            asyncio.run(rpc_limiter.clear_all())
+
+    def test_multicall_cost_counts_direct_handler_calls(
+        self, client: TestClient, rpc_user: dict
+    ) -> None:
+        from app.core.rate_limit_config import rate_limit_config
+        from app.routers.aria2_rpc import _rpc_rate_limit_cost, rpc_limiter
+
+        multicall = {
+            "jsonrpc": "2.0",
+            "method": "system.multicall",
+            "params": [[
+                {"methodName": "aria2.getVersion", "params": [f"token:{rpc_user['rpc_secret']}"]},
+                "invalid call",
+                {"methodName": "system.multicall", "params": [[]]},
+            ]],
+            "id": "multi-1",
+        }
+        assert _rpc_rate_limit_cost(multicall) == 2
+        assert _rpc_rate_limit_cost({"method": "system.multicall", "params": [[{}] * 21]}) == 1
+
+        original_limit = rate_limit_config.rpc
+        asyncio.run(rpc_limiter.clear_all())
+        rate_limit_config.rpc = 2
+        try:
+            with patch(
+                "app.routers.aria2_rpc.Aria2RpcHandler.handle",
+                new=AsyncMock(return_value={"ok": True}),
+            ) as handle:
+                response = client.post("/aria2/jsonrpc", json=multicall)
+                blocked = client.post(
+                    "/aria2/jsonrpc",
+                    json={
+                        "jsonrpc": "2.0",
+                        "method": "aria2.getVersion",
+                        "params": [f"token:{rpc_user['rpc_secret']}"],
+                        "id": "after-multi",
+                    },
+                )
+
+            assert response.status_code == 200
+            assert handle.await_count == 1
+            assert blocked.json()["error"]["code"] == -32000
+            assert int(blocked.headers["Retry-After"]) > 0
+        finally:
+            rate_limit_config.rpc = original_limit
+            asyncio.run(rpc_limiter.clear_all())
+
+    def test_limited_notification_has_no_body_and_retry_header(
+        self, client: TestClient, rpc_user: dict
+    ) -> None:
+        from app.core.rate_limit_config import rate_limit_config
+        from app.routers.aria2_rpc import rpc_limiter
+
+        notification = {
+            "jsonrpc": "2.0",
+            "method": "aria2.getVersion",
+            "params": [f"token:{rpc_user['rpc_secret']}"],
+        }
+        original_limit = rate_limit_config.rpc
+        asyncio.run(rpc_limiter.clear_all())
+        rate_limit_config.rpc = 1
+        try:
+            with patch(
+                "app.routers.aria2_rpc.Aria2RpcHandler.handle",
+                new=AsyncMock(return_value={"ok": True}),
+            ) as handle:
+                first = client.post("/aria2/jsonrpc", json=notification)
+                blocked = client.post("/aria2/jsonrpc", json=notification)
+
+            assert first.status_code == 204
+            assert blocked.status_code == 204
+            assert blocked.content == b""
+            assert int(blocked.headers["Retry-After"]) > 0
+            assert handle.await_count == 1
+        finally:
+            rate_limit_config.rpc = original_limit
+            asyncio.run(rpc_limiter.clear_all())
 
 
 class TestExtractSecret:
@@ -307,39 +443,83 @@ class TestJsonrpcHandler:
         data = response.json()
         assert "error" in data
 
-    def test_get_query_json_params(self, client: TestClient, rpc_user: dict):
-        response = client.get(
-            "/aria2/jsonrpc",
-            params={
-                "jsonrpc": "2.0",
-                "method": "aria2.getOption",
-                "id": "get-json-1",
-                "params": json.dumps([f"token:{rpc_user['rpc_secret']}", "dummy-gid"]),
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["id"] == "get-json-1"
-        assert data["result"] == {}
+    def test_notification_executes_without_response(
+        self, client: TestClient, rpc_user: dict
+    ) -> None:
+        with patch(
+            "app.routers.aria2_rpc.Aria2RpcHandler.handle",
+            new=AsyncMock(return_value={"ok": True}),
+        ) as handle:
+            response = client.post(
+                "/aria2/jsonrpc",
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "aria2.getOption",
+                    "params": [f"token:{rpc_user['rpc_secret']}", "dummy-gid"],
+                },
+            )
 
-    def test_get_query_base64_params(self, client: TestClient, rpc_user: dict):
-        encoded_params = base64.b64encode(
-            json.dumps([f"token:{rpc_user['rpc_secret']}", "dummy-gid"]).encode("utf-8")
-        ).decode("ascii")
+        assert response.status_code == 204
+        assert response.content == b""
+        handle.assert_awaited_once_with("aria2.getOption", ["dummy-gid"])
 
-        response = client.get(
-            "/aria2/jsonrpc",
-            params={
-                "jsonrpc": "2.0",
-                "method": "aria2.getOption",
-                "id": "get-b64-1",
-                "params": encoded_params,
-            },
-        )
+    def test_null_id_is_a_request(self, client: TestClient, rpc_user: dict) -> None:
+        with patch(
+            "app.routers.aria2_rpc.Aria2RpcHandler.handle",
+            new=AsyncMock(return_value={"ok": True}),
+        ):
+            response = client.post(
+                "/aria2/jsonrpc",
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "aria2.getOption",
+                    "params": [f"token:{rpc_user['rpc_secret']}", "dummy-gid"],
+                    "id": None,
+                },
+            )
+
         assert response.status_code == 200
-        data = response.json()
-        assert data["id"] == "get-b64-1"
-        assert data["result"] == {}
+        assert response.json() == {"jsonrpc": "2.0", "result": {"ok": True}, "id": None}
+
+    def test_all_notification_batch_returns_no_content(
+        self, client: TestClient, rpc_user: dict
+    ) -> None:
+        request = {"jsonrpc": "2.0", "method": "aria2.getOption", "params": [f"token:{rpc_user['rpc_secret']}", "dummy-gid"]}
+        with patch(
+            "app.routers.aria2_rpc.Aria2RpcHandler.handle",
+            new=AsyncMock(return_value={}),
+        ) as handle:
+            response = client.post("/aria2/jsonrpc", json=[request, request])
+
+        assert response.status_code == 204
+        assert response.content == b""
+        assert handle.await_count == 2
+
+    def test_mixed_batch_filters_notification_responses(
+        self, client: TestClient, rpc_user: dict
+    ) -> None:
+        notification = {"jsonrpc": "2.0", "method": "aria2.getOption", "params": [f"token:{rpc_user['rpc_secret']}", "dummy-gid"]}
+        request = {**notification, "id": "request-1"}
+        with patch(
+            "app.routers.aria2_rpc.Aria2RpcHandler.handle",
+            new=AsyncMock(return_value={"ok": True}),
+        ) as handle:
+            response = client.post("/aria2/jsonrpc", json=[notification, request])
+
+        assert response.status_code == 200
+        assert response.json() == [{"jsonrpc": "2.0", "result": {"ok": True}, "id": "request-1"}]
+        assert handle.await_count == 2
+
+    def test_invalid_notification_returns_no_content(
+        self, client: TestClient, rpc_user: dict
+    ) -> None:
+        response = client.post(
+            "/aria2/jsonrpc",
+            json={"jsonrpc": "1.0", "params": [f"token:{rpc_user['rpc_secret']}"]},
+        )
+
+        assert response.status_code == 204
+        assert response.content == b""
 
     def test_uses_refreshed_aria2_client_config(
         self, client: TestClient, rpc_user: dict, monkeypatch
@@ -351,7 +531,8 @@ class TestJsonrpcHandler:
             rpc_url="http://new-rpc:6800/jsonrpc",
             rpc_secret="new-secret",
         )
-        client.app.state.aria2_client = Aria2Client(
+        app = cast(FastAPI, client.app)
+        app.state.aria2_client = Aria2Client(
             "http://old-rpc:6800/jsonrpc", "old-secret"
         )
 
@@ -374,22 +555,20 @@ class TestJsonrpcHandler:
         assert data["result"]["version"] == "1.36.0"
         assert "rpc_url" not in data["result"]
         assert "secret" not in data["result"]
-        assert client.app.state.aria2_client._rpc_url == "http://new-rpc:6800/jsonrpc"
+        assert app.state.aria2_client._rpc_url == "http://new-rpc:6800/jsonrpc"
 
-    def test_get_query_invalid_params_encoding(self, client: TestClient):
+    def test_get_rejects_query_credentials(
+        self, client: TestClient, rpc_user: dict
+    ) -> None:
         response = client.get(
             "/aria2/jsonrpc",
-            params={
-                "jsonrpc": "2.0",
-                "method": "aria2.pause",
-                "id": "get-invalid-1",
-                "params": "%%%",
-            },
+            params={"method": "aria2.getOption", "params": f"token:{rpc_user['rpc_secret']}"},
         )
-        assert response.status_code == 200
-        data = response.json()
-        assert "error" in data
-        assert data["error"]["code"] == -32602
+
+        assert response.status_code == 405
+        assert response.headers["allow"] == "POST"
+        assert response.json() == {"detail": "JSON-RPC 仅支持 POST 请求，请在请求体中传递 token。"}
+        assert rpc_user["rpc_secret"] not in response.text
 
     def test_cors_preflight_allows_null_origin(self, client: TestClient):
         """测试 debug 模式下允许 null origin（本地文件调试）"""
@@ -416,22 +595,15 @@ class TestJsonrpcHandler:
                 # null origin 被正确拒绝（生产模式行为）
                 assert response.status_code in (200, 400)
 
-    def test_cors_get_allows_ariang_origin(self, client: TestClient, rpc_user: dict):
+    def test_cors_get_rejects_ariang_origin(self, client: TestClient, rpc_user: dict):
         response = client.get(
             "/aria2/jsonrpc",
-            params={
-                "jsonrpc": "2.0",
-                "method": "aria2.pause",
-                "id": "cors-get-1",
-                "params": json.dumps([f"token:{rpc_user['rpc_secret']}", "dummy-gid"]),
-            },
+            params={"params": f"token:{rpc_user['rpc_secret']}"},
             headers={"Origin": "https://ariang.mayswind.net"},
         )
-        assert response.status_code == 200
-        assert (
-            response.headers.get("access-control-allow-origin")
-            == "https://ariang.mayswind.net"
-        )
+
+        assert response.status_code == 405
+        assert response.headers.get("access-control-allow-origin") == "https://ariang.mayswind.net"
 
 
 @pytest.mark.asyncio

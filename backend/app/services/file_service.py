@@ -10,7 +10,11 @@ from app.core.config import settings
 from app.core.time_utils import ms_to_iso
 from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.repositories import files as files_repo
-from app.services.storage import get_store_dir, safe_delete_path
+from app.services.storage_locks import (
+    ContentReadLease,
+    acquire_content_read_lease_locked,
+    get_content_hash_lock,
+)
 from app.services.task_broadcast import broadcast_task_update_to_subscribers
 from app.services.usage_service import get_usage, visible_space_from_usage
 
@@ -21,6 +25,8 @@ logger = logging.getLogger(__name__)
 class DeleteUserFileReferenceResult:
     deleted: bool
     affected_download_ids: list[int]
+    state: str = "not_found"
+    accepted: bool = False
 
 
 def file_row_to_dict(row: dict[str, Any]) -> dict:
@@ -164,6 +170,23 @@ async def resolve_download_target(
     return target_path, target_path.name if path else str(row["display_name"])
 
 
+async def resolve_download_target_with_read_lease(
+    user_id: int,
+    file_hash: str,
+    path: str = "",
+) -> tuple[Path, str, ContentReadLease]:
+    content_lock = await get_content_hash_lock(file_hash)
+    async with content_lock:
+        target_path, download_name = await resolve_download_target(
+            user_id, file_hash, path
+        )
+        return (
+            target_path,
+            download_name,
+            acquire_content_read_lease_locked(file_hash),
+        )
+
+
 async def resolve_file_ids(
     user_id: int, file_ids: list[int]
 ) -> list[tuple[str, int, str]]:
@@ -187,25 +210,37 @@ async def resolve_file_ids(
 async def delete_user_file_reference_v0_result(
     user_id: int, user_file_id: int
 ) -> DeleteUserFileReferenceResult:
-    deleted, affected_download_ids, real_path = await files_repo.delete_user_file_reference(
-        user_id, user_file_id
-    )
-    if not deleted:
+    identity = await files_repo.get_user_file_delete_identity(user_id, user_file_id)
+    if identity is None:
         return DeleteUserFileReferenceResult(False, [])
-    if real_path:
-        path = Path(real_path)
+    content_lock = await get_content_hash_lock(str(identity["content_hash"]))
+    async with content_lock:
         try:
-            safe_delete_path(
-                base_dir=get_store_dir(),
-                target=path,
-                recursive=path.is_dir(),
-                allow_missing=True,
+            deleted, affected_download_ids, real_path = (
+                await files_repo.delete_user_file_reference(
+                    user_id,
+                    user_file_id,
+                    expected_stored_file_id=int(identity["stored_file_id"]),
+                    expected_created_at_ms=int(identity["created_at_ms"]),
+                )
             )
-        except Exception:
-            logger.warning(
-                "Failed to delete unreferenced stored path=%s", path, exc_info=True
-            )
-    return DeleteUserFileReferenceResult(True, affected_download_ids)
+        except files_repo.PackSourceProtectedError:
+            raise ForbiddenError(
+                "文件正在被打包或等待源文件清理，暂不能删除"
+            ) from None
+        if not deleted:
+            return DeleteUserFileReferenceResult(False, [])
+    accepted = real_path is not None
+    if accepted:
+        from app.services.deletion_cleanup import DeletionCleanupManager
+
+        DeletionCleanupManager.wake()
+    return DeleteUserFileReferenceResult(
+        True,
+        affected_download_ids,
+        state="pending" if accepted else "released",
+        accepted=accepted,
+    )
 
 
 async def delete_user_file_reference_v0(user_id: int, user_file_id: int) -> bool:
@@ -216,9 +251,9 @@ async def delete_file_by_hash(user_id: int, file_hash: str) -> DeleteUserFileRef
     row = await get_user_file_by_hash(user_id, file_hash)
     if not row:
         raise NotFoundError("文件不存在")
-    if await files_repo.count_active_shares_for_user_file(int(row["user_file_id"])) > 0:
-        raise ForbiddenError("该文件有活跃的分享链接，请先失效所有分享后再删除")
-    result = await delete_user_file_reference_v0_result(user_id, int(row["user_file_id"]))
+    result = await delete_user_file_reference_v0_result(
+        user_id, int(row["user_file_id"])
+    )
     if not result.deleted:
         raise NotFoundError("文件不存在")
     for download_id in result.affected_download_ids:

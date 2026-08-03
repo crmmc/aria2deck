@@ -1,8 +1,10 @@
 from fastapi.testclient import TestClient
 from sqlalchemy import insert, select
 
+from app.core.config import settings
 from app.db.engine import transaction
 from app.db.schema import global_downloads, pack_tasks, sessions, user_files, user_tasks
+from app.services.deletion_cleanup import DeletionCleanupManager
 from tests.helpers_v0 import create_user_file_v0, now_ms
 
 
@@ -24,8 +26,8 @@ async def create_user_task(user_id: int) -> int:
                         resource_kind="http",
                         source_uri="http://example.com/file.zip",
                         display_name="file.zip",
-                        aria2_gid="abc123",
-                        status="active",
+                        aria2_gid=None,
+                        status="completed",
                         total_bytes=0,
                         completed_bytes=0,
                         created_at_ms=timestamp,
@@ -44,7 +46,7 @@ async def create_user_task(user_id: int) -> int:
                     .values(
                         user_id=user_id,
                         global_download_id=download["id"],
-                        status="active",
+                        status="completed",
                         display_name="file.zip",
                         created_at_ms=timestamp,
                         updated_at_ms=timestamp,
@@ -69,7 +71,7 @@ async def create_pack_task(user_id: int) -> int:
                         user_id=user_id,
                         source_user_file_ids_json="[]",
                         source_size_bytes=1000,
-                        reserved_bytes=1000,
+                        reserved_bytes=0,
                         output_name="test_folder.tar.zst",
                         status="pending",
                         created_at_ms=timestamp,
@@ -91,7 +93,8 @@ class TestDeleteUserCleanup:
         import asyncio
 
         response = admin_client.delete(f"/api/users/{test_user['id']}")
-        assert response.status_code == 200
+        assert response.status_code == 202
+        asyncio.run(DeletionCleanupManager.run_once())
         assert (
             asyncio.run(
                 fetch_one(select(sessions).where(sessions.c.user_id == test_user["id"]))
@@ -107,7 +110,8 @@ class TestDeleteUserCleanup:
         asyncio.run(create_user_task(test_user["id"]))
 
         response = admin_client.delete(f"/api/users/{test_user['id']}")
-        assert response.status_code == 200
+        assert response.status_code == 202
+        asyncio.run(DeletionCleanupManager.run_once())
         assert (
             asyncio.run(
                 fetch_one(
@@ -125,7 +129,8 @@ class TestDeleteUserCleanup:
         asyncio.run(create_pack_task(test_user["id"]))
 
         response = admin_client.delete(f"/api/users/{test_user['id']}")
-        assert response.status_code == 200
+        assert response.status_code == 202
+        asyncio.run(DeletionCleanupManager.run_once())
         assert (
             asyncio.run(
                 fetch_one(
@@ -141,10 +146,13 @@ class TestDeleteUserCleanup:
         import asyncio
         from pathlib import Path
 
+        real_path = Path(settings.download_dir) / "store" / "abc123"
+        real_path.parent.mkdir(parents=True, exist_ok=True)
+        real_path.write_bytes(b"stored")
         asyncio.run(
             create_user_file_v0(
                 user_id=test_user["id"],
-                real_path=Path("/store/abc123"),
+                real_path=real_path,
                 content_hash="abc123hash",
                 display_name="test_file.txt",
                 size_bytes=1000,
@@ -153,7 +161,8 @@ class TestDeleteUserCleanup:
 
         response = admin_client.delete(f"/api/users/{test_user['id']}")
 
-        assert response.status_code == 200
+        assert response.status_code == 202
+        asyncio.run(DeletionCleanupManager.run_once())
         assert (
             asyncio.run(
                 fetch_one(
@@ -162,3 +171,4 @@ class TestDeleteUserCleanup:
             )
             is None
         )
+        assert not real_path.exists()

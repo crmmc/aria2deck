@@ -113,8 +113,12 @@ class TestDeleteFile:
             f"/api/files/{user_file['content_hash']}"
         )
 
-        assert response.status_code == 200
-        assert response.json() == {"ok": True}
+        assert response.status_code == 202
+        assert response.json() == {
+            "ok": True,
+            "state": "pending",
+            "accepted": True,
+        }
 
         import asyncio
 

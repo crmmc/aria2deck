@@ -15,8 +15,12 @@ from app.http.request_body_limit import (
 from app.main import create_app
 
 
-async def _unexpected(*args: object) -> Message:
-    raise AssertionError("unexpected ASGI call")
+async def _unexpected_receive() -> Message:
+    raise AssertionError("unexpected ASGI receive")
+
+
+async def _unexpected_send(_message: Message) -> None:
+    raise AssertionError("unexpected ASGI send")
 
 
 async def _run_http(
@@ -114,7 +118,7 @@ async def test_websocket_scope_is_unchanged() -> None:
         called = scope["type"] == "websocket"
 
     middleware = RequestBodyLimitMiddleware(downstream, max_body_bytes=5)
-    await middleware({"type": "websocket"}, _unexpected, _unexpected)
+    await middleware({"type": "websocket"}, _unexpected_receive, _unexpected_send)
     assert called is True
 
 
@@ -130,7 +134,7 @@ async def test_http_disconnect_is_forwarded() -> None:
         return {"type": "http.disconnect"}
 
     middleware = RequestBodyLimitMiddleware(downstream, max_body_bytes=5)
-    await middleware({"type": "http", "headers": []}, receive, _unexpected)
+    await middleware({"type": "http", "headers": []}, receive, _unexpected_send)
     assert received == {"type": "http.disconnect"}
 
 
@@ -142,7 +146,7 @@ async def test_unrelated_downstream_exception_propagates() -> None:
     middleware = RequestBodyLimitMiddleware(downstream, max_body_bytes=5)
     with pytest.raises(RuntimeError, match="downstream failed"):
         await middleware(
-            {"type": "http", "headers": []}, _unexpected, _unexpected
+            {"type": "http", "headers": []}, _unexpected_receive, _unexpected_send
         )
 
 

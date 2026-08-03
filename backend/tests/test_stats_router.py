@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -349,3 +350,34 @@ class TestGetStatsWithUsageRows:
         assert response.status_code == 200
         data = response.json()
         assert data["disk_frozen_space"] == 5_000_000
+
+
+@pytest.mark.asyncio
+async def test_machine_stats_scans_in_thread_and_uses_short_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import stats_service
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def scan(_path):
+        calls.append(1)
+        entered.set()
+        release.wait(0.2)
+        return 123
+
+    monkeypatch.setattr(stats_service, "_machine_size_cache", None)
+    monkeypatch.setattr(stats_service, "get_directory_size_bytes", scan)
+    monkeypatch.setattr(stats_service.shutil, "disk_usage", lambda _path: _disk_usage())
+
+    task = asyncio.create_task(stats_service.get_machine_stats(None))
+    assert await asyncio.to_thread(entered.wait, 1)
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+
+    assert (await task)["download_used"] == 123
+    assert (await stats_service.get_machine_stats(None))["download_used"] == 123
+    assert calls == [1]

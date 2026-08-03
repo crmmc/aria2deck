@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -16,6 +17,8 @@ from app.services.aria2_lifecycle_service import (
     cleanup_stale_queued_downloads_v0,
     fail_v0_download_and_cleanup,
     get_task_complete_lock,
+    handle_missing_gid,
+    expected_completed_size,
     repair_inconsistent_completed_downloads_v0,
     update_v0_download_from_aria2,
 )
@@ -24,6 +27,7 @@ from app.db.engine import transaction
 from app.db.schema import global_downloads, stored_files, user_files, user_tasks
 from app.repositories.downloads import now_ms
 from app.services.usage_service import get_usage, reserve_bytes
+from app.services.storage import get_task_download_dir
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_file_v0,
@@ -245,6 +249,44 @@ async def test_active_aria2_status_updates_global_bytes_and_active_user_task_sta
 
 
 @pytest.mark.asyncio
+async def test_sync_progress_only_size_fails_unknown_download(temp_db: str) -> None:
+    user = await create_user_v0(username="sync_progress_only", quota_bytes=1000)
+    download = await create_global_download_v0(
+        resource_key="sync:progress-only", resource_kind="http",
+        status="active", aria2_gid="gid-sync-progress-only",
+        total_bytes=0, size_known=False,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"], global_download_id=download["id"], status="active"
+    )
+    client = AsyncMock()
+
+    changed = await update_v0_download_from_aria2(
+        client=client,
+        download=download,
+        status={
+            "gid": "gid-sync-progress-only", "status": "active",
+            "totalLength": "0", "completedLength": "123", "files": [],
+        },
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    usage = await get_usage(user["id"], user["quota_bytes"])
+    assert changed is True
+    assert updated["status"] == "failed"
+    assert updated["error_code"] == "unknown_size"
+    assert updated["aria2_gid"] is None
+    assert updated["size_known"] == 0
+    assert updated_task["status"] == "failed"
+    assert updated_task["reserved_bytes"] == 0
+    assert usage["reserved_bytes"] == 0
+    client.pause.assert_not_awaited()
+    client.unpause.assert_not_awaited()
+    client.force_remove.assert_awaited_once_with("gid-sync-progress-only")
+
+
+@pytest.mark.asyncio
 async def test_error_aria2_result_marks_active_user_tasks_failed(
     temp_db: str,
 ) -> None:
@@ -361,7 +403,7 @@ async def test_metadata_followed_by_refreshes_real_task_progress_and_name(
         "totalLength": "2048",
         "completedLength": "512",
         "bittorrent": {"info": {"name": "Real Torrent"}},
-        "files": [{"path": "/downloads/Real Torrent/file.bin", "length": "2048"}],
+        "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "2048"}],
     }
     client.remove_download_result.return_value = "OK"
 
@@ -416,7 +458,7 @@ async def test_metadata_followed_by_preserves_real_waiting_status(
         "totalLength": "2048",
         "completedLength": "0",
         "bittorrent": {"info": {"name": "Waiting Torrent"}},
-        "files": [{"path": "/downloads/Waiting Torrent/file.bin", "length": "2048"}],
+        "files": [{"path": str(get_task_download_dir(download["id"]) / "Waiting Torrent" / "file.bin"), "length": "2048"}],
     }
     client.remove_download_result.return_value = "OK"
 
@@ -464,8 +506,8 @@ async def test_metadata_followed_by_complete_real_status_is_indexed(
         reserved_bytes=5,
         display_name="magnet:?xt=urn:btih:followedcomplete",
     )
-    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
-    task_dir.mkdir(parents=True)
+    task_dir = get_task_download_dir(download["id"])
+    task_dir.mkdir(parents=True, exist_ok=True)
     source_file = task_dir / "payload.bin"
     source_file.write_bytes(b"abcde")
 
@@ -548,7 +590,7 @@ async def test_torrent_synthetic_task_name_is_replaced_with_real_name(
             "totalLength": "2048",
             "completedLength": "512",
             "bittorrent": {"info": {"name": "Real Torrent"}},
-            "files": [{"path": "/downloads/Real Torrent/file.bin", "length": "2048"}],
+            "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "2048"}],
         },
     )
 
@@ -677,7 +719,7 @@ async def test_http_torrent_live_infohash_upgrades_resource_kind_and_name(
             "completedLength": "1024",
             "infoHash": info_hash,
             "bittorrent": {"info": {"name": "Real Torrent"}},
-            "files": [{"path": "/downloads/Real Torrent/file.bin"}],
+            "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin")}],
         },
     )
 
@@ -755,7 +797,7 @@ async def test_http_torrent_followed_by_handoff_upgrades_resource_kind(
 async def test_metadata_completion_retries_for_late_followed_by_before_file_validation(
     temp_db: str,
 ) -> None:
-    user = await create_user_v0(username="sync_late_followed_by", quota_bytes=1000)
+    user = await create_user_v0(username="sync_late_followed_by", quota_bytes=5000)
     await reserve_bytes(user["id"], 9, quota_bytes=user["quota_bytes"])
     download = await create_global_download_v0(
         resource_key="sync:late-followed-by",
@@ -773,8 +815,8 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
         status="active",
         reserved_bytes=9,
     )
-    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
-    task_dir.mkdir(parents=True)
+    task_dir = get_task_download_dir(download["id"])
+    task_dir.mkdir(parents=True, exist_ok=True)
     metadata_file = task_dir / "metadata"
     metadata_file.write_bytes(b"short")
     client = AsyncMock()
@@ -799,7 +841,7 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
             "totalLength": "2048",
             "completedLength": "256",
             "bittorrent": {"info": {"name": "Real Torrent"}},
-            "files": [{"path": "/downloads/Real Torrent/file.bin", "length": "2048"}],
+            "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "2048"}],
         },
     ]
     client.remove_download_result.return_value = "OK"
@@ -839,8 +881,8 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
     assert updated["total_bytes"] == 2048
     assert updated["completed_bytes"] == 256
     assert updated_task["status"] == "active"
-    assert updated_task["reserved_bytes"] == 9
-    assert usage["reserved_bytes"] == 9
+    assert updated_task["reserved_bytes"] == 2048
+    assert usage["reserved_bytes"] == 2048
     assert len(user_file_count) == 0
 
 
@@ -917,8 +959,8 @@ async def test_active_bt_status_with_full_bytes_completes_v0_download(
         status="active",
         reserved_bytes=7,
     )
-    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
-    task_dir.mkdir(parents=True)
+    task_dir = get_task_download_dir(download["id"])
+    task_dir.mkdir(parents=True, exist_ok=True)
     source_file = task_dir / "payload.bin"
     source_file.write_bytes(b"payload")
     client = AsyncMock()
@@ -1036,8 +1078,8 @@ async def test_active_full_bytes_with_verify_integrity_pending_stays_active(
         status="active",
         reserved_bytes=7,
     )
-    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
-    task_dir.mkdir(parents=True)
+    task_dir = get_task_download_dir(download["id"])
+    task_dir.mkdir(parents=True, exist_ok=True)
     source_file = task_dir / "payload.bin"
     source_file.write_bytes(b"payload")
     client = AsyncMock()
@@ -1193,8 +1235,8 @@ async def test_sync_missing_gid_recovers_completed_file_from_disk(
         status="active",
         reserved_bytes=7,
     )
-    task_dir = Path(settings.download_dir) / "downloading" / str(download["id"])
-    task_dir.mkdir(parents=True)
+    task_dir = get_task_download_dir(download["id"])
+    task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "payload.bin").write_bytes(b"payload")
 
     client = AsyncMock()
@@ -1237,3 +1279,115 @@ async def test_sync_missing_gid_recovers_completed_file_from_disk(
     assert usage["reserved_bytes"] == 0
     assert len(user_file_count) == 1
     client.remove_download_result.assert_awaited_once_with("gid-sync-missing-recover")
+
+
+@pytest.mark.asyncio
+async def test_missing_gid_with_unknown_size_fails_without_indexing(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="sync_missing_gid_unknown", quota_bytes=1000)
+    download = await create_global_download_v0(
+        resource_key="sync:missing-gid-unknown",
+        status="active",
+        aria2_gid="gid-sync-missing-unknown",
+        total_bytes=0,
+        completed_bytes=0,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+    )
+    task_dir = get_task_download_dir(download["id"])
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "unknown.bin").write_bytes(b"unknown payload")
+    client = AsyncMock()
+    client.force_remove.return_value = "OK"
+    client.remove_download_result.return_value = "OK"
+
+    await handle_missing_gid(
+        client=client,
+        download=download,
+        gid="gid-sync-missing-unknown",
+    )
+
+    updated = await _fetch_global(download["id"])
+    updated_task = await _fetch_user_task(task["id"])
+    async with transaction() as conn:
+        stored_count = (
+            await conn.execute(select(func.count()).select_from(stored_files))
+        ).scalar_one()
+        user_file_count = (
+            await conn.execute(select(func.count()).select_from(user_files))
+        ).scalar_one()
+    assert updated["status"] == "failed"
+    assert updated["error_code"] == "missing_gid_unknown_size"
+    assert updated["completed_file_id"] is None
+    assert updated_task["status"] == "failed"
+    assert stored_count == 0
+    assert user_file_count == 0
+
+
+def test_expected_completed_size_ignores_unselected_torrent_files(
+    tmp_path: Path,
+) -> None:
+    status = {
+        "totalLength": "104",
+        "files": [
+            {"path": "selected.bin", "length": "4", "selected": "true"},
+            {"path": "ignored.bin", "length": "100", "selected": False},
+        ],
+    }
+
+    assert expected_completed_size(status, tmp_path) == 4
+    assert expected_completed_size(
+        {
+            "totalLength": "100",
+            "files": [
+                {"path": "ignored.bin", "length": "100", "selected": "false"}
+            ],
+        },
+        tmp_path,
+    ) == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_recovers_after_first_round_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repair = AsyncMock(side_effect=[RuntimeError("first round failed"), None])
+    list_downloads = AsyncMock(return_value=[])
+    cleanup_stale = AsyncMock()
+    client = AsyncMock()
+    client.tell_stopped.return_value = []
+    monkeypatch.setattr(
+        "app.aria2.sync.lifecycle.repair_inconsistent_completed_downloads_v0",
+        repair,
+    )
+    monkeypatch.setattr(
+        "app.aria2.sync.lifecycle.list_v0_tracked_downloads",
+        list_downloads,
+    )
+    monkeypatch.setattr(
+        "app.aria2.sync.lifecycle.cleanup_stale_queued_downloads_v0",
+        cleanup_stale,
+    )
+    monkeypatch.setattr("app.aria2.sync.get_aria2_client", lambda: client)
+    sleeps = 0
+
+    async def stop_after_second_round(_interval: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("app.aria2.sync.asyncio.sleep", stop_after_second_round)
+    with caplog.at_level(logging.ERROR, logger="app.aria2.sync"):
+        with pytest.raises(asyncio.CancelledError):
+            await sync_tasks(interval=0.01)
+
+    assert repair.await_count == 2
+    list_downloads.assert_awaited_once()
+    cleanup_stale.assert_awaited_once()
+    assert "Synchronization round failed" in caplog.text

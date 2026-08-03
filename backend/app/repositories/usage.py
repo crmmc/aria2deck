@@ -3,14 +3,58 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from sqlalchemy import case, select, update
+from sqlalchemy import case, func, select, update
 
 from app.db.engine import transaction
-from app.db.schema import user_storage_usage
+from app.db.schema import (
+    pack_tasks,
+    stored_files,
+    user_files,
+    user_storage_usage,
+    user_tasks,
+)
+from app.domain.status import ACTIVE_USER_TASK_STATUSES
 
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+async def rebuild_usage_from_authoritative_state() -> None:
+    used_subquery = (
+        select(func.coalesce(func.sum(stored_files.c.size_bytes), 0))
+        .select_from(
+            user_files.join(
+                stored_files, user_files.c.stored_file_id == stored_files.c.id
+            )
+        )
+        .where(user_files.c.user_id == user_storage_usage.c.user_id)
+        .scalar_subquery()
+    )
+    download_subquery = (
+        select(func.coalesce(func.sum(user_tasks.c.reserved_bytes), 0))
+        .where(
+            user_tasks.c.user_id == user_storage_usage.c.user_id,
+            user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+        )
+        .scalar_subquery()
+    )
+    pack_subquery = (
+        select(func.coalesce(func.sum(pack_tasks.c.reserved_bytes), 0))
+        .where(
+            pack_tasks.c.user_id == user_storage_usage.c.user_id,
+            pack_tasks.c.status.in_(("pending", "packing")),
+        )
+        .scalar_subquery()
+    )
+    async with transaction() as conn:
+        await conn.execute(
+            update(user_storage_usage).values(
+                used_bytes=used_subquery,
+                reserved_bytes=download_subquery + pack_subquery,
+                updated_at_ms=now_ms(),
+            )
+        )
 
 
 async def get_usage_row(user_id: int) -> dict[str, Any]:
