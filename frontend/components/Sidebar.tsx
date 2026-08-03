@@ -235,6 +235,7 @@ function SidebarContent({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
       {showMoreMenu && (
         <ModalOverlay
           onClose={() => setShowMoreMenu(false)}
+          ariaLabel="更多导航"
           className="more-menu-overlay"
           contentClassName="more-menu"
         >

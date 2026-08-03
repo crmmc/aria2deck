@@ -70,6 +70,7 @@ export function SharesToolbar({
       <ToolbarGroup className="toolbar-select-group">
         <span className="muted text-sm">筛选:</span>
         <select
+          aria-label="分享状态筛选"
           value={filterStatus}
           onChange={(e) => onFilterStatusChange(e.target.value as ShareFilterStatus)}
           className="select"

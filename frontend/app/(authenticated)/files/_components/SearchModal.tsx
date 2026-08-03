@@ -33,6 +33,7 @@ export function SearchModal({
   return (
     <ModalOverlay
       onClose={onClose}
+      ariaLabel="搜索文件"
       contentClassName="search-modal"
     >
         <div className="search-modal-header">

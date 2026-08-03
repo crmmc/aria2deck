@@ -34,6 +34,7 @@ export function PackDialog({
   return (
     <ModalOverlay
       onClose={() => !packing && onClose()}
+      ariaLabel="创建打包任务"
       contentClassName="batch-modal-content"
       contentStyle={{ maxWidth: "500px", width: "90%" }}
     >

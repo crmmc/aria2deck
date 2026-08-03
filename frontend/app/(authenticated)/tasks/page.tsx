@@ -100,7 +100,10 @@ export default function TasksPage() {
 
   const deletedTaskIdsRef = useRef<Set<number>>(new Set());
   const tasksRef = useRef<Task[]>([]);
-  tasksRef.current = tasks;
+
+  useEffect(() => {
+    tasksRef.current = tasks;
+  }, [tasks]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -151,9 +154,9 @@ export default function TasksPage() {
             }
           }
 
+          const deletedIds = new Set(deletedTaskIdsRef.current);
+          deletedTaskIdsRef.current.clear();
           setTasks((prev) => {
-            const deletedIds = new Set(deletedTaskIdsRef.current);
-            deletedTaskIdsRef.current.clear();
             const nonActive = prev.filter(
               (t) => t.status !== "active" && t.status !== "queued" && !deletedIds.has(t.id)
             );
@@ -190,6 +193,18 @@ export default function TasksPage() {
       return;
     }
 
+    const oldTask = tasksRef.current.find((task) => task.id === taskId);
+    if (oldTask) {
+      const taskName = newTask.name || "下载任务";
+      if (oldTask.status !== "complete" && newTask.status === "complete") {
+        sendTaskCompleteNotification(taskName, newTask.id);
+        showToast(`${taskName} 下载完成`, "success");
+      } else if (oldTask.status !== "error" && newTask.status === "error") {
+        sendTaskErrorNotification(taskName, newTask.id);
+        showToast(`${taskName} 下载失败`, "error");
+      }
+    }
+
     const isVisibleStatus =
       newTask.status === "active" ||
       newTask.status === "queued" ||
@@ -197,41 +212,12 @@ export default function TasksPage() {
 
     setTasks((prev) => {
       const idx = prev.findIndex((task) => task.id === taskId);
-      const oldTask = idx !== -1 ? prev[idx] : null;
-
-      if (oldTask) {
-        const taskName = newTask.name || "下载任务";
-        if (oldTask.status !== "complete" && newTask.status === "complete") {
-          sendTaskCompleteNotification(taskName, newTask.id);
-          showToast(`${taskName} 下载完成`, "success");
-          if (idx !== -1) {
-            const next = [...prev];
-            next.splice(idx, 1);
-            return next;
-          }
-          return prev;
-        } else if (oldTask.status !== "error" && newTask.status === "error") {
-          sendTaskErrorNotification(taskName, newTask.id);
-          showToast(`${taskName} 下载失败`, "error");
-        }
-      }
-
-      if (newTask.status === "complete") {
-        if (idx !== -1) {
-          const next = [...prev];
-          next.splice(idx, 1);
-          return next;
-        }
-        return prev;
-      }
 
       if (!isVisibleStatus) {
-        if (idx !== -1) {
-          const next = [...prev];
-          next.splice(idx, 1);
-          return next;
-        }
-        return prev;
+        if (idx === -1) return prev;
+        const next = [...prev];
+        next.splice(idx, 1);
+        return next;
       }
 
       if (idx === -1) return [newTask, ...prev];
@@ -412,7 +398,7 @@ export default function TasksPage() {
         });
       }
     },
-    [showConfirm, showToast]
+    [showConfirm, showToast, setItemSelected]
   );
 
   const retryTask = useCallback(
@@ -466,7 +452,7 @@ export default function TasksPage() {
     } finally {
       setIsBatchOperating(false);
     }
-  }, [selectedTasks, isBatchOperating, showConfirm, showToast]);
+  }, [selectedTasks, isBatchOperating, showConfirm, showToast, clearSelection]);
 
   const batchAddTasks = useCallback(async () => {
     if (isBatchAdding) return;

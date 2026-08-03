@@ -98,7 +98,10 @@ export interface TaskWebSocketCallbacks {
 
 export function useTaskWebSocket(callbacks: TaskWebSocketCallbacks) {
   const callbacksRef = useRef(callbacks);
-  callbacksRef.current = callbacks;
+
+  useEffect(() => {
+    callbacksRef.current = callbacks;
+  }, [callbacks]);
 
   useEffect(() => {
     let ws: WebSocket | null = null;

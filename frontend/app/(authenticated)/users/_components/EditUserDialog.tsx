@@ -34,6 +34,7 @@ export function EditUserDialog({
   return (
     <ModalOverlay
       onClose={onClose}
+      ariaLabel="编辑用户"
       contentClassName="modal-content max-w-400 animate-in"
     >
         <h3 className="mb-5">编辑用户</h3>

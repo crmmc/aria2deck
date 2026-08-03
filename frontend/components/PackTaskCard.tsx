@@ -21,7 +21,10 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   const timersRef = useRef<Set<NodeJS.Timeout>>(new Set());
   const taskStatusRef = useRef<Map<number, PackTask["status"]>>(new Map());
   const onTaskCompleteRef = useRef(onTaskComplete);
-  onTaskCompleteRef.current = onTaskComplete;
+
+  useEffect(() => {
+    onTaskCompleteRef.current = onTaskComplete;
+  }, [onTaskComplete]);
 
   const loadTasks = useCallback(async () => {
     try {

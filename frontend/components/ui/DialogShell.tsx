@@ -6,6 +6,7 @@ import { useMounted } from "@/lib/useMounted";
 
 type DialogShellProps = {
   onClose: () => void;
+  ariaLabel: string;
   children: ReactNode;
   contentClassName?: string;
   contentStyle?: CSSProperties;
@@ -15,6 +16,7 @@ type DialogShellProps = {
 
 export function DialogShell({
   onClose,
+  ariaLabel,
   children,
   contentClassName,
   contentStyle,
@@ -25,6 +27,7 @@ export function DialogShell({
   const dialog = (
     <ModalOverlay
       onClose={onClose}
+      ariaLabel={ariaLabel}
       className={className}
       contentClassName={contentClassName}
       contentStyle={contentStyle}

@@ -47,12 +47,12 @@ describe("ModalOverlay", () => {
 
   it("renders a native dialog and opens it modally", () => {
     const { unmount } = render(
-      <ModalOverlay onClose={jest.fn()}>
+      <ModalOverlay onClose={jest.fn()} ariaLabel="测试弹窗">
         <button type="button">Inside</button>
       </ModalOverlay>
     );
 
-    const dialog = screen.getByRole("dialog");
+    const dialog = screen.getByRole("dialog", { name: "测试弹窗" });
     expect(dialog.tagName).toBe("DIALOG");
     expect(dialog).toHaveClass("modal-overlay");
     expect(showModalMock).toHaveBeenCalledTimes(1);
@@ -65,12 +65,16 @@ describe("ModalOverlay", () => {
   it("closes from backdrop click and native cancel but not content click", () => {
     const onClose = jest.fn();
     render(
-      <ModalOverlay onClose={onClose} contentClassName="modal-content">
+      <ModalOverlay
+        onClose={onClose}
+        ariaLabel="测试弹窗"
+        contentClassName="modal-content"
+      >
         <button type="button">Inside</button>
       </ModalOverlay>
     );
 
-    const dialog = screen.getByRole("dialog");
+    const dialog = screen.getByRole("dialog", { name: "测试弹窗" });
     const content = document.querySelector(".modal-content");
 
     expect(screen.queryByRole("button", { name: "关闭弹窗" })).not.toBeInTheDocument();

@@ -328,6 +328,7 @@ export default function StoragePage() {
       {userModalFile && (
         <ModalOverlay
           onClose={() => setUserModalFile(null)}
+          ariaLabel="文件引用用户"
           contentClassName="modal-content max-w-400 animate-in"
         >
             <h3 className="mb-4">引用用户</h3>

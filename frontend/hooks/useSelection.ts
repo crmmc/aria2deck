@@ -1,6 +1,8 @@
 import { useCallback, useMemo, useState } from "react";
 
-export function useSelection<TId>(visibleIds: readonly TId[] = []) {
+const EMPTY_IDS: readonly never[] = [];
+
+export function useSelection<TId>(visibleIds: readonly TId[] = EMPTY_IDS) {
   const [selected, setSelected] = useState<Set<TId>>(() => new Set());
 
   const areAllSelected = useCallback(

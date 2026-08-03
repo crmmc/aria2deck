@@ -11,6 +11,7 @@ export function DeleteUserDialog({ user, onConfirm, onClose }: DeleteUserDialogP
   return (
     <ModalOverlay
       onClose={onClose}
+      ariaLabel="删除用户"
       contentClassName="modal-content max-w-400 animate-in"
     >
         <h3 className="mb-4">删除用户</h3>

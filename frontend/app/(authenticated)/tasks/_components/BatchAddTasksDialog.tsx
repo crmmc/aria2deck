@@ -18,6 +18,7 @@ export function BatchAddTasksDialog({
   return (
     <DialogShell
       onClose={onCancel}
+      ariaLabel="批量添加任务"
       contentClassName="batch-modal-content"
     >
       <div className="modal-header">

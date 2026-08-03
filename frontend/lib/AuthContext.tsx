@@ -45,7 +45,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const initializedRef = useRef(false);
   const mountedRef = useRef(false);
   const pathnameRef = useRef(pathname);
-  pathnameRef.current = pathname;
+
+  useEffect(() => {
+    pathnameRef.current = pathname;
+  }, [pathname]);
 
   const shouldRedirectToLogin = useCallback(
     () => pathnameRef.current !== "/login" && !pathnameRef.current.startsWith("/s/"),

@@ -582,6 +582,7 @@ describe("TasksPage", () => {
     expect(await screen.findByText("添加 BT 下载任务")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
+    expect(screen.getByRole("dialog", { name: "取消添加任务" })).toBeInTheDocument();
     expect(screen.getByText("取消添加任务？")).toBeInTheDocument();
 
     readAsDataURL.mockRestore();

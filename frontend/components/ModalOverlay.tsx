@@ -13,6 +13,7 @@ const FOCUSABLE_SELECTOR = [
 
 interface ModalOverlayProps {
   onClose: () => void;
+  ariaLabel: string;
   children: ReactNode;
   className?: string;
   contentClassName?: string;
@@ -21,6 +22,7 @@ interface ModalOverlayProps {
 
 export function ModalOverlay({
   onClose,
+  ariaLabel,
   children,
   className = "modal-overlay",
   contentClassName,
@@ -29,7 +31,10 @@ export function ModalOverlay({
   const dialogRef = useRef<HTMLDialogElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   const stableOnClose = useCallback(() => onCloseRef.current(), []);
 
@@ -62,6 +67,7 @@ export function ModalOverlay({
     <dialog
       ref={dialogRef}
       className={className}
+      aria-label={ariaLabel}
     >
       <button
         type="button"

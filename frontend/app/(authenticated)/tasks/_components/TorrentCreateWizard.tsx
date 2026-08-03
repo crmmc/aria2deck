@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 
+import { ModalOverlay } from "@/components/ModalOverlay";
+import { DialogShell } from "@/components/ui/DialogShell";
 import { api } from "@/lib/api";
 import type { Task, TorrentPreview } from "@/types";
 
@@ -25,14 +27,9 @@ export function TorrentCreateWizard({
   onCreated,
   onError,
 }: TorrentCreateWizardProps) {
-  const dialogRef = useRef<HTMLElement>(null);
   const [stage, setStage] = useState<Stage>("select");
   const [searchQuery, setSearchQuery] = useState("");
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
-
-  useEffect(() => {
-    dialogRef.current?.focus();
-  }, []);
   const [isCreating, setIsCreating] = useState(false);
   const [selectedIndexes, setSelectedIndexes] = useState<Set<number>>(
     () => new Set(preview.files.map((file) => file.index))
@@ -88,16 +85,13 @@ export function TorrentCreateWizard({
   };
 
   return (
-    <div className="torrent-wizard-backdrop" role="presentation">
-      <section
-        ref={dialogRef}
-        className="torrent-wizard"
-        role="dialog"
-        aria-modal="true"
-        aria-label="添加 BT 下载任务"
-        tabIndex={-1}
-      >
-        <header className="torrent-wizard-header">
+    <ModalOverlay
+      onClose={() => setShowCancelConfirm(true)}
+      ariaLabel="添加 BT 下载任务"
+      className="modal-overlay torrent-wizard-backdrop"
+      contentClassName="torrent-wizard"
+    >
+      <header className="torrent-wizard-header">
           <div>
             <h2>添加 BT 下载任务</h2>
           </div>
@@ -212,32 +206,29 @@ export function TorrentCreateWizard({
           )}
         </div>
 
-        {showCancelConfirm ? (
-          <div className="torrent-cancel-layer" role="presentation">
-            <section
-              className="torrent-cancel-dialog"
-              role="dialog"
-              aria-modal="true"
-              aria-label="取消添加任务"
+      {showCancelConfirm ? (
+        <DialogShell
+          onClose={() => setShowCancelConfirm(false)}
+          ariaLabel="取消添加任务"
+          className="modal-overlay torrent-cancel-layer"
+          contentClassName="torrent-cancel-dialog"
+        >
+          <h3>取消添加任务？</h3>
+          <p>当前文件选择不会保存，取消后需要重新上传种子。</p>
+          <div className="torrent-cancel-actions">
+            <button
+              type="button"
+              className="button secondary shadow-none"
+              onClick={() => setShowCancelConfirm(false)}
             >
-              <h3>取消添加任务？</h3>
-              <p>当前文件选择不会保存，取消后需要重新上传种子。</p>
-              <div className="torrent-cancel-actions">
-                <button
-                  type="button"
-                  className="button secondary shadow-none"
-                  onClick={() => setShowCancelConfirm(false)}
-                >
-                  继续选择
-                </button>
-                <button type="button" className="button shadow-none" onClick={onCancel}>
-                  确认取消
-                </button>
-              </div>
-            </section>
+              继续选择
+            </button>
+            <button type="button" className="button shadow-none" onClick={onCancel}>
+              确认取消
+            </button>
           </div>
-        ) : null}
-      </section>
-    </div>
+        </DialogShell>
+      ) : null}
+    </ModalOverlay>
   );
 }

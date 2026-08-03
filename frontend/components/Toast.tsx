@@ -130,6 +130,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             {confirm && (
               <ModalOverlay
                 onClose={() => handleConfirm(false)}
+                ariaLabel={confirm.title || "确认操作"}
                 className="confirm-overlay"
                 contentClassName="confirm-content"
               >

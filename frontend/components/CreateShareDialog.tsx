@@ -59,7 +59,11 @@ export default function CreateShareDialog({
   const copyLink = () => { copy(shareUrl); };
 
   return (
-    <DialogShell onClose={onClose} contentClassName="modal-content max-w-400">
+    <DialogShell
+      onClose={onClose}
+      ariaLabel="创建分享"
+      contentClassName="modal-content max-w-400"
+    >
         <div className="modal-header">
           <h3 className="modal-title">创建分享</h3>
           <button type="button" className="modal-close-btn" onClick={onClose}>
