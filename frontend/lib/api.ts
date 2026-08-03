@@ -53,6 +53,25 @@ function downloadUrl(path: string, params: Record<string, QueryValue> = {}): str
   return `${getApiBase()}${withQuery(path, params)}`;
 }
 
+function submitDownloadForm(path: string, fields: Record<string, string | undefined>): void {
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = downloadUrl(path);
+  form.target = "_blank";
+  form.style.display = "none";
+  Object.entries(fields).forEach(([name, value]) => {
+    if (!value) return;
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = name;
+    input.value = value;
+    form.appendChild(input);
+  });
+  document.body.appendChild(form);
+  form.submit();
+  form.remove();
+}
+
 const removePackTask = (id: number) =>
   request<{ ok: boolean; message: string }>(`/api/files/pack/${id}`, {
     method: "DELETE",
@@ -350,18 +369,25 @@ export const api = {
     }),
   // Public share (no auth)
   getShareInfo: (code: string) =>
-    request<ShareInfo>(`/api/s/${code}`),
+    request<ShareInfo>(`/api/s/${encodeURIComponent(code)}`),
   accessShare: (code: string, password: string) =>
-    request<{ access_token: string }>(`/api/s/${code}/access`, {
-      method: "POST",
-      body: JSON.stringify({ password }),
-    }),
-  shareDownloadUrl: (code: string, token?: string, subpath?: string) => {
-    return downloadUrl(`/api/s/${code}/download`, { token, subpath });
+    request<{ access_token: string }>(
+      `/api/s/${encodeURIComponent(code)}/access`,
+      {
+        method: "POST",
+        body: JSON.stringify({ password }),
+      }
+    ),
+  downloadShare: (code: string, token?: string, subpath?: string) => {
+    submitDownloadForm(`/api/s/${encodeURIComponent(code)}/download`, {
+      token,
+      subpath,
+    });
   },
   browseShare: (code: string, token?: string, subpath?: string) => {
     return request<Array<{ name: string; is_dir: boolean; size: number; path: string }>>(
-      withQuery(`/api/s/${code}/browse`, { token, subpath })
+      withQuery(`/api/s/${encodeURIComponent(code)}/browse`, { subpath }),
+      token ? { headers: { Authorization: `Bearer ${token}` } } : undefined
     );
   },
   // 公开 API（无需认证）

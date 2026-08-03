@@ -333,6 +333,50 @@ describe("api methods", () => {
     });
   });
 
+  describe("api.downloadShare", () => {
+    it("submits token and subpath in a POST form without URL exposure", () => {
+      const submitSpy = jest
+        .spyOn(HTMLFormElement.prototype, "submit")
+        .mockImplementation(() => {});
+
+      api.downloadShare("code/with?chars", "bearer-secret", "folder/a b.txt");
+
+      expect(submitSpy).toHaveBeenCalledTimes(1);
+      const form = submitSpy.mock.instances[0] as HTMLFormElement;
+      expect(form.method).toBe("post");
+      expect(form.target).toBe("_blank");
+      expect(form.action).toContain("/api/s/code%2Fwith%3Fchars/download");
+      expect(form.action).not.toContain("bearer-secret");
+      expect(form.action).not.toContain("token=");
+      expect(form.querySelector<HTMLInputElement>('input[name="token"]')?.value).toBe(
+        "bearer-secret"
+      );
+      expect(form.querySelector<HTMLInputElement>('input[name="subpath"]')?.value).toBe(
+        "folder/a b.txt"
+      );
+      expect(document.body.contains(form)).toBe(false);
+      submitSpy.mockRestore();
+    });
+  });
+
+  describe("api.browseShare", () => {
+    it("uses a bearer header and keeps the token out of the URL", async () => {
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve([]),
+      });
+      global.fetch = fetchMock;
+
+      await api.browseShare("code/one", "bearer-secret", "folder/a");
+
+      const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toContain("/api/s/code%2Fone/browse?subpath=folder%2Fa");
+      expect(url).not.toContain("bearer-secret");
+      expect(options.headers).toEqual({ Authorization: "Bearer bearer-secret" });
+    });
+  });
+
   describe("api.changePassword", () => {
     it("sends hashed passwords", async () => {
       global.fetch = jest.fn().mockResolvedValue({

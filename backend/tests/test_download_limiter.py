@@ -265,7 +265,6 @@ async def test_share_route_cancellation_before_tracking_releases_lease(
         shares_router.download_shared_file(
             "code",
             Request(_http_scope()),
-            token=None,
             subpath=None,
         )
     )
@@ -505,20 +504,25 @@ async def test_shared_range_response_holds_content_read_lease(
     async def resolve_target(*_args, **_kwargs):
         return file_path, file_path.name
 
-    async def consume_share(_share_id: int) -> None:
-        return None
+    count_decisions: list[bool] = []
+
+    async def record_share(
+        _share: dict[str, object], *, should_count_download: bool
+    ) -> None:
+        count_decisions.append(should_count_download)
 
     monkeypatch.setattr(shares_router.share_service, "check_share_access", check_access)
     monkeypatch.setattr(
         shares_router.share_service, "resolve_shared_download_target", resolve_target
     )
     monkeypatch.setattr(
-        shares_router.share_service, "consume_share_download", consume_share
+        shares_router.share_service, "record_shared_download", record_share
     )
     scope = {**_http_scope(), "headers": [(b"range", b"bytes=0-3")]}
     response = await shares_router.download_shared_file(
-        "code", Request(scope), token=None, subpath=None
+        "code", Request(scope), subpath=None
     )
+    assert count_decisions == [False]
 
     async def wait_for_readers() -> None:
         lock = await get_content_hash_lock(content_hash)

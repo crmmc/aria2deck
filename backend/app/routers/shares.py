@@ -4,20 +4,21 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 
 from app.auth import AuthUser, require_limited_api_user
 from app.core.download_limiter import download_limiter
 from app.core.request_rate_guard import (
     RateLimitScope,
     client_ip_from_request,
+    ensure_authenticated_allowed,
     ensure_public_allowed,
     ensure_share_access_allowed,
 )
 from app.domain.errors import DomainError
 from app.http.errors import raise_http
 from app.http.file_response import (
-    range_file_response,
+    prepare_range_file_response,
     release_response_leases,
     tracked_response,
 )
@@ -38,11 +39,72 @@ router = APIRouter(tags=["shares"])
 logger = logging.getLogger(__name__)
 
 
+def _bearer_token(request: Request) -> str | None:
+    authorization = request.headers.get("authorization")
+    if not authorization:
+        return None
+    parts = authorization.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip() or None
+
+
+async def _serve_shared_download(
+    code: str,
+    request: Request,
+    *,
+    token: str | None,
+    subpath: str | None,
+):
+    client_ip = client_ip_from_request(request)
+    try:
+        share = await share_service.check_share_access(code, token)
+    except DomainError as exc:
+        raise_http(exc)
+    acquire_result = await download_limiter.acquire_anonymous(
+        client_ip, share["content_hash"]
+    )
+    if not acquire_result.allowed:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, acquire_result.detail())
+
+    lease = acquire_result.lease
+    read_lease = None
+    response_transferred = False
+    try:
+        content_lock = await get_content_hash_lock(str(share["content_hash"]))
+        async with content_lock:
+            share = await share_service.check_share_access(code, token)
+            target, filename = await share_service.resolve_shared_download_target(
+                share,
+                subpath=subpath,
+            )
+            response, covers_full_entity = prepare_range_file_response(
+                request, target, filename
+            )
+            read_lease = acquire_content_read_lease_locked(str(share["content_hash"]))
+            await share_service.record_shared_download(
+                share,
+                should_count_download=covers_full_entity,
+            )
+        response = tracked_response(response, lease, read_lease)
+        response_transferred = True
+        return response
+    except DomainError as exc:
+        raise_http(exc)
+    finally:
+        if not response_transferred:
+            await release_response_leases(lease, read_lease)
+
 @router.post("/api/shares", status_code=status.HTTP_201_CREATED)
 async def create_share(
     req: CreateShareRequest,
     user: AuthUser = Depends(require_limited_api_user),
 ) -> ShareLinkOut:
+    await ensure_authenticated_allowed(
+        user.id,
+        RateLimitScope.CREATE_SHARE,
+        detail="创建分享过于频繁，请稍后再试",
+    )
     try:
         result = await share_service.create_share(
             user_id=user.id,
@@ -131,47 +193,34 @@ async def access_share(
 async def download_shared_file(
     code: str,
     request: Request,
-    token: str | None = Query(default=None),
     subpath: str | None = Query(default=None),
 ):
-    client_ip = client_ip_from_request(request)
-    try:
-        share = await share_service.check_share_access(code, token)
-    except DomainError as exc:
-        raise_http(exc)
-    acquire_result = await download_limiter.acquire_anonymous(client_ip, share["content_hash"])
-    if not acquire_result.allowed:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, acquire_result.detail())
+    return await _serve_shared_download(
+        code,
+        request,
+        token=_bearer_token(request),
+        subpath=subpath,
+    )
 
-    lease = acquire_result.lease
-    read_lease = None
-    response_transferred = False
-    try:
-        content_lock = await get_content_hash_lock(str(share["content_hash"]))
-        async with content_lock:
-            share = await share_service.check_share_access(code, token)
-            target, filename = await share_service.resolve_shared_download_target(
-                share,
-                subpath=subpath,
-            )
-            response = range_file_response(request, target, filename)
-            read_lease = acquire_content_read_lease_locked(str(share["content_hash"]))
-            await share_service.consume_share_download(int(share["id"]))
-        response = tracked_response(response, lease, read_lease)
-        response_transferred = True
-        return response
-    except DomainError as exc:
-        raise_http(exc)
-    finally:
-        if not response_transferred:
-            await release_response_leases(lease, read_lease)
+@router.post("/api/s/{code}/download")
+async def submit_shared_file_download(
+    code: str,
+    request: Request,
+    token: str | None = Form(default=None),
+    subpath: str | None = Form(default=None),
+):
+    return await _serve_shared_download(
+        code,
+        request,
+        token=token or _bearer_token(request),
+        subpath=subpath,
+    )
 
 
 @router.get("/api/s/{code}/browse")
 async def browse_shared_directory(
     code: str,
     request: Request,
-    token: str | None = Query(default=None),
     subpath: str = Query(default=""),
 ) -> list[dict]:
     await ensure_public_allowed(
@@ -180,7 +229,11 @@ async def browse_shared_directory(
         detail="请求过于频繁",
     )
     try:
-        return await share_service.browse_shared_directory(code, token, subpath)
+        return await share_service.browse_shared_directory(
+            code,
+            _bearer_token(request),
+            subpath,
+        )
     except DomainError as exc:
         raise_http(exc)
         raise AssertionError("unreachable")

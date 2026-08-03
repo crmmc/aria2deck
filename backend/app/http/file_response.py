@@ -13,12 +13,12 @@ from app.core.download_limiter import DownloadLease
 from app.services.storage_locks import ContentReadLease
 
 
-def range_file_response(
+def prepare_range_file_response(
     request: Request,
     file_path: Path,
     filename: str,
-) -> FileResponse | StreamingResponse:
-    """Create a file response with Range support."""
+) -> tuple[FileResponse | StreamingResponse, bool]:
+    """Create a file response and report whether it covers the full entity."""
     try:
         file_size = file_path.stat().st_size
     except FileNotFoundError:
@@ -29,11 +29,14 @@ def range_file_response(
     else:
         disposition = f'attachment; filename="{filename}"'
 
-    def full_response() -> FileResponse:
-        return FileResponse(
-            path=str(file_path),
-            media_type="application/octet-stream",
-            headers={"Accept-Ranges": "bytes", "Content-Disposition": disposition},
+    def full_response() -> tuple[FileResponse, bool]:
+        return (
+            FileResponse(
+                path=str(file_path),
+                media_type="application/octet-stream",
+                headers={"Accept-Ranges": "bytes", "Content-Disposition": disposition},
+            ),
+            True,
         )
 
     range_header = request.headers.get("range")
@@ -111,7 +114,7 @@ def range_file_response(
         except FileNotFoundError:
             return
 
-    return StreamingResponse(
+    response = StreamingResponse(
         iter_file(),
         status_code=206,
         media_type="application/octet-stream",
@@ -122,6 +125,14 @@ def range_file_response(
             "Content-Disposition": disposition,
         },
     )
+    return response, start == 0 and end == file_size - 1
+
+
+def range_file_response(request: Request, file_path: Path, filename: str):
+    response, _covers_full_entity = prepare_range_file_response(
+        request, file_path, filename
+    )
+    return response
 
 
 async def release_download_lease(lease: DownloadLease | None) -> None:

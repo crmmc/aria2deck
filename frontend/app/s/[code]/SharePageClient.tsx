@@ -115,11 +115,11 @@ export default function SharePageClient() {
     setDownloading(true);
     if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
     downloadTimerRef.current = setTimeout(() => setDownloading(false), 2000);
-    window.open(api.shareDownloadUrl(codeRef.current, accessToken || undefined), "_blank");
+    api.downloadShare(codeRef.current, accessToken || undefined);
   };
 
   const handleItemDownload = (itemPath: string) => {
-    window.open(api.shareDownloadUrl(codeRef.current, accessToken || undefined, itemPath), "_blank");
+    api.downloadShare(codeRef.current, accessToken || undefined, itemPath);
   };
 
   const handleDirClick = (itemPath: string) => loadDirectory(codeRef.current, accessToken, itemPath);

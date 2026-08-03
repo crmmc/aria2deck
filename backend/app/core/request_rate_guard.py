@@ -15,6 +15,7 @@ class RateLimitScope(StrEnum):
     CREATE_TASK = "create_task"
     CREATE_TORRENT = "create_torrent"
     CREATE_PACK = "create_pack"
+    CREATE_SHARE = "create_share"
     ARIA2_TEST = "aria2_test"
     PUBLIC_API = "public_api"
     SHARE_ACCESS = "share_access"
