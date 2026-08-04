@@ -5,7 +5,7 @@ import logging
 import app.aria2.gateway as aria2_gateway
 from app.core.security import redact_url_for_log
 from app.domain.errors import BadRequestError
-from app.services import settings_service
+from app.services import backend_connectivity, settings_service
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ async def get_aria2_version(admin_id: int | None) -> dict:
 
     try:
         version_info = await client.get_version()
+        await backend_connectivity.mark_ok()
         logger.info("获取aria2版本成功 admin_id=%s", admin_id)
         return {
             "connected": True,
@@ -28,6 +29,7 @@ async def get_aria2_version(admin_id: int | None) -> dict:
             "enabled_features": version_info.get("enabledFeatures", []),
         }
     except Exception as exc:
+        await backend_connectivity.mark_fail()
         logger.warning(
             "获取aria2版本失败 admin_id=%s error_type=%s",
             admin_id,
@@ -56,6 +58,7 @@ async def test_aria2_connection(
 
     try:
         version_info = await client.get_version()
+        await backend_connectivity.mark_ok()
         logger.info(
             "测试aria2连接成功 admin_id=%s url=%s",
             admin_id,
@@ -67,6 +70,7 @@ async def test_aria2_connection(
             "enabled_features": version_info.get("enabledFeatures", []),
         }
     except Exception as exc:
+        await backend_connectivity.mark_fail()
         logger.warning(
             "测试aria2连接失败 admin_id=%s url=%s error_type=%s",
             admin_id,

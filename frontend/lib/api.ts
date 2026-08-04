@@ -10,6 +10,7 @@ import type {
   MachineStats,
   PackTask,
   RpcAccessStatus,
+  SystemStatus,
   TaskHistory,
   StoredFileListResponse,
   FileUsersResponse,
@@ -217,6 +218,7 @@ export const api = {
     }),
 
   // Stats & Config
+  getSystemStatus: () => request<SystemStatus>("/api/system/status"),
   getStats: () => request<SystemStats>("/api/stats"),
   getMachineStats: () => request<MachineStats>("/api/stats/machine"),
   getConfig: () => request<SystemConfig>("/api/config"),

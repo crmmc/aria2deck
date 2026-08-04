@@ -147,6 +147,9 @@ export const mockApi = {
   clearHistory: jest.fn().mockResolvedValue({ ok: true, count: 5 }),
 
   // Stats & Config
+  getSystemStatus: jest.fn().mockResolvedValue({
+    download_backend: { status: "ok", message: "服务运行正常" },
+  }),
   getStats: jest.fn().mockResolvedValue(createMockSystemStats()),
   getMachineStats: jest.fn().mockResolvedValue({
     disk_total: 500000000000,

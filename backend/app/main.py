@@ -107,6 +107,7 @@ from app.routers import (
     shares,
     stats,
     storage,
+    system,
     tasks,
     users,
     ws,
@@ -450,6 +451,7 @@ def create_app() -> FastAPI:
     app.include_router(config.router)
     app.include_router(storage.router)
     app.include_router(health.router)
+    app.include_router(system.router)
     app.include_router(ws.router)
     app.include_router(internal_fetch.router)
     app.include_router(aria2_rpc.router)

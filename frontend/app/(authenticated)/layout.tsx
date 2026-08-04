@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useAuth } from "@/lib/AuthContext";
 import Sidebar from "@/components/Sidebar";
 import PasswordWarningBanner from "@/components/PasswordWarningBanner";
+import BackendStatusBanner from "@/components/BackendStatusBanner";
 
 export default function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
   const { user, loading, error, retryAuth } = useAuth();
@@ -64,6 +65,7 @@ export default function AuthenticatedLayout({ children }: { children: React.Reac
     <>
       <Sidebar user={user} sidebarExpanded={sidebarExpanded} setSidebarExpanded={setSidebarExpanded} />
       <PasswordWarningBanner user={user} />
+      <BackendStatusBanner user={user} />
       <div className={`main-content${sidebarExpanded ? " sidebar-expanded" : ""}`}>
         <div className="auth-container">
           {children}

@@ -12,6 +12,7 @@ import aiohttp
 from app.aria2.gateway import get_aria2_client
 from app.core.security import redact_url_for_log
 from app.services import aria2_lifecycle_service as lifecycle
+from app.services import backend_connectivity
 from app.services.settings_service import (
     get_config_value_sync,
     get_ws_reconnect_factor,
@@ -161,6 +162,7 @@ async def listen_aria2_events() -> None:
                 async with session.ws_connect(ws_url) as ws:
                     logger.info("[WS] Connected to aria2 WebSocket")
                     reconnect_attempt = 0
+                    await backend_connectivity.mark_ok()
 
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
@@ -212,6 +214,7 @@ async def listen_aria2_events() -> None:
                 redacted_ws_url,
                 type(exc).__name__,
             )
+            await backend_connectivity.mark_fail()
 
         delay = _calculate_backoff(reconnect_attempt)
         reconnect_attempt += 1

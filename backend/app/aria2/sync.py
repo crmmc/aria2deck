@@ -9,6 +9,7 @@ from typing import Any
 from app.aria2.gateway import get_aria2_client
 from app.aria2.protocol import Aria2Gateway
 from app.services import aria2_lifecycle_service as lifecycle
+from app.services import backend_connectivity
 
 logger = logging.getLogger(__name__)
 
@@ -38,16 +39,22 @@ async def _sync_tasks_once() -> None:
     client = get_aria2_client()
     downloads = await lifecycle.list_v0_tracked_downloads()
     removable_stopped_gids: set[str] = set()
+    saw_backend_ok = False
+    saw_backend_fail = False
 
     async def fetch_and_update(download: dict[str, Any]) -> None:
+        nonlocal saw_backend_ok, saw_backend_fail
         gid = str(download.get("aria2_gid") or "")
         if not gid:
             return
 
         try:
             status = await client.tell_status(gid)
+            saw_backend_ok = True
         except Exception as exc:
             if lifecycle.is_missing_gid_error(exc):
+                # Backend responded: the GID is gone, not the transport.
+                saw_backend_ok = True
                 await lifecycle.handle_missing_gid(
                     client=client,
                     download=download,
@@ -55,10 +62,16 @@ async def _sync_tasks_once() -> None:
                 )
                 return
 
-            level = (
-                logger.warning if lifecycle.is_transient_rpc_error(exc) else logger.error
+            if lifecycle.is_transient_rpc_error(exc):
+                saw_backend_fail = True
+                logger.warning(
+                    "[Sync] Failed to fetch GID %s status, retry later: %s", gid, exc
+                )
+                return
+
+            logger.error(
+                "[Sync] Failed to fetch GID %s status, retry later: %s", gid, exc
             )
-            level("[Sync] Failed to fetch GID %s status, retry later: %s", gid, exc)
             return
 
         handled = await lifecycle.update_v0_download_from_aria2(
@@ -73,17 +86,38 @@ async def _sync_tasks_once() -> None:
                 return
             removable_stopped_gids.add(gid)
 
-    results = await asyncio.gather(
-        *[fetch_and_update(download) for download in downloads],
-        return_exceptions=True,
-    )
-    for index, result in enumerate(results):
-        if isinstance(result, Exception):
-            logger.warning(
-                "sync_tasks: v0 download update failed download_id=%s error=%s",
-                downloads[index]["id"],
-                result,
-            )
+    if downloads:
+        results = await asyncio.gather(
+            *[fetch_and_update(download) for download in downloads],
+            return_exceptions=True,
+        )
+        for index, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "sync_tasks: v0 download update failed download_id=%s error=%s",
+                    downloads[index]["id"],
+                    result,
+                )
+    else:
+        # No tracked downloads: still probe backend reachability.
+        try:
+            await client.get_version()
+            saw_backend_ok = True
+        except Exception as exc:
+            if lifecycle.is_transient_rpc_error(exc):
+                saw_backend_fail = True
+                logger.warning(
+                    "[Sync] Backend reachability probe failed, retry later: %s", exc
+                )
+            else:
+                logger.error(
+                    "[Sync] Backend reachability probe failed, retry later: %s", exc
+                )
+
+    if saw_backend_ok:
+        await backend_connectivity.mark_ok()
+    elif saw_backend_fail:
+        await backend_connectivity.mark_fail()
 
     await _cleanup_owned_stopped_results(
         client=client,

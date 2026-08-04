@@ -86,6 +86,13 @@ export type UploadTorrentRequest = {
   options?: Record<string, unknown>;
 };
 
+export type SystemStatus = {
+  download_backend: {
+    status: "ok" | "degraded";
+    message: string;
+  };
+};
+
 export type SystemStats = {
   download_speed: number;
   upload_speed: number;
