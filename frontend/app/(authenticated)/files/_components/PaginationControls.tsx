@@ -47,6 +47,7 @@ export function PaginationControls({
           className="button secondary btn-sm"
           style={{ borderRadius: "4px 0 0 4px" }}
           disabled={currentPage <= 1}
+          aria-label="上一页"
           onClick={() => onPageChange(currentPage - 1)}
         >
           ‹
@@ -69,6 +70,7 @@ export function PaginationControls({
           className="button secondary btn-sm"
           style={{ borderRadius: "0 4px 4px 0" }}
           disabled={currentPage >= totalPages}
+          aria-label="下一页"
           onClick={() => onPageChange(currentPage + 1)}
         >
           ›

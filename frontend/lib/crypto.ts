@@ -21,16 +21,17 @@ function isSubtleAvailable(): boolean {
 async function hashWithSubtle(password: string, username: string): Promise<string> {
   const encoder = new TextEncoder();
   const usernameBytes = encoder.encode(username.toLowerCase());
-  const saltBuffer = await crypto.subtle.digest("SHA-256", usernameBytes);
+  const [saltBuffer, passwordKey] = await Promise.all([
+    crypto.subtle.digest("SHA-256", usernameBytes),
+    crypto.subtle.importKey(
+      "raw",
+      encoder.encode(password),
+      "PBKDF2",
+      false,
+      ["deriveBits"]
+    ),
+  ]);
   const salt = new Uint8Array(saltBuffer);
-
-  const passwordKey = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(password),
-    "PBKDF2",
-    false,
-    ["deriveBits"]
-  );
 
   const derivedBits = await crypto.subtle.deriveBits(
     {
@@ -50,8 +51,10 @@ async function hashWithSubtle(password: string, username: string): Promise<strin
 }
 
 async function hashWithNoble(password: string, username: string): Promise<string> {
-  const { sha256 } = await import("@noble/hashes/sha2.js");
-  const { pbkdf2 } = await import("@noble/hashes/pbkdf2.js");
+  const [{ sha256 }, { pbkdf2 }] = await Promise.all([
+    import("@noble/hashes/sha2.js"),
+    import("@noble/hashes/pbkdf2.js"),
+  ]);
   const encoder = new TextEncoder();
   const salt = sha256(encoder.encode(username.toLowerCase()));
   const derived = pbkdf2(sha256, encoder.encode(password), salt, {

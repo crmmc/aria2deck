@@ -42,69 +42,75 @@ export function useToast() {
 
 let toastId = 0;
 
+function getToastClass(type: ToastType): string {
+  switch (type) {
+    case "success": return "toast-success";
+    case "error": return "toast-error";
+    case "warning": return "toast-warning";
+    default: return "toast-info";
+  }
+}
+
+function getToastIcon(type: ToastType): string {
+  switch (type) {
+    case "success": return "✓";
+    case "error": return "✕";
+    case "warning": return "⚠";
+    default: return "ℹ";
+  }
+}
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const mounted = useMounted();
-  const toastTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const toastTimersRef = useRef<Set<ReturnType<typeof setTimeout>> | null>(null);
+  if (toastTimersRef.current === null) {
+    toastTimersRef.current = new Set();
+  }
+  const toastTimers = toastTimersRef.current;
   const confirmRef = useRef<ConfirmState | null>(null);
-  const confirmResolvers = useRef<Set<ConfirmState["resolve"]>>(new Set());
+  const confirmResolversRef = useRef<Set<ConfirmState["resolve"]> | null>(null);
+  if (confirmResolversRef.current === null) {
+    confirmResolversRef.current = new Set();
+  }
+  const confirmResolvers = confirmResolversRef.current;
 
   useEffect(() => {
-    const timers = toastTimers.current;
-    const resolvers = confirmResolvers.current;
     return () => {
-      timers.forEach(clearTimeout);
-      resolvers.forEach((resolve) => resolve(false));
+      toastTimers.forEach(clearTimeout);
+      confirmResolvers.forEach((resolve) => resolve(false));
     };
-  }, []);
+  }, [toastTimers, confirmResolvers]);
 
   const showToast = useCallback((message: string, type: ToastType = "info") => {
     const id = ++toastId;
     setToasts((prev) => [...prev, { id, message, type }]);
     const timer = setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-      toastTimers.current.delete(timer);
+      toastTimers.delete(timer);
     }, 3000);
-    toastTimers.current.add(timer);
-  }, []);
+    toastTimers.add(timer);
+  }, [toastTimers]);
 
   const showConfirm = useCallback((options: ConfirmOptions): Promise<boolean> => {
     return new Promise((resolve) => {
       const state = { ...options, resolve };
       confirmRef.current = state;
-      confirmResolvers.current.add(resolve);
+      confirmResolvers.add(resolve);
       setConfirm(state);
     });
-  }, []);
+  }, [confirmResolvers]);
 
   const handleConfirm = useCallback((result: boolean) => {
     const current = confirmRef.current;
     current?.resolve(result);
     if (current) {
-      confirmResolvers.current.delete(current.resolve);
+      confirmResolvers.delete(current.resolve);
     }
     confirmRef.current = null;
     setConfirm(null);
-  }, []);
-
-  const getToastClass = (type: ToastType) => {
-    switch (type) {
-      case "success": return "toast-success";
-      case "error": return "toast-error";
-      case "warning": return "toast-warning";
-      default: return "toast-info";
-    }
-  };
-
-  const getToastIcon = (type: ToastType) => {
-    switch (type) {
-      case "success": return "✓";
-      case "error": return "✕";
-      case "warning": return "⚠";
-      default: return "ℹ";
-    }
-  };
+  }, [confirmResolvers]);
 
   const contextValue = useMemo(
     () => ({ showToast, showConfirm }),

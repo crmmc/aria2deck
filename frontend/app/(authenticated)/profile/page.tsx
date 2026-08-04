@@ -18,6 +18,11 @@ import { PasswordSection } from "./_components/PasswordSection";
 import { NotificationSection } from "./_components/NotificationSection";
 import { RpcAccessSection } from "./_components/RpcAccessSection";
 
+function getRpcUrl(): string {
+  if (typeof window === "undefined") return "";
+  return `${window.location.origin}/aria2/jsonrpc`;
+}
+
 export default function ProfilePage() {
   const { showToast, showConfirm } = useToast();
   const { user, refreshUser } = useAuth();
@@ -44,7 +49,11 @@ export default function ProfilePage() {
   const [rpcLoading, setRpcLoading] = useState(false);
   const [copiedSecret, setCopiedSecret] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
-  const copyTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const copyTimers = useRef<Set<ReturnType<typeof setTimeout>> | null>(null);
+  if (copyTimers.current === null) {
+    copyTimers.current = new Set();
+  }
+  const copyTimerSet = copyTimers.current;
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -63,9 +72,9 @@ export default function ProfilePage() {
     }
     return () => {
       mountedRef.current = false;
-      copyTimers.current.forEach(clearTimeout);
+      copyTimerSet.forEach(clearTimeout);
     };
-  }, []);
+  }, [copyTimerSet]);
 
   const loadRpcAccess = async () => {
     try {
@@ -122,9 +131,9 @@ export default function ProfilePage() {
           const t = setTimeout(() => {
             if (!mountedRef.current) return;
             setCopiedSecret(false);
-            copyTimers.current.delete(t);
+            copyTimerSet.delete(t);
           }, 2000);
-          copyTimers.current.add(t);
+          copyTimerSet.add(t);
         },
       });
     }
@@ -141,18 +150,13 @@ export default function ProfilePage() {
           const t = setTimeout(() => {
             if (!mountedRef.current) return;
             setCopiedUrl(false);
-            copyTimers.current.delete(t);
+            copyTimerSet.delete(t);
           }, 2000);
-          copyTimers.current.add(t);
+          copyTimerSet.add(t);
         },
       });
     }
   };
-
-  function getRpcUrl(): string {
-    if (typeof window === "undefined") return "";
-    return `${window.location.origin}/aria2/jsonrpc`;
-  }
 
   async function handleChangePassword(e: React.FormEvent) {
     e.preventDefault();

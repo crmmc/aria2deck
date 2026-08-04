@@ -127,7 +127,7 @@ describe("CreateShareDialog", () => {
     const onClose = jest.fn();
     render(<CreateShareDialog userFileId={42} fileName="demo.txt" onClose={onClose} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "✕" }));
+    fireEvent.click(await screen.findByRole("button", { name: "关闭创建分享" }));
     expect(onClose).toHaveBeenCalledTimes(1);
 
     fireEvent.click(document.querySelector(".modal-backdrop-button")!);

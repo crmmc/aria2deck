@@ -66,7 +66,7 @@ export default function CreateShareDialog({
     >
         <div className="modal-header">
           <h3 className="modal-title">创建分享</h3>
-          <button type="button" className="modal-close-btn" onClick={onClose}>
+          <button type="button" className="modal-close-btn" aria-label="关闭创建分享" onClick={onClose}>
             ✕
           </button>
         </div>

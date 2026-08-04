@@ -7,7 +7,8 @@ import {
   type NotificationSettings,
 } from "@/lib/notification";
 
-const STORAGE_KEY = "aria2_notification_settings";
+const STORAGE_KEY = "aria2_notification_settings:v1";
+const LEGACY_STORAGE_KEY = "aria2_notification_settings";
 
 describe("notification", () => {
   let localStorageMock: {
@@ -93,6 +94,17 @@ describe("notification", () => {
 
       const settings = getNotificationSettings();
       expect(settings).toEqual(stored);
+    });
+
+    it("reads settings from the legacy key", () => {
+      const stored: NotificationSettings = {
+        enabled: true,
+        onComplete: false,
+        onError: true,
+      };
+      localStorageMock.store[LEGACY_STORAGE_KEY] = JSON.stringify(stored);
+
+      expect(getNotificationSettings()).toEqual(stored);
     });
 
     it("handles invalid JSON gracefully", () => {

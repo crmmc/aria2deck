@@ -31,6 +31,10 @@ type RootFileTableProps = {
 
 type RootFileListProps = Omit<RootFileTableProps, "isMobile" | "loading" | "error">;
 
+function stopClick(event: MouseEvent) {
+  event.stopPropagation();
+}
+
 function RenameControls({
   file,
   newName,
@@ -46,7 +50,6 @@ function RenameControls({
   onCancelRename: () => void;
   compact?: boolean;
 }) {
-  const stopClick = (event: MouseEvent) => event.stopPropagation();
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter") onRename(file);
     if (event.key === "Escape") onCancelRename();
@@ -66,6 +69,7 @@ function RenameControls({
       <button
         type="button"
         className="button secondary btn-sm"
+        aria-label="确认重命名"
         onClick={(event) => { event.stopPropagation(); onRename(file); }}
       >
         ✓
@@ -73,6 +77,7 @@ function RenameControls({
       <button
         type="button"
         className="button secondary btn-sm"
+        aria-label="取消重命名"
         onClick={(event) => { event.stopPropagation(); onCancelRename(); }}
       >
         ✕

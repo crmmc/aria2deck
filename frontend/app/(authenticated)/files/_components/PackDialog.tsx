@@ -44,6 +44,7 @@ export function PackDialog({
           type="button"
           onClick={() => !packing && onClose()}
           className="modal-close-btn"
+          aria-label="关闭打包弹窗"
           disabled={packing}
         >
           ×

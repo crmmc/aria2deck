@@ -64,6 +64,7 @@ export function HiddenExtensionsSection({ form, dispatch }: HiddenExtensionsSect
                 <button
                   type="button"
                   onClick={() => dispatch({ type: "remove_hidden_extension", extension: ext })}
+                  aria-label={`移除 ${ext}`}
                   className="chip-close"
                 >
                   ×

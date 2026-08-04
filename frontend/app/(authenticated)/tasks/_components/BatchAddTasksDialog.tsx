@@ -27,6 +27,7 @@ export function BatchAddTasksDialog({
           type="button"
           onClick={onCancel}
           className="modal-close-btn"
+          aria-label="关闭批量添加任务"
         >
           ×
         </button>

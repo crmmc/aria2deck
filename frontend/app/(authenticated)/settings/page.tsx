@@ -21,6 +21,11 @@ import { WebSocketSettingsSection } from "./_components/WebSocketSettingsSection
 import { RateLimitSettingsSection } from "./_components/RateLimitSettingsSection";
 import { DownloadConnectionSettingsSection } from "./_components/DownloadConnectionSettingsSection";
 
+function toPercent(value: number, total: number): number {
+  if (!total || total <= 0) return 0;
+  return (value / total) * 100;
+}
+
 function AdvancedSettingsSection({ children }: { children: React.ReactNode }) {
   const [expanded, setExpanded] = useState(false);
   const panelId = useId();
@@ -177,11 +182,6 @@ export default function SettingsPage() {
       if (mountedRef.current) setTestingConnection(false);
     }
   }
-
-  const toPercent = (value: number, total: number) => {
-    if (!total || total <= 0) return 0;
-    return (value / total) * 100;
-  };
 
   const setField = <K extends keyof SettingsFormState>(field: K, value: SettingsFormState[K]) => {
     dispatch({ type: "field", field, value });

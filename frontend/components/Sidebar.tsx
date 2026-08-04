@@ -187,6 +187,13 @@ const MoreIcon = () => (
   </svg>
 );
 
+const bottomNavItems = [
+  { name: "任务", href: "/tasks", icon: <TasksIcon /> },
+  { name: "历史", href: "/history", icon: <HistoryIcon /> },
+  { name: "文件", href: "/files", icon: <FilesIcon /> },
+  { name: "分享", href: "/shares", icon: <ShareIcon /> },
+];
+
 function SidebarContent({ user, sidebarExpanded, setSidebarExpanded }: SidebarProps) {
   const pathname = usePathname();
   const { logout, siteTitle } = useAuth();
@@ -197,14 +204,6 @@ function SidebarContent({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
     if (!pathname) return false;
     return pathname === href || pathname.startsWith(href + "/");
   };
-
-  // Mobile bottom navigation
-  const bottomNavItems = [
-    { name: "任务", href: "/tasks", icon: <TasksIcon /> },
-    { name: "历史", href: "/history", icon: <HistoryIcon /> },
-    { name: "文件", href: "/files", icon: <FilesIcon /> },
-    { name: "分享", href: "/shares", icon: <ShareIcon /> },
-  ];
 
   return (
     <>
@@ -243,6 +242,7 @@ function SidebarContent({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
               <h3 className="more-menu-title">更多</h3>
               <button type="button"
                 className="more-menu-close"
+                aria-label="关闭更多菜单"
                 onClick={() => setShowMoreMenu(false)}
               >
                 ×

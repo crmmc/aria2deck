@@ -365,7 +365,7 @@ describe("Folder in-page browsing", () => {
     });
     expect(mockApi.listFiles).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "›" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
 
     await waitFor(() => {
       expect(mockApi.listFiles).toHaveBeenCalledTimes(2);

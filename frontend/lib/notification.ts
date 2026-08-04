@@ -1,4 +1,5 @@
-const STORAGE_KEY = "aria2_notification_settings";
+const STORAGE_KEY = "aria2_notification_settings:v1";
+const LEGACY_STORAGE_KEY = "aria2_notification_settings";
 
 export interface NotificationSettings {
   enabled: boolean;
@@ -12,26 +13,43 @@ const defaultSettings: NotificationSettings = {
   onError: true,
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function parseStoredSettings(stored: string): NotificationSettings {
+  try {
+    const parsed: unknown = JSON.parse(stored);
+    if (!isRecord(parsed)) {
+      console.warn("通知设置格式无效");
+      return defaultSettings;
+    }
+    return {
+      enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : defaultSettings.enabled,
+      onComplete: typeof parsed.onComplete === "boolean" ? parsed.onComplete : defaultSettings.onComplete,
+      onError: typeof parsed.onError === "boolean" ? parsed.onError : defaultSettings.onError,
+    };
+  } catch (err) {
+    console.warn("解析通知设置失败", err);
+    return defaultSettings;
+  }
+}
+
 export function getNotificationSettings(): NotificationSettings {
   if (typeof window === "undefined") return defaultSettings;
   let stored: string | null = null;
   try {
     stored = localStorage.getItem(STORAGE_KEY);
+    if (stored === null) {
+      stored = localStorage.getItem(LEGACY_STORAGE_KEY);
+    }
   } catch (err) {
     console.warn("读取通知设置失败", err);
     return defaultSettings;
   }
 
-  if (stored) {
-    try {
-      return { ...defaultSettings, ...JSON.parse(stored) };
-    } catch (err) {
-      console.warn("解析通知设置失败", err);
-      return defaultSettings;
-    }
-  }
-
-  return defaultSettings;
+  if (!stored) return defaultSettings;
+  return parseStoredSettings(stored);
 }
 
 export function saveNotificationSettings(settings: NotificationSettings): void {

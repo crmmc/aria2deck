@@ -5,15 +5,21 @@ import { SystemStats } from "@/types";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
 
+function toPercent(used: number, total: number): number {
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  const value = (used / total) * 100;
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+function getDiskColor(percent: number): string {
+  if (percent >= 80) return "var(--danger)";
+  if (percent >= 50) return "var(--warning)";
+  return "var(--success)";
+}
+
 export default function StatsWidget() {
   const [stats, setStats] = useState<SystemStats | null>(null);
-
-  const toPercent = (used: number, total: number): number => {
-    if (!Number.isFinite(total) || total <= 0) return 0;
-    const value = (used / total) * 100;
-    if (!Number.isFinite(value)) return 0;
-    return Math.max(0, Math.min(100, value));
-  };
 
   useEffect(() => {
     let cancelled = false;
@@ -34,12 +40,6 @@ export default function StatsWidget() {
 
   const diskPercent = toPercent(stats.disk_used_space, stats.disk_total_space);
   const frozenSpace = stats.disk_frozen_space || 0;
-
-  const getDiskColor = (percent: number) => {
-    if (percent >= 80) return "var(--danger)";
-    if (percent >= 50) return "var(--warning)";
-    return "var(--success)";
-  };
 
   return (
     <div className="card row stats-widget">

@@ -6,6 +6,40 @@ import { formatBytes } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
 import type { PackTask } from "@/types";
 
+function getStatusColor(status: string): string {
+  switch (status) {
+    case "packing": return "var(--primary)";
+    case "done": return "var(--success)";
+    case "failed": return "var(--danger)";
+    case "cancelled": return "var(--gray)";
+    default: return "var(--warning)";
+  }
+}
+
+function getStatusText(status: string): string {
+  switch (status) {
+    case "pending": return "排队中...";
+    case "packing": return "打包中";
+    case "done": return "已完成";
+    case "failed": return "失败";
+    case "cancelled": return "已取消";
+    default: return status;
+  }
+}
+
+function getDisplayName(task: PackTask): string {
+  if (task.output_name) return task.output_name;
+  if (task.folder_path.startsWith("[")) {
+    try {
+      const paths = JSON.parse(task.folder_path) as string[];
+      return `${paths.length} 个文件`;
+    } catch {
+      return task.folder_path;
+    }
+  }
+  return task.folder_path;
+}
+
 interface PackTaskCardProps {
   onTaskComplete?: () => void;
 }
@@ -18,8 +52,16 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   const hideTimerRef = useRef<NodeJS.Timeout | null>(null);
   const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
   const expandTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const timersRef = useRef<Set<NodeJS.Timeout>>(new Set());
-  const taskStatusRef = useRef<Map<number, PackTask["status"]>>(new Map());
+  const timersRef = useRef<Set<NodeJS.Timeout> | null>(null);
+  if (timersRef.current === null) {
+    timersRef.current = new Set();
+  }
+  const timers = timersRef.current;
+  const taskStatusRef = useRef<Map<number, PackTask["status"]> | null>(null);
+  if (taskStatusRef.current === null) {
+    taskStatusRef.current = new Map();
+  }
+  const taskStatus = taskStatusRef.current;
   const onTaskCompleteRef = useRef(onTaskComplete);
 
   useEffect(() => {
@@ -29,7 +71,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   const loadTasks = useCallback(async () => {
     try {
       const data = await api.listPackTasks();
-      const previousStatuses = taskStatusRef.current;
+      const previousStatuses = taskStatus;
       const completedFromActive = data.some((task) => {
         const previousStatus = previousStatuses.get(task.id);
         return (
@@ -37,7 +79,8 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
           (previousStatus === "pending" || previousStatus === "packing")
         );
       });
-      taskStatusRef.current = new Map(data.map((task) => [task.id, task.status]));
+      taskStatus.clear();
+      data.forEach((task) => taskStatus.set(task.id, task.status));
       setTasks(data);
       if (completedFromActive) {
         onTaskCompleteRef.current?.();
@@ -45,7 +88,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
     } catch (err) {
       console.error("Failed to load pack tasks:", err);
     }
-  }, []);
+  }, [taskStatus]);
 
   useEffect(() => {
     void loadTasks();
@@ -66,45 +109,44 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   }, [tasks, loadTasks]);
 
   useEffect(() => {
-    const timers = timersRef.current;
     return () => {
       timers.forEach(clearTimeout);
     };
-  }, []);
+  }, [timers]);
 
   const handleMouseEnter = () => {
     if (hideTimerRef.current) {
       clearTimeout(hideTimerRef.current);
-      timersRef.current.delete(hideTimerRef.current);
+      timers.delete(hideTimerRef.current);
       hideTimerRef.current = null;
     }
     if (collapseTimerRef.current) {
       clearTimeout(collapseTimerRef.current);
-      timersRef.current.delete(collapseTimerRef.current);
+      timers.delete(collapseTimerRef.current);
       collapseTimerRef.current = null;
     }
     setExpanded(true);
     const expandTimer = setTimeout(() => {
       setVisible(true);
-      timersRef.current.delete(expandTimer);
+      timers.delete(expandTimer);
     }, 10);
     expandTimerRef.current = expandTimer;
-    timersRef.current.add(expandTimer);
+    timers.add(expandTimer);
   };
 
   const handleMouseLeave = () => {
     const hideTimer = setTimeout(() => {
       setVisible(false);
-      timersRef.current.delete(hideTimer);
+      timers.delete(hideTimer);
       const collapseTimer = setTimeout(() => {
         setExpanded(false);
-        timersRef.current.delete(collapseTimer);
+        timers.delete(collapseTimer);
       }, 400);
       collapseTimerRef.current = collapseTimer;
-      timersRef.current.add(collapseTimer);
+      timers.add(collapseTimer);
     }, 1200);
     hideTimerRef.current = hideTimer;
-    timersRef.current.add(hideTimer);
+    timers.add(hideTimer);
   };
 
   const activeTasks = useMemo(
@@ -157,42 +199,6 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
     } catch (err) {
       showToast(`删除失败: ${(err as Error).message}`, "error");
     }
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "packing": return "var(--primary)";
-      case "done": return "var(--success)";
-      case "failed": return "var(--danger)";
-      case "cancelled": return "var(--gray)";
-      default: return "var(--warning)";
-    }
-  };
-
-  const getStatusText = (status: string) => {
-    switch (status) {
-      case "pending": return "排队中...";
-      case "packing": return "打包中";
-      case "done": return "已完成";
-      case "failed": return "失败";
-      case "cancelled": return "已取消";
-      default: return status;
-    }
-  };
-
-  const getDisplayName = (task: PackTask) => {
-    if (task.output_name) {
-      return task.output_name;
-    }
-    if (task.folder_path.startsWith("[")) {
-      try {
-        const paths = JSON.parse(task.folder_path) as string[];
-        return `${paths.length} 个文件`;
-      } catch {
-        return task.folder_path;
-      }
-    }
-    return task.folder_path;
   };
 
   if (tasks.length === 0) return null;

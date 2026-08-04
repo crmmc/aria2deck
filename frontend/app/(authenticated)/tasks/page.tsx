@@ -98,7 +98,11 @@ export default function TasksPage() {
     };
   }, [showBatchAddModal]);
 
-  const deletedTaskIdsRef = useRef<Set<number>>(new Set());
+  const deletedTaskIdsRef = useRef<Set<number> | null>(null);
+  if (deletedTaskIdsRef.current === null) {
+    deletedTaskIdsRef.current = new Set();
+  }
+  const deletedTaskIds = deletedTaskIdsRef.current;
   const tasksRef = useRef<Task[]>([]);
 
   useEffect(() => {
@@ -139,7 +143,7 @@ export default function TasksPage() {
           const activeMap = new Map(activeTasks.map((t) => [t.id, t]));
 
           const updatedActive = activeTasks.filter(
-            (t) => !deletedTaskIdsRef.current.has(t.id)
+            (t) => !deletedTaskIds.has(t.id)
           );
 
           let needRefresh = false;
@@ -148,14 +152,14 @@ export default function TasksPage() {
             (t) => t.status === "active" || t.status === "queued"
           );
           for (const t of prevActive) {
-            if (!activeMap.has(t.id) && !deletedTaskIdsRef.current.has(t.id)) {
+            if (!activeMap.has(t.id) && !deletedTaskIds.has(t.id)) {
               needRefresh = true;
               break;
             }
           }
 
-          const deletedIds = new Set(deletedTaskIdsRef.current);
-          deletedTaskIdsRef.current.clear();
+          const deletedIds = new Set(deletedTaskIds);
+          deletedTaskIds.clear();
           setTasks((prev) => {
             const nonActive = prev.filter(
               (t) => t.status !== "active" && t.status !== "queued" && !deletedIds.has(t.id)
@@ -168,7 +172,7 @@ export default function TasksPage() {
               .listTasks("current")
               .then((currentTasks) => {
                 setTasks((prev) => {
-                  const freshDeletedIds = new Set(deletedTaskIdsRef.current);
+                  const freshDeletedIds = new Set(deletedTaskIds);
                   return currentTasks.filter((t) => !freshDeletedIds.has(t.id));
                 });
               })
@@ -184,12 +188,12 @@ export default function TasksPage() {
     }, 5000);
 
     return () => clearInterval(pollInterval);
-  }, []);
+  }, [deletedTaskIds]);
 
   const handleTaskUpdate = useCallback((newTask: Task) => {
     const taskId = newTask.id;
 
-    if (deletedTaskIdsRef.current.has(taskId)) {
+    if (deletedTaskIds.has(taskId)) {
       return;
     }
 
@@ -225,7 +229,7 @@ export default function TasksPage() {
       next[idx] = newTask;
       return next;
     });
-  }, [showToast]);
+  }, [deletedTaskIds, showToast]);
 
   const handleNotification = useCallback(
     (message: string, level: "info" | "warning" | "error") => {
@@ -240,7 +244,7 @@ export default function TasksPage() {
       .listTasks("current")
       .then((currentTasks) => {
         setTasks(() => {
-          const deletedIds = deletedTaskIdsRef.current;
+          const deletedIds = deletedTaskIds;
           return currentTasks.filter((t) => !deletedIds.has(t.id));
         });
       })
@@ -385,7 +389,7 @@ export default function TasksPage() {
 
       try {
         await api.cancelTask(id);
-        deletedTaskIdsRef.current.add(id);
+        deletedTaskIds.add(id);
         setTasks((prev) => prev.filter((t) => t.id !== id));
         setItemSelected(id, false);
       } catch (err) {
@@ -398,7 +402,7 @@ export default function TasksPage() {
         });
       }
     },
-    [showConfirm, showToast, setItemSelected]
+    [showConfirm, showToast, setItemSelected, deletedTaskIds]
   );
 
   const retryTask = useCallback(
@@ -443,7 +447,7 @@ export default function TasksPage() {
     try {
       await Promise.all(activeTasks.map((t) => api.cancelTask(t.id)));
       const cancelledIds = new Set(activeTasks.map((t) => t.id));
-      cancelledIds.forEach((id) => deletedTaskIdsRef.current.add(id));
+      cancelledIds.forEach((id) => deletedTaskIds.add(id));
       setTasks((prev) => prev.filter((t) => !cancelledIds.has(t.id)));
       clearSelection();
       showToast(`已取消 ${activeTasks.length} 个任务`, "success");
@@ -452,7 +456,7 @@ export default function TasksPage() {
     } finally {
       setIsBatchOperating(false);
     }
-  }, [selectedTasks, isBatchOperating, showConfirm, showToast, clearSelection]);
+  }, [selectedTasks, isBatchOperating, showConfirm, showToast, clearSelection, deletedTaskIds]);
 
   const batchAddTasks = useCallback(async () => {
     if (isBatchAdding) return;
