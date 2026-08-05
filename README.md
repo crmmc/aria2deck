@@ -118,7 +118,6 @@ docker run -d \
 | `ARIA2C_ARIA2_POLL_INTERVAL` | aria2 状态轮询间隔（秒） | `2.0` |
 | `ARIA2DECK_SHARE_JWT_SECRET` | 分享链接签名密钥，非 debug 模式必填 | - |
 | `ARIA2DECK_CREDENTIAL_PEPPER` | API Token 与用户 RPC 密钥摘要 pepper，非 debug 模式必填，至少 32 字节 | - |
-| `ARIA2DECK_PREVIOUS_CREDENTIAL_PEPPER` | 可选的上一代 pepper，仅用于轮换期间验证旧摘要，至少 32 字节 | - |
 | `ARIA2DECK_INITIAL_ADMIN_PASSWORD` | 首次创建管理员时使用，至少 16 个字符 | - |
 | `ARIA2C_CORS_ORIGINS` | 额外允许的 CORS 域名，逗号分隔 | - |
 | `ARIA2C_ALLOW_NULL_ORIGIN` | 是否允许 `Origin: null`，仅受控客户端需要时设为 `true` | `false` |
@@ -148,8 +147,13 @@ Docker 部署时需要挂载两个目录：
 <details>
 <summary><strong>安全建议</strong></summary>
 
-- 使用强随机的 `ARIA2C_ARIA2_RPC_SECRET`、`ARIA2DECK_SHARE_JWT_SECRET` 和 `ARIA2DECK_CREDENTIAL_PEPPER`
-- 轮换 credential pepper 时，先将旧值配置为 `ARIA2DECK_PREVIOUS_CREDENTIAL_PEPPER`、新值配置为 `ARIA2DECK_CREDENTIAL_PEPPER`。旧摘要首次成功认证会原子升级为新摘要；确认所有活跃 Token 与 RPC 密钥已迁移后，移除 previous 配置并重启。
+- 使用强随机且**互不相同**的 `ARIA2C_ARIA2_RPC_SECRET`、`ARIA2DECK_SHARE_JWT_SECRET` 和 `ARIA2DECK_CREDENTIAL_PEPPER`。`SHARE_JWT_SECRET` 只签分享/内部短时令牌；`CREDENTIAL_PEPPER` 只保护 API Token 与用户 RPC Secret 摘要，二者不要共用同一值。
+- 轮换 `ARIA2DECK_CREDENTIAL_PEPPER` 后，旧 API Token / RPC Secret 摘要无法再验证。正确做法：
+  1. 备份数据库
+  2. 配置新的 `ARIA2DECK_SHARE_JWT_SECRET` 与 `ARIA2DECK_CREDENTIAL_PEPPER`（各至少 32 字节、互不相同）
+  3. 启动服务后，管理员在「系统设置 → 凭证安全」点击「作废全部 API Token / RPC Secret」
+  4. 通知用户重新签发 API Token / RPC Secret
+  5. 分享访问 JWT 最长 30 分钟，轮换 secret 后旧 JWT 自动失效
 - v6 升级会启用 SQLite `secure_delete`、checkpoint truncate 和受磁盘空间约束的 VACUUM 来清理可达的旧凭证页；应用无法清除已有备份、快照、复制副本、块设备历史或已经导出的 WAL 文件，升级前后的备份应按含敏感凭证处理。
 - Compose 默认仅在 `127.0.0.1:8001` 提供 Web 服务，且不会向宿主机发布 aria2 RPC 6800
 - 远程访问必须使用提供 TLS 的反向代理；客户端 PBKDF2 结果仍是可重放的密码等价物，不能替代传输加密

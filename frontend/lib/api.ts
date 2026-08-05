@@ -244,6 +244,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ aria2_rpc_url, aria2_rpc_secret }),
     }),
+  invalidateAllCredentials: () =>
+    request<{
+      ok: boolean;
+      api_token_count: number;
+      rpc_secret_count: number;
+    }>("/api/config/credentials/invalidate", {
+      method: "POST",
+      body: JSON.stringify({ confirm: "INVALIDATE_ALL_CREDENTIALS" }),
+    }),
 
   // RPC Access
   getRpcAccess: () => request<RpcAccessStatus>("/api/users/me/rpc-access"),

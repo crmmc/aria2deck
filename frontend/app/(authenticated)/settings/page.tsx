@@ -20,6 +20,7 @@ import { PackSettingsSection } from "./_components/PackSettingsSection";
 import { WebSocketSettingsSection } from "./_components/WebSocketSettingsSection";
 import { RateLimitSettingsSection } from "./_components/RateLimitSettingsSection";
 import { DownloadConnectionSettingsSection } from "./_components/DownloadConnectionSettingsSection";
+import { CredentialSecuritySection } from "./_components/CredentialSecuritySection";
 
 function toPercent(value: number, total: number): number {
   if (!total || total <= 0) return 0;
@@ -67,7 +68,7 @@ function AdvancedSettingsSection({ children }: { children: React.ReactNode }) {
 
 export default function SettingsPage() {
   const { push } = useRouter();
-  const { showToast } = useToast();
+  const { showToast, showConfirm } = useToast();
   const mountedRef = useRef(true);
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -89,6 +90,7 @@ export default function SettingsPage() {
   const [testingConnection, setTestingConnection] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [invalidatingCredentials, setInvalidatingCredentials] = useState(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -183,6 +185,32 @@ export default function SettingsPage() {
     }
   }
 
+  async function invalidateCredentials() {
+    const confirmed = await showConfirm({
+      title: "作废全部凭证",
+      message:
+        "将删除所有用户的 API Token，并清空全部用户 RPC Secret。登录密码与当前会话不受影响，但自动化客户端需重新签发凭证。此操作不可恢复。",
+      confirmText: "确认作废",
+      danger: true,
+    });
+    if (!confirmed || !mountedRef.current) return;
+
+    setInvalidatingCredentials(true);
+    try {
+      const result = await api.invalidateAllCredentials();
+      if (!mountedRef.current) return;
+      showToast(
+        `已作废 ${result.api_token_count} 个 API Token、${result.rpc_secret_count} 个 RPC Secret`,
+        "success",
+      );
+    } catch (err) {
+      if (!mountedRef.current) return;
+      showToast("作废失败：" + ((err as Error).message || "未知错误"), "error");
+    } finally {
+      if (mountedRef.current) setInvalidatingCredentials(false);
+    }
+  }
+
   const setField = <K extends keyof SettingsFormState>(field: K, value: SettingsFormState[K]) => {
     dispatch({ type: "field", field, value });
   };
@@ -269,6 +297,13 @@ export default function SettingsPage() {
             )}
           </div>
         </form>
+      </div>
+
+      <div className="card mt-6">
+        <CredentialSecuritySection
+          invalidating={invalidatingCredentials}
+          onInvalidate={invalidateCredentials}
+        />
       </div>
     </div>
   );

@@ -10,7 +10,7 @@ from fastapi import Depends, HTTPException, Request, Response, status
 
 from app.core.config import settings
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
-from app.core.security import credential_digest_candidates
+from app.core.security import credential_digest
 from app.repositories import auth as auth_repo
 
 
@@ -53,35 +53,17 @@ def user_from_row(row: dict) -> AuthUser:
 
 async def get_user_by_rpc_secret(secret: str) -> dict | None:
     """Return an RPC-authenticated user shape for a valid ``token:<secret>`` value."""
-    current_digest, previous_digest = credential_digest_candidates("rpc-secret", secret)
-    rows = await auth_repo.list_users_by_rpc_secret_digests(
-        current_digest, previous_digest, limit=2
-    )
+    digest = credential_digest("rpc-secret", secret)
+    rows = await auth_repo.list_users_by_rpc_secret_digests(digest, limit=2)
     if len(rows) != 1:
-        secrets.compare_digest(current_digest, "0" * len(current_digest))
+        secrets.compare_digest(digest, "0" * len(digest))
         if len(rows) > 1:
             logger.error("RPC secret 摘要冲突，拒绝鉴权")
         return None
 
     user = rows[0]
     stored_digest = str(user["rpc_secret_digest"] or "")
-    if secrets.compare_digest(stored_digest, current_digest):
-        pass
-    elif previous_digest and secrets.compare_digest(stored_digest, previous_digest):
-        try:
-            promoted = await auth_repo.promote_rpc_secret_digest(
-                int(user["id"]), previous_digest, current_digest
-            )
-        except auth_repo.DuplicateCredentialError:
-            return None
-        if not promoted:
-            current_rows = await auth_repo.list_users_by_rpc_secret_digests(
-                current_digest, None, limit=2
-            )
-            if len(current_rows) != 1 or current_rows[0]["id"] != user["id"]:
-                return None
-            user = current_rows[0]
-    else:
+    if not secrets.compare_digest(stored_digest, digest):
         return None
     quota_bytes = int(user["quota_bytes"])
     return {
@@ -153,8 +135,8 @@ async def require_api_user(request: Request) -> AuthUser:
     if scheme.lower() != "bearer" or not separator or not token or any(char.isspace() for char in token):
         _set_request_auth_state(request, None, None)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API Token 无效")
-    current_digest, previous_digest = credential_digest_candidates("api-token", token)
-    row = await auth_repo.use_api_token_digests(current_digest, previous_digest)
+    digest = credential_digest("api-token", token)
+    row = await auth_repo.use_api_token_digest(digest)
     if not row or bool(row["is_admin"]):
         _set_request_auth_state(request, None, None)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API Token 无效")

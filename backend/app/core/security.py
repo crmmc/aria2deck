@@ -10,7 +10,7 @@ import socket
 from collections.abc import Mapping, Sequence
 from urllib.parse import parse_qsl, unquote, urlparse, urlunparse
 
-from app.core.config import credential_peppers
+from app.core.config import get_credential_pepper
 
 logger = logging.getLogger(__name__)
 
@@ -54,22 +54,10 @@ def _credential_digest(kind: str, secret: str, pepper: str) -> str:
 
 
 def credential_digest(kind: str, secret: str) -> str:
-    """Return the current domain-separated HMAC digest for a credential."""
+    """Return the domain-separated HMAC digest for a credential."""
     if kind not in CREDENTIAL_DIGEST_DOMAINS:
         raise ValueError("不支持的凭证类型")
-    current, _ = credential_peppers()
-    return _credential_digest(kind, secret, current)
-
-
-def credential_digest_candidates(kind: str, secret: str) -> tuple[str, str | None]:
-    """Return current and optional previous digests during pepper rotation."""
-    if kind not in CREDENTIAL_DIGEST_DOMAINS:
-        raise ValueError("不支持的凭证类型")
-    current, previous = credential_peppers()
-    return (
-        _credential_digest(kind, secret, current),
-        _credential_digest(kind, secret, previous) if previous else None,
-    )
+    return _credential_digest(kind, secret, get_credential_pepper())
 
 
 def credential_prefix(secret: str) -> str:

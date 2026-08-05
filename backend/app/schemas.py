@@ -98,6 +98,18 @@ class ApiTokenIssued(ApiTokenOut):
     token: str
 
 
+class InvalidateCredentialsRequest(BaseModel):
+    """管理员硬切换凭证时的确认请求。"""
+    confirm: str = Field(..., min_length=1, max_length=64)
+
+
+class InvalidateCredentialsResponse(BaseModel):
+    """管理员硬切换凭证结果。"""
+    ok: bool
+    api_token_count: int
+    rpc_secret_count: int
+
+
 class RpcAccessToggle(BaseModel):
     """RPC 访问开关请求"""
     enabled: bool

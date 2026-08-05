@@ -70,3 +70,18 @@ async def delete_token(user_id: int, token_id: int) -> dict:
 
     logger.info("删除Token成功 user_id=%s token_id=%s", user_id, token_id)
     return {"ok": True}
+
+
+async def invalidate_all_credential_digests(*, actor_id: int) -> dict:
+    counts = await auth_repo.invalidate_all_credential_digests()
+    logger.warning(
+        "管理员作废全部凭证摘要 actor_id=%s api_token_count=%s rpc_secret_count=%s",
+        actor_id,
+        counts["api_token_count"],
+        counts["rpc_secret_count"],
+    )
+    return {
+        "ok": True,
+        "api_token_count": counts["api_token_count"],
+        "rpc_secret_count": counts["rpc_secret_count"],
+    }

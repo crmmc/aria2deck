@@ -208,45 +208,20 @@ async def get_user_by_username(username: str) -> dict[str, Any] | None:
 
 
 async def list_users_by_rpc_secret_digests(
-    current_digest: str, previous_digest: str | None, *, limit: int = 2
+    digest: str, *, limit: int = 2
 ) -> list[dict[str, Any]]:
-    digests = [current_digest]
-    if previous_digest is not None:
-        digests.append(previous_digest)
     async with transaction() as conn:
         rows = (
             await conn.execute(
                 select(users)
                 .where(
-                    users.c.rpc_secret_digest.in_(digests),
+                    users.c.rpc_secret_digest == digest,
                     users.c.pending_delete == 0,
                 )
                 .limit(limit)
             )
         ).mappings().all()
     return [dict(row) for row in rows]
-
-
-async def promote_rpc_secret_digest(
-    user_id: int, old_digest: str, current_digest: str
-) -> bool:
-    async with transaction() as conn:
-        try:
-            row = (
-                await conn.execute(
-                    update(users)
-                    .where(
-                        users.c.id == user_id,
-                        users.c.pending_delete == 0,
-                        users.c.rpc_secret_digest == old_digest,
-                    )
-                    .values(rpc_secret_digest=current_digest, updated_at_ms=now_ms())
-                    .returning(users.c.id)
-                )
-            ).first()
-        except IntegrityError:
-            raise DuplicateCredentialError from None
-    return row is not None
 
 
 async def list_users() -> list[dict[str, Any]]:
@@ -704,17 +679,13 @@ async def create_api_token(
     return dict(row)
 
 
-async def use_api_token_digests(
-    current_digest: str,
-    previous_digest: str | None = None,
+async def use_api_token_digest(
+    digest: str,
     *,
     timestamp_ms: int | None = None,
 ) -> dict[str, Any] | None:
     timestamp = now_ms() if timestamp_ms is None else timestamp_ms
     write_before = timestamp - API_TOKEN_LAST_USED_WRITE_INTERVAL_MS
-    digests = [current_digest]
-    if previous_digest is not None:
-        digests.append(previous_digest)
     lookup = (
         select(
             users,
@@ -723,49 +694,34 @@ async def use_api_token_digests(
             api_tokens.c.last_used_at_ms.label("api_token_last_used_at_ms"),
         )
         .select_from(api_tokens.join(users, api_tokens.c.user_id == users.c.id))
-        .where(api_tokens.c.token_digest.in_(digests), users.c.pending_delete == 0)
+        .where(api_tokens.c.token_digest == digest, users.c.pending_delete == 0)
     )
     async with transaction() as conn:
         rows = (await conn.execute(lookup.limit(2))).mappings().all()
         if len(rows) != 1:
             return None
         row = dict(rows[0])
-        stored_digest = str(row["api_token_digest"])
-        is_previous = previous_digest is not None and stored_digest == previous_digest
-        if stored_digest != current_digest and not is_previous:
-            return None
         should_touch = (
             row["api_token_last_used_at_ms"] is None
             or int(row["api_token_last_used_at_ms"]) <= write_before
         )
-        if is_previous or should_touch:
-            values: dict[str, Any] = {}
-            if is_previous:
-                values["token_digest"] = current_digest
-            if should_touch:
-                values["last_used_at_ms"] = timestamp
-            try:
-                updated = (
-                    await conn.execute(
-                        update(api_tokens)
-                        .where(
-                            api_tokens.c.id == row["api_token_id"],
-                            api_tokens.c.token_digest == stored_digest,
-                        )
-                        .values(**values)
-                        .returning(api_tokens.c.id)
+        if should_touch:
+            updated = (
+                await conn.execute(
+                    update(api_tokens)
+                    .where(
+                        api_tokens.c.id == row["api_token_id"],
+                        api_tokens.c.token_digest == digest,
                     )
-                ).first()
-            except IntegrityError:
-                return None
+                    .values(last_used_at_ms=timestamp)
+                    .returning(api_tokens.c.id)
+                )
+            ).first()
             if updated is None:
                 row = dict(
                     (
                         await conn.execute(
-                            lookup.where(
-                                api_tokens.c.id == row["api_token_id"],
-                                api_tokens.c.token_digest == current_digest,
-                            )
+                            lookup.where(api_tokens.c.id == row["api_token_id"])
                         )
                     ).mappings().first()
                     or {}
@@ -773,10 +729,6 @@ async def use_api_token_digests(
                 if not row:
                     return None
         return row
-
-
-async def use_api_token_digest(digest: str) -> dict[str, Any] | None:
-    return await use_api_token_digests(digest)
 
 
 async def delete_api_token(user_id: int, token_id: int) -> bool:
@@ -788,6 +740,46 @@ async def delete_api_token(user_id: int, token_id: int) -> bool:
             )
         )
     return bool(result.rowcount)
+
+
+async def invalidate_all_credential_digests() -> dict[str, int]:
+    """Delete all API token digests and clear every user RPC secret digest.
+
+    Used after rotating ARIA2DECK_CREDENTIAL_PEPPER so stale digests cannot be
+    mistaken for still-valid credentials.
+    """
+    async with transaction() as conn:
+        token_count = int(
+            (
+                await conn.execute(select(func.count()).select_from(api_tokens))
+            ).scalar_one()
+        )
+        rpc_count = int(
+            (
+                await conn.execute(
+                    select(func.count())
+                    .select_from(users)
+                    .where(users.c.rpc_secret_digest.is_not(None))
+                )
+            ).scalar_one()
+        )
+        if token_count:
+            await conn.execute(delete(api_tokens))
+        if rpc_count:
+            await conn.execute(
+                update(users)
+                .where(users.c.rpc_secret_digest.is_not(None))
+                .values(
+                    rpc_secret_digest=None,
+                    rpc_secret_prefix=None,
+                    rpc_secret_created_at_ms=None,
+                    updated_at_ms=now_ms(),
+                )
+            )
+    return {
+        "api_token_count": token_count,
+        "rpc_secret_count": rpc_count,
+    }
 
 
 async def list_pending_user_ids() -> list[int]:

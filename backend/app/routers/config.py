@@ -11,7 +11,12 @@ from app.auth import require_limited_admin, require_limited_session_user
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
 from app.domain.errors import DomainError
 from app.http.errors import raise_http
-from app.schemas import ApiTokenIssued, ApiTokenOut
+from app.schemas import (
+    ApiTokenIssued,
+    ApiTokenOut,
+    InvalidateCredentialsRequest,
+    InvalidateCredentialsResponse,
+)
 from app.services import aria2_admin_service, settings_service, token_service
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -149,3 +154,19 @@ async def delete_token(token_id: int, user=Depends(require_limited_session_user)
         return await token_service.delete_token(user.id, token_id)
     except DomainError as exc:
         raise_http(exc)
+
+
+@router.post(
+    "/credentials/invalidate",
+    response_model=InvalidateCredentialsResponse,
+)
+async def invalidate_all_credentials(
+    payload: InvalidateCredentialsRequest,
+    admin=Depends(require_limited_admin),
+) -> dict:
+    if payload.confirm != "INVALIDATE_ALL_CREDENTIALS":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="confirm 必须为 INVALIDATE_ALL_CREDENTIALS",
+        )
+    return await token_service.invalidate_all_credential_digests(actor_id=admin.id)

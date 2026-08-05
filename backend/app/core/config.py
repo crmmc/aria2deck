@@ -10,7 +10,6 @@ SHARE_JWT_SECRET_ENV = "ARIA2DECK_SHARE_JWT_SECRET"
 LEGACY_SHARE_JWT_SECRET_ENV = "ARIA2C_SECRET_KEY"
 INITIAL_ADMIN_PASSWORD_ENV = "ARIA2DECK_INITIAL_ADMIN_PASSWORD"
 CREDENTIAL_PEPPER_ENV = "ARIA2DECK_CREDENTIAL_PEPPER"
-PREVIOUS_CREDENTIAL_PEPPER_ENV = "ARIA2DECK_PREVIOUS_CREDENTIAL_PEPPER"
 INTERNAL_BASE_URL_ENV = "ARIA2DECK_INTERNAL_BASE_URL"
 MIN_INITIAL_ADMIN_PASSWORD_LENGTH = 16
 MIN_SECRET_KEY_BYTES = 32
@@ -47,10 +46,6 @@ class Settings(BaseSettings):
         default="",
         validation_alias=CREDENTIAL_PEPPER_ENV,
     )
-    previous_credential_pepper: str = Field(
-        default="",
-        validation_alias=PREVIOUS_CREDENTIAL_PEPPER_ENV,
-    )
 
     class Config:
         env_prefix = "ARIA2C_"
@@ -59,22 +54,13 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
-def credential_peppers() -> tuple[str, str | None]:
+def get_credential_pepper() -> str:
     current = settings.credential_pepper or settings.secret_key
     if not current.strip() or len(current.encode("utf-8")) < MIN_SECRET_KEY_BYTES:
         raise RuntimeError(
             f"{CREDENTIAL_PEPPER_ENV} 未配置或少于 {MIN_SECRET_KEY_BYTES} 字节。"
         )
-    previous = settings.previous_credential_pepper
-    if not previous:
-        return current, None
-    if not previous.strip() or len(previous.encode("utf-8")) < MIN_SECRET_KEY_BYTES:
-        raise RuntimeError(
-            f"{PREVIOUS_CREDENTIAL_PEPPER_ENV} 少于 {MIN_SECRET_KEY_BYTES} 字节。"
-        )
-    if previous == current:
-        raise RuntimeError("当前与旧 credential pepper 不能相同。")
-    return current, previous
+    return current
 
 
 def get_internal_base_url() -> str:
@@ -158,7 +144,12 @@ def check_secret_key() -> None:
         raise RuntimeError(
             f"{CREDENTIAL_PEPPER_ENV} 未配置，生产环境禁止启动。"
         )
-    credential_peppers()
+    if settings.credential_pepper == secret:
+        raise RuntimeError(
+            f"{CREDENTIAL_PEPPER_ENV} 不得与 {SHARE_JWT_SECRET_ENV} 使用相同值；"
+            "两者职责不同，应分别生成独立随机密钥。"
+        )
+    get_credential_pepper()
     if settings.dev_reset_admin_password:
         raise RuntimeError(
             "ARIA2C_DEV_RESET_ADMIN_PASSWORD 仅允许在调试模式下启用。"

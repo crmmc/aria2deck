@@ -12,7 +12,6 @@ from app.core.config import (
     INTERNAL_BASE_URL_ENV,
     LEGACY_SHARE_JWT_SECRET_ENV,
     MIN_SECRET_KEY_BYTES,
-    PREVIOUS_CREDENTIAL_PEPPER_ENV,
     SHARE_JWT_SECRET_ENV,
     Settings,
     check_secret_key,
@@ -81,13 +80,14 @@ def test_check_secret_key_requires_credential_pepper_in_non_debug(monkeypatch):
         check_secret_key()
 
 
-def test_check_secret_key_rejects_short_previous_credential_pepper(monkeypatch):
+def test_check_secret_key_rejects_identical_share_and_credential_secrets(monkeypatch):
+    shared = "s" * MIN_SECRET_KEY_BYTES
     monkeypatch.setattr(settings, "debug", False)
-    monkeypatch.setattr(settings, "secret_key", "s" * MIN_SECRET_KEY_BYTES)
-    monkeypatch.setattr(settings, "credential_pepper", "c" * MIN_SECRET_KEY_BYTES)
-    monkeypatch.setattr(settings, "previous_credential_pepper", "p" * 31)
+    monkeypatch.setattr(settings, "secret_key", shared)
+    monkeypatch.setattr(settings, "credential_pepper", shared)
+    monkeypatch.setattr(settings, "dev_reset_admin_password", False)
 
-    with pytest.raises(RuntimeError, match=PREVIOUS_CREDENTIAL_PEPPER_ENV):
+    with pytest.raises(RuntimeError, match="不得与"):
         check_secret_key()
 
 

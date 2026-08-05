@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 const pushMock = jest.fn();
 const routerMock = { push: pushMock };
 const showToastMock = jest.fn();
+const showConfirmMock = jest.fn();
 
 jest.mock("next/navigation", () => ({
   useRouter: () => routerMock,
@@ -14,7 +15,7 @@ jest.mock("@/components/Toast", () => ({
   __esModule: true,
   useToast: () => ({
     showToast: showToastMock,
-    showConfirm: jest.fn(),
+    showConfirm: showConfirmMock,
   }),
 }));
 
@@ -27,6 +28,7 @@ jest.mock("@/lib/api", () => ({
     getAria2Version: jest.fn(),
     updateConfig: jest.fn(),
     testAria2Connection: jest.fn(),
+    invalidateAllCredentials: jest.fn(),
   },
 }));
 
@@ -165,10 +167,16 @@ async function renderWithInitialLoad(options: InitialLoadOptions = {}) {
 describe("SettingsPage", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    showConfirmMock.mockResolvedValue(true);
     mockApi.updateConfig.mockResolvedValue({} as never);
     mockApi.testAria2Connection.mockResolvedValue({
       connected: true,
       version: "1.36.0",
+    } as never);
+    mockApi.invalidateAllCredentials.mockResolvedValue({
+      ok: true,
+      api_token_count: 2,
+      rpc_secret_count: 1,
     } as never);
   });
 
@@ -181,6 +189,10 @@ describe("SettingsPage", () => {
 
     expect(screen.getByText("系统设置")).toBeInTheDocument();
     expect(screen.getByText("系统配置（仅管理员）")).toBeInTheDocument();
+    expect(screen.getByText("凭证安全")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /系统高级设置/ }),
     ).toHaveAttribute("aria-expanded", "false");
@@ -229,6 +241,46 @@ describe("SettingsPage", () => {
       expect(mockApi.updateConfig).toHaveBeenCalled();
     });
     expect(showToastMock).toHaveBeenCalledWith("配置已保存", "success");
+  });
+
+  test("invalidates credentials after confirmation", async () => {
+    await renderWithInitialLoad();
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(showConfirmMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "作废全部凭证",
+          danger: true,
+        }),
+      );
+      expect(mockApi.invalidateAllCredentials).toHaveBeenCalled();
+    });
+    expect(showToastMock).toHaveBeenCalledWith(
+      "已作废 2 个 API Token、1 个 RPC Secret",
+      "success",
+    );
+  });
+
+  test("does not invalidate credentials when confirmation is cancelled", async () => {
+    showConfirmMock.mockResolvedValueOnce(false);
+    await renderWithInitialLoad();
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(showConfirmMock).toHaveBeenCalled();
+    });
+    expect(mockApi.invalidateAllCredentials).not.toHaveBeenCalled();
   });
 
   test("shows validation message when testing empty rpc url", async () => {
