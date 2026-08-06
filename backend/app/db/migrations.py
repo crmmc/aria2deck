@@ -184,14 +184,16 @@ async def _rebuild_schema_meta(conn: AsyncConnection, version: int) -> None:
 
 
 async def ensure_v8_retry_attempt_schema(conn: AsyncConnection) -> None:
-    """Drop the table-wide resource_key unique index and keep live attempts unique."""
+    """Rebuild global_downloads so retry attempts only require live uniqueness."""
     if "global_downloads" not in await _table_names(conn):
         return
     if "resource_key" not in await _column_names(conn, "global_downloads"):
         return
+
     rows = (
         await conn.execute(text("PRAGMA index_list('global_downloads')"))
     ).all()
+    has_table_wide_unique = False
     for row in rows:
         index_name = str(row[1])
         origin = str(row[3] or "")
@@ -214,7 +216,82 @@ async def ensure_v8_retry_attempt_schema(conn: AsyncConnection) -> None:
         definition = str(sql_row[0] or "").lower() if sql_row else ""
         if "where" in definition and "status" in definition:
             continue
-        await conn.execute(text(f'DROP INDEX IF EXISTS "{index_name}"'))
+        if origin == "u" or "unique" in definition:
+            has_table_wide_unique = True
+            break
+
+    if has_table_wide_unique:
+        await conn.execute(
+            text(
+                "CREATE TABLE global_downloads_v8 ("
+                "id INTEGER NOT NULL PRIMARY KEY, "
+                "resource_key VARCHAR(128) NOT NULL, "
+                "resource_kind VARCHAR(16) NOT NULL, "
+                "source_uri TEXT NOT NULL, "
+                "bt_info_hash VARCHAR(40), "
+                "display_name TEXT, "
+                "aria2_gid VARCHAR(32) UNIQUE, "
+                "status VARCHAR(16) NOT NULL, "
+                "total_bytes INTEGER NOT NULL DEFAULT 0, "
+                "completed_bytes INTEGER NOT NULL DEFAULT 0, "
+                "size_known INTEGER NOT NULL DEFAULT 0, "
+                "size_limit_bytes INTEGER NOT NULL DEFAULT 0, "
+                "disk_reserved_bytes INTEGER NOT NULL DEFAULT 0, "
+                "error_code VARCHAR(64), "
+                "error_message TEXT, "
+                "completed_file_id INTEGER, "
+                "created_at_ms INTEGER NOT NULL, "
+                "updated_at_ms INTEGER NOT NULL, "
+                "completed_at_ms INTEGER, "
+                "CONSTRAINT ck_global_downloads_resource_kind CHECK "
+                "(resource_kind IN ('http', 'magnet', 'torrent', 'other')), "
+                "CONSTRAINT ck_global_downloads_status CHECK "
+                "(status IN ('queued', 'active', 'waiting', 'paused', 'completed', 'failed', 'cancelled')), "
+                "CONSTRAINT ck_global_downloads_size_known_bool CHECK (size_known IN (0, 1)), "
+                "CONSTRAINT ck_global_downloads_size_limit_non_negative CHECK (size_limit_bytes >= 0), "
+                "CONSTRAINT ck_global_downloads_disk_reserved_non_negative CHECK (disk_reserved_bytes >= 0), "
+                "FOREIGN KEY(completed_file_id) REFERENCES stored_files (id)"
+                ")"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO global_downloads_v8 ("
+                "id, resource_key, resource_kind, source_uri, bt_info_hash, display_name, "
+                "aria2_gid, status, total_bytes, completed_bytes, size_known, "
+                "size_limit_bytes, disk_reserved_bytes, error_code, error_message, "
+                "completed_file_id, created_at_ms, updated_at_ms, completed_at_ms"
+                ") SELECT "
+                "id, resource_key, resource_kind, source_uri, bt_info_hash, display_name, "
+                "aria2_gid, status, total_bytes, completed_bytes, size_known, "
+                "size_limit_bytes, disk_reserved_bytes, error_code, error_message, "
+                "completed_file_id, created_at_ms, updated_at_ms, completed_at_ms "
+                "FROM global_downloads"
+            )
+        )
+        await conn.execute(text("DROP TABLE global_downloads"))
+        await conn.execute(
+            text("ALTER TABLE global_downloads_v8 RENAME TO global_downloads")
+        )
+
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_global_downloads_status_gid "
+            "ON global_downloads (status, aria2_gid)"
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_global_downloads_status_disk_reserved "
+            "ON global_downloads (status, disk_reserved_bytes)"
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_global_downloads_completed_file_id "
+            "ON global_downloads (completed_file_id)"
+        )
+    )
     await conn.execute(
         text(
             "CREATE INDEX IF NOT EXISTS ix_global_downloads_resource_key "
