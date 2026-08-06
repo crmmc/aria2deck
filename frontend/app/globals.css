@@ -3708,6 +3708,43 @@ dialog.confirm-overlay {
   }
 }
 
+.user-storage-cell {
+  min-width: 180px;
+  max-width: 280px;
+}
+
+.user-storage-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.user-storage-bar {
+  position: relative;
+  height: 6px;
+  margin-bottom: 4px;
+}
+
+.user-storage-reserved {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 2px,
+    rgba(255, 255, 255, 0.35) 2px,
+    rgba(255, 255, 255, 0.35) 4px
+  );
+  pointer-events: none;
+}
+
+.user-storage-sub {
+  line-height: 1.3;
+}
+
 /* ==================== MOBILE STATS WIDGET ==================== */
 
 @media (max-width: 767px) {

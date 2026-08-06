@@ -109,6 +109,11 @@ export default function UsersPage() {
       quota: user.quota,
       quotaValue: qv,
       quotaUnit: qu,
+      used_bytes: user.used_bytes,
+      reserved_bytes: user.reserved_bytes,
+      available_bytes: user.available_bytes,
+      usage_percent: user.usage_percent,
+      machine_share_percent: user.machine_share_percent,
     });
     setEditError(null);
   }

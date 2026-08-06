@@ -5,12 +5,13 @@ import shutil
 
 from app.core.config import settings
 from app.domain.quota import usage_with_available, visible_space_from_quota
-
+from app.repositories.downloads import get_active_physical_commitment_bytes
 from app.repositories.usage import (
     apply_usage_delta,
     get_usage_row,
     reserve_usage_bytes_if_within_quota,
 )
+from app.services.settings_service import get_min_free_disk
 
 
 async def _resolve_quota(user_id: int, quota_bytes: int | None) -> int:
@@ -27,25 +28,45 @@ async def get_usage(user_id: int, quota_bytes: int) -> dict[str, int]:
     return usage_with_available(await get_usage_row(user_id), int(quota_bytes))
 
 
+def machine_headroom_bytes(
+    *,
+    disk_free: int,
+    global_physical_commitment: int,
+    min_free_disk: int | None = None,
+) -> int:
+    min_free = get_min_free_disk() if min_free_disk is None else max(0, int(min_free_disk))
+    disk_available = max(0, int(disk_free) - min_free)
+    return max(0, disk_available - max(0, int(global_physical_commitment)))
+
+
 def visible_space_from_usage(
     usage: dict[str, int],
     *,
-    machine_free: int,
-) -> dict[str, int | bool]:
+    machine_headroom: int,
+) -> dict[str, int | bool | float]:
     return visible_space_from_quota(
         quota_bytes=int(usage["quota_bytes"]),
         used_bytes=int(usage["used_bytes"]),
         reserved_bytes=int(usage["reserved_bytes"]),
-        machine_free=int(machine_free),
+        machine_headroom=int(machine_headroom),
     )
 
 
-async def get_visible_space(user_id: int, quota_bytes: int) -> dict[str, int | bool]:
-    usage = await get_usage(user_id, quota_bytes)
+async def get_machine_headroom() -> int:
     download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
-    machine_free = shutil.disk_usage(download_path).free
-    return visible_space_from_usage(usage, machine_free=machine_free)
+    disk_free = shutil.disk_usage(download_path).free
+    commitment = await get_active_physical_commitment_bytes()
+    return machine_headroom_bytes(
+        disk_free=int(disk_free),
+        global_physical_commitment=int(commitment),
+    )
+
+
+async def get_visible_space(user_id: int, quota_bytes: int) -> dict[str, int | bool | float]:
+    usage = await get_usage(user_id, quota_bytes)
+    headroom = await get_machine_headroom()
+    return visible_space_from_usage(usage, machine_headroom=headroom)
 
 
 async def reserve_bytes(

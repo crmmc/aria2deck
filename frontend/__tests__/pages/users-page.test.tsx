@@ -35,6 +35,11 @@ const adminUser = {
   is_admin: true,
   quota: 1024 * 1024 * 1024,
   is_initial_password: false,
+  used_bytes: 100 * 1024 * 1024,
+  reserved_bytes: 0,
+  available_bytes: 924 * 1024 * 1024,
+  usage_percent: 9.8,
+  machine_share_percent: 20,
 };
 
 const normalUser = {
@@ -49,6 +54,11 @@ const managedUser = {
   id: 3,
   username: "alice",
   quota: 2 * 1024 * 1024 * 1024,
+  used_bytes: 400 * 1024 * 1024,
+  reserved_bytes: 50 * 1024 * 1024,
+  available_bytes: 1600 * 1024 * 1024,
+  usage_percent: 19.5,
+  machine_share_percent: 80,
 };
 
 function renderPage() {
@@ -196,6 +206,25 @@ describe("UsersPage", () => {
       );
     });
     expect(screen.queryByText("编辑用户")).not.toBeInTheDocument();
+  });
+
+  test("renders storage usage and machine share in the users table", async () => {
+    await renderAdminPage();
+
+    expect(screen.getByText("存储")).toBeInTheDocument();
+    expect(screen.getByText(/400.0 MB \/ 2.0 GB/)).toBeInTheDocument();
+    expect(screen.getByText(/全站 80.0%/)).toBeInTheDocument();
+  });
+
+  test("shows readonly occupancy summary when editing a user", async () => {
+    await renderAdminPage();
+
+    const managedRow = screen.getByText("alice").closest("tr") as HTMLElement;
+    fireEvent.click(within(managedRow).getByRole("button", { name: "编辑" }));
+
+    expect(await screen.findByText(/当前占用：400.0 MB 已用/)).toBeInTheDocument();
+    const dialog = screen.getByLabelText("编辑用户");
+    expect(within(dialog).getByText(/全站 80.0%/)).toBeInTheDocument();
   });
 
   test("deletes a user and shows success toast", async () => {

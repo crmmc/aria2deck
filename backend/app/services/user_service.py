@@ -7,10 +7,13 @@ from app.auth import AuthUser
 from app.core.security import credential_digest, credential_prefix, hash_password
 from app.core.time_utils import ms_to_iso, now_ms
 from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
+from app.domain.quota import machine_share_percent, usage_percent
 from app.repositories import auth as auth_repo
+from app.repositories.usage import list_usage_rows
 from app.schemas import RpcAccessIssued, RpcAccessStatus, UserCreate, UserUpdate
 from app.services.rate_limit_service import ensure_account_security_allowed
 from app.services.task_broadcast import remove_connections_for_user
+from app.services.usage_service import get_machine_headroom, visible_space_from_usage
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +21,63 @@ DEFAULT_QUOTA_BYTES = 100 * 1024 * 1024 * 1024
 
 
 def user_out(row: dict) -> dict:
-    return {
+    payload = {
         "id": row["id"],
         "username": row["username"],
         "is_admin": bool(row["is_admin"]),
         "quota": row["quota_bytes"],
         "is_initial_password": bool(row.get("is_initial_password", 0)),
     }
+    for key in (
+        "used_bytes",
+        "reserved_bytes",
+        "available_bytes",
+        "usage_percent",
+        "machine_share_percent",
+    ):
+        if key in row and row[key] is not None:
+            payload[key] = row[key]
+    return payload
+
+
+def _usage_map(rows: list[dict]) -> dict[int, dict]:
+    return {int(row["user_id"]): row for row in rows}
+
+
+def _enrich_user_with_storage(
+    row: dict,
+    *,
+    usage_row: dict | None,
+    machine_headroom: int,
+    total_used_bytes: int,
+) -> dict:
+    used = int((usage_row or {}).get("used_bytes") or 0)
+    reserved = int((usage_row or {}).get("reserved_bytes") or 0)
+    visible = visible_space_from_usage(
+        {
+            "quota_bytes": int(row["quota_bytes"]),
+            "used_bytes": used,
+            "reserved_bytes": reserved,
+        },
+        machine_headroom=machine_headroom,
+    )
+    enriched = dict(row)
+    enriched.update(
+        {
+            "used_bytes": used,
+            "reserved_bytes": reserved,
+            "available_bytes": int(visible["available"]),
+            "usage_percent": usage_percent(
+                used_bytes=used,
+                quota_bytes=int(row["quota_bytes"]),
+            ),
+            "machine_share_percent": machine_share_percent(
+                used_bytes=used,
+                total_used_bytes=total_used_bytes,
+            ),
+        }
+    )
+    return user_out(enriched)
 
 
 async def has_any_user() -> bool:
@@ -117,13 +170,29 @@ async def create_user(
             request_id,
         )
 
-    return user_out(user)
+    return _enrich_user_with_storage(
+        user,
+        usage_row={"used_bytes": 0, "reserved_bytes": 0},
+        machine_headroom=await get_machine_headroom(),
+        total_used_bytes=0,
+    )
 
 
 async def list_users(admin_id: int | None) -> list[dict]:
     rows = await auth_repo.list_users()
+    usage_by_user = _usage_map(await list_usage_rows())
+    machine_headroom = await get_machine_headroom()
+    total_used = sum(int(row.get("used_bytes") or 0) for row in usage_by_user.values())
     logger.debug("查询用户列表 admin_id=%s count=%s", admin_id, len(rows))
-    return [user_out(row) for row in rows]
+    return [
+        _enrich_user_with_storage(
+            row,
+            usage_row=usage_by_user.get(int(row["id"])),
+            machine_headroom=machine_headroom,
+            total_used_bytes=total_used,
+        )
+        for row in rows
+    ]
 
 
 async def delete_user(*, actor: AuthUser, user_id: int, request_id: str) -> dict:
@@ -188,8 +257,16 @@ async def get_user(*, actor_id: int | None, user_id: int) -> dict:
     user = await auth_repo.get_user_by_id(user_id)
     if not user:
         raise NotFoundError("用户不存在")
+    usage_by_user = _usage_map(await list_usage_rows())
+    machine_headroom = await get_machine_headroom()
+    total_used = sum(int(row.get("used_bytes") or 0) for row in usage_by_user.values())
     logger.debug("查询用户详情 admin_id=%s target_user_id=%s", actor_id, user_id)
-    return user_out(user)
+    return _enrich_user_with_storage(
+        user,
+        usage_row=usage_by_user.get(int(user["id"])),
+        machine_headroom=machine_headroom,
+        total_used_bytes=total_used,
+    )
 
 
 async def update_user(
@@ -287,7 +364,15 @@ async def update_user(
         payload.quota is not None,
         request_id,
     )
-    return user_out(updated)
+    usage_by_user = _usage_map(await list_usage_rows())
+    machine_headroom = await get_machine_headroom()
+    total_used = sum(int(row.get("used_bytes") or 0) for row in usage_by_user.values())
+    return _enrich_user_with_storage(
+        updated,
+        usage_row=usage_by_user.get(int(updated["id"])),
+        machine_headroom=machine_headroom,
+        total_used_bytes=total_used,
+    )
 
 
 async def get_rpc_access(user_id: int) -> RpcAccessStatus:

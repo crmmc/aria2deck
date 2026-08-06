@@ -51,7 +51,7 @@ export default function StatsWidget() {
           {stats.disk_space_limited && (
             <span
               className="space-warning"
-              title="当前机器空间受限，您的可用空间已被调整，请联系管理员"
+              title="当前机器可分配空间已被其他任务占用，可用空间已按全局预算调整"
             >
               ⚠️
             </span>

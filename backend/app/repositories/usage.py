@@ -73,6 +73,14 @@ async def get_usage_row(user_id: int) -> dict[str, Any]:
     return dict(row)
 
 
+async def list_usage_rows() -> list[dict[str, Any]]:
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(select(user_storage_usage))
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 async def apply_usage_delta(
     user_id: int, *, used_delta: int = 0, reserved_delta: int = 0
 ) -> dict[str, Any]:

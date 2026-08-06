@@ -16,7 +16,7 @@ from app.services.storage_locks import (
     get_content_hash_lock,
 )
 from app.services.task_broadcast import broadcast_task_update_to_subscribers
-from app.services.usage_service import get_usage, visible_space_from_usage
+from app.services.usage_service import get_visible_space
 
 logger = logging.getLogger(__name__)
 
@@ -91,11 +91,7 @@ async def directory_entries(
 
 
 async def get_user_space_info(user_id: int, quota_bytes: int) -> dict[str, int]:
-    usage = await get_usage(user_id, quota_bytes)
-    download_path = Path(settings.download_dir)
-    download_path.mkdir(parents=True, exist_ok=True)
-    disk = shutil.disk_usage(download_path)
-    visible = visible_space_from_usage(usage, machine_free=int(disk.free))
+    visible = await get_visible_space(user_id, quota_bytes)
     return {
         "quota": int(visible["quota"]),
         "used": int(visible["used"]),

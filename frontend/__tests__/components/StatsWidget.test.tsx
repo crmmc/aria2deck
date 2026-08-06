@@ -40,7 +40,7 @@ describe("StatsWidget", () => {
     expect(screen.getByText("15.0 GB")).toBeInTheDocument();
     expect(screen.getByText("/ 100.0 GB")).toBeInTheDocument();
     expect(
-      screen.getByTitle("当前机器空间受限，您的可用空间已被调整，请联系管理员")
+      screen.getByTitle("当前机器可分配空间已被其他任务占用，可用空间已按全局预算调整")
     ).toBeInTheDocument();
     expect(screen.getByText("已冻结: 5.0 GB (下载中)")).toBeInTheDocument();
     expect(document.querySelector(".progress-bar")).toHaveStyle({

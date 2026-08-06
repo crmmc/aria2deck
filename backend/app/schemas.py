@@ -65,6 +65,11 @@ class UserOut(BaseModel):
     password_warning: str | None = None  # 密码安全警告
 
     is_initial_password: bool = False  # 是否为初始密码状态
+    used_bytes: int | None = None
+    reserved_bytes: int | None = None
+    available_bytes: int | None = None
+    usage_percent: float | None = None
+    machine_share_percent: float | None = None
 
 
 class ChangePasswordRequest(BaseModel):

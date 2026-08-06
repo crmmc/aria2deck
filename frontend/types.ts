@@ -5,6 +5,11 @@ export type User = {
   quota: number;
 
   is_initial_password?: boolean;  // whether user needs to reset password
+  used_bytes?: number;
+  reserved_bytes?: number;
+  available_bytes?: number;
+  usage_percent?: number;
+  machine_share_percent?: number;
 };
 
 export type UserCreate = {

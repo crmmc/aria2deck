@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.repositories.downloads import list_user_tasks
 from app.services.task_projection import speed_totals, stat_counts
 from app.services.task_runtime import fetch_active_live_statuses_by_gid
-from app.services.usage_service import get_usage, visible_space_from_usage
+from app.services.usage_service import get_visible_space
 
 logger = logging.getLogger(__name__)
 MACHINE_SIZE_CACHE_TTL_SECONDS = 5.0
@@ -60,14 +60,9 @@ async def get_user_stats(
     user_id: int,
     quota_bytes: int,
 ) -> dict:
-    usage = await get_usage(user_id, quota_bytes)
-    used_space = int(usage["used_bytes"])
-    frozen_space = int(usage["reserved_bytes"])
-
-    download_path = Path(settings.download_dir)
-    download_path.mkdir(parents=True, exist_ok=True)
-    disk = shutil.disk_usage(download_path)
-    visible_space = visible_space_from_usage(usage, machine_free=int(disk.free))
+    visible_space = await get_visible_space(user_id, quota_bytes)
+    used_space = int(visible_space["used"])
+    frozen_space = int(visible_space["frozen"])
 
     rows = await list_user_tasks(user_id)
     counts = stat_counts(rows)

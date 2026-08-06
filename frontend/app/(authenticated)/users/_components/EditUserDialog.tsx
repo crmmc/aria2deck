@@ -1,6 +1,7 @@
 import type { FormEvent } from "react";
 import { ModalOverlay } from "@/components/ModalOverlay";
 import type { User } from "@/types";
+import { formatBytes } from "@/lib/utils";
 
 type EditingUser = {
   id: number;
@@ -10,6 +11,11 @@ type EditingUser = {
   quota: number;
   quotaValue: string;
   quotaUnit: string;
+  used_bytes?: number;
+  reserved_bytes?: number;
+  available_bytes?: number;
+  usage_percent?: number;
+  machine_share_percent?: number;
 };
 
 type EditUserDialogProps = {
@@ -91,6 +97,18 @@ export function EditUserDialog({
                 <option value="GB">GB</option>
               </select>
             </div>
+            {(editingUser.used_bytes !== undefined || editingUser.available_bytes !== undefined) && (
+              <p className="muted text-xs mt-2">
+                当前占用：{formatBytes(editingUser.used_bytes ?? 0)} 已用
+                {" · "}
+                {formatBytes(editingUser.reserved_bytes ?? 0)} 冻结
+                {" · 可用 "}
+                {formatBytes(editingUser.available_bytes ?? 0)}
+                {editingUser.machine_share_percent !== undefined
+                  ? ` · 全站 ${editingUser.machine_share_percent.toFixed(1)}%`
+                  : ""}
+              </p>
+            )}
           </div>
           <div className="mb-5">
             <label className="checkbox-label">
