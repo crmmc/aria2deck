@@ -596,9 +596,12 @@ async def test_terminal_release_is_idempotent_and_old_gid_is_noop(temp_db: str) 
 
 
 @pytest.mark.asyncio
-async def test_terminal_residual_gid_still_counts_against_disk_budget(
+async def test_terminal_residual_gid_does_not_count_against_disk_budget(
     temp_db: str,
 ) -> None:
+    """Terminal residual gids may remain briefly for cleanup/retry safety,
+    but they must not continue locking global disk budget.
+    """
     first_user = await create_user_v0(username="residual_disk_a", quota_bytes=2000)
     second_user = await create_user_v0(username="residual_disk_b", quota_bytes=2000)
     client = AsyncMock()
@@ -638,7 +641,7 @@ async def test_terminal_residual_gid_still_counts_against_disk_budget(
     assert residual["status"] == "failed"
     assert residual["aria2_gid"] == "gid-residual-disk"
     assert residual["disk_reserved_bytes"] == 0
-    assert result["outcome"] == "disk_budget"
+    assert result["outcome"] == "admitted"
 
 
 @pytest.mark.asyncio

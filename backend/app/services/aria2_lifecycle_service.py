@@ -1397,10 +1397,25 @@ async def handle_aria2_event(
             user_status="active",
         )
     elif event == "pause":
+        # Keep paused tasks visible. Metadata-phase pause is system-owned
+        # (pause-metadata); other pauses are treated as external/admin holds.
+        pause_values: dict[str, Any] = {
+            "status": "paused",
+            **progress_values,
+            # Paused tasks only retain already-written bytes as reservation.
+            "disk_reserved_bytes": max(
+                0, int(download.get("completed_bytes") or 0)
+            ),
+        }
+        if not is_metadata_phase_status(aria2_status):
+            pause_values["error_message"] = (
+                "任务已被管理员暂停，请联系管理员处理"
+            )
+            pause_values["error_code"] = "admin_paused"
         changed = await update_download_and_active_user_tasks(
             download_id=download_id,
             expected_gid=gid,
-            global_values={"status": "paused", **progress_values},
+            global_values=pause_values,
             user_status="paused",
         )
     elif event in {"complete", "bt_complete"}:

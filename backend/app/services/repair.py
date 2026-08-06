@@ -10,6 +10,7 @@ from app.aria2.protocol import Aria2Gateway
 from app.repositories.downloads import (
     list_active_global_downloads,
     list_completed_downloads_without_file,
+    list_terminal_downloads_with_residual_gid,
     mark_global_download_failed,
     reconcile_download_size,
     reset_active_accounting_for_startup,
@@ -60,6 +61,43 @@ class TaskAssociationRepairResult(TypedDict):
 
 
 FileRepairStatus = Literal["created", "resolved", "unresolved"]
+
+
+async def purge_terminal_residual_gids(client: Aria2Gateway) -> dict[str, int]:
+    """Clear terminal downloads that still hold an aria2 gid.
+
+    These residuals must never continue to claim disk budget after cancel/fail.
+    """
+    residuals = await list_terminal_downloads_with_residual_gid()
+    purged = 0
+    failed = 0
+    for download in residuals:
+        download_id = int(download["id"])
+        gid = str(download.get("aria2_gid") or "")
+        if not gid:
+            continue
+        try:
+            result = await cleanup_terminal_download_generation(
+                client=client,
+                task_id=download_id,
+                gid=gid,
+                owner_id=None,
+                log_prefix="[Residual]",
+                skip_status_check=True,
+            )
+            if result.writer_stopped:
+                purged += 1
+            else:
+                failed += 1
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                "Failed to purge residual gid download_id=%s gid=%s error=%s",
+                download_id,
+                gid,
+                exc,
+            )
+    return {"found": len(residuals), "purged": purged, "failed": failed}
 
 
 async def rebuild_active_download_accounting(

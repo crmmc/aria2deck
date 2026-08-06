@@ -130,6 +130,9 @@ async def cleanup_terminal_download_generation(
         log_prefix=log_prefix,
         skip_status_check=skip_status_check,
     )
+    # Only drop the residual gid after writer stop + directory cleanup.
+    # Budget no longer counts terminal residual gids, but retry safety still
+    # requires the on-disk generation to be gone before reuse.
     if result.safe_to_reuse:
         await clear_terminal_download_gid(task_id, expected_gid=gid)
     return result

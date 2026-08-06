@@ -89,29 +89,31 @@ async def _strict_adjust_usage_reserved(
 
 
 async def active_physical_commitment_bytes(conn: Any) -> int:
-    reserved_bytes = case(
-        (
-            global_downloads.c.status.in_(("failed", "cancelled"))
-            & global_downloads.c.aria2_gid.is_not(None),
-            global_downloads.c.total_bytes,
-        ),
-        else_=global_downloads.c.disk_reserved_bytes,
-    )
+    """Future disk write commitment for admission / visible headroom.
+
+    Only tasks that are actively claiming future write capacity count.
+    Waiting/paused do not lock full claimed size; terminal states never count.
+    Bytes already on disk are reflected by ``df.free``, not this commitment.
+    """
     remaining = case(
         (
-            reserved_bytes > global_downloads.c.completed_bytes,
-            reserved_bytes - global_downloads.c.completed_bytes,
+            global_downloads.c.status.in_(("active", "queued")),
+            case(
+                (
+                    global_downloads.c.disk_reserved_bytes
+                    > global_downloads.c.completed_bytes,
+                    global_downloads.c.disk_reserved_bytes
+                    - global_downloads.c.completed_bytes,
+                ),
+                else_=0,
+            ),
         ),
         else_=0,
     )
     downloads_reserved = (
         await conn.execute(
             select(func.coalesce(func.sum(remaining), 0)).where(
-                or_(
-                    global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
-                    global_downloads.c.status.in_(("failed", "cancelled"))
-                    & global_downloads.c.aria2_gid.is_not(None),
-                )
+                global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES)
             )
         )
     ).scalar_one()
@@ -1388,11 +1390,16 @@ async def guarded_update_download_and_active_user_tasks(
             user_tasks.c.global_download_id == download_id,
             user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
         ]
+        user_values: dict[str, Any] = {"updated_at_ms": timestamp}
         if user_status is not None:
+            user_values["status"] = user_status
+        if "error_message" in global_values:
+            user_values["error_message"] = global_values.get("error_message")
+        if len(user_values) > 1:
             await conn.execute(
                 update(user_tasks)
                 .where(*base_condition)
-                .values(status=user_status, updated_at_ms=timestamp)
+                .values(**user_values)
             )
         if display_name:
             name_update = update(user_tasks).where(*base_condition)
@@ -1924,18 +1931,21 @@ async def replace_terminal_download_gid(
 async def clear_terminal_download_gid(
     download_id: int,
     *,
-    expected_gid: str,
+    expected_gid: str | None = None,
 ) -> bool:
     async with transaction() as conn:
+        conditions = [
+            global_downloads.c.id == download_id,
+            global_downloads.c.status.in_(("failed", "cancelled")),
+            global_downloads.c.completed_file_id.is_(None),
+            global_downloads.c.aria2_gid.is_not(None),
+        ]
+        if expected_gid is not None:
+            conditions.append(global_downloads.c.aria2_gid == expected_gid)
         row = (
             await conn.execute(
                 update(global_downloads)
-                .where(
-                    global_downloads.c.id == download_id,
-                    global_downloads.c.aria2_gid == expected_gid,
-                    global_downloads.c.status.in_(("failed", "cancelled")),
-                    global_downloads.c.completed_file_id.is_(None),
-                )
+                .where(*conditions)
                 .values(
                     aria2_gid=None,
                     disk_reserved_bytes=0,
@@ -1945,6 +1955,20 @@ async def clear_terminal_download_gid(
             )
         ).first()
     return row is not None
+
+
+async def list_terminal_downloads_with_residual_gid() -> list[dict[str, Any]]:
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                select(global_downloads).where(
+                    global_downloads.c.status.in_(("failed", "cancelled")),
+                    global_downloads.c.aria2_gid.is_not(None),
+                    global_downloads.c.completed_file_id.is_(None),
+                )
+            )
+        ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 async def prepare_download_retry(download_id: int) -> dict[str, Any] | None:

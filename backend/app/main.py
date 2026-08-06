@@ -113,6 +113,7 @@ from app.routers import (
     ws,
 )
 from app.services.repair import (
+    purge_terminal_residual_gids,
     rebuild_active_download_accounting,
     run_startup_repair,
 )
@@ -279,6 +280,14 @@ async def lifespan(app: FastAPI):
 
         await DeletionCleanupManager.recover_startup()
         await PackTaskManager.recover_startup()
+
+        residual = await purge_terminal_residual_gids(get_aria2_client())
+        logger.info(
+            "启动 residual 清理完成: found=%d purged=%d failed=%d",
+            residual["found"],
+            residual["purged"],
+            residual["failed"],
+        )
 
         accounting = await rebuild_active_download_accounting(get_aria2_client())
         logger.info(

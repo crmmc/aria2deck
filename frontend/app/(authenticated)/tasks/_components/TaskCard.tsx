@@ -132,9 +132,13 @@ export const TaskCard = memo(function TaskCard({
                 ? "下载中"
                 : task.status === "queued"
                   ? "排队中"
-                  : task.status === "error"
-                    ? "失败"
-                    : task.status}
+                  : task.status === "waiting"
+                    ? "等待中"
+                    : task.status === "paused"
+                      ? "已暂停"
+                      : task.status === "error"
+                        ? "失败"
+                        : task.status}
             </span>
             {task.error && (
               <span className="text-danger text-sm" title={task.error}>
@@ -169,12 +173,16 @@ export const TaskCard = memo(function TaskCard({
                 重试
               </button>
             )}
-            {(task.status === "active" || task.status === "queued") && (
+            {(task.status === "active" ||
+              task.status === "queued" ||
+              task.status === "waiting" ||
+              task.status === "paused") && (
               <button
                 type="button"
                 className={`button secondary danger btn-task${isOperating ? " opacity-60" : ""}`}
                 onClick={handleCancelClick}
                 disabled={isOperating}
+                title={task.status === "paused" ? "取消被暂停的任务" : "取消任务"}
               >
                 {isOperating ? "处理中..." : "取消"}
               </button>
