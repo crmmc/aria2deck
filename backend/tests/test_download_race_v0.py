@@ -12,6 +12,7 @@ from app.repositories.downloads import (
     clear_terminal_download_gid,
     DownloadAdmissionError,
     get_global_by_resource_key,
+    get_global_download_by_id,
     get_user_task,
 )
 from app.services import aria2_lifecycle_service
@@ -146,7 +147,7 @@ async def test_failed_submit_releases_user_reservation(temp_db: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_failure_cleanup_blocks_retry_until_cleanup_finishes(
+async def test_failure_cleanup_does_not_block_new_retry_attempt(
     temp_db: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -206,15 +207,16 @@ async def test_failure_cleanup_blocks_retry_until_cleanup_finishes(
         )
     )
     await asyncio.sleep(0.05)
-    assert not retry_task.done()
-    assert client.add_uri.await_count == 1
+    assert retry_task.done()
+    assert client.add_uri.await_count == 2
 
     release_cleanup.set()
     failed, retried = await asyncio.gather(failure_task, retry_task)
-    stored = await get_global_by_resource_key("http:failure-retry")
+    stored = await get_global_download_by_id(int(retried["global_download_id"]))
     assert failed is True
-    assert retried["id"] == task["id"]
+    assert retried["global_download_id"] != task["global_download_id"]
     assert stored is not None
+    assert stored["id"] != task["global_download_id"]
     assert stored["aria2_gid"] == "gid-failure-g2"
     assert stored["status"] == "active"
 
@@ -343,7 +345,7 @@ async def test_force_remove_failure_keeps_gid_and_blocks_retry(
 ) -> None:
     user = await create_user_v0(username="race_force_remove_failure", quota_bytes=1000)
     client = AsyncMock()
-    client.add_uri.return_value = "gid-force-remove-g1"
+    client.add_uri.side_effect = ["gid-force-remove-g1", "gid-force-remove-g2"]
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -373,18 +375,24 @@ async def test_force_remove_failure_keeps_gid_and_blocks_retry(
     assert failed["aria2_gid"] == "gid-force-remove-g1"
     assert failed["disk_reserved_bytes"] == 0
     assert usage["reserved_bytes"] == 0
-    with pytest.raises(DownloadAdmissionError, match="previous_cleanup_pending"):
-        await create_user_download(
-            user_id=user["id"],
-            quota_bytes=user["quota_bytes"],
-            uri="https://example.com/force-remove.bin",
-            resource_key="http:force-remove-failure",
-            resource_kind="http",
-            display_name="force-remove.bin",
-            total_bytes=100,
-            aria2_client=client,
-        )
-    assert client.add_uri.await_count == 1
+
+    retried = await create_user_download(
+        user_id=user["id"],
+        quota_bytes=user["quota_bytes"],
+        uri="https://example.com/force-remove.bin",
+        resource_key="http:force-remove-failure",
+        resource_kind="http",
+        display_name="force-remove.bin",
+        total_bytes=100,
+        aria2_client=client,
+    )
+    stored = await get_global_download_by_id(int(retried["global_download_id"]))
+    assert retried["global_download_id"] != task["global_download_id"]
+    assert stored is not None
+    assert stored["id"] != failed["id"]
+    assert stored["status"] == "active"
+    assert stored["aria2_gid"] == "gid-force-remove-g2"
+    assert client.add_uri.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -394,7 +402,7 @@ async def test_directory_cleanup_failure_keeps_gid_and_blocks_retry(
 ) -> None:
     user = await create_user_v0(username="race_directory_failure", quota_bytes=1000)
     client = AsyncMock()
-    client.add_uri.return_value = "gid-directory-g1"
+    client.add_uri.side_effect = ["gid-directory-g1", "gid-directory-g2"]
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -429,19 +437,23 @@ async def test_directory_cleanup_failure_keeps_gid_and_blocks_retry(
     assert failed["aria2_gid"] == "gid-directory-g1"
     assert failed["disk_reserved_bytes"] == 0
 
-    with pytest.raises(DownloadAdmissionError, match="previous_cleanup_pending"):
-        await create_user_download(
-            user_id=user["id"],
-            quota_bytes=user["quota_bytes"],
-            uri="https://example.com/directory.bin",
-            resource_key="http:directory-cleanup-failure",
-            resource_kind="http",
-            display_name="directory.bin",
-            total_bytes=100,
-            aria2_client=client,
-        )
-    assert cleanup_calls == 2
-    assert client.add_uri.await_count == 1
+    retried = await create_user_download(
+        user_id=user["id"],
+        quota_bytes=user["quota_bytes"],
+        uri="https://example.com/directory.bin",
+        resource_key="http:directory-cleanup-failure",
+        resource_kind="http",
+        display_name="directory.bin",
+        total_bytes=100,
+        aria2_client=client,
+    )
+    stored = await get_global_download_by_id(int(retried["global_download_id"]))
+    assert retried["global_download_id"] != task["global_download_id"]
+    assert stored is not None
+    assert stored["id"] != failed["id"]
+    assert stored["status"] == "active"
+    assert cleanup_calls >= 1
+    assert client.add_uri.await_count == 2
 
 
 @pytest.mark.asyncio

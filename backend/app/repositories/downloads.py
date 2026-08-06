@@ -285,6 +285,48 @@ async def get_global_by_resource_key(resource_key: str) -> dict[str, Any] | None
     return dict(row) if row else None
 
 
+async def find_live_global_download_by_resource_key(
+    resource_key: str,
+) -> dict[str, Any] | None:
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    select(global_downloads).where(
+                        global_downloads.c.resource_key == resource_key,
+                        global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+    return dict(row) if row else None
+
+
+async def find_latest_completed_global_download_by_resource_key(
+    resource_key: str,
+) -> dict[str, Any] | None:
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    select(global_downloads)
+                    .where(
+                        global_downloads.c.resource_key == resource_key,
+                        global_downloads.c.status == "completed",
+                        global_downloads.c.completed_file_id.is_not(None),
+                    )
+                    .order_by(global_downloads.c.id.desc())
+                    .limit(1)
+                )
+            )
+            .mappings()
+            .first()
+        )
+    return dict(row) if row else None
+
+
 async def get_global_download_by_id(download_id: int) -> dict[str, Any] | None:
     async with transaction() as conn:
         row = (
@@ -480,33 +522,27 @@ async def create_global_download(values: dict[str, Any]) -> dict[str, Any]:
         "updated_at_ms": timestamp,
         **values,
     }
-    async with transaction() as conn:
-        row = (
-            (
-                await conn.execute(
-                    insert(global_downloads)
-                    .values(**row_values)
-                    .returning(global_downloads)
+    try:
+        async with transaction() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        insert(global_downloads)
+                        .values(**row_values)
+                        .returning(global_downloads)
+                    )
                 )
+                .mappings()
+                .one()
             )
-            .mappings()
-            .one()
-        )
+    except IntegrityError as exc:
+        raise RepositoryConflictError(str(exc)) from exc
     return dict(row)
 
 
-async def get_or_create_global_download(values: dict[str, Any]) -> dict[str, Any]:
-    existing = await get_global_by_resource_key(str(values["resource_key"]))
-    if existing:
-        return existing
-
-    try:
-        return await create_global_download(values)
-    except IntegrityError:
-        fallback = await get_global_by_resource_key(str(values["resource_key"]))
-        if fallback:
-            return fallback
-        raise
+async def create_global_download_attempt(values: dict[str, Any]) -> dict[str, Any]:
+    """Create a fresh download attempt; live resource uniqueness is DB-enforced."""
+    return await create_global_download(values)
 
 
 async def get_user_task(user_id: int, global_download_id: int) -> dict[str, Any] | None:
@@ -2101,31 +2137,6 @@ async def restore_incomplete_completed_download(
             )
         )
     return dict(row)
-
-
-async def prepare_download_retry(download_id: int) -> dict[str, Any] | None:
-    async with transaction() as conn:
-        row = (
-            await conn.execute(
-                update(global_downloads)
-                .where(
-                    global_downloads.c.id == download_id,
-                    global_downloads.c.aria2_gid.is_(None),
-                    global_downloads.c.status.in_(("failed", "cancelled")),
-                    global_downloads.c.completed_file_id.is_(None),
-                )
-                .values(
-                    status="queued",
-                    disk_reserved_bytes=0,
-                    error_code=None,
-                    error_message=None,
-                    completed_at_ms=None,
-                    updated_at_ms=now_ms(),
-                )
-                .returning(global_downloads)
-            )
-        ).mappings().first()
-    return dict(row) if row else None
 
 
 async def mark_global_download_failed(

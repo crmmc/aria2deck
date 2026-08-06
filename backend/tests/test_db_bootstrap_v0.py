@@ -221,7 +221,7 @@ async def test_bootstrap_creates_latest_schema(isolated_db: Path):
             await conn.execute(text("SELECT id FROM app_settings"))
         ).scalar_one()
 
-    assert version == SCHEMA_VERSION == 7
+    assert version == SCHEMA_VERSION == 8
     assert users_exists == "users"
     assert settings_id == 1
 
@@ -326,8 +326,8 @@ async def test_v2_to_latest_migration_is_idempotent(isolated_db: Path):
                 "id INTEGER PRIMARY KEY, status TEXT NOT NULL)"
             )
         )
-        assert await run_migrations(conn, 2) == 7
-        assert await run_migrations(conn, 2) == 7
+        assert await run_migrations(conn, 2) == 8
+        assert await run_migrations(conn, 2) == 8
 
     async with get_engine().connect() as conn:
         columns = {
@@ -379,8 +379,8 @@ async def test_v3_to_v4_migration_is_idempotent(isolated_db: Path):
                 ),
                 {"id": task_id, "sources": sources},
             )
-        assert await run_migrations(conn, 3) == 7
-        assert await run_migrations(conn, 3) == 7
+        assert await run_migrations(conn, 3) == 8
+        assert await run_migrations(conn, 3) == 8
 
     async with get_engine().connect() as conn:
         columns = {
@@ -452,7 +452,7 @@ async def test_v4_migration_backfills_confirmed_and_unknown_source_identities(
             "(2,1,'[2]',10,0,99,1,0,'completed',NULL,200,200,200),"
             "(3,1,'[3]',10,0,98,1,1,'completed',NULL,200,200,200)"
         ))
-        assert await run_migrations(conn, 3) == 7
+        assert await run_migrations(conn, 3) == 8
 
     async with get_engine().connect() as conn:
         sources = (
@@ -604,7 +604,7 @@ async def test_bootstrap_migrates_existing_v0_schema_to_latest_version(
             ).all()
         }
 
-    assert version == SCHEMA_VERSION == 7
+    assert version == SCHEMA_VERSION == 8
     assert timeout_seconds == DEFAULT_ARIA2_BT_STOP_TIMEOUT_SECONDS
     assert {
         "bt_info_hash",

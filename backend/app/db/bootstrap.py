@@ -21,6 +21,7 @@ from app.db.migrations import (
     ensure_v5_deletion_schema,
     ensure_v6_credentials_schema,
     ensure_v7_content_identity_schema,
+    ensure_v8_retry_attempt_schema,
     run_migrations,
 )
 from app.db.schema import SCHEMA_VERSION, app_settings, metadata, schema_meta
@@ -154,6 +155,14 @@ async def validate_current_schema_shape() -> None:
         )
 
     required_fragments = {
+        "ix_global_downloads_resource_key": (
+            "onglobal_downloads(resource_key)",
+        ),
+        "uq_global_downloads_live_resource": (
+            "createuniqueindex",
+            "onglobal_downloads(resource_key)",
+            "wherestatusin('queued','active','waiting','paused')",
+        ),
         "uq_stored_files_content_identity": (
             "createuniqueindex",
             "onstored_files(content_hash_version,content_object_kind,content_digest)",
@@ -230,6 +239,7 @@ async def _migrate_existing_database(version: int) -> None:
                 await ensure_v5_deletion_schema(conn)
                 await ensure_v6_credentials_schema(conn)
                 await ensure_v7_content_identity_schema(conn)
+                await ensure_v8_retry_attempt_schema(conn)
         finally:
             await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
             await conn.commit()
@@ -262,6 +272,7 @@ async def bootstrap_database() -> None:
         await ensure_v5_deletion_schema(conn)
         await ensure_v6_credentials_schema(conn)
         await ensure_v7_content_identity_schema(conn)
+        await ensure_v8_retry_attempt_schema(conn)
         await conn.execute(
             insert(schema_meta).values(
                 id=1, version=SCHEMA_VERSION, created_at_ms=timestamp_ms

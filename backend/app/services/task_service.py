@@ -22,7 +22,6 @@ from app.domain.errors import (
 )
 from app.repositories.downloads import (
     clear_terminal_user_tasks,
-    get_global_by_resource_key,
     get_global_download_by_id,
     list_user_tasks,
     list_user_tasks_page,
@@ -427,7 +426,7 @@ async def create_torrent_task(
         logger.warning("添加种子任务失败 user_id=%s error=%s", user_id, exc)
         raise BadGatewayError("添加下载任务失败") from exc
 
-    global_download = await get_global_by_resource_key(resource_key)
+    global_download = await get_global_download_by_id(int(task_row["global_download_id"]))
     return create_task_response(
         task_row=task_row,
         global_download=global_download,

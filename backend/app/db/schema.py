@@ -21,7 +21,7 @@ from app.domain.status import (
     USER_TASK_STATUSES,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
 PACK_SOURCE_CLEANUP_STATES = (
     "retained",
@@ -205,7 +205,7 @@ global_downloads = Table(
     "global_downloads",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("resource_key", String(128), nullable=False, unique=True),
+    Column("resource_key", String(128), nullable=False),
     Column("resource_kind", String(16), nullable=False),
     Column("source_uri", Text, nullable=False),
     Column("bt_info_hash", String(40)),
@@ -242,6 +242,13 @@ global_downloads = Table(
         "ix_global_downloads_status_disk_reserved",
         "status",
         "disk_reserved_bytes",
+    ),
+    Index("ix_global_downloads_resource_key", "resource_key"),
+    Index(
+        "uq_global_downloads_live_resource",
+        "resource_key",
+        unique=True,
+        sqlite_where=text("status IN ('queued', 'active', 'waiting', 'paused')"),
     ),
     Index("ix_global_downloads_completed_file_id", "completed_file_id"),
 )

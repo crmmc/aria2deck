@@ -13,7 +13,6 @@ from app.core.config import get_internal_base_url, settings
 from app.http.safe_client import UnsafeTargetError, normalize_public_http_url
 from app.domain.task_policy import (
     CANCELABLE_TASK_STATUSES,
-    RETRYABLE_DOWNLOAD_STATUSES,
     RETRYABLE_TASK_STATUSES,
 )
 from app.repositories.downloads import (
@@ -23,18 +22,21 @@ from app.repositories.downloads import (
     cancel_active_user_task,
     complete_active_user_tasks_for_stored_file,
     count_active_user_tasks,
+    create_global_download_attempt,
     DiskAvailable,
     DownloadAdmissionError,
     claim_submitted_gid_for_failure,
     fail_user_task_submission,
+    find_latest_completed_global_download_by_resource_key,
+    find_live_global_download_by_resource_key,
+    get_global_download_by_id,
+    get_global_by_resource_key,
     get_user_task_by_id,
     get_global_download_for_generation,
     get_global_download_status_snapshot,
-    get_or_create_global_download,
     get_user_task,
     guarded_update_download_and_active_user_tasks,
     now_ms,
-    prepare_download_retry,
     reconcile_download_size,
 )
 from app.repositories.errors import RepositoryConflictError
@@ -650,6 +652,152 @@ async def create_user_torrent_download(
     )
 
 
+async def _resolve_existing_download(
+    *,
+    user_id: int,
+    quota_bytes: int,
+    resource_key: str,
+    source_uri: str,
+    display_name: str | None,
+    requested_total_bytes: int,
+) -> dict[str, Any] | None:
+    """Attach to live/completed downloads when possible; otherwise create nothing."""
+    completed_download = await find_latest_completed_global_download_by_resource_key(
+        resource_key
+    )
+    if completed_download is not None:
+        completed_file_id = completed_download.get("completed_file_id")
+        existing_task = await get_user_task(user_id, int(completed_download["id"]))
+        if existing_task is not None:
+            raise DuplicateTaskError(DUPLICATE_TASK_MESSAGE)
+        if completed_file_id is not None:
+            return await attach_completed_file_to_user(
+                user_id=user_id,
+                quota_bytes=quota_bytes,
+                global_download_id=int(completed_download["id"]),
+                stored_file_id=int(completed_file_id),
+                size_bytes=int(
+                    completed_download.get("completed_bytes") or requested_total_bytes
+                ),
+                display_name=str(
+                    display_name or completed_download.get("display_name") or source_uri
+                ),
+                finished_at_ms=int(completed_download.get("completed_at_ms") or now_ms()),
+            )
+        return None
+    legacy_completed = await get_global_by_resource_key(resource_key)
+    if legacy_completed is not None and legacy_completed["status"] == "completed":
+        existing_task = await get_user_task(user_id, int(legacy_completed["id"]))
+        if existing_task is not None:
+            raise DuplicateTaskError(DUPLICATE_TASK_MESSAGE)
+    return None
+
+
+async def _create_attempt_locked(
+    *,
+    resource_key: str,
+    global_values: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    existing = await find_live_global_download_by_resource_key(resource_key)
+    if existing is not None:
+        return existing, False
+    try:
+        return await create_global_download_attempt(global_values), True
+    except RepositoryConflictError:
+        existing = await find_live_global_download_by_resource_key(resource_key)
+        if existing is None:
+            raise DownloadAdmissionError("stale")
+        return existing, False
+
+
+async def _submit_attempt_locked(
+    *,
+    user_id: int,
+    global_download: dict[str, Any],
+    created_attempt: bool,
+    requested_total_bytes: int,
+    requested_size_known: bool,
+    size_limit_bytes: int,
+    disk_available_bytes: DiskAvailable,
+    display_name: str | None,
+    options: Mapping[str, Any] | None,
+    server_options: Mapping[str, Any] | None,
+    aria2_client: Aria2Gateway,
+    gateway_source_uris: list[str] | None,
+    submit_download: Callable[
+        [list[str] | None, Mapping[str, Any] | None], Awaitable[str]
+    ],
+) -> dict[str, Any]:
+    existing_task = await get_user_task(user_id, int(global_download["id"]))
+    _raise_if_duplicate_user_task(existing_task)
+
+    effective_total_bytes = max(
+        requested_total_bytes,
+        max(0, int(global_download.get("total_bytes") or 0)),
+    )
+    try:
+        task = await admit_user_task(
+            user_id=user_id,
+            global_download_id=int(global_download["id"]),
+            expected_gid=(
+                str(global_download["aria2_gid"])
+                if global_download.get("aria2_gid")
+                else None
+            ),
+            display_name=display_name,
+            total_bytes=effective_total_bytes,
+            size_known=bool(global_download.get("size_known")) or requested_size_known,
+            size_limit_bytes=size_limit_bytes,
+            disk_available_bytes=disk_available_bytes,
+        )
+    except RepositoryConflictError:
+        existing_task = await get_user_task(user_id, int(global_download["id"]))
+        _raise_if_duplicate_user_task(existing_task)
+        raise
+
+    try:
+        refreshed_global = await _ensure_download_submitted(
+            global_download=global_download,
+            task_id=int(task["id"]),
+            size_limit_bytes=size_limit_bytes,
+            disk_available_bytes=disk_available_bytes,
+            options=options,
+            server_options=server_options,
+            aria2_client=aria2_client,
+            gateway_source_uris=gateway_source_uris,
+            submit_download=submit_download,
+        )
+    except Exception:
+        if created_attempt:
+            current = await get_global_download_by_id(int(global_download["id"]))
+            if current is not None and current.get("status") in {
+                "queued",
+                "active",
+                "waiting",
+                "paused",
+            }:
+                current_gid = current.get("aria2_gid")
+                from app.services.aria2_lifecycle_service import fail_download_and_reclaim
+
+                await fail_download_and_reclaim(
+                    client=aria2_client,
+                    download_id=int(global_download["id"]),
+                    message=DOWNLOAD_SUBMISSION_FAILED_MESSAGE,
+                    error_code="submit_failed",
+                    expected_gid=str(current_gid) if current_gid else None,
+                    writer_gid=str(current_gid) if current_gid else None,
+                    acquire_completion_lock=False,
+                    acquire_lifecycle_lock=False,
+                    log_prefix="[Submit]",
+                )
+        raise
+
+    refreshed = await get_user_task(user_id, int(refreshed_global["id"]))
+    if refreshed is None:
+        raise LookupError("user task not found")
+    return refreshed
+
+
 async def _create_user_download_with_submit(
     *,
     user_id: int,
@@ -691,90 +839,39 @@ async def _create_user_download_with_submit(
         "size_limit_bytes": size_limit,
         "disk_reserved_bytes": 0,
     }
-    global_download = await get_or_create_global_download(global_values)
-    lifecycle_lock = await get_download_lifecycle_lock(global_download["id"])
+    attached = await _resolve_existing_download(
+        user_id=user_id,
+        quota_bytes=quota_bytes,
+        resource_key=resource_key,
+        source_uri=source_uri,
+        display_name=display_name,
+        requested_total_bytes=requested_total_bytes,
+    )
+    if attached is not None:
+        return attached
+
+    lock_key_id = hash(resource_key) & 0x7FFFFFFF
+    lifecycle_lock = await get_download_lifecycle_lock(lock_key_id)
     async with lifecycle_lock:
-        global_download = await get_or_create_global_download(global_values)
-        if global_download["status"] in RETRYABLE_DOWNLOAD_STATUSES:
-            residual_gid = str(global_download.get("aria2_gid") or "")
-            if residual_gid:
-                cleanup = await cleanup_terminal_download_generation(
-                    client=aria2_client,
-                    task_id=int(global_download["id"]),
-                    gid=residual_gid,
-                    owner_id=user_id,
-                    log_prefix="[Retry]",
-                    skip_status_check=True,
-                )
-                if not cleanup.safe_to_reuse:
-                    raise DownloadAdmissionError("previous_cleanup_pending")
-            updated_global = await prepare_download_retry(
-                int(global_download["id"])
-            )
-            if updated_global is None:
-                raise DownloadAdmissionError("stale")
-            global_download = updated_global
-
-        existing_task = await get_user_task(user_id, global_download["id"])
-        _raise_if_duplicate_user_task(existing_task)
-
-        effective_total_bytes = max(
-            requested_total_bytes,
-            max(0, int(global_download.get("total_bytes") or 0)),
+        global_download, created_attempt = await _create_attempt_locked(
+            resource_key=resource_key,
+            global_values=global_values,
         )
-        completed_file_id = global_download.get("completed_file_id")
-        if global_download["status"] == "completed" and completed_file_id is not None:
-            return await attach_completed_file_to_user(
-                user_id=user_id,
-                quota_bytes=quota_bytes,
-                global_download_id=int(global_download["id"]),
-                stored_file_id=int(completed_file_id),
-                size_bytes=int(
-                    global_download["completed_bytes"] or effective_total_bytes
-                ),
-                display_name=str(
-                    display_name or global_download.get("display_name") or source_uri
-                ),
-                finished_at_ms=int(global_download["completed_at_ms"] or now_ms()),
-            )
-
-        try:
-            task = await admit_user_task(
-                user_id=user_id,
-                global_download_id=int(global_download["id"]),
-                expected_gid=(
-                    str(global_download["aria2_gid"])
-                    if global_download.get("aria2_gid")
-                    else None
-                ),
-                display_name=display_name,
-                total_bytes=effective_total_bytes,
-                size_known=bool(global_download.get("size_known"))
-                or requested_size_known,
-                size_limit_bytes=size_limit,
-                disk_available_bytes=disk_available,
-            )
-        except RepositoryConflictError:
-            existing_task = await get_user_task(user_id, global_download["id"])
-            _raise_if_duplicate_user_task(existing_task)
-            raise
-
-        global_download = await _ensure_download_submitted(
+        return await _submit_attempt_locked(
+            user_id=user_id,
             global_download=global_download,
-            task_id=int(task["id"]),
+            created_attempt=created_attempt,
+            requested_total_bytes=requested_total_bytes,
+            requested_size_known=requested_size_known,
             size_limit_bytes=size_limit,
             disk_available_bytes=disk_available,
+            display_name=display_name,
             options=options,
             server_options=server_options,
             aria2_client=aria2_client,
             gateway_source_uris=gateway_source_uris,
             submit_download=submit_download,
         )
-
-        refreshed = await get_user_task(user_id, int(global_download["id"]))
-        if refreshed is None:
-            raise LookupError("user task not found")
-        return refreshed
 
 
 async def _admit_paused_unknown_download(
@@ -845,15 +942,9 @@ async def _ensure_download_submitted(
 
     lock = await _get_download_lock(global_download["id"])
     async with lock:
-        current = await get_or_create_global_download(
-            {
-                "resource_key": global_download["resource_key"],
-                "resource_kind": global_download["resource_kind"],
-                "source_uri": global_download["source_uri"],
-                "display_name": global_download["display_name"],
-                "total_bytes": global_download["total_bytes"],
-            }
-        )
+        current = await get_global_download_by_id(int(global_download["id"]))
+        if current is None:
+            raise LookupError("global download not found")
         if current.get("aria2_gid") or current["status"] != "queued":
             return current
 

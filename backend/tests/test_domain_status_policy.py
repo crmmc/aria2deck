@@ -10,7 +10,7 @@ from app.domain.status import (
 )
 from app.domain.task_policy import (
     CANCELABLE_TASK_STATUSES,
-    RETRYABLE_DOWNLOAD_STATUSES,
+    RETRYABLE_TASK_STATUSES,
     InvalidTaskStatusFilter,
     aria2_status,
     effective_status,
@@ -26,7 +26,7 @@ def test_status_sets_capture_current_download_language() -> None:
     assert ACTIVE_LIKE_DOWNLOAD_STATUSES == ("queued", "active", "waiting", "paused")
     assert TERMINAL_DOWNLOAD_STATUSES == ("completed", "failed", "cancelled")
     assert ERROR_DOWNLOAD_STATUSES == ("failed", "cancelled")
-    assert RETRYABLE_DOWNLOAD_STATUSES == frozenset({"failed", "cancelled"})
+    assert RETRYABLE_TASK_STATUSES == frozenset({"failed", "cancelled"})
     assert CANCELABLE_TASK_STATUSES == frozenset(
         {"queued", "active", "waiting", "paused"}
     )

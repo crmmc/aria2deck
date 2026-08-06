@@ -183,6 +183,58 @@ async def _rebuild_schema_meta(conn: AsyncConnection, version: int) -> None:
     await conn.execute(text("DROP TABLE schema_meta_old"))
 
 
+async def ensure_v8_retry_attempt_schema(conn: AsyncConnection) -> None:
+    """Drop the table-wide resource_key unique index and keep live attempts unique."""
+    if "global_downloads" not in await _table_names(conn):
+        return
+    if "resource_key" not in await _column_names(conn, "global_downloads"):
+        return
+    rows = (
+        await conn.execute(text("PRAGMA index_list('global_downloads')"))
+    ).all()
+    for row in rows:
+        index_name = str(row[1])
+        origin = str(row[3] or "")
+        columns = (
+            await conn.execute(text(f"PRAGMA index_info('{index_name}')"))
+        ).all()
+        column_names = {str(col[2]) for col in columns}
+        if column_names != {"resource_key"}:
+            continue
+        if origin == "pk":
+            continue
+        sql_row = (
+            await conn.execute(
+                text(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = :name"
+                ),
+                {"name": index_name},
+            )
+        ).first()
+        definition = str(sql_row[0] or "").lower() if sql_row else ""
+        if "where" in definition and "status" in definition:
+            continue
+        await conn.execute(text(f'DROP INDEX IF EXISTS "{index_name}"'))
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_global_downloads_resource_key "
+            "ON global_downloads (resource_key)"
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_global_downloads_live_resource "
+            "ON global_downloads (resource_key) "
+            "WHERE status IN ('queued', 'active', 'waiting', 'paused')"
+        )
+    )
+
+
+async def migrate_v8(conn: AsyncConnection) -> None:
+    await ensure_v8_retry_attempt_schema(conn)
+    await _rebuild_schema_meta(conn, 8)
+
+
 async def migrate_v1(conn: AsyncConnection) -> None:
     await _add_missing_columns(conn, "app_settings", V1_APP_SETTINGS_ADDED_COLUMNS)
     await _rebuild_schema_meta(conn, 1)
@@ -771,6 +823,7 @@ MIGRATIONS: dict[int, Migration] = {
     5: migrate_v5,
     6: migrate_v6,
     7: migrate_v7,
+    8: migrate_v8,
 }
 
 

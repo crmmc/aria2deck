@@ -533,9 +533,10 @@ async def test_cancelled_user_task_can_be_recreated(temp_db: str) -> None:
         aria2_client=client,
     )
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
-    stored_global = await get_global_by_resource_key("http:retry-cancelled")
+    stored_global = await get_global_download_by_id(int(task["global_download_id"]))
 
-    assert task["id"] == cancelled_task["id"]
+    assert task["id"] != cancelled_task["id"]
+    assert task["global_download_id"] != global_download["id"]
     assert task["status"] == "active"
     assert task["reserved_bytes"] == 200
     assert usage["reserved_bytes"] == 200
