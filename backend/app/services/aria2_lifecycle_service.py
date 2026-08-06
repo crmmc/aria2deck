@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +14,10 @@ import aiohttp
 from app.aria2.protocol import Aria2Gateway
 from app.core.config import get_internal_base_url
 from app.core.security import sanitize_string
-from app.domain.status import ACTIVE_USER_TASK_STATUSES
+from app.domain.status import (
+    ACTIVE_USER_TASK_STATUSES,
+    FAILABLE_GLOBAL_DOWNLOAD_STATUSES,
+)
 from app.repositories.downloads import (
     clear_terminal_download_gid,
     get_global_download_by_gid,
@@ -46,7 +49,7 @@ from app.services.failed_task_cleanup import (
 )
 from app.services.settings_service import get_max_task_size
 from app.services.aria2_error_messages import prefer_aria2_error_message
-from app.services.storage import get_downloading_dir
+from app.services.storage import cleanup_task_download_dir, get_downloading_dir
 from app.services.task_broadcast import broadcast_task_update_to_subscribers
 from app.services.task_projection import (
     METADATA_NAME_PREFIX,
@@ -294,36 +297,124 @@ async def _cleanup_handoff_rejection_safely(**kwargs: Any) -> CleanupResult:
         raise
 
 
-async def _fail_v0_download_and_cleanup_operation(
+_WRITER_GID_UNSET: object = object()
+
+
+async def _fail_download_and_reclaim_operation(
     *,
     client: Aria2Gateway,
     download_id: int,
-    gid: str,
     message: str,
     error_code: str | None,
+    expected_gid: str | None,
+    writer_gid: str | None,
+    expected_statuses: Iterable[str],
+    clear_gid: bool,
+    acquire_lifecycle_lock: bool,
     log_prefix: str,
 ) -> bool:
-    lifecycle_lock = await get_download_lifecycle_lock(download_id)
-    async with lifecycle_lock:
+    async def _mark_and_cleanup() -> bool:
         owner_id = await get_representative_owner_id(download_id)
         failed_download = await mark_global_download_failed(
             download_id,
-            expected_gid=gid,
+            expected_gid=expected_gid,
             message=message,
             error_code=error_code,
-            clear_gid=False,
+            clear_gid=clear_gid,
+            expected_statuses=expected_statuses,
         )
         if failed_download is None:
             return False
 
-        cleanup = await _cleanup_terminal_generation_safely(
-            client=client,
-            download_id=download_id,
-            gid=gid,
-            owner_id=owner_id,
-            log_prefix=log_prefix,
-        )
+        if (
+            expected_gid is not None
+            and writer_gid is not None
+            and expected_gid != writer_gid
+        ):
+            cleanup = await _cleanup_handoff_rejection_operation(
+                client=client,
+                download_id=download_id,
+                expected_gid=expected_gid,
+                writer_gid=writer_gid,
+                log_prefix=log_prefix,
+            )
+        elif writer_gid is not None:
+            cleanup = await cleanup_terminal_download_generation(
+                client=client,
+                task_id=download_id,
+                gid=writer_gid,
+                owner_id=owner_id,
+                log_prefix=log_prefix,
+                skip_status_check=True,
+            )
+        else:
+            cleanup = await cleanup_failed_task_artifacts(
+                client=client,
+                task_id=download_id,
+                gid=None,
+                owner_id=owner_id,
+                log_prefix=log_prefix,
+                skip_status_check=True,
+            )
         return cleanup.safe_to_reuse or failed_download is not None
+
+    if not acquire_lifecycle_lock:
+        return await _mark_and_cleanup()
+
+    lifecycle_lock = await get_download_lifecycle_lock(download_id)
+    async with lifecycle_lock:
+        return await _mark_and_cleanup()
+
+
+async def fail_download_and_reclaim(
+    *,
+    client: Aria2Gateway,
+    download_id: int,
+    message: str,
+    error_code: str | None = None,
+    expected_gid: str | None = None,
+    writer_gid: str | None | object = _WRITER_GID_UNSET,
+    expected_statuses: Iterable[str] = FAILABLE_GLOBAL_DOWNLOAD_STATUSES,
+    clear_gid: bool = False,
+    acquire_completion_lock: bool = True,
+    acquire_lifecycle_lock: bool = True,
+    log_prefix: str = "[Fail]",
+) -> bool:
+    """Mark failed and best-effort reclaim aria2 writer + downloading/<id>.
+
+    Does not broadcast. Dual-gid handoff uses writer_gid != expected_gid.
+    """
+    if writer_gid is _WRITER_GID_UNSET:
+        effective_writer: str | None = expected_gid
+    else:
+        effective_writer = writer_gid  # type: ignore[assignment]
+
+    async def _run_shielded() -> bool:
+        operation = asyncio.create_task(
+            _fail_download_and_reclaim_operation(
+                client=client,
+                download_id=download_id,
+                message=message,
+                error_code=error_code,
+                expected_gid=expected_gid,
+                writer_gid=effective_writer,
+                expected_statuses=expected_statuses,
+                clear_gid=clear_gid,
+                acquire_lifecycle_lock=acquire_lifecycle_lock,
+                log_prefix=log_prefix,
+            )
+        )
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            await asyncio.shield(operation)
+            raise
+
+    if acquire_completion_lock:
+        completion_lock = await get_task_complete_lock(download_id)
+        async with completion_lock:
+            return await _run_shielded()
+    return await _run_shielded()
 
 
 async def _fail_v0_download_and_cleanup_locked(
@@ -335,21 +426,17 @@ async def _fail_v0_download_and_cleanup_locked(
     error_code: str | None,
     log_prefix: str,
 ) -> bool:
-    operation = asyncio.create_task(
-        _fail_v0_download_and_cleanup_operation(
-            client=client,
-            download_id=download_id,
-            gid=gid,
-            message=message,
-            error_code=error_code,
-            log_prefix=log_prefix,
-        )
+    return await fail_download_and_reclaim(
+        client=client,
+        download_id=download_id,
+        message=message,
+        error_code=error_code,
+        expected_gid=gid,
+        writer_gid=gid,
+        acquire_completion_lock=False,
+        acquire_lifecycle_lock=True,
+        log_prefix=log_prefix,
     )
-    try:
-        return await asyncio.shield(operation)
-    except asyncio.CancelledError:
-        await asyncio.shield(operation)
-        raise
 
 
 async def fail_v0_download_and_cleanup(
@@ -361,16 +448,17 @@ async def fail_v0_download_and_cleanup(
     error_code: str | None,
     log_prefix: str,
 ) -> bool:
-    completion_lock = await get_task_complete_lock(download_id)
-    async with completion_lock:
-        return await _fail_v0_download_and_cleanup_locked(
-            client=client,
-            download_id=download_id,
-            gid=gid,
-            message=message,
-            error_code=error_code,
-            log_prefix=log_prefix,
-        )
+    return await fail_download_and_reclaim(
+        client=client,
+        download_id=download_id,
+        message=message,
+        error_code=error_code,
+        expected_gid=gid,
+        writer_gid=gid,
+        acquire_completion_lock=True,
+        acquire_lifecycle_lock=True,
+        log_prefix=log_prefix,
+    )
 
 
 def _has_only_internal_gateway_uris(
@@ -454,23 +542,19 @@ async def reconcile_legacy_http_downloads_v0(client: Aria2Gateway) -> int:
                 download_id=download_id,
                 gid=gid,
             )
-        failed_download = await mark_global_download_failed(
-            download_id,
-            expected_gid=gid or None,
+        changed = await fail_download_and_reclaim(
+            client=client,
+            download_id=download_id,
             message="HTTP 下载未通过内部网关校验，已停止",
             error_code="unsafe_http_download_uri",
+            expected_gid=gid or None,
+            writer_gid=None,
             clear_gid=bool(gid),
-        )
-        if failed_download is None:
-            continue
-        await cleanup_failed_download_artifacts(
-            client=client,
-            task_id=download_id,
-            gid=None,
-            owner_id=None,
+            acquire_completion_lock=False,
             log_prefix="[Startup]",
-            validate_status=False,
         )
+        if not changed:
+            continue
         failed_count += 1
     return failed_count
 
@@ -713,6 +797,7 @@ async def coordinate_reported_size(
     status: Mapping[str, Any],
     require_trusted_total: bool = False,
     resume_after_admission: bool = True,
+    acquire_lifecycle_lock: bool = True,
 ) -> dict[str, Any]:
     current = await get_global_download_for_generation(
         int(download["id"]), expected_gid
@@ -737,11 +822,16 @@ async def coordinate_reported_size(
             await client.pause(control_gid)
             paused_by_us = True
         except Exception:
-            await mark_global_download_failed(
-                int(download["id"]),
-                expected_gid=expected_gid,
+            await fail_download_and_reclaim(
+                client=client,
+                download_id=int(download["id"]),
                 message="任务大小增长时无法安全暂停",
                 error_code="growth_pause_failed",
+                expected_gid=expected_gid,
+                writer_gid=control_gid,
+                acquire_completion_lock=False,
+                acquire_lifecycle_lock=acquire_lifecycle_lock,
+                log_prefix="[Resize]",
             )
             return {"outcome": "pause_failed", "paused_by_us": False}
 
@@ -758,20 +848,17 @@ async def coordinate_reported_size(
         try:
             await client.unpause(control_gid)
         except Exception:
-            failed = await mark_global_download_failed(
-                int(download["id"]),
-                expected_gid=expected_gid,
+            await fail_download_and_reclaim(
+                client=client,
+                download_id=int(download["id"]),
                 message="任务大小调整后恢复下载失败",
                 error_code="growth_unpause_failed",
+                expected_gid=expected_gid,
+                writer_gid=control_gid,
+                acquire_completion_lock=False,
+                acquire_lifecycle_lock=acquire_lifecycle_lock,
+                log_prefix="[Resize]",
             )
-            if failed is not None:
-                await _cleanup_terminal_generation_safely(
-                    client=client,
-                    download_id=int(download["id"]),
-                    gid=expected_gid,
-                    owner_id=None,
-                    log_prefix="[Resize]",
-                )
             result["outcome"] = "unpause_failed"
     return result
 
@@ -850,17 +937,15 @@ async def switch_to_followed_download(
     real_status = _real_status
 
     if real_status is None:
-        await mark_global_download_failed(
-            download_id,
-            expected_gid=metadata_gid,
-            message="磁力任务元数据完成后无法获取文件大小",
-            error_code="unknown_followed_size",
-        )
-        await _cleanup_handoff_rejection_safely(
+        await fail_download_and_reclaim(
             client=client,
             download_id=download_id,
+            message="磁力任务元数据完成后无法获取文件大小",
+            error_code="unknown_followed_size",
             expected_gid=metadata_gid,
             writer_gid=followed_gid,
+            acquire_completion_lock=False,
+            acquire_lifecycle_lock=False,
             log_prefix=log_prefix,
         )
         return True
@@ -870,17 +955,15 @@ async def switch_to_followed_download(
             real_status.get("files"), get_downloading_dir() / str(download_id)
         )
         if layout_error:
-            await mark_global_download_failed(
-                download_id,
-                expected_gid=metadata_gid,
-                message=layout_error,
-                error_code="invalid_followed_layout",
-            )
-            await _cleanup_handoff_rejection_safely(
+            await fail_download_and_reclaim(
                 client=client,
                 download_id=download_id,
+                message=layout_error,
+                error_code="invalid_followed_layout",
                 expected_gid=metadata_gid,
                 writer_gid=followed_gid,
+                acquire_completion_lock=False,
+                acquire_lifecycle_lock=False,
                 log_prefix=log_prefix,
             )
             return True
@@ -893,24 +976,32 @@ async def switch_to_followed_download(
         status=real_status,
         require_trusted_total=True,
         resume_after_admission=False,
+        acquire_lifecycle_lock=False,
     )
     if admission.get("outcome") == "stale":
         return False
     if admission.get("outcome") != "admitted":
         if admission.get("outcome") == "unknown_size":
-            await mark_global_download_failed(
-                download_id,
-                expected_gid=metadata_gid,
+            await fail_download_and_reclaim(
+                client=client,
+                download_id=download_id,
                 message="磁力任务无法获取可信文件大小",
                 error_code="unknown_followed_size",
+                expected_gid=metadata_gid,
+                writer_gid=followed_gid,
+                acquire_completion_lock=False,
+                acquire_lifecycle_lock=False,
+                log_prefix=log_prefix,
             )
-        await _cleanup_handoff_rejection_safely(
-            client=client,
-            download_id=download_id,
-            expected_gid=metadata_gid,
-            writer_gid=followed_gid,
-            log_prefix=log_prefix,
-        )
+        else:
+            # Admission reject without fail: keep cleanup-only semantics.
+            await _cleanup_handoff_rejection_safely(
+                client=client,
+                download_id=download_id,
+                expected_gid=metadata_gid,
+                writer_gid=followed_gid,
+                log_prefix=log_prefix,
+            )
         return True
 
     followed_status = str(real_status.get("status") or "")
@@ -965,17 +1056,15 @@ async def switch_to_followed_download(
         try:
             await client.unpause(followed_gid)
         except Exception:
-            await mark_global_download_failed(
-                download_id,
-                expected_gid=followed_gid,
-                message="磁力任务准入后恢复下载失败",
-                error_code="unpause_failed",
-            )
-            await _cleanup_handoff_rejection_safely(
+            await fail_download_and_reclaim(
                 client=client,
                 download_id=download_id,
+                message="磁力任务准入后恢复下载失败",
+                error_code="unpause_failed",
                 expected_gid=followed_gid,
                 writer_gid=followed_gid,
+                acquire_completion_lock=False,
+                acquire_lifecycle_lock=False,
                 log_prefix=log_prefix,
             )
             return True
@@ -1324,6 +1413,15 @@ async def handle_v0_download_complete(
         )
 
     await _remove_download_result_best_effort(client, completion_gid, log_prefix)
+    try:
+        await cleanup_task_download_dir(download_id)
+    except Exception as exc:
+        logger.warning(
+            "%s Failed to reclaim completed download dir id=%s error=%s",
+            log_prefix,
+            download_id,
+            exc,
+        )
     return True
 
 
@@ -1661,38 +1759,56 @@ async def update_v0_download_from_aria2(
     return True
 
 
-async def repair_inconsistent_completed_downloads_v0() -> None:
+async def repair_inconsistent_completed_downloads_v0(
+    client: Aria2Gateway | None = None,
+) -> None:
+    if client is None:
+        from app.aria2.gateway import get_aria2_client
+
+        client = get_aria2_client()
     threshold_ms = now_ms() - int(COMPLETE_REPAIR_GRACE_SECONDS * 1000)
     for snapshot in await list_inconsistent_completed_download_ids(threshold_ms):
         download_id = int(snapshot["id"])
         logger.warning(
             "[Sync] Completed v0 download was not indexed, failing id=%s", download_id
         )
-        failed = await mark_global_download_failed(
-            download_id,
-            expected_gid=snapshot.get("aria2_gid"),
-            expected_statuses=("completed",),
+        gid = snapshot.get("aria2_gid")
+        changed = await fail_download_and_reclaim(
+            client=client,
+            download_id=download_id,
             message="下载完成但文件未入库",
             error_code="completion_not_indexed",
+            expected_gid=gid if isinstance(gid, str) and gid else None,
+            writer_gid=gid if isinstance(gid, str) and gid else None,
+            expected_statuses=("completed",),
+            log_prefix="[Sync]",
         )
-        if failed is not None:
+        if changed:
             await _broadcast_download_update(download_id)
 
 
 async def cleanup_stale_queued_downloads_v0(
     grace_seconds: float = STALE_QUEUED_GRACE_SECONDS,
+    client: Aria2Gateway | None = None,
 ) -> None:
+    if client is None:
+        from app.aria2.gateway import get_aria2_client
+
+        client = get_aria2_client()
     threshold_ms = now_ms() - int(grace_seconds * 1000)
     for download_id in await list_stale_queued_download_ids(threshold_ms):
         logger.warning("[Sync] Cleaning stale v0 queued download_id=%s", download_id)
-        failed_download = await mark_global_download_failed(
-            download_id,
-            expected_gid=None,
-            expected_statuses=("queued",),
+        changed = await fail_download_and_reclaim(
+            client=client,
+            download_id=download_id,
             message="任务提交超时，已自动清理",
             error_code="submit_timeout",
+            expected_gid=None,
+            writer_gid=None,
+            expected_statuses=("queued",),
+            log_prefix="[Sync]",
         )
-        if failed_download is not None:
+        if changed:
             await _broadcast_download_update(download_id)
 
 

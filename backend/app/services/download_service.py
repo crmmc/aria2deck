@@ -33,7 +33,6 @@ from app.repositories.downloads import (
     get_or_create_global_download,
     get_user_task,
     guarded_update_download_and_active_user_tasks,
-    mark_global_download_failed,
     now_ms,
     prepare_download_retry,
     reconcile_download_size,
@@ -203,32 +202,39 @@ async def _cleanup_submitted_failure(
     log_prefix: str,
     message: str = "提交下载失败",
 ) -> bool:
-    await mark_global_download_failed(
-        download_id,
-        expected_gid=gid,
+    from app.services.aria2_lifecycle_service import fail_download_and_reclaim
+
+    changed = await fail_download_and_reclaim(
+        client=aria2_client,
+        download_id=download_id,
         message=message,
         error_code="submit_failed",
+        expected_gid=gid,
+        writer_gid=gid,
+        acquire_completion_lock=False,
+        acquire_lifecycle_lock=False,
+        log_prefix=log_prefix,
     )
+    if changed:
+        return True
+
     snapshot = await get_global_download_status_snapshot(download_id)
     if snapshot is not None and snapshot.get("aria2_gid") is None:
         await claim_submitted_gid_for_failure(
             download_id=download_id, gid=gid, message=message
         )
-        snapshot = await get_global_download_status_snapshot(download_id)
-    if (
-        snapshot is not None
-        and str(snapshot.get("aria2_gid") or "") == gid
-        and str(snapshot.get("status") or "") in {"failed", "cancelled"}
-    ):
-        cleanup = await cleanup_terminal_download_generation(
+        return await fail_download_and_reclaim(
             client=aria2_client,
-            task_id=download_id,
-            gid=gid,
-            owner_id=owner_id,
+            download_id=download_id,
+            message=message,
+            error_code="submit_failed",
+            expected_gid=gid,
+            writer_gid=gid,
+            expected_statuses=("failed", "cancelled"),
+            acquire_completion_lock=False,
+            acquire_lifecycle_lock=False,
             log_prefix=log_prefix,
-            skip_status_check=True,
         )
-        return cleanup.safe_to_reuse
 
     try:
         await aria2_client.force_remove(gid)
@@ -782,11 +788,18 @@ async def _admit_paused_unknown_download(
     status = await aria2_client.tell_status(gid)
     candidate = candidate_size_from_status(status, require_trusted_total=True)
     if candidate is None:
-        await mark_global_download_failed(
-            int(download["id"]),
-            expected_gid=gid,
+        from app.services.aria2_lifecycle_service import fail_download_and_reclaim
+
+        await fail_download_and_reclaim(
+            client=aria2_client,
+            download_id=int(download["id"]),
             message="无法在暂停状态获取可信文件大小",
             error_code="unknown_size",
+            expected_gid=gid,
+            writer_gid=gid,
+            acquire_completion_lock=False,
+            acquire_lifecycle_lock=False,
+            log_prefix="[Submit]",
         )
         raise DownloadAdmissionError("unknown_size")
 

@@ -8,10 +8,14 @@ from typing import Any, Literal, TypedDict
 
 from app.aria2.protocol import Aria2Gateway
 from app.repositories.downloads import (
+    get_global_download_by_id,
     list_active_global_downloads,
+    list_completed_downloads_pending_index,
     list_completed_downloads_without_file,
+    list_terminal_download_ids,
     list_terminal_downloads_with_residual_gid,
-    mark_global_download_failed,
+    reopen_completed_download_for_index_repair,
+    restore_incomplete_completed_download,
     reconcile_download_size,
     reset_active_accounting_for_startup,
 )
@@ -27,7 +31,12 @@ from app.services.download_service import (
 )
 from app.services.settings_service import get_max_task_size
 from app.services.task_projection import is_metadata_phase_status
-from app.services.storage import get_store_dir, get_store_path_for_hash
+from app.services.storage import (
+    cleanup_task_download_dir,
+    get_downloading_dir,
+    get_store_dir,
+    get_store_path_for_hash,
+)
 from app.services.storage_index import (
     CONTENT_HASH_V1,
     calculate_legacy_content_hash,
@@ -100,9 +109,182 @@ async def purge_terminal_residual_gids(client: Aria2Gateway) -> dict[str, int]:
     return {"found": len(residuals), "purged": purged, "failed": failed}
 
 
+async def purge_terminal_download_dirs() -> dict[str, int]:
+    """Delete downloading/<id> only when reclaim is known-safe.
+
+    Safe set:
+    - failed / cancelled
+    - completed with completed_file_id (payload already in store)
+
+    Never delete completed-without-index dirs: they may hold the only copy.
+    """
+    terminal_ids = set(await list_terminal_download_ids())
+    downloading_dir = get_downloading_dir()
+    found = 0
+    purged = 0
+    failed = 0
+    skipped = 0
+    if not downloading_dir.exists():
+        return {
+            "found": 0,
+            "purged": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+
+    for entry in downloading_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        if not name.isdigit():
+            # pack_* and other non-task dirs are out of scope for this purge.
+            skipped += 1
+            continue
+        download_id = int(name)
+        if download_id not in terminal_ids:
+            skipped += 1
+            continue
+        found += 1
+        try:
+            await cleanup_task_download_dir(download_id)
+            purged += 1
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                "Failed to purge terminal download dir id=%s error=%s",
+                download_id,
+                exc,
+            )
+    return {
+        "found": found,
+        "purged": purged,
+        "failed": failed,
+        "skipped": skipped,
+    }
+
+
+async def recover_completed_downloads_pending_index(
+    client: Aria2Gateway,
+) -> dict[str, int]:
+    """Retry store indexing for completed rows that still own downloading dirs."""
+    from app.services.aria2_lifecycle_service import handle_v0_download_complete
+
+    pending = await list_completed_downloads_pending_index()
+    recovered = 0
+    failed = 0
+    skipped = 0
+    for download in pending:
+        download_id = int(download["id"])
+        task_dir = get_downloading_dir() / str(download_id)
+        if not task_dir.exists() or not task_dir.is_dir():
+            skipped += 1
+            continue
+
+        original_gid = download.get("aria2_gid")
+        original_gid_str = str(original_gid) if original_gid else None
+        recovery_gid = original_gid_str or f"recover-{download_id}"
+        reopened = await reopen_completed_download_for_index_repair(
+            download_id,
+            recovery_gid=None if original_gid_str else recovery_gid,
+        )
+        if reopened is None:
+            skipped += 1
+            continue
+
+        async def _restore_incomplete() -> None:
+            restored = await restore_incomplete_completed_download(
+                download_id,
+                aria2_gid=original_gid_str,
+            )
+            if restored is None:
+                logger.warning(
+                    "Failed to restore incomplete completed download after recovery miss id=%s",
+                    download_id,
+                )
+
+        display_name = str(
+            reopened.get("display_name") or reopened.get("source_uri") or task_dir.name
+        )
+        files: list[dict[str, Any]] = []
+        try:
+            for path in task_dir.rglob("*"):
+                if path.is_file() and not path.name.endswith(".aria2"):
+                    size = path.stat().st_size
+                    files.append(
+                        {
+                            "path": str(path),
+                            "length": str(size),
+                            "completedLength": str(size),
+                            "selected": "true",
+                        }
+                    )
+        except OSError as exc:
+            failed += 1
+            logger.warning(
+                "Failed to scan pending-index download dir id=%s error=%s",
+                download_id,
+                exc,
+            )
+            await _restore_incomplete()
+            continue
+
+        if not files:
+            skipped += 1
+            await _restore_incomplete()
+            continue
+
+        total_bytes = sum(int(item["length"]) for item in files)
+        aria2_status = {
+            "status": "complete",
+            "totalLength": str(total_bytes),
+            "completedLength": str(total_bytes),
+            "files": files,
+            "bittorrent": {"info": {"name": display_name}},
+        }
+        try:
+            changed = await handle_v0_download_complete(
+                client=client,
+                download=reopened,
+                aria2_status=aria2_status,
+                completion_gid=str(reopened.get("aria2_gid") or recovery_gid),
+                log_prefix="[Recover]",
+                allow_metadata_handoff_defer=False,
+            )
+            if changed:
+                snapshot = await get_global_download_by_id(download_id)
+                if (
+                    snapshot is not None
+                    and snapshot.get("status") == "completed"
+                    and snapshot.get("completed_file_id") is not None
+                ):
+                    recovered += 1
+                else:
+                    failed += 1
+                    await _restore_incomplete()
+            else:
+                failed += 1
+                await _restore_incomplete()
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                "Failed to recover pending-index download id=%s error=%s",
+                download_id,
+                exc,
+            )
+            await _restore_incomplete()
+    return {
+        "found": len(pending),
+        "recovered": recovered,
+        "failed": failed,
+        "skipped": skipped,
+    }
+
+
 async def rebuild_active_download_accounting(
     client: Aria2Gateway,
 ) -> dict[str, int]:
+    from app.services.aria2_lifecycle_service import fail_download_and_reclaim
+
     downloads = await list_active_global_downloads()
     snapshots: dict[int, tuple[dict[str, Any], bool]] = {}
     for download in downloads:
@@ -131,19 +313,15 @@ async def rebuild_active_download_accounting(
         should_resume = snapshot[1] if snapshot else False
         raw_status = str(status.get("status") or "")
         if raw_status in {"error", "removed"}:
-            await mark_global_download_failed(
-                download_id,
-                expected_gid=gid,
+            await fail_download_and_reclaim(
+                client=client,
+                download_id=download_id,
                 message="启动恢复发现下载已终止",
                 error_code=f"startup_{raw_status}",
-            )
-            await cleanup_terminal_download_generation(
-                client=client,
-                task_id=download_id,
-                gid=gid,
-                owner_id=None,
+                expected_gid=gid or None,
+                writer_gid=gid or None,
+                acquire_completion_lock=False,
                 log_prefix="[Startup]",
-                skip_status_check=True,
             )
             failed += 1
             continue
@@ -159,19 +337,15 @@ async def rebuild_active_download_accounting(
                 if should_resume and raw_status not in {"complete", "error", "removed"}:
                     await client.unpause(gid)
             except Exception:
-                await mark_global_download_failed(
-                    download_id,
-                    expected_gid=gid,
+                await fail_download_and_reclaim(
+                    client=client,
+                    download_id=download_id,
                     message="启动恢复无法安全配置磁力元数据暂停",
                     error_code="startup_metadata_pause_failed",
-                )
-                await cleanup_terminal_download_generation(
-                    client=client,
-                    task_id=download_id,
-                    gid=gid,
-                    owner_id=None,
+                    expected_gid=gid or None,
+                    writer_gid=gid or None,
+                    acquire_completion_lock=False,
                     log_prefix="[Startup]",
-                    skip_status_check=True,
                 )
                 failed += 1
             continue
@@ -194,21 +368,16 @@ async def rebuild_active_download_accounting(
                     ),
                 )
         if candidate is None:
-            await mark_global_download_failed(
-                download_id,
-                expected_gid=gid or None,
+            await fail_download_and_reclaim(
+                client=client,
+                download_id=download_id,
                 message="启动恢复无法确认任务大小",
                 error_code="startup_unknown_size",
+                expected_gid=gid or None,
+                writer_gid=gid or None,
+                acquire_completion_lock=False,
+                log_prefix="[Startup]",
             )
-            if gid:
-                await cleanup_terminal_download_generation(
-                    client=client,
-                    task_id=download_id,
-                    gid=gid,
-                    owner_id=None,
-                    log_prefix="[Startup]",
-                    skip_status_check=True,
-                )
             failed += 1
             continue
 
@@ -231,19 +400,15 @@ async def rebuild_active_download_accounting(
                 try:
                     await client.unpause(gid)
                 except Exception:
-                    await mark_global_download_failed(
-                        download_id,
-                        expected_gid=gid,
+                    await fail_download_and_reclaim(
+                        client=client,
+                        download_id=download_id,
                         message="启动恢复后无法恢复下载",
                         error_code="startup_unpause_failed",
-                    )
-                    await cleanup_terminal_download_generation(
-                        client=client,
-                        task_id=download_id,
-                        gid=gid,
-                        owner_id=None,
+                        expected_gid=gid,
+                        writer_gid=gid,
+                        acquire_completion_lock=False,
                         log_prefix="[Startup]",
-                        skip_status_check=True,
                     )
                     failed += 1
                     continue

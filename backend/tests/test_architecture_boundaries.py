@@ -482,3 +482,42 @@ def test_removed_layering_compatibility_modules_do_not_exist_or_get_imported() -
 
     assert existing == []
     assert offenders == []
+
+
+def test_runtime_services_mark_failed_only_via_fail_download_and_reclaim() -> None:
+    """Direct mark_global_download_failed is allowed only inside fail reclaim entry."""
+    allowed_files = {
+        APP_ROOT / "services" / "aria2_lifecycle_service.py",
+        APP_ROOT / "repositories" / "downloads.py",
+    }
+    allowed_functions = {
+        "_fail_download_and_reclaim_operation",
+        "_mark_and_cleanup",
+        "mark_global_download_failed",
+    }
+    offenders: list[str] = []
+
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "mark_global_download_failed" not in source:
+            continue
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for child in ast.walk(node):
+                if (
+                    isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Name)
+                    and child.func.id == "mark_global_download_failed"
+                ):
+                    if path in allowed_files and node.name in allowed_functions:
+                        continue
+                    relative = path.relative_to(APP_ROOT.parent)
+                    offenders.append(
+                        f"{relative}:{_line_number(child)} in {node.name}"
+                    )
+
+    assert offenders == []

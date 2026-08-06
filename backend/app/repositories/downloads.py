@@ -1971,6 +1971,138 @@ async def list_terminal_downloads_with_residual_gid() -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+async def list_terminal_download_ids() -> list[int]:
+    """Return terminal download ids whose downloading dir is safe to reclaim.
+
+    - failed / cancelled: always reclaimable
+    - completed: only when already indexed into store (completed_file_id set)
+      Incomplete completed rows may still hold the only copy under downloading/.
+    """
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                select(global_downloads.c.id).where(
+                    global_downloads.c.status.in_(("failed", "cancelled"))
+                    | (
+                        (global_downloads.c.status == "completed")
+                        & global_downloads.c.completed_file_id.is_not(None)
+                    )
+                )
+            )
+        ).all()
+    return [int(row[0]) for row in rows]
+
+
+async def list_completed_downloads_pending_index() -> list[dict[str, Any]]:
+    """Completed rows that never received a stored_file index."""
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                select(global_downloads).where(
+                    global_downloads.c.status == "completed",
+                    global_downloads.c.completed_file_id.is_(None),
+                )
+            )
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+async def reopen_completed_download_for_index_repair(
+    download_id: int,
+    *,
+    recovery_gid: str | None = None,
+) -> dict[str, Any] | None:
+    """Move incomplete completed row back to active so completion can re-run."""
+    values: dict[str, Any] = {
+        "status": "active",
+        "error_code": None,
+        "error_message": None,
+        "completed_at_ms": None,
+        "updated_at_ms": now_ms(),
+    }
+    if recovery_gid is not None:
+        values["aria2_gid"] = recovery_gid
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                update(global_downloads)
+                .where(
+                    global_downloads.c.id == download_id,
+                    global_downloads.c.status == "completed",
+                    global_downloads.c.completed_file_id.is_(None),
+                )
+                .values(**values)
+                .returning(global_downloads)
+            )
+        ).mappings().first()
+        if row is None:
+            return None
+        await conn.execute(
+            update(user_tasks)
+            .where(
+                user_tasks.c.global_download_id == download_id,
+                user_tasks.c.status.in_(TERMINAL_USER_TASK_STATUSES),
+            )
+            .values(
+                status="active",
+                error_message=None,
+                finished_at_ms=None,
+                updated_at_ms=now_ms(),
+            )
+        )
+    return dict(row)
+
+
+async def restore_incomplete_completed_download(
+    download_id: int,
+    *,
+    aria2_gid: str | None,
+) -> dict[str, Any] | None:
+    """Undo reopen when pending-index recovery cannot finish safely.
+
+    Leaves the row completed without completed_file_id so purge keeps the
+    downloading dir (it may still hold the only payload copy).
+    """
+    timestamp = now_ms()
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                update(global_downloads)
+                .where(
+                    global_downloads.c.id == download_id,
+                    global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
+                    global_downloads.c.completed_file_id.is_(None),
+                )
+                .values(
+                    status="completed",
+                    aria2_gid=aria2_gid,
+                    disk_reserved_bytes=0,
+                    error_code=None,
+                    error_message=None,
+                    completed_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                )
+                .returning(global_downloads)
+            )
+        ).mappings().first()
+        if row is None:
+            return None
+        await conn.execute(
+            update(user_tasks)
+            .where(
+                user_tasks.c.global_download_id == download_id,
+                user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            )
+            .values(
+                status="completed",
+                error_message=None,
+                finished_at_ms=timestamp,
+                updated_at_ms=timestamp,
+            )
+        )
+    return dict(row)
+
+
 async def prepare_download_retry(download_id: int) -> dict[str, Any] | None:
     async with transaction() as conn:
         row = (

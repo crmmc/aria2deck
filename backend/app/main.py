@@ -113,8 +113,10 @@ from app.routers import (
     ws,
 )
 from app.services.repair import (
+    purge_terminal_download_dirs,
     purge_terminal_residual_gids,
     rebuild_active_download_accounting,
+    recover_completed_downloads_pending_index,
     run_startup_repair,
 )
 from app.services.storage import verify_download_dir_writable
@@ -287,6 +289,24 @@ async def lifespan(app: FastAPI):
             residual["found"],
             residual["purged"],
             residual["failed"],
+        )
+
+        recovered = await recover_completed_downloads_pending_index(get_aria2_client())
+        logger.info(
+            "启动未入库 completed 恢复: found=%d recovered=%d failed=%d skipped=%d",
+            recovered["found"],
+            recovered["recovered"],
+            recovered["failed"],
+            recovered["skipped"],
+        )
+
+        residual_dirs = await purge_terminal_download_dirs()
+        logger.info(
+            "启动 terminal 目录清理完成: found=%d purged=%d failed=%d skipped=%d",
+            residual_dirs["found"],
+            residual_dirs["purged"],
+            residual_dirs["failed"],
+            residual_dirs["skipped"],
         )
 
         accounting = await rebuild_active_download_accounting(get_aria2_client())
