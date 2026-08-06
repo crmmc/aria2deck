@@ -915,6 +915,13 @@ async def switch_to_followed_download(
                 _lock_held=True,
                 _real_status=real_status,
             )
+            if switched and real_status is not None:
+                await handle_aria2_event(
+                    client=client,
+                    gid=followed_gid,
+                    event="complete",
+                    aria2_status=real_status,
+                )
 
         if (
             switched
