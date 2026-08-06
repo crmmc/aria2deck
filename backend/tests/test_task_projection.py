@@ -203,19 +203,37 @@ def test_speed_totals_sum_current_rows_only() -> None:
 # ---------------------------------------------------------------------------
 
 def test_is_metadata_phase_status_detects_metadata_prefix() -> None:
-    status = {"bittorrent": {"info": {"name": "[METADATA]abc123"}}}
+    status = {
+        "files": [{"path": "[METADATA]abc123"}],
+    }
     assert is_metadata_phase_status(status) is True
 
 
-def test_is_metadata_phase_status_passes_real_name() -> None:
-    status = {"bittorrent": {"info": {"name": "Ubuntu.24.04.iso"}}}
+def test_is_metadata_phase_status_rejects_when_bittorrent_info_exists() -> None:
+    status = {
+        "bittorrent": {"info": {"name": "[METADATA]abc123"}},
+        "files": [{"path": "[METADATA]abc123"}],
+    }
     assert is_metadata_phase_status(status) is False
 
 
-def test_is_metadata_phase_status_returns_false_without_bittorrent() -> None:
+def test_is_metadata_phase_status_passes_real_name() -> None:
+    status = {
+        "bittorrent": {"info": {"name": "Ubuntu.24.04.iso"}},
+        "files": [{"path": "/downloads/Ubuntu.24.04.iso"}],
+    }
+    assert is_metadata_phase_status(status) is False
+
+
+def test_is_metadata_phase_status_returns_false_without_files() -> None:
     assert is_metadata_phase_status({}) is False
-    assert is_metadata_phase_status({"bittorrent": {}}) is False
-    assert is_metadata_phase_status({"bittorrent": {"info": {}}}) is False
+    assert is_metadata_phase_status({"files": []}) is False
+    assert is_metadata_phase_status({"files": [{}]}) is False
+
+
+def test_is_metadata_phase_status_returns_false_without_metadata_prefix() -> None:
+    status = {"files": [{"path": "/downloads/file.iso"}]}
+    assert is_metadata_phase_status(status) is False
 
 
 def test_metadata_name_prefix_is_exact_string() -> None:
@@ -362,7 +380,7 @@ def test_rest_response_skips_metadata_total_but_keeps_completed() -> None:
         "resource_kind": "magnet",
     }
     live = {"totalLength": "32768", "completedLength": "16384",
-            "bittorrent": {"info": {"name": "[METADATA]abc"}},
+            "files": [{"path": "[METADATA]abc"}],
             "downloadSpeed": "5000", "uploadSpeed": "0"}
 
     response = build_rest_task_response(row, live)

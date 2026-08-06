@@ -112,7 +112,7 @@ class TestMapProgressValues:
 
     def test_metadata_phase_skips_total(self) -> None:
         status = {
-            "bittorrent": {"info": {"name": "[METADATA]hash"}},
+            "files": [{"path": "[METADATA]hash"}],
             "totalLength": "99",
             "completedLength": "10",
         }
@@ -126,7 +126,7 @@ class TestMapProgressValues:
 
     def test_skip_total_disabled(self) -> None:
         status = {
-            "bittorrent": {"info": {"name": "[METADATA]hash"}},
+            "files": [{"path": "[METADATA]hash"}],
             "totalLength": "99",
             "completedLength": "10",
         }

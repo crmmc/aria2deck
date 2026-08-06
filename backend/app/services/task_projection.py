@@ -258,18 +258,25 @@ METADATA_NAME_PREFIX = "[METADATA]"
 
 
 def is_metadata_phase_status(aria2_status: dict[str, Any]) -> bool:
-    """Check if aria2 status represents a metadata download phase.
+    """Check if aria2 status represents a magnet metadata download phase.
 
-    Returns True when ``bittorrent.info.name`` starts with the ``[METADATA]``
-    prefix that aria2 assigns during magnet-link metadata resolution.
+    aria2 1.36.0 在 magnet 元数据阶段：
+    - ``bittorrent.info`` 字段不存在（metadata 内容为空）
+    - ``files[0].path`` 以 ``[METADATA]`` 前缀命名
+
+    因此用 ``files[0].path`` 判断，而不是 ``bittorrent.info.name``。
     """
     bt = aria2_status.get("bittorrent")
-    if not isinstance(bt, dict):
+    if isinstance(bt, dict) and isinstance(bt.get("info"), dict):
         return False
-    info = bt.get("info")
-    if not isinstance(info, dict):
+    files = aria2_status.get("files")
+    if not isinstance(files, list) or not files:
         return False
-    return str(info.get("name") or "").startswith(METADATA_NAME_PREFIX)
+    first = files[0]
+    if not isinstance(first, dict):
+        return False
+    path = str(first.get("path") or "")
+    return path.startswith(METADATA_NAME_PREFIX)
 
 
 def _extract_live_display_name(live: dict[str, Any]) -> str | None:
