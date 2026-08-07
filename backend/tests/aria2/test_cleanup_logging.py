@@ -1,7 +1,7 @@
 """Tests for cleanup logging observability via cleanup_with_claim."""
 
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -11,6 +11,7 @@ from app.services.failed_task_cleanup import (
     cleanup_with_claim,
     get_representative_owner_id,
 )
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_global_download_v0, create_user_task_v0
 
 
@@ -29,10 +30,7 @@ def _claim(task_id: int, gid: str | None = "abc123"):
 
 @pytest.fixture
 def mock_client():
-    client = AsyncMock()
-    client.force_remove = AsyncMock()
-    client.remove_download_result = AsyncMock()
-    return client
+    return make_aria2_client()
 
 
 @pytest.mark.asyncio

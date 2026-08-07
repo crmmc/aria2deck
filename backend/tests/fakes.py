@@ -32,9 +32,23 @@ _DEFAULT_TELL_STATUS: dict[str, Any] = {
     "status": "active",
     "totalLength": "1000000",
     "completedLength": "0",
+    "uploadLength": "0",
     "downloadSpeed": "10000",
     "uploadSpeed": "0",
+    "connections": "1",
+    "numSeeders": "0",
+    "seeder": "false",
+    "pieceLength": "0",
+    "numPieces": "0",
+    "bittorrent": {"info": {}},
+    "infoHash": "",
+    "dir": "",
     "files": [],
+    "following": "",
+    "followedBy": [],
+    "belongsTo": "",
+    "errorCode": "0",
+    "errorMessage": "",
 }
 
 _DEFAULT_ADD_URI = "test_gid"

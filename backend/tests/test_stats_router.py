@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
 from app.repositories.usage import apply_usage_delta
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_global_download_v0, create_user_task_v0
 
 
@@ -286,19 +287,20 @@ class TestGetStatsWithActiveTasks:
             global_status="completed",
             aria2_gid="gid-speed-complete",
         )
-        client = AsyncMock()
-        client.tell_active.return_value = [
-            {
-                "gid": "gid-speed-active",
-                "downloadSpeed": "4096",
-                "uploadSpeed": "64",
-            },
-            {
-                "gid": "gid-speed-complete",
-                "downloadSpeed": "9999",
-                "uploadSpeed": "9999",
-            },
-        ]
+        client = make_aria2_client(
+            tell_active=[
+                {
+                    "gid": "gid-speed-active",
+                    "downloadSpeed": "4096",
+                    "uploadSpeed": "64",
+                },
+                {
+                    "gid": "gid-speed-complete",
+                    "downloadSpeed": "9999",
+                    "uploadSpeed": "9999",
+                },
+            ]
+        )
 
         with (
             patch("shutil.disk_usage", return_value=_disk_usage()),

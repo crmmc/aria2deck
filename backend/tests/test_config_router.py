@@ -3,13 +3,14 @@
 import logging
 
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.core.config import settings
 from app.db.engine import transaction
 from app.db.schema import app_settings
+from tests.fakes import make_aria2_client
 
 
 def test_tokens_use_current_schema(authenticated_client: TestClient):
@@ -289,11 +290,9 @@ class TestUpdateConfig:
 
 class TestAria2Version:
     def test_get_aria2_version_success(self, admin_client: TestClient):
-        mock_client = AsyncMock()
-        mock_client.get_version.return_value = {
-            "version": "1.36.0",
-            "enabledFeatures": ["BitTorrent", "GZip"],
-        }
+        mock_client = make_aria2_client(
+            get_version={"version": "1.36.0", "enabledFeatures": ["BitTorrent", "GZip"]}
+        )
 
         with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client):
             response = admin_client.get("/api/config/aria2/version")
@@ -305,8 +304,7 @@ class TestAria2Version:
         assert "BitTorrent" in data["enabled_features"]
 
     def test_get_aria2_version_connection_failed(self, admin_client: TestClient):
-        mock_client = AsyncMock()
-        mock_client.get_version.side_effect = Exception("Connection refused")
+        mock_client = make_aria2_client(get_version=Exception("Connection refused"))
 
         with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client):
             response = admin_client.get("/api/config/aria2/version")
@@ -323,11 +321,9 @@ class TestAria2Version:
 
 class TestAria2Test:
     def test_test_aria2_connection_success(self, admin_client: TestClient, caplog):
-        mock_client = AsyncMock()
-        mock_client.get_version.return_value = {
-            "version": "1.36.0",
-            "enabledFeatures": ["BitTorrent"],
-        }
+        mock_client = make_aria2_client(
+            get_version={"version": "1.36.0", "enabledFeatures": ["BitTorrent"]}
+        )
 
         with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client), caplog.at_level(
             logging.INFO, logger="app.services.aria2_admin_service"
@@ -347,8 +343,7 @@ class TestAria2Test:
         assert_aria2_log_redacted(caplog)
 
     def test_test_aria2_connection_failed(self, admin_client: TestClient, caplog):
-        mock_client = AsyncMock()
-        mock_client.get_version.side_effect = RuntimeError(ARIA2_LOG_URL)
+        mock_client = make_aria2_client(get_version=RuntimeError(ARIA2_LOG_URL))
 
         with patch("app.aria2.gateway.create_aria2_client", return_value=mock_client), caplog.at_level(
             logging.WARNING, logger="app.services.aria2_admin_service"

@@ -25,6 +25,7 @@ from app.domain.torrent_metadata import (
 )
 from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
 from app.services.task_projection import BT_TRACKER_PLACEHOLDER
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_user_v0, now_ms
 
 
@@ -130,23 +131,11 @@ async def create_rpc_task(
 
 @pytest.fixture
 def mock_aria2_client() -> AsyncMock:
-    client = AsyncMock()
-    client.get_version.return_value = {
-        "version": "1.36.0",
-        "enabledFeatures": ["BitTorrent"],
-    }
-    client.get_global_stat.return_value = {
-        "downloadSpeed": "1000",
-        "uploadSpeed": "500",
-    }
-    client.tell_active.return_value = []
-    client.tell_status.return_value = {}
-    client.get_files.return_value = []
-    client.get_uris.return_value = []
-    client.get_peers.return_value = []
-    client.get_servers.return_value = []
-    client.force_remove.return_value = "OK"
-    return client
+    return make_aria2_client(
+        get_version={"version": "1.36.0", "enabledFeatures": ["BitTorrent"]},
+        get_global_stat={"downloadSpeed": "1000", "uploadSpeed": "500"},
+        tell_status={},
+    )
 
 
 @pytest.fixture

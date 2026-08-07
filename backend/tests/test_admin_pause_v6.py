@@ -1,9 +1,10 @@
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import patch
 from sqlalchemy import select
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
 from app.services.aria2_lifecycle_service import handle_aria2_event
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_global_download_v0, create_user_task_v0, create_user_v0
 
 @pytest.mark.asyncio
@@ -22,7 +23,7 @@ async def test_external_pause_keeps_task_visible_with_admin_message(temp_db):
     task = await create_user_task_v0(
         user_id=user["id"], global_download_id=download["id"], status="active"
     )
-    client = AsyncMock()
+    client = make_aria2_client()
     status = {
         "gid": "gid-pause-admin",
         "status": "paused",

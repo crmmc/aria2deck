@@ -11,6 +11,8 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
+from tests.fakes import make_aria2_client
+
 
 class TestSSRFProtection:
     """SSRF 防护测试套件"""
@@ -192,7 +194,7 @@ class TestSSRFProtection:
         ["ftp://ftp.example.com/file.zip", "ftp://192.168.1.1/file.zip", "custom:data"],
     )
     def test_reject_unsupported_scheme_before_aria2(self, authenticated_client, uri):
-        aria2_client = AsyncMock()
+        aria2_client = make_aria2_client()
         with patch("app.services.task_service._get_client", return_value=aria2_client):
             response = authenticated_client.post("/api/tasks", json={"uri": uri})
 
