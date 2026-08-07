@@ -15,6 +15,7 @@ from app.repositories.downloads import (
 )
 from app.services.aria2_lifecycle_service import switch_to_followed_download
 from app.services.storage import get_task_download_dir
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_task_v0,
@@ -340,16 +341,16 @@ async def test_switch_to_followed_http_to_torrent(temp_db: str) -> None:
         display_name="file.torrent",
     )
 
-    mock_client = AsyncMock()
-    mock_client.tell_status.return_value = {
-        "status": "active",
-        "bittorrent": {"info": {"name": "Ubuntu 24.04 LTS"}},
-        "infoHash": "ab" * 20,
-        "totalLength": "4000000000",
-        "completedLength": "100000",
-        "files": [{"path": "/downloads/Ubuntu 24.04 LTS/ubuntu.iso"}],
-    }
-    mock_client.remove_download_result = AsyncMock()
+    mock_client = make_aria2_client(
+        tell_status={
+            "status": "active",
+            "bittorrent": {"info": {"name": "Ubuntu 24.04 LTS"}},
+            "infoHash": "ab" * 20,
+            "totalLength": "4000000000",
+            "completedLength": "100000",
+            "files": [{"path": "/downloads/Ubuntu 24.04 LTS/ubuntu.iso"}],
+        },
+    )
 
     result = await switch_to_followed_download(
         client=mock_client,
@@ -404,16 +405,16 @@ async def test_switch_to_followed_uses_real_status(temp_db: str) -> None:
         display_name="magnet:?xt=urn:btih:" + "ef" * 20,
     )
 
-    mock_client = AsyncMock()
-    mock_client.tell_status.return_value = {
-        "status": "waiting",
-        "bittorrent": {"info": {"name": "Queued Torrent"}},
-        "infoHash": "ef" * 20,
-        "totalLength": "1234",
-        "completedLength": "0",
-        "files": [{"path": str(get_task_download_dir(dl["id"]) / "Queued Torrent" / "file.bin")}],
-    }
-    mock_client.remove_download_result = AsyncMock()
+    mock_client = make_aria2_client(
+        tell_status={
+            "status": "waiting",
+            "bittorrent": {"info": {"name": "Queued Torrent"}},
+            "infoHash": "ef" * 20,
+            "totalLength": "1234",
+            "completedLength": "0",
+            "files": [{"path": str(get_task_download_dir(dl["id"]) / "Queued Torrent" / "file.bin")}],
+        },
+    )
 
     result = await switch_to_followed_download(
         client=mock_client,
@@ -461,18 +462,18 @@ async def test_switch_to_followed_complete_status_does_not_mark_completed_withou
         display_name="magnet:?xt=urn:btih:" + "fa" * 20,
     )
 
-    mock_client = AsyncMock()
-    mock_client.tell_status.return_value = {
-        "gid": "real-gid-complete",
-        "status": "complete",
-        "following": "meta-gid-complete",
-        "bittorrent": {"info": {"name": "Complete Torrent"}},
-        "infoHash": "fa" * 20,
-        "totalLength": "1234",
-        "completedLength": "1234",
-        "files": [{"path": str(get_task_download_dir(dl["id"]) / "Complete Torrent" / "file.bin"), "length": "1234"}],
-    }
-    mock_client.remove_download_result = AsyncMock()
+    mock_client = make_aria2_client(
+        tell_status={
+            "gid": "real-gid-complete",
+            "status": "complete",
+            "following": "meta-gid-complete",
+            "bittorrent": {"info": {"name": "Complete Torrent"}},
+            "infoHash": "fa" * 20,
+            "totalLength": "1234",
+            "completedLength": "1234",
+            "files": [{"path": str(get_task_download_dir(dl["id"]) / "Complete Torrent" / "file.bin"), "length": "1234"}],
+        },
+    )
 
     result = await switch_to_followed_download(
         client=mock_client,
@@ -529,16 +530,16 @@ async def test_switch_to_followed_magnet_upgrades_kind(temp_db: str) -> None:
         display_name="magnet:?xt=urn:btih:" + "cc" * 20,
     )
 
-    mock_client = AsyncMock()
-    mock_client.tell_status.return_value = {
-        "status": "active",
-        "bittorrent": {"info": {"name": "Debian ISO"}},
-        "infoHash": "dd" * 20,
-        "totalLength": "3000000000",
-        "completedLength": "0",
-        "files": [{"path": str(get_task_download_dir(dl["id"]) / "debian.iso")}],
-    }
-    mock_client.remove_download_result = AsyncMock()
+    mock_client = make_aria2_client(
+        tell_status={
+            "status": "active",
+            "bittorrent": {"info": {"name": "Debian ISO"}},
+            "infoHash": "dd" * 20,
+            "totalLength": "3000000000",
+            "completedLength": "0",
+            "files": [{"path": str(get_task_download_dir(dl["id"]) / "debian.iso")}],
+        },
+    )
 
     await switch_to_followed_download(
         client=mock_client,
@@ -560,7 +561,10 @@ async def test_switch_to_followed_magnet_upgrades_kind(temp_db: str) -> None:
 
 @pytest.mark.asyncio
 async def test_switch_to_followed_tell_status_fails(temp_db: str) -> None:
-    """A followed task without a trustworthy status is failed closed."""
+    """M3: transient tell_status failure during handoff → WAITING, not failed.
+
+    The download stays active; no force_remove is issued.
+    """
     user = await create_user_v0(username="fail-user")
     dl = await create_global_download_v0(
         resource_key="fail-key",
@@ -577,9 +581,7 @@ async def test_switch_to_followed_tell_status_fails(temp_db: str) -> None:
         display_name="big.torrent",
     )
 
-    mock_client = AsyncMock()
-    mock_client.tell_status.side_effect = Exception("connection refused")
-    mock_client.remove_download_result = AsyncMock()
+    mock_client = make_aria2_client(tell_status=Exception("connection refused"))
 
     result = await switch_to_followed_download(
         client=mock_client,
@@ -590,7 +592,7 @@ async def test_switch_to_followed_tell_status_fails(temp_db: str) -> None:
         log_prefix="[Test]",
     )
 
-    assert result is True
+    assert result is False
 
     async with transaction() as conn:
         g_row = (
@@ -598,13 +600,16 @@ async def test_switch_to_followed_tell_status_fails(temp_db: str) -> None:
                 select(global_downloads).where(global_downloads.c.id == dl["id"])
             )
         ).mappings().one()
-    assert g_row["aria2_gid"] is None
-    assert g_row["status"] == "failed"
-    assert g_row["error_code"] == "unknown_followed_size"
-    mock_client.force_remove.assert_awaited_once_with("real-gid-3")
+    assert g_row["aria2_gid"] == "meta-gid-3"
+    assert g_row["status"] == "active"
+    mock_client.force_remove.assert_not_awaited()
 
 @pytest.mark.asyncio
-async def test_magnet_handoff_rejects_oversized_metadata_layout(temp_db: str) -> None:
+async def test_magnet_handoff_admits_payload_regardless_of_file_count(temp_db: str) -> None:
+    """M3: handoff admission is size-based, not file-count-based.
+
+    A payload with many files but small totalLength is admitted normally.
+    """
     user = await create_user_v0(username="oversized-metadata")
     download = await create_global_download_v0(
         resource_key="oversized-layout", resource_kind="magnet",
@@ -614,11 +619,12 @@ async def test_magnet_handoff_rejects_oversized_metadata_layout(temp_db: str) ->
     await create_user_task_v0(
         user_id=user["id"], global_download_id=download["id"], status="active"
     )
-    client = AsyncMock()
-    client.tell_status.return_value = {
-        "status": "paused", "totalLength": "1", "completedLength": "0",
-        "files": [{"path": str(get_task_download_dir(download["id"]) / "payload")}] * 5001,
-    }
+    client = make_aria2_client(
+        tell_status={
+            "status": "paused", "totalLength": "1", "completedLength": "0",
+            "files": [{"path": str(get_task_download_dir(download["id"]) / "payload")}] * 5001,
+        },
+    )
 
     changed = await switch_to_followed_download(
         client=client, download=download, metadata_gid="metadata-gid",
@@ -630,7 +636,9 @@ async def test_magnet_handoff_rejects_oversized_metadata_layout(temp_db: str) ->
             select(global_downloads).where(global_downloads.c.id == download["id"])
         )).mappings().one()
     assert changed is True
-    assert row["status"] == "failed"
-    assert row["error_code"] == "invalid_followed_layout"
-    assert row["error_message"] == "磁力任务文件布局无效"
-    client.force_remove.assert_awaited_once_with("payload-gid")
+    assert row["aria2_gid"] == "payload-gid"
+    # Payload was paused by aria2 (pause-metadata / admission). After handoff
+    # admission M3 resumes it and projects active when unpause succeeds.
+    assert row["status"] == "active"
+    client.unpause.assert_awaited_once_with("payload-gid")
+    client.force_remove.assert_not_awaited()

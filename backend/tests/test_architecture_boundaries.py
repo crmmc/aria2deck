@@ -521,3 +521,250 @@ def test_runtime_services_mark_failed_only_via_fail_download_and_reclaim() -> No
                     )
 
     assert offenders == []
+
+
+def test_aria2_listener_sync_do_not_call_lifecycle_terminal_or_cleanup() -> None:
+    """listener/sync must not directly call terminalization or cleanup helpers (spec §17.3–§17.4).
+
+    These modules are transport/observation layers. All lifecycle decisions
+    go through ``reconcile_attempt_signal`` in the coordinator.
+    """
+    blocked_calls = {
+        "mark_global_download_failed",
+        "force_remove",
+        "cleanup_task_download_dir",
+        "cleanup_failed_task_artifacts",
+        "cleanup_terminal_download_generation",
+        "cleanup_failed_task_artifacts_unchecked",
+        "cleanup_with_claim",
+        "fail_download_and_reclaim",
+        "claim_attempt_terminal",
+        "claim_terminal_reclaim",
+    }
+    offenders: list[str] = []
+
+    for path in (APP_ROOT / "aria2" / "listener.py", APP_ROOT / "aria2" / "sync.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        relative = path.relative_to(APP_ROOT.parent)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else None
+                if name in blocked_calls:
+                    offenders.append(
+                        f"{relative}:{_line_number(node)} calls {name}()"
+                    )
+
+    assert offenders == []
+
+
+def test_files_repository_does_not_write_live_lifecycle() -> None:
+    """repositories/files.py must not call lifecycle terminalization or cleanup (spec §16, §17.7).
+
+    Files, shares, and pack modules influence downloads only through
+    controlled bridges (completed_file_id, stored file deletion), never
+    by directly terminalizing or cleaning up live attempts.
+    """
+    blocked_calls = {
+        "mark_global_download_failed",
+        "claim_attempt_terminal",
+        "claim_terminal_reclaim",
+        "fail_download_and_reclaim",
+        "cleanup_with_claim",
+        "cleanup_task_download_dir",
+        "cleanup_failed_task_artifacts",
+        "cleanup_terminal_download_generation",
+        "cancel_user_task_and_maybe_claim_attempt",
+    }
+    offenders: list[str] = []
+    files_repo = APP_ROOT / "repositories" / "files.py"
+    if not files_repo.exists():
+        return
+    tree = ast.parse(files_repo.read_text(encoding="utf-8"), filename=str(files_repo))
+    relative = files_repo.relative_to(APP_ROOT.parent)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else None
+            if name in blocked_calls:
+                offenders.append(f"{relative}:{_line_number(node)} calls {name}()")
+
+    assert offenders == []
+
+
+def test_deprecated_cleanup_apis_removed_from_production() -> None:
+    """Deprecated cleanup bypass functions must not exist in production code (spec §17.5, §23).
+
+    ``cleanup_failed_task_artifacts``, ``cleanup_terminal_download_generation``,
+    and ``cleanup_failed_task_artifacts_unchecked`` were unauthorized legacy
+    paths that accepted arbitrary task_id + gid without a claim. They have
+    been deleted; this test prevents re-introduction.
+    """
+    removed_names = {
+        "cleanup_failed_task_artifacts",
+        "cleanup_terminal_download_generation",
+        "cleanup_failed_task_artifacts_unchecked",
+    }
+    offenders: list[str] = []
+
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        relative = path.relative_to(APP_ROOT.parent)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name in removed_names:
+                    offenders.append(
+                        f"{relative}:{_line_number(node)} defines {node.name}"
+                    )
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else None
+                if name in removed_names:
+                    offenders.append(
+                        f"{relative}:{_line_number(node)} calls {name}()"
+                    )
+
+    assert offenders == []
+
+
+def test_no_skip_status_check_in_production_code() -> None:
+    """No production function may define or pass ``skip_status_check`` (spec §17.5, §23).
+
+    The ``skip_status_check`` bypass allowed unauthorized cleanup without a
+    terminal claim. It has been removed from all production code.
+    """
+    offenders: list[str] = []
+
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "skip_status_check" not in source:
+            continue
+        tree = ast.parse(source, filename=str(path))
+        relative = path.relative_to(APP_ROOT.parent)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for arg in node.args.args:
+                    if arg.arg == "skip_status_check":
+                        offenders.append(
+                            f"{relative}:{_line_number(node)} defines skip_status_check"
+                        )
+            if isinstance(node, ast.keyword):
+                if node.arg == "skip_status_check":
+                    offenders.append(
+                        f"{relative}:{_line_number(node)} passes skip_status_check"
+                    )
+
+    assert offenders == []
+
+
+def test_physical_cleanup_only_via_claim_or_coordinator() -> None:
+    """cleanup_with_claim must be called only from coordinator/repair/cancel paths (spec §10.3, §17.5).
+
+    Physical reclamation (force_remove + directory deletion) is authorized
+    solely by a TerminalizationClaim or RepairClaim. Only the coordinator
+    (aria2_lifecycle_service), the cancel facade (download_service),
+    startup repair, and the cleanup module itself may invoke it.
+    """
+    allowed_paths = {
+        APP_ROOT / "services" / "failed_task_cleanup.py",
+        APP_ROOT / "services" / "aria2_lifecycle_service.py",
+        APP_ROOT / "services" / "download_service.py",
+        APP_ROOT / "services" / "repair.py",
+    }
+    offenders: list[str] = []
+
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "cleanup_with_claim" not in source:
+            continue
+        if path in allowed_paths:
+            continue
+        relative = path.relative_to(APP_ROOT.parent)
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else None
+                if name == "cleanup_with_claim":
+                    offenders.append(
+                        f"{relative}:{_line_number(node)} calls cleanup_with_claim()"
+                    )
+
+    assert offenders == []
+
+
+def test_force_remove_only_in_coordinator_and_cleanup() -> None:
+    """force_remove must only be called from coordinator, cleanup module, or download_service (spec §10.3, §17.2).
+
+    Stopping an aria2 writer is a physical reclamation step that must be
+    authorized by a terminal or repair claim. It is not a general-purpose
+    control primitive for services or routers.
+    """
+    allowed_paths = {
+        APP_ROOT / "services" / "aria2_lifecycle_service.py",
+        APP_ROOT / "services" / "failed_task_cleanup.py",
+        APP_ROOT / "services" / "download_service.py",
+        APP_ROOT / "services" / "repair.py",
+    }
+    offenders: list[str] = []
+
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "force_remove" not in source:
+            continue
+        if path in allowed_paths:
+            continue
+        relative = path.relative_to(APP_ROOT.parent)
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Attribute) and func.attr == "force_remove":
+                    offenders.append(
+                        f"{relative}:{_line_number(node)} calls .force_remove()"
+                    )
+
+    assert offenders == []
+
+
+def test_cleanup_task_download_dir_only_in_allowed_modules() -> None:
+    """cleanup_task_download_dir must not be called from arbitrary services (spec §22.6).
+
+    Directory deletion is restricted to the coordinator (completion cleanup),
+    the cleanup module (claim-based reclamation), storage (definition),
+    deletion cleanup, and startup repair.
+    """
+    allowed_paths = {
+        APP_ROOT / "services" / "aria2_lifecycle_service.py",
+        APP_ROOT / "services" / "failed_task_cleanup.py",
+        APP_ROOT / "services" / "repair.py",
+        APP_ROOT / "services" / "storage.py",
+        APP_ROOT / "services" / "deletion_cleanup.py",
+    }
+    offenders: list[str] = []
+
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "cleanup_task_download_dir" not in source:
+            continue
+        if path in allowed_paths:
+            continue
+        relative = path.relative_to(APP_ROOT.parent)
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else None
+                if name == "cleanup_task_download_dir":
+                    offenders.append(
+                        f"{relative}:{_line_number(node)} calls cleanup_task_download_dir()"
+                    )
+
+    assert offenders == []

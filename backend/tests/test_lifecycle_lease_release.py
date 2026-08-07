@@ -1,3 +1,5 @@
+"""Verify startup failure releases the singleton lease and cleans up resources."""
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,6 +10,7 @@ from app.main import lifespan
 
 @pytest.mark.asyncio
 async def test_startup_failure_releases_singleton_lease(temp_db):
+    """When lifespan startup raises, the lease must be released before propagation."""
     lease = MagicMock()
 
     with (

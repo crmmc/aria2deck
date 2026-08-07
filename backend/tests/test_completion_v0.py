@@ -22,6 +22,7 @@ from app.services.download_service import (
     create_user_download,
 )
 from app.services.usage_service import get_usage
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_user_v0
 
 
@@ -30,8 +31,7 @@ async def test_complete_global_download_indexes_stored_files_and_user_files(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="complete_v0", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-complete"
+    client = make_aria2_client(add_uri="gid-complete")
     total_bytes = len(b"alpha") + len(b"beta")
 
     task = await create_user_download(
@@ -128,8 +128,7 @@ async def test_complete_global_download_reuses_existing_stored_file_for_same_con
 ) -> None:
     user_a = await create_user_v0(username="complete_reuse_a", quota_bytes=1000)
     user_b = await create_user_v0(username="complete_reuse_b", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.side_effect = ["gid-reuse-a", "gid-reuse-b"]
+    client = make_aria2_client(add_uri=["gid-reuse-a", "gid-reuse-b"])
     total_bytes = len(b"same")
 
     first_task = await create_user_download(
@@ -212,8 +211,7 @@ async def test_create_user_download_attaches_late_subscriber_to_completed_file(
 ) -> None:
     user_a = await create_user_v0(username="late_done_a", quota_bytes=1000)
     user_b = await create_user_v0(username="late_done_b", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-late"
+    client = make_aria2_client(add_uri="gid-late")
     total_bytes = len(b"done")
 
     first_task = await create_user_download(
@@ -277,8 +275,7 @@ async def test_complete_global_download_restores_source_when_index_registration_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = await create_user_v0(username="complete_fail", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-complete-fail"
+    client = make_aria2_client(add_uri="gid-complete-fail")
     total_bytes = len(b"rollback")
 
     task = await create_user_download(
@@ -341,8 +338,7 @@ async def test_stale_completion_generation_does_not_hash_or_touch_g2_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = await create_user_v0(username="complete_stale_generation", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-complete-g1"
+    client = make_aria2_client(add_uri="gid-complete-g1")
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -384,8 +380,7 @@ async def test_completion_cancel_after_move_restores_source_and_temporary_db(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = await create_user_v0(username="complete_cancel_compensation", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-complete-cancel"
+    client = make_aria2_client(add_uri="gid-complete-cancel")
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -451,8 +446,7 @@ async def test_completion_cancellation_waits_for_scan_worker_before_move(
     temp_db: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     user = await create_user_v0(username="scan_cancel", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-scan-cancel"
+    client = make_aria2_client(add_uri="gid-scan-cancel")
     task = await create_user_download(
         user_id=user["id"], quota_bytes=user["quota_bytes"],
         uri="https://example.com/scan-cancel", resource_key="scan:cancel",

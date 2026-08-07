@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 import time
 from typing import Any, Literal, overload
 
@@ -17,6 +17,12 @@ from app.db.schema import (
     user_storage_usage,
     user_tasks,
     users,
+)
+from app.domain.lifecycle import (
+    RepairClaim,
+    TerminalizationClaim,
+    make_repair_claim,
+    make_terminalization_claim,
 )
 from app.domain.status import (
     ACTIVE_GLOBAL_DOWNLOAD_STATUSES,
@@ -173,10 +179,11 @@ async def _lock_active_download(
     return dict(row) if row else None
 
 
-async def _fail_active_task_row(
+async def _terminate_active_task_row(
     conn: Any,
     task: Any,
     *,
+    terminal_status: str,
     message: str,
     timestamp: int,
 ) -> None:
@@ -195,12 +202,24 @@ async def _fail_active_task_row(
             user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
         )
         .values(
-            status="failed",
+            status=terminal_status,
             reserved_bytes=0,
             error_message=message,
             updated_at_ms=timestamp,
             finished_at_ms=timestamp,
         )
+    )
+
+
+async def _fail_active_task_row(
+    conn: Any,
+    task: Any,
+    *,
+    message: str,
+    timestamp: int,
+) -> None:
+    await _terminate_active_task_row(
+        conn, task, terminal_status="failed", message=message, timestamp=timestamp
     )
 
 
@@ -1176,6 +1195,7 @@ async def assign_submitted_gid(
                     global_downloads.c.id == download_id,
                     global_downloads.c.aria2_gid.is_(None),
                     global_downloads.c.status == "queued",
+                    global_downloads.c.completed_file_id.is_(None),
                 )
                 .values(
                     aria2_gid=gid,
@@ -1851,6 +1871,114 @@ async def complete_active_user_tasks_for_stored_file(
     return user_files_created
 
 
+async def complete_attempt(
+    *,
+    attempt_id: int,
+    expected_gid: str,
+    stored_file_id: int,
+    size_bytes: int,
+    original_name: str,
+    completed_at_ms: int,
+) -> dict[str, Any] | None:
+    """Conditionally transition a live attempt to completed (spec §11.2, §16.1).
+
+    CAS requires: ``id = attempt_id``, ``aria2_gid = expected_gid``,
+    ``status ∈ active``, ``completed_file_id IS NULL``, an active subscriber
+    exists, and the stored file is not pending delete.
+
+    On success: sets ``status = completed``, writes ``completed_file_id``,
+    clears ``aria2_gid``, completes all active user_tasks with the stored
+    file, and returns the updated ``global_downloads`` row.
+    Returns ``None`` when the CAS does not match.
+    """
+    timestamp = now_ms()
+    active_subscriber = exists(
+        select(user_tasks.c.id)
+        .select_from(
+            user_tasks.join(users, users.c.id == user_tasks.c.user_id)
+        )
+        .where(
+            user_tasks.c.global_download_id == attempt_id,
+            user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+            users.c.pending_delete == 0,
+        )
+    )
+    active_stored = exists(
+        select(stored_files.c.id).where(
+            stored_files.c.id == stored_file_id,
+            stored_files.c.pending_delete == 0,
+        )
+    )
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    update(global_downloads)
+                    .where(
+                        global_downloads.c.id == attempt_id,
+                        global_downloads.c.aria2_gid == expected_gid,
+                        global_downloads.c.status.in_(
+                            ACTIVE_GLOBAL_DOWNLOAD_STATUSES
+                        ),
+                        global_downloads.c.completed_file_id.is_(None),
+                        active_subscriber,
+                        active_stored,
+                    )
+                    .values(
+                        status="completed",
+                        completed_file_id=stored_file_id,
+                        total_bytes=size_bytes,
+                        completed_bytes=size_bytes,
+                        size_known=1,
+                        disk_reserved_bytes=0,
+                        completed_at_ms=completed_at_ms,
+                        aria2_gid=None,
+                        error_code=None,
+                        error_message=None,
+                        updated_at_ms=timestamp,
+                    )
+                    .returning(global_downloads)
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            return None
+
+        tasks = (
+            (
+                await conn.execute(
+                    select(user_tasks)
+                    .select_from(
+                        user_tasks.join(
+                            users, users.c.id == user_tasks.c.user_id
+                        )
+                    )
+                    .where(
+                        user_tasks.c.global_download_id == attempt_id,
+                        user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                        users.c.pending_delete == 0,
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+        for task in tasks:
+            await _complete_user_task_with_file(
+                conn,
+                task,
+                stored_file_id=stored_file_id,
+                size_bytes=size_bytes,
+                original_name=original_name,
+                completed_at_ms=completed_at_ms,
+                timestamp=timestamp,
+            )
+    return dict(row)
+
+
 async def repair_completed_download_with_stored_file(
     *,
     global_download_id: int,
@@ -2290,6 +2418,143 @@ async def cancel_active_user_task(
     return dict(row) if row else None
 
 
+async def cancel_user_task_and_maybe_claim_attempt(
+    *,
+    user_id: int,
+    user_task_id: int,
+    expected_gid: str | None,
+    error_message: str = "用户取消",
+) -> tuple[dict[str, Any] | None, TerminalizationClaim | None]:
+    """Atomically cancel a user task and conditionally claim the attempt (§13).
+
+    If other active subscribers remain, only the user task is cancelled and
+    the global attempt stays live.  If this is the last active subscriber,
+    the attempt is CAS-terminalized to ``cancelled`` in the same transaction,
+    preserving ``aria2_gid`` for residual cleanup fencing.
+
+    Returns ``(updated_task, claim)`` when the last subscriber cancels and the
+    CAS succeeds; ``(updated_task, None)`` when other subscribers remain or the
+    CAS does not match (global already terminal, GID changed); ``(None, None)``
+    when the user task is already terminal, does not belong to the user, or
+    does not exist.
+    """
+    timestamp = now_ms()
+    claim: TerminalizationClaim | None = None
+    updated_task: dict[str, Any] | None = None
+    async with transaction() as conn:
+        task = (
+            (
+                await conn.execute(
+                    select(user_tasks).where(
+                        user_tasks.c.id == user_task_id,
+                        user_tasks.c.user_id == user_id,
+                        user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if task is None:
+            return None, None
+
+        download_id = int(task["global_download_id"])
+
+        reserved_bytes = int(task["reserved_bytes"] or 0)
+        if reserved_bytes > 0:
+            await _strict_adjust_usage_reserved(
+                conn,
+                user_id=user_id,
+                delta=-reserved_bytes,
+                timestamp=timestamp,
+            )
+
+        updated_row = (
+            (
+                await conn.execute(
+                    update(user_tasks)
+                    .where(
+                        user_tasks.c.id == user_task_id,
+                        user_tasks.c.user_id == user_id,
+                        user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                    )
+                    .values(
+                        status="cancelled",
+                        reserved_bytes=0,
+                        error_message=error_message,
+                        finished_at_ms=timestamp,
+                        updated_at_ms=timestamp,
+                    )
+                    .returning(user_tasks)
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if updated_row is None:
+            return None, None
+
+        remaining = (
+            await conn.execute(
+                select(func.count())
+                .select_from(user_tasks)
+                .where(
+                    user_tasks.c.global_download_id == download_id,
+                    user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                )
+            )
+        ).scalar_one()
+
+        if int(remaining) > 0:
+            updated_task = dict(updated_row)
+        else:
+            gid_condition = (
+                global_downloads.c.aria2_gid.is_(None)
+                if expected_gid is None
+                else global_downloads.c.aria2_gid == expected_gid
+            )
+            global_row = (
+                (
+                    await conn.execute(
+                        update(global_downloads)
+                        .where(
+                            global_downloads.c.id == download_id,
+                            gid_condition,
+                            global_downloads.c.status.in_(
+                                ACTIVE_GLOBAL_DOWNLOAD_STATUSES
+                            ),
+                            global_downloads.c.completed_file_id.is_(None),
+                        )
+                        .values(
+                            status="cancelled",
+                            disk_reserved_bytes=0,
+                            error_code="user_cancelled",
+                            error_message=error_message,
+                            updated_at_ms=timestamp,
+                        )
+                        .returning(global_downloads)
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            updated_task = dict(updated_row)
+            if global_row is not None:
+                current_gid = global_row["aria2_gid"]
+                w_gids = (current_gid,) if current_gid is not None else ()
+                claim = make_terminalization_claim(
+                    attempt_id=download_id,
+                    expected_current_gid=current_gid,
+                    writer_gids=w_gids,
+                    result_gids=w_gids,
+                    terminal_status="cancelled",
+                    claim_timestamp=timestamp,
+                    error_code="user_cancelled",
+                    error_message=error_message,
+                )
+    return updated_task, claim
+
+
 async def count_active_user_tasks(global_download_id: int) -> int:
     async with transaction() as conn:
         count = (
@@ -2334,3 +2599,150 @@ async def clear_terminal_user_tasks(user_id: int) -> int:
             )
         ).all()
     return len(rows)
+
+
+async def claim_attempt_terminal(
+    *,
+    attempt_id: int,
+    expected_gid: str | None,
+    terminal_status: str,
+    error_code: str | None,
+    error_message: str | None,
+    expected_statuses: Sequence[str],
+    writer_gids: Sequence[str] | None = None,
+    result_gids: Sequence[str] | None = None,
+) -> TerminalizationClaim | None:
+    """Conditionally transition an attempt to a terminal state (spec §10.2).
+
+    Returns a ``TerminalizationClaim`` on success or ``None`` when the CAS
+    does not match (stale GID, already terminal, completed_file_id set).
+    Does not clear ``aria2_gid`` — it is preserved for residual cleanup fencing.
+    """
+    timestamp = now_ms()
+    gid_condition = (
+        global_downloads.c.aria2_gid.is_(None)
+        if expected_gid is None
+        else global_downloads.c.aria2_gid == expected_gid
+    )
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    update(global_downloads)
+                    .where(
+                        global_downloads.c.id == attempt_id,
+                        gid_condition,
+                        global_downloads.c.status.in_(
+                            tuple(expected_statuses)
+                        ),
+                        global_downloads.c.completed_file_id.is_(None),
+                    )
+                    .values(
+                        status=terminal_status,
+                        disk_reserved_bytes=0,
+                        error_code=error_code,
+                        error_message=error_message,
+                        updated_at_ms=timestamp,
+                    )
+                    .returning(global_downloads)
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            return None
+
+        active_tasks = (
+            (
+                await conn.execute(
+                    select(user_tasks).where(
+                        user_tasks.c.global_download_id == attempt_id,
+                        user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+        for task in active_tasks:
+            await _terminate_active_task_row(
+                conn,
+                task,
+                terminal_status=terminal_status,
+                message=error_message or "",
+                timestamp=timestamp,
+            )
+
+    if writer_gids is not None:
+        w_gids = tuple(writer_gids)
+    else:
+        w_gids = (expected_gid,) if expected_gid is not None else ()
+    if result_gids is not None:
+        r_gids = tuple(result_gids)
+    else:
+        r_gids = (expected_gid,) if expected_gid is not None else ()
+    return make_terminalization_claim(
+        attempt_id=attempt_id,
+        expected_current_gid=expected_gid,
+        writer_gids=w_gids,
+        result_gids=r_gids,
+        terminal_status=terminal_status,
+        claim_timestamp=timestamp,
+        error_code=error_code,
+        error_message=error_message,
+    )
+
+
+async def claim_terminal_reclaim(
+    *,
+    attempt_id: int,
+    expected_gid: str | None,
+) -> RepairClaim | None:
+    """CAS-confirm an already-terminal attempt for physical reclaim (§10.4).
+
+    Does not change business terminal state.  Returns a ``RepairClaim`` when
+    the attempt is still ``failed``/``cancelled`` with an unchanged GID, or
+    ``None`` otherwise.
+    """
+    timestamp = now_ms()
+    gid_condition = (
+        global_downloads.c.aria2_gid.is_(None)
+        if expected_gid is None
+        else global_downloads.c.aria2_gid == expected_gid
+    )
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    select(
+                        global_downloads.c.id,
+                        global_downloads.c.status,
+                        global_downloads.c.aria2_gid,
+                    ).where(
+                        global_downloads.c.id == attempt_id,
+                        gid_condition,
+                        global_downloads.c.status.in_(
+                            ("failed", "cancelled")
+                        ),
+                        global_downloads.c.completed_file_id.is_(None),
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            return None
+
+    repair_gids = (
+        (expected_gid,) if expected_gid is not None else ()
+    )
+    return make_repair_claim(
+        attempt_id=attempt_id,
+        expected_current_gid=expected_gid,
+        writer_gids=repair_gids,
+        result_gids=repair_gids,
+        terminal_status=str(row["status"]),
+        claim_timestamp=timestamp,
+    )

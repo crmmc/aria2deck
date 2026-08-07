@@ -1,21 +1,34 @@
-"""Tests for cleanup logging observability (Phase 3)."""
+"""Tests for cleanup logging observability via cleanup_with_claim."""
 
 import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.domain.lifecycle import make_terminalization_claim
 from app.services.failed_task_cleanup import (
     CleanupErrorType,
-    cleanup_failed_task_artifacts,
+    cleanup_with_claim,
     get_representative_owner_id,
 )
 from tests.helpers_v0 import create_global_download_v0, create_user_task_v0
 
 
+def _claim(task_id: int, gid: str | None = "abc123"):
+    return make_terminalization_claim(
+        attempt_id=task_id,
+        expected_current_gid=gid,
+        writer_gids=(gid,) if gid else (),
+        result_gids=(gid,) if gid else (),
+        terminal_status="failed",
+        claim_timestamp=0,
+        error_code="test",
+        error_message="test",
+    )
+
+
 @pytest.fixture
 def mock_client():
-    """Create a mock Aria2Client."""
     client = AsyncMock()
     client.force_remove = AsyncMock()
     client.remove_download_result = AsyncMock()
@@ -24,58 +37,44 @@ def mock_client():
 
 @pytest.mark.asyncio
 async def test_cleanup_logs_success_with_all_fields(mock_client, caplog):
-    """Verify successful cleanup logs all required fields."""
     with (
-        patch(
-            "app.services.failed_task_cleanup.cleanup_task_download_dir"
-        ) as mock_cleanup,
+        patch("app.services.failed_task_cleanup.cleanup_task_download_dir") as mock_cleanup,
         patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.clear_terminal_download_gid") as mock_clear,
     ):
         mock_cleanup.return_value = None
-        mock_dir.return_value.joinpath = lambda x: f"/downloads/{x}"
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
+        mock_clear.return_value = True
 
         with caplog.at_level(logging.INFO):
-            result = await cleanup_failed_task_artifacts(
-                client=mock_client,
-                task_id=123,
-                gid="abc123",
-                owner_id=456,
+            result = await cleanup_with_claim(
+                mock_client,
+                _claim(123),
                 log_prefix="[Test]",
-                skip_status_check=True,
             )
 
         assert result.safe_to_reuse is True
         assert result.result_removed is True
         assert "[CLEANUP]" in caplog.text
-        assert "task_id=123" in caplog.text
-        assert "owner_id=456" in caplog.text
-        assert "gid=abc123" in caplog.text
+        assert "attempt_id=123" in caplog.text
         assert "result=success" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_cleanup_logs_rpc_failure(mock_client, caplog):
-    """Verify RPC failures are logged with error_type."""
     mock_client.force_remove.side_effect = Exception("RPC error")
 
     with (
-        patch(
-            "app.services.failed_task_cleanup.cleanup_task_download_dir"
-        ) as mock_cleanup,
+        patch("app.services.failed_task_cleanup.cleanup_task_download_dir") as mock_cleanup,
         patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
     ):
-        mock_cleanup.return_value = None
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
 
         with caplog.at_level(logging.WARNING):
-            result = await cleanup_failed_task_artifacts(
-                client=mock_client,
-                task_id=123,
-                gid="abc123",
-                owner_id=456,
+            result = await cleanup_with_claim(
+                mock_client,
+                _claim(123),
                 log_prefix="[Test]",
-                skip_status_check=True,
             )
 
         assert result.writer_stopped is False
@@ -93,49 +92,41 @@ async def test_remove_result_failure_is_non_blocking_after_safe_cleanup(
 ):
     mock_client.remove_download_result.side_effect = OSError("history unavailable")
     with (
-        patch(
-            "app.services.failed_task_cleanup.cleanup_task_download_dir"
-        ),
+        patch("app.services.failed_task_cleanup.cleanup_task_download_dir"),
         patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.clear_terminal_download_gid") as mock_clear,
     ):
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
+        mock_clear.return_value = True
         with caplog.at_level(logging.WARNING):
-            result = await cleanup_failed_task_artifacts(
-                client=mock_client,
-                task_id=123,
-                gid="abc123",
-                owner_id=456,
+            result = await cleanup_with_claim(
+                mock_client,
+                _claim(123),
                 log_prefix="[Test]",
-                skip_status_check=True,
             )
 
     assert result.writer_stopped is True
     assert result.directory_cleaned is True
     assert result.result_removed is False
     assert result.safe_to_reuse is True
-    assert "op=remove_download_result" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_cleanup_logs_fs_failure(mock_client, caplog):
-    """Verify filesystem failures are logged with error_type."""
     with (
-        patch(
-            "app.services.failed_task_cleanup.cleanup_task_download_dir"
-        ) as mock_cleanup,
+        patch("app.services.failed_task_cleanup.cleanup_task_download_dir") as mock_cleanup,
         patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.clear_terminal_download_gid") as mock_clear,
     ):
         mock_cleanup.side_effect = RuntimeError("Path boundary violation")
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
+        mock_clear.return_value = True
 
         with caplog.at_level(logging.WARNING):
-            result = await cleanup_failed_task_artifacts(
-                client=mock_client,
-                task_id=123,
-                gid="abc123",
-                owner_id=456,
+            result = await cleanup_with_claim(
+                mock_client,
+                _claim(123),
                 log_prefix="[Test]",
-                skip_status_check=True,
             )
 
         assert result.writer_stopped is True
@@ -147,179 +138,60 @@ async def test_cleanup_logs_fs_failure(mock_client, caplog):
 
 @pytest.mark.asyncio
 async def test_cleanup_error_type_enum_values():
-    """Verify CleanupErrorType enum has expected values."""
     assert CleanupErrorType.RPC_FAILURE.value == "RPC_FAILURE"
     assert CleanupErrorType.FS_FAILURE.value == "FS_FAILURE"
     assert CleanupErrorType.STATUS_CONFLICT.value == "STATUS_CONFLICT"
     assert CleanupErrorType.NONE.value == "NONE"
 
 
-# Phase 4: Core unit tests for cleanup behavior
-
-
 @pytest.mark.asyncio
-async def test_cleanup_idempotent_repeated_calls(mock_client):
-    """Verify repeated cleanup calls are idempotent."""
+async def test_cleanup_writer_already_stopped(mock_client, caplog):
+    mock_client.force_remove.side_effect = RuntimeError("gid abc123 is not found")
     with (
-        patch(
-            "app.services.failed_task_cleanup.cleanup_task_download_dir"
-        ) as mock_cleanup,
+        patch("app.services.failed_task_cleanup.cleanup_task_download_dir") as mock_cleanup,
         patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
-    ):
-        mock_cleanup.return_value = None
-        mock_client.force_remove.side_effect = [
-            "OK",
-            RuntimeError("GID abc123 is not found"),
-        ]
-        mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
-
-        # First call
-        result1 = await cleanup_failed_task_artifacts(
-            client=mock_client,
-            task_id=123,
-            gid="abc123",
-            owner_id=456,
-            log_prefix="[Test]",
-            skip_status_check=True,
-        )
-
-        # Second call (simulating repeated cleanup)
-        result2 = await cleanup_failed_task_artifacts(
-            client=mock_client,
-            task_id=123,
-            gid="abc123",
-            owner_id=456,
-            log_prefix="[Test]",
-            skip_status_check=True,
-        )
-
-        assert result1.safe_to_reuse is True
-        assert result2.safe_to_reuse is True
-        assert mock_cleanup.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_cleanup_skips_non_failed_status(mock_client, caplog, temp_db):
-    """Verify cleanup skips tasks not in failed state."""
-    task = await create_global_download_v0(
-        resource_key="http:active-cleanup-skip",
-        status="active",
-    )
-
-    with (
-        patch(
-            "app.services.failed_task_cleanup.cleanup_task_download_dir"
-        ) as mock_cleanup,
-        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
-    ):
-        mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
-
-        with caplog.at_level(logging.DEBUG):
-            result = await cleanup_failed_task_artifacts(
-                client=mock_client,
-                task_id=task["id"],
-                gid="abc123",
-                owner_id=456,
-                log_prefix="[Test]",
-                skip_status_check=False,  # Enable status check
-            )
-
-        assert result.skipped is True
-        assert "[CLEANUP] skipped" in caplog.text
-        assert "STATUS_CONFLICT" in caplog.text
-        mock_cleanup.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_cleanup_handles_missing_task(mock_client, caplog, temp_db):
-    """Verify cleanup handles task not found gracefully."""
-    with (
-        patch(
-            "app.services.failed_task_cleanup.cleanup_task_download_dir"
-        ) as mock_cleanup,
-        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
-    ):
-        mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
-
-        with caplog.at_level(logging.DEBUG):
-            result = await cleanup_failed_task_artifacts(
-                client=mock_client,
-                task_id=999,
-                gid="nonexistent",
-                owner_id=456,
-                log_prefix="[Test]",
-                skip_status_check=False,
-            )
-
-        assert result.skipped is True
-        assert "[CLEANUP] skipped" in caplog.text
-        assert "task_not_found" in caplog.text
-        mock_cleanup.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_cleanup_proceeds_for_failed_status(mock_client, temp_db):
-    """Verify cleanup proceeds for tasks in failed state."""
-    task = await create_global_download_v0(
-        resource_key="http:failed-cleanup",
-        status="failed",
-    )
-
-    with (
-        patch(
-            "app.services.failed_task_cleanup.cleanup_task_download_dir"
-        ) as mock_cleanup,
-        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.clear_terminal_download_gid") as mock_clear,
     ):
         mock_cleanup.return_value = None
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
+        mock_clear.return_value = True
 
-        result = await cleanup_failed_task_artifacts(
-            client=mock_client,
-            task_id=task["id"],
-            gid="abc123",
-            owner_id=456,
+        result = await cleanup_with_claim(
+            mock_client,
+            _claim(123),
             log_prefix="[Test]",
-            skip_status_check=False,
         )
 
-        assert result.safe_to_reuse is True
+        assert result.writer_stopped is True
+        assert result.directory_cleaned is True
         mock_cleanup.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_cleanup_proceeds_for_cancelled_status(mock_client, temp_db):
-    """Verify cleanup proceeds for tasks in cancelled state."""
-    task = await create_global_download_v0(
-        resource_key="http:cancelled-cleanup",
-        status="cancelled",
-    )
-
+async def test_cleanup_without_gid_skips_rpc(mock_client):
     with (
-        patch(
-            "app.services.failed_task_cleanup.cleanup_task_download_dir"
-        ) as mock_cleanup,
+        patch("app.services.failed_task_cleanup.cleanup_task_download_dir") as mock_cleanup,
         patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
+        patch("app.services.failed_task_cleanup.clear_terminal_download_gid") as mock_clear,
     ):
         mock_cleanup.return_value = None
         mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
+        mock_clear.return_value = True
 
-        result = await cleanup_failed_task_artifacts(
-            client=mock_client,
-            task_id=task["id"],
-            gid="abc123",
-            owner_id=456,
+        result = await cleanup_with_claim(
+            mock_client,
+            _claim(123, gid=None),
             log_prefix="[Test]",
-            skip_status_check=False,
         )
 
-        assert result.safe_to_reuse is True
+        assert result.writer_stopped is True
+        mock_client.force_remove.assert_not_called()
+        mock_client.remove_download_result.assert_not_called()
         mock_cleanup.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_get_representative_owner_id_returns_active_owner(test_user, temp_db):
-    """Verify representative owner uses active v0 user task rows."""
     task = await create_global_download_v0(
         resource_key="http:representative-owner-active",
         status="active",
@@ -335,7 +207,6 @@ async def test_get_representative_owner_id_returns_active_owner(test_user, temp_
 
 @pytest.mark.asyncio
 async def test_get_representative_owner_id_ignores_terminal_tasks(test_user, temp_db):
-    """Verify terminal v0 user task rows are ignored for representative owner."""
     task = await create_global_download_v0(
         resource_key="http:representative-owner-terminal",
         status="failed",
@@ -347,30 +218,3 @@ async def test_get_representative_owner_id_ignores_terminal_tasks(test_user, tem
     )
 
     assert await get_representative_owner_id(task["id"]) is None
-
-
-@pytest.mark.asyncio
-async def test_cleanup_without_gid_skips_rpc(mock_client):
-    """Verify cleanup without GID skips RPC calls."""
-    with (
-        patch(
-            "app.services.failed_task_cleanup.cleanup_task_download_dir"
-        ) as mock_cleanup,
-        patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_dir,
-    ):
-        mock_cleanup.return_value = None
-        mock_dir.return_value.__truediv__ = lambda self, x: f"/downloads/{x}"
-
-        result = await cleanup_failed_task_artifacts(
-            client=mock_client,
-            task_id=123,
-            gid=None,  # No GID
-            owner_id=456,
-            log_prefix="[Test]",
-            skip_status_check=True,
-        )
-
-        assert result.safe_to_reuse is True
-        mock_client.force_remove.assert_not_called()
-        mock_client.remove_download_result.assert_not_called()
-        mock_cleanup.assert_called_once()

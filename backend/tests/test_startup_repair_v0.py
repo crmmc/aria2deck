@@ -19,6 +19,7 @@ from app.services.repair import repair_task_associations, run_startup_repair
 from app.services.storage import get_task_download_dir
 from app.services.storage_index import StorageScan
 from app.services.usage_service import get_usage, reserve_bytes
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_task_v0,
@@ -336,7 +337,7 @@ async def test_startup_reconciliation_fails_direct_http_and_is_idempotent(
     user, download, task, task_dir = await _create_active_http_download(
         "direct_http", gid="gid-direct-http"
     )
-    client = AsyncMock()
+    client = make_aria2_client()
     client.get_uris.return_value = [
         {"uri": "https://example.com/direct_http.bin", "status": "used"}
     ]
@@ -402,12 +403,11 @@ async def test_startup_reconciliation_preserves_state_when_remote_stop_fails(
     user, download, task, task_dir = await _create_active_http_download(
         f"stop_failure_{uri_state}", gid=gid
     )
-    client = AsyncMock()
+    client = make_aria2_client(force_remove=RuntimeError(secret))
     if uri_state == "direct":
         client.get_uris.return_value = [{"uri": "https://example.com/direct.bin"}]
     else:
         client.get_uris.side_effect = RuntimeError("getUris unavailable")
-    client.force_remove.side_effect = RuntimeError(secret)
 
     with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError) as exc_info:
         await reconcile_legacy_http_downloads_v0(client)
@@ -429,9 +429,8 @@ async def test_startup_reconciliation_accepts_missing_gid_as_stopped(
     user, download, task, task_dir = await _create_active_http_download(
         "already_missing", gid=gid
     )
-    client = AsyncMock()
+    client = make_aria2_client(force_remove=RuntimeError(f"GID#{gid} not found"))
     client.get_uris.return_value = [{"uri": "https://example.com/direct.bin"}]
-    client.force_remove.side_effect = RuntimeError(f"GID#{gid} not found")
 
     assert await reconcile_legacy_http_downloads_v0(client) == 1
 
@@ -449,7 +448,7 @@ async def test_startup_reconciliation_fails_direct_active_like_http(
     user, download, task, task_dir = await _create_active_http_download(
         f"direct_{status}", gid=gid, status=status
     )
-    client = AsyncMock()
+    client = make_aria2_client()
     client.get_uris.return_value = [{"uri": "https://example.com/direct.bin"}]
 
     assert await reconcile_legacy_http_downloads_v0(client) == 1
@@ -480,7 +479,7 @@ async def test_startup_reconciliation_rejects_malformed_internal_uri(
         "wrong_id": f"{base}/_internal/fetch/{int(download['id']) + 1}/0",
         "foreign_base": f"https://foreign.internal{path}",
     }[case]
-    client = AsyncMock()
+    client = make_aria2_client()
     client.get_uris.return_value = [{"uri": malformed_uri}]
 
     assert await reconcile_legacy_http_downloads_v0(client) == 1
@@ -499,7 +498,7 @@ async def test_startup_reconciliation_preserves_valid_gateway_http(
     user, download, task, task_dir = await _create_active_http_download(
         f"gateway_http_{status}", gid=gid, status=status
     )
-    client = AsyncMock()
+    client = make_aria2_client()
     client.get_uris.return_value = [
         {"uri": f"{get_internal_base_url()}/_internal/fetch/{download['id']}/0"}
     ]
@@ -528,7 +527,7 @@ async def test_startup_reconciliation_fails_unverifiable_http_and_releases_reser
     user, download, task, task_dir = await _create_active_http_download(
         f"unverifiable_{mode}", gid=gid, status=status
     )
-    client = AsyncMock()
+    client = make_aria2_client()
     if mode == "get_uris_error":
         client.get_uris.side_effect = RuntimeError("aria2 unavailable")
     else:

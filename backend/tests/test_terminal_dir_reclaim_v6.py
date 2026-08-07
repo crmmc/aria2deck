@@ -22,6 +22,7 @@ from app.services.aria2_lifecycle_service import (
 from app.services.download_service import complete_global_download, create_user_download
 from app.services.repair import purge_terminal_download_dirs
 from app.services.storage import get_downloading_dir
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_file_v0,
@@ -54,8 +55,7 @@ def _task_dir(download_id: int) -> Path:
 @pytest.mark.asyncio
 async def test_growth_pause_failed_reclaims_download_dir(temp_db: str) -> None:
     user = await create_user_v0(username="growth_pause_reclaim", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-growth-pause"
+    client = make_aria2_client(add_uri="gid-growth-pause", pause=OSError("pause failed"))
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -69,7 +69,6 @@ async def test_growth_pause_failed_reclaims_download_dir(temp_db: str) -> None:
     )
     download_id = int(task["global_download_id"])
     task_dir = _task_dir(download_id)
-    client.pause.side_effect = OSError("pause failed")
 
     result = await coordinate_reported_size(
         client=client,
@@ -84,7 +83,7 @@ async def test_growth_pause_failed_reclaims_download_dir(temp_db: str) -> None:
     )
 
     stored = await _fetch_global(download_id)
-    assert result["outcome"] == "pause_failed"
+    assert result["outcome"] == "terminalized"
     assert stored["status"] == "failed"
     assert stored["error_code"] == "growth_pause_failed"
     assert not task_dir.exists()
@@ -122,7 +121,7 @@ async def test_repair_inconsistent_completed_reclaims_download_dir(
             .values(updated_at_ms=old_timestamp)
         )
 
-    client = AsyncMock()
+    client = make_aria2_client()
     await repair_inconsistent_completed_downloads_v0(client=client)
 
     updated = await _fetch_global(download["id"])
@@ -156,7 +155,7 @@ async def test_stale_queued_cleanup_reclaims_download_dir(temp_db: str) -> None:
             .values(updated_at_ms=old_timestamp)
         )
 
-    client = AsyncMock()
+    client = make_aria2_client()
     await cleanup_stale_queued_downloads_v0(client=client)
 
     updated = await _fetch_global(download["id"])
@@ -169,8 +168,7 @@ async def test_stale_queued_cleanup_reclaims_download_dir(temp_db: str) -> None:
 @pytest.mark.asyncio
 async def test_completed_success_reclaims_download_dir_shell(temp_db: str) -> None:
     user = await create_user_v0(username="complete_shell_reclaim", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-complete-shell"
+    client = make_aria2_client(add_uri="gid-complete-shell")
     payload = b"complete-shell-payload"
     task = await create_user_download(
         user_id=user["id"],
@@ -313,7 +311,7 @@ async def test_purge_keeps_completed_without_index_and_recovery_indexes(
     assert task_dir.exists()
     assert purge_before["found"] == 0
 
-    client = AsyncMock()
+    client = make_aria2_client()
     result = await recover_completed_downloads_pending_index(client)
     assert result["found"] == 1
     assert result["recovered"] == 1
@@ -362,7 +360,7 @@ async def test_recover_failed_restore_keeps_only_copy(
         _boom,
     )
 
-    client = AsyncMock()
+    client = make_aria2_client()
     result = await repair_module.recover_completed_downloads_pending_index(client)
     assert result["found"] == 1
     assert result["failed"] == 1
@@ -385,8 +383,7 @@ async def test_complete_global_download_still_indexes_after_shell_cleanup_helper
 ) -> None:
     """Sanity: complete_global_download itself still moves files into store."""
     user = await create_user_v0(username="complete_store_sanity", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-store-sanity"
+    client = make_aria2_client(add_uri="gid-store-sanity")
     payload = b"store-sanity"
     task = await create_user_download(
         user_id=user["id"],

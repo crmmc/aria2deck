@@ -15,6 +15,7 @@ from app.services.download_service import (
 )
 from app.services.internal_fetch import CAPABILITY_HEADER, verify_capability
 from app.services.storage import get_store_path_for_hash
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_file_v0,
@@ -40,11 +41,10 @@ def _valid_rpc_torrent(*, extra: tuple[tuple[bytes, bytes], ...] = ()) -> str:
 @pytest.mark.asyncio
 async def test_rpc_tell_active_uses_user_tasks(temp_db: str) -> None:
     user = await create_user_v0(username="rpc_active")
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-rpc-active"
-    client.tell_active.return_value = [
-        {"gid": "gid-rpc-active", "status": "active", "downloadSpeed": "10"}
-    ]
+    client = make_aria2_client(
+        add_uri="gid-rpc-active",
+        tell_active=[{"gid": "gid-rpc-active", "status": "active", "downloadSpeed": "10"}],
+    )
     await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -70,7 +70,7 @@ async def test_rpc_purge_download_result_deletes_terminal_user_task(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="rpc_stopped")
-    client = AsyncMock()
+    client = make_aria2_client()
     handler = Aria2RpcHandler(user["id"], client)
 
     result = await handler.handle("aria2.purgeDownloadResult", [])
@@ -88,15 +88,16 @@ async def test_rpc_add_uri_creates_v0_task_and_returns_gid(
         lambda *_args, **_kwargs: [(None, None, None, None, ("93.184.216.34", 443))],
     )
     user = await create_user_v0(username="rpc_add_uri")
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-rpc-add-uri"
-    client.tell_status.return_value = {
-        "gid": "gid-rpc-add-uri",
-        "status": "paused",
-        "totalLength": "128",
-        "completedLength": "0",
-        "files": [{"length": "128", "selected": "true"}],
-    }
+    client = make_aria2_client(
+        add_uri="gid-rpc-add-uri",
+        tell_status={
+            "gid": "gid-rpc-add-uri",
+            "status": "paused",
+            "totalLength": "128",
+            "completedLength": "0",
+            "files": [{"length": "128", "selected": "true"}],
+        },
+    )
     handler = Aria2RpcHandler(user["id"], client)
 
     result = await handler.handle(
@@ -144,8 +145,7 @@ async def test_rpc_add_uri_creates_v0_task_and_returns_gid(
 @pytest.mark.asyncio
 async def test_rpc_add_uri_canonicalizes_magnet_before_submit(temp_db: str) -> None:
     user = await create_user_v0(username="rpc_magnet_canonical")
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-rpc-magnet"
+    client = make_aria2_client(add_uri="gid-rpc-magnet")
     handler = Aria2RpcHandler(user["id"], client)
     canonical_uri = f"magnet:?xt=urn:btih:{MAGNET_INFO_HASH}"
     markers = (
@@ -175,22 +175,23 @@ async def test_rpc_http_auth_contexts_do_not_share_global_download(
 ) -> None:
     user_a = await create_user_v0(username="rpc_auth_a")
     user_b = await create_user_v0(username="rpc_auth_b")
-    client = AsyncMock()
-    client.add_uri.side_effect = ["gid-rpc-auth-a", "gid-rpc-auth-b"]
-    client.tell_status.side_effect = [
-        {
-            "status": "paused",
-            "totalLength": "8",
-            "completedLength": "0",
-            "files": [{"selected": "true", "length": "8"}],
-        },
-        {
-            "status": "paused",
-            "totalLength": "8",
-            "completedLength": "0",
-            "files": [{"selected": "true", "length": "8"}],
-        },
-    ]
+    client = make_aria2_client(
+        add_uri=["gid-rpc-auth-a", "gid-rpc-auth-b"],
+        tell_status=[
+            {
+                "status": "paused",
+                "totalLength": "8",
+                "completedLength": "0",
+                "files": [{"selected": "true", "length": "8"}],
+            },
+            {
+                "status": "paused",
+                "totalLength": "8",
+                "completedLength": "0",
+                "files": [{"selected": "true", "length": "8"}],
+            },
+        ],
+    )
     uri = "https://example.com/protected.bin"
 
     await Aria2RpcHandler(user_a["id"], client).handle(
@@ -226,7 +227,7 @@ async def test_rpc_add_uri_rejects_unsafe_primary_before_database_write(
     uri: str,
 ) -> None:
     user = await create_user_v0(username=f"rpc_unsafe_{len(uri)}")
-    client = AsyncMock()
+    client = make_aria2_client()
     handler = Aria2RpcHandler(user["id"], client)
 
     with pytest.raises(RpcError) as exc_info:
@@ -244,8 +245,7 @@ async def test_multicall_add_uri_failure_redacts_response_task_and_logs(
 ) -> None:
     secret = "fake-capability.multicall-add-uri-secret"
     user = await create_user_v0(username="rpc_multicall_submit_failure")
-    client = AsyncMock()
-    client.add_uri.side_effect = RuntimeError(secret)
+    client = make_aria2_client(add_uri=RuntimeError(secret))
     handler = Aria2RpcHandler(user["id"], client)
 
     with caplog.at_level(logging.WARNING):
@@ -279,8 +279,7 @@ async def test_multicall_add_uri_failure_redacts_response_task_and_logs(
 @pytest.mark.asyncio
 async def test_rpc_add_uri_rejects_path_like_out_option(temp_db: str) -> None:
     user = await create_user_v0(username="rpc_add_uri_bad_out")
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-rpc-bad-out"
+    client = make_aria2_client(add_uri="gid-rpc-bad-out")
     handler = Aria2RpcHandler(user["id"], client)
 
     with pytest.raises(RpcError) as exc_info:
@@ -326,7 +325,7 @@ async def test_rpc_add_uri_rejects_duplicate_completed_magnet_without_renaming(
         status="completed",
         display_name="real-magnet-name",
     )
-    client = AsyncMock()
+    client = make_aria2_client()
     handler = Aria2RpcHandler(user["id"], client)
 
     with pytest.raises(RpcError) as exc_info:
@@ -346,8 +345,7 @@ async def test_rpc_add_uri_rejects_duplicate_completed_magnet_without_renaming(
 @pytest.mark.asyncio
 async def test_rpc_add_torrent_creates_v0_task_and_returns_gid(temp_db: str) -> None:
     user = await create_user_v0(username="rpc_add_torrent")
-    client = AsyncMock()
-    client.add_torrent.return_value = "gid-rpc-add-torrent"
+    client = make_aria2_client(add_torrent="gid-rpc-add-torrent")
     handler = Aria2RpcHandler(user["id"], client)
     torrent_data = _valid_rpc_torrent()
 
@@ -383,7 +381,7 @@ async def test_rpc_add_torrent_rejects_caller_webseed_before_submit(
     webseed: str,
 ) -> None:
     user = await create_user_v0(username=f"rpc_webseed_{len(webseed)}")
-    client = AsyncMock()
+    client = make_aria2_client()
     handler = Aria2RpcHandler(user["id"], client)
 
     with pytest.raises(RpcError) as exc_info:
@@ -397,7 +395,7 @@ async def test_rpc_add_torrent_rejects_caller_webseed_before_submit(
 @pytest.mark.asyncio
 async def test_rpc_add_torrent_rejects_bt_tracker_before_submit(temp_db: str) -> None:
     user = await create_user_v0(username="rpc_bt_tracker")
-    client = AsyncMock()
+    client = make_aria2_client()
     handler = Aria2RpcHandler(user["id"], client)
 
     with pytest.raises(RpcError) as exc_info:
@@ -418,7 +416,7 @@ async def test_rpc_add_torrent_rejects_embedded_webseed_before_submit(
     key: bytes,
 ) -> None:
     user = await create_user_v0(username=f"rpc_embedded_{key.decode()}")
-    client = AsyncMock()
+    client = make_aria2_client()
     handler = Aria2RpcHandler(user["id"], client)
     torrent = _valid_rpc_torrent(
         extra=((key, _bencode_bytes(b"http://127.0.0.1/private")),)
@@ -436,8 +434,7 @@ async def test_rpc_add_torrent_rejects_embedded_webseed_before_submit(
 @pytest.mark.asyncio
 async def test_rpc_add_torrent_rejects_duplicate_torrent(temp_db: str) -> None:
     user = await create_user_v0(username="rpc_duplicate_torrent")
-    client = AsyncMock()
-    client.add_torrent.return_value = "gid-rpc-duplicate-torrent"
+    client = make_aria2_client(add_torrent="gid-rpc-duplicate-torrent")
     handler = Aria2RpcHandler(user["id"], client)
     torrent_data = _valid_rpc_torrent()
 

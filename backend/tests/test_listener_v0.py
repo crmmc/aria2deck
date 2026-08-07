@@ -15,6 +15,7 @@ from app.repositories.downloads import mark_global_download_failed
 from app.services import aria2_lifecycle_service
 from app.services.usage_service import get_usage, reserve_bytes
 from app.services.storage import get_task_download_dir
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_file_v0,
@@ -67,11 +68,10 @@ async def test_listener_progress_only_size_fails_unknown_download(
     task = await create_user_task_v0(
         user_id=user["id"], global_download_id=download["id"], status="active"
     )
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-listener-progress-only", "status": "active",
         "totalLength": "0", "completedLength": "123", "files": [],
-    }
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-listener-progress-only", "start")
@@ -125,15 +125,13 @@ async def test_duplicate_completion_creates_one_stored_file_and_user_file_per_ac
     source_file = task_dir / "payload.bin"
     source_file.write_bytes(b"payload")
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-listener-complete",
         "status": "complete",
         "totalLength": "7",
         "completedLength": "7",
         "files": [{"path": str(source_file)}],
-    }
-    client.remove_download_result.return_value = "OK"
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await asyncio.gather(
@@ -180,8 +178,7 @@ async def test_completion_with_followed_by_changes_gid_without_creating_files(
         global_download_id=download["id"],
         status="active",
     )
-    client = AsyncMock()
-    client.tell_status.side_effect = [
+    client = make_aria2_client(tell_status=[
         {
             "gid": "gid-metadata",
             "status": "complete",
@@ -198,8 +195,7 @@ async def test_completion_with_followed_by_changes_gid_without_creating_files(
             "files": [{"path": str(get_task_download_dir(download["id"]) / "file.bin"), "length": "2048"}],
             "bittorrent": {"info": {"name": "payload"}},
         },
-    ]
-    client.remove_download_result.return_value = "OK"
+    ])
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-metadata", "complete")
@@ -240,8 +236,7 @@ async def test_event_for_followed_task_uses_following_to_update_original_gid(
         global_download_id=download["id"],
         status="waiting",
     )
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-real",
         "status": "active",
         "following": "gid-metadata",
@@ -249,7 +244,7 @@ async def test_event_for_followed_task_uses_following_to_update_original_gid(
         "completedLength": "1024",
         "bittorrent": {"info": {"name": "Real Torrent"}},
         "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "4096"}],
-    }
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-real", "start")
@@ -284,8 +279,7 @@ async def test_completion_with_followed_by_refreshes_real_task_name_and_size(
         global_download_id=download["id"],
         status="active",
     )
-    client = AsyncMock()
-    client.tell_status.side_effect = [
+    client = make_aria2_client(tell_status=[
         {
             "gid": "gid-metadata",
             "status": "complete",
@@ -302,8 +296,7 @@ async def test_completion_with_followed_by_refreshes_real_task_name_and_size(
             "bittorrent": {"info": {"name": "Real Torrent"}},
             "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "4096"}],
         },
-    ]
-    client.remove_download_result.return_value = "OK"
+    ])
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-metadata", "complete")
@@ -342,8 +335,7 @@ async def test_completion_with_followed_by_complete_real_status_indexes_payload(
     source_file = task_dir / "payload.bin"
     source_file.write_bytes(b"abcde")
 
-    client = AsyncMock()
-    client.tell_status.side_effect = [
+    client = make_aria2_client(tell_status=[
         {
             "gid": "gid-metadata-complete",
             "status": "complete",
@@ -361,8 +353,7 @@ async def test_completion_with_followed_by_complete_real_status_indexes_payload(
             "bittorrent": {"info": {"name": "payload.bin"}},
             "files": [{"path": str(source_file), "length": "5"}],
         },
-    ]
-    client.remove_download_result.return_value = "OK"
+    ])
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-metadata-complete", "complete")
@@ -409,15 +400,14 @@ async def test_start_event_replaces_exact_torrent_synthetic_task_name(
         status="active",
         display_name=f"torrent-{resource_key[:12]}",
     )
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-listener-torrent-placeholder",
         "status": "active",
         "totalLength": "4096",
         "completedLength": "1024",
         "bittorrent": {"info": {"name": "Real Torrent"}},
         "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "4096"}],
-    }
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-listener-torrent-placeholder", "start")
@@ -447,14 +437,13 @@ async def test_start_event_preserves_torrent_prefixed_http_user_task_name(
         status="active",
         display_name="torrent-release.iso",
     )
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-listener-http-torrent-prefix",
         "status": "active",
         "totalLength": "4096",
         "completedLength": "1024",
         "files": [{"path": "/downloads/renamed-by-server.iso", "length": "4096"}],
-    }
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-listener-http-torrent-prefix", "start")
@@ -492,8 +481,7 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
     metadata_file = task_dir / "metadata"
     metadata_file.write_bytes(b"short")
 
-    client = AsyncMock()
-    client.tell_status.side_effect = [
+    client = make_aria2_client(tell_status=[
         {
             "gid": "gid-metadata",
             "status": "complete",
@@ -529,8 +517,7 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
             "bittorrent": {"info": {"name": "Real Torrent"}},
             "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "4096"}],
         },
-    ]
-    client.remove_download_result.return_value = "OK"
+    ])
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-metadata", "complete")
@@ -596,25 +583,25 @@ async def test_metadata_completion_discovers_followed_task_by_following_gid(
             }
         ],
     }
-    client = AsyncMock()
-    client.tell_status.side_effect = [
-        metadata_status,
-        metadata_status,
-        {
-            "gid": "gid-real",
-            "status": "active",
-            "totalLength": "4096",
-            "completedLength": "512",
-            "bittorrent": {"info": {"name": "Real Torrent"}},
-            "files": [
-                {"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "4096"}
-            ],
-        },
-    ]
-    client.tell_active.return_value = [
-        {"gid": "gid-real", "status": "active", "followingGid": "gid-metadata"}
-    ]
-    client.remove_download_result.return_value = "OK"
+    client = make_aria2_client(
+        tell_status=[
+            metadata_status,
+            metadata_status,
+            {
+                "gid": "gid-real",
+                "status": "active",
+                "totalLength": "4096",
+                "completedLength": "512",
+                "bittorrent": {"info": {"name": "Real Torrent"}},
+                "files": [
+                    {"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "4096"}
+                ],
+            },
+        ],
+        tell_active=[
+            {"gid": "gid-real", "status": "active", "followingGid": "gid-metadata"}
+        ],
+    )
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-metadata", "complete")
@@ -668,8 +655,7 @@ async def test_metadata_completion_without_followed_by_does_not_index_metadata_f
     metadata_file = task_dir / "metadata"
     metadata_file.write_bytes(b"metadata")
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-metadata",
         "status": "complete",
         "totalLength": "8",
@@ -681,8 +667,7 @@ async def test_metadata_completion_without_followed_by_does_not_index_metadata_f
                 "completedLength": "8",
             }
         ],
-    }
-    client.remove_download_result.return_value = "OK"
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-metadata", "complete")
@@ -729,16 +714,13 @@ async def test_completed_download_missing_task_dir_uses_directory_error(
         display_name="payload.bin",
     )
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-missing-dir",
         "status": "complete",
         "totalLength": "7",
         "completedLength": "7",
         "files": [],
-    }
-    client.force_remove.return_value = "OK"
-    client.remove_download_result.return_value = "OK"
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-missing-dir", "complete")
@@ -778,16 +760,13 @@ async def test_completed_download_existing_task_dir_missing_file_uses_file_error
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "payload.bin.aria2").write_bytes(b"")
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-missing-file",
         "status": "complete",
         "totalLength": "7",
         "completedLength": "7",
         "files": [],
-    }
-    client.force_remove.return_value = "OK"
-    client.remove_download_result.return_value = "OK"
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-missing-file", "complete")
@@ -828,8 +807,7 @@ async def test_completed_download_with_short_file_fails_size_validation(
     source_file = task_dir / "payload.bin"
     source_file.write_bytes(b"short")
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-size-mismatch",
         "status": "complete",
         "totalLength": "9",
@@ -841,9 +819,7 @@ async def test_completed_download_with_short_file_fails_size_validation(
                 "completedLength": "9",
             }
         ],
-    }
-    client.force_remove.return_value = "OK"
-    client.remove_download_result.return_value = "OK"
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-size-mismatch", "complete")
@@ -897,16 +873,13 @@ async def test_completed_download_over_actual_size_limit_fails_and_cleans_up(
     source_file = task_dir / "payload.bin"
     source_file.write_bytes(b"12345")
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-actual-size",
         "status": "complete",
         "totalLength": "4",
         "completedLength": "4",
         "files": [{"path": str(source_file), "length": "4"}],
-    }
-    client.force_remove.return_value = "OK"
-    client.remove_download_result.return_value = "OK"
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-actual-size", "complete")
@@ -963,16 +936,13 @@ async def test_completed_download_over_only_user_quota_leaves_no_stored_payload(
     source_file = task_dir / "quota.bin"
     source_file.write_bytes(b"123456")
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-actual-quota",
         "status": "complete",
         "totalLength": "4",
         "completedLength": "4",
         "files": [{"path": str(source_file), "length": "4"}],
-    }
-    client.force_remove.return_value = "OK"
-    client.remove_download_result.return_value = "OK"
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-actual-quota", "complete")
@@ -1047,8 +1017,7 @@ async def test_error_event_marks_global_and_user_tasks_failed_and_releases_reser
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "partial.bin").write_bytes(b"x")
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-error",
         "status": "error",
         "errorCode": "3",
@@ -1056,9 +1025,7 @@ async def test_error_event_marks_global_and_user_tasks_failed_and_releases_reser
         "totalLength": "300",
         "completedLength": "10",
         "files": [],
-    }
-    client.force_remove.return_value = "OK"
-    client.remove_download_result.return_value = "OK"
+    })
     _patch_aria2_client(monkeypatch, client)
     broadcast = AsyncMock()
     monkeypatch.setattr(
@@ -1157,14 +1124,13 @@ async def test_late_completion_does_not_overwrite_failed_download(
     source_file = task_dir / "late.bin"
     source_file.write_bytes(b"late")
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-late-complete",
         "status": "complete",
         "totalLength": "4",
         "completedLength": "4",
         "files": [{"path": str(source_file)}],
-    }
+    })
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-late-complete", "complete")
@@ -1189,10 +1155,16 @@ async def test_late_completion_does_not_overwrite_failed_download(
 
 
 @pytest.mark.asyncio
-async def test_error_event_waits_for_inflight_completion_lock(
+async def test_error_event_serializes_with_inflight_completion(
     temp_db: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Complete and error events on the same attempt serialize on attempt lock.
+
+    M3 removed the dedicated completion lock. Completion holds the lifecycle
+    lock while writing; a concurrent error event must wait and then observe
+    the completed terminal state without force_remove.
+    """
     user = await create_user_v0(username="listener_complete_error_race")
     stored_path = Path(settings.download_dir) / "store" / "race-complete.bin"
     stored_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1226,7 +1198,7 @@ async def test_error_event_waits_for_inflight_completion_lock(
     completion_started = asyncio.Event()
     allow_completion = asyncio.Event()
 
-    async def fake_complete_global_download(
+    async def fake_complete_global_download_locked(
         *,
         global_download_id: int,
         expected_gid: str,
@@ -1266,12 +1238,11 @@ async def test_error_event_waits_for_inflight_completion_lock(
         return {"status": "completed", "entries_created": 0, "user_files_created": 1}
 
     monkeypatch.setattr(
-        "app.services.aria2_lifecycle_service.complete_global_download",
-        fake_complete_global_download,
+        "app.services.aria2_lifecycle_service.complete_global_download_locked",
+        fake_complete_global_download_locked,
     )
 
-    client = AsyncMock()
-    client.tell_status.side_effect = [
+    client = make_aria2_client(tell_status=[
         {
             "gid": "gid-race-complete",
             "status": "complete",
@@ -1288,9 +1259,7 @@ async def test_error_event_waits_for_inflight_completion_lock(
             "completedLength": "1",
             "files": [],
         },
-    ]
-    client.remove_download_result.return_value = "OK"
-    client.force_remove.return_value = "OK"
+    ])
     _patch_aria2_client(monkeypatch, client)
 
     completion_task = asyncio.create_task(
@@ -1346,8 +1315,7 @@ async def test_late_g1_event_does_not_mutate_g2_or_delete_directory(
     source = task_dir / "payload.bin"
     source.write_bytes(b"payload")
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-g1",
         "status": "error" if event == "error" else event,
         "errorCode": "3",
@@ -1355,7 +1323,7 @@ async def test_late_g1_event_does_not_mutate_g2_or_delete_directory(
         "totalLength": "7",
         "completedLength": "7" if event == "complete" else "1",
         "files": [{"path": str(source), "length": "7"}],
-    }
+    })
     _patch_aria2_client(monkeypatch, client)
     broadcast = AsyncMock()
     monkeypatch.setattr(

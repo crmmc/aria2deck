@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
 from app.services.download_service import create_user_download
 from app.services.usage_service import get_usage
+from tests.fakes import make_aria2_client
 
 
 def _create_download_for_user(
@@ -21,8 +22,7 @@ def _create_download_for_user(
     total_bytes: int,
     gid: str,
 ) -> tuple[dict, AsyncMock]:
-    client = AsyncMock()
-    client.add_uri.return_value = gid
+    client = make_aria2_client(add_uri=gid)
     task = asyncio.run(
         create_user_download(
             user_id=user["id"],
@@ -52,8 +52,7 @@ class TestCancelTaskEndpoint:
             total_bytes=700,
             gid="gid-cancel-endpoint",
         )
-        cancel_client = AsyncMock()
-        cancel_client.force_remove.return_value = "gid-cancel-endpoint"
+        cancel_client = make_aria2_client(force_remove="gid-cancel-endpoint")
 
         with patch("app.services.task_service._get_client", return_value=cancel_client):
             response = authenticated_client.delete(f"/api/tasks/{task['id']}")
@@ -87,8 +86,7 @@ class TestCancelTaskEndpoint:
         test_user: dict,
         test_admin: dict,
     ) -> None:
-        setup_client = AsyncMock()
-        setup_client.add_uri.return_value = "gid-shared-endpoint"
+        setup_client = make_aria2_client(add_uri="gid-shared-endpoint")
         first = asyncio.run(
             create_user_download(
                 user_id=test_user["id"],
@@ -113,7 +111,7 @@ class TestCancelTaskEndpoint:
                 aria2_client=setup_client,
             )
         )
-        cancel_client = AsyncMock()
+        cancel_client = make_aria2_client()
 
         with patch("app.services.task_service._get_client", return_value=cancel_client):
             response = authenticated_client.delete(f"/api/tasks/{first['id']}")
@@ -148,11 +146,12 @@ class TestCancelTaskEndpoint:
 
         assert response.status_code == 404
 
-    def test_cancel_force_remove_failure_returns_502_and_keeps_retryable(
+    def test_cancel_force_remove_failure_still_cancels_task(
         self,
         authenticated_client: TestClient,
         test_user: dict,
     ) -> None:
+        """M3: cleanup RPC failure does not block cancel; task is already cancelled."""
         task, _ = _create_download_for_user(
             user=test_user,
             resource_key="http:cancel-endpoint-failure",
@@ -161,13 +160,13 @@ class TestCancelTaskEndpoint:
             total_bytes=600,
             gid="gid-cancel-endpoint-failure",
         )
-        cancel_client = AsyncMock()
-        cancel_client.force_remove.side_effect = OSError("aria2 timeout")
+        cancel_client = make_aria2_client(force_remove=OSError("aria2 timeout"))
 
         with patch("app.services.task_service._get_client", return_value=cancel_client):
             response = authenticated_client.delete(f"/api/tasks/{task['id']}")
 
-        assert response.status_code == 502
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
 
         stored_task = asyncio.run(
             get_user_task(test_user["id"], task["global_download_id"])
@@ -177,6 +176,7 @@ class TestCancelTaskEndpoint:
         )
 
         assert stored_task is not None
-        assert stored_task["status"] == "active"
-        assert stored_task["reserved_bytes"] == 600
-        assert usage["reserved_bytes"] == 600
+        assert stored_task["status"] == "cancelled"
+        assert stored_task["reserved_bytes"] == 0
+        assert usage["reserved_bytes"] == 0
+        cancel_client.force_remove.assert_awaited()

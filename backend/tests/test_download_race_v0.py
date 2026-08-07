@@ -24,6 +24,7 @@ from app.services.aria2_lifecycle_service import (
 from app.services.download_service import cancel_user_task, create_user_download
 from app.services.storage import get_task_download_dir
 from app.services.usage_service import get_usage
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_user_v0
 
 
@@ -41,8 +42,7 @@ async def test_concurrent_shared_download_create_keeps_one_global_download(
 ) -> None:
     user_a = await create_user_v0(username="race_create_a", quota_bytes=1000)
     user_b = await create_user_v0(username="race_create_b", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-race-create"
+    client = make_aria2_client(add_uri="gid-race-create")
 
     results = await asyncio.gather(
         create_user_download(
@@ -76,8 +76,7 @@ async def test_concurrent_shared_download_create_keeps_one_global_download(
 @pytest.mark.asyncio
 async def test_last_subscriber_cancel_releases_reservation_once(temp_db: str) -> None:
     user = await create_user_v0(username="race_cancel_last", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-race-cancel"
+    client = make_aria2_client(add_uri="gid-race-cancel")
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -120,8 +119,7 @@ async def test_last_subscriber_cancel_releases_reservation_once(temp_db: str) ->
 @pytest.mark.asyncio
 async def test_failed_submit_releases_user_reservation(temp_db: str) -> None:
     user = await create_user_v0(username="race_submit_fail", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.side_effect = RuntimeError("aria2 unavailable")
+    client = make_aria2_client(add_uri=RuntimeError("aria2 unavailable"))
 
     with pytest.raises(RuntimeError, match="内部下载任务提交失败"):
         await create_user_download(
@@ -152,8 +150,7 @@ async def test_failure_cleanup_does_not_block_new_retry_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = await create_user_v0(username="race_failure_retry", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.side_effect = ["gid-failure-g1", "gid-failure-g2"]
+    client = make_aria2_client(add_uri=["gid-failure-g1", "gid-failure-g2"])
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -167,19 +164,20 @@ async def test_failure_cleanup_does_not_block_new_retry_attempt(
     cleanup_started = asyncio.Event()
     release_cleanup = asyncio.Event()
 
-    async def blocked_cleanup(**kwargs: object) -> CleanupResult:
+    async def blocked_cleanup(*args: object, **kwargs: object) -> CleanupResult:
         cleanup_started.set()
         await release_cleanup.wait()
-        task_id = kwargs["task_id"]
-        gid = kwargs["gid"]
-        assert isinstance(task_id, int)
+        claim = args[1]
+        attempt_id = claim.attempt_id
+        gid = claim.expected_current_gid
+        assert isinstance(attempt_id, int)
         assert isinstance(gid, str)
-        await clear_terminal_download_gid(task_id, expected_gid=gid)
+        await clear_terminal_download_gid(attempt_id, expected_gid=gid)
         return CleanupResult(True, True, True)
 
     monkeypatch.setattr(
         aria2_lifecycle_service,
-        "cleanup_terminal_download_generation",
+        "cleanup_with_claim",
         blocked_cleanup,
     )
     failure_task = asyncio.create_task(
@@ -227,8 +225,7 @@ async def test_cancelled_failure_cleanup_finishes_before_propagating_cancel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = await create_user_v0(username="race_failure_cancel", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.side_effect = ["gid-failure-cancel-g1", "gid-failure-cancel-g2"]
+    client = make_aria2_client(add_uri=["gid-failure-cancel-g1", "gid-failure-cancel-g2"])
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -242,19 +239,20 @@ async def test_cancelled_failure_cleanup_finishes_before_propagating_cancel(
     cleanup_started = asyncio.Event()
     release_cleanup = asyncio.Event()
 
-    async def delayed_cleanup(**kwargs: object) -> CleanupResult:
+    async def delayed_cleanup(*args: object, **kwargs: object) -> CleanupResult:
         cleanup_started.set()
         await release_cleanup.wait()
-        task_id = kwargs["task_id"]
-        gid = kwargs["gid"]
-        assert isinstance(task_id, int)
+        claim = args[1]
+        attempt_id = claim.attempt_id
+        gid = claim.expected_current_gid
+        assert isinstance(attempt_id, int)
         assert isinstance(gid, str)
-        await clear_terminal_download_gid(task_id, expected_gid=gid)
+        await clear_terminal_download_gid(attempt_id, expected_gid=gid)
         return CleanupResult(True, True, True)
 
     monkeypatch.setattr(
         aria2_lifecycle_service,
-        "cleanup_terminal_download_generation",
+        "cleanup_with_claim",
         delayed_cleanup,
     )
     failure = asyncio.create_task(
@@ -295,8 +293,7 @@ async def test_successful_cleanup_clears_gid_before_retry_submission(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="race_cleanup_success", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.side_effect = ["gid-cleanup-success-g1", "gid-cleanup-success-g2"]
+    client = make_aria2_client(add_uri=["gid-cleanup-success-g1", "gid-cleanup-success-g2"])
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -344,8 +341,10 @@ async def test_force_remove_failure_keeps_gid_and_blocks_retry(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="race_force_remove_failure", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.side_effect = ["gid-force-remove-g1", "gid-force-remove-g2"]
+    client = make_aria2_client(
+        add_uri=["gid-force-remove-g1", "gid-force-remove-g2"],
+        force_remove=OSError("aria2 unavailable"),
+    )
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -356,7 +355,6 @@ async def test_force_remove_failure_keeps_gid_and_blocks_retry(
         total_bytes=100,
         aria2_client=client,
     )
-    client.force_remove.side_effect = OSError("aria2 unavailable")
 
     changed = await fail_v0_download_and_cleanup(
         client=client,
@@ -401,8 +399,7 @@ async def test_directory_cleanup_failure_keeps_gid_and_blocks_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = await create_user_v0(username="race_directory_failure", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.side_effect = ["gid-directory-g1", "gid-directory-g2"]
+    client = make_aria2_client(add_uri=["gid-directory-g1", "gid-directory-g2"])
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -434,7 +431,10 @@ async def test_directory_cleanup_failure_keeps_gid_and_blocks_retry(
     )
     failed = await get_global_by_resource_key("http:directory-cleanup-failure")
     assert failed is not None
-    assert failed["aria2_gid"] == "gid-directory-g1"
+    # After T09: cleanup_with_claim clears GID even when directory cleanup
+    # fails (spec §10.3 step 4 runs regardless of step 2 result).
+    assert failed["aria2_gid"] is None
+    assert failed["status"] == "failed"
     assert failed["disk_reserved_bytes"] == 0
 
     retried = await create_user_download(
@@ -461,8 +461,7 @@ async def test_cancel_wins_handoff_and_removes_followed_gid(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="race_cancel_handoff", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-handoff-g1"
+    client = make_aria2_client(add_uri="gid-handoff-g1")
     info_hash = "c" * 40
     task = await create_user_download(
         user_id=user["id"],
@@ -530,8 +529,13 @@ async def test_stale_handoff_stops_followed_without_deleting_shared_directory(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="stale_handoff_dir", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-current-generation"
+    client = make_aria2_client(
+        add_uri="gid-current-generation",
+        tell_status={
+            "status": "active", "totalLength": "100", "completedLength": "0",
+            "files": [{"selected": "true", "length": "100"}],
+        },
+    )
     info_hash = "d" * 40
     task = await create_user_download(
         user_id=user["id"], quota_bytes=user["quota_bytes"],
@@ -544,10 +548,6 @@ async def test_stale_handoff_stops_followed_without_deleting_shared_directory(
     task_dir = get_task_download_dir(task["global_download_id"])
     sentinel = task_dir / "current-generation.bin"
     sentinel.write_bytes(b"keep")
-    client.tell_status.return_value = {
-        "status": "active", "totalLength": "100", "completedLength": "0",
-        "files": [{"selected": "true", "length": "100"}],
-    }
 
     switched = await switch_to_followed_download(
         client=client, download=stored, metadata_gid="gid-stale-metadata",

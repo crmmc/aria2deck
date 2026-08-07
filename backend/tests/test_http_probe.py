@@ -1,7 +1,7 @@
 """Tests for HTTP probe service."""
 import logging
 import pytest
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, call, patch
 import aiohttp
 
 from app.services.http_probe import (
@@ -11,6 +11,7 @@ from app.services.http_probe import (
     probe_url_with_get_fallback,
     ProbeResult,
 )
+from tests.fakes import make_aiohttp_response, make_aiohttp_session
 
 
 SENSITIVE_PROBE_URL = (
@@ -27,13 +28,6 @@ def assert_probe_log_redacted(caplog):
         "probe-fragment",
     ):
         assert secret not in caplog.text
-
-
-def _response_context(response: MagicMock) -> AsyncMock:
-    return AsyncMock(
-        __aenter__=AsyncMock(return_value=response),
-        __aexit__=AsyncMock(return_value=None),
-    )
 
 
 class TestParseContentDisposition:
@@ -114,25 +108,19 @@ class TestProbeHttpUrl:
 
     @pytest.mark.asyncio
     async def test_successful_probe(self):
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.url = "https://example.com/file.zip"
-        mock_response.reason = "OK"
-        mock_response.headers = {
-            "Content-Length": "1024",
-            "Content-Disposition": 'attachment; filename="test.zip"',
-            "Content-Type": "application/zip"
-        }
+        response = make_aiohttp_response(
+            status=200,
+            url="https://example.com/file.zip",
+            reason="OK",
+            headers={
+                "Content-Length": "1024",
+                "Content-Disposition": 'attachment; filename="test.zip"',
+                "Content-Type": "application/zip",
+            },
+        )
+        session = make_aiohttp_session(response)
 
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(return_value=AsyncMock(
-            __aenter__=AsyncMock(return_value=mock_response),
-            __aexit__=AsyncMock(return_value=None)
-        ))
-
-        with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=session):
             result = await probe_http_url("https://example.com/file.zip")
 
         assert result.success is True
@@ -145,23 +133,20 @@ class TestProbeHttpUrl:
     async def test_redirect_rejects_private_target_before_head_request(self):
         original_url = "https://example.com/download"
         private_url = "http://127.0.0.1/admin"
-        redirect = MagicMock(
+        redirect = make_aiohttp_response(
             status=302,
             url=original_url,
             reason="Found",
             headers={"Location": private_url},
         )
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(return_value=_response_context(redirect))
+        session = make_aiohttp_session(redirect)
 
-        with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=session):
             result = await probe_http_url(original_url)
 
         assert result.success is False
         assert "重定向目标不安全" in result.error
-        mock_session.head.assert_called_once_with(
+        session.head.assert_called_once_with(
             original_url,
             allow_redirects=False,
         )
@@ -170,32 +155,27 @@ class TestProbeHttpUrl:
     async def test_relative_redirect_is_checked_before_following(self):
         original_url = "https://example.com/download/start"
         final_url = "https://example.com/files/archive.zip"
-        redirect = MagicMock(
+        redirect = make_aiohttp_response(
             status=302,
             url=original_url,
             reason="Found",
             headers={"Location": "/files/archive.zip#section"},
         )
-        final = MagicMock(
+        final = make_aiohttp_response(
             status=200,
             url=final_url,
             reason="OK",
             headers={"Content-Length": "42"},
         )
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(
-            side_effect=[_response_context(redirect), _response_context(final)]
-        )
+        session = make_aiohttp_session(redirect, final)
 
-        with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=session):
             result = await probe_http_url(original_url)
 
         assert result.success is True
         assert result.final_url == final_url
         assert result.content_length == 42
-        assert [call.args[0] for call in mock_session.head.call_args_list] == [
+        assert [call.args[0] for call in session.head.call_args_list] == [
             original_url,
             final_url,
         ]
@@ -216,18 +196,15 @@ class TestProbeHttpUrl:
         expected_error: str,
     ):
         original_url = "https://example.com/download"
-        redirect = MagicMock(
+        redirect = make_aiohttp_response(
             status=302,
             url=original_url,
             reason="Found",
             headers=headers,
         )
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(return_value=_response_context(redirect))
+        session = make_aiohttp_session(redirect)
 
-        with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=session):
             result = await probe_http_url(
                 original_url,
                 max_redirects=max_redirects,
@@ -235,28 +212,21 @@ class TestProbeHttpUrl:
 
         assert result.success is False
         assert expected_error in result.error
-        mock_session.head.assert_called_once_with(
+        session.head.assert_called_once_with(
             original_url,
             allow_redirects=False,
         )
 
     @pytest.mark.asyncio
     async def test_http_error(self):
-        mock_response = AsyncMock()
-        mock_response.status = 404
-        mock_response.url = "https://example.com/notfound.zip"
-        mock_response.reason = "Not Found"
-        mock_response.headers = {}
+        response = make_aiohttp_response(
+            status=404,
+            url="https://example.com/notfound.zip",
+            reason="Not Found",
+        )
+        session = make_aiohttp_session(response)
 
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(return_value=AsyncMock(
-            __aenter__=AsyncMock(return_value=mock_response),
-            __aexit__=AsyncMock(return_value=None)
-        ))
-
-        with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=session):
             result = await probe_http_url("https://example.com/notfound.zip")
 
         assert result.success is False
@@ -264,13 +234,10 @@ class TestProbeHttpUrl:
 
     @pytest.mark.asyncio
     async def test_connection_error(self, caplog):
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(side_effect=aiohttp.ClientError(SENSITIVE_PROBE_URL))
+        session = make_aiohttp_session(aiohttp.ClientError(SENSITIVE_PROBE_URL))
 
         with patch(
-            "aiohttp.ClientSession", return_value=mock_session
+            "aiohttp.ClientSession", return_value=session
         ), caplog.at_level(
             logging.WARNING, logger="app.services.http_probe"
         ):
@@ -282,13 +249,10 @@ class TestProbeHttpUrl:
 
     @pytest.mark.asyncio
     async def test_timeout_error(self, caplog):
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(side_effect=TimeoutError())
+        session = make_aiohttp_session(TimeoutError())
 
         with patch(
-            "aiohttp.ClientSession", return_value=mock_session
+            "aiohttp.ClientSession", return_value=session
         ), caplog.at_level(
             logging.WARNING, logger="app.services.http_probe"
         ):
@@ -300,13 +264,10 @@ class TestProbeHttpUrl:
 
     @pytest.mark.asyncio
     async def test_unexpected_error(self, caplog):
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(side_effect=RuntimeError(SENSITIVE_PROBE_URL))
+        session = make_aiohttp_session(RuntimeError(SENSITIVE_PROBE_URL))
 
         with patch(
-            "aiohttp.ClientSession", return_value=mock_session
+            "aiohttp.ClientSession", return_value=session
         ), caplog.at_level(
             logging.WARNING, logger="app.services.http_probe"
         ):
@@ -318,21 +279,14 @@ class TestProbeHttpUrl:
 
     @pytest.mark.asyncio
     async def test_no_content_length(self):
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.url = "https://example.com/file.zip"
-        mock_response.reason = "OK"
-        mock_response.headers = {}
+        response = make_aiohttp_response(
+            status=200,
+            url="https://example.com/file.zip",
+            reason="OK",
+        )
+        session = make_aiohttp_session(response)
 
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(return_value=AsyncMock(
-            __aenter__=AsyncMock(return_value=mock_response),
-            __aexit__=AsyncMock(return_value=None)
-        ))
-
-        with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=session):
             result = await probe_http_url("https://example.com/file.zip")
 
         assert result.success is True
@@ -341,20 +295,15 @@ class TestProbeHttpUrl:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("content_length", ["invalid", "-1"])
     async def test_invalid_content_length_is_not_trusted(self, content_length: str):
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.url = "https://example.com/file.zip"
-        mock_response.reason = "OK"
-        mock_response.headers = {"Content-Length": content_length}
-
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(
-            return_value=_response_context(mock_response)
+        response = make_aiohttp_response(
+            status=200,
+            url="https://example.com/file.zip",
+            reason="OK",
+            headers={"Content-Length": content_length},
         )
+        session = make_aiohttp_session(response)
 
-        with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=session):
             result = await probe_http_url("https://example.com/file.zip")
 
         assert result.success is True
@@ -362,21 +311,15 @@ class TestProbeHttpUrl:
 
     @pytest.mark.asyncio
     async def test_filename_from_url_fallback(self):
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.url = "https://example.com/download/myfile.zip"
-        mock_response.reason = "OK"
-        mock_response.headers = {"Content-Length": "1024"}
+        response = make_aiohttp_response(
+            status=200,
+            url="https://example.com/download/myfile.zip",
+            reason="OK",
+            headers={"Content-Length": "1024"},
+        )
+        session = make_aiohttp_session(response)
 
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(return_value=AsyncMock(
-            __aenter__=AsyncMock(return_value=mock_response),
-            __aexit__=AsyncMock(return_value=None)
-        ))
-
-        with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=session):
             result = await probe_http_url("https://example.com/download/myfile.zip")
 
         assert result.success is True
@@ -384,21 +327,15 @@ class TestProbeHttpUrl:
 
     @pytest.mark.asyncio
     async def test_private_redirect_target_is_never_requested(self):
-        redirect = AsyncMock()
-        redirect.status = 302
-        redirect.url = "https://example.com/start"
-        redirect.headers = {"Location": "http://100.64.0.8/secret"}
-        redirect_context = AsyncMock(
-            __aenter__=AsyncMock(return_value=redirect),
-            __aexit__=AsyncMock(return_value=None),
+        redirect = make_aiohttp_response(
+            status=302,
+            url="https://example.com/start",
+            headers={"Location": "http://100.64.0.8/secret"},
         )
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(return_value=redirect_context)
+        session = make_aiohttp_session(redirect)
 
         dns_result = [(None, None, None, None, ("8.8.8.8", 443))]
-        with patch("aiohttp.ClientSession", return_value=mock_session), patch(
+        with patch("aiohttp.ClientSession", return_value=session), patch(
             "app.core.security.socket.getaddrinfo",
             return_value=dns_result,
         ):
@@ -406,58 +343,44 @@ class TestProbeHttpUrl:
 
         assert result.success is False
         assert result.error == "重定向目标不安全: 不允许访问非公网地址"
-        assert mock_session.head.call_args_list == [
+        assert session.head.call_args_list == [
             call("https://example.com/start", allow_redirects=False)
         ]
 
     @pytest.mark.asyncio
     async def test_follows_relative_redirect_after_validation(self):
-        redirect = AsyncMock()
-        redirect.status = 302
-        redirect.url = "https://example.com/start"
-        redirect.headers = {"Location": "/files/final.zip"}
-        success = AsyncMock()
-        success.status = 200
-        success.url = "https://example.com/files/final.zip"
-        success.headers = {"Content-Length": "12"}
-        contexts = [
-            AsyncMock(
-                __aenter__=AsyncMock(return_value=response),
-                __aexit__=AsyncMock(return_value=None),
-            )
-            for response in (redirect, success)
-        ]
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(side_effect=contexts)
+        redirect = make_aiohttp_response(
+            status=302,
+            url="https://example.com/start",
+            headers={"Location": "/files/final.zip"},
+        )
+        success = make_aiohttp_response(
+            status=200,
+            url="https://example.com/files/final.zip",
+            headers={"Content-Length": "12"},
+        )
+        session = make_aiohttp_session(redirect, success)
 
-        with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=session):
             result = await probe_http_url("https://example.com/start")
 
         assert result.success is True
         assert result.final_url == "https://example.com/files/final.zip"
-        assert mock_session.head.call_args_list == [
+        assert session.head.call_args_list == [
             call("https://example.com/start", allow_redirects=False),
             call("https://example.com/files/final.zip", allow_redirects=False),
         ]
 
     @pytest.mark.asyncio
     async def test_stops_at_redirect_limit(self):
-        redirect = AsyncMock()
-        redirect.status = 302
-        redirect.url = "https://example.com/start"
-        redirect.headers = {"Location": "/next"}
-        redirect_context = AsyncMock(
-            __aenter__=AsyncMock(return_value=redirect),
-            __aexit__=AsyncMock(return_value=None),
+        redirect = make_aiohttp_response(
+            status=302,
+            url="https://example.com/start",
+            headers={"Location": "/next"},
         )
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(return_value=redirect_context)
+        session = make_aiohttp_session(redirect)
 
-        with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=session):
             result = await probe_http_url(
                 "https://example.com/start",
                 max_redirects=0,
@@ -465,7 +388,7 @@ class TestProbeHttpUrl:
 
         assert result.success is False
         assert result.error == "重定向次数超过限制"
-        mock_session.head.assert_called_once_with(
+        session.head.assert_called_once_with(
             "https://example.com/start",
             allow_redirects=False,
         )
@@ -475,7 +398,7 @@ class TestProbeUrlWithGetFallback:
 
     @pytest.mark.asyncio
     async def test_head_success_still_uses_get_metadata(self):
-        get_response = MagicMock(
+        get_response = make_aiohttp_response(
             status=200,
             url="https://example.com/file.zip",
             reason="OK",
@@ -484,11 +407,7 @@ class TestProbeUrlWithGetFallback:
                 "Content-Disposition": 'attachment; filename="get.zip"',
             },
         )
-        response_context = _response_context(get_response)
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get = MagicMock(return_value=response_context)
+        session = make_aiohttp_session(get_response, method="get")
 
         with patch(
             "app.services.http_probe.probe_http_url",
@@ -500,7 +419,7 @@ class TestProbeUrlWithGetFallback:
                     filename="head.zip",
                 )
             ),
-        ), patch("aiohttp.ClientSession", return_value=mock_session):
+        ), patch("aiohttp.ClientSession", return_value=session):
             result = await probe_url_with_get_fallback(
                 "https://example.com/file.zip"
             )
@@ -508,31 +427,25 @@ class TestProbeUrlWithGetFallback:
         assert result.success is True
         assert result.content_length == 2048
         assert result.filename == "get.zip"
-        mock_session.get.assert_called_once_with(
+        session.get.assert_called_once_with(
             "https://example.com/file.zip",
             allow_redirects=False,
             read_until_eof=False,
         )
-        response_context.__aexit__.assert_awaited_once()
+        session.get.return_value.__aexit__.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_head_method_not_allowed_falls_back_to_get(self):
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.url = "https://example.com/file.zip"
-        mock_response.headers = {"Content-Length": "10"}
-        mock_context = AsyncMock(
-            __aenter__=AsyncMock(return_value=mock_response),
-            __aexit__=AsyncMock(return_value=None),
+        response = make_aiohttp_response(
+            status=200,
+            url="https://example.com/file.zip",
+            headers={"Content-Length": "10"},
         )
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get = MagicMock(return_value=mock_context)
+        session = make_aiohttp_session(response, method="get")
 
         with patch("app.services.http_probe.probe_http_url") as mock_probe, patch(
             "aiohttp.ClientSession",
-            return_value=mock_session,
+            return_value=session,
         ):
             mock_probe.return_value = ProbeResult(
                 success=False,
@@ -543,7 +456,7 @@ class TestProbeUrlWithGetFallback:
             )
 
         assert result.success is True
-        mock_session.get.assert_called_once_with(
+        session.get.assert_called_once_with(
             "https://example.com/file.zip",
             allow_redirects=False,
             read_until_eof=False,
@@ -568,29 +481,23 @@ class TestProbeUrlWithGetFallback:
 
     @pytest.mark.asyncio
     async def test_head_fails_get_succeeds(self):
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.url = "https://example.com/file.zip"
-        mock_response.reason = "OK"
-        mock_response.headers = {
-            "Content-Length": "2048",
-            "Content-Disposition": 'attachment; filename="fallback.zip"'
-        }
-
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get = MagicMock(return_value=AsyncMock(
-            __aenter__=AsyncMock(return_value=mock_response),
-            __aexit__=AsyncMock(return_value=None)
-        ))
+        response = make_aiohttp_response(
+            status=200,
+            url="https://example.com/file.zip",
+            reason="OK",
+            headers={
+                "Content-Length": "2048",
+                "Content-Disposition": 'attachment; filename="fallback.zip"',
+            },
+        )
+        session = make_aiohttp_session(response, method="get")
 
         with patch("app.services.http_probe.probe_http_url") as mock_probe:
             mock_probe.return_value = ProbeResult(
                 success=False,
-                error="Connection error: ClientError"
+                error="Connection error: ClientError",
             )
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("aiohttp.ClientSession", return_value=session):
                 result = await probe_url_with_get_fallback("https://example.com/file.zip")
 
         assert result.success is True
@@ -601,16 +508,13 @@ class TestProbeUrlWithGetFallback:
     async def test_get_probe_rejects_private_redirect_before_request(self):
         original_url = "https://example.com/download"
         private_url = "http://10.0.0.8/internal"
-        redirect = MagicMock(
+        redirect = make_aiohttp_response(
             status=307,
             url=original_url,
             reason="Temporary Redirect",
             headers={"Location": private_url},
         )
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get = MagicMock(return_value=_response_context(redirect))
+        session = make_aiohttp_session(redirect, method="get")
 
         with patch(
             "app.services.http_probe.probe_http_url",
@@ -622,12 +526,12 @@ class TestProbeUrlWithGetFallback:
                     filename="download.bin",
                 )
             ),
-        ), patch("aiohttp.ClientSession", return_value=mock_session):
+        ), patch("aiohttp.ClientSession", return_value=session):
             result = await probe_url_with_get_fallback(original_url)
 
         assert result.success is False
         assert "重定向目标不安全" in result.error
-        mock_session.get.assert_called_once_with(
+        session.get.assert_called_once_with(
             original_url,
             allow_redirects=False,
             read_until_eof=False,
@@ -637,24 +541,19 @@ class TestProbeUrlWithGetFallback:
     async def test_get_probe_follows_only_validated_safe_redirect(self):
         original_url = "https://example.com/download"
         final_url = "https://cdn.example.com/files/archive.zip"
-        redirect = MagicMock(
+        redirect = make_aiohttp_response(
             status=302,
             url=original_url,
             reason="Found",
             headers={"Location": final_url},
         )
-        final = MagicMock(
+        final = make_aiohttp_response(
             status=200,
             url=final_url,
             reason="OK",
             headers={"Content-Length": "42"},
         )
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get = MagicMock(
-            side_effect=[_response_context(redirect), _response_context(final)]
-        )
+        session = make_aiohttp_session(redirect, final, method="get")
 
         with patch(
             "app.services.http_probe.probe_http_url",
@@ -665,12 +564,12 @@ class TestProbeUrlWithGetFallback:
                     content_length=42,
                 )
             ),
-        ), patch("aiohttp.ClientSession", return_value=mock_session):
+        ), patch("aiohttp.ClientSession", return_value=session):
             result = await probe_url_with_get_fallback(original_url)
 
         assert result.success is True
         assert result.final_url == final_url
-        assert [call.args[0] for call in mock_session.get.call_args_list] == [
+        assert [call.args[0] for call in session.get.call_args_list] == [
             original_url,
             final_url,
         ]
@@ -679,28 +578,24 @@ class TestProbeUrlWithGetFallback:
                 "allow_redirects": False,
                 "read_until_eof": False,
             }
-            for call in mock_session.get.call_args_list
+            for call in session.get.call_args_list
         )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("status", [300, 304, 305])
     async def test_get_probe_rejects_unhandled_3xx(self, status: int):
         original_url = "https://example.com/download"
-        response = MagicMock(
+        response = make_aiohttp_response(
             status=status,
             url=original_url,
             reason="Unhandled redirect",
-            headers={},
         )
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get = MagicMock(return_value=_response_context(response))
+        session = make_aiohttp_session(response, method="get")
 
         with patch(
             "app.services.http_probe.probe_http_url",
             new=AsyncMock(return_value=ProbeResult(success=True)),
-        ), patch("aiohttp.ClientSession", return_value=mock_session):
+        ), patch("aiohttp.ClientSession", return_value=session):
             result = await probe_url_with_get_fallback(original_url)
 
         assert result.success is False
@@ -708,13 +603,12 @@ class TestProbeUrlWithGetFallback:
 
     @pytest.mark.asyncio
     async def test_both_fail_redacts_logs(self, caplog):
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get = MagicMock(side_effect=RuntimeError(SENSITIVE_PROBE_URL))
+        session = make_aiohttp_session(
+            RuntimeError(SENSITIVE_PROBE_URL), method="get"
+        )
 
         with patch("app.services.http_probe.probe_http_url") as mock_probe, patch(
-            "aiohttp.ClientSession", return_value=mock_session
+            "aiohttp.ClientSession", return_value=session
         ), caplog.at_level(
             logging.WARNING, logger="app.services.http_probe"
         ):
@@ -748,21 +642,14 @@ class TestProbeHttpUrlEdgeCases:
 
     @pytest.mark.asyncio
     async def test_probe_http_error_status(self):
-        mock_response = AsyncMock()
-        mock_response.status = 404
-        mock_response.reason = "Not Found"
-        mock_response.url = "https://example.com/notfound.zip"
-        mock_response.headers = {}
+        response = make_aiohttp_response(
+            status=404,
+            reason="Not Found",
+            url="https://example.com/notfound.zip",
+        )
+        session = make_aiohttp_session(response)
 
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.head = MagicMock(return_value=AsyncMock(
-            __aenter__=AsyncMock(return_value=mock_response),
-            __aexit__=AsyncMock(return_value=None)
-        ))
-
-        with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=session):
             result = await probe_http_url("https://example.com/notfound.zip")
 
         assert result.success is False

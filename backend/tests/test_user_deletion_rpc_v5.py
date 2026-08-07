@@ -21,10 +21,15 @@ from tests.helpers_v0 import (
 
 
 @pytest.mark.asyncio
-async def test_user_rpc_failure_retries_before_staging_and_db_cleanup(
+async def test_user_rpc_failure_does_not_block_terminal_user_cleanup(
     test_admin: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """M3: force_remove failure no longer blocks user deletion cleanup.
+
+    Cancel terminalizes the attempt first; physical Aria2 cleanup may fail
+    without leaving the user in a permanent pending-delete retry loop.
+    """
     user = await create_user_v0(username="rpc-delete-user")
     download = await create_global_download_v0(
         resource_key="user-delete-rpc",
@@ -58,34 +63,10 @@ async def test_user_rpc_failure_retries_before_staging_and_db_cleanup(
     monkeypatch.setattr(deletion_cleanup, "get_aria2_client", lambda: aria2)
     await DeletionCleanupManager.run_once()
 
-    pending = await auth_repo.get_user_by_id_any(user["id"])
-    assert pending is not None
-    assert pending["delete_attempts"] == 1
-    assert pending["delete_lease_token"] is None
-    assert pending["delete_error"] == "用户清理失败：RuntimeError"
-    assert staging.exists()
-    async with transaction() as conn:
-        status = (
-            await conn.execute(
-                select(user_tasks.c.status).where(user_tasks.c.id == task["id"])
-            )
-        ).scalar_one()
-    assert status == "active"
-
-    aria2.force_remove.side_effect = None
-    aria2.force_remove.return_value = "delete-generation-gid"
-    aria2.remove_download_result.return_value = "OK"
-    async with transaction() as conn:
-        await conn.execute(
-            update(users)
-            .where(users.c.id == user["id"])
-            .values(delete_next_retry_at_ms=0)
-        )
-    await DeletionCleanupManager.run_once()
-
     assert await auth_repo.get_user_by_id_any(user["id"]) is None
-    assert not staging.exists()
-    assert aria2.force_remove.await_count == 2
+    # force_remove failure keeps the download directory (writer not confirmed
+    # stopped), but the user row and user_task are already terminal-cleaned.
+    assert staging.exists()
     async with transaction() as conn:
         assert (
             await conn.execute(
@@ -100,3 +81,4 @@ async def test_user_rpc_failure_retries_before_staging_and_db_cleanup(
             )
         ).scalar_one()
     assert global_status == "cancelled"
+    aria2.force_remove.assert_awaited()

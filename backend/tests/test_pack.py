@@ -111,6 +111,26 @@ async def _insert_pack_task(
     return dict(row)
 
 
+def _setup_disk_space(
+    monkeypatch: pytest.MonkeyPatch, *, free_bytes: int, min_free: int
+) -> None:
+    """统一设置磁盘空间 mock。"""
+    disk = type("DiskUsage", (), {"free": free_bytes})()
+    monkeypatch.setattr(pack_service.shutil, "disk_usage", lambda _path: disk)
+    monkeypatch.setattr(pack_service, "get_min_free_disk", lambda: min_free)
+
+
+def _mock_write_archive(
+    monkeypatch: pytest.MonkeyPatch, content: bytes
+) -> None:
+    """模拟归档写入，将指定内容写入输出路径。"""
+    monkeypatch.setattr(
+        PackTaskManager,
+        "_write_archive_sync",
+        lambda output_path, *_args: output_path.write_bytes(content),
+    )
+
+
 @pytest.mark.asyncio
 async def test_get_reserved_space_sums_active_v0_pack_tasks(temp_db: str) -> None:
     user = await create_user_v0(username="pack_reserved")
@@ -159,9 +179,7 @@ async def test_pack_available_space_subtracts_download_and_pack_commitments(
                 created_at_ms=now_ms(), updated_at_ms=now_ms(),
             )
         )
-    disk = type("DiskUsage", (), {"free": 1000})()
-    monkeypatch.setattr(pack_service.shutil, "disk_usage", lambda _path: disk)
-    monkeypatch.setattr(pack_service, "get_min_free_disk", lambda: 100)
+    _setup_disk_space(monkeypatch, free_bytes=1000, min_free=100)
 
     assert await pack_service.get_server_available_space() == 450
 
@@ -195,9 +213,7 @@ async def test_pack_materialized_bytes_are_not_double_committed(
             size_limit_bytes=200, disk_reserved_bytes=200,
             created_at_ms=now_ms(), updated_at_ms=now_ms(),
         ))
-    disk = type("DiskUsage", (), {"free": 1000})()
-    monkeypatch.setattr(pack_service.shutil, "disk_usage", lambda _path: disk)
-    monkeypatch.setattr(pack_service, "get_min_free_disk", lambda: 100)
+    _setup_disk_space(monkeypatch, free_bytes=1000, min_free=100)
 
     assert await pack_service.get_server_available_space() == 540
 
@@ -353,10 +369,7 @@ async def test_pack_fsyncs_prepared_canonical_and_parent_directories(
         user_id=user["id"], source_ids=[source_ref["id"]], source_size_bytes=6,
         reserved_bytes=100, status="pending", output_name="fsync-output",
     )
-    monkeypatch.setattr(
-        PackTaskManager, "_write_archive_sync",
-        lambda output_path, *_args: output_path.write_bytes(b"archive"),
-    )
+    _mock_write_archive(monkeypatch, b"archive")
     fsync_calls: list[int] = []
     monkeypatch.setattr(pack_service.os, "fsync", fsync_calls.append)
 
@@ -504,16 +517,7 @@ async def test_pack_completion_does_not_charge_used_bytes_for_existing_output_re
         output_name="packed",
     )
 
-    def write_existing_archive(
-        output_path: Path, *_args: object, **_kwargs: object
-    ) -> None:
-        output_path.write_bytes(b"existing")
-
-    monkeypatch.setattr(
-        PackTaskManager,
-        "_write_archive_sync",
-        write_existing_archive,
-    )
+    _mock_write_archive(monkeypatch, b"existing")
 
     await PackTaskManager.start_pack(
         task_id=task["id"],
@@ -571,12 +575,7 @@ async def test_delete_source_preserves_deduplicated_output_reference(
         status="pending", output_name="same-output", delete_source=True,
     )
 
-    def write_same_content(output: Path, *_args: object) -> None:
-        output.write_bytes(content)
-
-    monkeypatch.setattr(
-        PackTaskManager, "_write_archive_sync", write_same_content
-    )
+    _mock_write_archive(monkeypatch, content)
     await PackTaskManager.start_pack(task["id"], user["id"], [], [])
 
     async with transaction() as conn:
@@ -907,10 +906,7 @@ async def test_pack_refuses_canonical_path_owned_by_different_hash(
         user_id=user["id"], source_ids=[source_ref["id"]], source_size_bytes=6,
         reserved_bytes=100, status="pending", output_name="owned-target",
     )
-    monkeypatch.setattr(
-        PackTaskManager, "_write_archive_sync",
-        lambda output_path, *_args: output_path.write_bytes(output),
-    )
+    _mock_write_archive(monkeypatch, output)
 
     await PackTaskManager.start_pack(task["id"], user["id"], [], [])
 
@@ -954,11 +950,7 @@ async def test_pack_completion_rolls_back_new_output_ref_when_final_update_loses
 
     packed = b"cancel-race-output"
     packed_hash = hashlib.sha256(packed).hexdigest()
-    monkeypatch.setattr(
-        PackTaskManager,
-        "_write_archive_sync",
-        lambda output_path, *_args: output_path.write_bytes(packed),
-    )
+    _mock_write_archive(monkeypatch, packed)
     real_finalize = pack_service.finalize_prepared_pack_task
 
     async def racing_finalize(
@@ -1163,12 +1155,7 @@ async def test_pack_completion_converts_reserved_to_used_without_release_window(
         output_name="atomic-packed",
     )
 
-    def write_fixed_archive(
-        output_path: Path, *_args: object, **_kwargs: object
-    ) -> None:
-        output_path.write_bytes(b"12345")
-
-    monkeypatch.setattr(PackTaskManager, "_write_archive_sync", write_fixed_archive)
+    _mock_write_archive(monkeypatch, b"12345")
 
     await PackTaskManager.start_pack(
         task_id=task["id"],
@@ -1808,9 +1795,7 @@ async def test_copy_fallback_rejects_near_disk_floor_without_second_copy(
         "link",
         lambda *_args: (_ for _ in ()).throw(OSError(errno.EXDEV, "cross-device")),
     )
-    monkeypatch.setattr(pack_service, "get_min_free_disk", lambda: 100)
-    disk = type("DiskUsage", (), {"free": 199})()
-    monkeypatch.setattr(pack_service.shutil, "disk_usage", lambda _path: disk)
+    _setup_disk_space(monkeypatch, free_bytes=199, min_free=100)
 
     with pytest.raises(pack_service.PackBoundaryError, match="磁盘可用空间不足"):
         await PackTaskManager._install_prepared_file(
@@ -2451,11 +2436,7 @@ async def test_finalize_rollback_keeps_prepared_output_recoverable(
     )
     content = b"archive"
     content_hash = _v2_file_key(content)
-
-    def write_archive(output: Path, *_args: object) -> None:
-        output.write_bytes(content)
-
-    monkeypatch.setattr(PackTaskManager, "_write_archive_sync", write_archive)
+    _mock_write_archive(monkeypatch, content)
     async with transaction() as conn:
         await conn.execute(text(
             "CREATE TRIGGER reject_pack_finalize BEFORE UPDATE OF status ON pack_tasks "

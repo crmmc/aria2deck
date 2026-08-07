@@ -20,12 +20,14 @@ from app.repositories.downloads import (
     admit_user_task,
     assign_submitted_gid,
     cancel_active_user_task,
+    cancel_user_task_and_maybe_claim_attempt,
+    claim_submitted_gid_for_failure,
+    claim_terminal_reclaim,
     complete_active_user_tasks_for_stored_file,
     count_active_user_tasks,
     create_global_download_attempt,
     DiskAvailable,
     DownloadAdmissionError,
-    claim_submitted_gid_for_failure,
     fail_user_task_submission,
     find_latest_completed_global_download_by_resource_key,
     find_live_global_download_by_resource_key,
@@ -46,8 +48,7 @@ from app.repositories.files import (
     get_stored_file_by_identity,
 )
 from app.services.failed_task_cleanup import (
-    cleanup_failed_task_artifacts,
-    cleanup_terminal_download_generation,
+    cleanup_with_claim,
 )
 from app.services.hash import extract_info_hash_from_magnet
 from app.services.internal_fetch import (
@@ -104,8 +105,6 @@ def _raise_if_duplicate_user_task(task: dict[str, Any] | None) -> None:
         raise DuplicateTaskError(DUPLICATE_TASK_MESSAGE)
 
 
-_download_locks: dict[tuple[int, int], asyncio.Lock] = {}
-_download_locks_guard = threading.Lock()
 _lifecycle_locks: dict[tuple[int, int], asyncio.Lock] = {}
 _lifecycle_locks_guard = threading.Lock()
 _user_task_locks: dict[tuple[int, int, int], asyncio.Lock] = {}
@@ -114,16 +113,6 @@ _user_task_locks_guard = threading.Lock()
 
 def _loop_id() -> int:
     return id(asyncio.get_running_loop())
-
-
-async def _get_download_lock(download_id: int) -> asyncio.Lock:
-    key = (_loop_id(), download_id)
-    with _download_locks_guard:
-        lock = _download_locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            _download_locks[key] = lock
-        return lock
 
 
 async def get_download_lifecycle_lock(download_id: int) -> asyncio.Lock:
@@ -213,30 +202,22 @@ async def _cleanup_submitted_failure(
         error_code="submit_failed",
         expected_gid=gid,
         writer_gid=gid,
-        acquire_completion_lock=False,
         acquire_lifecycle_lock=False,
         log_prefix=log_prefix,
     )
     if changed:
         return True
 
-    snapshot = await get_global_download_status_snapshot(download_id)
-    if snapshot is not None and snapshot.get("aria2_gid") is None:
-        await claim_submitted_gid_for_failure(
-            download_id=download_id, gid=gid, message=message
+    claimed = await claim_submitted_gid_for_failure(
+        download_id=download_id, gid=gid, message=message
+    )
+    if claimed is not None:
+        repair = await claim_terminal_reclaim(
+            attempt_id=download_id, expected_gid=gid
         )
-        return await fail_download_and_reclaim(
-            client=aria2_client,
-            download_id=download_id,
-            message=message,
-            error_code="submit_failed",
-            expected_gid=gid,
-            writer_gid=gid,
-            expected_statuses=("failed", "cancelled"),
-            acquire_completion_lock=False,
-            acquire_lifecycle_lock=False,
-            log_prefix=log_prefix,
-        )
+        if repair is not None:
+            await cleanup_with_claim(aria2_client, repair, log_prefix=log_prefix)
+        return True
 
     try:
         await aria2_client.force_remove(gid)
@@ -349,87 +330,118 @@ async def complete_global_download(
     original_name: str,
     expected_size: int | None = None,
 ) -> dict[str, Any] | None:
-    source_path = Path(source_path)
     lifecycle_lock = await get_download_lifecycle_lock(global_download_id)
     async with lifecycle_lock:
-        current = await get_global_download_for_generation(
-            global_download_id, expected_gid
-        )
-        if current is None:
-            return None
-        if not source_path.exists():
-            raise FileNotFoundError(f"Source path does not exist: {source_path}")
-
-        try:
-            scan = await _scan_completed_source(source_path)
-        except StorageScanError:
-            logger.warning("Rejected invalid completed source id=%s", global_download_id)
-            return {"status": "invalid_source", "entries_created": 0, "user_files_created": 0}
-        size_bytes = scan.size_bytes
-        if expected_size is not None and size_bytes < expected_size:
-            return {"status": "incomplete", "size_bytes": size_bytes, "entries_created": 0, "user_files_created": 0}
-        admission = await reconcile_download_size(
-            download_id=global_download_id,
+        return await complete_global_download_locked(
+            global_download_id=global_download_id,
             expected_gid=expected_gid,
-            candidate_bytes=size_bytes,
-            completed_bytes=size_bytes,
-            size_limit_bytes=int(
-                current.get("size_limit_bytes") or get_max_task_size()
-            ),
-            disk_available_bytes=get_disk_available_bytes,
+            source_path=source_path,
+            original_name=original_name,
+            expected_size=expected_size,
         )
-        if not admission.admitted:
-            if admission.get("outcome") == "stale":
-                return None
-            return {
-                "status": "rejected",
-                "reason": admission.get("outcome"),
-                "entries_created": 0,
-                "user_files_created": 0,
-            }
 
-        identity = scan.content_identity
-        content_hash = identity.content_hash
-        is_directory = scan.is_directory
-        content_lock = await get_content_hash_lock(content_hash)
-        async with content_lock:
-            stored_file = await get_stored_file_by_identity(identity)
-            entries_created = 0
-            moved_source = False
-            created_stored_file_id: int | None = None
-            registration_started = False
-            store_path = get_store_path_for_hash(content_hash)
-            if stored_file:
-                size_bytes = int(stored_file["size_bytes"])
-                store_path = Path(str(stored_file["real_path"]))
-                if not store_path.exists():
-                    store_path.parent.mkdir(parents=True, exist_ok=True)
-                    source_path.rename(store_path)
-                    moved_source = True
-            else:
-                if store_path.exists():
-                    raise RuntimeError("content store path already exists")
-                store_path, moved_source = _move_to_content_store(source_path, content_hash)
-                entry_templates = scan.entry_templates
+
+async def complete_global_download_locked(
+    *,
+    global_download_id: int,
+    expected_gid: str,
+    source_path: Path,
+    original_name: str,
+    expected_size: int | None = None,
+) -> dict[str, Any] | None:
+    source_path = Path(source_path)
+    current = await get_global_download_for_generation(
+        global_download_id, expected_gid
+    )
+    if current is None:
+        return None
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source path does not exist: {source_path}")
+
+    try:
+        scan = await _scan_completed_source(source_path)
+    except StorageScanError:
+        logger.warning("Rejected invalid completed source id=%s", global_download_id)
+        return {"status": "invalid_source", "entries_created": 0, "user_files_created": 0}
+    size_bytes = scan.size_bytes
+    if expected_size is not None and size_bytes < expected_size:
+        return {"status": "incomplete", "size_bytes": size_bytes, "entries_created": 0, "user_files_created": 0}
+    admission = await reconcile_download_size(
+        download_id=global_download_id,
+        expected_gid=expected_gid,
+        candidate_bytes=size_bytes,
+        completed_bytes=size_bytes,
+        size_limit_bytes=int(
+            current.get("size_limit_bytes") or get_max_task_size()
+        ),
+        disk_available_bytes=get_disk_available_bytes,
+    )
+    if not admission.admitted:
+        if admission.get("outcome") == "stale":
+            return None
+        return {
+            "status": "rejected",
+            "reason": admission.get("outcome"),
+            "entries_created": 0,
+            "user_files_created": 0,
+        }
+
+    identity = scan.content_identity
+    content_hash = identity.content_hash
+    is_directory = scan.is_directory
+    content_lock = await get_content_hash_lock(content_hash)
+    async with content_lock:
+        stored_file = await get_stored_file_by_identity(identity)
+        entries_created = 0
+        moved_source = False
+        created_stored_file_id: int | None = None
+        registration_started = False
+        store_path = get_store_path_for_hash(content_hash)
+        if stored_file:
+            size_bytes = int(stored_file["size_bytes"])
+            store_path = Path(str(stored_file["real_path"]))
+            if not store_path.exists():
+                store_path.parent.mkdir(parents=True, exist_ok=True)
+                source_path.rename(store_path)
+                moved_source = True
+        else:
+            if store_path.exists():
+                raise RuntimeError("content store path already exists")
+            store_path, moved_source = _move_to_content_store(source_path, content_hash)
+            entry_templates = scan.entry_templates
+            try:
+                registration_started = True
+                (
+                    stored_file,
+                    entries_created,
+                ) = await create_stored_file_with_entries(
+                    {
+                        "content_hash": content_hash,
+                        "content_hash_version": identity.version,
+                        "content_object_kind": identity.object_kind,
+                        "content_digest": identity.digest,
+                        "real_path": str(store_path),
+                        "size_bytes": size_bytes,
+                        "is_directory": 1 if is_directory else 0,
+                        "original_name": original_name,
+                    },
+                    entry_templates,
+                )
+                created_stored_file_id = int(stored_file["id"])
+            except asyncio.CancelledError:
+                await _compensate_completion_safely(
+                    global_download_id=global_download_id,
+                    content_hash=content_hash,
+                    store_path=store_path,
+                    source_path=source_path,
+                    moved_source=moved_source,
+                    created_stored_file_id=created_stored_file_id,
+                    registration_started=registration_started,
+                )
+                raise
+            except RepositoryConflictError:
                 try:
-                    registration_started = True
-                    (
-                        stored_file,
-                        entries_created,
-                    ) = await create_stored_file_with_entries(
-                        {
-                            "content_hash": content_hash,
-                            "content_hash_version": identity.version,
-                            "content_object_kind": identity.object_kind,
-                            "content_digest": identity.digest,
-                            "real_path": str(store_path),
-                            "size_bytes": size_bytes,
-                            "is_directory": 1 if is_directory else 0,
-                            "original_name": original_name,
-                        },
-                        entry_templates,
-                    )
-                    created_stored_file_id = int(stored_file["id"])
+                    existing = await get_stored_file_by_identity(identity)
                 except asyncio.CancelledError:
                     await _compensate_completion_safely(
                         global_download_id=global_download_id,
@@ -441,99 +453,85 @@ async def complete_global_download(
                         registration_started=registration_started,
                     )
                     raise
-                except RepositoryConflictError:
-                    try:
-                        existing = await get_stored_file_by_identity(identity)
-                    except asyncio.CancelledError:
-                        await _compensate_completion_safely(
-                            global_download_id=global_download_id,
-                            content_hash=content_hash,
-                            store_path=store_path,
-                            source_path=source_path,
-                            moved_source=moved_source,
-                            created_stored_file_id=created_stored_file_id,
-                            registration_started=registration_started,
-                        )
-                        raise
-                    if existing is None:
-                        await _compensate_completion_safely(
-                            global_download_id=global_download_id,
-                            content_hash=content_hash,
-                            store_path=store_path,
-                            source_path=source_path,
-                            moved_source=moved_source,
-                            created_stored_file_id=None,
-                            registration_started=registration_started,
-                        )
-                        raise
-                    registration_started = False
-                    stored_file = existing
-                    size_bytes = int(stored_file["size_bytes"])
-                except Exception:
+                if existing is None:
                     await _compensate_completion_safely(
                         global_download_id=global_download_id,
                         content_hash=content_hash,
                         store_path=store_path,
                         source_path=source_path,
                         moved_source=moved_source,
-                        created_stored_file_id=created_stored_file_id,
+                        created_stored_file_id=None,
                         registration_started=registration_started,
                     )
                     raise
+                registration_started = False
+                stored_file = existing
+                size_bytes = int(stored_file["size_bytes"])
+            except Exception:
+                await _compensate_completion_safely(
+                    global_download_id=global_download_id,
+                    content_hash=content_hash,
+                    store_path=store_path,
+                    source_path=source_path,
+                    moved_source=moved_source,
+                    created_stored_file_id=created_stored_file_id,
+                    registration_started=registration_started,
+                )
+                raise
 
-        try:
-            completed_at_ms = now_ms()
-            user_files_created = await complete_active_user_tasks_for_stored_file(
-                global_download_id=global_download_id,
-                expected_gid=expected_gid,
-                stored_file_id=int(stored_file["id"]),
-                size_bytes=size_bytes,
-                original_name=original_name,
-                completed_at_ms=completed_at_ms,
-            )
-        except asyncio.CancelledError:
-            await _compensate_completion_safely(
-                global_download_id=global_download_id,
-                content_hash=content_hash,
-                store_path=store_path,
-                source_path=source_path,
-                moved_source=moved_source,
-                created_stored_file_id=created_stored_file_id,
-                registration_started=registration_started,
-            )
-            raise
-        except Exception:
-            await _compensate_completion_safely(
-                global_download_id=global_download_id,
-                content_hash=content_hash,
-                store_path=store_path,
-                source_path=source_path,
-                moved_source=moved_source,
-                created_stored_file_id=created_stored_file_id,
-                registration_started=registration_started,
-            )
-            raise
+    try:
+        completed_at_ms = now_ms()
+        user_files_created = await complete_active_user_tasks_for_stored_file(
+            global_download_id=global_download_id,
+            expected_gid=expected_gid,
+            stored_file_id=int(stored_file["id"]),
+            size_bytes=size_bytes,
+            original_name=original_name,
+            completed_at_ms=completed_at_ms,
+        )
+    except asyncio.CancelledError:
+        await _compensate_completion_safely(
+            global_download_id=global_download_id,
+            content_hash=content_hash,
+            store_path=store_path,
+            source_path=source_path,
+            moved_source=moved_source,
+            created_stored_file_id=created_stored_file_id,
+            registration_started=registration_started,
+        )
+        raise
+    except Exception:
+        await _compensate_completion_safely(
+            global_download_id=global_download_id,
+            content_hash=content_hash,
+            store_path=store_path,
+            source_path=source_path,
+            moved_source=moved_source,
+            created_stored_file_id=created_stored_file_id,
+            registration_started=registration_started,
+        )
+        raise
 
-        if user_files_created is None:
-            await _compensate_completion_safely(
-                global_download_id=global_download_id,
-                content_hash=content_hash,
-                store_path=store_path,
-                source_path=source_path,
-                moved_source=moved_source,
-                created_stored_file_id=created_stored_file_id,
-                registration_started=registration_started,
-            )
-            return None
+    if user_files_created is None:
+        await _compensate_completion_safely(
+            global_download_id=global_download_id,
+            content_hash=content_hash,
+            store_path=store_path,
+            source_path=source_path,
+            moved_source=moved_source,
+            created_stored_file_id=created_stored_file_id,
+            registration_started=registration_started,
+        )
+        return None
 
-        if not moved_source:
-            _delete_download_source(source_path, recursive=is_directory)
+    if not moved_source:
+        _delete_download_source(source_path, recursive=is_directory)
 
-        return {
-            "status": "completed",
-            "entries_created": entries_created,
-            "user_files_created": user_files_created,
-        }
+    return {
+        "status": "completed",
+        "entries_created": entries_created,
+        "user_files_created": user_files_created,
+    }
 
 
 async def create_user_download(
@@ -770,13 +768,11 @@ async def _submit_attempt_locked(
     except Exception:
         if created_attempt:
             current = await get_global_download_by_id(int(global_download["id"]))
-            if current is not None and current.get("status") in {
-                "queued",
-                "active",
-                "waiting",
-                "paused",
-            }:
-                current_gid = current.get("aria2_gid")
+            if (
+                current is not None
+                and current.get("status") == "queued"
+                and current.get("aria2_gid") is None
+            ):
                 from app.services.aria2_lifecycle_service import fail_download_and_reclaim
 
                 await fail_download_and_reclaim(
@@ -784,9 +780,8 @@ async def _submit_attempt_locked(
                     download_id=int(global_download["id"]),
                     message=DOWNLOAD_SUBMISSION_FAILED_MESSAGE,
                     error_code="submit_failed",
-                    expected_gid=str(current_gid) if current_gid else None,
-                    writer_gid=str(current_gid) if current_gid else None,
-                    acquire_completion_lock=False,
+                    expected_gid=None,
+                    writer_gid=None,
                     acquire_lifecycle_lock=False,
                     log_prefix="[Submit]",
                 )
@@ -894,7 +889,6 @@ async def _admit_paused_unknown_download(
             error_code="unknown_size",
             expected_gid=gid,
             writer_gid=gid,
-            acquire_completion_lock=False,
             acquire_lifecycle_lock=False,
             log_prefix="[Submit]",
         )
@@ -940,90 +934,88 @@ async def _ensure_download_submitted(
     if global_download.get("aria2_gid") or global_download["status"] != "queued":
         return global_download
 
-    lock = await _get_download_lock(global_download["id"])
-    async with lock:
-        current = await get_global_download_by_id(int(global_download["id"]))
-        if current is None:
-            raise LookupError("global download not found")
-        if current.get("aria2_gid") or current["status"] != "queued":
-            return current
+    current = await get_global_download_by_id(int(global_download["id"]))
+    if current is None:
+        raise LookupError("global download not found")
+    if current.get("aria2_gid") or current["status"] != "queued":
+        return current
 
-        task_dir = get_task_download_dir(current["id"])
+    task_dir = get_task_download_dir(current["id"])
 
-        submit_options: dict[str, Any] = {
-            "dir": str(task_dir),
-            "seed-time": "0",
-            "bt-stop-timeout": str(get_aria2_bt_stop_timeout_seconds()),
-        }
-        submission_uris: list[str] | None = None
-        resource_kind = str(current.get("resource_kind") or "")
-        if resource_kind == "http":
-            gateway_uris, gateway_options = build_gateway_submission(
-                download_id=int(current["id"]),
-                source_uri=str(current["source_uri"]),
-                options=options,
-                source_uris=gateway_source_uris,
-            )
-            submission_uris = gateway_uris
-            submit_options.update(gateway_options)
-        else:
-            if options:
-                for key in _ALLOWED_USER_OPTIONS:
-                    if key in options:
-                        if key == "out":
-                            submit_options[key] = _normalize_out_option(options[key])
-                        else:
-                            submit_options[key] = str(options[key])
-            if server_options:
-                for key, value in server_options.items():
-                    submit_options[str(key)] = str(value)
-        unknown_size = not bool(current.get("size_known"))
-        if unknown_size and resource_kind == "magnet":
-            submit_options["pause-metadata"] = "true"
-        elif unknown_size:
-            submit_options["pause"] = "true"
-
-        try:
-            gid = await submit_download(submission_uris, submit_options)
-        except Exception as exc:
-            await fail_user_task_submission(
-                task_id=task_id,
-                global_download_id=int(current["id"]),
-                message=DOWNLOAD_SUBMISSION_FAILED_MESSAGE,
-            )
-            raise RuntimeError(DOWNLOAD_SUBMISSION_FAILED_MESSAGE) from exc
-
-        submitted_status = (
-            "waiting" if unknown_size and resource_kind != "magnet" else "active"
+    submit_options: dict[str, Any] = {
+        "dir": str(task_dir),
+        "seed-time": "0",
+        "bt-stop-timeout": str(get_aria2_bt_stop_timeout_seconds()),
+    }
+    submission_uris: list[str] | None = None
+    resource_kind = str(current.get("resource_kind") or "")
+    if resource_kind == "http":
+        gateway_uris, gateway_options = build_gateway_submission(
+            download_id=int(current["id"]),
+            source_uri=str(current["source_uri"]),
+            options=options,
+            source_uris=gateway_source_uris,
         )
-        try:
-            updated = await assign_submitted_gid(
-                download_id=int(current["id"]),
-                gid=gid,
-                status=submitted_status,
-            )
-            if updated is None:
-                raise RuntimeError("failed to persist submitted download")
+        submission_uris = gateway_uris
+        submit_options.update(gateway_options)
+    else:
+        if options:
+            for key in _ALLOWED_USER_OPTIONS:
+                if key in options:
+                    if key == "out":
+                        submit_options[key] = _normalize_out_option(options[key])
+                    else:
+                        submit_options[key] = str(options[key])
+        if server_options:
+            for key, value in server_options.items():
+                submit_options[str(key)] = str(value)
+    unknown_size = not bool(current.get("size_known"))
+    if unknown_size and resource_kind == "magnet":
+        submit_options["pause-metadata"] = "true"
+    elif unknown_size:
+        submit_options["pause"] = "true"
 
-            if unknown_size and resource_kind != "magnet":
-                return await _admit_paused_unknown_download(
-                    download=updated,
-                    gid=gid,
-                    aria2_client=aria2_client,
-                    size_limit_bytes=size_limit_bytes,
-                    disk_available_bytes=disk_available_bytes,
-                )
-            return updated
-        except BaseException as exc:
-            await _cleanup_submitted_failure_safely(
-                aria2_client=aria2_client,
-                download_id=int(current["id"]),
+    try:
+        gid = await submit_download(submission_uris, submit_options)
+    except Exception as exc:
+        await fail_user_task_submission(
+            task_id=task_id,
+            global_download_id=int(current["id"]),
+            message=DOWNLOAD_SUBMISSION_FAILED_MESSAGE,
+        )
+        raise RuntimeError(DOWNLOAD_SUBMISSION_FAILED_MESSAGE) from exc
+
+    submitted_status = (
+        "waiting" if unknown_size and resource_kind != "magnet" else "active"
+    )
+    try:
+        updated = await assign_submitted_gid(
+            download_id=int(current["id"]),
+            gid=gid,
+            status=submitted_status,
+        )
+        if updated is None:
+            raise RuntimeError("failed to persist submitted download")
+
+        if unknown_size and resource_kind != "magnet":
+            return await _admit_paused_unknown_download(
+                download=updated,
                 gid=gid,
-                owner_id=None,
-                log_prefix="[Submit]",
-                message=str(exc) or type(exc).__name__,
+                aria2_client=aria2_client,
+                size_limit_bytes=size_limit_bytes,
+                disk_available_bytes=disk_available_bytes,
             )
-            raise
+        return updated
+    except BaseException as exc:
+        await _cleanup_submitted_failure_safely(
+            aria2_client=aria2_client,
+            download_id=int(current["id"]),
+            gid=gid,
+            owner_id=None,
+            log_prefix="[Submit]",
+            message=str(exc) or type(exc).__name__,
+        )
+        raise
 
 
 async def cancel_user_task(
@@ -1034,6 +1026,17 @@ async def cancel_user_task(
     aria2_client: Aria2Gateway,
     cleanup_pending_user: bool = False,
 ) -> dict[str, Any]:
+    """Cancel a user task, conditionally terminalizing the shared attempt.
+
+    Spec §13 flow:
+      1. Load task → acquire attempt lock → reload.
+      2. If already terminal, return idempotently.
+      3. Call ``cancel_user_task_and_maybe_claim_attempt`` under the lock.
+      4. If a ``TerminalizationClaim`` is produced (last subscriber),
+         run ``cleanup_with_claim``.  RPC failures are logged but never
+         block the cancellation or subsequent create attempts.
+    """
+
     async def load_task() -> dict[str, Any] | None:
         if cleanup_pending_user:
             return await get_user_task_by_id(
@@ -1048,7 +1051,8 @@ async def cancel_user_task(
     if task["status"] not in CANCELABLE_TASK_STATUSES:
         return task
 
-    lifecycle_lock = await get_download_lifecycle_lock(task["global_download_id"])
+    global_download_id = int(task["global_download_id"])
+    lifecycle_lock = await get_download_lifecycle_lock(global_download_id)
     async with lifecycle_lock:
         task = await load_task()
         if task is None:
@@ -1056,31 +1060,35 @@ async def cancel_user_task(
         if task["status"] not in CANCELABLE_TASK_STATUSES:
             return task
 
-        active_count = await count_active_user_tasks(task["global_download_id"])
-        should_cancel_global = active_count <= 1
-        gid = task.get("aria2_gid")
-        if should_cancel_global and gid:
-            cleanup = await cleanup_failed_task_artifacts(
-                client=aria2_client,
-                task_id=int(task["global_download_id"]),
-                gid=str(gid),
-                owner_id=user_id,
-                log_prefix="[Cancel]",
-                skip_status_check=True,
-            )
-            if not cleanup.safe_to_reuse:
-                raise RuntimeError("旧下载任务尚未安全停止，无法取消")
+        expected_gid = task.get("aria2_gid")
 
-        cancelled = await cancel_active_user_task(
-            user_id,
-            user_task_id,
-            error_message="用户取消",
-            finished_at_ms=now_ms(),
+        updated_task, claim = await cancel_user_task_and_maybe_claim_attempt(
+            user_id=user_id,
+            user_task_id=user_task_id,
+            expected_gid=expected_gid,
         )
-        if cancelled is None:
+
+        # Already terminal / wrong user / not found — idempotent return.
+        if updated_task is None:
             latest = await load_task()
             if latest is None:
                 raise LookupError("task not found")
             return latest
 
-        return cancelled
+        # Physical reclamation only when we won the terminal CAS.
+        if claim is not None:
+            try:
+                await cleanup_with_claim(
+                    aria2_client,
+                    claim,
+                    log_prefix="[Cancel]",
+                )
+            except Exception:
+                logger.warning(
+                    "[Cancel] cleanup RPC failed for attempt %s, "
+                    "task remains cancelled; residual cleanup deferred",
+                    global_download_id,
+                    exc_info=True,
+                )
+
+        return updated_task

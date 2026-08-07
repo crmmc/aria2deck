@@ -210,6 +210,74 @@ async def _database_ready() -> bool:
     return True
 
 
+# Canonical startup repair sequence per spec 15.1 / 15.4.
+#
+# Order (data-safety first):
+#   1. recover completed-without-index  (may hold the only copy)
+#   2. rebuild active accounting        (reconcile live attempts)
+#   3. purge failed/cancelled residual GID
+#   4. purge safe terminal directories  (strict indexed-completed shell fallback)
+#   5. orphan store cleanup             (run separately after safe_startup_repair)
+#
+# Each step is isolated: a failure in one phase must not block the remaining
+# safe phases or change attempts outside its own claim.
+STARTUP_REPAIR_STEPS: tuple[str, ...] = (
+    "recover_pending_index",
+    "rebuild_active_accounting",
+    "purge_residual_gids",
+    "purge_terminal_dirs",
+)
+
+
+async def _run_startup_repair_sequence(
+    client: Any,
+) -> dict[str, Any]:
+    """Run the fixed startup repair sequence, isolating each phase.
+
+    Returns a dict mapping step names to {"ok": bool, "result": ...}.
+    Exceptions are logged but never propagated to the caller.
+    """
+    results: dict[str, Any] = {}
+
+    async def _step(name: str, coro: Awaitable[Any], label: str) -> None:
+        try:
+            value = await coro
+            results[name] = {"ok": True, "result": value}
+        except Exception:
+            logger.exception("启动修复步骤失败: %s", label)
+            results[name] = {"ok": False, "result": None}
+
+    # 1. recover completed-without-index BEFORE any purge
+    await _step(
+        "recover_pending_index",
+        recover_completed_downloads_pending_index(client),
+        "recover completed-without-index",
+    )
+
+    # 2. rebuild active accounting / reconcile live attempts
+    await _step(
+        "rebuild_active_accounting",
+        rebuild_active_download_accounting(client),
+        "rebuild active accounting",
+    )
+
+    # 3. purge failed/cancelled residual GID
+    await _step(
+        "purge_residual_gids",
+        purge_terminal_residual_gids(client),
+        "purge terminal residual GID",
+    )
+
+    # 4. purge safe terminal directories / strict indexed-completed fallback
+    await _step(
+        "purge_terminal_dirs",
+        purge_terminal_download_dirs(),
+        "purge terminal download dirs",
+    )
+
+    return results
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理器"""
@@ -283,38 +351,14 @@ async def lifespan(app: FastAPI):
         await DeletionCleanupManager.recover_startup()
         await PackTaskManager.recover_startup()
 
-        residual = await purge_terminal_residual_gids(get_aria2_client())
-        logger.info(
-            "启动 residual 清理完成: found=%d purged=%d failed=%d",
-            residual["found"],
-            residual["purged"],
-            residual["failed"],
-        )
+        repair_results = await _run_startup_repair_sequence(get_aria2_client())
 
-        recovered = await recover_completed_downloads_pending_index(get_aria2_client())
-        logger.info(
-            "启动未入库 completed 恢复: found=%d recovered=%d failed=%d skipped=%d",
-            recovered["found"],
-            recovered["recovered"],
-            recovered["failed"],
-            recovered["skipped"],
-        )
-
-        residual_dirs = await purge_terminal_download_dirs()
-        logger.info(
-            "启动 terminal 目录清理完成: found=%d purged=%d failed=%d skipped=%d",
-            residual_dirs["found"],
-            residual_dirs["purged"],
-            residual_dirs["failed"],
-            residual_dirs["skipped"],
-        )
-
-        accounting = await rebuild_active_download_accounting(get_aria2_client())
-        logger.info(
-            "启动下载预算重建完成: rebuilt=%d failed=%d",
-            accounting["rebuilt"],
-            accounting["failed"],
-        )
+        for step_name in STARTUP_REPAIR_STEPS:
+            step_result = repair_results.get(step_name, {})
+            if not step_result.get("ok"):
+                logger.warning("启动修复步骤未成功: %s", step_name)
+            else:
+                logger.info("启动修复步骤完成: %s result=%s", step_name, step_result.get("result"))
 
         if await safe_startup_repair():
             await safe_orphan_cleanup()

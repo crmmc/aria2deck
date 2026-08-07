@@ -24,6 +24,7 @@ from app.services.download_service import (
 from app.services.settings_service import set_config_value
 from app.services.storage import get_store_path_for_hash
 from app.services.usage_service import get_usage
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_file_v0,
@@ -40,8 +41,7 @@ CANONICAL_MAGNET_URI = f"magnet:?xt=urn:btih:{MAGNET_INFO_HASH}"
 async def test_two_users_share_one_global_download(temp_db: str):
     user_a = await create_user_v0(username="down_a")
     user_b = await create_user_v0(username="down_b")
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-shared"
+    client = make_aria2_client(add_uri="gid-shared")
 
     first = await create_user_download(
         user_id=user_a["id"],
@@ -76,8 +76,7 @@ async def test_http_credentials_isolate_completed_content_between_users(
 ) -> None:
     user_a = await create_user_v0(username="credential_a", quota_bytes=1000)
     user_b = await create_user_v0(username="credential_b", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.side_effect = ["gid-credential-a", "gid-credential-b"]
+    client = make_aria2_client(add_uri=["gid-credential-a", "gid-credential-b"])
     base_key = "http:credential-isolation"
 
     task_a = await create_user_download(
@@ -136,8 +135,7 @@ async def test_http_credentials_isolate_completed_content_between_users(
 @pytest.mark.asyncio
 async def test_create_download_reserves_user_space(temp_db: str):
     user = await create_user_v0(username="reserve_down", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-reserve"
+    client = make_aria2_client(add_uri="gid-reserve")
 
     task = await create_user_download(
         user_id=user["id"],
@@ -157,8 +155,7 @@ async def test_create_download_reserves_user_space(temp_db: str):
 @pytest.mark.asyncio
 async def test_submit_options_include_default_bt_stop_timeout(temp_db: str) -> None:
     user = await create_user_v0(username="bt_stop_default")
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-bt-stop-default"
+    client = make_aria2_client(add_uri="gid-bt-stop-default")
 
     await create_user_download(
         user_id=user["id"],
@@ -179,8 +176,7 @@ async def test_submit_options_include_default_bt_stop_timeout(temp_db: str) -> N
 async def test_submit_options_use_configured_bt_stop_timeout(temp_db: str) -> None:
     await set_config_value("aria2_bt_stop_timeout_seconds", "3600")
     user = await create_user_v0(username="bt_stop_configured")
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-bt-stop-configured"
+    client = make_aria2_client(add_uri="gid-bt-stop-configured")
 
     await create_user_download(
         user_id=user["id"],
@@ -202,8 +198,7 @@ async def test_magnet_sink_canonicalizes_uri_and_ignores_submit_uris(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="magnet_sink")
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-magnet-sink"
+    client = make_aria2_client(add_uri="gid-magnet-sink")
     markers = (
         "tracker-secret.example",
         "webseed-secret.example",
@@ -252,7 +247,7 @@ async def test_download_sink_rejects_invalid_resource_before_submit(
     resource_key: str,
 ) -> None:
     user = await create_user_v0(username=f"sink_reject_{resource_kind}")
-    client = AsyncMock()
+    client = make_aria2_client()
 
     with pytest.raises(ValueError):
         await create_user_download(
@@ -286,8 +281,7 @@ async def test_create_download_rejects_path_like_out_option_before_submit(
     resource_key: str,
 ) -> None:
     user = await create_user_v0(username=f"reject_{resource_key.rsplit('-', 1)[-1]}")
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-bad-out"
+    client = make_aria2_client(add_uri="gid-bad-out")
 
     with pytest.raises(ValueError, match="invalid out option"):
         await create_user_download(
@@ -311,7 +305,7 @@ async def test_create_download_rejects_private_bt_tracker_before_submit(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="reject_private_bt_tracker")
-    client = AsyncMock()
+    client = make_aria2_client()
     resource_key = "magnet:private-bt-tracker"
 
     with pytest.raises(ValueError, match="bt-tracker"):
@@ -342,7 +336,7 @@ async def test_http_download_fails_closed_when_internal_base_is_invalid(
     monkeypatch,
 ) -> None:
     user = await create_user_v0(username="invalid_internal_base")
-    client = AsyncMock()
+    client = make_aria2_client()
     monkeypatch.setattr(settings, "internal_base_url", "ftp://app:8001")
 
     with pytest.raises(RuntimeError, match="ARIA2DECK_INTERNAL_BASE_URL"):
@@ -366,8 +360,7 @@ async def test_concurrent_same_user_create_rejects_duplicate_and_keeps_single_re
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="same_user_race_down", quota_bytes=500)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-same-user"
+    client = make_aria2_client(add_uri="gid-same-user")
 
     results = await asyncio.gather(
         create_user_download(
@@ -430,7 +423,7 @@ async def test_same_user_non_retryable_task_rejects_duplicate(
         status=status,
         display_name="original.bin",
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     with pytest.raises(DuplicateTaskError, match="任务已存在"):
         await create_user_download(
@@ -481,7 +474,7 @@ async def test_duplicate_completed_download_does_not_overwrite_existing_task_nam
         status="completed",
         display_name="real-name.bin",
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     with pytest.raises(DuplicateTaskError, match="任务已存在"):
         await create_user_download(
@@ -519,8 +512,7 @@ async def test_cancelled_user_task_can_be_recreated(temp_db: str) -> None:
         reserved_bytes=0,
         display_name="retry-cancelled.bin",
     )
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-retry-cancelled"
+    client = make_aria2_client(add_uri="gid-retry-cancelled")
 
     task = await create_user_download(
         user_id=user["id"],
@@ -551,8 +543,7 @@ async def test_add_uri_failure_releases_reservation_and_marks_task_failed(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="submit_fail_down", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.side_effect = RuntimeError("aria2 unavailable")
+    client = make_aria2_client(add_uri=RuntimeError("aria2 unavailable"))
 
     with pytest.raises(RuntimeError, match="内部下载任务提交失败"):
         await create_user_download(
@@ -583,8 +574,7 @@ async def test_submit_persist_failure_removes_orphan_gid_and_releases_reservatio
     temp_db: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     user = await create_user_v0(username="persist_fail_down", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-orphan"
+    client = make_aria2_client(add_uri="gid-orphan")
 
     async def fail_gid_assignment(**_kwargs):
         raise RuntimeError("db unavailable")
@@ -623,8 +613,7 @@ async def test_submit_persist_failure_removes_orphan_gid_and_releases_reservatio
 @pytest.mark.asyncio
 async def test_retry_failed_submit_reactivates_user_task(temp_db: str) -> None:
     user = await create_user_v0(username="retry_fail_down", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.side_effect = [RuntimeError("temporary rpc failure"), "gid-retry"]
+    client = make_aria2_client(add_uri=[RuntimeError("temporary rpc failure"), "gid-retry"])
 
     with pytest.raises(RuntimeError, match="内部下载任务提交失败"):
         await create_user_download(
@@ -661,8 +650,7 @@ async def test_create_torrent_download_reserves_known_size(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="torrent_submit", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_torrent.return_value = "gid-torrent-submit"
+    client = make_aria2_client(add_torrent="gid-torrent-submit")
 
     task = await create_user_torrent_download(
         user_id=user["id"],
@@ -699,8 +687,7 @@ async def test_create_torrent_download_reserves_known_size(
 @pytest.mark.asyncio
 async def test_torrent_download_uses_server_generated_select_file(temp_db: str) -> None:
     user = await create_user_v0(username="torrent_select_file", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_torrent.return_value = "gid-select-file"
+    client = make_aria2_client(add_torrent="gid-select-file")
 
     await create_user_torrent_download(
         user_id=user["id"],
@@ -721,8 +708,7 @@ async def test_torrent_download_uses_server_generated_select_file(temp_db: str) 
 @pytest.mark.asyncio
 async def test_user_options_cannot_set_select_file(temp_db: str) -> None:
     user = await create_user_v0(username="torrent_user_select_file", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_torrent.return_value = "gid-user-select-file"
+    client = make_aria2_client(add_torrent="gid-user-select-file")
 
     await create_user_torrent_download(
         user_id=user["id"],
@@ -754,7 +740,7 @@ async def test_torrent_bypass_inputs_are_rejected_before_submit(
     uris: list[str] | None,
 ) -> None:
     user = await create_user_v0(username=f"torrent_bypass_{bool(options)}")
-    client = AsyncMock()
+    client = make_aria2_client()
 
     with pytest.raises(ValueError):
         await create_user_torrent_download(
@@ -778,8 +764,7 @@ async def test_torrent_bypass_inputs_are_rejected_before_submit(
 async def test_two_users_share_one_global_torrent_download(temp_db: str) -> None:
     user_a = await create_user_v0(username="torrent_share_a")
     user_b = await create_user_v0(username="torrent_share_b")
-    client = AsyncMock()
-    client.add_torrent.return_value = "gid-torrent-shared"
+    client = make_aria2_client(add_torrent="gid-torrent-shared")
 
     first = await create_user_torrent_download(
         user_id=user_a["id"],
@@ -836,7 +821,7 @@ async def test_existing_known_size_torrent_checks_new_user_quota(
         reserved_bytes=900,
         display_name="known-size.torrent",
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     with pytest.raises(ValueError, match="quota exceeded"):
         await create_user_torrent_download(
@@ -868,8 +853,7 @@ async def test_add_torrent_failure_releases_reservation_and_marks_task_failed(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="torrent_submit_fail", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_torrent.side_effect = RuntimeError("aria2 unavailable")
+    client = make_aria2_client(add_torrent=RuntimeError("aria2 unavailable"))
 
     with pytest.raises(RuntimeError, match=DOWNLOAD_SUBMISSION_FAILED_MESSAGE):
         await create_user_torrent_download(
@@ -900,8 +884,7 @@ async def test_torrent_submit_persist_failure_removes_orphan_gid_and_releases_re
     temp_db: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     user = await create_user_v0(username="torrent_persist_fail", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_torrent.return_value = "gid-torrent-orphan"
+    client = make_aria2_client(add_torrent="gid-torrent-orphan")
 
     async def fail_gid_assignment(**_kwargs):
         raise RuntimeError("db unavailable")
@@ -940,11 +923,10 @@ async def test_torrent_submit_persist_failure_removes_orphan_gid_and_releases_re
 @pytest.mark.asyncio
 async def test_retry_failed_torrent_submit_reactivates_user_task(temp_db: str) -> None:
     user = await create_user_v0(username="torrent_retry_fail", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_torrent.side_effect = [
+    client = make_aria2_client(add_torrent=[
         RuntimeError("temporary torrent rpc failure"),
         "gid-torrent-retry",
-    ]
+    ])
 
     with pytest.raises(RuntimeError, match=DOWNLOAD_SUBMISSION_FAILED_MESSAGE):
         await create_user_torrent_download(
@@ -1004,7 +986,7 @@ async def test_completed_torrent_download_attaches_completed_file_to_new_user(
         completed_bytes=20,
         completed_file_id=user_file["stored_file_id"],
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     task = await create_user_torrent_download(
         user_id=new_owner["id"],
@@ -1028,8 +1010,7 @@ async def test_completed_torrent_download_attaches_completed_file_to_new_user(
 async def test_cancel_one_user_keeps_shared_download_active(temp_db: str) -> None:
     user_a = await create_user_v0(username="cancel_shared_a", quota_bytes=1000)
     user_b = await create_user_v0(username="cancel_shared_b", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-shared-cancel"
+    client = make_aria2_client(add_uri="gid-shared-cancel")
 
     first = await create_user_download(
         user_id=user_a["id"],
@@ -1085,8 +1066,7 @@ async def test_cancel_last_user_removes_global_download_and_releases_space(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="cancel_last", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-last-cancel"
+    client = make_aria2_client(add_uri="gid-last-cancel")
 
     task = await create_user_download(
         user_id=user["id"],
@@ -1123,8 +1103,7 @@ async def test_concurrent_cancel_same_task_releases_reservation_once(
     temp_db: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     user = await create_user_v0(username="cancel_same_race", quota_bytes=2000)
-    client = AsyncMock()
-    client.add_uri.side_effect = ["gid-cancel-race-1", "gid-cancel-race-2"]
+    client = make_aria2_client(add_uri=["gid-cancel-race-1", "gid-cancel-race-2"])
 
     task_to_cancel = await create_user_download(
         user_id=user["id"],
@@ -1195,12 +1174,17 @@ async def test_concurrent_cancel_same_task_releases_reservation_once(
 
 
 @pytest.mark.asyncio
-async def test_cancel_last_user_force_remove_failure_keeps_task_retryable(
+async def test_cancel_last_user_force_remove_failure_keeps_task_cancelled(
     temp_db: str,
 ) -> None:
+    """M3: cancel cleanup RPC failure does not block cancellation.
+
+    The task is still terminalized to ``cancelled`` in the DB even when
+    ``force_remove`` raises.  A subsequent cancel is an idempotent no-op
+    (already terminal), so ``force_remove`` is only called once total.
+    """
     user = await create_user_v0(username="cancel_retry", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-cancel-retry"
+    client = make_aria2_client(add_uri="gid-cancel-retry")
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -1212,45 +1196,42 @@ async def test_cancel_last_user_force_remove_failure_keeps_task_retryable(
         aria2_client=client,
     )
 
-    client.force_remove.side_effect = [OSError("aria2 timeout"), "gid-cancel-retry"]
+    client.force_remove.side_effect = OSError("aria2 timeout")
 
-    with pytest.raises(RuntimeError, match="尚未安全停止"):
-        await cancel_user_task(
-            user_id=user["id"],
-            user_task_id=task["id"],
-            quota_bytes=user["quota_bytes"],
-            aria2_client=client,
-        )
-
-    task_after_failure = await get_user_task(user["id"], task["global_download_id"])
-    global_after_failure = await get_global_by_resource_key("http:cancel-retry")
-    usage_after_failure = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
-
-    assert task_after_failure is not None
-    assert task_after_failure["status"] == "active"
-    assert task_after_failure["reserved_bytes"] == 500
-    assert global_after_failure is not None
-    assert global_after_failure["status"] == "active"
-    assert global_after_failure["aria2_gid"] == "gid-cancel-retry"
-    assert usage_after_failure["reserved_bytes"] == 500
-
-    cancelled = await cancel_user_task(
+    result = await cancel_user_task(
         user_id=user["id"],
         user_task_id=task["id"],
         quota_bytes=user["quota_bytes"],
         aria2_client=client,
     )
-    usage_after_retry = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
 
-    assert cancelled["status"] == "cancelled"
-    assert usage_after_retry["reserved_bytes"] == 0
-    assert client.force_remove.await_count == 2
+    task_after_failure = await get_user_task(user["id"], task["global_download_id"])
+    global_after_failure = await get_global_by_resource_key("http:cancel-retry")
+    usage_after_failure = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+
+    assert result["status"] == "cancelled"
+    assert task_after_failure is not None
+    assert task_after_failure["status"] == "cancelled"
+    assert task_after_failure["reserved_bytes"] == 0
+    assert global_after_failure is not None
+    assert global_after_failure["status"] == "cancelled"
+    assert usage_after_failure["reserved_bytes"] == 0
+
+    # Second cancel is idempotent (already terminal).
+    idempotent = await cancel_user_task(
+        user_id=user["id"],
+        user_task_id=task["id"],
+        quota_bytes=user["quota_bytes"],
+        aria2_client=client,
+    )
+    assert idempotent["status"] == "cancelled"
+    assert client.force_remove.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_cancel_missing_user_task_raises_lookup_error(temp_db: str) -> None:
     user = await create_user_v0(username="cancel_missing")
-    client = AsyncMock()
+    client = make_aria2_client()
 
     with pytest.raises(LookupError, match="task not found"):
         await cancel_user_task(
@@ -1266,8 +1247,7 @@ async def test_cancel_missing_user_task_raises_lookup_error(temp_db: str) -> Non
 @pytest.mark.asyncio
 async def test_cancel_terminal_user_task_is_noop(temp_db: str) -> None:
     user = await create_user_v0(username="cancel_terminal", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-cancel-terminal"
+    client = make_aria2_client(add_uri="gid-cancel-terminal")
     task = await create_user_download(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
@@ -1304,9 +1284,10 @@ async def test_cancel_terminal_user_task_is_noop(temp_db: str) -> None:
 @pytest.mark.asyncio
 async def test_post_submit_tell_status_failure_uses_two_phase_cleanup(temp_db: str) -> None:
     user = await create_user_v0(username="submit_tell_fail", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-submit-tell-fail"
-    client.tell_status.side_effect = OSError("tell failed")
+    client = make_aria2_client(
+        add_uri="gid-submit-tell-fail",
+        tell_status=OSError("tell failed"),
+    )
 
     with pytest.raises(OSError, match="tell failed"):
         await create_user_download(
@@ -1331,13 +1312,14 @@ async def test_post_submit_tell_status_failure_uses_two_phase_cleanup(temp_db: s
 @pytest.mark.asyncio
 async def test_post_submit_unpause_failure_uses_two_phase_cleanup(temp_db: str) -> None:
     user = await create_user_v0(username="submit_unpause_fail", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-submit-unpause-fail"
-    client.tell_status.return_value = {
-        "status": "paused", "totalLength": "100", "completedLength": "0",
-        "files": [{"selected": "true", "length": "100"}],
-    }
-    client.unpause.side_effect = OSError("unpause failed")
+    client = make_aria2_client(
+        add_uri="gid-submit-unpause-fail",
+        tell_status={
+            "status": "paused", "totalLength": "100", "completedLength": "0",
+            "files": [{"selected": "true", "length": "100"}],
+        },
+        unpause=OSError("unpause failed"),
+    )
 
     with pytest.raises(OSError, match="unpause failed"):
         await create_user_download(
@@ -1364,12 +1346,13 @@ async def test_post_submit_status_write_failure_uses_two_phase_cleanup(
     temp_db: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = await create_user_v0(username="submit_status_fail", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-submit-status-fail"
-    client.tell_status.return_value = {
-        "status": "paused", "totalLength": "100", "completedLength": "0",
-        "files": [{"selected": "true", "length": "100"}],
-    }
+    client = make_aria2_client(
+        add_uri="gid-submit-status-fail",
+        tell_status={
+            "status": "paused", "totalLength": "100", "completedLength": "0",
+            "files": [{"selected": "true", "length": "100"}],
+        },
+    )
 
     async def fail_status_write(*_args, **_kwargs):
         raise RuntimeError("status write failed")
@@ -1402,10 +1385,11 @@ async def test_post_submit_status_write_failure_uses_two_phase_cleanup(
 @pytest.mark.asyncio
 async def test_post_submit_cleanup_failure_retains_residual_gid(temp_db: str) -> None:
     user = await create_user_v0(username="submit_residual", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-submit-residual"
-    client.tell_status.side_effect = OSError("tell failed")
-    client.force_remove.side_effect = OSError("writer still running")
+    client = make_aria2_client(
+        add_uri="gid-submit-residual",
+        tell_status=OSError("tell failed"),
+        force_remove=OSError("writer still running"),
+    )
 
     with pytest.raises(OSError, match="tell failed"):
         await create_user_download(

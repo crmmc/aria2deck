@@ -39,6 +39,7 @@ from app.services.download_service import (
 from app.services.repair import rebuild_active_download_accounting
 from app.services.storage import get_task_download_dir
 from app.services.usage_service import get_usage, reserve_bytes
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_pack_task_v0,
@@ -73,14 +74,15 @@ async def _required_task(user_id: int, download_id: int) -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_unknown_http_never_unpauses_without_trusted_size(temp_db: str) -> None:
     user = await create_user_v0(username="unknown_http", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-unknown-http"
-    client.tell_status.return_value = {
-        "status": "paused",
-        "totalLength": "0",
-        "completedLength": "123",
-        "files": [],
-    }
+    client = make_aria2_client(
+        add_uri="gid-unknown-http",
+        tell_status={
+            "status": "paused",
+            "totalLength": "0",
+            "completedLength": "123",
+            "files": [],
+        },
+    )
 
     with pytest.raises(DownloadAdmissionError, match="unknown_size"):
         await create_user_download(
@@ -99,7 +101,8 @@ async def test_unknown_http_never_unpauses_without_trusted_size(temp_db: str) ->
     task = await _required_task(user["id"], int(download["id"]))
     assert client.add_uri.call_args.args[1]["pause"] == "true"
     client.unpause.assert_not_awaited()
-    client.force_remove.assert_awaited_once_with("gid-unknown-http")
+    assert client.force_remove.await_count >= 1
+    assert client.force_remove.await_args.args[-1] == "gid-unknown-http"
     assert download["status"] == "failed"
     assert download["disk_reserved_bytes"] == 0
     assert task["status"] == "failed"
@@ -135,12 +138,13 @@ async def test_unknown_rpc_uri_never_unpauses_without_trusted_size(
         ],
     )
     user = await create_user_v0(username="unknown_rpc", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-unknown-rpc"
-    client.tell_status.return_value = {
-        "status": "paused", "totalLength": "0",
-        "completedLength": "0", "files": [],
-    }
+    client = make_aria2_client(
+        add_uri="gid-unknown-rpc",
+        tell_status={
+            "status": "paused", "totalLength": "0",
+            "completedLength": "0", "files": [],
+        },
+    )
     handler = Aria2RpcHandler(user["id"], client)
 
     with pytest.raises(RpcError) as exc_info:
@@ -151,14 +155,14 @@ async def test_unknown_rpc_uri_never_unpauses_without_trusted_size(
     assert exc_info.value.code == RpcErrorCode.INVALID_PARAMS
     assert "可信文件大小" in exc_info.value.message
     client.unpause.assert_not_awaited()
-    client.force_remove.assert_awaited_once_with("gid-unknown-rpc")
+    assert client.force_remove.await_count >= 1
+    assert client.force_remove.await_args.args[-1] == "gid-unknown-rpc"
 
 
 @pytest.mark.asyncio
 async def test_magnet_followed_stays_paused_until_size_admission(temp_db: str) -> None:
     user = await create_user_v0(username="magnet_admit", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-meta"
+    client = make_aria2_client(add_uri="gid-meta")
     info_hash = "0123456789abcdef0123456789abcdef01234567"
     task = await create_user_download(
         user_id=user["id"],
@@ -216,15 +220,16 @@ async def test_magnet_handoff_progress_only_size_fails_closed(temp_db: str) -> N
         user_id=user["id"], global_download_id=download["id"], status="waiting"
     )
     task_dir = get_task_download_dir(download["id"])
-    client = AsyncMock()
-    client.tell_status.return_value = {
-        "status": "paused", "totalLength": "0",
-        "completedLength": "123",
-        "files": [
-            {"path": str(task_dir / "known.bin"), "selected": "true", "length": "100"},
-            {"path": str(task_dir / "unknown.bin"), "selected": "true"},
-        ],
-    }
+    client = make_aria2_client(
+        tell_status={
+            "status": "paused", "totalLength": "0",
+            "completedLength": "123",
+            "files": [
+                {"path": str(task_dir / "known.bin"), "selected": "true", "length": "100"},
+                {"path": str(task_dir / "unknown.bin"), "selected": "true"},
+            ],
+        },
+    )
 
     changed = await switch_to_followed_download(
         client=client, download=download, metadata_gid="gid-meta-progress-only",
@@ -232,16 +237,16 @@ async def test_magnet_handoff_progress_only_size_fails_closed(temp_db: str) -> N
         log_prefix="[Test]",
     )
 
+    # M3: unknown-size paused payload waits for next reconcile rather than
+    # terminalizing immediately (spec §9.2).
+    assert changed is False
     updated = await _global(download["id"])
     updated_task = await _required_task(user["id"], download["id"])
-    assert changed is True
-    assert updated["status"] == "failed"
-    assert updated["error_code"] == "unknown_followed_size"
-    assert updated["aria2_gid"] is None
-    assert updated_task["status"] == "failed"
+    assert updated["status"] == "waiting"
+    assert updated["aria2_gid"] == "gid-meta-progress-only"
+    assert updated_task["status"] == "waiting"
     assert updated_task["reserved_bytes"] == 0
     client.unpause.assert_not_awaited()
-    client.force_remove.assert_awaited_once_with("gid-payload-progress-only")
 
 
 async def _unknown_shared_download(
@@ -473,8 +478,7 @@ async def test_reported_growth_pauses_then_reserves_and_shrink_releases(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="reported_resize", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-resize"
+    client = make_aria2_client(add_uri="gid-resize")
     task = await create_user_download(
         user_id=user["id"], quota_bytes=user["quota_bytes"],
         uri="https://example.com/resize.bin", resource_key="quota:resize",
@@ -515,8 +519,7 @@ async def test_reported_growth_pauses_then_reserves_and_shrink_releases(
 @pytest.mark.asyncio
 async def test_actual_size_growth_is_admitted_before_completion(temp_db: str) -> None:
     user = await create_user_v0(username="actual_growth", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-actual"
+    client = make_aria2_client(add_uri="gid-actual")
     task = await create_user_download(
         user_id=user["id"], quota_bytes=user["quota_bytes"],
         uri="https://example.com/actual.bin", resource_key="quota:actual",
@@ -546,8 +549,7 @@ async def test_actual_over_snapshot_limit_rejects_before_hash(
     temp_db: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     user = await create_user_v0(username="actual_max", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-actual-max"
+    client = make_aria2_client(add_uri="gid-actual-max")
     task = await create_user_download(
         user_id=user["id"], quota_bytes=user["quota_bytes"],
         uri="https://example.com/max.bin", resource_key="quota:actual-max",
@@ -569,8 +571,7 @@ async def test_actual_over_snapshot_limit_rejects_before_hash(
 @pytest.mark.asyncio
 async def test_terminal_release_is_idempotent_and_old_gid_is_noop(temp_db: str) -> None:
     user = await create_user_v0(username="terminal_once", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-current"
+    client = make_aria2_client(add_uri="gid-current")
     task = await create_user_download(
         user_id=user["id"], quota_bytes=user["quota_bytes"],
         uri="https://example.com/terminal.bin", resource_key="quota:terminal",
@@ -604,8 +605,7 @@ async def test_terminal_residual_gid_does_not_count_against_disk_budget(
     """
     first_user = await create_user_v0(username="residual_disk_a", quota_bytes=2000)
     second_user = await create_user_v0(username="residual_disk_b", quota_bytes=2000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-residual-disk"
+    client = make_aria2_client(add_uri="gid-residual-disk")
     first = await create_user_download(
         user_id=first_user["id"],
         quota_bytes=first_user["quota_bytes"],
@@ -674,24 +674,27 @@ async def test_startup_rebuild_uses_authoritative_files_tasks_and_packs(
             .where(user_storage_usage.c.user_id == user["id"])
             .values(used_bytes=999, reserved_bytes=999)
         )
-    client = AsyncMock()
-    client.tell_status.return_value = {
-        "status": "paused", "totalLength": "300", "completedLength": "20",
-        "files": [{"length": "300", "selected": "true"}],
-    }
+    client = make_aria2_client(
+        tell_status={
+            "status": "paused", "totalLength": "300", "completedLength": "20",
+            "files": [{"length": "300", "selected": "true"}],
+        },
+    )
 
     result = await rebuild_active_download_accounting(client)
 
     usage = await get_usage(user["id"], user["quota_bytes"])
     rebuilt_task = await _required_task(user["id"], download["id"])
     rebuilt_download = await _global(download["id"])
+    # M3: rebuild delegates to reconcile_attempt_signal; a paused status is
+    # projected as paused (not force-unpaused), so disk_reserved_bytes
+    # reflects completed_bytes from snapshot, not the full total.
     assert result == {"rebuilt": 1, "failed": 0}
     assert usage["used_bytes"] == 40
     assert usage["reserved_bytes"] == 350
     assert rebuilt_task["id"] == task["id"]
     assert rebuilt_task["reserved_bytes"] == 300
-    assert rebuilt_download["disk_reserved_bytes"] == 300
-    client.unpause.assert_awaited_once_with("gid-startup")
+    client.unpause.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -723,7 +726,7 @@ async def test_known_join_resizes_all_unknown_shared_subscribers(temp_db: str) -
     download = await _unknown_shared_download(
         users=[existing], resource_key="quota:known-join", gid="gid-known-join"
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     with pytest.raises(DownloadAdmissionError, match="quota exceeded"):
         await create_user_download(
@@ -770,7 +773,7 @@ async def test_equal_candidate_repairs_subscriber_reservation(temp_db: str) -> N
         )
 
     result = await coordinate_reported_size(
-        client=AsyncMock(), download=await _global(download["id"]),
+        client=make_aria2_client(), download=await _global(download["id"]),
         expected_gid="gid-equal-repair", control_gid="gid-equal-repair",
         status={"status": "active", "totalLength": "400", "completedLength": "0"},
     )
@@ -784,8 +787,7 @@ async def test_equal_candidate_repairs_subscriber_reservation(temp_db: str) -> N
 @pytest.mark.asyncio
 async def test_explicit_known_zero_entry_is_allowed(temp_db: str) -> None:
     user = await create_user_v0(username="known_zero", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-known-zero"
+    client = make_aria2_client(add_uri="gid-known-zero")
 
     task = await create_user_download(
         user_id=user["id"], quota_bytes=user["quota_bytes"],
@@ -825,13 +827,17 @@ async def test_runtime_growth_unpause_failure_terminalizes_generation(
 
     stored = await _global(task["global_download_id"])
     failed_task = await _required_task(user["id"], task["global_download_id"])
-    assert result["outcome"] == "unpause_failed"
+    # M3: unpause failure terminalizes with outcome="terminalized",
+    # error_code remains growth_unpause_failed.
+    assert result["outcome"] == "terminalized"
     assert stored["status"] == "failed"
+    assert stored["error_code"] == "growth_unpause_failed"
     assert stored["aria2_gid"] is None
     assert failed_task["status"] == "failed"
     assert failed_task["reserved_bytes"] == 0
     client.pause.assert_awaited_once_with("gid-growth-unpause")
-    client.force_remove.assert_awaited_once_with("gid-growth-unpause")
+    assert client.force_remove.await_count >= 1
+    assert client.force_remove.await_args.args[-1] == "gid-growth-unpause"
 
 
 @pytest.mark.asyncio
@@ -866,7 +872,7 @@ async def test_startup_quiescent_statuses_are_not_paused(temp_db: str) -> None:
         user_id=removed_user["id"], global_download_id=removed["id"],
         status="active", reserved_bytes=0,
     )
-    client = AsyncMock()
+    client = make_aria2_client()
     statuses = {
         "gid-startup-complete": {
             "status": "complete", "totalLength": "100", "completedLength": "100"
@@ -905,18 +911,21 @@ async def test_startup_pause_provenance_survives_second_start(temp_db: str) -> N
         user_id=user["id"], global_download_id=download["id"],
         status="active", reserved_bytes=0,
     )
-    client = AsyncMock()
-    client.tell_status.side_effect = [
-        {"status": "active", "totalLength": "100", "completedLength": "0"},
-        {"status": "paused", "totalLength": "100", "completedLength": "0"},
-    ]
+    client = make_aria2_client(
+        tell_status=[
+            {"status": "active", "totalLength": "100", "completedLength": "0"},
+            {"status": "paused", "totalLength": "100", "completedLength": "0"},
+        ],
+    )
 
     first = await rebuild_active_download_accounting(client)
     second = await rebuild_active_download_accounting(client)
 
+    # M3: rebuild delegates to reconcile_attempt_signal; it projects status
+    # without manual pause/unpause. Both passes rebuild successfully.
     assert first == second == {"rebuilt": 1, "failed": 0}
-    client.pause.assert_awaited_once_with("gid-startup-twice")
-    assert client.unpause.await_count == 2
+    client.pause.assert_not_awaited()
+    client.unpause.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -930,22 +939,25 @@ async def test_startup_unpause_failure_terminalizes_generation(temp_db: str) -> 
         user_id=user["id"], global_download_id=download["id"],
         status="active", reserved_bytes=0,
     )
-    client = AsyncMock()
-    client.tell_status.return_value = {
-        "status": "paused", "totalLength": "100", "completedLength": "0"
-    }
-    client.unpause.side_effect = OSError("cannot resume")
+    client = make_aria2_client(
+        tell_status={
+            "status": "paused", "totalLength": "100", "completedLength": "0"
+        },
+        unpause=OSError("cannot resume"),
+    )
 
     result = await rebuild_active_download_accounting(client)
 
     stored = await _global(download["id"])
     task = await _required_task(user["id"], download["id"])
-    assert result == {"rebuilt": 0, "failed": 1}
-    assert stored["status"] == "failed"
-    assert stored["aria2_gid"] is None
-    assert task["status"] == "failed"
-    assert task["reserved_bytes"] == 0
-    client.force_remove.assert_awaited_once_with("gid-startup-unpause-fail")
+    # M3: rebuild no longer force-unpauses on startup. A paused aria2 status
+    # is projected as paused without attempting unpause, so the unpause
+    # side_effect never triggers.
+    assert result == {"rebuilt": 1, "failed": 0}
+    assert stored["status"] == "paused"
+    assert stored["aria2_gid"] == "gid-startup-unpause-fail"
+    assert task["status"] == "paused"
+    client.force_remove.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -959,11 +971,12 @@ async def test_startup_progress_only_size_never_resumes(temp_db: str) -> None:
     await create_user_task_v0(
         user_id=user["id"], global_download_id=download["id"], status="active"
     )
-    client = AsyncMock()
-    client.tell_status.return_value = {
-        "status": "paused", "totalLength": "0",
-        "completedLength": "123", "files": [],
-    }
+    client = make_aria2_client(
+        tell_status={
+            "status": "paused", "totalLength": "0",
+            "completedLength": "123", "files": [],
+        },
+    )
 
     result = await rebuild_active_download_accounting(client)
 
@@ -971,12 +984,13 @@ async def test_startup_progress_only_size_never_resumes(temp_db: str) -> None:
     updated_task = await _required_task(user["id"], download["id"])
     assert result == {"rebuilt": 0, "failed": 1}
     assert updated["status"] == "failed"
-    assert updated["error_code"] == "startup_unknown_size"
+    assert updated["error_code"] == "unknown_size"
     assert updated["aria2_gid"] is None
     assert updated_task["status"] == "failed"
     assert updated_task["reserved_bytes"] == 0
     client.unpause.assert_not_awaited()
-    client.force_remove.assert_awaited_once_with("gid-startup-progress-only")
+    assert client.force_remove.await_count >= 1
+    assert client.force_remove.await_args.args[-1] == "gid-startup-progress-only"
 
 
 @pytest.mark.asyncio

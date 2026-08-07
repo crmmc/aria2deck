@@ -29,6 +29,7 @@ from app.services.internal_fetch import (
     source_request_options,
     verify_capability,
 )
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_task_v0,
@@ -1121,12 +1122,11 @@ def test_broadcast_task_update_uses_live_speed(test_user: dict) -> None:
     )
     from app.services.task_runtime import clear_live_status_cache
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-broadcast-speed",
         "downloadSpeed": "16384",
         "uploadSpeed": "512",
-    }
+    })
     global_download = asyncio.run(
         create_global_download_v0(
             resource_key="http:broadcast-speed",
@@ -1170,12 +1170,11 @@ def test_broadcast_task_update_fetches_live_status_once_for_shared_download(
     from app.services.task_runtime import clear_live_status_cache
 
     second_user = asyncio.run(create_user_v0(username="broadcast-second-user"))
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-shared-broadcast",
         "downloadSpeed": "2048",
         "uploadSpeed": "128",
-    }
+    })
     global_download = asyncio.run(
         create_global_download_v0(
             resource_key="http:shared-broadcast",
@@ -1225,8 +1224,7 @@ def test_broadcast_task_update_reuses_live_status_cache_within_ttl(
         force_expire_live_status_cache_entry,
     )
 
-    client = AsyncMock()
-    client.tell_status.side_effect = [
+    client = make_aria2_client(tell_status=[
         {
             "gid": "gid-cache-broadcast",
             "downloadSpeed": "1000",
@@ -1242,7 +1240,7 @@ def test_broadcast_task_update_reuses_live_status_cache_within_ttl(
             "downloadSpeed": "3000",
             "uploadSpeed": "100",
         },
-    ]
+    ])
     global_download = asyncio.run(
         create_global_download_v0(
             resource_key="http:cache-broadcast",
@@ -1296,12 +1294,11 @@ def test_broadcast_task_update_prunes_unrequested_stale_live_status_cache(
         set_live_status_cache_entry,
     )
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
+    client = make_aria2_client(tell_status={
         "gid": "gid-cache-prune",
         "downloadSpeed": "100",
         "uploadSpeed": "5",
-    }
+    })
     global_download = asyncio.run(
         create_global_download_v0(
             resource_key="http:cache-prune",
@@ -1357,8 +1354,7 @@ class TestListTasks:
         authenticated_client: TestClient,
         test_user: dict,
     ) -> None:
-        client = AsyncMock()
-        client.add_uri.return_value = "gid-list-v0"
+        client = make_aria2_client(add_uri="gid-list-v0")
         task = asyncio.run(
             create_user_download(
                 user_id=test_user["id"],
@@ -1392,14 +1388,13 @@ class TestListTasks:
         authenticated_client: TestClient,
         test_user: dict,
     ) -> None:
-        client = AsyncMock()
-        client.tell_active.return_value = [
+        client = make_aria2_client(tell_active=[
             {
                 "gid": "gid-speed-task",
                 "downloadSpeed": "8192",
                 "uploadSpeed": "256",
             }
-        ]
+        ])
         mock_get_client.return_value = client
         global_download = asyncio.run(
             create_global_download_v0(
@@ -1608,8 +1603,7 @@ class TestCancelTask:
         authenticated_client: TestClient,
         test_user: dict,
     ) -> None:
-        setup_client = AsyncMock()
-        setup_client.add_uri.return_value = "gid-cancel-basic"
+        setup_client = make_aria2_client(add_uri="gid-cancel-basic")
         task = asyncio.run(
             create_user_download(
                 user_id=test_user["id"],
@@ -1622,8 +1616,7 @@ class TestCancelTask:
                 aria2_client=setup_client,
             )
         )
-        cancel_client = AsyncMock()
-        cancel_client.force_remove.return_value = "gid-cancel-basic"
+        cancel_client = make_aria2_client(force_remove="gid-cancel-basic")
 
         with patch("app.services.task_service._get_client", return_value=cancel_client):
             response = authenticated_client.delete(f"/api/tasks/{task['id']}")

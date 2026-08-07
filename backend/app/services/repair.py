@@ -8,6 +8,7 @@ from typing import Any, Literal, TypedDict
 
 from app.aria2.protocol import Aria2Gateway
 from app.repositories.downloads import (
+    claim_terminal_reclaim,
     get_global_download_by_id,
     list_active_global_downloads,
     list_completed_downloads_pending_index,
@@ -16,7 +17,6 @@ from app.repositories.downloads import (
     list_terminal_downloads_with_residual_gid,
     reopen_completed_download_for_index_repair,
     restore_incomplete_completed_download,
-    reconcile_download_size,
     reset_active_accounting_for_startup,
 )
 from app.repositories.files import (
@@ -24,13 +24,7 @@ from app.repositories.files import (
     get_stored_file_by_content_hash,
     list_stored_file_content_hashes,
 )
-from app.services.failed_task_cleanup import cleanup_terminal_download_generation
-from app.services.download_service import (
-    candidate_size_from_status,
-    get_disk_available_bytes,
-)
-from app.services.settings_service import get_max_task_size
-from app.services.task_projection import is_metadata_phase_status
+from app.services.failed_task_cleanup import cleanup_with_claim
 from app.services.storage import (
     cleanup_task_download_dir,
     get_downloading_dir,
@@ -76,6 +70,8 @@ async def purge_terminal_residual_gids(client: Aria2Gateway) -> dict[str, int]:
     """Clear terminal downloads that still hold an aria2 gid.
 
     These residuals must never continue to claim disk budget after cancel/fail.
+    Each attempt must obtain a repair claim (spec §15.3) before physical
+    reclamation; no ``skip_status_check`` bypass is used.
     """
     residuals = await list_terminal_downloads_with_residual_gid()
     purged = 0
@@ -86,13 +82,15 @@ async def purge_terminal_residual_gids(client: Aria2Gateway) -> dict[str, int]:
         if not gid:
             continue
         try:
-            result = await cleanup_terminal_download_generation(
-                client=client,
-                task_id=download_id,
-                gid=gid,
-                owner_id=None,
-                log_prefix="[Residual]",
-                skip_status_check=True,
+            claim = await claim_terminal_reclaim(
+                attempt_id=download_id,
+                expected_gid=gid,
+            )
+            if claim is None:
+                # Attempt no longer failed/cancelled or GID changed — skip.
+                continue
+            result = await cleanup_with_claim(
+                client, claim, log_prefix="[Residual]"
             )
             if result.writer_stopped:
                 purged += 1
@@ -283,147 +281,60 @@ async def recover_completed_downloads_pending_index(
 async def rebuild_active_download_accounting(
     client: Aria2Gateway,
 ) -> dict[str, int]:
-    from app.services.aria2_lifecycle_service import fail_download_and_reclaim
+    """Re-admit active attempts through the unified coordinator (spec §15.2).
+
+    No longer does manual pause/unpause/size logic or calls
+    ``fail_download_and_reclaim`` directly. Each live attempt is reconciled via ``reconcile_attempt_signal``,
+    which acquires the attempt lock, rereads, queries Aria2 and handles
+    size admission, handoff, completion, error/removed terminalization and
+    missing-GID inside a single coordinator boundary.
+    """
+    from app.services.aria2_lifecycle_service import reconcile_attempt_signal
+    from app.domain.lifecycle import ReconcileResult
 
     downloads = await list_active_global_downloads()
-    snapshots: dict[int, tuple[dict[str, Any], bool]] = {}
-    for download in downloads:
-        gid = str(download.get("aria2_gid") or "")
-        if not gid:
-            continue
-        status = await client.tell_status(gid)
-        raw_status = str(status.get("status") or "")
-        quiescent = raw_status in {"complete", "error", "removed"}
-        if raw_status != "paused" and not quiescent:
-            await client.pause(gid)
-        should_resume = (
-            str(download.get("status") or "") != "paused"
-            or not bool(download.get("size_known"))
-        )
-        snapshots[int(download["id"])] = (status, should_resume)
 
     await reset_active_accounting_for_startup()
+
     rebuilt = 0
     failed = 0
     for download in downloads:
         download_id = int(download["id"])
         gid = str(download.get("aria2_gid") or "")
-        snapshot = snapshots.get(download_id)
-        status = snapshot[0] if snapshot else {}
-        should_resume = snapshot[1] if snapshot else False
-        raw_status = str(status.get("status") or "")
-        if raw_status in {"error", "removed"}:
-            await fail_download_and_reclaim(
+        if not gid:
+            # Queued without GID — submission path will handle it.
+            continue
+        try:
+            result = await reconcile_attempt_signal(
                 client=client,
-                download_id=download_id,
-                message="启动恢复发现下载已终止",
-                error_code=f"startup_{raw_status}",
-                expected_gid=gid or None,
-                writer_gid=gid or None,
-                acquire_completion_lock=False,
+                observed_gid=gid,
+                event="startup",
+                observed_status=None,
                 log_prefix="[Startup]",
             )
+        except Exception as exc:
             failed += 1
-            continue
-
-        is_metadata = (
-            str(download.get("resource_kind") or "") == "magnet"
-            and bool(status)
-            and is_metadata_phase_status(status)
-        )
-        if is_metadata:
-            try:
-                await client.change_option(gid, {"pause-metadata": "true"})
-                if should_resume and raw_status not in {"complete", "error", "removed"}:
-                    await client.unpause(gid)
-            except Exception:
-                await fail_download_and_reclaim(
-                    client=client,
-                    download_id=download_id,
-                    message="启动恢复无法安全配置磁力元数据暂停",
-                    error_code="startup_metadata_pause_failed",
-                    expected_gid=gid or None,
-                    writer_gid=gid or None,
-                    acquire_completion_lock=False,
-                    log_prefix="[Startup]",
-                )
-                failed += 1
-            continue
-
-        candidate = candidate_size_from_status(
-            status, require_trusted_total=True
-        )
-        if candidate is None and bool(download.get("size_known")):
-            known_total = max(0, int(download.get("total_bytes") or 0))
-            try:
-                reported_completed = max(0, int(status.get("completedLength") or 0))
-            except (TypeError, ValueError):
-                reported_completed = 0
-            if reported_completed <= known_total:
-                candidate = (
-                    known_total,
-                    max(
-                        reported_completed,
-                        max(0, int(download.get("completed_bytes") or 0)),
-                    ),
-                )
-        if candidate is None:
-            await fail_download_and_reclaim(
-                client=client,
-                download_id=download_id,
-                message="启动恢复无法确认任务大小",
-                error_code="startup_unknown_size",
-                expected_gid=gid or None,
-                writer_gid=gid or None,
-                acquire_completion_lock=False,
-                log_prefix="[Startup]",
+            logger.warning(
+                "Startup reconcile failed download_id=%s gid=%s error=%s",
+                download_id,
+                gid,
+                exc,
             )
-            failed += 1
             continue
 
-        result = await reconcile_download_size(
-            download_id=download_id,
-            expected_gid=gid or None,
-            candidate_bytes=candidate[0],
-            completed_bytes=candidate[1],
-            size_limit_bytes=int(
-                download.get("size_limit_bytes") or get_max_task_size()
-            ),
-            disk_available_bytes=get_disk_available_bytes,
-        )
-        if result.admitted:
-            if (
-                gid
-                and should_resume
-                and raw_status not in {"complete", "error", "removed"}
-            ):
-                try:
-                    await client.unpause(gid)
-                except Exception:
-                    await fail_download_and_reclaim(
-                        client=client,
-                        download_id=download_id,
-                        message="启动恢复后无法恢复下载",
-                        error_code="startup_unpause_failed",
-                        expected_gid=gid,
-                        writer_gid=gid,
-                        acquire_completion_lock=False,
-                        log_prefix="[Startup]",
-                    )
-                    failed += 1
-                    continue
+        if result in (
+            ReconcileResult.CHANGED,
+            ReconcileResult.ALREADY_ACTIVE,
+            ReconcileResult.ALREADY_COMPLETE,
+            ReconcileResult.COMPLETED,
+            ReconcileResult.WAITING,
+        ):
             rebuilt += 1
-        else:
+        elif result == ReconcileResult.TERMINALIZED:
             failed += 1
-            if gid:
-                await cleanup_terminal_download_generation(
-                    client=client,
-                    task_id=download_id,
-                    gid=gid,
-                    owner_id=None,
-                    log_prefix="[Startup]",
-                    skip_status_check=True,
-                )
+        else:
+            # stale / ignored / already_terminal / recovery_pending
+            rebuilt += 1
     return {"rebuilt": rebuilt, "failed": failed}
 
 

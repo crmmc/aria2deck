@@ -36,11 +36,6 @@ EVENT_MAP = {
 }
 
 RECONNECT_BASE_DELAY = 1.0
-COMPLETE_SOURCE_RETRY_COUNT = lifecycle.COMPLETE_SOURCE_RETRY_COUNT
-COMPLETE_SOURCE_RETRY_INTERVAL = lifecycle.COMPLETE_SOURCE_RETRY_INTERVAL
-DOWNLOAD_DIR_NOT_FOUND_MESSAGE = lifecycle.DOWNLOAD_DIR_NOT_FOUND_MESSAGE
-DOWNLOAD_FILE_NOT_FOUND_MESSAGE = lifecycle.DOWNLOAD_FILE_NOT_FOUND_MESSAGE
-COMPLETED_SIZE_MISMATCH_MESSAGE = lifecycle.COMPLETED_SIZE_MISMATCH_MESSAGE
 
 
 def _http_to_ws_url(http_url: str) -> str:
@@ -70,23 +65,33 @@ def _calculate_backoff(
 
 
 async def handle_aria2_event(gid: str, event: str) -> None:
-    """Handle a single aria2 event against v0 global_downloads/user_tasks."""
+    """Submit a single aria2 event to the coordinator as a trigger (spec §7.1).
+
+    The listener does not decide task ownership, call force_remove, or
+    invoke completion/failure/handoff directly.  It only extracts the
+    observed GID and event name, optionally fetches a tell_status snapshot
+    as observation input, and delegates all business logic to
+    ``reconcile_attempt_signal``.
+    """
     client = get_aria2_client()
+    observed_status: dict | None = None
     try:
-        aria2_status = await client.tell_status(gid)
+        observed_status = await client.tell_status(gid)
     except Exception as exc:
         logger.warning(
             "[WS] Failed to fetch aria2 status gid=%s error_type=%s",
             gid,
             type(exc).__name__,
         )
-        aria2_status = {}
+        # RPC failure is an observation gap, not a task failure.
+        # Pass None and let the coordinator interpret the event.
 
-    await lifecycle.handle_aria2_event(
+    await lifecycle.reconcile_attempt_signal(
         client=client,
-        gid=gid,
+        observed_gid=gid,
         event=event,
-        aria2_status=aria2_status,
+        observed_status=observed_status,
+        log_prefix="[WS]",
     )
 
 

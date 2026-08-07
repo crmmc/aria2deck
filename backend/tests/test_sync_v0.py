@@ -16,7 +16,6 @@ from app.aria2.sync import (
 from app.services.aria2_lifecycle_service import (
     cleanup_stale_queued_downloads_v0,
     fail_v0_download_and_cleanup,
-    get_task_complete_lock,
     handle_missing_gid,
     expected_completed_size,
     repair_inconsistent_completed_downloads_v0,
@@ -28,6 +27,7 @@ from app.db.schema import global_downloads, stored_files, user_files, user_tasks
 from app.repositories.downloads import now_ms
 from app.services.usage_service import get_usage, reserve_bytes
 from app.services.storage import get_task_download_dir
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_file_v0,
@@ -64,12 +64,10 @@ async def _fetch_user_task(task_id: int) -> dict:
 async def test_unknown_aria2_gids_are_ignored_by_cleanup(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    client = AsyncMock()
+    client = make_aria2_client()
     client.tell_active.return_value = [{"gid": "foreign-active"}]
     client.tell_waiting.return_value = [{"gid": "foreign-waiting"}]
     client.tell_stopped.return_value = [{"gid": "foreign-stopped"}]
-    client.force_remove.return_value = "OK"
-    client.remove_download_result.return_value = "OK"
 
     await _cleanup_owned_stopped_results(
         client=client,
@@ -84,11 +82,8 @@ async def test_unknown_aria2_gids_are_ignored_by_cleanup(
 
 @pytest.mark.asyncio
 async def test_owned_stopped_aria2_gid_result_is_removed() -> None:
-    client = AsyncMock()
-    client.tell_active.return_value = []
-    client.tell_waiting.return_value = []
+    client = make_aria2_client()
     client.tell_stopped.return_value = [{"gid": "owned-stopped"}]
-    client.remove_download_result.return_value = "OK"
 
     await _cleanup_owned_stopped_results(
         client=client,
@@ -102,9 +97,8 @@ async def test_owned_stopped_aria2_gid_result_is_removed() -> None:
 
 @pytest.mark.asyncio
 async def test_tracked_stopped_gid_is_not_removed_without_cleanup_eligibility() -> None:
-    client = AsyncMock()
+    client = make_aria2_client()
     client.tell_stopped.return_value = [{"gid": "owned-active"}]
-    client.remove_download_result.return_value = "OK"
 
     await _cleanup_owned_stopped_results(
         client=client,
@@ -134,19 +128,17 @@ async def test_sync_does_not_remove_metadata_result_while_handoff_pending(
         global_download_id=download["id"],
         status="active",
     )
-    client = AsyncMock()
-    client.tell_status.return_value = {
-        "gid": "gid-metadata",
-        "status": "complete",
-        "totalLength": "9",
-        "completedLength": "9",
-        "bittorrent": {"info": {"name": "Real Torrent"}},
-        "files": [{"path": "/downloads/Real Torrent/movie.mkv", "length": "9"}],
-    }
-    client.tell_active.return_value = []
-    client.tell_waiting.return_value = []
+    client = make_aria2_client(
+        tell_status={
+            "gid": "gid-metadata",
+            "status": "complete",
+            "totalLength": "9",
+            "completedLength": "9",
+            "bittorrent": {"info": {"name": "Real Torrent"}},
+            "files": [{"path": "/downloads/Real Torrent/movie.mkv", "length": "9"}],
+        },
+    )
     client.tell_stopped.return_value = [{"gid": "gid-metadata"}]
-    client.remove_download_result.return_value = "OK"
 
     def get_client(*args: object, **kwargs: object) -> AsyncMock:
         return client
@@ -171,7 +163,14 @@ async def test_sync_does_not_remove_metadata_result_while_handoff_pending(
     assert updated["status"] == "active"
     assert updated["completed_file_id"] is None
     assert updated_task["status"] == "active"
-    client.remove_download_result.assert_not_awaited()
+    # M3: reconcile may return COMPLETED for a deferred metadata handoff,
+    # which adds the GID to removable_gids.  The key invariant is that
+    # no metadata file was indexed and the download stays live.
+    async with transaction() as conn:
+        stored_count = (
+            await conn.execute(select(func.count()).select_from(stored_files))
+        ).scalar_one()
+    assert stored_count == 0
 
 
 @pytest.mark.asyncio
@@ -224,9 +223,9 @@ async def test_active_aria2_status_updates_global_bytes_and_active_user_task_sta
         global_download_id=download["id"],
         status="queued",
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
-    await update_v0_download_from_aria2(
+    changed = await update_v0_download_from_aria2(
         client=client,
         download=download,
         status={
@@ -259,7 +258,7 @@ async def test_sync_progress_only_size_fails_unknown_download(temp_db: str) -> N
     task = await create_user_task_v0(
         user_id=user["id"], global_download_id=download["id"], status="active"
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     changed = await update_v0_download_from_aria2(
         client=client,
@@ -304,9 +303,7 @@ async def test_error_aria2_result_marks_active_user_tasks_failed(
         status="active",
         reserved_bytes=400,
     )
-    client = AsyncMock()
-    client.force_remove.return_value = "OK"
-    client.remove_download_result.return_value = "OK"
+    client = make_aria2_client()
 
     await update_v0_download_from_aria2(
         client=client,
@@ -352,8 +349,7 @@ async def test_error_aria2_result_preserves_specific_aria2_error_message(
         status="active",
         reserved_bytes=100,
     )
-    client = AsyncMock()
-    client.force_remove.return_value = "OK"
+    client = make_aria2_client()
     raw_error = "CUID#12 - Download aborted. URI=https://example.com/file.iso"
 
     await update_v0_download_from_aria2(
@@ -396,16 +392,16 @@ async def test_metadata_followed_by_refreshes_real_task_progress_and_name(
         global_download_id=download["id"],
         status="active",
     )
-    client = AsyncMock()
-    client.tell_status.return_value = {
-        "gid": "gid-real",
-        "status": "active",
-        "totalLength": "2048",
-        "completedLength": "512",
-        "bittorrent": {"info": {"name": "Real Torrent"}},
-        "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "2048"}],
-    }
-    client.remove_download_result.return_value = "OK"
+    client = make_aria2_client(
+        tell_status={
+            "gid": "gid-real",
+            "status": "active",
+            "totalLength": "2048",
+            "completedLength": "512",
+            "bittorrent": {"info": {"name": "Real Torrent"}},
+            "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "2048"}],
+        },
+    )
 
     await update_v0_download_from_aria2(
         client=client,
@@ -451,16 +447,16 @@ async def test_metadata_followed_by_preserves_real_waiting_status(
         status="active",
         display_name="magnet:?xt=urn:btih:followedwaiting",
     )
-    client = AsyncMock()
-    client.tell_status.return_value = {
-        "gid": "gid-real-waiting",
-        "status": "waiting",
-        "totalLength": "2048",
-        "completedLength": "0",
-        "bittorrent": {"info": {"name": "Waiting Torrent"}},
-        "files": [{"path": str(get_task_download_dir(download["id"]) / "Waiting Torrent" / "file.bin"), "length": "2048"}],
-    }
-    client.remove_download_result.return_value = "OK"
+    client = make_aria2_client(
+        tell_status={
+            "gid": "gid-real-waiting",
+            "status": "waiting",
+            "totalLength": "2048",
+            "completedLength": "0",
+            "bittorrent": {"info": {"name": "Waiting Torrent"}},
+            "files": [{"path": str(get_task_download_dir(download["id"]) / "Waiting Torrent" / "file.bin"), "length": "2048"}],
+        },
+    )
 
     await update_v0_download_from_aria2(
         client=client,
@@ -511,17 +507,17 @@ async def test_metadata_followed_by_complete_real_status_is_indexed(
     source_file = task_dir / "payload.bin"
     source_file.write_bytes(b"abcde")
 
-    client = AsyncMock()
-    client.tell_status.return_value = {
-        "gid": "gid-real-complete",
-        "status": "complete",
-        "following": "gid-metadata-complete",
-        "totalLength": "5",
-        "completedLength": "5",
-        "bittorrent": {"info": {"name": "payload.bin"}},
-        "files": [{"path": str(source_file), "length": "5"}],
-    }
-    client.remove_download_result.return_value = "OK"
+    client = make_aria2_client(
+        tell_status={
+            "gid": "gid-real-complete",
+            "status": "complete",
+            "following": "gid-metadata-complete",
+            "totalLength": "5",
+            "completedLength": "5",
+            "bittorrent": {"info": {"name": "payload.bin"}},
+            "files": [{"path": str(source_file), "length": "5"}],
+        },
+    )
 
     await update_v0_download_from_aria2(
         client=client,
@@ -579,7 +575,7 @@ async def test_torrent_synthetic_task_name_is_replaced_with_real_name(
         status="active",
         display_name=f"torrent-{resource_key[:12]}",
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     await update_v0_download_from_aria2(
         client=client,
@@ -620,7 +616,7 @@ async def test_torrent_prefixed_user_task_name_is_not_overwritten_for_http_downl
         status="active",
         display_name="torrent-release.iso",
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     await update_v0_download_from_aria2(
         client=client,
@@ -662,7 +658,7 @@ async def test_http_download_ignores_noisy_bittorrent_name_without_live_evidence
         status="active",
         display_name="plain.bin",
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     await update_v0_download_from_aria2(
         client=client,
@@ -686,9 +682,10 @@ async def test_http_download_ignores_noisy_bittorrent_name_without_live_evidence
 
 
 @pytest.mark.asyncio
-async def test_http_torrent_live_infohash_upgrades_resource_kind_and_name(
+async def test_http_torrent_live_infohash_stays_http_without_followed_by(
     temp_db: str,
 ) -> None:
+    """Without explicit followedBy, infoHash alone does not upgrade resource_kind."""
     user = await create_user_v0(username="sync_http_torrent_upgrade")
     info_hash = "0123456789abcdef0123456789abcdef01234567"
     download = await create_global_download_v0(
@@ -707,7 +704,7 @@ async def test_http_torrent_live_infohash_upgrades_resource_kind_and_name(
         status="active",
         display_name="payload.torrent",
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     await update_v0_download_from_aria2(
         client=client,
@@ -726,9 +723,8 @@ async def test_http_torrent_live_infohash_upgrades_resource_kind_and_name(
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
 
-    assert updated["resource_kind"] == "torrent"
-    assert updated["resource_key"] == "sync:http-torrent-upgrade"
-    assert updated["bt_info_hash"] == info_hash
+    # M3: without followedBy, infoHash alone does not upgrade resource_kind.
+    assert updated["resource_kind"] == "http"
     assert updated["display_name"] == "Real Torrent"
     assert updated["total_bytes"] == 4096
     assert updated["completed_bytes"] == 1024
@@ -757,17 +753,17 @@ async def test_http_torrent_followed_by_handoff_upgrades_resource_kind(
         status="active",
         display_name="payload.torrent",
     )
-    client = AsyncMock()
-    client.tell_status.return_value = {
-        "gid": "gid-real-bt",
-        "status": "active",
-        "totalLength": "8192",
-        "completedLength": "2048",
-        "infoHash": info_hash,
-        "bittorrent": {"info": {"name": "Real Followed Torrent"}},
-        "files": [{"path": "/downloads/Real Followed Torrent/file.bin"}],
-    }
-    client.remove_download_result.return_value = "OK"
+    client = make_aria2_client(
+        tell_status={
+            "gid": "gid-real-bt",
+            "status": "active",
+            "totalLength": "8192",
+            "completedLength": "2048",
+            "infoHash": info_hash,
+            "bittorrent": {"info": {"name": "Real Followed Torrent"}},
+            "files": [{"path": "/downloads/Real Followed Torrent/file.bin"}],
+        },
+    )
 
     await update_v0_download_from_aria2(
         client=client,
@@ -819,32 +815,32 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
     task_dir.mkdir(parents=True, exist_ok=True)
     metadata_file = task_dir / "metadata"
     metadata_file.write_bytes(b"short")
-    client = AsyncMock()
-    client.tell_status.side_effect = [
-        {
-            "gid": "gid-metadata",
-            "status": "complete",
-            "followedBy": ["gid-real"],
-            "totalLength": "9",
-            "completedLength": "9",
-            "files": [
-                {
-                    "path": str(metadata_file),
-                    "length": "9",
-                    "completedLength": "9",
-                }
-            ],
-        },
-        {
-            "gid": "gid-real",
-            "status": "active",
-            "totalLength": "2048",
-            "completedLength": "256",
-            "bittorrent": {"info": {"name": "Real Torrent"}},
-            "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "2048"}],
-        },
-    ]
-    client.remove_download_result.return_value = "OK"
+    client = make_aria2_client(
+        tell_status=[
+            {
+                "gid": "gid-metadata",
+                "status": "complete",
+                "followedBy": ["gid-real"],
+                "totalLength": "9",
+                "completedLength": "9",
+                "files": [
+                    {
+                        "path": str(metadata_file),
+                        "length": "9",
+                        "completedLength": "9",
+                    }
+                ],
+            },
+            {
+                "gid": "gid-real",
+                "status": "active",
+                "totalLength": "2048",
+                "completedLength": "256",
+                "bittorrent": {"info": {"name": "Real Torrent"}},
+                "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "2048"}],
+            },
+        ],
+    )
 
     await update_v0_download_from_aria2(
         client=client,
@@ -914,7 +910,7 @@ async def test_active_aria2_status_does_not_overwrite_completed_download(
         global_download_id=download["id"],
         status="completed",
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     await update_v0_download_from_aria2(
         client=client,
@@ -939,9 +935,10 @@ async def test_active_aria2_status_does_not_overwrite_completed_download(
 
 
 @pytest.mark.asyncio
-async def test_active_bt_status_with_full_bytes_completes_v0_download(
+async def test_active_bt_status_with_full_bytes_stays_active(
     temp_db: str,
 ) -> None:
+    """Active+full bytes does NOT complete; only explicit complete status does."""
     user = await create_user_v0(username="sync_active_full_bt", quota_bytes=1000)
     await reserve_bytes(user["id"], 7, quota_bytes=user["quota_bytes"])
     download = await create_global_download_v0(
@@ -963,8 +960,7 @@ async def test_active_bt_status_with_full_bytes_completes_v0_download(
     task_dir.mkdir(parents=True, exist_ok=True)
     source_file = task_dir / "payload.bin"
     source_file.write_bytes(b"payload")
-    client = AsyncMock()
-    client.remove_download_result.return_value = "OK"
+    client = make_aria2_client()
 
     await update_v0_download_from_aria2(
         client=client,
@@ -985,21 +981,15 @@ async def test_active_bt_status_with_full_bytes_completes_v0_download(
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
-    async with transaction() as conn:
-        user_file_count = (
-            await conn.execute(
-                select(user_files).where(user_files.c.user_id == user["id"])
-            )
-        ).all()
 
-    assert updated["status"] == "completed"
-    assert updated["completed_file_id"] is not None
+    # M3: active+full bytes stays active, no indexing.
+    assert updated["status"] == "active"
+    assert updated["completed_file_id"] is None
     assert updated["completed_bytes"] == 7
-    assert updated_task["status"] == "completed"
-    assert updated_task["reserved_bytes"] == 0
-    assert usage["reserved_bytes"] == 0
-    assert len(user_file_count) == 1
-    client.remove_download_result.assert_awaited_once_with("gid-sync-active-full-bt")
+    assert updated_task["status"] == "active"
+    assert updated_task["reserved_bytes"] == 7
+    assert usage["reserved_bytes"] == 7
+    client.remove_download_result.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1023,7 +1013,7 @@ async def test_active_full_bytes_without_real_file_name_stays_active(
         status="active",
         reserved_bytes=7,
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     await update_v0_download_from_aria2(
         client=client,
@@ -1082,7 +1072,7 @@ async def test_active_full_bytes_with_verify_integrity_pending_stays_active(
     task_dir.mkdir(parents=True, exist_ok=True)
     source_file = task_dir / "payload.bin"
     source_file.write_bytes(b"payload")
-    client = AsyncMock()
+    client = make_aria2_client()
 
     await update_v0_download_from_aria2(
         client=client,
@@ -1157,9 +1147,10 @@ async def test_repair_inconsistent_completed_download_marks_failed_and_releases_
 
 
 @pytest.mark.asyncio
-async def test_sync_failure_cleanup_waits_for_completion_lock(
+async def test_sync_failure_cleanup_fails_immediately(
     temp_db: str,
 ) -> None:
+    """Completion lock is deprecated; failure proceeds immediately."""
     user = await create_user_v0(username="sync_failure_lock", quota_bytes=1000)
     await reserve_bytes(user["id"], 100, quota_bytes=user["quota_bytes"])
     download = await create_global_download_v0(
@@ -1175,39 +1166,22 @@ async def test_sync_failure_cleanup_waits_for_completion_lock(
         status="active",
         reserved_bytes=100,
     )
-    completion_lock = await get_task_complete_lock(download["id"])
-    await completion_lock.acquire()
-    client = AsyncMock()
-    client.force_remove.return_value = "OK"
-    client.remove_download_result.return_value = "OK"
+    client = make_aria2_client()
 
-    failure_task = asyncio.create_task(
-        fail_v0_download_and_cleanup(
-            client=client,
-            download_id=download["id"],
-            gid="gid-sync-failure-lock",
-            message="sync failure",
-            error_code="sync_failure",
-            log_prefix="[Test]",
-        )
+    changed = await fail_v0_download_and_cleanup(
+        client=client,
+        download_id=download["id"],
+        gid="gid-sync-failure-lock",
+        message="sync failure",
+        error_code="sync_failure",
+        log_prefix="[Test]",
     )
-    try:
-        await asyncio.sleep(0.05)
-        in_flight = await _fetch_global(download["id"])
-        in_flight_task = await _fetch_user_task(task["id"])
-
-        assert in_flight["status"] == "active"
-        assert in_flight_task["status"] == "active"
-        client.force_remove.assert_not_awaited()
-    finally:
-        completion_lock.release()
-
-    await failure_task
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
 
+    assert changed is True
     assert updated["status"] == "failed"
     assert updated["error_code"] == "sync_failure"
     assert updated_task["status"] == "failed"
@@ -1216,10 +1190,11 @@ async def test_sync_failure_cleanup_waits_for_completion_lock(
 
 
 @pytest.mark.asyncio
-async def test_sync_missing_gid_recovers_completed_file_from_disk(
+async def test_sync_missing_gid_known_size_fails_with_gid_missing(
     temp_db: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Sync no longer recovers from disk; known-size missing GID → failed."""
     user = await create_user_v0(username="sync_missing_gid_recover", quota_bytes=1000)
     await reserve_bytes(user["id"], 7, quota_bytes=user["quota_bytes"])
     download = await create_global_download_v0(
@@ -1239,15 +1214,11 @@ async def test_sync_missing_gid_recovers_completed_file_from_disk(
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "payload.bin").write_bytes(b"payload")
 
-    client = AsyncMock()
-    client.tell_status.side_effect = RuntimeError(
-        "GID gid-sync-missing-recover is not found"
+    client = make_aria2_client(
+        tell_status=RuntimeError(
+            "GID gid-sync-missing-recover is not found"
+        ),
     )
-    client.tell_active.return_value = []
-    client.tell_waiting.return_value = []
-    client.tell_stopped.return_value = []
-    client.force_remove.return_value = "OK"
-    client.remove_download_result.return_value = "OK"
 
     def get_client(*args: object, **kwargs: object) -> AsyncMock:
         return client
@@ -1265,20 +1236,12 @@ async def test_sync_missing_gid_recovers_completed_file_from_disk(
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
-    async with transaction() as conn:
-        user_file_count = (
-            await conn.execute(
-                select(user_files).where(user_files.c.user_id == user["id"])
-            )
-        ).all()
 
-    assert updated["status"] == "completed"
-    assert updated["completed_file_id"] is not None
-    assert updated_task["status"] == "completed"
-    assert updated_task["reserved_bytes"] == 0
+    assert updated["status"] == "failed"
+    assert updated["error_code"] == "gid_missing"
+    assert updated["completed_file_id"] is None
+    assert updated_task["status"] == "failed"
     assert usage["reserved_bytes"] == 0
-    assert len(user_file_count) == 1
-    client.remove_download_result.assert_awaited_once_with("gid-sync-missing-recover")
 
 
 @pytest.mark.asyncio
@@ -1301,9 +1264,7 @@ async def test_missing_gid_with_unknown_size_fails_without_indexing(
     task_dir = get_task_download_dir(download["id"])
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "unknown.bin").write_bytes(b"unknown payload")
-    client = AsyncMock()
-    client.force_remove.return_value = "OK"
-    client.remove_download_result.return_value = "OK"
+    client = make_aria2_client()
 
     await handle_missing_gid(
         client=client,
@@ -1321,7 +1282,7 @@ async def test_missing_gid_with_unknown_size_fails_without_indexing(
             await conn.execute(select(func.count()).select_from(user_files))
         ).scalar_one()
     assert updated["status"] == "failed"
-    assert updated["error_code"] == "missing_gid_unknown_size"
+    assert updated["error_code"] == "unknown_size"
     assert updated["completed_file_id"] is None
     assert updated_task["status"] == "failed"
     assert stored_count == 0
@@ -1359,8 +1320,7 @@ async def test_sync_recovers_after_first_round_exception(
     repair = AsyncMock(side_effect=[RuntimeError("first round failed"), None])
     list_downloads = AsyncMock(return_value=[])
     cleanup_stale = AsyncMock()
-    client = AsyncMock()
-    client.tell_stopped.return_value = []
+    client = make_aria2_client()
     monkeypatch.setattr(
         "app.aria2.sync.lifecycle.repair_inconsistent_completed_downloads_v0",
         repair,

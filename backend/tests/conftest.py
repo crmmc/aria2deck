@@ -27,6 +27,7 @@ from app.db.engine import dispose_engine, reset_engine, transaction
 from app.db.schema import global_downloads, user_tasks
 from app.main import app
 from app.aria2.client import Aria2Client
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_session_v0, create_user_file_v0, create_user_v0, now_ms
 
 
@@ -214,21 +215,13 @@ def authenticated_client(client: TestClient, user_session: str) -> TestClient:
 @pytest.fixture
 def mock_aria2_client() -> AsyncMock:
     """Create a mock Aria2 client."""
-    mock = AsyncMock(spec=Aria2Client)
-    mock.add_uri.return_value = "test_gid_12345"
-    mock.tell_status.return_value = {
-        "gid": "test_gid_12345",
-        "status": "active",
-        "totalLength": "1000000",
-        "completedLength": "500000",
-        "downloadSpeed": "10000",
-        "uploadSpeed": "0",
-    }
-    mock.pause.return_value = "test_gid_12345"
-    mock.unpause.return_value = "test_gid_12345"
-    mock.force_remove.return_value = "test_gid_12345"
-    mock.remove_download_result.return_value = "OK"
-    return mock
+    return make_aria2_client()
+
+
+@pytest.fixture
+def aria2_factory():
+    """Factory fixture returning :func:`make_aria2_client` for per-test customisation."""
+    return make_aria2_client
 
 
 @pytest.fixture

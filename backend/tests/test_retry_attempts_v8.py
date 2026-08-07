@@ -14,6 +14,7 @@ from app.repositories.downloads import (
 )
 from app.services.download_service import create_user_download
 from app.services.storage import get_store_path_for_hash
+from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_file_v0,
@@ -25,8 +26,7 @@ from tests.helpers_v0 import (
 @pytest.mark.asyncio
 async def test_failed_retry_creates_new_attempt_ids(temp_db: str) -> None:
     user = await create_user_v0(username="retry_new_attempt", quota_bytes=1000)
-    client = AsyncMock()
-    client.add_uri.side_effect = ["gid-retry-old", "gid-retry-new"]
+    client = make_aria2_client(add_uri=["gid-retry-old", "gid-retry-new"])
 
     first = await create_user_download(
         user_id=user["id"],
@@ -91,8 +91,7 @@ async def test_terminal_global_download_never_resurrected(temp_db: str) -> None:
         reserved_bytes=0,
         display_name="terminal.bin",
     )
-    client = AsyncMock()
-    client.add_uri.return_value = "gid-terminal-new"
+    client = make_aria2_client(add_uri="gid-terminal-new")
 
     task = await create_user_download(
         user_id=user["id"],
@@ -135,7 +134,7 @@ async def test_completed_same_user_duplicate_rejected_without_store_file(
         status="completed",
         display_name="original.bin",
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     from app.services.download_service import DuplicateTaskError
 
@@ -177,7 +176,7 @@ async def test_completed_other_user_attaches_store_file(temp_db: str) -> None:
         completed_bytes=9,
         completed_file_id=user_file["stored_file_id"],
     )
-    client = AsyncMock()
+    client = make_aria2_client()
 
     task = await create_user_download(
         user_id=other["id"],

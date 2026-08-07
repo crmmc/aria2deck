@@ -1,4 +1,10 @@
-"""aria2 polling sync for the v0 shared download model."""
+"""aria2 polling sync — trigger-only observer for the lifecycle coordinator.
+
+Sync enumerates live attempts, fetches an observed ``tell_status`` snapshot
+for each ``current_gid``, and delegates every state transition to
+``reconcile_attempt_signal``.  It never writes DB rows or deletes files
+directly.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +14,7 @@ from typing import Any
 
 from app.aria2.gateway import get_aria2_client
 from app.aria2.protocol import Aria2Gateway
+from app.domain.lifecycle import ReconcileResult
 from app.services import aria2_lifecycle_service as lifecycle
 from app.services import backend_connectivity
 
@@ -35,71 +42,69 @@ async def sync_tasks(interval: float) -> None:
 
 
 async def _sync_tasks_once() -> None:
+    # Legacy module-level repair/stale-queued helpers still live in lifecycle;
+    # migrating them into coordinator calls requires changing lifecycle.py
+    # (deferred to T18/T20).  Sync itself performs no direct DB writes here.
     await lifecycle.repair_inconsistent_completed_downloads_v0()
     client = get_aria2_client()
     downloads = await lifecycle.list_v0_tracked_downloads()
-    removable_stopped_gids: set[str] = set()
+
+    removable_gids: set[str] = set()
     saw_backend_ok = False
     saw_backend_fail = False
 
-    async def fetch_and_update(download: dict[str, Any]) -> None:
+    async def fetch_and_reconcile(download: dict[str, Any]) -> None:
         nonlocal saw_backend_ok, saw_backend_fail
         gid = str(download.get("aria2_gid") or "")
         if not gid:
             return
 
+        observed_status: dict[str, Any] | None = None
+        observed_error: Exception | None = None
         try:
-            status = await client.tell_status(gid)
+            observed_status = await client.tell_status(gid)
             saw_backend_ok = True
         except Exception as exc:
             if lifecycle.is_missing_gid_error(exc):
-                # Backend responded: the GID is gone, not the transport.
                 saw_backend_ok = True
-                await lifecycle.handle_missing_gid(
-                    client=client,
-                    download=download,
-                    gid=gid,
-                )
-                return
-
-            if lifecycle.is_transient_rpc_error(exc):
+            elif lifecycle.is_transient_rpc_error(exc):
                 saw_backend_fail = True
                 logger.warning(
-                    "[Sync] Failed to fetch GID %s status, retry later: %s", gid, exc
+                    "[Sync] Transient RPC for gid=%s, will retry next round: %s",
+                    gid,
+                    exc,
                 )
                 return
+            else:
+                logger.error(
+                    "[Sync] Failed to fetch gid=%s status: %s", gid, exc
+                )
+            observed_error = exc
 
-            logger.error(
-                "[Sync] Failed to fetch GID %s status, retry later: %s", gid, exc
-            )
-            return
-
-        handled = await lifecycle.update_v0_download_from_aria2(
+        result = await lifecycle.reconcile_attempt_signal(
             client=client,
-            download=download,
-            status=status,
+            observed_gid=gid,
+            event=None,
+            observed_status=observed_status,
+            observed_error=observed_error,
+            log_prefix="[Sync]",
         )
-        if not handled:
-            return
-        if str(status.get("status") or "") in {"complete", "error", "removed"}:
-            if lifecycle.should_defer_stopped_result_cleanup(download, status):
-                return
-            removable_stopped_gids.add(gid)
+        if result in (ReconcileResult.TERMINALIZED, ReconcileResult.COMPLETED):
+            removable_gids.add(gid)
 
     if downloads:
         results = await asyncio.gather(
-            *[fetch_and_update(download) for download in downloads],
+            *[fetch_and_reconcile(d) for d in downloads],
             return_exceptions=True,
         )
         for index, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.warning(
-                    "sync_tasks: v0 download update failed download_id=%s error=%s",
+                    "[Sync] reconcile failed download_id=%s error=%s",
                     downloads[index]["id"],
                     result,
                 )
     else:
-        # No tracked downloads: still probe backend reachability.
         try:
             await client.get_version()
             saw_backend_ok = True
@@ -107,11 +112,11 @@ async def _sync_tasks_once() -> None:
             if lifecycle.is_transient_rpc_error(exc):
                 saw_backend_fail = True
                 logger.warning(
-                    "[Sync] Backend reachability probe failed, retry later: %s", exc
+                    "[Sync] Backend reachability probe failed: %s", exc
                 )
             else:
                 logger.error(
-                    "[Sync] Backend reachability probe failed, retry later: %s", exc
+                    "[Sync] Backend reachability probe failed: %s", exc
                 )
 
     if saw_backend_ok:
@@ -121,7 +126,7 @@ async def _sync_tasks_once() -> None:
 
     await _cleanup_owned_stopped_results(
         client=client,
-        removable_gids=removable_stopped_gids,
+        removable_gids=removable_gids,
         max_actions=OWNED_STOPPED_RESULT_CLEANUP_BATCH,
     )
     await lifecycle.cleanup_stale_queued_downloads_v0()
