@@ -155,6 +155,8 @@ async def create_global_download_v0(
     size_limit_bytes: int = 10 * 1024 * 1024 * 1024,
     disk_reserved_bytes: int | None = None,
     completed_file_id: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
 ) -> dict[str, Any]:
     timestamp = now_ms()
     known = total_bytes > 0 if size_known is None else size_known
@@ -183,6 +185,8 @@ async def create_global_download_v0(
                         size_limit_bytes=size_limit_bytes,
                         disk_reserved_bytes=reserved,
                         completed_file_id=completed_file_id,
+                        error_code=error_code,
+                        error_message=error_message,
                         created_at_ms=timestamp,
                         updated_at_ms=timestamp,
                         completed_at_ms=timestamp if status == "completed" else None,

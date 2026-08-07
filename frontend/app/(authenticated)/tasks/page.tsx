@@ -36,6 +36,27 @@ function getTaskDisplayName(task: Task): string {
   return task.name || "未知文件";
 }
 
+/** Tasks that stay on the current tasks page (aligned with backend is_current + error). */
+function isCurrentVisibleStatus(status: string): boolean {
+  return (
+    status === "active" ||
+    status === "queued" ||
+    status === "waiting" ||
+    status === "paused" ||
+    status === "error"
+  );
+}
+
+/** Live in-flight attempts that can still be cancelled. */
+function isInFlightStatus(status: string): boolean {
+  return (
+    status === "active" ||
+    status === "queued" ||
+    status === "waiting" ||
+    status === "paused"
+  );
+}
+
 const MAX_TORRENT_FILE_SIZE = 10 * 1024 * 1024;
 const MAX_BATCH_TASKS = 30;
 const BATCH_TASK_CONCURRENCY = 3;
@@ -148,10 +169,8 @@ export default function TasksPage() {
 
           let needRefresh = false;
           const prevTasks = tasksRef.current;
-          const prevActive = prevTasks.filter(
-            (t) => t.status === "active" || t.status === "queued"
-          );
-          for (const t of prevActive) {
+          const prevInFlight = prevTasks.filter((t) => isInFlightStatus(t.status));
+          for (const t of prevInFlight) {
             if (!activeMap.has(t.id) && !deletedTaskIds.has(t.id)) {
               needRefresh = true;
               break;
@@ -161,10 +180,10 @@ export default function TasksPage() {
           const deletedIds = new Set(deletedTaskIds);
           deletedTaskIds.clear();
           setTasks((prev) => {
-            const nonActive = prev.filter(
-              (t) => t.status !== "active" && t.status !== "queued" && !deletedIds.has(t.id)
+            const nonInFlight = prev.filter(
+              (t) => !isInFlightStatus(t.status) && !deletedIds.has(t.id)
             );
-            return [...updatedActive, ...nonActive];
+            return [...updatedActive, ...nonInFlight];
           });
 
           if (needRefresh) {
@@ -209,10 +228,7 @@ export default function TasksPage() {
       }
     }
 
-    const isVisibleStatus =
-      newTask.status === "active" ||
-      newTask.status === "queued" ||
-      newTask.status === "error";
+    const isVisibleStatus = isCurrentVisibleStatus(newTask.status);
 
     setTasks((prev) => {
       const idx = prev.findIndex((task) => task.id === taskId);
@@ -273,7 +289,7 @@ export default function TasksPage() {
       setIsSubmitting(true);
       try {
         const task = await api.createTask(uri);
-        if (task.status === "active" || task.status === "queued") {
+        if (isCurrentVisibleStatus(task.status)) {
           setTasks((prev) => upsertTaskById(prev, task));
         }
         setUri("");
@@ -350,7 +366,7 @@ export default function TasksPage() {
   );
 
   const handleTorrentCreated = useCallback((task: Task) => {
-    if (task.status === "active" || task.status === "queued") {
+    if (isCurrentVisibleStatus(task.status)) {
       setTasks((prev) => upsertTaskById(prev, task));
     }
     setTorrentWizard(null);
@@ -411,7 +427,7 @@ export default function TasksPage() {
 
       try {
         const newTask = await api.createTask(task.uri);
-        if (newTask.status === "active" || newTask.status === "queued") {
+        if (isCurrentVisibleStatus(newTask.status)) {
           setTasks((prev) => upsertTaskById(prev, newTask));
         }
         showToast("已重新添加下载任务", "success");
@@ -426,9 +442,7 @@ export default function TasksPage() {
     if (selectedTasks.size === 0 || isBatchOperating) return;
 
     const activeTasks = tasksRef.current.filter(
-      (t) =>
-        selectedTasks.has(t.id) &&
-        (t.status === "active" || t.status === "queued")
+      (t) => selectedTasks.has(t.id) && isInFlightStatus(t.status)
     );
     if (activeTasks.length === 0) {
       showToast("没有可取消的任务", "warning");
@@ -508,8 +522,8 @@ export default function TasksPage() {
         batchAddControllerRef.current !== controller
       ) return;
 
-      const visibleTasks = createdTasks.filter(
-        (task) => task.status === "active" || task.status === "queued"
+      const visibleTasks = createdTasks.filter((task) =>
+        isCurrentVisibleStatus(task.status)
       );
       if (visibleTasks.length > 0) {
         setTasks((prev) =>
@@ -554,9 +568,7 @@ export default function TasksPage() {
     }
 
     if (filterStatus === "active") {
-      filtered = filtered.filter(
-        (t) => t.status === "active" || t.status === "queued"
-      );
+      filtered = filtered.filter((t) => isInFlightStatus(t.status));
     }
 
     if (sortBy === "speed") {
@@ -576,9 +588,7 @@ export default function TasksPage() {
   const hasActiveTasks = useMemo(
     () =>
       tasks.some(
-        (t) =>
-          selectedTasks.has(t.id) &&
-          (t.status === "active" || t.status === "queued")
+        (t) => selectedTasks.has(t.id) && isInFlightStatus(t.status)
       ),
     [tasks, selectedTasks]
   );

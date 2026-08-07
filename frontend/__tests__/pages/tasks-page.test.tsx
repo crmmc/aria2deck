@@ -404,6 +404,43 @@ describe("TasksPage", () => {
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
   });
 
+  test("keeps paused and waiting tasks in list after websocket update", async () => {
+    let wsCallbacks: {
+      onTaskUpdate: (task: Task) => void;
+    } | null = null;
+    mockUseTaskWebSocket.mockImplementation((callbacks) => {
+      wsCallbacks = callbacks;
+    });
+
+    render(<TasksPage />);
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+
+    act(() => {
+      wsCallbacks?.onTaskUpdate({
+        ...activeTask,
+        status: "paused",
+        error: "任务已被外部暂停，请联系管理员处理",
+      });
+    });
+
+    expect(screen.getByText("ubuntu.iso")).toBeInTheDocument();
+    expect(screen.getByText("已暂停")).toBeInTheDocument();
+    expect(
+      screen.getByText("任务已被外部暂停，请联系管理员处理")
+    ).toBeInTheDocument();
+
+    act(() => {
+      wsCallbacks?.onTaskUpdate({
+        ...activeTask,
+        status: "waiting",
+        error: null,
+      });
+    });
+
+    expect(screen.getByText("ubuntu.iso")).toBeInTheDocument();
+    expect(screen.getByText("等待中")).toBeInTheDocument();
+  });
+
   test("pauses fallback polling while websocket is connected and resumes after disconnect", async () => {
     let wsCallbacks: {
       onConnected?: () => void;

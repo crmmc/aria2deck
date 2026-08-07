@@ -2047,6 +2047,7 @@ async def reconcile_attempt_signal(
                 is_metadata = bt_evidence and is_metadata_phase_status(
                     working_status
                 )
+                admission: dict[str, Any] | None = None
 
                 # Size admission for non-metadata live states (spec §8.2).
                 # coordinate_reported_size is a lock-internal action here;
@@ -2124,21 +2125,51 @@ async def reconcile_attempt_signal(
                     if mapped["display_name"]:
                         global_values["display_name"] = mapped["display_name"]
 
-                # Non-metadata pause: write admin_paused hint (spec §8.1, §14.3).
+                # External pause only (spec §8.1 / §14.3, plan A):
+                # - never mark metadata-phase pause as external
+                # - never mark pause that size-admission just owned (paused_by_us)
+                # - never overwrite growth/handoff/admission error codes with external pause
+                # - only when transitioning into paused from a non-paused live status
+                prev_status = str(snapshot.get("status") or "")
+                prev_error_code = str(snapshot.get("error_code") or "")
+                size_paused_by_us = bool(
+                    admission is not None and admission.get("paused_by_us")
+                )
+                protected_error_codes = {
+                    "growth_pause_failed",
+                    "growth_unpause_failed",
+                    "unpause_failed",
+                    "handoff_unknown_size",
+                    "unknown_size",
+                    "disk_budget",
+                    "disk_budget_exceeded",
+                    "max_task_size",
+                    "admission_rejected",
+                }
                 if (
                     mapped["status"] == "paused"
-                    and not is_metadata_phase_status(working_status)
+                    and not is_metadata
+                    and not size_paused_by_us
+                    and prev_status in {"active", "queued", "waiting"}
+                    and prev_error_code not in protected_error_codes
                 ):
                     global_values["error_message"] = (
-                        "任务已被管理员暂停，请联系管理员处理"
+                        "任务已被外部暂停，请联系管理员处理"
                     )
-                    global_values["error_code"] = "admin_paused"
+                    global_values["error_code"] = "external_paused"
                     global_values["disk_reserved_bytes"] = max(
                         0,
                         download_ops.safe_int(
                             snapshot.get("completed_bytes")
                         ),
                     )
+                elif mapped["status"] == "active" and prev_error_code in {
+                    "external_paused",
+                    "admin_paused",
+                }:
+                    # Clear sticky external-pause hint when download resumes.
+                    global_values["error_code"] = None
+                    global_values["error_message"] = None
 
                 updated = await guarded_update_download_and_active_user_tasks(
                     attempt_id,
