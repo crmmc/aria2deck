@@ -18,9 +18,67 @@ def _paused_status(*, gid: str = "gid-pause-admin") -> dict:
     }
 
 
+def _active_status(*, gid: str = "gid-pause-admin") -> dict:
+    return {
+        "gid": gid,
+        "status": "active",
+        "totalLength": "1000",
+        "completedLength": "100",
+        "downloadSpeed": "1000",
+        "uploadSpeed": "0",
+        "files": [{"path": "/tmp/file.bin", "length": "1000", "selected": "true"}],
+    }
+
+
 @pytest.mark.asyncio
-async def test_external_pause_keeps_task_visible_with_neutral_message(temp_db):
+async def test_size_known_pause_auto_resumes_instead_of_external_paused(temp_db):
+    """Admitted payloads that become paused must resume, not stick on external_paused."""
     user = await create_user_v0(username="pause_user", quota_bytes=10_000)
+    download = await create_global_download_v0(
+        resource_key="http:pause-autoresume",
+        resource_kind="http",
+        status="active",
+        aria2_gid="gid-pause-autoresume",
+        total_bytes=1000,
+        size_known=True,
+        disk_reserved_bytes=1000,
+        completed_bytes=100,
+    )
+    task = await create_user_task_v0(
+        user_id=user["id"], global_download_id=download["id"], status="active"
+    )
+    client = make_aria2_client(
+        tell_status=_active_status(gid="gid-pause-autoresume"),
+    )
+    status = _paused_status(gid="gid-pause-autoresume")
+    await handle_aria2_event(
+        client=client,
+        gid="gid-pause-autoresume",
+        event="pause",
+        aria2_status=status,
+    )
+    async with transaction() as conn:
+        g = (
+            await conn.execute(
+                select(global_downloads).where(global_downloads.c.id == download["id"])
+            )
+        ).mappings().one()
+        t = (
+            await conn.execute(
+                select(user_tasks).where(user_tasks.c.id == task["id"])
+            )
+        ).mappings().one()
+    assert g["status"] == "active"
+    assert t["status"] == "active"
+    assert g["error_code"] in (None, "")
+    assert g["error_message"] in (None, "")
+    client.unpause.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_external_pause_when_auto_resume_cannot_unpause(temp_db):
+    """If unpause cannot leave paused, project external_paused for active→paused."""
+    user = await create_user_v0(username="pause_user_ext", quota_bytes=10_000)
     download = await create_global_download_v0(
         resource_key="http:pause-external",
         resource_kind="http",
@@ -34,7 +92,10 @@ async def test_external_pause_keeps_task_visible_with_neutral_message(temp_db):
     task = await create_user_task_v0(
         user_id=user["id"], global_download_id=download["id"], status="active"
     )
-    client = make_aria2_client()
+    client = make_aria2_client(
+        unpause=RuntimeError("refused"),
+        tell_status=_paused_status(gid="gid-pause-external"),
+    )
     status = _paused_status(gid="gid-pause-external")
     await handle_aria2_event(
         client=client,
@@ -62,8 +123,8 @@ async def test_external_pause_keeps_task_visible_with_neutral_message(temp_db):
 
 
 @pytest.mark.asyncio
-async def test_already_paused_sync_does_not_rewrite_external_paused(temp_db):
-    """Repeated paused projection must not keep overwriting with external_paused."""
+async def test_already_paused_sync_auto_resumes_when_size_known(temp_db):
+    """Sticky paused admitted tasks should resume on Sync, not stay stuck."""
     user = await create_user_v0(username="pause_user2", quota_bytes=10_000)
     download = await create_global_download_v0(
         resource_key="http:pause-sticky",
@@ -74,13 +135,18 @@ async def test_already_paused_sync_does_not_rewrite_external_paused(temp_db):
         size_known=True,
         disk_reserved_bytes=100,
         completed_bytes=100,
-        error_code=None,
-        error_message=None,
+        error_code="external_paused",
+        error_message="任务已被外部暂停，请联系管理员处理",
     )
-    await create_user_task_v0(
-        user_id=user["id"], global_download_id=download["id"], status="paused"
+    task = await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="paused",
+        error_message="任务已被外部暂停，请联系管理员处理",
     )
-    client = make_aria2_client()
+    client = make_aria2_client(
+        tell_status=_active_status(gid="gid-pause-sticky"),
+    )
     status = _paused_status(gid="gid-pause-sticky")
     await handle_aria2_event(
         client=client,
@@ -94,9 +160,16 @@ async def test_already_paused_sync_does_not_rewrite_external_paused(temp_db):
                 select(global_downloads).where(global_downloads.c.id == download["id"])
             )
         ).mappings().one()
-    assert g["status"] == "paused"
+        t = (
+            await conn.execute(
+                select(user_tasks).where(user_tasks.c.id == task["id"])
+            )
+        ).mappings().one()
+    assert g["status"] == "active"
+    assert t["status"] == "active"
     assert g["error_code"] in (None, "")
-    assert not (g["error_message"] or "")
+    assert g["error_message"] in (None, "")
+    client.unpause.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -121,31 +194,10 @@ async def test_resume_from_external_pause_clears_error_hint(temp_db):
         error_message="任务已被外部暂停，请联系管理员处理",
     )
     client = make_aria2_client(
-        tell_status={
-            "gid": "gid-pause-resume",
-            "status": "active",
-            "totalLength": "1000",
-            "completedLength": "200",
-            "downloadSpeed": "1000",
-            "uploadSpeed": "0",
-            "files": [
-                {
-                    "path": "/tmp/file.bin",
-                    "length": "1000",
-                    "selected": "true",
-                }
-            ],
-        }
+        tell_status=_active_status(gid="gid-pause-resume"),
     )
-    status = {
-        "gid": "gid-pause-resume",
-        "status": "active",
-        "totalLength": "1000",
-        "completedLength": "200",
-        "downloadSpeed": "1000",
-        "uploadSpeed": "0",
-        "files": [{"path": "/tmp/file.bin", "length": "1000", "selected": "true"}],
-    }
+    status = _active_status(gid="gid-pause-resume")
+    status["completedLength"] = "200"
     await handle_aria2_event(
         client=client,
         gid="gid-pause-resume",
