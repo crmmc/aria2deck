@@ -5,10 +5,9 @@ import logging
 from typing import Any
 
 
-from app.aria2.gateway import get_aria2_client
 from app.repositories.downloads import list_user_tasks_for_download
 from app.services.task_projection import build_rest_task_response
-from app.services.task_runtime import fetch_cached_live_status_for_row
+from app.services.task_projection_rows import attach_snapshots_to_rows
 
 
 logger = logging.getLogger(__name__)
@@ -159,19 +158,14 @@ async def _detach_and_close(
 
 
 async def broadcast_task_update_to_subscribers(task_id: int) -> None:
-    rows = await list_user_tasks_for_download(task_id)
-    client = get_aria2_client()
-    live_by_gid: dict[str, dict] = {}
+    # M3 T10: 广播只读快照投影，不再回退实时 aria2 RPC。
+    rows = await attach_snapshots_to_rows(
+        await list_user_tasks_for_download(task_id)
+    )
 
     for row in rows:
         owner_id = int(row["user_id"])
-        live = await fetch_cached_live_status_for_row(
-            row,
-            client,
-            logger,
-            live_by_gid,
-        )
-        payload = build_rest_task_response(row, live)
+        payload = build_rest_task_response(row)
 
         sockets = await _registered_sockets(owner_id)
 

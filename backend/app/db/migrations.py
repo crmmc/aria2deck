@@ -312,6 +312,37 @@ async def migrate_v8(conn: AsyncConnection) -> None:
     await _rebuild_schema_meta(conn, 8)
 
 
+async def ensure_v9_backend_snapshot_schema(conn: AsyncConnection) -> None:
+    await conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS task_backend_snapshots ("
+            "global_download_id INTEGER NOT NULL PRIMARY KEY, "
+            "download_speed INTEGER NOT NULL DEFAULT 0, "
+            "upload_speed INTEGER NOT NULL DEFAULT 0, "
+            "total_length INTEGER NOT NULL DEFAULT 0, "
+            "completed_length INTEGER NOT NULL DEFAULT 0, "
+            "status VARCHAR(32) NOT NULL DEFAULT '', "
+            "files_json TEXT NOT NULL DEFAULT '[]', "
+            "raw_json TEXT NOT NULL DEFAULT '{}', "
+            "updated_at_ms INTEGER NOT NULL, "
+            "FOREIGN KEY(global_download_id) REFERENCES global_downloads (id) "
+            "ON DELETE CASCADE"
+            ")"
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_task_backend_snapshots_updated_at "
+            "ON task_backend_snapshots (updated_at_ms)"
+        )
+    )
+
+
+async def migrate_v9(conn: AsyncConnection) -> None:
+    await ensure_v9_backend_snapshot_schema(conn)
+    await _rebuild_schema_meta(conn, 9)
+
+
 async def migrate_v1(conn: AsyncConnection) -> None:
     await _add_missing_columns(conn, "app_settings", V1_APP_SETTINGS_ADDED_COLUMNS)
     await _rebuild_schema_meta(conn, 1)
@@ -901,6 +932,7 @@ MIGRATIONS: dict[int, Migration] = {
     6: migrate_v6,
     7: migrate_v7,
     8: migrate_v8,
+    9: migrate_v9,
 }
 
 

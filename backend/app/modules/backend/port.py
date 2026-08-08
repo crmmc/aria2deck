@@ -38,3 +38,9 @@ class BackendPort(Protocol):
     async def unpause(self, tid: int) -> None: ...
 
     async def remove(self, tid: int) -> None: ...
+
+    async def join_submission(
+        self, *, tid: int, gid: str, uris: list[str]
+    ) -> None:
+        """把已提交 attempt 的补发 URI 下发到 backend（多 mirror/capability）。"""
+        ...

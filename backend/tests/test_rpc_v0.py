@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
-from unittest.mock import AsyncMock
+from collections.abc import Generator
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.core.config import get_internal_base_url
+from app.modules.backend.aria2_adapter import Aria2BackendAdapter
+from app.repositories.backend_snapshots import upsert_snapshot
 from app.repositories.downloads import get_user_task, list_user_tasks
+from app.services import task_service
 from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
-from app.services.download_service import (
-    DOWNLOAD_SUBMISSION_FAILED_MESSAGE,
-    create_user_download,
-)
 from app.services.internal_fetch import CAPABILITY_HEADER, verify_capability
 from app.services.storage import get_store_path_for_hash
+from tests.create_task_helper import create_download_task
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -22,6 +25,44 @@ from tests.helpers_v0 import (
     create_user_task_v0,
     create_user_v0,
 )
+
+
+@pytest.fixture(autouse=True)
+def rpc_backend() -> Generator[None, None, None]:
+    """把本模块创建的 fake aria2 client 接到 register_and_submit 的 backend。
+
+    autouse teardown-only：测试在 handler.handle 之前（任何时候）创建 fake
+    client，fixture 在测试结束后清理 task backend override，避免泄漏到其他用例。
+    """
+    try:
+        yield
+    finally:
+        _clear_rpc_client()
+        task_service.set_task_backend_override(None)
+
+
+_RPC_CLIENT: AsyncMock | None = None
+
+
+def _clear_rpc_client() -> None:
+    global _RPC_CLIENT
+    _RPC_CLIENT = None
+
+
+def _make_rpc_client(**kwargs) -> AsyncMock:
+    """创建 fake aria2 client 并接到 task backend override。"""
+    global _RPC_CLIENT
+    _RPC_CLIENT = make_aria2_client(**kwargs)
+    task_service.set_task_backend_override(Aria2BackendAdapter(_RPC_CLIENT))
+    return _RPC_CLIENT
+
+
+async def _rpc_handler(
+    user_id: int, **client_kwargs: Any
+) -> tuple[Aria2RpcHandler, AsyncMock]:
+    """创建 fake client + handler，并把 client 接到 task backend override。"""
+    client = _make_rpc_client(**client_kwargs)
+    return Aria2RpcHandler(user_id), client
 
 
 MAGNET_INFO_HASH = "0123456789abcdef0123456789abcdef01234567"
@@ -41,11 +82,11 @@ def _valid_rpc_torrent(*, extra: tuple[tuple[bytes, bytes], ...] = ()) -> str:
 @pytest.mark.asyncio
 async def test_rpc_tell_active_uses_user_tasks(temp_db: str) -> None:
     user = await create_user_v0(username="rpc_active")
-    client = make_aria2_client(
+    client = _make_rpc_client(
         add_uri="gid-rpc-active",
         tell_active=[{"gid": "gid-rpc-active", "status": "active", "downloadSpeed": "10"}],
     )
-    await create_user_download(
+    await create_download_task(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
         uri="https://example.com/rpc.bin",
@@ -56,9 +97,22 @@ async def test_rpc_tell_active_uses_user_tasks(temp_db: str) -> None:
         aria2_client=client,
     )
 
-    handler = Aria2RpcHandler(user["id"], client)
-    rows = await handler.handle("aria2.tellActive", [])
+    handler = Aria2RpcHandler(user["id"])
     owned = await list_user_tasks(user["id"])
+    await upsert_snapshot(
+        global_download_id=int(owned[0]["global_download_id"]),
+        download_speed=10,
+        upload_speed=0,
+        total_length=10,
+        completed_length=0,
+        status="active",
+        files_json="[]",
+        raw_json=json.dumps(
+            {"gid": "gid-rpc-active", "status": "active", "downloadSpeed": "10"}
+        ),
+        updated_at_ms=1,
+    )
+    rows = await handler.handle("aria2.tellActive", [])
 
     assert len(rows) == 1
     assert rows[0]["gid"] == f"task-{owned[0]['id']}"
@@ -70,8 +124,8 @@ async def test_rpc_purge_download_result_deletes_terminal_user_task(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="rpc_stopped")
-    client = make_aria2_client()
-    handler = Aria2RpcHandler(user["id"], client)
+    client = _make_rpc_client()
+    handler = Aria2RpcHandler(user["id"])
 
     result = await handler.handle("aria2.purgeDownloadResult", [])
 
@@ -88,7 +142,8 @@ async def test_rpc_add_uri_creates_v0_task_and_returns_gid(
         lambda *_args, **_kwargs: [(None, None, None, None, ("93.184.216.34", 443))],
     )
     user = await create_user_v0(username="rpc_add_uri")
-    client = make_aria2_client(
+    handler, client = await _rpc_handler(
+        user["id"],
         add_uri="gid-rpc-add-uri",
         tell_status={
             "gid": "gid-rpc-add-uri",
@@ -98,7 +153,6 @@ async def test_rpc_add_uri_creates_v0_task_and_returns_gid(
             "files": [{"length": "128", "selected": "true"}],
         },
     )
-    handler = Aria2RpcHandler(user["id"], client)
 
     result = await handler.handle(
         "aria2.addUri",
@@ -115,20 +169,33 @@ async def test_rpc_add_uri_creates_v0_task_and_returns_gid(
     assert result == f"task-{rows[0]['id']}"
     assert len(rows) == 1
     assert rows[0]["aria2_gid"] == "gid-rpc-add-uri"
-    assert rows[0]["status"] == "active"
+    # T12：未知大小 HTTP 任务以 pause 提交，状态 waiting，由同步协调器
+    # (sync + reconcile_attempt_signal) 准入后恢复为 active。
+    assert rows[0]["status"] == "waiting"
     assert rows[0]["source_uri"] == "https://example.com/add.bin"
     client.add_uri.assert_awaited_once()
     uris, opts = client.add_uri.await_args.args
+    # mirror 随初次 add_uri 一起下发（capability 声明 mirror 供网关回源）。
     assert uris == [
         f"{get_internal_base_url()}/_internal/fetch/{rows[0]['global_download_id']}/0",
         f"{get_internal_base_url()}/_internal/fetch/{rows[0]['global_download_id']}/1",
     ]
     assert all("example.com" not in uri for uri in uris)
+    # join_submission 负责把 mirror gateway uri 补发到 gid。
+    join_calls = [
+        call
+        for call in client.change_uri.await_args_list
+        if call.args[0] == "gid-rpc-add-uri"
+    ]
+    assert len(join_calls) >= 1
+    joined_uris = [uri for call in join_calls for uri in call.args[3]]
+    assert f"{get_internal_base_url()}/_internal/fetch/{rows[0]['global_download_id']}/1" in joined_uris
     assert opts["out"] == "payload"
     assert opts["seed-time"] == "0"
     assert opts["pause"] == "true"
     assert opts["split"] == "1"
     assert opts["max-connection-per-server"] == "1"
+    assert "dir" in opts
     header_name, capability = opts["header"][0].split(": ", 1)
     assert header_name == CAPABILITY_HEADER
     verified = verify_capability(
@@ -138,15 +205,38 @@ async def test_rpc_add_uri_creates_v0_task_and_returns_gid(
     )
     assert verified.headers == ()
     assert verified.mirrors == ("https://mirror.example.com/add.bin",)
-    assert "dir" in opts
+
+    # 同步协调器从 aria2 读取 paused 状态并完成准入，任务恢复下载。
+    from app.aria2.sync import _sync_tasks_once
+
+    with patch("app.aria2.sync.get_aria2_client", return_value=client):
+        await _sync_tasks_once()
+    rows = await list_user_tasks(user["id"])
+    # Task Core：同一轮 sync 内 reconcile 先投影 paused，policy 再 unpause；
+    # DB 需下一轮 reconcile 才投影 active。
+    assert rows[0]["status"] == "paused"
     client.unpause.assert_awaited_once_with("gid-rpc-add-uri")
+    client.tell_status.side_effect = None
+    client.tell_status.return_value = {
+        "gid": "gid-rpc-add-uri",
+        "status": "active",
+        "totalLength": "128",
+        "completedLength": "0",
+        "files": [{"length": "128", "selected": "true"}],
+    }
+    with patch("app.aria2.sync.get_aria2_client", return_value=client):
+        await _sync_tasks_once()
+    rows = await list_user_tasks(user["id"])
+    assert rows[0]["status"] == "active"
 
 
 @pytest.mark.asyncio
-async def test_rpc_add_uri_canonicalizes_magnet_before_submit(temp_db: str) -> None:
+async def test_rpc_add_uri_canonicalizes_magnet_before_submit(
+    temp_db: str,
+) -> None:
     user = await create_user_v0(username="rpc_magnet_canonical")
-    client = make_aria2_client(add_uri="gid-rpc-magnet")
-    handler = Aria2RpcHandler(user["id"], client)
+    client = _make_rpc_client(add_uri="gid-rpc-magnet")
+    handler = Aria2RpcHandler(user["id"])
     canonical_uri = f"magnet:?xt=urn:btih:{MAGNET_INFO_HASH}"
     markers = (
         "rpc-tracker-secret.example",
@@ -175,7 +265,7 @@ async def test_rpc_http_auth_contexts_do_not_share_global_download(
 ) -> None:
     user_a = await create_user_v0(username="rpc_auth_a")
     user_b = await create_user_v0(username="rpc_auth_b")
-    client = make_aria2_client(
+    client = _make_rpc_client(
         add_uri=["gid-rpc-auth-a", "gid-rpc-auth-b"],
         tell_status=[
             {
@@ -194,11 +284,11 @@ async def test_rpc_http_auth_contexts_do_not_share_global_download(
     )
     uri = "https://example.com/protected.bin"
 
-    await Aria2RpcHandler(user_a["id"], client).handle(
+    await Aria2RpcHandler(user_a["id"]).handle(
         "aria2.addUri",
         [[uri], {"header": "X-Api-Key: rpc-user-a-secret"}],
     )
-    await Aria2RpcHandler(user_b["id"], client).handle(
+    await Aria2RpcHandler(user_b["id"]).handle(
         "aria2.addUri",
         [[uri], {}],
     )
@@ -227,8 +317,8 @@ async def test_rpc_add_uri_rejects_unsafe_primary_before_database_write(
     uri: str,
 ) -> None:
     user = await create_user_v0(username=f"rpc_unsafe_{len(uri)}")
-    client = make_aria2_client()
-    handler = Aria2RpcHandler(user["id"], client)
+    client = _make_rpc_client()
+    handler = Aria2RpcHandler(user["id"])
 
     with pytest.raises(RpcError) as exc_info:
         await handler.handle("aria2.addUri", [[uri], {}])
@@ -243,10 +333,14 @@ async def test_multicall_add_uri_failure_redacts_response_task_and_logs(
     temp_db: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # T12：提交失败由 register_and_submit 统一映射为 BadGatewayError，
+    # RPC 层转换为 INVALID_PARAMS + 通用中文文案（不泄漏内部异常）。
+    from app.services.task_service import SUBMISSION_FAILED_MESSAGE
+
     secret = "fake-capability.multicall-add-uri-secret"
     user = await create_user_v0(username="rpc_multicall_submit_failure")
-    client = make_aria2_client(add_uri=RuntimeError(secret))
-    handler = Aria2RpcHandler(user["id"], client)
+    client = _make_rpc_client(add_uri=RuntimeError(secret))
+    handler = Aria2RpcHandler(user["id"])
 
     with caplog.at_level(logging.WARNING):
         result = await handler.handle(
@@ -264,13 +358,13 @@ async def test_multicall_add_uri_failure_redacts_response_task_and_logs(
     rows = await list_user_tasks(user["id"])
     assert result == [
         {
-            "faultCode": RpcErrorCode.INTERNAL_ERROR,
-            "faultString": "Internal error",
+            "faultCode": RpcErrorCode.INVALID_PARAMS,
+            "faultString": SUBMISSION_FAILED_MESSAGE,
         }
     ]
     assert len(rows) == 1
-    assert rows[0]["status"] == "failed"
-    assert rows[0]["error_message"] == DOWNLOAD_SUBMISSION_FAILED_MESSAGE
+    assert rows[0]["status"] == "cancelled"
+    assert rows[0]["error_message"] == SUBMISSION_FAILED_MESSAGE
     assert secret not in repr(result)
     assert secret not in repr(rows[0])
     assert secret not in caplog.text
@@ -279,8 +373,8 @@ async def test_multicall_add_uri_failure_redacts_response_task_and_logs(
 @pytest.mark.asyncio
 async def test_rpc_add_uri_rejects_path_like_out_option(temp_db: str) -> None:
     user = await create_user_v0(username="rpc_add_uri_bad_out")
-    client = make_aria2_client(add_uri="gid-rpc-bad-out")
-    handler = Aria2RpcHandler(user["id"], client)
+    client = _make_rpc_client(add_uri="gid-rpc-bad-out")
+    handler = Aria2RpcHandler(user["id"])
 
     with pytest.raises(RpcError) as exc_info:
         await handler.handle(
@@ -325,8 +419,8 @@ async def test_rpc_add_uri_rejects_duplicate_completed_magnet_without_renaming(
         status="completed",
         display_name="real-magnet-name",
     )
-    client = make_aria2_client()
-    handler = Aria2RpcHandler(user["id"], client)
+    client = _make_rpc_client()
+    handler = Aria2RpcHandler(user["id"])
 
     with pytest.raises(RpcError) as exc_info:
         await handler.handle(
@@ -343,10 +437,12 @@ async def test_rpc_add_uri_rejects_duplicate_completed_magnet_without_renaming(
 
 
 @pytest.mark.asyncio
-async def test_rpc_add_torrent_creates_v0_task_and_returns_gid(temp_db: str) -> None:
+async def test_rpc_add_torrent_creates_v0_task_and_returns_gid(
+    temp_db: str,
+) -> None:
     user = await create_user_v0(username="rpc_add_torrent")
-    client = make_aria2_client(add_torrent="gid-rpc-add-torrent")
-    handler = Aria2RpcHandler(user["id"], client)
+    client = _make_rpc_client(add_torrent="gid-rpc-add-torrent")
+    handler = Aria2RpcHandler(user["id"])
     torrent_data = _valid_rpc_torrent()
 
     result = await handler.handle(
@@ -360,7 +456,8 @@ async def test_rpc_add_torrent_creates_v0_task_and_returns_gid(temp_db: str) -> 
     assert rows[0]["aria2_gid"] == "gid-rpc-add-torrent"
     assert rows[0]["status"] == "active"
     assert rows[0]["resource_kind"] == "torrent"
-    assert str(rows[0]["source_uri"]).startswith("magnet:?xt=urn:btih:")
+    # torrent 任务的 source_uri 保存 base64 提交体；magnet 展示地址经 display_uri 投影。
+    assert str(rows[0]["source_uri"]).startswith("base64:")
     client.add_torrent.assert_awaited_once()
     call_args = client.add_torrent.call_args
     assert call_args[0][0] == torrent_data
@@ -381,8 +478,8 @@ async def test_rpc_add_torrent_rejects_caller_webseed_before_submit(
     webseed: str,
 ) -> None:
     user = await create_user_v0(username=f"rpc_webseed_{len(webseed)}")
-    client = make_aria2_client()
-    handler = Aria2RpcHandler(user["id"], client)
+    client = _make_rpc_client()
+    handler = Aria2RpcHandler(user["id"])
 
     with pytest.raises(RpcError) as exc_info:
         await handler.handle("aria2.addTorrent", [_valid_rpc_torrent(), [webseed]])
@@ -395,8 +492,8 @@ async def test_rpc_add_torrent_rejects_caller_webseed_before_submit(
 @pytest.mark.asyncio
 async def test_rpc_add_torrent_rejects_bt_tracker_before_submit(temp_db: str) -> None:
     user = await create_user_v0(username="rpc_bt_tracker")
-    client = make_aria2_client()
-    handler = Aria2RpcHandler(user["id"], client)
+    client = _make_rpc_client()
+    handler = Aria2RpcHandler(user["id"])
 
     with pytest.raises(RpcError) as exc_info:
         await handler.handle(
@@ -416,8 +513,8 @@ async def test_rpc_add_torrent_rejects_embedded_webseed_before_submit(
     key: bytes,
 ) -> None:
     user = await create_user_v0(username=f"rpc_embedded_{key.decode()}")
-    client = make_aria2_client()
-    handler = Aria2RpcHandler(user["id"], client)
+    client = _make_rpc_client()
+    handler = Aria2RpcHandler(user["id"])
     torrent = _valid_rpc_torrent(
         extra=((key, _bencode_bytes(b"http://127.0.0.1/private")),)
     )
@@ -432,10 +529,12 @@ async def test_rpc_add_torrent_rejects_embedded_webseed_before_submit(
 
 
 @pytest.mark.asyncio
-async def test_rpc_add_torrent_rejects_duplicate_torrent(temp_db: str) -> None:
+async def test_rpc_add_torrent_rejects_duplicate_torrent(
+    temp_db: str,
+) -> None:
     user = await create_user_v0(username="rpc_duplicate_torrent")
-    client = make_aria2_client(add_torrent="gid-rpc-duplicate-torrent")
-    handler = Aria2RpcHandler(user["id"], client)
+    client = _make_rpc_client(add_torrent="gid-rpc-duplicate-torrent")
+    handler = Aria2RpcHandler(user["id"])
     torrent_data = _valid_rpc_torrent()
 
     first_gid = await handler.handle("aria2.addTorrent", [torrent_data])

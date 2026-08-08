@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -17,6 +18,7 @@ from app.db.schema import (
     user_tasks,
     users,
 )
+from app.repositories.backend_snapshots import upsert_snapshot
 from app.repositories.downloads import get_user_task_by_id, list_user_tasks
 from app.domain.torrent_metadata import (
     TorrentFile,
@@ -140,11 +142,40 @@ def mock_aria2_client() -> AsyncMock:
 
 @pytest.fixture
 def handler(test_user: dict, mock_aria2_client: AsyncMock) -> Aria2RpcHandler:
-    return Aria2RpcHandler(test_user["id"], mock_aria2_client)
+    from app.services import task_service
+    from app.modules.backend.aria2_adapter import Aria2BackendAdapter
+
+    task_service.set_task_backend_override(Aria2BackendAdapter(mock_aria2_client))
+    yield Aria2RpcHandler(test_user["id"])
+    task_service.set_task_backend_override(None)
 
 
 def _mock_client(handler: Aria2RpcHandler) -> AsyncMock:
-    return cast(AsyncMock, handler.client)
+    from app.services import task_service
+
+    backend = task_service._get_backend()
+    return cast(AsyncMock, backend._client)
+
+
+async def _upsert_rpc_snapshot(
+    task: dict[str, Any],
+    raw: dict[str, Any],
+    *,
+    files: list[dict[str, Any]] | None = None,
+) -> None:
+    """Seed the projection snapshot that the RPC read path now consumes."""
+    snapshot_files = files if files is not None else raw.get("files") or []
+    await upsert_snapshot(
+        global_download_id=int(task["global_download_id"]),
+        download_speed=int(str(raw.get("downloadSpeed") or 0)),
+        upload_speed=int(str(raw.get("uploadSpeed") or 0)),
+        total_length=int(str(raw.get("totalLength") or 0)),
+        completed_length=int(str(raw.get("completedLength") or 0)),
+        status=str(raw.get("status") or "active"),
+        files_json=json.dumps(snapshot_files),
+        raw_json=json.dumps(raw),
+        updated_at_ms=now_ms(),
+    )
 
 
 def test_rpc_error_to_dict() -> None:
@@ -179,7 +210,7 @@ async def test_get_version_and_system_methods(handler: Aria2RpcHandler) -> None:
     version = await handler.handle("aria2.getVersion", [])
     methods = await handler.handle("system.listMethods", [])
 
-    assert version["version"] == "1.36.0"
+    assert version["version"] == "aria2deck-proxy"
     assert "aria2.addUri" in methods
     assert "aria2.getVersion" in methods
 
@@ -320,7 +351,7 @@ async def test_add_uri_rejects_malformed_uri_lists(
 async def test_get_global_stat_counts_v0_tasks(
     handler: Aria2RpcHandler,
 ) -> None:
-    await create_rpc_task(
+    active = await create_rpc_task(
         user_id=handler.user_id, gid="gid-active", status="active", name="active.bin"
     )
     await create_rpc_task(
@@ -329,14 +360,16 @@ async def test_get_global_stat_counts_v0_tasks(
     await create_rpc_task(
         user_id=handler.user_id, gid="gid-done", status="completed", name="done.bin"
     )
-    _mock_client(handler).tell_active.return_value = [
+    await _upsert_rpc_snapshot(
+        active,
         {
             "gid": "gid-active",
             "status": "active",
             "downloadSpeed": "1000",
             "uploadSpeed": "500",
-        }
-    ]
+        },
+    )
+    _mock_client(handler).tell_active.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle("aria2.getGlobalStat", [])
 
@@ -348,11 +381,11 @@ async def test_get_global_stat_counts_v0_tasks(
 
 
 @pytest.mark.asyncio
-async def test_get_global_stat_uses_owned_live_speeds_only(
+async def test_get_global_stat_uses_owned_snapshot_speeds_only(
     handler: Aria2RpcHandler,
 ) -> None:
     other = await create_user_v0(username="rpc_global_stat_other")
-    await create_rpc_task(
+    owned_active = await create_rpc_task(
         user_id=handler.user_id,
         gid="gid-owned-active",
         status="active",
@@ -364,30 +397,31 @@ async def test_get_global_stat_uses_owned_live_speeds_only(
         status="completed",
         name="owned-complete.bin",
     )
-    await create_rpc_task(
+    foreign_active = await create_rpc_task(
         user_id=other["id"],
         gid="gid-foreign-active",
         status="active",
         name="foreign-active.bin",
     )
-    _mock_client(handler).tell_active.return_value = [
+    await _upsert_rpc_snapshot(
+        owned_active,
         {
             "gid": "gid-owned-active",
             "status": "active",
             "downloadSpeed": "40",
             "uploadSpeed": "4",
         },
+    )
+    await _upsert_rpc_snapshot(
+        foreign_active,
         {
             "gid": "gid-foreign-active",
             "status": "active",
             "downloadSpeed": "900",
             "uploadSpeed": "90",
         },
-    ]
-    _mock_client(handler).get_global_stat.return_value = {
-        "downloadSpeed": "940",
-        "uploadSpeed": "94",
-    }
+    )
+    _mock_client(handler).tell_active.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle("aria2.getGlobalStat", [])
 
@@ -399,7 +433,7 @@ async def test_get_global_stat_uses_owned_live_speeds_only(
 
 
 @pytest.mark.asyncio
-async def test_tell_active_uses_v0_tasks_and_live_speed(
+async def test_tell_active_uses_v0_tasks_and_snapshot_speed(
     handler: Aria2RpcHandler,
 ) -> None:
     task = await create_rpc_task(
@@ -410,9 +444,12 @@ async def test_tell_active_uses_v0_tasks_and_live_speed(
         total_bytes=500,
         completed_bytes=100,
     )
-    _mock_client(handler).tell_active.return_value = [
-        {"gid": "gid-active", "status": "active", "downloadSpeed": "42", "files": []}
-    ]
+    await _upsert_rpc_snapshot(
+        task,
+        {"gid": "gid-active", "status": "active", "downloadSpeed": "42"},
+        files=[],
+    )
+    _mock_client(handler).tell_active.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle(
         "aria2.tellActive", [["gid", "downloadSpeed", "files"]]
@@ -437,7 +474,7 @@ async def test_tell_active_uses_v0_tasks_and_live_speed(
 
 
 @pytest.mark.asyncio
-async def test_tell_active_refreshes_stale_live_bt_metadata(
+async def test_tell_active_renders_snapshot_bt_metadata(
     handler: Aria2RpcHandler,
 ) -> None:
     task = await create_rpc_task(
@@ -450,40 +487,47 @@ async def test_tell_active_refreshes_stale_live_bt_metadata(
         total_bytes=868_289_498,
         completed_bytes=866_552_794,
     )
-    _mock_client(handler).tell_active.return_value = [
+    snapshot_files = [
+        {
+            "index": "1",
+            "path": "real-file.mkv",
+            "length": "868289498",
+            "completedLength": "868289498",
+        }
+    ]
+    await _upsert_rpc_snapshot(
+        task,
         {
             "gid": "gid-stale-bt",
             "status": "active",
             "totalLength": "868289498",
-            "completedLength": "866552794",
-            "infoHash": "",
-            "bittorrent": {"info": {"name": "magnet:?xt=urn:btih:stale"}},
+            "completedLength": "868289498",
+            "infoHash": "145c59fb37d713ad1c1b84caa64ac4d9c6f78fe1",
+            "bittorrent": {"info": {"name": "real-file.mkv"}},
             "files": [
                 {
                     "index": "1",
-                    "path": "magnet:?xt=urn:btih:stale",
+                    "path": "real-file.mkv",
                     "length": "868289498",
-                    "completedLength": "866552794",
+                    "completedLength": "868289498",
+                    "selected": "true",
+                    "uris": [],
                 }
             ],
-        }
-    ]
-    _mock_client(handler).tell_status.return_value = {
-        "gid": "gid-stale-bt",
-        "status": "active",
-        "totalLength": "868289498",
-        "completedLength": "868289498",
-        "infoHash": "145c59fb37d713ad1c1b84caa64ac4d9c6f78fe1",
-        "bittorrent": {"info": {"name": "real-file.mkv"}},
-        "files": [
+        },
+        files=[
             {
                 "index": "1",
-                "path": "/downloads/real-file.mkv",
+                "path": "real-file.mkv",
                 "length": "868289498",
                 "completedLength": "868289498",
+                "selected": "true",
+                "uris": [],
             }
         ],
-    }
+    )
+    _mock_client(handler).tell_active.side_effect = RuntimeError("aria2 unavailable")
+    _mock_client(handler).tell_status.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle(
         "aria2.tellActive",
@@ -514,11 +558,12 @@ async def test_tell_active_refreshes_stale_live_bt_metadata(
             ],
         }
     ]
-    _mock_client(handler).tell_status.assert_awaited_once_with("gid-stale-bt")
+    _mock_client(handler).tell_active.assert_not_awaited()
+    _mock_client(handler).tell_status.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_tell_active_keeps_sanitized_live_status_when_bt_refresh_fails(
+async def test_tell_active_falls_back_to_row_name_without_snapshot(
     handler: Aria2RpcHandler,
 ) -> None:
     task = await create_rpc_task(
@@ -529,22 +574,7 @@ async def test_tell_active_keeps_sanitized_live_status_when_bt_refresh_fails(
         total_bytes=100,
         completed_bytes=10,
     )
-    _mock_client(handler).tell_active.return_value = [
-        {
-            "gid": "gid-refresh-fails",
-            "status": "active",
-            "downloadSpeed": "5",
-            "bittorrent": {"info": {"name": "magnet:?xt=urn:btih:stale"}},
-            "files": [
-                {
-                    "index": "1",
-                    "path": "magnet:?xt=urn:btih:stale",
-                    "length": "100",
-                    "completedLength": "10",
-                }
-            ],
-        }
-    ]
+    _mock_client(handler).tell_active.side_effect = RuntimeError("aria2 unavailable")
     _mock_client(handler).tell_status.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle(
@@ -556,7 +586,7 @@ async def test_tell_active_keeps_sanitized_live_status_when_bt_refresh_fails(
         {
             "gid": f"task-{task['id']}",
             "status": "active",
-            "downloadSpeed": "5",
+            "downloadSpeed": "0",
             "files": [
                 {
                     "index": "1",
@@ -569,14 +599,14 @@ async def test_tell_active_keeps_sanitized_live_status_when_bt_refresh_fails(
             ],
         }
     ]
-    _mock_client(handler).tell_status.assert_awaited_once_with("gid-refresh-fails")
+    _mock_client(handler).tell_active.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_tell_status_prefers_live_status_over_stale_db(
+async def test_tell_status_prefers_snapshot_over_stale_db(
     handler: Aria2RpcHandler,
 ) -> None:
-    await create_rpc_task(
+    task = await create_rpc_task(
         user_id=handler.user_id,
         gid="gid-live-status",
         status="active",
@@ -585,22 +615,27 @@ async def test_tell_status_prefers_live_status_over_stale_db(
         total_bytes=100,
         completed_bytes=90,
     )
-    _mock_client(handler).tell_status.return_value = {
-        "gid": "gid-live-status",
-        "status": "complete",
-        "totalLength": "100",
-        "completedLength": "100",
-        "infoHash": "abc",
-        "bittorrent": {"info": {"name": "real-name.bin"}},
-        "files": [
-            {
-                "index": "1",
-                "path": "/downloads/real-name.bin",
-                "length": "100",
-                "completedLength": "100",
-            }
-        ],
-    }
+    snapshot_files = [
+        {
+            "index": "1",
+            "path": "real-name.bin",
+            "length": "100",
+            "completedLength": "100",
+        }
+    ]
+    await _upsert_rpc_snapshot(
+        task,
+        {
+            "gid": "gid-live-status",
+            "status": "complete",
+            "totalLength": "100",
+            "completedLength": "100",
+            "infoHash": "abc",
+            "bittorrent": {"info": {"name": "real-name.bin"}},
+            "files": snapshot_files,
+        },
+    )
+    _mock_client(handler).tell_status.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle(
         "aria2.tellStatus",
@@ -614,24 +649,24 @@ async def test_tell_status_prefers_live_status_over_stale_db(
 
 
 @pytest.mark.asyncio
-async def test_tell_active_returns_empty_when_aria2_has_no_active_rows(
+async def test_tell_active_lists_db_active_rows_without_aria2(
     handler: Aria2RpcHandler,
 ) -> None:
-    await create_rpc_task(
+    task = await create_rpc_task(
         user_id=handler.user_id,
         gid="gid-db-stale-active",
         status="active",
         name="stale-active.bin",
     )
-    _mock_client(handler).tell_active.return_value = []
+    _mock_client(handler).tell_active.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle("aria2.tellActive", [["gid"]])
 
-    assert result == []
+    assert result == [{"gid": f"task-{task['id']}"}]
 
 
 @pytest.mark.asyncio
-async def test_tell_waiting_prefers_live_rows_and_filters_by_user(
+async def test_tell_waiting_reads_projection_and_filters_by_user(
     handler: Aria2RpcHandler,
 ) -> None:
     other = await create_user_v0(username="rpc_waiting_other")
@@ -640,6 +675,8 @@ async def test_tell_waiting_prefers_live_rows_and_filters_by_user(
         gid="gid-waiting-owned",
         status="waiting",
         name="owned.bin",
+        total_bytes=55,
+        completed_bytes=5,
     )
     await create_rpc_task(
         user_id=other["id"],
@@ -647,16 +684,26 @@ async def test_tell_waiting_prefers_live_rows_and_filters_by_user(
         status="waiting",
         name="other.bin",
     )
-    _mock_client(handler).tell_waiting.return_value = [
-        {"gid": "gid-waiting-other", "status": "waiting", "files": []},
+    await _upsert_rpc_snapshot(
+        owned,
         {
             "gid": "gid-waiting-owned",
             "status": "waiting",
             "totalLength": "55",
             "completedLength": "5",
-            "files": [{"path": "/tmp/owned.bin", "length": "55", "completedLength": "5"}],
         },
-    ]
+        files=[
+            {
+                "index": "1",
+                "path": "owned.bin",
+                "length": "55",
+                "completedLength": "5",
+                "selected": "true",
+                "uris": [],
+            }
+        ],
+    )
+    _mock_client(handler).tell_waiting.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle(
         "aria2.tellWaiting",
@@ -788,37 +835,31 @@ async def test_tell_status_keeps_aria2_shape_with_bt_placeholders(
         total_bytes=10,
         completed_bytes=1,
     )
-    _mock_client(handler).tell_status.return_value = {
-        "gid": "gid-bt-shape",
-        "status": "active",
-        "totalLength": "10",
-        "completedLength": "1",
-        "downloadSpeed": "7",
-        "uploadSpeed": "3",
-        "connections": "2",
-        "bittorrent": {
-            "announceList": [["udp://private-tracker.example/announce"]],
-            "comment": "private comment",
-            "creationDate": "1700000000",
-            "mode": "multi",
-            "info": {"name": "public display name"},
+    snapshot_files = [
+        {
+            "index": "1",
+            "path": "file.bin",
+            "length": "10",
+            "completedLength": "1",
+            "selected": "true",
+            "uris": [{"uri": "", "status": "used"}],
+        }
+    ]
+    await _upsert_rpc_snapshot(
+        task,
+        {
+            "gid": "gid-bt-shape",
+            "status": "active",
+            "totalLength": "10",
+            "completedLength": "1",
+            "downloadSpeed": "7",
+            "uploadSpeed": "3",
+            "connections": "2",
+            "bittorrent": {"mode": "multi", "info": {"name": "public display name"}},
+            "files": snapshot_files,
         },
-        "files": [
-            {
-                "index": "1",
-                "path": "/downloads/public display name/file.bin",
-                "length": "10",
-                "completedLength": "1",
-                "selected": "true",
-                "uris": [
-                    {
-                        "uri": "https://user:pass@example.com/file.bin",
-                        "status": "used",
-                    }
-                ],
-            }
-        ],
-    }
+    )
+    _mock_client(handler).tell_status.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle("aria2.tellStatus", ["gid-bt-shape"])
 
@@ -837,7 +878,7 @@ async def test_tell_status_keeps_aria2_shape_with_bt_placeholders(
 
 
 @pytest.mark.asyncio
-async def test_http_tell_status_does_not_expose_bt_fields_from_noisy_live_status(
+async def test_http_tell_status_omits_bt_fields_for_http_task(
     handler: Aria2RpcHandler,
 ) -> None:
     task = await create_rpc_task(
@@ -847,14 +888,7 @@ async def test_http_tell_status_does_not_expose_bt_fields_from_noisy_live_status
         name="plain.bin",
         resource_kind="http",
     )
-    _mock_client(handler).tell_status.return_value = {
-        "gid": "gid-http-bt-noise",
-        "status": "active",
-        "totalLength": "100",
-        "completedLength": "10",
-        "bittorrent": {"info": {"name": "not-a-torrent-name"}},
-        "files": [{"index": "1", "path": "/downloads/plain.bin"}],
-    }
+    _mock_client(handler).tell_status.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle(
         "aria2.tellStatus",
@@ -879,18 +913,23 @@ async def test_http_torrent_conversion_tell_status_projects_bt_shape(
         name="payload.torrent",
         resource_kind="http",
     )
-    _mock_client(handler).tell_status.return_value = {
-        "gid": "gid-http-torrent-converted",
-        "status": "active",
-        "totalLength": "4096",
-        "completedLength": "1024",
-        "infoHash": info_hash,
-        "bittorrent": {"mode": "multi", "info": {"name": "Real Torrent"}},
-        "files": [
-            {"index": "1", "path": "/downloads/Real Torrent/a.bin"},
-            {"index": "2", "path": "/downloads/Real Torrent/b.bin"},
-        ],
-    }
+    snapshot_files = [
+        {"index": "1", "path": "a.bin"},
+        {"index": "2", "path": "b.bin"},
+    ]
+    await _upsert_rpc_snapshot(
+        task,
+        {
+            "gid": "gid-http-torrent-converted",
+            "status": "active",
+            "totalLength": "4096",
+            "completedLength": "1024",
+            "infoHash": info_hash,
+            "bittorrent": {"mode": "multi", "info": {"name": "Real Torrent"}},
+            "files": snapshot_files,
+        },
+    )
+    _mock_client(handler).tell_status.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle(
         "aria2.tellStatus",
@@ -910,32 +949,42 @@ async def test_http_torrent_conversion_tell_status_projects_bt_shape(
 
 
 @pytest.mark.asyncio
-async def test_get_files_strips_paths_and_falls_back_to_v0_name(
+async def test_get_files_reads_snapshot_and_falls_back_to_v0_name(
     handler: Aria2RpcHandler,
 ) -> None:
-    await create_rpc_task(
+    task = await create_rpc_task(
         user_id=handler.user_id, gid="gid-files", status="active", name="fallback.bin"
     )
-    _mock_client(handler).get_files.return_value = [
-        {
-            "index": "1",
-            "path": "/private/downloads/file.bin",
-            "length": "10",
-            "uris": [{"uri": "https://user:pass@example.com/file.bin"}],
-        }
-    ]
-    live_files = await handler.handle("aria2.getFiles", ["gid-files"])
+    await _upsert_rpc_snapshot(
+        task,
+        {"gid": "gid-files", "status": "active"},
+        files=[
+            {
+                "index": "1",
+                "path": "file.bin",
+                "length": "10",
+                "uris": [{"uri": "", "status": "waiting"}],
+            }
+        ],
+    )
+    _mock_client(handler).get_files.side_effect = RuntimeError("aria2 unavailable")
+    snapshot_files = await handler.handle("aria2.getFiles", ["gid-files"])
 
-    _mock_client(handler).get_files.return_value = []
+    await _upsert_rpc_snapshot(
+        task,
+        {"gid": "gid-files", "status": "active"},
+        files=[],
+    )
     fallback_files = await handler.handle("aria2.getFiles", ["gid-files"])
 
-    assert live_files[0]["path"] == "file.bin"
-    assert live_files[0]["uris"] == [{"uri": "", "status": "waiting"}]
+    assert snapshot_files[0]["path"] == "file.bin"
+    assert snapshot_files[0]["uris"] == [{"uri": "", "status": "waiting"}]
     assert fallback_files[0]["path"] == "fallback.bin"
+    _mock_client(handler).get_files.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_get_uris_preserves_shape_with_empty_uri(
+async def test_get_uris_returns_masked_source_uri_shape(
     handler: Aria2RpcHandler,
 ) -> None:
     await create_rpc_task(
@@ -945,22 +994,15 @@ async def test_get_uris_preserves_shape_with_empty_uri(
         name="secret.bin",
         uri="https://user:pass@example.com/secret.bin",
     )
-    _mock_client(handler).get_uris.return_value = [
-        {"uri": "https://user:pass@example.com/secret.bin", "status": "used"},
-        {"uri": "https://example.com/next.bin", "status": "unknown"},
-    ]
+    _mock_client(handler).get_uris.side_effect = RuntimeError("aria2 unavailable")
     live = await handler.handle("aria2.getUris", ["gid-uris"])
 
-    _mock_client(handler).get_uris.side_effect = RuntimeError("aria2 unavailable")
-    fallback = await handler.handle("aria2.getUris", ["gid-uris"])
-
-    assert live[0] == {"uri": "", "status": "used"}
-    assert live[1] == {"uri": "", "status": "waiting"}
-    assert fallback == [{"uri": "", "status": "used"}]
+    assert live == [{"uri": "", "status": "used"}]
+    _mock_client(handler).get_uris.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_get_peers_and_servers_keep_stable_private_shape(
+async def test_get_peers_and_servers_return_empty_without_aria2(
     handler: Aria2RpcHandler,
 ) -> None:
     await create_rpc_task(
@@ -971,80 +1013,16 @@ async def test_get_peers_and_servers_keep_stable_private_shape(
         uri="magnet:?xt=urn:btih:abc",
         resource_kind="magnet",
     )
-    _mock_client(handler).get_peers.return_value = [
-        {
-            "peerId": "private-peer-id",
-            "ip": "203.0.113.9",
-            "port": "6881",
-            "bitfield": "ffff",
-            "amChoking": "true",
-            "peerChoking": "true",
-            "downloadSpeed": "123",
-            "uploadSpeed": "456",
-            "seeder": "true",
-        },
-        {
-            "peerId": "another-private-peer-id",
-            "ip": "203.0.113.10",
-            "port": "6882",
-            "downloadSpeed": "789",
-            "uploadSpeed": "10",
-        },
-    ]
-    _mock_client(handler).get_servers.return_value = [
-        {
-            "index": "1",
-            "servers": [
-                {
-                    "uri": "https://tracker-or-server.example/one",
-                    "currentUri": "https://tracker-or-server.example/current-one",
-                    "downloadSpeed": "123",
-                },
-                {
-                    "uri": "https://tracker-or-server.example/two",
-                    "currentUri": "https://tracker-or-server.example/current-two",
-                    "downloadSpeed": "456",
-                },
-            ],
-        }
-    ]
+    _mock_client(handler).get_peers.side_effect = RuntimeError("aria2 unavailable")
+    _mock_client(handler).get_servers.side_effect = RuntimeError("aria2 unavailable")
 
     peers = await handler.handle("aria2.getPeers", ["gid-peer"])
     servers = await handler.handle("aria2.getServers", ["gid-peer"])
 
     assert peers == []
-    assert servers == [
-        {"index": "1", "servers": [{"uri": "", "currentUri": "", "downloadSpeed": "0"}]}
-    ]
-
-    _mock_client(handler).get_servers.return_value = []
-    _mock_client(handler).get_files.return_value = [
-        {"index": "1", "path": "/dl/file1.bin", "length": "100"},
-        None,
-        {"index": "3", "path": "/dl/file3.bin", "length": "300"},
-    ]
-    servers = await handler.handle("aria2.getServers", ["gid-peer"])
-    assert servers == [
-        {"index": "1", "servers": [{"uri": "", "currentUri": "", "downloadSpeed": "0"}]},
-        {"index": "3", "servers": [{"uri": "", "currentUri": "", "downloadSpeed": "0"}]},
-    ]
-
-    _mock_client(handler).get_servers.return_value = [
-        {
-            "index": "9",
-            "servers": [
-                {
-                    "uri": "https://private.example/file.bin",
-                    "currentUri": "https://private.example/file.bin",
-                    "downloadSpeed": "999",
-                }
-            ],
-        }
-    ]
-    servers = await handler.handle("aria2.getServers", ["gid-peer"])
-    assert servers == [
-        {"index": "9", "servers": [{"uri": "", "currentUri": "", "downloadSpeed": "0"}]}
-    ]
+    assert servers == []
+    _mock_client(handler).get_peers.assert_not_awaited()
+    _mock_client(handler).get_servers.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1059,7 +1037,7 @@ async def test_remove_cancels_active_v0_task(handler: Aria2RpcHandler) -> None:
     assert result == "gid-remove"
     assert latest is not None
     assert latest["status"] == "cancelled"
-    _mock_client(handler).force_remove.assert_awaited_once_with("gid-remove")
+    _mock_client(handler).remove.assert_awaited_once_with("gid-remove")
 
 
 @pytest.mark.asyncio
@@ -1235,28 +1213,29 @@ async def test_gateway_capability_is_omitted_from_rpc_views_and_logs(
     )
     task_gid = f"task-{task['id']}"
     capability = "eyJwIjoic291cmNlLXNlY3JldCJ9.raw-capability-signature"
-    internal_uri = f"http://app:8001/_internal/fetch/1/0?token={capability}"
-    mock_aria2_client.tell_status.return_value = {
-        "gid": "gid-capability",
-        "status": "active",
-        "errorMessage": capability,
-        "header": capability,
-        "options": {"header": [f"X-Aria2Deck-Fetch-Capability: {capability}"]},
-        "files": [
-            {
-                "index": "1",
-                "path": "payload",
-                "length": "1",
-                "completedLength": "0",
-                "selected": "true",
-                "uris": [{"uri": internal_uri, "status": "used"}],
-            }
-        ],
-    }
+    await _upsert_rpc_snapshot(
+        task,
+        {
+            "gid": "gid-capability",
+            "status": "active",
+            "errorMessage": capability,
+            "files": [
+                {
+                    "index": "1",
+                    "path": "payload",
+                    "length": "1",
+                    "completedLength": "0",
+                    "selected": "true",
+                    "uris": [{"uri": "", "status": "used"}],
+                }
+            ],
+        },
+    )
+    mock_aria2_client.tell_status.side_effect = RuntimeError(capability)
     mock_aria2_client.get_uris.side_effect = RuntimeError(capability)
     mock_aria2_client.change_uri = AsyncMock()
-    owner_handler = Aria2RpcHandler(owner["id"], mock_aria2_client)
-    other_handler = Aria2RpcHandler(other["id"], mock_aria2_client)
+    owner_handler = Aria2RpcHandler(owner["id"])
+    other_handler = Aria2RpcHandler(other["id"])
 
     with caplog.at_level(logging.DEBUG):
         status = await owner_handler.handle("aria2.tellStatus", [task_gid])
@@ -1294,7 +1273,7 @@ async def test_system_multicall_strips_inner_token(handler: Aria2RpcHandler) -> 
         [[{"methodName": "aria2.getVersion", "params": ["token:inner"]}]],
     )
 
-    assert result == [[{"version": "1.36.0", "enabledFeatures": ["BitTorrent"]}]]
+    assert result == [[{"version": "aria2deck-proxy", "enabledFeatures": []}]]
 
 
 @pytest.mark.asyncio
@@ -1458,17 +1437,20 @@ async def test_tell_active_masks_backend_gid(handler: Aria2RpcHandler) -> None:
         status="active",
         name="active.bin",
     )
-    _mock_client(handler).tell_active.return_value = [
-        {"gid": "backend-gid-active", "status": "active", "downloadSpeed": "42"}
-    ]
+    await _upsert_rpc_snapshot(
+        task,
+        {"gid": "backend-gid-active", "status": "active", "downloadSpeed": "42"},
+    )
+    _mock_client(handler).tell_active.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle("aria2.tellActive", [["gid", "downloadSpeed"]])
 
     assert result == [{"gid": f"task-{task['id']}", "downloadSpeed": "42"}]
+    _mock_client(handler).tell_active.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_tell_status_by_task_gid_keeps_live_data(
+async def test_tell_status_by_task_gid_reads_projection(
     handler: Aria2RpcHandler,
 ) -> None:
     task = await create_rpc_task(
@@ -1479,25 +1461,28 @@ async def test_tell_status_by_task_gid_keeps_live_data(
         total_bytes=100,
         completed_bytes=10,
     )
-    _mock_client(handler).tell_status.return_value = {
-        "gid": "backend-gid-status",
-        "status": "active",
-        "totalLength": "100",
-        "completedLength": "80",
-        "downloadSpeed": "999",
-    }
+    await _upsert_rpc_snapshot(
+        task,
+        {
+            "gid": "backend-gid-status",
+            "status": "active",
+            "totalLength": "100",
+            "completedLength": "80",
+            "downloadSpeed": "999",
+        },
+    )
+    _mock_client(handler).tell_status.side_effect = RuntimeError("aria2 unavailable")
 
     result = await handler.handle(
         "aria2.tellStatus",
         [f"task-{task['id']}", ["gid", "completedLength", "downloadSpeed"]],
     )
 
-    # Output identity is masked, but the live aria2 numbers are preserved by
-    # resolving task-{id} back to the real backend gid.
+    # Output identity is masked; the numbers come from the backend snapshot.
     assert result["gid"] == f"task-{task['id']}"
     assert result["completedLength"] == "80"
     assert result["downloadSpeed"] == "999"
-    _mock_client(handler).tell_status.assert_awaited_once_with("backend-gid-status")
+    _mock_client(handler).tell_status.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1515,7 +1500,7 @@ async def test_remove_accepts_task_gid(handler: Aria2RpcHandler) -> None:
     assert result == f"task-{task['id']}"
     assert latest is not None
     assert latest["status"] == "cancelled"
-    _mock_client(handler).force_remove.assert_awaited_once_with("backend-gid-remove")
+    _mock_client(handler).remove.assert_awaited_once_with("backend-gid-remove")
 
 
 @pytest.mark.asyncio

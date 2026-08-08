@@ -63,15 +63,29 @@ class Aria2BackendAdapter:
                 uri[len("base64:"):], [], submit_options
             )
         elif resource_kind == "http":
+            mirrors = [str(item) for item in (options.get("mirrors") or [])]
             gateway_uris, gateway_options = build_gateway_submission(
                 download_id=tid,
                 source_uri=uri,
                 options=options,
+                source_uris=[uri, *mirrors],
             )
             submit_options.update(gateway_options)
             if unknown_size:
                 submit_options["pause"] = "true"
             gid = await self._client.add_uri(gateway_uris, submit_options)
+            # 多 mirror 场景：capability 中已带 mirrors，需要把剩余 gateway
+            # uri 追加到当前 gid，保证 aria2 侧可见。
+            if len(gateway_uris) > 1:
+                try:
+                    await self._client.change_uri(gid, 1, [], gateway_uris[1:])
+                except Exception:
+                    logger.warning(
+                        "补发 mirror 失败 tid=%s gid=%s",
+                        tid,
+                        gid,
+                        exc_info=True,
+                    )
         else:
             self._merge_user_and_server_options(submit_options, options)
             if unknown_size and resource_kind == "magnet":
@@ -185,3 +199,11 @@ class Aria2BackendAdapter:
             logger.warning(
                 "clear terminal gid failed tid=%s gid=%s", tid, gid, exc_info=True
             )
+
+    async def join_submission(
+        self, *, tid: int, gid: str, uris: list[str]
+    ) -> None:
+        """对已提交的 gid 重新下发 URI 列表（mirror/capability 补发）。"""
+        if not uris:
+            return
+        await self._client.change_uri(gid, 1, [], uris)

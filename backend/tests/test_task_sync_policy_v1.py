@@ -82,7 +82,7 @@ async def test_quota_queued_resumes_on_sufficient_headroom(temp_db: str) -> None
 
 @pytest.mark.asyncio
 async def test_external_pause_marked_without_unpause(temp_db: str) -> None:
-    """paused without system error_code -> mark external_paused, no unpause."""
+    """paused without system error_code and without admitted size -> external pause."""
     user = await create_user_v0(username="qp2", quota_bytes=10**9)
     gd = await create_global_download_v0(
         resource_key="http://example.com/q2.bin",
@@ -90,8 +90,8 @@ async def test_external_pause_marked_without_unpause(temp_db: str) -> None:
         resource_kind="http",
         status="paused",
         aria2_gid="gid-q2",
-        total_bytes=100,
-        size_known=True,
+        total_bytes=0,
+        size_known=False,
     )
     await create_user_task_v0(
         user_id=user["id"], global_download_id=gd["id"], status="paused"

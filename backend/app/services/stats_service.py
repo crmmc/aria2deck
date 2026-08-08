@@ -5,13 +5,10 @@ import logging
 import shutil
 from time import monotonic
 from pathlib import Path
-from typing import Any
 
-from app.aria2.gateway import get_aria2_client
 from app.core.config import settings
-from app.repositories.downloads import list_user_tasks
 from app.services.task_projection import speed_totals, stat_counts
-from app.services.task_runtime import fetch_active_live_statuses_by_gid
+from app.services.task_projection_rows import list_user_task_projections
 from app.services.usage_service import get_visible_space
 
 logger = logging.getLogger(__name__)
@@ -64,11 +61,9 @@ async def get_user_stats(
     used_space = int(visible_space["used"])
     frozen_space = int(visible_space["frozen"])
 
-    rows = await list_user_tasks(user_id)
+    rows = await list_user_task_projections(user_id)
     counts = stat_counts(rows)
-    client: Any = get_aria2_client()
-    live_by_gid = await fetch_active_live_statuses_by_gid(rows, client, logger)
-    speeds = speed_totals(rows, live_by_gid)
+    speeds = speed_totals(rows)
     active_count = counts["current"]
 
     result = {

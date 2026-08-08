@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -10,8 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
+from app.repositories.backend_snapshots import upsert_snapshot
 from app.repositories.usage import apply_usage_delta
-from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_global_download_v0, create_user_task_v0
 
 
@@ -56,7 +57,7 @@ def _create_user_download_task(
     user_status: str = "active",
     global_status: str = "active",
     aria2_gid: str | None = None,
-) -> None:
+) -> int:
     download = asyncio.run(
         create_global_download_v0(
             resource_key=resource_key,
@@ -74,6 +75,36 @@ def _create_user_download_task(
             global_download_id=download["id"],
             status=user_status,
             display_name=f"{resource_key}.zip",
+        )
+    )
+    return int(download["id"])
+
+
+def _upsert_speed_snapshot(
+    global_download_id: int,
+    *,
+    download_speed: int,
+    upload_speed: int,
+) -> None:
+    raw = {
+        "gid": "gid-snap",
+        "status": "active",
+        "totalLength": "1000",
+        "completedLength": "500",
+        "downloadSpeed": str(download_speed),
+        "uploadSpeed": str(upload_speed),
+    }
+    asyncio.run(
+        upsert_snapshot(
+            global_download_id=global_download_id,
+            download_speed=download_speed,
+            upload_speed=upload_speed,
+            total_length=1000,
+            completed_length=500,
+            status="active",
+            files_json=json.dumps([]),
+            raw_json=json.dumps(raw),
+            updated_at_ms=1,
         )
     )
 
@@ -270,42 +301,27 @@ class TestGetStatsWithActiveTasks:
         assert response.status_code == 200
         assert response.json()["active_task_count"] == 2
 
-    def test_get_stats_sums_live_speeds_for_current_user(
+    def test_get_stats_sums_snapshot_speeds_for_current_user(
         self, authenticated_client: TestClient, test_user: dict
     ) -> None:
-        _create_user_download_task(
+        active_tid = _create_user_download_task(
             test_user["id"],
             "speed-active",
             user_status="active",
             global_status="active",
             aria2_gid="gid-speed-active",
         )
-        _create_user_download_task(
+        complete_tid = _create_user_download_task(
             test_user["id"],
             "speed-complete",
             user_status="completed",
             global_status="completed",
             aria2_gid="gid-speed-complete",
         )
-        client = make_aria2_client(
-            tell_active=[
-                {
-                    "gid": "gid-speed-active",
-                    "downloadSpeed": "4096",
-                    "uploadSpeed": "64",
-                },
-                {
-                    "gid": "gid-speed-complete",
-                    "downloadSpeed": "9999",
-                    "uploadSpeed": "9999",
-                },
-            ]
-        )
+        _upsert_speed_snapshot(active_tid, download_speed=4096, upload_speed=64)
+        _upsert_speed_snapshot(complete_tid, download_speed=9999, upload_speed=9999)
 
-        with (
-            patch("shutil.disk_usage", return_value=_disk_usage()),
-            patch("app.services.stats_service.get_aria2_client", return_value=client),
-        ):
+        with patch("shutil.disk_usage", return_value=_disk_usage()):
             response = authenticated_client.get("/api/stats")
 
         assert response.status_code == 200

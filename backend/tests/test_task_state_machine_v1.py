@@ -56,9 +56,9 @@ def _row(**overrides) -> dict:
 # --- pure decision tests ---------------------------------------------------
 
 
-def test_external_pause_never_auto_unpauses() -> None:
-    """AC-6: paused without a system queue code is external; no unpause."""
-    row = _row(status="paused", error_code=None, total_bytes=100, size_known=True)
+def test_external_pause_without_known_size_is_marked() -> None:
+    """Paused + no error_code + size not yet admitted → external pause."""
+    row = _row(status="paused", error_code=None, total_bytes=0, size_known=False)
     decision = decide_on_snapshot(row, "paused", quota=QuotaContext(quota_bytes=10**9))
     assert decision.action == "mark_external_paused"
     assert decision.error_code == ERROR_EXTERNAL_PAUSED
@@ -70,8 +70,16 @@ def test_external_pause_never_auto_unpauses() -> None:
     assert decision2.action == "keep"
 
 
-def test_size_known_alone_never_resumes() -> None:
-    """Invariant: size_known + paused must not auto-unpause by itself."""
+def test_admission_paused_resumes() -> None:
+    """System-owned admission pause → resume and clear marker."""
+    row = _row(status="paused", error_code="admission_paused", total_bytes=500, size_known=True)
+    decision = decide_on_snapshot(row, "paused", quota=QuotaContext(quota_bytes=10**9))
+    assert decision.action == "resume"
+    assert decision.clear_error_code
+
+
+def test_size_known_paused_without_error_is_external() -> None:
+    """Known size + paused without ownership marker → external pause."""
     row = _row(status="paused", error_code=None, total_bytes=500, size_known=True)
     for ctx in (
         None,
@@ -79,7 +87,7 @@ def test_size_known_alone_never_resumes() -> None:
         QuotaContext(quota_bytes=10**9, quota_used_bytes=0),
     ):
         decision = decide_on_snapshot(row, "paused", quota=ctx)
-        assert decision.action != "resume"
+        assert decision.action == "mark_external_paused"
 
 
 def test_quota_queued_resumes_when_headroom_sufficient() -> None:

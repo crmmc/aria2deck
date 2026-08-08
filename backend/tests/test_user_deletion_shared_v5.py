@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
 from app.repositories import auth as auth_repo
-from app.services import deletion_cleanup
+from app.services import task_service
 from app.services.deletion_cleanup import DeletionCleanupManager
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -42,7 +42,9 @@ async def test_deleting_shared_subscriber_keeps_writer_for_active_user(
         status="active",
     )
     aria2 = AsyncMock()
-    monkeypatch.setattr(deletion_cleanup, "get_aria2_client", lambda: aria2)
+    monkeypatch.setattr(
+        task_service, "_get_backend", lambda: task_service.Aria2BackendAdapter(aria2)
+    )
 
     await auth_repo.delete_user_as_admin(
         actor_id=test_admin["id"], user_id=deleting["id"]
@@ -50,7 +52,7 @@ async def test_deleting_shared_subscriber_keeps_writer_for_active_user(
     await DeletionCleanupManager.run_once()
 
     assert await auth_repo.get_user_by_id_any(deleting["id"]) is None
-    aria2.force_remove.assert_not_awaited()
+    aria2.remove.assert_not_awaited()
     async with transaction() as conn:
         removed = (
             await conn.execute(

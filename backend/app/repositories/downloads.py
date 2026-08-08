@@ -431,6 +431,7 @@ async def get_global_download_status_snapshot(
                         global_downloads.c.completed_file_id,
                         global_downloads.c.completed_bytes,
                         global_downloads.c.total_bytes,
+                        global_downloads.c.size_known,
                         global_downloads.c.error_code,
                         global_downloads.c.error_message,
                     ).where(global_downloads.c.id == download_id)

@@ -9,17 +9,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from app.aria2.gateway import get_aria2_client
 from app.domain.status import ACTIVE_USER_TASK_STATUSES
 from app.repositories import auth as auth_repo
 from app.repositories import downloads as downloads_repo
 from app.repositories import files as files_repo
-from app.services.download_service import cancel_user_task
 from app.services.storage import get_store_dir, is_path_within_base
 from app.services.storage_locks import (
     get_content_hash_lock,
     wait_for_content_readers_locked,
 )
+from app.services.task_service import cancel_task
 from app.services.task_broadcast import broadcast_task_update_to_subscribers
 
 logger = logging.getLogger(__name__)
@@ -279,12 +278,11 @@ class DeletionCleanupManager:
             include_pending_user=True,
         )
         for task in tasks:
-            await cancel_user_task(
+            await cancel_task(
                 user_id=user_id,
                 user_task_id=int(task["id"]),
                 quota_bytes=int(claimed_row["quota_bytes"]),
-                aria2_client=get_aria2_client(),
-                cleanup_pending_user=True,
+                tolerate_backend_failure=True,
             )
             await broadcast_task_update_to_subscribers(
                 int(task["global_download_id"])

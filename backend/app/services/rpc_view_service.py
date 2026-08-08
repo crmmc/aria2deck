@@ -9,8 +9,8 @@ from app.domain.status import (
 from app.domain.task_policy import (
     is_current,
 )
-from app.repositories.downloads import list_user_tasks
 from app.services.task_projection import build_aria2_status
+from app.services.task_projection_rows import list_user_task_projections
 
 
 def status_from_task(
@@ -23,7 +23,7 @@ async def list_active_statuses(
     user_id: int,
     live_by_gid: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    rows = await list_user_tasks(user_id, ACTIVE_LIKE_DOWNLOAD_STATUSES)
+    rows = await list_user_task_projections(user_id, ACTIVE_LIKE_DOWNLOAD_STATUSES)
     live_by_gid = live_by_gid or {}
     return [
         status_from_task(row, live_by_gid.get(str(row.get("aria2_gid"))))
@@ -33,7 +33,7 @@ async def list_active_statuses(
 
 
 async def list_waiting_statuses(user_id: int) -> list[dict[str, Any]]:
-    rows = await list_user_tasks(user_id, ACTIVE_LIKE_DOWNLOAD_STATUSES)
+    rows = await list_user_task_projections(user_id, ACTIVE_LIKE_DOWNLOAD_STATUSES)
     return [
         status_from_task(row)
         for row in rows
@@ -42,7 +42,7 @@ async def list_waiting_statuses(user_id: int) -> list[dict[str, Any]]:
 
 
 async def list_stopped_statuses(user_id: int) -> list[dict[str, Any]]:
-    rows = await list_user_tasks(user_id, None)
+    rows = await list_user_task_projections(user_id, None)
     return [
         status_from_task(row)
         for row in rows

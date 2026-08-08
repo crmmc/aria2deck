@@ -1,5 +1,13 @@
 """Minimal batch sync from backend into Task Core.
 
+职责边界（M3 投影缓存）：本模块只负责 **读投影**——将后端快照写入
+``task_backend_snapshots`` 投影表，并保留既有的
+``global_downloads.status`` / ``completed_bytes`` 进度记账与暂停/排队
+policy pass。状态机流转、完成/失败 handoff、终态落库与物理清理一律
+归 ``reconcile_attempt_signal``（``app/services/aria2_lifecycle_service.py``）
+处理，本模块不得调用 ``claim_attempt_terminal`` / ``cleanup_with_claim`` /
+``fail_download_and_reclaim`` 等终态路径。
+
 v1 keeps the sync model simple: list live tids that already have a
 backend gid, ask the backend for snapshots, and write the observed
 ``completed_bytes``/``status`` back to the global download row. After
@@ -15,8 +23,10 @@ on the policy pass for queue-eligible tids only.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
+from app.core.time_utils import now_ms
 from app.modules.backend.port import BackendPort, Snapshot
 from app.modules.task_core.policy import (
     SYSTEM_QUEUE_CODES,
@@ -35,6 +45,9 @@ from app.services.download_service import get_disk_available_bytes
 from app.services.usage_service import get_usage
 
 _SYNCED_STATUSES = {"active", "waiting", "paused"}
+
+# NOTE: sanitize/upsert imports live inside _upsert_snapshot_row to avoid a
+# circular import (task_projection -> app.modules -> task_core.sync).
 
 
 @dataclass(frozen=True)
@@ -77,6 +90,32 @@ async def _run_policy_for_snapshot(
     return True
 
 
+def _to_int(value: object) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _upsert_snapshot_row(snap: Snapshot) -> None:
+    """Write one sanitized projection row for ``snap`` into task_backend_snapshots."""
+    from app.repositories.backend_snapshots import upsert_snapshot
+    from app.services.aria2_snapshot_sanitize import sanitize_status
+
+    sanitized = sanitize_status(snap.raw)
+    await upsert_snapshot(
+        global_download_id=snap.tid,
+        download_speed=_to_int(sanitized["downloadSpeed"]),
+        upload_speed=_to_int(sanitized["uploadSpeed"]),
+        total_length=_to_int(sanitized["totalLength"]),
+        completed_length=_to_int(sanitized["completedLength"]),
+        status=str(sanitized["status"]),
+        files_json=json.dumps(sanitized.get("files", []), ensure_ascii=False),
+        raw_json=json.dumps(sanitized, ensure_ascii=False),
+        updated_at_ms=now_ms(),
+    )
+
+
 async def sync_once(backend: BackendPort) -> SyncReport:
     """Run one batch sync round against the backend.
 
@@ -103,6 +142,7 @@ async def sync_once(backend: BackendPort) -> SyncReport:
         if str(current.get("status")) not in _SYNCED_STATUSES:
             skipped += 1
             continue
+        await _upsert_snapshot_row(snap)
         completed = int(snap.raw.get("completedLength", 0) or 0)
         status = str(snap.status)
         if status not in _SYNCED_STATUSES and status not in {"complete", "error", "removed"}:
@@ -163,6 +203,7 @@ async def apply_queue_policy(backend: BackendPort) -> SyncReport:
         if str(current.get("status")) not in _SYNCED_STATUSES:
             skipped += 1
             continue
+        await _upsert_snapshot_row(snap)
         if await _run_policy_for_snapshot(backend, snap, current):
             updated += 1
     return SyncReport(

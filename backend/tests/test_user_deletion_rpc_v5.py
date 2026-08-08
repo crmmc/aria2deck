@@ -11,7 +11,7 @@ from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks, users
 from app.repositories import auth as auth_repo
 from app.repositories import downloads as downloads_repo
-from app.services import deletion_cleanup
+from app.services import task_service
 from app.services.deletion_cleanup import DeletionCleanupManager
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -60,12 +60,14 @@ async def test_user_rpc_failure_does_not_block_terminal_user_cleanup(
 
     aria2 = AsyncMock()
     aria2.force_remove.side_effect = OSError("rpc unavailable")
-    monkeypatch.setattr(deletion_cleanup, "get_aria2_client", lambda: aria2)
+    monkeypatch.setattr(
+        task_service, "_get_backend", lambda: task_service.Aria2BackendAdapter(aria2)
+    )
     await DeletionCleanupManager.run_once()
 
     assert await auth_repo.get_user_by_id_any(user["id"]) is None
-    # force_remove failure keeps the download directory (writer not confirmed
-    # stopped), but the user row and user_task are already terminal-cleaned.
+    # backend remove 失败保留下载目录（writer 未确认停止），但用户行与
+    # user_task 已完成终态清理。
     assert staging.exists()
     async with transaction() as conn:
         assert (
@@ -81,4 +83,4 @@ async def test_user_rpc_failure_does_not_block_terminal_user_cleanup(
             )
         ).scalar_one()
     assert global_status == "cancelled"
-    aria2.force_remove.assert_awaited()
+    aria2.remove.assert_awaited()

@@ -590,10 +590,9 @@ class TestJsonrpcHandler:
         )
         assert response.status_code == 200
         data = response.json()
-        assert data["result"]["version"] == "1.36.0"
+        assert data["result"]["version"] == "aria2deck-proxy"
         assert "rpc_url" not in data["result"]
         assert "secret" not in data["result"]
-        assert app.state.aria2_client._rpc_url == "http://new-rpc:6800/jsonrpc"
 
     def test_get_rejects_query_credentials(
         self, client: TestClient, rpc_user: dict

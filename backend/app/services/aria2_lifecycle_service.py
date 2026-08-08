@@ -2048,11 +2048,24 @@ async def reconcile_attempt_signal(
                     prefer_bittorrent_name=bt_evidence,
                 )
 
+                # Whether the admission path just learned a trusted size in
+                # this reconcile (unknown before, admitted now).
+                size_just_admitted = (
+                    admission is not None
+                    and str(admission.get("outcome") or "") == "admitted"
+                    and not bool(resolved.download.get("size_known"))
+                )
+
                 global_values: dict[str, Any] = {
                     "status": mapped["status"],
                     "completed_bytes": mapped["completed_bytes"],
                     "updated_at_ms": now_ms(),
                 }
+                if size_just_admitted:
+                    # Mark the pause as system admission ownership so policy
+                    # resumes it instead of treating it as external.
+                    global_values["error_code"] = "admission_paused"
+                    global_values["error_message"] = None
                 if not is_metadata:
                     global_values["total_bytes"] = mapped["total_bytes"]
                     if mapped["display_name"]:
@@ -2077,12 +2090,19 @@ async def reconcile_attempt_signal(
                     "quota_queued",
                     "disk_queued",
                 }
+                # Unknown-size initial submit admission pause is
+                # system-owned: do not brand it as external (policy will
+                # resume it via ``admission_paused``).
+                admission_initial_submit_pause = (
+                    event != "pause" and size_just_admitted
+                )
                 if (
                     mapped["status"] == "paused"
                     and not is_metadata
                     and not size_paused_by_us
                     and prev_status in {"active", "queued", "waiting"}
                     and prev_error_code not in protected_error_codes
+                    and not admission_initial_submit_pause
                 ):
                     global_values["error_message"] = "任务已被外部暂停"
                     global_values["error_code"] = "external_paused"

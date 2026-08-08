@@ -19,9 +19,10 @@ from app.services.aria2_lifecycle_service import (
     handle_v0_download_complete,
     repair_inconsistent_completed_downloads_v0,
 )
-from app.services.download_service import complete_global_download, create_user_download
+from app.services.download_service import complete_global_download
 from app.services.repair import purge_terminal_download_dirs
 from app.services.storage import get_downloading_dir
+from tests.create_task_helper import create_download_task, global_download_id_of
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -56,7 +57,7 @@ def _task_dir(download_id: int) -> Path:
 async def test_growth_pause_failed_reclaims_download_dir(temp_db: str) -> None:
     user = await create_user_v0(username="growth_pause_reclaim", quota_bytes=1000)
     client = make_aria2_client(add_uri="gid-growth-pause", pause=OSError("pause failed"))
-    task = await create_user_download(
+    task = await create_download_task(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
         uri="https://example.com/grow.bin",
@@ -64,10 +65,9 @@ async def test_growth_pause_failed_reclaims_download_dir(temp_db: str) -> None:
         resource_kind="http",
         display_name="grow.bin",
         total_bytes=100,
-        size_known=True,
         aria2_client=client,
     )
-    download_id = int(task["global_download_id"])
+    download_id = int(global_download_id_of(task))
     task_dir = _task_dir(download_id)
 
     result = await coordinate_reported_size(
@@ -170,7 +170,7 @@ async def test_completed_success_reclaims_download_dir_shell(temp_db: str) -> No
     user = await create_user_v0(username="complete_shell_reclaim", quota_bytes=1000)
     client = make_aria2_client(add_uri="gid-complete-shell")
     payload = b"complete-shell-payload"
-    task = await create_user_download(
+    task = await create_download_task(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
         uri="https://example.com/shell.bin",
@@ -180,7 +180,7 @@ async def test_completed_success_reclaims_download_dir_shell(temp_db: str) -> No
         total_bytes=len(payload),
         aria2_client=client,
     )
-    download_id = int(task["global_download_id"])
+    download_id = int(global_download_id_of(task))
     task_dir = Path(settings.download_dir) / "downloading" / str(download_id)
     task_dir.mkdir(parents=True, exist_ok=True)
     source_file = task_dir / "shell.bin"
@@ -385,7 +385,7 @@ async def test_complete_global_download_still_indexes_after_shell_cleanup_helper
     user = await create_user_v0(username="complete_store_sanity", quota_bytes=1000)
     client = make_aria2_client(add_uri="gid-store-sanity")
     payload = b"store-sanity"
-    task = await create_user_download(
+    task = await create_download_task(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
         uri="https://example.com/store.bin",
@@ -396,13 +396,13 @@ async def test_complete_global_download_still_indexes_after_shell_cleanup_helper
         aria2_client=client,
     )
     source_path = Path(settings.download_dir) / "downloading" / str(
-        task["global_download_id"]
+        global_download_id_of(task)
     )
     source_path.mkdir(parents=True, exist_ok=True)
     (source_path / "store.bin").write_bytes(payload)
 
     result = await complete_global_download(
-        global_download_id=task["global_download_id"],
+        global_download_id=global_download_id_of(task),
         expected_gid="gid-store-sanity",
         source_path=source_path,
         original_name="store.bin",

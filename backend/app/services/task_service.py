@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import logging
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
-from app.core.config import settings
+from app.modules.backend.port import BackendPort
+
+from app.core.config import get_internal_base_url, settings
 from app.core.security import (
     check_torrent_network_endpoints,
     check_url_ssrf,
@@ -24,7 +27,6 @@ from app.repositories.downloads import (
     clear_terminal_user_tasks,
     get_global_download_by_id,
     get_user_task_by_id,
-    list_user_tasks,
     list_user_tasks_page,
 )
 from app.services.hash import (
@@ -35,6 +37,8 @@ from app.services.hash import (
 )
 from app.services.http_probe import probe_url_with_get_fallback
 from app.services.internal_fetch import (
+    CAPABILITY_HEADER,
+    create_capability,
     http_resource_identity,
     source_request_options,
 )
@@ -44,7 +48,10 @@ from app.services.task_projection import (
     build_rest_task_response,
     filter_rows_for_status,
 )
-from app.services.task_runtime import fetch_active_live_statuses_by_gid
+from app.services.task_projection_rows import (
+    attach_snapshots_to_rows,
+    list_user_task_projections,
+)
 from app.domain.torrent_metadata import (
     MAX_TORRENT_FILE_COUNT,
     TorrentMetadata,
@@ -73,6 +80,9 @@ from app.modules.task_core.unref import (
 from app.services.usage_service import get_usage
 
 logger = logging.getLogger(__name__)
+
+# 提交失败对外统一文案：RPC 层错误 message + 用户任务 error_message。
+SUBMISSION_FAILED_MESSAGE = "添加下载任务失败"
 
 MAGNET_MIN_SPACE = 1 * 1024 * 1024
 MAX_TORRENT_BASE64_LENGTH = 14 * 1024 * 1024
@@ -181,8 +191,49 @@ def _get_client() -> Any:
     return get_aria2_client()
 
 
-def _get_backend() -> Aria2BackendAdapter:
+# aria2deck 唯一部署的 backend 是 aria2；该 override 只用于注入测试 fake，
+# 让 RPC handler 的 register_and_submit 与集成测试的 aria2 client 一致。
+_backend_override: BackendPort | None = None
+_backend_override_lock = threading.Lock()
+
+
+def set_task_backend_override(backend: BackendPort | None) -> None:
+    global _backend_override
+    with _backend_override_lock:
+        _backend_override = backend
+
+
+def _get_backend() -> BackendPort:
+    with _backend_override_lock:
+        override = _backend_override
+    if override is not None:
+        return override
     return Aria2BackendAdapter(_get_client())
+
+
+class _TolerantBackend:
+    """BackendPort wrapper that swallows ``remove`` failures.
+
+    Used by cleanup paths (e.g. pending-delete user cleanup) where the pid
+    and tid have already been terminalized in DB and a failing backend RPC
+    must not roll the flow into a retry loop.
+    """
+
+    def __init__(self, inner: BackendPort) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def remove(self, tid: int) -> None:
+        try:
+            await self._inner.remove(tid)
+        except Exception:
+            logger.warning(
+                "backend remove 失败，残余清理交由后续兜底 tid=%s",
+                tid,
+                exc_info=True,
+            )
 
 
 def raise_register_error(exc: RegisterError) -> None:
@@ -219,12 +270,13 @@ async def register_and_submit(
     except RegisterError as exc:
         raise_register_error(exc)
 
+    submit_options = dict(options or {})
     if result.outcome == "created":
         try:
             gid = await submit_tid(
                 backend=backend,
                 tid=result.tid,
-                options=options or {},
+                options=submit_options,
             )
         except Exception as exc:
             logger.warning(
@@ -238,7 +290,7 @@ async def register_and_submit(
                     user_id=user_id,
                     pid=result.pid,
                     backend=backend,
-                    error_message="提交下载任务失败",
+                    error_message=SUBMISSION_FAILED_MESSAGE,
                 )
             except Exception:
                 logger.warning(
@@ -246,7 +298,7 @@ async def register_and_submit(
                     user_id,
                     result.pid,
                 )
-            raise BadGatewayError("添加下载任务失败") from exc
+            raise BadGatewayError(SUBMISSION_FAILED_MESSAGE) from exc
         if gid is None:
             logger.warning(
                 "提交下载任务失败 user_id=%s tid=%s reason=no_gid",
@@ -258,7 +310,7 @@ async def register_and_submit(
                     user_id=user_id,
                     pid=result.pid,
                     backend=backend,
-                    error_message="提交下载任务失败",
+                    error_message=SUBMISSION_FAILED_MESSAGE,
                 )
             except Exception:
                 logger.warning(
@@ -266,9 +318,33 @@ async def register_and_submit(
                     user_id,
                     result.pid,
                 )
-            raise BadGatewayError("添加下载任务失败")
+            raise BadGatewayError(SUBMISSION_FAILED_MESSAGE)
 
     global_download = await get_global_download_by_id(result.tid)
+    if result.outcome == "created" and global_download is not None:
+        # register 只写 DB；新 attempt 由本流程提交后，需要把 capability /
+        # mirror 等提交上下文补进 capability（含 mirrors 的重新下发）。
+        gid_value = global_download.get("aria2_gid")
+        if gid_value:
+            gid = str(gid_value)
+            uris = _resolve_join_submission_uris(
+                global_download=global_download,
+                resource=resource,
+                options=submit_options,
+            )
+            if uris:
+                try:
+                    await backend.join_submission(
+                        tid=result.tid, gid=gid, uris=uris
+                    )
+                except Exception:
+                    logger.warning(
+                        "join submission 失败 user_id=%s tid=%s gid=%s",
+                        user_id,
+                        result.tid,
+                        gid,
+                        exc_info=True,
+                    )
     task_status = (
         str(global_download.get("status"))
         if global_download is not None
@@ -291,6 +367,42 @@ async def register_and_submit(
     if resource.display_uri:
         payload["uri"] = resource.display_uri
     return payload
+
+
+def _resolve_join_submission_uris(
+    *,
+    global_download: dict,
+    resource: ResourceSpec,
+    options: dict,
+) -> list[str]:
+    """返回新 attempt 的 join 下发 URI 列表（空表示无需补发）。
+
+    只有 HTTP 且调用方带 mirror 或 header/auth 的 submission 与 capability
+    的默认内容不一致时才补发：直接以 capability 重算 gateway uris。
+    """
+    if str(global_download.get("resource_kind") or "") != "http":
+        return []
+    source_uri = str(global_download.get("source_uri") or resource.source_uri)
+    if not source_uri:
+        return []
+    mirrors = list(options.get("mirrors") or [])
+    has_auth_or_headers = any(
+        key in options for key in ("header", "http-user", "http-passwd")
+    )
+    if not mirrors and not has_auth_or_headers:
+        return []
+    # mirror 已由 adapter.submit 写入初次提交的 capability；
+    # join_submission 只负责把 gateway uri 重新下发到 gid，capability 保持一致。
+    source_opts = source_request_options(options, mirrors=[])
+    base = f"{get_internal_base_url()}/_internal/fetch/{global_download['id']}"
+    uris = [
+        f"{base}/{index}" for index in range(1 + len(source_opts.mirrors))
+    ]
+    capability = create_capability(
+        int(global_download["id"]), source_uri, source_opts
+    )
+    options["header"] = [f"{CAPABILITY_HEADER}: {capability}"]
+    return uris
 
 
 async def create_task(
@@ -529,12 +641,14 @@ async def list_tasks(
     user_id: int,
     status_filter: str | None,
 ) -> list[dict]:
-    rows = await list_user_tasks(user_id)
-    try:
-        rows = filter_rows_for_status(rows, status_filter)
-    except InvalidTaskStatusFilter as exc:
-        raise BadRequestError(f"Unsupported status_filter: {exc.args[0]}") from exc
-    live_by_gid = await fetch_active_live_statuses_by_gid(rows, _get_client(), logger)
+    rows = await list_user_task_projections(user_id)
+    if status_filter is not None:
+        try:
+            rows = filter_rows_for_status(rows, status_filter)
+        except InvalidTaskStatusFilter as exc:
+            raise BadRequestError(
+                f"Unsupported status_filter: {exc.args[0]}"
+            ) from exc
 
     logger.debug(
         "查询任务列表 user_id=%s status_filter=%s count=%s",
@@ -543,10 +657,7 @@ async def list_tasks(
         len(rows),
     )
 
-    return [
-        list_task_response(row, live_by_gid.get(str(row.get("aria2_gid") or "")))
-        for row in rows
-    ]
+    return [list_task_response(row) for row in rows]
 
 
 async def list_tasks_page(
@@ -565,12 +676,9 @@ async def list_tasks_page(
         )
     except ValueError as exc:
         raise BadRequestError(f"Unsupported status_filter: {exc.args[0]}") from exc
-    live_by_gid = await fetch_active_live_statuses_by_gid(rows, _get_client(), logger)
+    rows = await attach_snapshots_to_rows(rows)
     return {
-        "items": [
-            list_task_response(row, live_by_gid.get(str(row.get("aria2_gid") or "")))
-            for row in rows
-        ],
+        "items": [list_task_response(row) for row in rows],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -582,17 +690,26 @@ async def cancel_task(
     user_id: int,
     user_task_id: int,
     quota_bytes: int,
+    tolerate_backend_failure: bool = False,
 ) -> dict:
     _ = quota_bytes  # budget release is handled inside unref's claim path
     # Legacy v0 submissions bind the aria2 gid up front; fencing on it keeps
     # the terminal CAS consistent with the old lifecycle claim path.
-    existing = await get_user_task_by_id(user_id, user_task_id)
+    # include_pending_user 允许 deletion_cleanup 取消待删除用户的任务。
+    existing = await get_user_task_by_id(
+        user_id, user_task_id, include_pending_user=True
+    )
     expected_gid = str(existing["aria2_gid"]) if existing and existing.get("aria2_gid") else None
+    backend: BackendPort | None = _get_backend()
+    if tolerate_backend_failure:
+        # 清理路径（如用户持久删除）要求终态化不被 backend RPC 失败阻塞；
+        # 残余 aria2 清理由 fencing/启动修复兜底。
+        backend = _TolerantBackend(backend)
     try:
         await unref(
             user_id=user_id,
             pid=user_task_id,
-            backend=_get_backend(),
+            backend=backend,
             expected_gid=expected_gid,
         )
     except UnrefError as exc:

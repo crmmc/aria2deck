@@ -94,12 +94,17 @@ def decide_on_snapshot(
     elif db_error == ERROR_DISK_QUEUED and ctx.disk_available:
         return Decision("resume", clear_error_code=True)
 
+    # Unknown-size HTTP tasks are submitted with ``pause=true`` so the
+    # coordinator can admit size before the first write.  The admission
+    # pause is system-owned (``admission_paused``); policy must resume it.
     if status == "paused":
+        if db_error == "admission_paused":
+            return Decision("resume", clear_error_code=True)
         if db_error in SYSTEM_QUEUE_CODES or ctx.system_pause:
             # Still waiting on the blocking resource: hold the pause.
             return Decision("keep", error_code=db_error)
-        # External pause: record it, never auto-unpause.
         if db_error is None:
+            # External pause: record it, never auto-unpause.
             return Decision("mark_external_paused", error_code="external_paused")
         return Decision("keep", error_code=db_error)
 

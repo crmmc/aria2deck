@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
-from app.services.download_service import create_user_download
 from app.services.usage_service import get_usage
+from tests.create_task_helper import create_download_task, global_download_id_of
 from tests.fakes import make_aria2_client
 
 
@@ -24,7 +24,7 @@ def _create_download_for_user(
 ) -> tuple[dict, AsyncMock]:
     client = make_aria2_client(add_uri=gid)
     task = asyncio.run(
-        create_user_download(
+        create_download_task(
             user_id=user["id"],
             quota_bytes=user["quota_bytes"],
             uri=uri,
@@ -67,7 +67,7 @@ class TestCancelTaskEndpoint:
             get_global_by_resource_key("http:cancel-endpoint")
         )
         stored_task = asyncio.run(
-            get_user_task(test_user["id"], task["global_download_id"])
+            get_user_task(test_user["id"], global_download_id_of(task))
         )
         usage = asyncio.run(
             get_usage(test_user["id"], quota_bytes=test_user["quota_bytes"])
@@ -91,7 +91,7 @@ class TestCancelTaskEndpoint:
     ) -> None:
         setup_client = make_aria2_client(add_uri="gid-shared-endpoint")
         first = asyncio.run(
-            create_user_download(
+            create_download_task(
                 user_id=test_user["id"],
                 quota_bytes=test_user["quota_bytes"],
                 uri="https://example.com/shared-endpoint.bin",
@@ -103,7 +103,7 @@ class TestCancelTaskEndpoint:
             )
         )
         second = asyncio.run(
-            create_user_download(
+            create_download_task(
                 user_id=test_admin["id"],
                 quota_bytes=test_admin["quota_bytes"],
                 uri="https://example.com/shared-endpoint.bin",
@@ -128,10 +128,10 @@ class TestCancelTaskEndpoint:
             get_global_by_resource_key("http:shared-endpoint")
         )
         first_task = asyncio.run(
-            get_user_task(test_user["id"], first["global_download_id"])
+            get_user_task(test_user["id"], global_download_id_of(first))
         )
         second_task = asyncio.run(
-            get_user_task(test_admin["id"], second["global_download_id"])
+            get_user_task(test_admin["id"], global_download_id_of(second))
         )
 
         assert first_task is not None
@@ -176,7 +176,7 @@ class TestCancelTaskEndpoint:
         assert response.json() == {"ok": True}
 
         stored_task = asyncio.run(
-            get_user_task(test_user["id"], task["global_download_id"])
+            get_user_task(test_user["id"], global_download_id_of(task))
         )
         usage = asyncio.run(
             get_usage(test_user["id"], quota_bytes=test_user["quota_bytes"])

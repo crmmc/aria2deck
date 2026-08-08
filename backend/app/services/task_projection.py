@@ -182,6 +182,8 @@ def _live_bittorrent_mode(live: dict[str, Any]) -> str:
 def build_aria2_status(
     row: dict[str, Any], live: dict[str, Any] | None = None
 ) -> dict[str, Any]:
+    if live is None:
+        live = row.get("backend_snapshot")
     live = live or {}
     effective = effective_status(row)
     status = aria2_status(effective)
@@ -236,6 +238,8 @@ def projected_speeds(
 ) -> tuple[int, int]:
     if effective_status(row) not in ACTIVE_LIKE_DOWNLOAD_STATUSES:
         return 0, 0
+    if live is None:
+        live = row.get("backend_snapshot")
     live = live or {}
     return _safe_int(live.get("downloadSpeed")), _safe_int(live.get("uploadSpeed"))
 
@@ -296,6 +300,8 @@ def build_rest_task_response(
     row: dict[str, Any],
     live: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if live is None:
+        live = row.get("backend_snapshot")
     error_message = row.get("error_message") or row.get("global_error_message")
     download_speed, upload_speed = projected_speeds(row, live)
     name = row.get("display_name") or row.get("global_display_name") or display_name(row)

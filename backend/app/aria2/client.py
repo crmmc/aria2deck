@@ -123,6 +123,17 @@ class Aria2Client:
     async def get_servers(self, gid: str) -> list[dict[str, Any]]:
         return cast(list[dict[str, Any]], await self._call("aria2.getServers", [gid]))
 
+    async def change_uri(
+        self,
+        gid: str,
+        file_index: int,
+        del_uris: list[str],
+        add_uris: list[str],
+    ) -> list[int]:
+        """向任务的某个文件追加/移除下载 URI（用于 mirror 补发）。"""
+        params: list[object] = [gid, file_index, del_uris, add_uris]
+        return cast(list[int], await self._call("aria2.changeUri", params))
+
     async def tell_active(self) -> list[dict[str, Any]]:
         return cast(list[dict[str, Any]], await self._call("aria2.tellActive", []))
 

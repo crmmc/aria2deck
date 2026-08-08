@@ -19,9 +19,9 @@ from app.repositories.downloads import (
 )
 from app.services.download_service import (
     complete_global_download,
-    create_user_download,
 )
 from app.services.usage_service import get_usage
+from tests.create_task_helper import create_download_task, global_download_id_of
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_user_v0
 
@@ -34,7 +34,7 @@ async def test_complete_global_download_indexes_stored_files_and_user_files(
     client = make_aria2_client(add_uri="gid-complete")
     total_bytes = len(b"alpha") + len(b"beta")
 
-    task = await create_user_download(
+    task = await create_download_task(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
         uri="https://example.com/archive",
@@ -46,7 +46,7 @@ async def test_complete_global_download_indexes_stored_files_and_user_files(
     )
 
     source_path = Path(settings.download_dir) / "downloading" / str(
-        task["global_download_id"]
+        global_download_id_of(task)
     )
     nested_path = source_path / "nested"
     nested_path.mkdir(parents=True)
@@ -54,14 +54,14 @@ async def test_complete_global_download_indexes_stored_files_and_user_files(
     (nested_path / "b.txt").write_bytes(b"beta")
 
     result = await complete_global_download(
-        global_download_id=task["global_download_id"],
+        global_download_id=global_download_id_of(task),
         expected_gid="gid-complete",
         source_path=source_path,
         original_name="archive",
     )
 
     global_download = await get_global_by_resource_key("http:complete-v0")
-    user_task = await get_user_task(user["id"], task["global_download_id"])
+    user_task = await get_user_task(user["id"], global_download_id_of(task))
     assert global_download is not None
     assert user_task is not None
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
@@ -131,7 +131,7 @@ async def test_complete_global_download_reuses_existing_stored_file_for_same_con
     client = make_aria2_client(add_uri=["gid-reuse-a", "gid-reuse-b"])
     total_bytes = len(b"same")
 
-    first_task = await create_user_download(
+    first_task = await create_download_task(
         user_id=user_a["id"],
         quota_bytes=user_a["quota_bytes"],
         uri="https://example.com/one",
@@ -141,7 +141,7 @@ async def test_complete_global_download_reuses_existing_stored_file_for_same_con
         total_bytes=total_bytes,
         aria2_client=client,
     )
-    second_task = await create_user_download(
+    second_task = await create_download_task(
         user_id=user_b["id"],
         quota_bytes=user_b["quota_bytes"],
         uri="https://example.com/two",
@@ -153,10 +153,10 @@ async def test_complete_global_download_reuses_existing_stored_file_for_same_con
     )
 
     first_source = Path(settings.download_dir) / "downloading" / str(
-        first_task["global_download_id"]
+        global_download_id_of(first_task)
     )
     second_source = Path(settings.download_dir) / "downloading" / str(
-        second_task["global_download_id"]
+        global_download_id_of(second_task)
     )
     first_source.mkdir(parents=True, exist_ok=True)
     second_source.mkdir(parents=True, exist_ok=True)
@@ -164,13 +164,13 @@ async def test_complete_global_download_reuses_existing_stored_file_for_same_con
     (second_source / "same.txt").write_bytes(b"same")
 
     first_result = await complete_global_download(
-        global_download_id=first_task["global_download_id"],
+        global_download_id=global_download_id_of(first_task),
         expected_gid="gid-reuse-a",
         source_path=first_source,
         original_name="one",
     )
     second_result = await complete_global_download(
-        global_download_id=second_task["global_download_id"],
+        global_download_id=global_download_id_of(second_task),
         expected_gid="gid-reuse-b",
         source_path=second_source,
         original_name="two",
@@ -214,7 +214,7 @@ async def test_create_user_download_attaches_late_subscriber_to_completed_file(
     client = make_aria2_client(add_uri="gid-late")
     total_bytes = len(b"done")
 
-    first_task = await create_user_download(
+    first_task = await create_download_task(
         user_id=user_a["id"],
         quota_bytes=user_a["quota_bytes"],
         uri="https://example.com/done",
@@ -225,18 +225,18 @@ async def test_create_user_download_attaches_late_subscriber_to_completed_file(
         aria2_client=client,
     )
     source_path = Path(settings.download_dir) / "downloading" / str(
-        first_task["global_download_id"]
+        global_download_id_of(first_task)
     )
     source_path.mkdir(parents=True, exist_ok=True)
     (source_path / "done.txt").write_bytes(b"done")
     await complete_global_download(
-        global_download_id=first_task["global_download_id"],
+        global_download_id=global_download_id_of(first_task),
         expected_gid="gid-late",
         source_path=source_path,
         original_name="done-a",
     )
 
-    second_task = await create_user_download(
+    second_task = await create_download_task(
         user_id=user_b["id"],
         quota_bytes=user_b["quota_bytes"],
         uri="https://example.com/done",
@@ -260,9 +260,8 @@ async def test_create_user_download_attaches_late_subscriber_to_completed_file(
             )
         ).mappings().one()
 
-    assert second_task["status"] == "completed"
-    assert second_task["reserved_bytes"] == 0
-    assert second_task["finished_at_ms"] is not None
+    assert second_task["status"] == "complete"
+    assert second_task["frozen_space"] == total_bytes
     assert usage_b["reserved_bytes"] == 0
     assert usage_b["used_bytes"] == total_bytes
     assert user_file["display_name"] == "done-b"
@@ -278,7 +277,7 @@ async def test_complete_global_download_restores_source_when_index_registration_
     client = make_aria2_client(add_uri="gid-complete-fail")
     total_bytes = len(b"rollback")
 
-    task = await create_user_download(
+    task = await create_download_task(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
         uri="https://example.com/fail",
@@ -289,7 +288,7 @@ async def test_complete_global_download_restores_source_when_index_registration_
         aria2_client=client,
     )
     source_path = Path(settings.download_dir) / "downloading" / str(
-        task["global_download_id"]
+        global_download_id_of(task)
     )
     source_path.mkdir(parents=True, exist_ok=True)
     (source_path / "file.txt").write_bytes(b"rollback")
@@ -305,13 +304,13 @@ async def test_complete_global_download_restores_source_when_index_registration_
 
     with pytest.raises(RuntimeError, match="index registration failed"):
         await complete_global_download(
-            global_download_id=task["global_download_id"],
+            global_download_id=global_download_id_of(task),
             expected_gid="gid-complete-fail",
             source_path=source_path,
             original_name="fail",
         )
 
-    user_task = await get_user_task(user["id"], task["global_download_id"])
+    user_task = await get_user_task(user["id"], global_download_id_of(task))
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
     async with transaction() as conn:
         stored_count = (
@@ -339,7 +338,7 @@ async def test_stale_completion_generation_does_not_hash_or_touch_g2_source(
 ) -> None:
     user = await create_user_v0(username="complete_stale_generation", quota_bytes=1000)
     client = make_aria2_client(add_uri="gid-complete-g1")
-    task = await create_user_download(
+    task = await create_download_task(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
         uri="https://example.com/stale.bin",
@@ -350,17 +349,17 @@ async def test_stale_completion_generation_does_not_hash_or_touch_g2_source(
         aria2_client=client,
     )
     await update_global_download(
-        task["global_download_id"],
+        global_download_id_of(task),
         {"aria2_gid": "gid-complete-g2", "status": "active"},
     )
     source_path = Path(settings.download_dir) / "downloading" / str(
-        task["global_download_id"]
+        global_download_id_of(task)
     )
     source_path.mkdir(parents=True, exist_ok=True)
     source = source_path / "g2.bin"
     source.write_bytes(b"g2-data")
     result = await complete_global_download(
-        global_download_id=task["global_download_id"],
+        global_download_id=global_download_id_of(task),
         expected_gid="gid-complete-g1",
         source_path=source_path,
         original_name="stale.bin",
@@ -381,7 +380,7 @@ async def test_completion_cancel_after_move_restores_source_and_temporary_db(
 ) -> None:
     user = await create_user_v0(username="complete_cancel_compensation", quota_bytes=1000)
     client = make_aria2_client(add_uri="gid-complete-cancel")
-    task = await create_user_download(
+    task = await create_download_task(
         user_id=user["id"],
         quota_bytes=user["quota_bytes"],
         uri="https://example.com/cancel.bin",
@@ -392,7 +391,7 @@ async def test_completion_cancel_after_move_restores_source_and_temporary_db(
         aria2_client=client,
     )
     source_path = Path(settings.download_dir) / "downloading" / str(
-        task["global_download_id"]
+        global_download_id_of(task)
     )
     source_path.mkdir(parents=True, exist_ok=True)
     (source_path / "payload.bin").write_bytes(b"data")
@@ -410,7 +409,7 @@ async def test_completion_cancel_after_move_restores_source_and_temporary_db(
     )
     completion = asyncio.create_task(
         complete_global_download(
-            global_download_id=task["global_download_id"],
+            global_download_id=global_download_id_of(task),
             expected_gid="gid-complete-cancel",
             source_path=source_path,
             original_name="cancel.bin",
@@ -424,7 +423,7 @@ async def test_completion_cancel_after_move_restores_source_and_temporary_db(
         await completion
 
     current = await get_global_by_resource_key("http:complete-cancel-compensation")
-    current_task = await get_user_task(user["id"], task["global_download_id"])
+    current_task = await get_user_task(user["id"], global_download_id_of(task))
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
     async with transaction() as conn:
         stored_count = (
@@ -447,12 +446,12 @@ async def test_completion_cancellation_waits_for_scan_worker_before_move(
 ) -> None:
     user = await create_user_v0(username="scan_cancel", quota_bytes=1000)
     client = make_aria2_client(add_uri="gid-scan-cancel")
-    task = await create_user_download(
+    task = await create_download_task(
         user_id=user["id"], quota_bytes=user["quota_bytes"],
         uri="https://example.com/scan-cancel", resource_key="scan:cancel",
         resource_kind="http", display_name="scan.bin", total_bytes=4, aria2_client=client,
     )
-    source = Path(settings.download_dir) / "downloading" / str(task["global_download_id"])
+    source = Path(settings.download_dir) / "downloading" / str(global_download_id_of(task))
     source.mkdir(parents=True, exist_ok=True)
     (source / "payload.bin").write_bytes(b"data")
     started = threading.Event()
@@ -465,7 +464,7 @@ async def test_completion_cancellation_waits_for_scan_worker_before_move(
     monkeypatch.setattr(download_service, "scan_storage_path", blocking_scan)
     completion = asyncio.create_task(
         complete_global_download(
-            global_download_id=task["global_download_id"], expected_gid="gid-scan-cancel",
+            global_download_id=global_download_id_of(task), expected_gid="gid-scan-cancel",
             source_path=source, original_name="scan.bin",
         )
     )

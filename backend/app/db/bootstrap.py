@@ -22,6 +22,7 @@ from app.db.migrations import (
     ensure_v6_credentials_schema,
     ensure_v7_content_identity_schema,
     ensure_v8_retry_attempt_schema,
+    ensure_v9_backend_snapshot_schema,
     run_migrations,
 )
 from app.db.schema import SCHEMA_VERSION, app_settings, metadata, schema_meta
@@ -205,6 +206,9 @@ async def validate_current_schema_shape() -> None:
             "new.prepared_content_hash",
             "raise(abort",
         ),
+        "ix_task_backend_snapshots_updated_at": (
+            "ontask_backend_snapshots(updated_at_ms)",
+        ),
         "ix_users_delete_due": (
             "onusers(pending_delete,delete_next_retry_at_ms,"
             "delete_lease_expires_at_ms,id)",
@@ -240,6 +244,7 @@ async def _migrate_existing_database(version: int) -> None:
                 await ensure_v6_credentials_schema(conn)
                 await ensure_v7_content_identity_schema(conn)
                 await ensure_v8_retry_attempt_schema(conn)
+                await ensure_v9_backend_snapshot_schema(conn)
         finally:
             await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
             await conn.commit()
@@ -273,6 +278,7 @@ async def bootstrap_database() -> None:
         await ensure_v6_credentials_schema(conn)
         await ensure_v7_content_identity_schema(conn)
         await ensure_v8_retry_attempt_schema(conn)
+        await ensure_v9_backend_snapshot_schema(conn)
         await conn.execute(
             insert(schema_meta).values(
                 id=1, version=SCHEMA_VERSION, created_at_ms=timestamp_ms

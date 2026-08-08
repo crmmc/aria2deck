@@ -21,7 +21,7 @@ from app.domain.status import (
     USER_TASK_STATUSES,
 )
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
 PACK_SOURCE_CLEANUP_STATES = (
     "retained",
@@ -482,4 +482,24 @@ user_storage_usage = Table(
     Column("used_bytes", Integer, nullable=False, server_default="0"),
     Column("reserved_bytes", Integer, nullable=False, server_default="0"),
     Column("updated_at_ms", Integer, nullable=False),
+)
+
+task_backend_snapshots = Table(
+    "task_backend_snapshots",
+    metadata,
+    Column(
+        "global_download_id",
+        Integer,
+        ForeignKey("global_downloads.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("download_speed", Integer, nullable=False, server_default="0"),
+    Column("upload_speed", Integer, nullable=False, server_default="0"),
+    Column("total_length", Integer, nullable=False, server_default="0"),
+    Column("completed_length", Integer, nullable=False, server_default="0"),
+    Column("status", String(32), nullable=False, server_default=""),
+    Column("files_json", Text, nullable=False, server_default="[]"),
+    Column("raw_json", Text, nullable=False, server_default="{}"),
+    Column("updated_at_ms", Integer, nullable=False),
+    Index("ix_task_backend_snapshots_updated_at", "updated_at_ms"),
 )

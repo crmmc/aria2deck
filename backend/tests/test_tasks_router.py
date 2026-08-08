@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import os
 import socket
@@ -20,8 +21,8 @@ from app.core.config import get_internal_base_url
 from app.db.schema import global_downloads
 from app.domain.errors import BadRequestError, BadGatewayError, ConflictError, ForbiddenError
 from app.domain.torrent_metadata import MAX_TORRENT_BASE64_LENGTH
+from app.repositories.backend_snapshots import upsert_snapshot
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
-from app.services.download_service import create_user_download
 from app.services.hash import get_uri_hash
 from app.services.http_probe import ProbeResult
 from app.services.internal_fetch import (
@@ -30,6 +31,7 @@ from app.services.internal_fetch import (
     source_request_options,
     verify_capability,
 )
+from tests.create_task_helper import create_download_task, global_download_id_of
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -749,7 +751,7 @@ class TestCreateTask:
         assert global_download is not None
         task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
         assert task is not None
-        assert task["error_message"] == "提交下载任务失败"
+        assert task["error_message"] == "添加下载任务失败"
         assert capability not in repr(global_download)
         assert capability not in repr(task)
 
@@ -1103,229 +1105,6 @@ class _FakeWebSocket:
         self.messages.append(payload)
 
 
-def test_broadcast_task_update_uses_live_speed(test_user: dict) -> None:
-    from app.services.task_broadcast import (
-        broadcast_task_update_to_subscribers,
-        clear_connections,
-        set_connections_for_user,
-    )
-    from app.services.task_runtime import clear_live_status_cache
-
-    client = make_aria2_client(tell_status={
-        "gid": "gid-broadcast-speed",
-        "downloadSpeed": "16384",
-        "uploadSpeed": "512",
-    })
-    global_download = asyncio.run(
-        create_global_download_v0(
-            resource_key="http:broadcast-speed",
-            resource_kind="http",
-            source_uri="https://example.com/broadcast-speed.bin",
-            status="active",
-            aria2_gid="gid-broadcast-speed",
-            display_name="broadcast-speed.bin",
-            total_bytes=100,
-        )
-    )
-    asyncio.run(
-        create_user_task_v0(
-            user_id=test_user["id"],
-            global_download_id=global_download["id"],
-            status="active",
-            display_name="broadcast-speed.bin",
-        )
-    )
-    websocket = _FakeWebSocket()
-    asyncio.run(clear_connections())
-    asyncio.run(clear_live_status_cache())
-    asyncio.run(set_connections_for_user(test_user["id"], {websocket}))
-
-    with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
-        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
-
-    task = websocket.messages[0]["task"]
-    assert task["download_speed"] == 16384
-    assert task["upload_speed"] == 512
-
-
-def test_broadcast_task_update_fetches_live_status_once_for_shared_download(
-    test_user: dict,
-) -> None:
-    from app.services.task_broadcast import (
-        broadcast_task_update_to_subscribers,
-        clear_connections,
-        set_connections_for_user,
-    )
-    from app.services.task_runtime import clear_live_status_cache
-
-    second_user = asyncio.run(create_user_v0(username="broadcast-second-user"))
-    client = make_aria2_client(tell_status={
-        "gid": "gid-shared-broadcast",
-        "downloadSpeed": "2048",
-        "uploadSpeed": "128",
-    })
-    global_download = asyncio.run(
-        create_global_download_v0(
-            resource_key="http:shared-broadcast",
-            resource_kind="http",
-            source_uri="https://example.com/shared-broadcast.bin",
-            status="active",
-            aria2_gid="gid-shared-broadcast",
-            display_name="shared-broadcast.bin",
-            total_bytes=100,
-        )
-    )
-    for user_id in (test_user["id"], second_user["id"]):
-        asyncio.run(
-            create_user_task_v0(
-                user_id=user_id,
-                global_download_id=global_download["id"],
-                status="active",
-                display_name="shared-broadcast.bin",
-            )
-        )
-
-    first_socket = _FakeWebSocket()
-    second_socket = _FakeWebSocket()
-    asyncio.run(clear_connections())
-    asyncio.run(clear_live_status_cache())
-    asyncio.run(set_connections_for_user(test_user["id"], {first_socket}))
-    asyncio.run(set_connections_for_user(second_user["id"], {second_socket}))
-
-    with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
-        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
-
-    client.tell_status.assert_awaited_once_with("gid-shared-broadcast")
-    assert first_socket.messages[0]["task"]["download_speed"] == 2048
-    assert second_socket.messages[0]["task"]["download_speed"] == 2048
-
-
-def test_broadcast_task_update_reuses_live_status_cache_within_ttl(
-    test_user: dict,
-) -> None:
-    from app.services.task_broadcast import (
-        broadcast_task_update_to_subscribers,
-        clear_connections,
-        set_connections_for_user,
-    )
-    from app.services.task_runtime import (
-        clear_live_status_cache,
-        force_expire_live_status_cache_entry,
-    )
-
-    client = make_aria2_client(tell_status=[
-        {
-            "gid": "gid-cache-broadcast",
-            "downloadSpeed": "1000",
-            "uploadSpeed": "50",
-        },
-        {
-            "gid": "gid-cache-broadcast",
-            "downloadSpeed": "2000",
-            "uploadSpeed": "75",
-        },
-        {
-            "gid": "gid-cache-broadcast",
-            "downloadSpeed": "3000",
-            "uploadSpeed": "100",
-        },
-    ])
-    global_download = asyncio.run(
-        create_global_download_v0(
-            resource_key="http:cache-broadcast",
-            resource_kind="http",
-            source_uri="https://example.com/cache-broadcast.bin",
-            status="active",
-            aria2_gid="gid-cache-broadcast",
-            display_name="cache-broadcast.bin",
-            total_bytes=100,
-        )
-    )
-    asyncio.run(
-        create_user_task_v0(
-            user_id=test_user["id"],
-            global_download_id=global_download["id"],
-            status="active",
-            display_name="cache-broadcast.bin",
-        )
-    )
-
-    websocket = _FakeWebSocket()
-    asyncio.run(clear_connections())
-    asyncio.run(clear_live_status_cache())
-    asyncio.run(set_connections_for_user(test_user["id"], {websocket}))
-
-    with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
-        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
-        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
-        asyncio.run(force_expire_live_status_cache_entry("gid-cache-broadcast"))
-        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
-
-    assert client.tell_status.await_count == 2
-    assert [message["task"]["download_speed"] for message in websocket.messages] == [
-        1000,
-        1000,
-        2000,
-    ]
-
-
-def test_broadcast_task_update_prunes_unrequested_stale_live_status_cache(
-    test_user: dict,
-) -> None:
-    from app.services.task_broadcast import (
-        broadcast_task_update_to_subscribers,
-        clear_connections,
-        set_connections_for_user,
-    )
-    from app.services.task_runtime import (
-        clear_live_status_cache,
-        live_status_cache_keys,
-        set_live_status_cache_entry,
-    )
-
-    client = make_aria2_client(tell_status={
-        "gid": "gid-cache-prune",
-        "downloadSpeed": "100",
-        "uploadSpeed": "5",
-    })
-    global_download = asyncio.run(
-        create_global_download_v0(
-            resource_key="http:cache-prune",
-            resource_kind="http",
-            source_uri="https://example.com/cache-prune.bin",
-            status="active",
-            aria2_gid="gid-cache-prune",
-            display_name="cache-prune.bin",
-            total_bytes=100,
-        )
-    )
-    asyncio.run(
-        create_user_task_v0(
-            user_id=test_user["id"],
-            global_download_id=global_download["id"],
-            status="active",
-            display_name="cache-prune.bin",
-        )
-    )
-
-    asyncio.run(clear_connections())
-    asyncio.run(clear_live_status_cache())
-    asyncio.run(set_live_status_cache_entry(
-        "stale-unrequested-gid",
-        status={"gid": "stale-unrequested-gid"},
-        fetched_at=-1_000_000.0,
-    ))
-    websocket = _FakeWebSocket()
-    asyncio.run(set_connections_for_user(test_user["id"], {websocket}))
-
-    with patch("app.services.task_broadcast.get_aria2_client", return_value=client):
-        asyncio.run(broadcast_task_update_to_subscribers(global_download["id"]))
-
-    cache_keys = asyncio.run(live_status_cache_keys())
-    assert "stale-unrequested-gid" not in cache_keys
-    assert "gid-cache-prune" in cache_keys
-
-
 class TestListTasks:
     def test_list_tasks_unauthorized(self, client: TestClient) -> None:
         response = client.get("/api/tasks")
@@ -1345,7 +1124,7 @@ class TestListTasks:
     ) -> None:
         client = make_aria2_client(add_uri="gid-list-v0")
         task = asyncio.run(
-            create_user_download(
+            create_download_task(
                 user_id=test_user["id"],
                 quota_bytes=test_user["quota_bytes"],
                 uri="https://example.com/list-v0.bin",
@@ -1363,28 +1142,19 @@ class TestListTasks:
         data = response.json()
         assert len(data) == 1
         assert data[0]["id"] == task["id"]
-        assert data[0]["task_id"] == task["global_download_id"]
+        assert data[0]["task_id"] == global_download_id_of(task)
         assert data[0]["status"] == "active"
         assert data[0]["name"] == "list-v0.bin"
         assert data[0]["uri"] == "https://example.com/list-v0.bin"
         assert data[0]["total_length"] == 1234
         assert data[0]["frozen_space"] == 1234
 
-    @patch("app.services.task_service._get_client")
     def test_list_tasks_uses_live_speed_for_active_rows(
         self,
-        mock_get_client: MagicMock,
         authenticated_client: TestClient,
         test_user: dict,
     ) -> None:
-        client = make_aria2_client(tell_active=[
-            {
-                "gid": "gid-speed-task",
-                "downloadSpeed": "8192",
-                "uploadSpeed": "256",
-            }
-        ])
-        mock_get_client.return_value = client
+        # M3 T08: 列表去实时 aria2，速度来自 task_backend_snapshots。
         global_download = asyncio.run(
             create_global_download_v0(
                 resource_key="http:speed-task",
@@ -1405,6 +1175,26 @@ class TestListTasks:
                 display_name="speed-task.bin",
             )
         )
+        asyncio.run(
+            upsert_snapshot(
+                global_download_id=global_download["id"],
+                download_speed=8192,
+                upload_speed=256,
+                total_length=100,
+                completed_length=40,
+                status="active",
+                files_json="[]",
+                raw_json=json.dumps(
+                    {
+                        "gid": "gid-speed-task",
+                        "status": "active",
+                        "downloadSpeed": "8192",
+                        "uploadSpeed": "256",
+                    }
+                ),
+                updated_at_ms=1,
+            )
+        )
 
         response = authenticated_client.get("/api/tasks")
 
@@ -1412,7 +1202,6 @@ class TestListTasks:
         data = response.json()
         assert data[0]["download_speed"] == 8192
         assert data[0]["upload_speed"] == 256
-        client.tell_active.assert_awaited_once()
 
     def test_list_tasks_status_filters(
         self,
@@ -1594,7 +1383,7 @@ class TestCancelTask:
     ) -> None:
         setup_client = make_aria2_client(add_uri="gid-cancel-basic")
         task = asyncio.run(
-            create_user_download(
+            create_download_task(
                 user_id=test_user["id"],
                 quota_bytes=test_user["quota_bytes"],
                 uri="https://example.com/cancel-basic.bin",
@@ -1615,7 +1404,7 @@ class TestCancelTask:
         assert response.status_code == 200
         assert response.json() == {"ok": True}
         stored_task = asyncio.run(
-            get_user_task(test_user["id"], task["global_download_id"])
+            get_user_task(test_user["id"], global_download_id_of(task))
         )
         assert stored_task is not None
         assert stored_task["status"] == "cancelled"
@@ -1795,8 +1584,8 @@ class TestV2TaskPagination:
         )
 
         with patch(
-            "app.services.task_service.fetch_active_live_statuses_by_gid",
-            new=AsyncMock(return_value={}),
+            "app.aria2.client.Aria2Client.tell_active",
+            new=AsyncMock(return_value=[]),
         ) as fetch_live:
             response = authenticated_client.get(
                 "/api/v2/tasks?status_filter=current&page=1&page_size=1"
@@ -1810,7 +1599,6 @@ class TestV2TaskPagination:
         assert payload["page"] == 1
         assert payload["page_size"] == 1
         assert payload["items"][0]["id"] == task_ids[1]
-        fetch_call = fetch_live.await_args
-        assert fetch_call is not None
-        assert len(fetch_call.args[0]) == 1
+        # M3 T08: 分页列表只读快照，不再调用实时 aria2。
+        fetch_live.assert_not_awaited()
         assert authenticated_client.get("/api/v2/tasks?page=9&page_size=1").json()["items"] == []

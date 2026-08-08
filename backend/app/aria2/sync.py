@@ -102,7 +102,7 @@ async def _sync_tasks_once() -> None:
         for index, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.warning(
-                    "[Sync] reconcile failed download_id=%s error=%s",
+                    "[Sync] reconcile failed download_id=%s error=%r",
                     downloads[index]["id"],
                     result,
                 )
