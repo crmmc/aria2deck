@@ -12,7 +12,7 @@ from pathlib import Path
 
 def test_download_service_no_longer_exports_legacy_create_cancel() -> None:
     """AST boundary: download_service.py must not define the removed symbols."""
-    source = Path("app/services/download_service.py").read_text(encoding="utf-8")
+    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "download_service.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     defined_names: set[str] = set()
     for node in ast.walk(tree):
@@ -47,7 +47,7 @@ def test_download_service_no_longer_exports_legacy_create_cancel() -> None:
 
 def test_download_service_retains_completion_path() -> None:
     """AST guard: completion path functions must still exist."""
-    source = Path("app/services/download_service.py").read_text(encoding="utf-8")
+    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "download_service.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     defined_names: set[str] = set()
     for node in ast.walk(tree):

@@ -18,8 +18,8 @@ from app.core.security import credential_digest, credential_prefix
 from app.repositories import auth as auth_repo
 from tests.helpers_v0 import create_user_v0, now_ms
 
-ROUTER_PATH = Path("app/routers/aria2_rpc.py")
-HANDLER_PATH = Path("app/services/aria2_rpc_handler.py")
+ROUTER_PATH = Path(__file__).resolve().parents[1] / "app" / "routers" / "aria2_rpc.py"
+HANDLER_PATH = Path(__file__).resolve().parents[1] / "app" / "services" / "aria2_rpc_handler.py"
 
 
 @pytest.fixture

@@ -253,7 +253,7 @@ def test_handler_no_longer_imports_legacy_write_path() -> None:
     import ast
     from pathlib import Path
 
-    source = Path("app/services/aria2_rpc_handler.py").read_text(encoding="utf-8")
+    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "aria2_rpc_handler.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     imported_names: set[str] = set()
     for node in ast.walk(tree):
