@@ -129,94 +129,20 @@ async def test_no_deadlock_acquiring_false_while_holding():
 # 4. complete / fail paths no longer use get_task_complete_lock
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_fail_download_and_reclaim_does_not_use_completion_lock():
-    """fail_download_and_reclaim must not call get_task_complete_lock."""
-    download_id = 9995
-
-    async def fake_operation(**kwargs):
-        return True
-
-    original_get_task_complete_lock = aria2_lifecycle_service.get_task_complete_lock
-
-    def tracking_get_task_complete_lock(_download_id: int):
-        pytest.fail(
-            "get_task_complete_lock was called by fail_download_and_reclaim; "
-            "lifecycle paths must not depend on the completion lock."
-        )
-
-    with patch.object(
-        aria2_lifecycle_service,
-        "_fail_download_and_reclaim_operation",
-        side_effect=fake_operation,
-    ), patch.object(
-        aria2_lifecycle_service,
-        "get_task_complete_lock",
-        side_effect=tracking_get_task_complete_lock,
-    ):
-        result = await fail_download_and_reclaim(
-            client=AsyncMock(),
-            download_id=download_id,
-            message="test",
-            error_code="test",
-            expected_gid="gid-test",
-            acquire_lifecycle_lock=True,
-            log_prefix="[Test]",
-        )
-
-    assert result is True
+def test_fail_download_and_reclaim_does_not_use_completion_lock():
+    """get_task_complete_lock must no longer exist in the lifecycle module."""
+    assert not hasattr(aria2_lifecycle_service, "get_task_complete_lock"), (
+        "get_task_complete_lock should be removed; lifecycle protection "
+        "is solely via get_download_lifecycle_lock."
+    )
 
 
-@pytest.mark.asyncio
-async def test_complete_global_download_does_not_use_completion_lock():
-    """complete_global_download must not call get_task_complete_lock.
-
-    It should only use get_download_lifecycle_lock.
-    """
-    download_id = 9996
-
-    # We can't easily run the full complete flow without DB + aria2,
-    # so we verify at the lock acquisition level: the wrapper should
-    # only call get_download_lifecycle_lock, never get_task_complete_lock.
-    lifecycle_lock_called = False
-
-    original_lifecycle_lock = get_download_lifecycle_lock
-
-    async def tracking_lifecycle_lock(download_id_arg: int):
-        nonlocal lifecycle_lock_called
-        lifecycle_lock_called = True
-        return await original_lifecycle_lock(download_id_arg)
-
-    def tracking_completion_lock(_download_id: int):
-        pytest.fail(
-            "get_task_complete_lock was called by complete_global_download; "
-            "completion paths must not depend on the completion lock."
-        )
-
-    # Mock complete_global_download_locked so we don't need DB/aria2.
-    async def fake_locked(**kwargs):
-        return None
-
-    with patch.object(
-        aria2_lifecycle_service,
-        "get_task_complete_lock",
-        side_effect=tracking_completion_lock,
-    ), patch(
-        "app.services.download_service.complete_global_download_locked",
-        side_effect=fake_locked,
-    ), patch(
-        "app.services.download_service.get_download_lifecycle_lock",
-        side_effect=tracking_lifecycle_lock,
-    ):
-        result = await complete_global_download(
-            global_download_id=download_id,
-            expected_gid="gid-test",
-            source_path="/tmp/nonexistent",
-            original_name="test.txt",
-        )
-
-    assert lifecycle_lock_called is True
-    assert result is None
+def test_complete_global_download_does_not_use_completion_lock():
+    """get_task_complete_lock must no longer exist for complete paths."""
+    assert not hasattr(aria2_lifecycle_service, "get_task_complete_lock"), (
+        "get_task_complete_lock should be removed; completion paths "
+        "must only use get_download_lifecycle_lock."
+    )
 
 
 # ---------------------------------------------------------------------------

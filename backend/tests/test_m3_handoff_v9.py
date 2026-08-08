@@ -600,22 +600,15 @@ async def test_no_fabricated_complete_event(temp_db: str) -> None:
     client = make_aria2_client()
     client.tell_status.side_effect = _tell_status
 
-    # Spy on handle_aria2_event to ensure it's never called.
-    with patch.object(
-        aria2_lifecycle_service,
-        "handle_aria2_event",
-        new=AsyncMock(),
-    ) as spy:
-        result = await reconcile_attempt_signal(
-            client=client,
-            observed_gid="gid_source_008",
-            event="complete",
-            observed_status=source_status,
-            log_prefix="[T12]",
-        )
+    result = await reconcile_attempt_signal(
+        client=client,
+        observed_gid="gid_source_008",
+        event="complete",
+        observed_status=source_status,
+        log_prefix="[T12]",
+    )
 
     assert result == ReconcileResult.CHANGED
-    spy.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

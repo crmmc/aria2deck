@@ -15,6 +15,8 @@ from typing import Any
 from app.aria2.gateway import get_aria2_client
 from app.aria2.protocol import Aria2Gateway
 from app.domain.lifecycle import ReconcileResult
+from app.modules.backend.aria2_adapter import Aria2BackendAdapter
+from app.modules.task_core.sync import apply_queue_policy
 from app.services import aria2_lifecycle_service as lifecycle
 from app.services import backend_connectivity
 
@@ -123,6 +125,15 @@ async def _sync_tasks_once() -> None:
         await backend_connectivity.mark_ok()
     elif saw_backend_fail:
         await backend_connectivity.mark_fail()
+
+    # Task Core queue policy: resume system-queued tasks when resources
+    # recover, and record external pauses. Runs after reconcile so handoff /
+    # completion signals are processed first.
+    if saw_backend_ok:
+        try:
+            await apply_queue_policy(Aria2BackendAdapter(client))
+        except Exception:
+            logger.debug("[Sync] Queue policy pass failed", exc_info=True)
 
     await _cleanup_owned_stopped_results(
         client=client,

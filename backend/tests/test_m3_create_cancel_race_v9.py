@@ -254,12 +254,13 @@ async def test_history_page_retry_is_same_create_path(temp_db: str) -> None:
         aria2_client=client,
     )
 
-    from app.services.aria2_lifecycle_service import fail_v0_download_and_cleanup
+    from app.services.aria2_lifecycle_service import fail_download_and_reclaim
 
-    await fail_v0_download_and_cleanup(
+    await fail_download_and_reclaim(
         client=client,
         download_id=first["global_download_id"],
-        gid="gid-hist-1",
+        expected_gid="gid-hist-1",
+        writer_gid="gid-hist-1",
         message="failed",
         error_code="failure",
         log_prefix="[Test]",

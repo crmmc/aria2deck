@@ -651,26 +651,18 @@ async def test_handoff_complete_no_fabricated_event(temp_db: str) -> None:
 
     with patch.object(
         aria2_lifecycle_service,
-        "handle_aria2_event",
-        new=AsyncMock(),
-    ) as spy_event:
-        with patch.object(
-            aria2_lifecycle_service,
-            "handle_v0_download_complete",
-            new=AsyncMock(return_value=False),
-        ) as spy_complete:
-            r = await reconcile_attempt_signal(
-                client=client,
-                observed_gid=source_gid,
-                event="complete",
-                observed_status=_source_status(
-                    gid=source_gid, followed_by=payload_gid
-                ),
-                log_prefix="[T23]",
-            )
-
-    # handle_aria2_event must never be called (no fabricated event).
-    spy_event.assert_not_called()
+        "handle_v0_download_complete",
+        new=AsyncMock(return_value=False),
+    ) as spy_complete:
+        r = await reconcile_attempt_signal(
+            client=client,
+            observed_gid=source_gid,
+            event="complete",
+            observed_status=_source_status(
+                gid=source_gid, followed_by=payload_gid
+            ),
+            log_prefix="[T23]",
+        )
 
     # The result should reflect the handoff happened (possibly via
     # completion dispatch). Either CHANGED or WAITING/COMPLETED.

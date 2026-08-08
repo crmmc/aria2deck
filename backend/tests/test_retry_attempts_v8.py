@@ -38,12 +38,13 @@ async def test_failed_retry_creates_new_attempt_ids(temp_db: str) -> None:
         total_bytes=100,
         aria2_client=client,
     )
-    from app.services.aria2_lifecycle_service import fail_v0_download_and_cleanup
+    from app.services.aria2_lifecycle_service import fail_download_and_reclaim
 
-    changed = await fail_v0_download_and_cleanup(
+    changed = await fail_download_and_reclaim(
         client=client,
         download_id=first["global_download_id"],
-        gid="gid-retry-old",
+        expected_gid="gid-retry-old",
+        writer_gid="gid-retry-old",
         message="failed",
         error_code="failure",
         log_prefix="[Test]",

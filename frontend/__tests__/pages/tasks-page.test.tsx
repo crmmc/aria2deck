@@ -441,6 +441,38 @@ describe("TasksPage", () => {
     expect(screen.getByText("等待中")).toBeInTheDocument();
   });
 
+  test("renders backend status_label for queued and paused tasks", async () => {
+    let wsCallbacks: {
+      onTaskUpdate: (task: Task) => void;
+    } | null = null;
+    mockUseTaskWebSocket.mockImplementation((callbacks) => {
+      wsCallbacks = callbacks;
+    });
+
+    render(<TasksPage />);
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+
+    act(() => {
+      wsCallbacks?.onTaskUpdate({
+        ...activeTask,
+        status: "queued",
+        status_label: "排队中(配额)",
+      });
+    });
+
+    expect(screen.getByText("排队中(配额)")).toBeInTheDocument();
+
+    act(() => {
+      wsCallbacks?.onTaskUpdate({
+        ...activeTask,
+        status: "paused",
+        status_label: "已暂停",
+      });
+    });
+
+    expect(screen.getByText("已暂停")).toBeInTheDocument();
+  });
+
   test("pauses fallback polling while websocket is connected and resumes after disconnect", async () => {
     let wsCallbacks: {
       onConnected?: () => void;

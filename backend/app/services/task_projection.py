@@ -21,6 +21,7 @@ from app.domain.task_policy import (
     legacy_rest_status,
     stat_counts,
 )
+from app.modules.user_ref.projection import user_visible_label
 
 _REEXPORTED_POLICY_SYMBOLS = (
     InvalidTaskStatusFilter,
@@ -300,6 +301,7 @@ def build_rest_task_response(
     name = row.get("display_name") or row.get("global_display_name") or display_name(row)
     total_length = _safe_int(row.get("total_bytes"))
     completed_length = _safe_int(row.get("completed_bytes"))
+    effective = effective_status(row)
 
     # Prefer live aria2 data for active tasks — fresher and avoids
     # stale/polluted DB values (e.g. during metadata download phase).
@@ -322,7 +324,10 @@ def build_rest_task_response(
     return {
         "id": row["id"],
         "task_id": row["global_download_id"],
-        "status": legacy_rest_status(effective_status(row)),
+        "status": legacy_rest_status(effective),
+        "status_label": user_visible_label(
+            effective, row.get("global_error_code") or row.get("error_code")
+        ),
         "name": name,
         "uri": row.get("source_uri") or "",
         "total_length": total_length,

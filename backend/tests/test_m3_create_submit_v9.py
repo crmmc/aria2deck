@@ -253,12 +253,13 @@ async def test_retry_creates_new_attempt(temp_db: str) -> None:
         aria2_client=client,
     )
 
-    from app.services.aria2_lifecycle_service import fail_v0_download_and_cleanup
+    from app.services.aria2_lifecycle_service import fail_download_and_reclaim
 
-    await fail_v0_download_and_cleanup(
+    await fail_download_and_reclaim(
         client=client,
         download_id=first["global_download_id"],
-        gid="gid-retry-first",
+        expected_gid="gid-retry-first",
+        writer_gid="gid-retry-first",
         message="failed",
         error_code="failure",
         log_prefix="[Test]",

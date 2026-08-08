@@ -18,7 +18,7 @@ from app.repositories.downloads import (
 from app.services import aria2_lifecycle_service
 from app.services.failed_task_cleanup import CleanupResult
 from app.services.aria2_lifecycle_service import (
-    fail_v0_download_and_cleanup,
+    fail_download_and_reclaim,
     switch_to_followed_download,
 )
 from app.services.download_service import cancel_user_task, create_user_download
@@ -181,10 +181,11 @@ async def test_failure_cleanup_does_not_block_new_retry_attempt(
         blocked_cleanup,
     )
     failure_task = asyncio.create_task(
-        fail_v0_download_and_cleanup(
+        fail_download_and_reclaim(
             client=client,
             download_id=task["global_download_id"],
-            gid="gid-failure-g1",
+            expected_gid="gid-failure-g1",
+            writer_gid="gid-failure-g1",
             message="failed",
             error_code="failure",
             log_prefix="[Test]",
@@ -256,10 +257,11 @@ async def test_cancelled_failure_cleanup_finishes_before_propagating_cancel(
         delayed_cleanup,
     )
     failure = asyncio.create_task(
-        fail_v0_download_and_cleanup(
+        fail_download_and_reclaim(
             client=client,
             download_id=task["global_download_id"],
-            gid="gid-failure-cancel-g1",
+            expected_gid="gid-failure-cancel-g1",
+            writer_gid="gid-failure-cancel-g1",
             message="failed",
             error_code="failure",
             log_prefix="[Test]",
@@ -304,10 +306,11 @@ async def test_successful_cleanup_clears_gid_before_retry_submission(
         total_bytes=100,
         aria2_client=client,
     )
-    await fail_v0_download_and_cleanup(
+    await fail_download_and_reclaim(
         client=client,
         download_id=task["global_download_id"],
-        gid="gid-cleanup-success-g1",
+        expected_gid="gid-cleanup-success-g1",
+        writer_gid="gid-cleanup-success-g1",
         message="failed",
         error_code="failure",
         log_prefix="[Test]",
@@ -356,10 +359,11 @@ async def test_force_remove_failure_keeps_gid_and_blocks_retry(
         aria2_client=client,
     )
 
-    changed = await fail_v0_download_and_cleanup(
+    changed = await fail_download_and_reclaim(
         client=client,
         download_id=task["global_download_id"],
-        gid="gid-force-remove-g1",
+        expected_gid="gid-force-remove-g1",
+        writer_gid="gid-force-remove-g1",
         message="failed",
         error_code="failure",
         log_prefix="[Test]",
@@ -421,10 +425,11 @@ async def test_directory_cleanup_failure_keeps_gid_and_blocks_retry(
         "app.services.failed_task_cleanup.cleanup_task_download_dir",
         fail_directory_cleanup,
     )
-    await fail_v0_download_and_cleanup(
+    await fail_download_and_reclaim(
         client=client,
         download_id=task["global_download_id"],
-        gid="gid-directory-g1",
+        expected_gid="gid-directory-g1",
+        writer_gid="gid-directory-g1",
         message="failed",
         error_code="failure",
         log_prefix="[Test]",

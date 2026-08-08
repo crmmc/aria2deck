@@ -23,15 +23,9 @@ from app.domain.errors import (
 from app.repositories.downloads import (
     clear_terminal_user_tasks,
     get_global_download_by_id,
+    get_user_task_by_id,
     list_user_tasks,
     list_user_tasks_page,
-)
-from app.services.download_service import (
-    DownloadAdmissionError,
-    DuplicateTaskError,
-    cancel_user_task,
-    create_user_download,
-    create_user_torrent_download,
 )
 from app.services.hash import (
     extract_info_hash_from_magnet,
@@ -40,6 +34,10 @@ from app.services.hash import (
     is_magnet_link,
 )
 from app.services.http_probe import probe_url_with_get_fallback
+from app.services.internal_fetch import (
+    http_resource_identity,
+    source_request_options,
+)
 from app.services.settings_service import get_max_task_size, get_min_free_disk
 from app.services.task_projection import (
     InvalidTaskStatusFilter,
@@ -56,6 +54,21 @@ from app.domain.torrent_metadata import (
     parse_torrent_base64_async,
     selected_total_size,
     validate_selected_indexes,
+)
+from app.modules.backend.aria2_adapter import Aria2BackendAdapter
+from app.modules.task_core.register import (
+    RegisterError,
+    ResourceSpec,
+    register,
+)
+from app.modules.task_core.submit import submit_tid
+from app.modules.task_core.states import ERROR_QUOTA_EXCEEDED
+from app.modules.task_core.unref import (
+    ERROR_ALREADY_TERMINAL,
+    ERROR_FORBIDDEN,
+    ERROR_NOT_FOUND,
+    UnrefError,
+    unref,
 )
 from app.services.usage_service import get_usage
 
@@ -79,16 +92,17 @@ def check_disk_space() -> tuple[bool, int]:
     return disk.free > min_free, disk.free
 
 
-def raise_admission_error(exc: DownloadAdmissionError) -> None:
-    if exc.reason == "max_task_size":
-        raise ForbiddenError("任务大小超过系统限制") from exc
-    if exc.reason == "disk_budget":
-        raise ForbiddenError("磁盘可用空间不足") from exc
-    if exc.reason in {"quota", "no_subscribers"}:
-        raise ForbiddenError("空间不足") from exc
-    if exc.reason == "unknown_size":
-        raise BadRequestError("无法获取可信文件大小，任务未开始下载") from exc
-    raise ConflictError("任务状态已变化，请重试") from exc
+def _validate_options(options: dict | None) -> None:
+    if not options:
+        return
+    if "bt-tracker" in options:
+        raise BadRequestError("bt-tracker option is not allowed")
+    if "out" in options:
+        out = str(options["out"])
+        if not out or out in {".", ".."} or "/" in out or "\\" in out:
+            raise BadRequestError(
+                "invalid out option: must be a filename without path separators"
+            )
 
 
 def torrent_preview_response(metadata: TorrentMetadata) -> dict:
@@ -165,6 +179,118 @@ def list_task_response(row: dict, live: dict | None = None) -> dict:
 
 def _get_client() -> Any:
     return get_aria2_client()
+
+
+def _get_backend() -> Aria2BackendAdapter:
+    return Aria2BackendAdapter(_get_client())
+
+
+def raise_register_error(exc: RegisterError) -> None:
+    """Map a Task Core register failure to the public REST error surface."""
+    if exc.code == "duplicate_task":
+        raise ConflictError(str(exc)) from exc
+    if exc.code == ERROR_QUOTA_EXCEEDED:
+        raise ForbiddenError(str(exc)) from exc
+    if exc.code == "stale":
+        raise ConflictError("任务状态已变化，请重试") from exc
+    raise ConflictError(str(exc)) from exc
+
+
+async def register_and_submit(
+    *,
+    user_id: int,
+    quota_bytes: int,
+    resource: ResourceSpec,
+    options: dict | None = None,
+) -> dict:
+    """New Task Core entry: register admission, then submit the tid.
+
+    Only DB admission is guaranteed; submit failures cancel the pid via
+    ``unref`` and surface a BadGatewayError. Returns the standard REST
+    task payload so callers stay response-compatible.
+    """
+    backend = _get_backend()
+    try:
+        result = await register(
+            user_id=user_id,
+            quota_bytes=quota_bytes,
+            resource=resource,
+        )
+    except RegisterError as exc:
+        raise_register_error(exc)
+
+    if result.outcome == "created":
+        try:
+            gid = await submit_tid(
+                backend=backend,
+                tid=result.tid,
+                options=options or {},
+            )
+        except Exception as exc:
+            logger.warning(
+                "提交下载任务失败 user_id=%s tid=%s error_type=%s",
+                user_id,
+                result.tid,
+                type(exc).__name__,
+            )
+            try:
+                await unref(
+                    user_id=user_id,
+                    pid=result.pid,
+                    backend=backend,
+                    error_message="提交下载任务失败",
+                )
+            except Exception:
+                logger.warning(
+                    "提交失败后回滚任务失败 user_id=%s pid=%s",
+                    user_id,
+                    result.pid,
+                )
+            raise BadGatewayError("添加下载任务失败") from exc
+        if gid is None:
+            logger.warning(
+                "提交下载任务失败 user_id=%s tid=%s reason=no_gid",
+                user_id,
+                result.tid,
+            )
+            try:
+                await unref(
+                    user_id=user_id,
+                    pid=result.pid,
+                    backend=backend,
+                    error_message="提交下载任务失败",
+                )
+            except Exception:
+                logger.warning(
+                    "提交失败后回滚任务失败 user_id=%s pid=%s",
+                    user_id,
+                    result.pid,
+                )
+            raise BadGatewayError("添加下载任务失败")
+
+    global_download = await get_global_download_by_id(result.tid)
+    task_status = (
+        str(global_download.get("status"))
+        if global_download is not None
+        else result.status
+    )
+    task_row = {
+        "id": result.pid,
+        "global_download_id": result.tid,
+        "status": task_status,
+        "display_name": resource.display_name,
+        "reserved_bytes": resource.size_bytes if resource.size_known else 0,
+    }
+    payload = create_task_response(
+        task_row=task_row,
+        global_download=global_download,
+        fallback_uri=resource.display_uri or resource.source_uri,
+        fallback_name=resource.display_name,
+        fallback_total_length=resource.size_bytes,
+    )
+    if resource.display_uri:
+        payload["uri"] = resource.display_uri
+    return payload
 
 
 async def create_task(
@@ -261,54 +387,34 @@ async def create_task(
         raise BadRequestError("无法识别的下载链接类型")
 
     masked_uri = mask_url_credentials(submission_uri)
-    try:
-        task_row = await create_user_download(
-            user_id=user_id,
-            quota_bytes=quota_bytes,
-            uri=masked_uri,
-            resource_key=uri_hash,
-            resource_kind=(
-                "magnet"
-                if is_magnet_link(submission_uri)
-                else "http"
-                if is_http_url(submission_uri)
-                else "other"
-            ),
-            display_name=name,
-            total_bytes=total_length,
-            size_known=size_known,
-            size_limit_bytes=max_task_size,
-            disk_available_bytes=None,
-            aria2_client=_get_client(),
-            options=options,
-        )
-    except DuplicateTaskError as exc:
-        raise ConflictError(str(exc)) from exc
-    except DownloadAdmissionError as exc:
-        raise_admission_error(exc)
-    except ValueError as exc:
-        if str(exc) == "quota exceeded":
-            raise ForbiddenError("空间不足") from exc
-        raise BadRequestError(str(exc)) from exc
-    except LookupError as exc:
-        raise ConflictError("任务状态已变化，请重试") from exc
-    except Exception as exc:
-        logger.warning(
-            "添加下载任务失败 user_id=%s error_type=%s",
-            user_id,
-            type(exc).__name__,
-        )
-        raise BadGatewayError("添加下载任务失败") from exc
+    _validate_options(options)
 
-    global_download = await get_global_download_by_id(
-        int(task_row["global_download_id"])
+    resource_kind = (
+        "magnet"
+        if is_magnet_link(submission_uri)
+        else "http"
+        if is_http_url(submission_uri)
+        else "other"
     )
-    return create_task_response(
-        task_row=task_row,
-        global_download=global_download,
-        fallback_uri=masked_uri,
-        fallback_name=name,
-        fallback_total_length=total_length,
+    if resource_kind == "http":
+        source_opts = source_request_options(options)
+        resource_key = http_resource_identity(uri_hash, source_opts)
+    else:
+        resource_key = uri_hash
+
+    resource = ResourceSpec(
+        resource_key=resource_key,
+        source_uri=masked_uri,
+        resource_kind=resource_kind,
+        display_name=name,
+        size_bytes=total_length,
+        size_known=size_known,
+    )
+    return await register_and_submit(
+        user_id=user_id,
+        quota_bytes=quota_bytes,
+        resource=resource,
+        options=options,
     )
 
 
@@ -394,45 +500,27 @@ async def create_torrent_task(
         selected_indexes,
         total_file_count=metadata.file_count,
     )
-    server_options = {"select-file": select_file} if select_file else None
     magnet_uri = f"magnet:?xt=urn:btih:{uri_hash}"
-    try:
-        task_row = await create_user_torrent_download(
-            user_id=user_id,
-            quota_bytes=int(quota_bytes),
-            torrent_data=torrent,
-            resource_key=resource_key,
-            source_uri=magnet_uri,
-            display_name=metadata.name,
-            total_bytes=selected_size,
-            size_known=True,
-            size_limit_bytes=max_task_size,
-            disk_available_bytes=None,
-            aria2_client=_get_client(),
-            options=options,
-            server_options=server_options,
-        )
-    except DuplicateTaskError as exc:
-        raise ConflictError(str(exc)) from exc
-    except DownloadAdmissionError as exc:
-        raise_admission_error(exc)
-    except ValueError as exc:
-        if str(exc) == "quota exceeded":
-            raise ForbiddenError("空间不足") from exc
-        raise BadRequestError(str(exc)) from exc
-    except LookupError as exc:
-        raise ConflictError("任务状态已变化，请重试") from exc
-    except Exception as exc:
-        logger.warning("添加种子任务失败 user_id=%s error=%s", user_id, exc)
-        raise BadGatewayError("添加下载任务失败") from exc
 
-    global_download = await get_global_download_by_id(int(task_row["global_download_id"]))
-    return create_task_response(
-        task_row=task_row,
-        global_download=global_download,
-        fallback_uri=magnet_uri,
-        fallback_name=metadata.name,
-        fallback_total_length=selected_size,
+    _validate_options(options)
+    submit_options = dict(options or {})
+    if select_file:
+        submit_options["select-file"] = select_file
+
+    resource = ResourceSpec(
+        resource_key=resource_key,
+        source_uri=f"base64:{torrent}",
+        resource_kind="torrent",
+        display_name=metadata.name,
+        size_bytes=selected_size,
+        size_known=True,
+        display_uri=magnet_uri,
+    )
+    return await register_and_submit(
+        user_id=user_id,
+        quota_bytes=quota_bytes,
+        resource=resource,
+        options=submit_options,
     )
 
 
@@ -495,20 +583,32 @@ async def cancel_task(
     user_task_id: int,
     quota_bytes: int,
 ) -> dict:
+    _ = quota_bytes  # budget release is handled inside unref's claim path
+    # Legacy v0 submissions bind the aria2 gid up front; fencing on it keeps
+    # the terminal CAS consistent with the old lifecycle claim path.
+    existing = await get_user_task_by_id(user_id, user_task_id)
+    expected_gid = str(existing["aria2_gid"]) if existing and existing.get("aria2_gid") else None
     try:
-        await cancel_user_task(
+        await unref(
             user_id=user_id,
-            user_task_id=user_task_id,
-            quota_bytes=quota_bytes,
-            aria2_client=_get_client(),
+            pid=user_task_id,
+            backend=_get_backend(),
+            expected_gid=expected_gid,
         )
-    except LookupError as exc:
+    except UnrefError as exc:
         logger.warning(
-            "取消任务失败 user_id=%s task_id=%s reason=not_found",
+            "取消任务失败 user_id=%s task_id=%s reason=%s",
             user_id,
             user_task_id,
+            exc.code,
         )
-        raise NotFoundError("任务不存在") from exc
+        if exc.code == ERROR_NOT_FOUND:
+            raise NotFoundError("任务不存在") from exc
+        if exc.code == ERROR_FORBIDDEN:
+            raise NotFoundError("任务不存在") from exc
+        if exc.code == ERROR_ALREADY_TERMINAL:
+            raise ConflictError(str(exc)) from exc
+        raise BadGatewayError("取消下载任务失败") from exc
     except Exception as exc:
         logger.warning("取消任务失败 user_id=%s task_id=%s error=%s", user_id, user_task_id, exc)
         raise BadGatewayError("取消下载任务失败") from exc

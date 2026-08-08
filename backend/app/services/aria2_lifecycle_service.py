@@ -40,7 +40,6 @@ from app.repositories.downloads import (
 from app.services import download_ops
 from app.services.download_service import (
     candidate_size_from_status,
-    complete_global_download,
     complete_global_download_locked,
     get_disk_available_bytes,
     get_download_lifecycle_lock,
@@ -80,20 +79,6 @@ class ResolveResult:
     def is_handoff_candidate(self) -> bool:
         return self.source_gid is not None
 
-
-# Deprecated: lifecycle protection is now unified under
-# get_download_lifecycle_lock. This shim remains for backward-compatible
-# imports but is no longer used by any lifecycle path.
-
-
-async def get_task_complete_lock(download_id: int) -> asyncio.Lock:
-    """Return an isolated lock that no lifecycle path uses.
-
-    Kept as a deprecated async shim so external callers importing the name
-    do not break at import time.  The returned lock is per-call and does
-    not share state with any lifecycle lock.
-    """
-    return asyncio.Lock()
 
 COMPLETE_SOURCE_RETRY_COUNT = 4
 COMPLETE_SOURCE_RETRY_INTERVAL = 0.5
@@ -344,47 +329,6 @@ async def fail_download_and_reclaim(
         await asyncio.shield(operation)
         raise
 
-
-async def _fail_v0_download_and_cleanup_locked(
-    *,
-    client: Aria2Gateway,
-    download_id: int,
-    gid: str,
-    message: str,
-    error_code: str | None,
-    log_prefix: str,
-) -> bool:
-    return await fail_download_and_reclaim(
-        client=client,
-        download_id=download_id,
-        message=message,
-        error_code=error_code,
-        expected_gid=gid,
-        writer_gid=gid,
-        acquire_lifecycle_lock=False,
-        log_prefix=log_prefix,
-    )
-
-
-async def fail_v0_download_and_cleanup(
-    *,
-    client: Aria2Gateway,
-    download_id: int,
-    gid: str,
-    message: str,
-    error_code: str | None,
-    log_prefix: str,
-) -> bool:
-    return await fail_download_and_reclaim(
-        client=client,
-        download_id=download_id,
-        message=message,
-        error_code=error_code,
-        expected_gid=gid,
-        writer_gid=gid,
-        acquire_lifecycle_lock=True,
-        log_prefix=log_prefix,
-    )
 
 
 def _has_only_internal_gateway_uris(
@@ -716,58 +660,6 @@ async def update_download_and_active_user_tasks(
 PAUSE_SUCCESS_STATUSES = {"paused"}
 UNPAUSE_SUCCESS_STATUSES = {"active", "waiting"}
 
-
-async def _auto_resume_size_admitted_pause(
-    *,
-    client: Aria2Gateway,
-    attempt_id: int,
-    control_gid: str,
-    expected_gid: str,
-    log_prefix: str,
-) -> dict[str, Any] | None:
-    """Unpause a size-admitted non-metadata payload that is unexpectedly paused.
-
-    Returns the re-queried aria2 status on success / already-running / complete.
-    Returns None when unpause cannot be confirmed (leave pause projection).
-    Never terminalizes; genuine external pauses stay paused.
-    """
-    del expected_gid  # fencing is owned by the caller
-
-    try:
-        await client.unpause(control_gid)
-    except Exception as exc:
-        logger.debug(
-            "%s Auto-resume unpause raised attempt_id=%s gid=%s error=%s",
-            log_prefix,
-            attempt_id,
-            control_gid,
-            exc,
-        )
-
-    try:
-        re_status = await client.tell_status(control_gid)
-    except Exception as re_exc:
-        if is_transient_rpc_error(re_exc) or is_missing_gid_error(re_exc):
-            return None
-        logger.debug(
-            "%s Auto-resume tell_status failed attempt_id=%s error=%s",
-            log_prefix,
-            attempt_id,
-            re_exc,
-        )
-        return None
-
-    re_raw = str(re_status.get("status") or "")
-    if re_raw in UNPAUSE_SUCCESS_STATUSES or re_raw == "complete":
-        logger.info(
-            "%s Auto-resumed size-admitted pause attempt_id=%s gid=%s status=%s",
-            log_prefix,
-            attempt_id,
-            control_gid,
-            re_raw,
-        )
-        return re_status
-    return None
 
 
 async def _requery_after_control_failure(
@@ -1679,12 +1571,14 @@ async def handle_v0_download_complete(
                 len(files),
                 error_code,
             )
-            return await _fail_v0_download_and_cleanup_locked(
+            return await fail_download_and_reclaim(
                 client=client,
                 download_id=download_id,
-                gid=completion_gid,
                 message=error_message,
                 error_code=error_code,
+                expected_gid=completion_gid,
+                writer_gid=completion_gid,
+                acquire_lifecycle_lock=False,
                 log_prefix=log_prefix,
             )
 
@@ -1706,12 +1600,14 @@ async def handle_v0_download_complete(
             )
             return True
         if result["status"] == "invalid_source":
-            return await _fail_v0_download_and_cleanup_locked(
+            return await fail_download_and_reclaim(
                 client=client,
                 download_id=download_id,
-                gid=completion_gid,
                 message="下载完成但文件布局无效",
                 error_code="invalid_completed_layout",
+                expected_gid=completion_gid,
+                writer_gid=completion_gid,
+                acquire_lifecycle_lock=False,
                 log_prefix=log_prefix,
             )
         logger.info(
@@ -1750,38 +1646,16 @@ async def handle_v0_download_complete(
     )
     lifecycle_lock = await get_download_lifecycle_lock(download_id)
     async with lifecycle_lock:
-        return await _fail_v0_download_and_cleanup_locked(
+        return await fail_download_and_reclaim(
             client=client,
             download_id=download_id,
-            gid=completion_gid,
             message=error_message,
             error_code=error_code,
+            expected_gid=completion_gid,
+            writer_gid=completion_gid,
+            acquire_lifecycle_lock=False,
             log_prefix=log_prefix,
         )
-
-
-async def handle_aria2_event(
-    *,
-    client: Aria2Gateway,
-    gid: str,
-    event: str,
-    aria2_status: dict[str, Any],
-) -> None:
-    """Deprecated thin wrapper: delegates to ``reconcile_attempt_signal``.
-
-    Retained for backward-compatible callers.  Normal runtime traffic enters
-    through ``reconcile_attempt_signal`` directly (spec §17.2).
-    """
-    result = await reconcile_attempt_signal(
-        client=client,
-        observed_gid=gid,
-        event=event,
-        observed_status=aria2_status,
-        log_prefix="[WS]",
-    )
-    logger.debug(
-        "[WS] handle_aria2_event gid=%s event=%s result=%s", gid, event, result
-    )
 
 
 async def _terminalize_missing_gid_locked(
@@ -2167,116 +2041,82 @@ async def reconcile_attempt_signal(
                 size_paused_by_us = bool(
                     admission is not None and admission.get("paused_by_us")
                 )
-                size_known = bool(resolved.download.get("size_known"))
-                skip_pause_projection = False
 
-                # Size-admitted non-metadata payloads must keep downloading.
-                # pause-metadata / delayed aria2 pause must auto-resume rather
-                # than stick forever as external_paused.
+                mapped = _map_v0_status(
+                    working_status,
+                    attempt_id,
+                    prefer_bittorrent_name=bt_evidence,
+                )
+
+                global_values: dict[str, Any] = {
+                    "status": mapped["status"],
+                    "completed_bytes": mapped["completed_bytes"],
+                    "updated_at_ms": now_ms(),
+                }
+                if not is_metadata:
+                    global_values["total_bytes"] = mapped["total_bytes"]
+                    if mapped["display_name"]:
+                        global_values["display_name"] = mapped["display_name"]
+
+                # Pause projection (arch M2):
+                # - never auto-unpause merely because size_known (removed a554c30 path)
+                # - never mark metadata-phase pause as external
+                # - never mark pause that size-admission just owned (paused_by_us)
+                # - never overwrite growth/handoff/admission or queue error codes
+                # - only when transitioning into paused from a non-paused live status
+                protected_error_codes = {
+                    "growth_pause_failed",
+                    "growth_unpause_failed",
+                    "unpause_failed",
+                    "handoff_unknown_size",
+                    "unknown_size",
+                    "disk_budget",
+                    "disk_budget_exceeded",
+                    "max_task_size",
+                    "admission_rejected",
+                    "quota_queued",
+                    "disk_queued",
+                }
                 if (
-                    raw_status == "paused"
+                    mapped["status"] == "paused"
                     and not is_metadata
-                    and size_known
                     and not size_paused_by_us
+                    and prev_status in {"active", "queued", "waiting"}
+                    and prev_error_code not in protected_error_codes
                 ):
-                    resumed_status = await _auto_resume_size_admitted_pause(
-                        client=client,
-                        attempt_id=attempt_id,
-                        control_gid=current_gid,
-                        expected_gid=current_gid,
-                        log_prefix=log_prefix,
+                    global_values["error_message"] = "任务已被外部暂停"
+                    global_values["error_code"] = "external_paused"
+                    global_values["disk_reserved_bytes"] = max(
+                        0,
+                        download_ops.safe_int(snapshot.get("completed_bytes")),
                     )
-                    if resumed_status is not None:
-                        re_raw = str(resumed_status.get("status") or "")
-                        if re_raw == "complete":
-                            complete_dispatch = (current_gid, resumed_status)
-                            skip_pause_projection = True
-                        elif re_raw in UNPAUSE_SUCCESS_STATUSES:
-                            working_status = resumed_status
-                            raw_status = re_raw
+                elif mapped["status"] == "active" and prev_error_code in {
+                    "external_paused",
+                    "admin_paused",
+                }:
+                    # Clear sticky external-pause hint when download resumes.
+                    global_values["error_code"] = None
+                    global_values["error_message"] = None
 
-                if not skip_pause_projection:
-                    mapped = _map_v0_status(
-                        working_status,
-                        attempt_id,
-                        prefer_bittorrent_name=bt_evidence,
-                    )
-
-                    global_values: dict[str, Any] = {
-                        "status": mapped["status"],
-                        "completed_bytes": mapped["completed_bytes"],
-                        "updated_at_ms": now_ms(),
-                    }
-                    if not is_metadata:
-                        global_values["total_bytes"] = mapped["total_bytes"]
-                        if mapped["display_name"]:
-                            global_values["display_name"] = mapped["display_name"]
-
-                    # External pause only if auto-resume did not restore download:
-                    # - never mark metadata-phase pause as external
-                    # - never mark pause that size-admission just owned (paused_by_us)
-                    # - never overwrite growth/handoff/admission error codes
-                    # - only when transitioning into paused from a non-paused live status
-                    protected_error_codes = {
-                        "growth_pause_failed",
-                        "growth_unpause_failed",
-                        "unpause_failed",
-                        "handoff_unknown_size",
-                        "unknown_size",
-                        "disk_budget",
-                        "disk_budget_exceeded",
-                        "max_task_size",
-                        "admission_rejected",
-                    }
-                    if (
-                        mapped["status"] == "paused"
-                        and not is_metadata
-                        and not size_paused_by_us
-                        and prev_status in {"active", "queued", "waiting"}
-                        and prev_error_code not in protected_error_codes
-                    ):
-                        global_values["error_message"] = (
-                            "任务已被外部暂停，请联系管理员处理"
-                        )
-                        global_values["error_code"] = "external_paused"
-                        global_values["disk_reserved_bytes"] = max(
-                            0,
-                            download_ops.safe_int(
-                                snapshot.get("completed_bytes")
-                            ),
-                        )
-                    elif mapped["status"] == "active" and prev_error_code in {
-                        "external_paused",
-                        "admin_paused",
-                    }:
-                        # Clear sticky external-pause hint when download resumes.
-                        global_values["error_code"] = None
-                        global_values["error_message"] = None
-
-                    updated = await guarded_update_download_and_active_user_tasks(
-                        attempt_id,
-                        global_values,
-                        expected_gid=current_gid,
-                        user_status=mapped["status"],
-                        display_name=(
-                            mapped["display_name"] if not is_metadata else None
-                        ),
-                    )
-                    if updated is not None:
-                        await _broadcast_download_update(attempt_id)
-                        logger.debug(
-                            "%s Projected attempt_id=%s status_after=%s",
-                            log_prefix,
-                            attempt_id,
-                            mapped["status"],
-                        )
-                        return ReconcileResult.CHANGED
-                    logger.info(
-                        "%s Projection fenced out attempt_id=%s",
+                updated = await guarded_update_download_and_active_user_tasks(
+                    attempt_id,
+                    global_values,
+                    expected_gid=current_gid,
+                    user_status=mapped["status"],
+                    display_name=(
+                        mapped["display_name"] if not is_metadata else None
+                    ),
+                )
+                if updated is not None:
+                    await _broadcast_download_update(attempt_id)
+                    logger.debug(
+                        "%s Projected attempt_id=%s status_after=%s",
                         log_prefix,
                         attempt_id,
+                        mapped["status"],
                     )
-                    return ReconcileResult.STALE
+                    return ReconcileResult.CHANGED
+                return ReconcileResult.STALE
 
             else:
                 logger.debug(
@@ -2317,59 +2157,6 @@ async def reconcile_attempt_signal(
         return ReconcileResult.WAITING
 
     return ReconcileResult.WAITING
-
-
-async def complete_v0_download_from_sync(
-    *,
-    client: Aria2Gateway,
-    download: dict[str, Any],
-    aria2_status: dict[str, Any],
-    completion_gid: str,
-    allow_metadata_handoff_defer: bool = True,
-) -> bool:
-    """Deprecated thin wrapper: delegates completion to ``handle_v0_download_complete``.
-
-    Retained for backward-compatible callers (spec §17.2).
-    """
-    changed = await handle_v0_download_complete(
-        client=client,
-        download=download,
-        aria2_status=aria2_status,
-        completion_gid=completion_gid,
-        log_prefix="[Sync]",
-        allow_metadata_handoff_defer=allow_metadata_handoff_defer,
-    )
-    if changed:
-        await _broadcast_download_update(int(download["id"]))
-    return changed
-
-
-async def update_v0_download_from_aria2(
-    *,
-    client: Aria2Gateway,
-    download: dict[str, Any],
-    status: dict[str, Any],
-) -> bool:
-    """Deprecated thin wrapper: delegates to ``reconcile_attempt_signal``.
-
-    Retained for backward-compatible callers.  Normal runtime traffic enters
-    through ``reconcile_attempt_signal`` directly (spec §17.2).
-    """
-    gid = str(download.get("aria2_gid") or "")
-    if not gid:
-        return False
-    result = await reconcile_attempt_signal(
-        client=client,
-        observed_gid=gid,
-        event=None,
-        observed_status=status,
-        log_prefix="[Sync]",
-    )
-    return result not in (
-        ReconcileResult.STALE,
-        ReconcileResult.IGNORED,
-        ReconcileResult.ALREADY_TERMINAL,
-    )
 
 
 async def repair_inconsistent_completed_downloads_v0(
@@ -2424,23 +2211,3 @@ async def cleanup_stale_queued_downloads_v0(
         if changed:
             await _broadcast_download_update(download_id)
 
-
-async def handle_missing_gid(
-    *,
-    client: Aria2Gateway,
-    download: dict[str, Any],
-    gid: str,
-) -> None:
-    """Deprecated thin wrapper: delegates to ``reconcile_attempt_signal``.
-
-    Passes a fabricated missing-GID error so the coordinator can apply the
-    correct fencing and terminalization logic (spec §14.1, §17.2).
-    """
-    await reconcile_attempt_signal(
-        client=client,
-        observed_gid=gid,
-        event=None,
-        observed_status=None,
-        observed_error=Exception("Active Resource not found: gid#" + gid),
-        log_prefix="[Sync]",
-    )

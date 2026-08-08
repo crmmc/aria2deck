@@ -13,13 +13,13 @@ from app.aria2.sync import (
     _cleanup_owned_stopped_results,
     sync_tasks,
 )
+from app.domain.lifecycle import ReconcileResult
 from app.services.aria2_lifecycle_service import (
     cleanup_stale_queued_downloads_v0,
-    fail_v0_download_and_cleanup,
-    handle_missing_gid,
+    fail_download_and_reclaim,
+    reconcile_attempt_signal,
     expected_completed_size,
     repair_inconsistent_completed_downloads_v0,
-    update_v0_download_from_aria2,
 )
 from app.core.config import settings
 from app.db.engine import transaction
@@ -225,10 +225,11 @@ async def test_active_aria2_status_updates_global_bytes_and_active_user_task_sta
     )
     client = make_aria2_client()
 
-    changed = await update_v0_download_from_aria2(
+    changed = await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-sync-active",
             "status": "active",
             "totalLength": "1000",
@@ -236,6 +237,7 @@ async def test_active_aria2_status_updates_global_bytes_and_active_user_task_sta
             "downloadSpeed": "10",
             "files": [{"path": "/tmp/sync-active.bin"}],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -260,19 +262,21 @@ async def test_sync_progress_only_size_fails_unknown_download(temp_db: str) -> N
     )
     client = make_aria2_client()
 
-    changed = await update_v0_download_from_aria2(
+    changed = await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-sync-progress-only", "status": "active",
             "totalLength": "0", "completedLength": "123", "files": [],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
     usage = await get_usage(user["id"], user["quota_bytes"])
-    assert changed is True
+    assert changed == ReconcileResult.TERMINALIZED
     assert updated["status"] == "failed"
     assert updated["error_code"] == "unknown_size"
     assert updated["aria2_gid"] is None
@@ -305,10 +309,11 @@ async def test_error_aria2_result_marks_active_user_tasks_failed(
     )
     client = make_aria2_client()
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-sync-error",
             "status": "error",
             "errorCode": "7",
@@ -317,6 +322,7 @@ async def test_error_aria2_result_marks_active_user_tasks_failed(
             "completedLength": "11",
             "files": [],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -352,10 +358,11 @@ async def test_error_aria2_result_preserves_specific_aria2_error_message(
     client = make_aria2_client()
     raw_error = "CUID#12 - Download aborted. URI=https://example.com/file.iso"
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-sync-specific-error",
             "status": "error",
             "errorCode": "7",
@@ -364,6 +371,7 @@ async def test_error_aria2_result_preserves_specific_aria2_error_message(
             "completedLength": "1",
             "files": [],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -403,10 +411,11 @@ async def test_metadata_followed_by_refreshes_real_task_progress_and_name(
         },
     )
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-metadata",
             "status": "complete",
             "followedBy": ["gid-real"],
@@ -414,6 +423,7 @@ async def test_metadata_followed_by_refreshes_real_task_progress_and_name(
             "completedLength": "0",
             "files": [],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -458,10 +468,11 @@ async def test_metadata_followed_by_preserves_real_waiting_status(
         },
     )
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-metadata-waiting",
             "status": "complete",
             "followedBy": ["gid-real-waiting"],
@@ -469,6 +480,7 @@ async def test_metadata_followed_by_preserves_real_waiting_status(
             "completedLength": "0",
             "files": [],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -519,10 +531,11 @@ async def test_metadata_followed_by_complete_real_status_is_indexed(
         },
     )
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-metadata-complete",
             "status": "complete",
             "followedBy": ["gid-real-complete"],
@@ -530,6 +543,7 @@ async def test_metadata_followed_by_complete_real_status_is_indexed(
             "completedLength": "0",
             "files": [],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -577,10 +591,11 @@ async def test_torrent_synthetic_task_name_is_replaced_with_real_name(
     )
     client = make_aria2_client()
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-torrent-placeholder",
             "status": "active",
             "totalLength": "2048",
@@ -588,6 +603,7 @@ async def test_torrent_synthetic_task_name_is_replaced_with_real_name(
             "bittorrent": {"info": {"name": "Real Torrent"}},
             "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "2048"}],
         },
+        log_prefix="[Sync]",
     )
 
     updated_task = await _fetch_user_task(task["id"])
@@ -618,16 +634,18 @@ async def test_torrent_prefixed_user_task_name_is_not_overwritten_for_http_downl
     )
     client = make_aria2_client()
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-http-torrent-prefix",
             "status": "active",
             "totalLength": "2048",
             "completedLength": "512",
             "files": [{"path": "/downloads/renamed-by-server.iso", "length": "2048"}],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -660,10 +678,11 @@ async def test_http_download_ignores_noisy_bittorrent_name_without_live_evidence
     )
     client = make_aria2_client()
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-http-bt-noise",
             "status": "active",
             "totalLength": "2048",
@@ -671,6 +690,7 @@ async def test_http_download_ignores_noisy_bittorrent_name_without_live_evidence
             "bittorrent": {"info": {"name": "Noisy Torrent Name"}},
             "files": [{"path": "/downloads/plain.bin", "length": "2048"}],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -706,10 +726,11 @@ async def test_http_torrent_live_infohash_stays_http_without_followed_by(
     )
     client = make_aria2_client()
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-http-torrent-upgrade",
             "status": "active",
             "totalLength": "4096",
@@ -718,6 +739,7 @@ async def test_http_torrent_live_infohash_stays_http_without_followed_by(
             "bittorrent": {"info": {"name": "Real Torrent"}},
             "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin")}],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -765,10 +787,11 @@ async def test_http_torrent_followed_by_handoff_upgrades_resource_kind(
         },
     )
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-http-metadata",
             "status": "complete",
             "followedBy": ["gid-real-bt"],
@@ -776,6 +799,7 @@ async def test_http_torrent_followed_by_handoff_upgrades_resource_kind(
             "completedLength": "0",
             "files": [],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -842,10 +866,11 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
         ],
     )
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-metadata",
             "status": "complete",
             "totalLength": "9",
@@ -858,6 +883,7 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
                 }
             ],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -912,16 +938,18 @@ async def test_active_aria2_status_does_not_overwrite_completed_download(
     )
     client = make_aria2_client()
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-sync-terminal",
             "status": "active",
             "totalLength": "1000",
             "completedLength": "250",
             "files": [{"path": "/tmp/stale-active.bin"}],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -962,10 +990,11 @@ async def test_active_bt_status_with_full_bytes_stays_active(
     source_file.write_bytes(b"payload")
     client = make_aria2_client()
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-sync-active-full-bt",
             "status": "active",
             "totalLength": "7",
@@ -976,6 +1005,7 @@ async def test_active_bt_status_with_full_bytes_stays_active(
                 {"path": str(source_file), "length": "7", "completedLength": "7"}
             ],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -1015,10 +1045,11 @@ async def test_active_full_bytes_without_real_file_name_stays_active(
     )
     client = make_aria2_client()
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-sync-active-full-no-name",
             "status": "active",
             "totalLength": "7",
@@ -1032,6 +1063,7 @@ async def test_active_full_bytes_without_real_file_name_stays_active(
                 }
             ],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -1074,10 +1106,11 @@ async def test_active_full_bytes_with_verify_integrity_pending_stays_active(
     source_file.write_bytes(b"payload")
     client = make_aria2_client()
 
-    await update_v0_download_from_aria2(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        status={
+        observed_gid=str(download["aria2_gid"]),
+        event=None,
+        observed_status={
             "gid": "gid-sync-active-full-verify",
             "status": "active",
             "totalLength": "7",
@@ -1089,6 +1122,7 @@ async def test_active_full_bytes_with_verify_integrity_pending_stays_active(
                 {"path": str(source_file), "length": "7", "completedLength": "7"}
             ],
         },
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])
@@ -1168,10 +1202,11 @@ async def test_sync_failure_cleanup_fails_immediately(
     )
     client = make_aria2_client()
 
-    changed = await fail_v0_download_and_cleanup(
+    changed = await fail_download_and_reclaim(
         client=client,
         download_id=download["id"],
-        gid="gid-sync-failure-lock",
+        expected_gid="gid-sync-failure-lock",
+        writer_gid="gid-sync-failure-lock",
         message="sync failure",
         error_code="sync_failure",
         log_prefix="[Test]",
@@ -1266,10 +1301,13 @@ async def test_missing_gid_with_unknown_size_fails_without_indexing(
     (task_dir / "unknown.bin").write_bytes(b"unknown payload")
     client = make_aria2_client()
 
-    await handle_missing_gid(
+    await reconcile_attempt_signal(
         client=client,
-        download=download,
-        gid="gid-sync-missing-unknown",
+        observed_gid="gid-sync-missing-unknown",
+        event=None,
+        observed_status=None,
+        observed_error=Exception("Active Resource not found: gid#gid-sync-missing-unknown"),
+        log_prefix="[Sync]",
     )
 
     updated = await _fetch_global(download["id"])

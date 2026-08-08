@@ -46,6 +46,7 @@ export type Task = {
   upload_speed: number;
   frozen_space: number;  // space frozen for this download
   error?: string | null;
+  status_label?: string | null;  // backend projection label (user_visible_label)
   created_at: string;
 };
 

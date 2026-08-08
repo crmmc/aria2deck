@@ -3,7 +3,7 @@ from sqlalchemy import select
 
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
-from app.services.aria2_lifecycle_service import handle_aria2_event
+from app.services.aria2_lifecycle_service import reconcile_attempt_signal
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_global_download_v0, create_user_task_v0, create_user_v0
 
@@ -31,8 +31,14 @@ def _active_status(*, gid: str = "gid-pause-admin") -> dict:
 
 
 @pytest.mark.asyncio
-async def test_size_known_pause_auto_resumes_instead_of_external_paused(temp_db):
-    """Admitted payloads that become paused must resume, not stick on external_paused."""
+async def test_size_known_pause_marks_external_paused_without_auto_resume(temp_db):
+    """size_known alone never auto-resumes (removed a554c30 path).
+
+    A size-admitted payload that transitions active -> paused is projected
+    as external_paused; unpause only happens via explicit state-machine
+    decisions (quota/disk queue headroom), never merely because the size
+    is known.
+    """
     user = await create_user_v0(username="pause_user", quota_bytes=10_000)
     download = await create_global_download_v0(
         resource_key="http:pause-autoresume",
@@ -51,11 +57,12 @@ async def test_size_known_pause_auto_resumes_instead_of_external_paused(temp_db)
         tell_status=_active_status(gid="gid-pause-autoresume"),
     )
     status = _paused_status(gid="gid-pause-autoresume")
-    await handle_aria2_event(
+    await reconcile_attempt_signal(
         client=client,
-        gid="gid-pause-autoresume",
+        observed_gid="gid-pause-autoresume",
         event="pause",
-        aria2_status=status,
+        observed_status=status,
+        log_prefix="[WS]",
     )
     async with transaction() as conn:
         g = (
@@ -68,15 +75,16 @@ async def test_size_known_pause_auto_resumes_instead_of_external_paused(temp_db)
                 select(user_tasks).where(user_tasks.c.id == task["id"])
             )
         ).mappings().one()
-    assert g["status"] == "active"
-    assert t["status"] == "active"
-    assert g["error_code"] in (None, "")
-    assert g["error_message"] in (None, "")
-    client.unpause.assert_awaited()
+    assert g["status"] == "paused"
+    assert t["status"] == "paused"
+    assert g["error_code"] == "external_paused"
+    assert "外部暂停" in (g["error_message"] or "")
+    assert int(g["disk_reserved_bytes"]) == 100
+    client.unpause.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_external_pause_when_auto_resume_cannot_unpause(temp_db):
+async def test_external_pause_when_unpause_not_attempted(temp_db):
     """If unpause cannot leave paused, project external_paused for active→paused."""
     user = await create_user_v0(username="pause_user_ext", quota_bytes=10_000)
     download = await create_global_download_v0(
@@ -97,11 +105,12 @@ async def test_external_pause_when_auto_resume_cannot_unpause(temp_db):
         tell_status=_paused_status(gid="gid-pause-external"),
     )
     status = _paused_status(gid="gid-pause-external")
-    await handle_aria2_event(
+    await reconcile_attempt_signal(
         client=client,
-        gid="gid-pause-external",
+        observed_gid="gid-pause-external",
         event="pause",
-        aria2_status=status,
+        observed_status=status,
+        log_prefix="[WS]",
     )
     async with transaction() as conn:
         g = (
@@ -123,8 +132,8 @@ async def test_external_pause_when_auto_resume_cannot_unpause(temp_db):
 
 
 @pytest.mark.asyncio
-async def test_already_paused_sync_auto_resumes_when_size_known(temp_db):
-    """Sticky paused admitted tasks should resume on Sync, not stay stuck."""
+async def test_sticky_paused_sync_keeps_external_pause_hint(temp_db):
+    """Sticky external-paused tasks stay paused on Sync; no size_known resume."""
     user = await create_user_v0(username="pause_user2", quota_bytes=10_000)
     download = await create_global_download_v0(
         resource_key="http:pause-sticky",
@@ -148,11 +157,12 @@ async def test_already_paused_sync_auto_resumes_when_size_known(temp_db):
         tell_status=_active_status(gid="gid-pause-sticky"),
     )
     status = _paused_status(gid="gid-pause-sticky")
-    await handle_aria2_event(
+    await reconcile_attempt_signal(
         client=client,
-        gid="gid-pause-sticky",
+        observed_gid="gid-pause-sticky",
         event=None,
-        aria2_status=status,
+        observed_status=status,
+        log_prefix="[WS]",
     )
     async with transaction() as conn:
         g = (
@@ -165,11 +175,11 @@ async def test_already_paused_sync_auto_resumes_when_size_known(temp_db):
                 select(user_tasks).where(user_tasks.c.id == task["id"])
             )
         ).mappings().one()
-    assert g["status"] == "active"
-    assert t["status"] == "active"
-    assert g["error_code"] in (None, "")
-    assert g["error_message"] in (None, "")
-    client.unpause.assert_awaited()
+    assert g["status"] == "paused"
+    assert t["status"] == "paused"
+    assert g["error_code"] == "external_paused"
+    assert "外部暂停" in (g["error_message"] or "")
+    client.unpause.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -198,11 +208,12 @@ async def test_resume_from_external_pause_clears_error_hint(temp_db):
     )
     status = _active_status(gid="gid-pause-resume")
     status["completedLength"] = "200"
-    await handle_aria2_event(
+    await reconcile_attempt_signal(
         client=client,
-        gid="gid-pause-resume",
+        observed_gid="gid-pause-resume",
         event="start",
-        aria2_status=status,
+        observed_status=status,
+        log_prefix="[WS]",
     )
     async with transaction() as conn:
         g = (

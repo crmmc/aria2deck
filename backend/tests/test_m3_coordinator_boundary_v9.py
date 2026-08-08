@@ -18,7 +18,6 @@ Test matrix:
 from __future__ import annotations
 
 import ast
-import inspect
 import re
 from pathlib import Path
 from typing import Any
@@ -33,10 +32,8 @@ from app.db.schema import global_downloads, user_tasks
 from app.domain.lifecycle import ReconcileResult
 from app.services import aria2_lifecycle_service as lifecycle_mod
 from app.services.aria2_lifecycle_service import (
-    handle_aria2_event,
     reconcile_attempt_signal,
     resolve_download_for_gid,
-    update_v0_download_from_aria2,
 )
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -262,20 +259,13 @@ async def test_handoff_does_not_fabricate_complete_event(temp_db: str) -> None:
 
     client.tell_status.side_effect = _tell_status
 
-    with patch.object(
-        lifecycle_mod,
-        "handle_aria2_event",
-        new=AsyncMock(),
-    ) as spy:
-        result = await reconcile_attempt_signal(
-            client=client,
-            observed_gid="payload_gid",
-            event=None,
-            observed_status=payload_status,
-            log_prefix="[T20]",
-        )
-        # handle_aria2_event must NOT be called to chain lifecycle.
-        spy.assert_not_called()
+    result = await reconcile_attempt_signal(
+        client=client,
+        observed_gid="payload_gid",
+        event=None,
+        observed_status=payload_status,
+        log_prefix="[T20]",
+    )
 
     # Result should be a normal reconcile outcome, not from a fabricated event.
     assert result in (
@@ -305,48 +295,8 @@ def test_no_skip_status_check_in_lifecycle() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_handle_aria2_event_is_thin_wrapper() -> None:
-    """``handle_aria2_event`` must delegate to ``reconcile_attempt_signal``
-    and not contain its own state machine (spec §17.2)."""
-    source = inspect.getsource(handle_aria2_event)
-    assert "reconcile_attempt_signal" in source, (
-        "handle_aria2_event must delegate to reconcile_attempt_signal"
-    )
-    # Must not contain its own state transition branches.
-    forbidden_patterns = [
-        "fail_v0_download_and_cleanup(",
-        "update_download_and_active_user_tasks(",
-        "coordinate_reported_size(",
-        "_map_v0_status(",
-    ]
-    for pattern in forbidden_patterns:
-        assert pattern not in source, (
-            f"handle_aria2_event still contains direct state logic: {pattern}"
-        )
-
-
-def test_update_v0_download_from_aria2_is_thin_wrapper() -> None:
-    """``update_v0_download_from_aria2`` must delegate to
-    ``reconcile_attempt_signal`` and not contain its own state machine."""
-    source = inspect.getsource(update_v0_download_from_aria2)
-    assert "reconcile_attempt_signal" in source, (
-        "update_v0_download_from_aria2 must delegate to reconcile_attempt_signal"
-    )
-    forbidden_patterns = [
-        "fail_v0_download_and_cleanup(",
-        "coordinate_reported_size(",
-        "switch_to_followed_download(",
-        "complete_v0_download_from_sync(",
-        "_map_v0_status(",
-    ]
-    for pattern in forbidden_patterns:
-        assert pattern not in source, (
-            f"update_v0_download_from_aria2 still contains direct state logic: {pattern}"
-        )
-
-
-def test_no_dead_bypass_functions() -> None:
-    """Dead bypass functions must be removed from the lifecycle source."""
+def test_dead_bypass_functions_removed() -> None:
+    """Deprecated thin wrappers must be removed from the lifecycle source."""
     source = _source_text()
     tree = ast.parse(source, filename=str(_LIFECYCLE_SRC))
 
@@ -356,6 +306,13 @@ def test_no_dead_bypass_functions() -> None:
             defined_funcs.add(node.name)
 
     removed = {
+        "handle_aria2_event",
+        "update_v0_download_from_aria2",
+        "complete_v0_download_from_sync",
+        "handle_missing_gid",
+        "fail_v0_download_and_cleanup",
+        "_fail_v0_download_and_cleanup_locked",
+        "get_task_complete_lock",
         "cleanup_failed_download_artifacts",
         "_cleanup_handoff_rejection_operation",
         "_cleanup_handoff_rejection_safely",
@@ -363,5 +320,5 @@ def test_no_dead_bypass_functions() -> None:
     }
     for name in removed:
         assert name not in defined_funcs, (
-            f"Dead bypass function {name} should have been removed"
+            f"Deprecated function {name} should have been removed"
         )

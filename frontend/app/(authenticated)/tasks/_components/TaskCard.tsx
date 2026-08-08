@@ -128,17 +128,15 @@ export const TaskCard = memo(function TaskCard({
         >
           <div className="task-footer-left">
             <span className={`task-status task-status-${task.status}`}>
-              {task.status === "active"
-                ? "下载中"
-                : task.status === "queued"
-                  ? "排队中"
+              {task.status === "queued" || task.status === "paused"
+                ? task.status_label || (task.status === "queued" ? "排队中" : "已暂停")
+                : task.status === "active"
+                  ? "下载中"
                   : task.status === "waiting"
                     ? "等待中"
-                    : task.status === "paused"
-                      ? "已暂停"
-                      : task.status === "error"
-                        ? "失败"
-                        : task.status}
+                    : task.status === "error"
+                      ? "失败"
+                      : task.status}
             </span>
             {task.error && (
               <span className="text-danger text-sm" title={task.error}>

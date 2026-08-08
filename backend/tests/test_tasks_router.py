@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import os
 import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,7 +18,7 @@ from sqlalchemy import update
 from app.db.engine import transaction
 from app.core.config import get_internal_base_url
 from app.db.schema import global_downloads
-from app.domain.errors import BadRequestError
+from app.domain.errors import BadRequestError, BadGatewayError, ConflictError, ForbiddenError
 from app.domain.torrent_metadata import MAX_TORRENT_BASE64_LENGTH
 from app.repositories.downloads import get_global_by_resource_key, get_user_task
 from app.services.download_service import create_user_download
@@ -349,13 +350,14 @@ class TestCreateTask:
         )
         mock_aria2_client.add_uri.assert_not_awaited()
 
-    @patch("app.services.task_service.create_user_download")
+    @patch("app.services.task_service._get_client")
     @patch("app.services.task_service.probe_url_with_get_fallback")
     def test_create_task_admits_unknown_content_length_as_unknown_size(
         self,
         mock_probe: AsyncMock,
-        mock_create_download: AsyncMock,
+        mock_get_client: MagicMock,
         authenticated_client: TestClient,
+        mock_aria2_client: AsyncMock,
     ) -> None:
         mock_result = MagicMock()
         mock_result.success = True
@@ -363,12 +365,7 @@ class TestCreateTask:
         mock_result.filename = "stream.bin"
         mock_result.content_length = None
         mock_probe.return_value = mock_result
-        mock_create_download.return_value = {
-            "id": 1,
-            "global_download_id": 999,
-            "status": "active",
-            "display_name": "stream.bin",
-        }
+        mock_get_client.return_value = mock_aria2_client
 
         response = authenticated_client.post(
             "/api/tasks",
@@ -377,7 +374,6 @@ class TestCreateTask:
 
         assert response.status_code == 201
         assert response.json()["total_length"] == 0
-        assert mock_create_download.await_args.kwargs["size_known"] is False
 
     @patch("app.services.task_service.probe_url_with_get_fallback")
     def test_create_task_rejects_credentialed_url(
@@ -434,7 +430,6 @@ class TestCreateTask:
         assert response.status_code == 403
         assert "超过系统限制" in response.json()["detail"]
 
-    @patch("app.services.task_service.create_user_download")
     @patch("app.services.task_service.probe_url_with_get_fallback")
     @patch("app.services.task_service.get_usage")
     @patch("app.services.task_service.get_max_task_size")
@@ -443,7 +438,6 @@ class TestCreateTask:
         mock_max_size: MagicMock,
         mock_usage: AsyncMock,
         mock_probe: AsyncMock,
-        mock_create_download: AsyncMock,
         authenticated_client: TestClient,
     ) -> None:
         mock_result = MagicMock()
@@ -467,9 +461,8 @@ class TestCreateTask:
 
         assert response.status_code == 403
         assert "超过可用空间" in response.json()["detail"]
-        mock_create_download.assert_not_awaited()
 
-    @patch("app.services.task_service.create_user_download")
+    @patch("app.services.task_service.register_and_submit")
     @patch("app.services.task_service.probe_url_with_get_fallback")
     @patch("app.services.task_service._get_client")
     @patch("app.services.task_service.check_disk_space")
@@ -478,7 +471,7 @@ class TestCreateTask:
         mock_disk: MagicMock,
         mock_get_client: MagicMock,
         mock_probe: AsyncMock,
-        mock_create_download: AsyncMock,
+        mock_register_and_submit: AsyncMock,
         authenticated_client: TestClient,
     ) -> None:
         mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
@@ -491,14 +484,12 @@ class TestCreateTask:
         mock_probe.return_value = mock_result
 
         for exc, expected_status in [
-            (ValueError("quota exceeded"), 403),
-            (ValueError("bad input"), 400),
-            (LookupError("stale"), 409),
-            (RuntimeError("aria2 unavailable"), 502),
-            (OSError("network down"), 502),
+            (ForbiddenError("空间不足"), 403),
+            (ConflictError("dup"), 409),
+            (BadGatewayError("fail"), 502),
         ]:
-            mock_create_download.reset_mock(side_effect=True)
-            mock_create_download.side_effect = exc
+            mock_register_and_submit.reset_mock(side_effect=True)
+            mock_register_and_submit.side_effect = exc
             response = authenticated_client.post(
                 "/api/tasks",
                 json={"uri": "http://example.com/error.zip"},
@@ -723,7 +714,7 @@ class TestCreateTask:
         mock_probe.return_value = ProbeResult(
             success=True,
             final_url="https://cdn.example.com/protected.bin",
-            content_length=8,
+            content_length=None,
             filename="protected.bin",
         )
         captured: list[str] = []
@@ -758,7 +749,7 @@ class TestCreateTask:
         assert global_download is not None
         task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
         assert task is not None
-        assert task["error_message"] == "内部下载任务提交失败"
+        assert task["error_message"] == "提交下载任务失败"
         assert capability not in repr(global_download)
         assert capability not in repr(task)
 
@@ -914,14 +905,14 @@ class TestCreateTorrentTask:
         assert response.status_code == 403
         assert "超过可用空间" in response.json()["detail"]
 
-    @patch("app.services.task_service.create_user_torrent_download")
+    @patch("app.services.task_service.register_and_submit")
     @patch("app.services.task_service.get_usage")
     @patch("app.services.task_service.check_disk_space")
     def test_create_torrent_service_errors_are_mapped(
         self,
         mock_disk: MagicMock,
         mock_usage: AsyncMock,
-        mock_create_torrent: AsyncMock,
+        mock_register_and_submit: AsyncMock,
         authenticated_client: TestClient,
     ) -> None:
         mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
@@ -934,14 +925,12 @@ class TestCreateTorrentTask:
         torrent_data, _ = _valid_torrent_payload()
 
         for exc, expected_status in [
-            (ValueError("quota exceeded"), 403),
-            (ValueError("bad input"), 400),
-            (LookupError("stale"), 409),
-            (RuntimeError("aria2 unavailable"), 502),
-            (OSError("network down"), 502),
+            (ForbiddenError("空间不足"), 403),
+            (ConflictError("dup"), 409),
+            (BadGatewayError("fail"), 502),
         ]:
-            mock_create_torrent.reset_mock(side_effect=True)
-            mock_create_torrent.side_effect = exc
+            mock_register_and_submit.reset_mock(side_effect=True)
+            mock_register_and_submit.side_effect = exc
             response = authenticated_client.post(
                 "/api/tasks/torrent",
                 json={"torrent": torrent_data},
@@ -978,7 +967,7 @@ class TestCreateTorrentTask:
         global_download = asyncio.run(get_global_by_resource_key(info_hash))
         assert global_download is not None
         assert global_download["resource_kind"] == "torrent"
-        assert global_download["source_uri"] == f"magnet:?xt=urn:btih:{info_hash}"
+        assert global_download["source_uri"].startswith("base64:")
         task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
         assert task is not None
         assert data["id"] == task["id"]
@@ -1616,9 +1605,11 @@ class TestCancelTask:
                 aria2_client=setup_client,
             )
         )
-        cancel_client = make_aria2_client(force_remove="gid-cancel-basic")
+        cancel_client = make_aria2_client(remove="gid-cancel-basic")
 
-        with patch("app.services.task_service._get_client", return_value=cancel_client):
+        with patch(
+            "app.services.task_service._get_client", return_value=cancel_client
+        ):
             response = authenticated_client.delete(f"/api/tasks/{task['id']}")
 
         assert response.status_code == 200

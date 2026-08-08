@@ -52,9 +52,12 @@ class TestCancelTaskEndpoint:
             total_bytes=700,
             gid="gid-cancel-endpoint",
         )
-        cancel_client = make_aria2_client(force_remove="gid-cancel-endpoint")
+        # BackendPort.remove uses client.remove (not force_remove).
+        cancel_client = make_aria2_client(remove="gid-cancel-endpoint")
 
-        with patch("app.services.task_service._get_client", return_value=cancel_client):
+        with patch(
+            "app.services.task_service._get_client", return_value=cancel_client
+        ):
             response = authenticated_client.delete(f"/api/tasks/{task['id']}")
 
         assert response.status_code == 200
@@ -78,7 +81,7 @@ class TestCancelTaskEndpoint:
         assert global_download is not None
         assert global_download["status"] == "cancelled"
         assert global_download["aria2_gid"] is None
-        cancel_client.force_remove.assert_awaited_once_with("gid-cancel-endpoint")
+        cancel_client.remove.assert_awaited_once_with("gid-cancel-endpoint")
 
     def test_cancel_one_users_shared_task_keeps_global_download_active(
         self,
@@ -113,7 +116,9 @@ class TestCancelTaskEndpoint:
         )
         cancel_client = make_aria2_client()
 
-        with patch("app.services.task_service._get_client", return_value=cancel_client):
+        with patch(
+            "app.services.task_service._get_client", return_value=cancel_client
+        ):
             response = authenticated_client.delete(f"/api/tasks/{first['id']}")
 
         assert response.status_code == 200
@@ -136,7 +141,7 @@ class TestCancelTaskEndpoint:
         assert global_download is not None
         assert global_download["status"] == "active"
         assert global_download["aria2_gid"] == "gid-shared-endpoint"
-        cancel_client.force_remove.assert_not_awaited()
+        cancel_client.remove.assert_not_awaited()
 
     def test_cancel_missing_v0_task_returns_404(
         self,
@@ -146,12 +151,12 @@ class TestCancelTaskEndpoint:
 
         assert response.status_code == 404
 
-    def test_cancel_force_remove_failure_still_cancels_task(
+    def test_cancel_backend_remove_failure_still_cancels_task(
         self,
         authenticated_client: TestClient,
         test_user: dict,
     ) -> None:
-        """M3: cleanup RPC failure does not block cancel; task is already cancelled."""
+        """Cleanup RPC failure does not block cancel; task is already cancelled."""
         task, _ = _create_download_for_user(
             user=test_user,
             resource_key="http:cancel-endpoint-failure",
@@ -160,9 +165,11 @@ class TestCancelTaskEndpoint:
             total_bytes=600,
             gid="gid-cancel-endpoint-failure",
         )
-        cancel_client = make_aria2_client(force_remove=OSError("aria2 timeout"))
+        cancel_client = make_aria2_client(remove=OSError("aria2 timeout"))
 
-        with patch("app.services.task_service._get_client", return_value=cancel_client):
+        with patch(
+            "app.services.task_service._get_client", return_value=cancel_client
+        ):
             response = authenticated_client.delete(f"/api/tasks/{task['id']}")
 
         assert response.status_code == 200
@@ -179,4 +186,8 @@ class TestCancelTaskEndpoint:
         assert stored_task["status"] == "cancelled"
         assert stored_task["reserved_bytes"] == 0
         assert usage["reserved_bytes"] == 0
-        cancel_client.force_remove.assert_awaited()
+        # remove may be tried; remove_download_result fallback also possible
+        assert (
+            cancel_client.remove.await_count
+            + cancel_client.remove_download_result.await_count
+        ) >= 1
