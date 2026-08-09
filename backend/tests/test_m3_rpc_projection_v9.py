@@ -13,7 +13,7 @@ import json
 import pytest
 
 from app.repositories.backend_snapshots import upsert_snapshot
-from app.services.aria2_rpc_handler import Aria2RpcHandler
+from app.services.rpc import Aria2RpcHandler
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,

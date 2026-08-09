@@ -18,13 +18,15 @@ from typing import Literal
 
 from app.domain.status import ACTIVE_USER_TASK_STATUSES
 from app.modules.task_core.states import ERROR_QUOTA_EXCEEDED
-from app.repositories.downloads import (
+from app.repositories.task.user_tasks import (
     attach_completed_file_to_user,
-    create_global_download_attempt,
     create_user_task,
+    get_user_task,
+)
+from app.repositories.task.downloads import (
+    create_global_download_attempt,
     find_latest_completed_global_download_by_resource_key,
     find_live_global_download_by_resource_key,
-    get_user_task,
 )
 from app.repositories.errors import RepositoryConflictError
 from app.services.usage_service import get_usage, release_reserved, reserve_bytes

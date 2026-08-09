@@ -137,7 +137,26 @@ def make_aria2_client(
     _apply(client.get_servers, get_servers, [])
     _apply(client.get_version, get_version, {"version": "1.36.0"})
 
+    client.force_remove_gid = client.force_remove
+    client.remove_download_result_gid = client.remove_download_result
+    client.pause_gid = client.pause
+    client.unpause_gid = client.unpause
+
     return client
+
+
+def make_backend(**kwargs: Any):
+    """Return an ``Aria2BackendAdapter`` wrapping a ``make_aria2_client`` mock.
+
+    Use this for code paths that require a real ``BackendPort`` adapter
+    (e.g. submit/tell_many flows that resolve tids via the DB).  For simple
+    gid-level control paths, ``make_aria2_client`` alone is sufficient: it
+    already aliases ``pause_gid``/``unpause_gid``/``force_remove_gid``/
+    ``remove_download_result_gid`` onto the raw client methods.
+    """
+    from app.modules.backend.aria2_adapter import Aria2BackendAdapter
+
+    return Aria2BackendAdapter(make_aria2_client(**kwargs))
 
 
 # ---------------------------------------------------------------------------

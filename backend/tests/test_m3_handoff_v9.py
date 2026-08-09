@@ -22,11 +22,8 @@ from sqlalchemy import select
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
 from app.domain.lifecycle import ReconcileResult
-from app.services import aria2_lifecycle_service
-from app.services.aria2_lifecycle_service import (
-    reconcile_attempt_signal,
-    switch_to_followed_download,
-)
+from app.services.lifecycle.coordinator import reconcile_attempt_signal
+from app.services.lifecycle.handoff import switch_to_followed_download
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -121,7 +118,7 @@ async def test_metadata_complete_no_followedby_does_not_fail(
     }
     client = make_aria2_client(tell_status=metadata_status)
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_meta_001",
         event="complete",
         observed_status=metadata_status,
@@ -194,7 +191,7 @@ async def test_followedby_switches_gid_once(temp_db: str) -> None:
     client.tell_status.side_effect = _tell_status
 
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_source_002",
         event="complete",
         observed_status=source_status,
@@ -211,7 +208,7 @@ async def test_followedby_switches_gid_once(temp_db: str) -> None:
     # Second reconcile with the same observed_gid should be stale
     # (current_gid is now payload, observed is source).
     result2 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_source_002",
         event="complete",
         observed_status=source_status,
@@ -270,7 +267,7 @@ async def test_following_early_arrives_handoff_succeeds(temp_db: str) -> None:
     )
 
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=payload_gid,
         event="start",
         observed_status=observed_status,
@@ -330,7 +327,7 @@ async def test_payload_active_unknown_size_pause_to_waiting(
     client.tell_status.side_effect = _tell_status
 
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=payload_gid,
         event="start",
         observed_status=observed_status,
@@ -401,7 +398,7 @@ async def test_payload_active_unknown_size_pause_not_confirmed_terminalized(
         mock_get_dir.return_value.__truediv__ = lambda self, x: f"/dl/{x}"
 
         result = await reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid=payload_gid,
             event="start",
             observed_status=observed_status,
@@ -452,7 +449,7 @@ async def test_payload_transient_rpc_returns_waiting_no_cleanup(
     client = make_aria2_client(tell_status=transient_err)
 
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=payload_gid,
         event="start",
         observed_status=observed_status,
@@ -537,7 +534,7 @@ async def test_admission_rejection_cleans_payload_writer(
         mock_get_dir.return_value.__truediv__ = lambda self, x: f"/dl/{x}"
 
         result = await reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid=payload_gid,
             event="start",
             observed_status=observed_status,
@@ -601,7 +598,7 @@ async def test_no_fabricated_complete_event(temp_db: str) -> None:
     client.tell_status.side_effect = _tell_status
 
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_source_008",
         event="complete",
         observed_status=source_status,
@@ -663,7 +660,7 @@ async def test_duplicate_handoff_is_idempotent(temp_db: str) -> None:
 
     # First handoff.
     result1 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_source_009",
         event="complete",
         observed_status=source_status,
@@ -676,7 +673,7 @@ async def test_duplicate_handoff_is_idempotent(temp_db: str) -> None:
 
     # Second handoff with same source observation.
     result2 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_source_009",
         event="complete",
         observed_status=source_status,

@@ -24,7 +24,7 @@ from app.db.schema import (
     user_storage_usage,
     user_tasks,
 )
-from app.services.pack import PackTaskManager, calculate_folder_size, get_reserved_space
+from app.modules.pack import PackTaskManager, calculate_folder_size, get_reserved_space
 from app.repositories.pack import (
     PackAdmissionError,
     create_pending_pack_with_reservation,
@@ -33,7 +33,7 @@ from app.repositories.pack import (
 from app.domain.errors import BadRequestError, ForbiddenError
 from app.services.task_broadcast import clear_connections, set_connections_for_user
 import app.services.file_service as file_service
-import app.services.pack as pack_service
+import app.modules.pack as pack_service
 from tests.helpers_v0 import create_user_file_v0, create_user_v0, now_ms
 
 
@@ -1195,7 +1195,7 @@ async def test_cancel_pack_sets_running_job_cancel_event(temp_db: str) -> None:
     task = asyncio.create_task(sleeper())
     await event_seen.wait()
     try:
-        from app.services.pack import _RunningPackJob
+        from app.modules.pack import _RunningPackJob
 
         cancel_event = __import__("threading").Event()
         PackTaskManager._running_tasks[12345] = _RunningPackJob(
@@ -1262,7 +1262,7 @@ async def test_pack_source_markers_block_file_and_task_deletion(temp_db: str) ->
 async def test_cancel_user_jobs_waits_for_tracked_executor_thread(
     temp_db: str,
 ) -> None:
-    from app.services.pack import _RunningPackJob
+    from app.modules.pack import _RunningPackJob
 
     entered = threading.Event()
     exited = threading.Event()
@@ -1697,7 +1697,7 @@ async def test_copy_fallback_persists_peak_commitment_until_install_finishes(
     temp_db: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.repositories.downloads import get_active_physical_commitment_bytes
+    from app.repositories.task.downloads import get_active_physical_commitment_bytes
     from app.services.storage import get_downloading_dir
 
     user = await create_user_v0(username="pack_copy_commitment", quota_bytes=1000)

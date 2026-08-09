@@ -14,17 +14,17 @@ from app.aria2.sync import (
     sync_tasks,
 )
 from app.domain.lifecycle import ReconcileResult
-from app.services.aria2_lifecycle_service import (
+from app.services.lifecycle.cleanup import fail_download_and_reclaim
+from app.services.lifecycle.completion import expected_completed_size
+from app.services.lifecycle.coordinator import reconcile_attempt_signal
+from app.services.lifecycle.repair import (
     cleanup_stale_queued_downloads_v0,
-    fail_download_and_reclaim,
-    reconcile_attempt_signal,
-    expected_completed_size,
     repair_inconsistent_completed_downloads_v0,
 )
 from app.core.config import settings
 from app.db.engine import transaction
 from app.db.schema import global_downloads, stored_files, user_files, user_tasks
-from app.repositories.downloads import now_ms
+from app.core.time_utils import now_ms
 from app.services.usage_service import get_usage, reserve_bytes
 from app.services.storage import get_task_download_dir
 from tests.fakes import make_aria2_client
@@ -145,7 +145,7 @@ async def test_sync_does_not_remove_metadata_result_while_handoff_pending(
 
     monkeypatch.setattr("app.aria2.sync.get_aria2_client", get_client)
     monkeypatch.setattr(
-        "app.services.aria2_lifecycle_service.COMPLETE_SOURCE_RETRY_COUNT", 1
+        "app.services.lifecycle.handoff.COMPLETE_SOURCE_RETRY_COUNT", 1
     )
 
     async def stop_after_first_sleep(_interval: float) -> None:
@@ -226,7 +226,7 @@ async def test_active_aria2_status_updates_global_bytes_and_active_user_task_sta
     client = make_aria2_client()
 
     changed = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -263,7 +263,7 @@ async def test_sync_progress_only_size_fails_unknown_download(temp_db: str) -> N
     client = make_aria2_client()
 
     changed = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -310,7 +310,7 @@ async def test_error_aria2_result_marks_active_user_tasks_failed(
     client = make_aria2_client()
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -359,7 +359,7 @@ async def test_error_aria2_result_preserves_specific_aria2_error_message(
     raw_error = "CUID#12 - Download aborted. URI=https://example.com/file.iso"
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -412,7 +412,7 @@ async def test_metadata_followed_by_refreshes_real_task_progress_and_name(
     )
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -469,7 +469,7 @@ async def test_metadata_followed_by_preserves_real_waiting_status(
     )
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -532,7 +532,7 @@ async def test_metadata_followed_by_complete_real_status_is_indexed(
     )
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -592,7 +592,7 @@ async def test_torrent_synthetic_task_name_is_replaced_with_real_name(
     client = make_aria2_client()
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -635,7 +635,7 @@ async def test_torrent_prefixed_user_task_name_is_not_overwritten_for_http_downl
     client = make_aria2_client()
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -679,7 +679,7 @@ async def test_http_download_ignores_noisy_bittorrent_name_without_live_evidence
     client = make_aria2_client()
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -727,7 +727,7 @@ async def test_http_torrent_live_infohash_stays_http_without_followed_by(
     client = make_aria2_client()
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -788,7 +788,7 @@ async def test_http_torrent_followed_by_handoff_upgrades_resource_kind(
     )
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -867,7 +867,7 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
     )
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -939,7 +939,7 @@ async def test_active_aria2_status_does_not_overwrite_completed_download(
     client = make_aria2_client()
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -991,7 +991,7 @@ async def test_active_bt_status_with_full_bytes_stays_active(
     client = make_aria2_client()
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -1046,7 +1046,7 @@ async def test_active_full_bytes_without_real_file_name_stays_active(
     client = make_aria2_client()
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -1107,7 +1107,7 @@ async def test_active_full_bytes_with_verify_integrity_pending_stays_active(
     client = make_aria2_client()
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=str(download["aria2_gid"]),
         event=None,
         observed_status={
@@ -1203,7 +1203,7 @@ async def test_sync_failure_cleanup_fails_immediately(
     client = make_aria2_client()
 
     changed = await fail_download_and_reclaim(
-        client=client,
+        backend=client,
         download_id=download["id"],
         expected_gid="gid-sync-failure-lock",
         writer_gid="gid-sync-failure-lock",
@@ -1302,7 +1302,7 @@ async def test_missing_gid_with_unknown_size_fails_without_indexing(
     client = make_aria2_client()
 
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid-sync-missing-unknown",
         event=None,
         observed_status=None,
@@ -1360,15 +1360,15 @@ async def test_sync_recovers_after_first_round_exception(
     cleanup_stale = AsyncMock()
     client = make_aria2_client()
     monkeypatch.setattr(
-        "app.aria2.sync.lifecycle.repair_inconsistent_completed_downloads_v0",
+        "app.aria2.sync.repair.repair_inconsistent_completed_downloads_v0",
         repair,
     )
     monkeypatch.setattr(
-        "app.aria2.sync.lifecycle.list_v0_tracked_downloads",
+        "app.aria2.sync.list_v0_tracked_downloads",
         list_downloads,
     )
     monkeypatch.setattr(
-        "app.aria2.sync.lifecycle.cleanup_stale_queued_downloads_v0",
+        "app.aria2.sync.repair.cleanup_stale_queued_downloads_v0",
         cleanup_stale,
     )
     monkeypatch.setattr("app.aria2.sync.get_aria2_client", lambda: client)

@@ -12,10 +12,13 @@ import pytest
 from app.core.config import get_internal_base_url
 from app.modules.backend.aria2_adapter import Aria2BackendAdapter
 from app.repositories.backend_snapshots import upsert_snapshot
-from app.repositories.downloads import get_user_task, list_user_tasks
+from app.repositories.task.user_tasks import (
+    get_user_task,
+    list_user_tasks,
+)
 from app.services import task_service
-from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
-from app.services.internal_fetch import CAPABILITY_HEADER, verify_capability
+from app.services.rpc import Aria2RpcHandler, RpcError, RpcErrorCode
+from app.services.gateway import CAPABILITY_HEADER, verify_capability
 from app.services.storage import get_store_path_for_hash
 from tests.create_task_helper import create_download_task
 from tests.fakes import make_aria2_client

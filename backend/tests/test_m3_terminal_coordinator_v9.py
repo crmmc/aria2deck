@@ -25,7 +25,7 @@ from sqlalchemy import select
 
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
-from app.services.aria2_lifecycle_service import fail_download_and_reclaim
+from app.services.lifecycle.cleanup import fail_download_and_reclaim
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -110,7 +110,7 @@ async def test_claim_success_triggers_cleanup_and_terminalizes(temp_db: str) -> 
         mock_get.return_value.__truediv__ = lambda self, x: f"/dl/{x}"
 
         changed = await fail_download_and_reclaim(
-            client=client,
+            backend=client,
             download_id=download["id"],
             message="test failure",
             error_code="test_err",
@@ -175,7 +175,7 @@ async def test_concurrent_fail_only_one_claim_wins(temp_db: str) -> None:
         patch("app.services.failed_task_cleanup.cleanup_task_download_dir") as mock_dir,
         patch("app.services.failed_task_cleanup.get_downloading_dir") as mock_get,
         patch(
-            "app.services.aria2_lifecycle_service.cleanup_with_claim", cleanup_spy
+            "app.services.lifecycle.cleanup.cleanup_with_claim", cleanup_spy
         ),
     ):
         mock_dir.return_value = None
@@ -183,7 +183,7 @@ async def test_concurrent_fail_only_one_claim_wins(temp_db: str) -> None:
 
         result_a, result_b = await asyncio.gather(
             fail_download_and_reclaim(
-                client=client,
+                backend=client,
                 download_id=download["id"],
                 message="fail_a",
                 error_code="err_a",
@@ -192,7 +192,7 @@ async def test_concurrent_fail_only_one_claim_wins(temp_db: str) -> None:
                 log_prefix="[A]",
             ),
             fail_download_and_reclaim(
-                client=client,
+                backend=client,
                 download_id=download["id"],
                 message="fail_b",
                 error_code="err_b",
@@ -233,7 +233,7 @@ async def test_expected_gid_mismatch_no_destructive_cleanup(temp_db: str) -> Non
 
     client = make_aria2_client()
     changed = await fail_download_and_reclaim(
-        client=client,
+        backend=client,
         download_id=download["id"],
         message="stale gid",
         error_code="stale",
@@ -271,7 +271,7 @@ async def test_already_terminal_no_cleanup(temp_db: str) -> None:
 
     client = make_aria2_client()
     changed = await fail_download_and_reclaim(
-        client=client,
+        backend=client,
         download_id=download["id"],
         message="double fail",
         error_code="err",
@@ -311,11 +311,11 @@ async def test_handoff_writer_gids_include_source_and_payload(temp_db: str) -> N
         return CleanupResult(True, True, True)
 
     with patch(
-        "app.services.aria2_lifecycle_service.cleanup_with_claim",
+        "app.services.lifecycle.cleanup.cleanup_with_claim",
         side_effect=_capture_cleanup,
     ):
         changed = await fail_download_and_reclaim(
-            client=client,
+            backend=client,
             download_id=download["id"],
             message="handoff fail",
             error_code="handoff_err",
@@ -360,11 +360,11 @@ async def test_handoff_with_only_writer_gid(temp_db: str) -> None:
         return CleanupResult(True, True, True)
 
     with patch(
-        "app.services.aria2_lifecycle_service.cleanup_with_claim",
+        "app.services.lifecycle.cleanup.cleanup_with_claim",
         side_effect=_capture_cleanup,
     ):
         changed = await fail_download_and_reclaim(
-            client=client,
+            backend=client,
             download_id=download["id"],
             message="single fail",
             error_code="err",
@@ -401,7 +401,7 @@ async def test_cleanup_failure_does_not_rollback_terminal(temp_db: str) -> None:
 
     with patch("app.services.failed_task_cleanup.cleanup_task_download_dir") as mock_dir:
         changed = await fail_download_and_reclaim(
-            client=client,
+            backend=client,
             download_id=download["id"],
             message="cleanup will fail",
             error_code="partial_err",
@@ -450,14 +450,14 @@ async def test_no_writer_gid_still_claims_and_cleans_dir(temp_db: str) -> None:
 
     with (
         patch(
-            "app.services.aria2_lifecycle_service.cleanup_with_claim",
+            "app.services.lifecycle.cleanup.cleanup_with_claim",
             side_effect=_capture_cleanup,
         ),
         patch("app.services.failed_task_cleanup.cleanup_task_download_dir") as mock_dir,
     ):
         mock_dir.return_value = None
         changed = await fail_download_and_reclaim(
-            client=client,
+            backend=client,
             download_id=download["id"],
             message="submit timeout",
             error_code="submit_timeout",

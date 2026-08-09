@@ -56,51 +56,59 @@ def test_task_service_never_calls_legacy_create() -> None:
 
 
 def test_create_task_uses_register_and_submit() -> None:
-    """create_task must end by calling register_and_submit (Task Core path)."""
-    source = (APP_ROOT / "services" / "task_service.py").read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(APP_ROOT / "services" / "task_service.py"))
+    """create_task must end by calling register_and_submit (Task Core path).
+
+    M4 T12 将创建流程下沉到 services/task_orchestration.py；该 guard 跟随
+    业务实现所在模块。
+    """
+    source = (APP_ROOT / "services" / "task_orchestration.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(APP_ROOT / "services" / "task_orchestration.py"))
 
     create_task_found = False
     calls_register = False
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name == "create_task":
+            if node.name == "_impl_create_task":
                 create_task_found = True
                 for child in ast.walk(node):
                     if (
                         isinstance(child, ast.Call)
-                        and isinstance(child.func, ast.Name)
-                        and child.func.id == "register_and_submit"
+                        and isinstance(child.func, ast.Attribute)
+                        and child.func.attr == "register_and_submit"
                     ):
                         calls_register = True
 
-    assert create_task_found, "create_task function not found in task_service.py"
-    assert calls_register, "create_task does not call register_and_submit"
+    assert create_task_found, "_impl_create_task function not found in task_orchestration.py"
+    assert calls_register, "_impl_create_task does not call register_and_submit"
 
 
 def test_create_torrent_task_uses_register_and_submit() -> None:
-    """create_torrent_task must end by calling register_and_submit (Task Core path)."""
-    source = (APP_ROOT / "services" / "task_service.py").read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(APP_ROOT / "services" / "task_service.py"))
+    """create_torrent_task must end by calling register_and_submit (Task Core path).
+
+    M4 T12 将创建流程下沉到 services/task_orchestration.py；该 guard 跟随
+    业务实现所在模块。
+    """
+    source = (APP_ROOT / "services" / "task_orchestration.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(APP_ROOT / "services" / "task_orchestration.py"))
 
     func_found = False
     calls_register = False
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name == "create_torrent_task":
+            if node.name == "_impl_create_torrent_task":
                 func_found = True
                 for child in ast.walk(node):
                     if (
                         isinstance(child, ast.Call)
-                        and isinstance(child.func, ast.Name)
-                        and child.func.id == "register_and_submit"
+                        and isinstance(child.func, ast.Attribute)
+                        and child.func.attr == "register_and_submit"
                     ):
                         calls_register = True
 
-    assert func_found, "create_torrent_task function not found in task_service.py"
-    assert calls_register, "create_torrent_task does not call register_and_submit"
+    assert func_found, "_impl_create_torrent_task function not found in task_orchestration.py"
+    assert calls_register, "_impl_create_torrent_task does not call register_and_submit"
 
 
 # --------------------------------------------------------------------------- #

@@ -22,7 +22,7 @@ import json
 from typing import Any, Iterable
 
 from app.repositories.backend_snapshots import get_snapshots_for_tids
-from app.repositories.downloads import list_user_tasks
+from app.repositories.task.user_tasks import list_user_tasks
 
 
 def _parse_json_object(value: str | None) -> dict[str, Any] | None:

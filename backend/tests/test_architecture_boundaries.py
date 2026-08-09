@@ -487,8 +487,8 @@ def test_removed_layering_compatibility_modules_do_not_exist_or_get_imported() -
 def test_runtime_services_mark_failed_only_via_fail_download_and_reclaim() -> None:
     """Direct mark_global_download_failed is allowed only inside fail reclaim entry."""
     allowed_files = {
-        APP_ROOT / "services" / "aria2_lifecycle_service.py",
-        APP_ROOT / "repositories" / "downloads.py",
+        APP_ROOT / "services" / "lifecycle" / "cleanup.py",
+        APP_ROOT / "repositories" / "task" / "downloads.py",
     }
     allowed_functions = {
         "_fail_download_and_reclaim_operation",
@@ -662,14 +662,14 @@ def test_physical_cleanup_only_via_claim_or_coordinator() -> None:
     """cleanup_with_claim must be called only from coordinator/repair/cancel paths (spec §10.3, §17.5).
 
     Physical reclamation (force_remove + directory deletion) is authorized
-    solely by a TerminalizationClaim or RepairClaim. Only the coordinator
-    (aria2_lifecycle_service), the cancel facade (download_service),
-    startup repair, and the cleanup module itself may invoke it.
+    solely by a TerminalizationClaim or RepairClaim. Only the lifecycle
+    coordinator/cleanup modules, startup repair, and the cleanup module
+    itself may invoke it.
     """
     allowed_paths = {
         APP_ROOT / "services" / "failed_task_cleanup.py",
-        APP_ROOT / "services" / "aria2_lifecycle_service.py",
-        APP_ROOT / "services" / "download_service.py",
+        APP_ROOT / "services" / "lifecycle" / "coordinator.py",
+        APP_ROOT / "services" / "lifecycle" / "cleanup.py",
         APP_ROOT / "services" / "repair.py",
     }
     offenders: list[str] = []
@@ -704,10 +704,11 @@ def test_force_remove_only_in_coordinator_and_cleanup() -> None:
     control primitive for services or routers.
     """
     allowed_paths = {
-        APP_ROOT / "services" / "aria2_lifecycle_service.py",
+        APP_ROOT / "services" / "lifecycle" / "cleanup.py",
+        APP_ROOT / "services" / "lifecycle" / "repair.py",
         APP_ROOT / "services" / "failed_task_cleanup.py",
-        APP_ROOT / "services" / "download_service.py",
         APP_ROOT / "services" / "repair.py",
+        APP_ROOT / "modules" / "backend" / "aria2_adapter.py",
     }
     offenders: list[str] = []
 
@@ -740,7 +741,8 @@ def test_cleanup_task_download_dir_only_in_allowed_modules() -> None:
     deletion cleanup, and startup repair.
     """
     allowed_paths = {
-        APP_ROOT / "services" / "aria2_lifecycle_service.py",
+        APP_ROOT / "services" / "lifecycle" / "coordinator.py",
+        APP_ROOT / "services" / "lifecycle" / "completion.py",
         APP_ROOT / "services" / "failed_task_cleanup.py",
         APP_ROOT / "services" / "repair.py",
         APP_ROOT / "services" / "storage.py",
@@ -766,5 +768,22 @@ def test_cleanup_task_download_dir_only_in_allowed_modules() -> None:
                     offenders.append(
                         f"{relative}:{_line_number(node)} calls cleanup_task_download_dir()"
                     )
+
+    assert offenders == []
+
+
+def test_internal_fetch_service_renamed_to_gateway() -> None:
+    """T18: services/internal_fetch.py renamed to services/gateway.py."""
+    assert not (APP_ROOT / "services" / "internal_fetch.py").exists()
+    assert (APP_ROOT / "services" / "gateway.py").exists()
+
+    offenders: list[str] = []
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            imported = _imports_blocked_module_prefix(node, {"app.services.internal_fetch"})
+            if imported is not None:
+                relative = path.relative_to(APP_ROOT.parent)
+                offenders.append(f"{relative}:{_line_number(node)} imports {imported}")
 
     assert offenders == []

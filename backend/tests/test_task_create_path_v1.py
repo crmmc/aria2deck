@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 from app.services import task_service
 from app.services.hash import get_uri_hash
 from app.services.http_probe import ProbeResult
-from app.services.internal_fetch import (
+from app.services.gateway import (
     http_resource_identity,
     source_request_options,
 )

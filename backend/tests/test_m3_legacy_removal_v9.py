@@ -11,8 +11,13 @@ from pathlib import Path
 
 
 def test_download_service_no_longer_exports_legacy_create_cancel() -> None:
-    """AST boundary: download_service.py must not define the removed symbols."""
-    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "download_service.py").read_text(encoding="utf-8")
+    """AST boundary: download_service.py is deleted (M4 T08); the removed symbols
+    must also be absent from its successor module lifecycle/completion.py."""
+    download_service = Path(__file__).resolve().parents[1] / "app" / "services" / "download_service.py"
+    assert not download_service.is_file(), (
+        f"download_service.py must be deleted (M4 T08): {download_service}"
+    )
+    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "lifecycle" / "completion.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     defined_names: set[str] = set()
     for node in ast.walk(tree):
@@ -45,9 +50,9 @@ def test_download_service_no_longer_exports_legacy_create_cancel() -> None:
     )
 
 
-def test_download_service_retains_completion_path() -> None:
-    """AST guard: completion path functions must still exist."""
-    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "download_service.py").read_text(encoding="utf-8")
+def test_lifecycle_completion_retains_completion_path() -> None:
+    """AST guard: completion path functions must still exist (M4 T08: moved to lifecycle.completion)."""
+    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "lifecycle" / "completion.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     defined_names: set[str] = set()
     for node in ast.walk(tree):
@@ -57,10 +62,62 @@ def test_download_service_retains_completion_path() -> None:
     required = {
         "complete_global_download",
         "complete_global_download_locked",
-        "get_download_lifecycle_lock",
-        "get_disk_available_bytes",
-        "candidate_size_from_status",
     }
     assert required.issubset(defined_names), (
         f"missing required symbols: {required - defined_names}"
     )
+
+
+def test_download_service_no_longer_exports_moved_domain_symbols() -> None:
+    """AST boundary: download_service.py is deleted (M4 T08); symbols moved to
+    domain must also be absent from its successor module lifecycle/completion.py."""
+    download_service = Path(__file__).resolve().parents[1] / "app" / "services" / "download_service.py"
+    assert not download_service.is_file(), (
+        f"download_service.py must be deleted (M4 T08): {download_service}"
+    )
+    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "lifecycle" / "completion.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    defined_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defined_names.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            defined_names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    defined_names.add(target.id)
+
+    forbidden = {
+        "get_download_lifecycle_lock",
+        "get_disk_available_bytes",
+        "candidate_size_from_status",
+    }
+    assert forbidden.isdisjoint(defined_names), (
+        f"moved domain symbols still defined: {forbidden & defined_names}"
+    )
+
+
+def test_domain_locks_defines_lifecycle_lock() -> None:
+    """AST boundary: domain/locks.py must uniquely define get_download_lifecycle_lock."""
+    source = (Path(__file__).resolve().parents[1] / "app" / "domain" / "locks.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    defined_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defined_names.add(node.name)
+
+    assert "get_download_lifecycle_lock" in defined_names
+
+
+def test_domain_quota_defines_disk_and_candidate_size() -> None:
+    """AST boundary: domain/quota.py must uniquely define the two quota helpers."""
+    source = (Path(__file__).resolve().parents[1] / "app" / "domain" / "quota.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    defined_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defined_names.add(node.name)
+
+    assert "get_disk_available_bytes" in defined_names
+    assert "candidate_size_from_status" in defined_names

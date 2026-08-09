@@ -170,11 +170,11 @@ class TestDeleteUser:
     ):
         with (
             patch(
-                "app.services.pack.PackTaskManager.cancel_user_jobs",
+                "app.modules.pack.PackTaskManager.cancel_user_jobs",
                 new_callable=AsyncMock,
             ) as cancel_jobs,
             patch(
-                "app.services.pack.PackTaskManager.unblock_user",
+                "app.modules.pack.PackTaskManager.unblock_user",
                 new_callable=AsyncMock,
             ) as unblock_user,
         ):

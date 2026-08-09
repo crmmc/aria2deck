@@ -21,8 +21,8 @@ from sqlalchemy import select
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
 from app.domain.lifecycle import ReconcileResult
-from app.services.aria2_lifecycle_service import reconcile_attempt_signal
-from app.services import aria2_lifecycle_service
+from app.services.lifecycle import coordinator as coordinator_mod
+from app.services.lifecycle.coordinator import reconcile_attempt_signal
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -108,7 +108,7 @@ async def test_active_projection_updates_status_and_bytes(temp_db: str) -> None:
 
     client = make_aria2_client()
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_active_001",
         event="start",
         observed_status={
@@ -156,7 +156,7 @@ async def test_old_gid_event_does_not_modify_db(temp_db: str) -> None:
     # Observed GID does not match any download → resolve returns None → IGNORED.
     client = make_aria2_client()
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_old_before_handoff",
         event="start",
         observed_status={"status": "active", "totalLength": "1024"},
@@ -195,7 +195,7 @@ async def test_failed_task_error_event_no_double_fail(temp_db: str) -> None:
 
     client = make_aria2_client()
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_failed_003",
         event="error",
         observed_status={
@@ -252,12 +252,12 @@ async def test_missing_gid_db_switched_stale(temp_db: str) -> None:
     err = _missing_gid_error("gid_original_004")
     client = make_aria2_client()
     with patch.object(
-        aria2_lifecycle_service,
+        coordinator_mod,
         "get_global_download_status_snapshot",
         new=AsyncMock(return_value=fake_snapshot),
     ):
         result = await reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid="gid_original_004",
             event=None,
             observed_status=None,
@@ -307,7 +307,7 @@ async def test_missing_gid_live_known_size_terminalized(temp_db: str) -> None:
         mock_get_dir.return_value.__truediv__ = lambda self, x: f"/dl/{x}"
 
         result = await reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid="gid_live_005",
             event=None,
             observed_status=None,
@@ -365,7 +365,7 @@ async def test_missing_gid_completed_no_file_recovery_pending(
         mock_get_dir.return_value.__truediv__ = lambda self, x: f"/dl/{x}"
 
         result = await reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid="gid_completed_006",
             event=None,
             observed_status=None,
@@ -409,7 +409,7 @@ async def test_transient_rpc_error_returns_waiting(temp_db: str) -> None:
     err = _transient_error()
     client = make_aria2_client()
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_transient_007",
         event="start",
         observed_status={"status": "active"},

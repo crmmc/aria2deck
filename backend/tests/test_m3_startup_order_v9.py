@@ -68,7 +68,7 @@ async def test_startup_repair_order_matches_spec(_capture_order):
             make_mock("dir_purge"),
         ),
     ):
-        await app_main._run_startup_repair_sequence(client=object())
+        await app_main._run_startup_repair_sequence(backend=object())
 
     assert order == [
         "recover",
@@ -108,7 +108,7 @@ async def test_recover_before_purge(_capture_order):
             make_mock("dir_purge"),
         ),
     ):
-        await app_main._run_startup_repair_sequence(client=object())
+        await app_main._run_startup_repair_sequence(backend=object())
 
     assert order.index("recover") < order.index("residual_purge")
     assert order.index("recover") < order.index("dir_purge")
@@ -145,7 +145,7 @@ async def test_step_failure_does_not_block_subsequent(_capture_order):
             make_mock("dir_purge"),
         ),
     ):
-        results = await app_main._run_startup_repair_sequence(client=object())
+        results = await app_main._run_startup_repair_sequence(backend=object())
 
     # rebuild failed but all four steps were attempted
     assert order == ["recover", "rebuild", "residual_purge", "dir_purge"]
@@ -185,7 +185,7 @@ async def test_first_step_failure_does_not_block(_capture_order):
             make_mock("dir_purge"),
         ),
     ):
-        results = await app_main._run_startup_repair_sequence(client=object())
+        results = await app_main._run_startup_repair_sequence(backend=object())
 
     assert order == ["recover", "rebuild", "residual_purge", "dir_purge"]
     assert results["recover_pending_index"]["ok"] is False
@@ -208,7 +208,7 @@ async def test_terminal_id_query_excludes_active_and_pending_index():
     """The terminal-id query used by dir purge must not return active or
     completed-without-index rows."""
     from app.db.schema import global_downloads
-    from app.repositories.downloads import list_terminal_download_ids
+    from app.repositories.task.downloads import list_terminal_download_ids
     import inspect
 
     src = inspect.getsource(list_terminal_download_ids)
@@ -271,7 +271,7 @@ async def test_all_steps_produce_results():
             return_value={"found": 1, "purged": 1, "failed": 0, "skipped": 0}
         )
 
-        results = await app_main._run_startup_repair_sequence(client=object())
+        results = await app_main._run_startup_repair_sequence(backend=object())
 
     for step_name in app_main.STARTUP_REPAIR_STEPS:
         assert step_name in results, f"Missing result for step {step_name}"

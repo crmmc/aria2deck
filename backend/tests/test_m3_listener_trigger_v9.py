@@ -40,7 +40,7 @@ async def test_single_event_one_signal(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(listener_mod, "get_aria2_client", lambda: fake_client)
     monkeypatch.setattr(
-        listener_mod.lifecycle, "reconcile_attempt_signal", fake_signal
+        listener_mod, "reconcile_attempt_signal", fake_signal
     )
 
     # Clean up any leftover state from other tests.
@@ -81,7 +81,7 @@ async def test_rpc_failure_does_not_fail_task(
 
     monkeypatch.setattr(listener_mod, "get_aria2_client", lambda: fake_client)
     monkeypatch.setattr(
-        listener_mod.lifecycle, "reconcile_attempt_signal", fake_signal
+        listener_mod, "reconcile_attempt_signal", fake_signal
     )
 
     listener_mod._event_tasks.clear()
@@ -113,7 +113,7 @@ async def test_different_gids_have_independent_transport_queues(
 
     monkeypatch.setattr(listener_mod, "get_aria2_client", lambda: fake_client)
     monkeypatch.setattr(
-        listener_mod.lifecycle, "reconcile_attempt_signal", fake_signal
+        listener_mod, "reconcile_attempt_signal", fake_signal
     )
 
     listener_mod._event_tasks.clear()

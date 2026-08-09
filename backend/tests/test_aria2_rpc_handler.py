@@ -19,13 +19,16 @@ from app.db.schema import (
     users,
 )
 from app.repositories.backend_snapshots import upsert_snapshot
-from app.repositories.downloads import get_user_task_by_id, list_user_tasks
+from app.repositories.task.user_tasks import (
+    get_user_task_by_id,
+    list_user_tasks,
+)
 from app.domain.torrent_metadata import (
     TorrentFile,
     TorrentMetadata,
     parse_torrent_base64_async,
 )
-from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
+from app.services.rpc import Aria2RpcHandler, RpcError, RpcErrorCode
 from app.services.task_projection import BT_TRACKER_PLACEHOLDER
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_user_v0, now_ms
@@ -293,7 +296,7 @@ async def test_add_torrent_parses_private_endpoint_once_before_aria2(
     torrent = _torrent_with_network_field(b"announce", b"http://100.64.0.5/private")
 
     with patch(
-        "app.services.aria2_rpc_handler.parse_torrent_base64_async",
+        "app.services.rpc.write.parse_torrent_base64_async",
         new_callable=AsyncMock,
         wraps=parse_torrent_base64_async,
     ) as parse_mock:

@@ -5,7 +5,7 @@ import shutil
 
 from app.core.config import settings
 from app.domain.quota import usage_with_available, visible_space_from_quota
-from app.repositories.downloads import get_active_physical_commitment_bytes
+from app.repositories.task.downloads import get_active_physical_commitment_bytes
 from app.repositories.usage import (
     apply_usage_delta,
     get_usage_row,

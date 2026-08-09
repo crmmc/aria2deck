@@ -17,7 +17,7 @@ from app.auth import get_user_by_rpc_secret
 from app.core.config import settings
 from app.core.rate_limit import rpc_limiter
 from app.core.rate_limit_config import rate_limit_config
-from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
+from app.services.rpc import Aria2RpcHandler, RpcError, RpcErrorCode
 
 router = APIRouter(tags=["aria2-rpc"])
 logger = logging.getLogger(__name__)

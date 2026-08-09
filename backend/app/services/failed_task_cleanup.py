@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import overload
 
-from app.aria2.protocol import Aria2Gateway
+from app.modules.backend.port import BackendPort
 from app.domain.lifecycle import RepairClaim, TerminalizationClaim
-from app.repositories.downloads import (
+from app.repositories.task.user_tasks import get_representative_active_owner_id
+from app.repositories.task.downloads import (
     clear_terminal_download_gid,
-    get_representative_active_owner_id,
 )
 from app.services.storage import cleanup_task_download_dir, get_downloading_dir
 
@@ -67,7 +67,7 @@ async def get_representative_owner_id(task_id: int) -> int | None:
 
 @overload
 def cleanup_with_claim(
-    client: Aria2Gateway,
+    backend: BackendPort,
     claim: TerminalizationClaim,
     *,
     log_prefix: str,
@@ -76,7 +76,7 @@ def cleanup_with_claim(
 
 @overload
 def cleanup_with_claim(
-    client: Aria2Gateway,
+    backend: BackendPort,
     claim: RepairClaim,
     *,
     log_prefix: str,
@@ -84,7 +84,7 @@ def cleanup_with_claim(
 
 
 async def cleanup_with_claim(
-    client: Aria2Gateway,
+    backend: BackendPort,
     claim: TerminalizationClaim | RepairClaim,
     *,
     log_prefix: str,
@@ -114,7 +114,7 @@ async def cleanup_with_claim(
     all_writers_stopped = True
     for wgid in writer_gids:
         try:
-            await client.force_remove(wgid)
+            await backend.force_remove_gid(wgid)
         except Exception as exc:
             if _writer_already_stopped(exc):
                 logger.debug(
@@ -161,7 +161,7 @@ async def cleanup_with_claim(
     result_removed = True
     for rgid in result_gids:
         try:
-            await client.remove_download_result(rgid)
+            await backend.remove_download_result_gid(rgid)
         except Exception as exc:
             result_removed = False
             logger.debug(

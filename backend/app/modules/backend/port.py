@@ -39,6 +39,45 @@ class BackendPort(Protocol):
 
     async def remove(self, tid: int) -> None: ...
 
+    async def tell_status(self, gid: str) -> dict[str, Any]:
+        """Fetch the backend-native status dict for ``gid``."""
+        ...
+
+    async def pause_gid(self, gid: str) -> str:
+        """Pause the backend writer identified by its native gid."""
+        ...
+
+    async def unpause_gid(self, gid: str) -> str:
+        """Resume the backend writer identified by its native gid."""
+        ...
+
+    async def tell_active(self) -> list[dict[str, Any]]:
+        """List active downloads in the backend."""
+        ...
+
+    async def tell_waiting(
+        self, offset: int = 0, num: int = 1000
+    ) -> list[dict[str, Any]]:
+        """List waiting downloads in the backend."""
+        ...
+
+    async def tell_stopped(
+        self, offset: int = 0, num: int = 1000
+    ) -> list[dict[str, Any]]:
+        """List stopped downloads in the backend."""
+        ...
+
+    async def force_remove_gid(self, gid: str) -> str:
+        """Force-stop the backend writer identified by its native gid.
+
+        Physical stop primitive for claim-authorized reclamation paths; the
+        aria2 adapter delegates to ``force_remove``."""
+        ...
+
+    async def remove_download_result_gid(self, gid: str) -> str:
+        """Best-effort removal of the backend-side result record for ``gid``."""
+        ...
+
     async def join_submission(
         self, *, tid: int, gid: str, uris: list[str]
     ) -> None:

@@ -27,7 +27,7 @@ from app.modules.backend.port import Snapshot
 from app.repositories import auth as auth_repo
 from app.repositories.backend_snapshots import upsert_snapshot
 from app.services import task_service
-from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
+from app.services.rpc import Aria2RpcHandler, RpcError, RpcErrorCode
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_session_v0,

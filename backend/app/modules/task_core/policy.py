@@ -22,7 +22,7 @@ from app.modules.task_core.states import (
     ERROR_QUOTA_EXCEEDED,
     ERROR_QUOTA_QUEUED,
 )
-from app.repositories.downloads import update_global_download
+from app.repositories.task.downloads import update_global_download
 
 SYSTEM_QUEUE_CODES = frozenset({ERROR_QUOTA_QUEUED, ERROR_DISK_QUEUED})
 

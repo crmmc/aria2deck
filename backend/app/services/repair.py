@@ -6,8 +6,8 @@ import logging
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-from app.aria2.protocol import Aria2Gateway
-from app.repositories.downloads import (
+from app.modules.backend.port import BackendPort
+from app.repositories.task.downloads import (
     claim_terminal_reclaim,
     get_global_download_by_id,
     list_active_global_downloads,
@@ -25,6 +25,7 @@ from app.repositories.files import (
     list_stored_file_content_hashes,
 )
 from app.services.failed_task_cleanup import cleanup_with_claim
+from app.services.lifecycle.completion import handle_v0_download_complete
 from app.services.storage import (
     cleanup_task_download_dir,
     get_downloading_dir,
@@ -66,7 +67,7 @@ class TaskAssociationRepairResult(TypedDict):
 FileRepairStatus = Literal["created", "resolved", "unresolved"]
 
 
-async def purge_terminal_residual_gids(client: Aria2Gateway) -> dict[str, int]:
+async def purge_terminal_residual_gids(backend: BackendPort) -> dict[str, int]:
     """Clear terminal downloads that still hold an aria2 gid.
 
     These residuals must never continue to claim disk budget after cancel/fail.
@@ -90,7 +91,7 @@ async def purge_terminal_residual_gids(client: Aria2Gateway) -> dict[str, int]:
                 # Attempt no longer failed/cancelled or GID changed — skip.
                 continue
             result = await cleanup_with_claim(
-                client, claim, log_prefix="[Residual]"
+                backend, claim, log_prefix="[Residual]"
             )
             if result.writer_stopped:
                 purged += 1
@@ -162,11 +163,9 @@ async def purge_terminal_download_dirs() -> dict[str, int]:
 
 
 async def recover_completed_downloads_pending_index(
-    client: Aria2Gateway,
+    backend: BackendPort,
 ) -> dict[str, int]:
     """Retry store indexing for completed rows that still own downloading dirs."""
-    from app.services.aria2_lifecycle_service import handle_v0_download_complete
-
     pending = await list_completed_downloads_pending_index()
     recovered = 0
     failed = 0
@@ -241,7 +240,7 @@ async def recover_completed_downloads_pending_index(
         }
         try:
             changed = await handle_v0_download_complete(
-                client=client,
+                backend=backend,
                 download=reopened,
                 aria2_status=aria2_status,
                 completion_gid=str(reopened.get("aria2_gid") or recovery_gid),
@@ -279,7 +278,7 @@ async def recover_completed_downloads_pending_index(
 
 
 async def rebuild_active_download_accounting(
-    client: Aria2Gateway,
+    backend: BackendPort,
 ) -> dict[str, int]:
     """Re-admit active attempts through the unified coordinator (spec §15.2).
 
@@ -289,7 +288,7 @@ async def rebuild_active_download_accounting(
     size admission, handoff, completion, error/removed terminalization and
     missing-GID inside a single coordinator boundary.
     """
-    from app.services.aria2_lifecycle_service import reconcile_attempt_signal
+    from app.services.lifecycle.coordinator import reconcile_attempt_signal
     from app.domain.lifecycle import ReconcileResult
 
     downloads = await list_active_global_downloads()
@@ -306,7 +305,7 @@ async def rebuild_active_download_accounting(
             continue
         try:
             result = await reconcile_attempt_signal(
-                client=client,
+                backend=backend,
                 observed_gid=gid,
                 event="startup",
                 observed_status=None,

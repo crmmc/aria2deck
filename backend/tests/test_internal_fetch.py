@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.services.internal_fetch import (
+from app.services.gateway import (
     CAPABILITY_HEADER,
     GatewayDownloadNotFound,
     GatewaySizeExceeded,
@@ -56,7 +56,7 @@ async def _consume(stream) -> bytes:
 
 def test_http_resource_identity_is_secret_safe_and_canonical(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.services.internal_fetch.settings.secret_key",
+        "app.services.gateway.settings.secret_key",
         "identity-test-secret",
     )
     base_key = "url-hash"
@@ -89,7 +89,7 @@ def test_http_resource_identity_is_secret_safe_and_canonical(monkeypatch) -> Non
 
 def test_capability_binds_download_uri_and_source_options(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.services.internal_fetch.settings.secret_key",
+        "app.services.gateway.settings.secret_key",
         "capability-test-secret",
     )
     options = source_request_options(
@@ -248,14 +248,14 @@ async def test_gateway_follows_safe_redirect_without_exposing_it_to_aria2(
     )
     session = _session(redirect, final)
     monkeypatch.setattr(
-        "app.services.internal_fetch.get_max_task_size",
+        "app.services.gateway.get_max_task_size",
         lambda: 10,
     )
     with patch(
-        "app.services.internal_fetch.create_public_connector",
+        "app.services.gateway.create_public_connector",
         return_value=MagicMock(),
     ), patch(
-        "app.services.internal_fetch.aiohttp.ClientSession",
+        "app.services.gateway.aiohttp.ClientSession",
         return_value=session,
     ):
         stream = await open_gateway_stream(
@@ -283,10 +283,10 @@ async def test_gateway_rejects_private_redirect_before_next_transport() -> None:
     )
     session = _session(redirect)
     with patch(
-        "app.services.internal_fetch.create_public_connector",
+        "app.services.gateway.create_public_connector",
         return_value=MagicMock(),
     ), patch(
-        "app.services.internal_fetch.aiohttp.ClientSession",
+        "app.services.gateway.aiohttp.ClientSession",
         return_value=session,
     ):
         with pytest.raises(GatewayTargetError):
@@ -305,10 +305,10 @@ async def test_gateway_rejects_private_redirect_before_next_transport() -> None:
 async def test_gateway_rejects_unsupported_3xx(status: int) -> None:
     session = _session(_response(status))
     with patch(
-        "app.services.internal_fetch.create_public_connector",
+        "app.services.gateway.create_public_connector",
         return_value=MagicMock(),
     ), patch(
-        "app.services.internal_fetch.aiohttp.ClientSession",
+        "app.services.gateway.aiohttp.ClientSession",
         return_value=session,
     ):
         with pytest.raises(GatewayUpstreamError, match="不支持的重定向"):
@@ -334,10 +334,10 @@ async def test_gateway_rejects_protocol_switch_or_encoded_payload(
 ) -> None:
     session = _session(_response(status, headers=headers))
     with patch(
-        "app.services.internal_fetch.create_public_connector",
+        "app.services.gateway.create_public_connector",
         return_value=MagicMock(),
     ), patch(
-        "app.services.internal_fetch.aiohttp.ClientSession",
+        "app.services.gateway.aiohttp.ClientSession",
         return_value=session,
     ):
         with pytest.raises(GatewayUpstreamError, match=message):
@@ -358,14 +358,14 @@ async def test_gateway_runtime_limit_stops_chunked_or_lying_upstream(
         _response(200, headers=headers, chunks=(b"1234", b"5678"))
     )
     monkeypatch.setattr(
-        "app.services.internal_fetch.get_max_task_size",
+        "app.services.gateway.get_max_task_size",
         lambda: 5,
     )
     with patch(
-        "app.services.internal_fetch.create_public_connector",
+        "app.services.gateway.create_public_connector",
         return_value=MagicMock(),
     ), patch(
-        "app.services.internal_fetch.aiohttp.ClientSession",
+        "app.services.gateway.aiohttp.ClientSession",
         return_value=session,
     ):
         stream = await open_gateway_stream(
@@ -392,14 +392,14 @@ async def test_gateway_rejects_declared_oversize_before_stream(monkeypatch) -> N
     )
     session = _session(response)
     monkeypatch.setattr(
-        "app.services.internal_fetch.get_max_task_size",
+        "app.services.gateway.get_max_task_size",
         lambda: 5,
     )
     with patch(
-        "app.services.internal_fetch.create_public_connector",
+        "app.services.gateway.create_public_connector",
         return_value=MagicMock(),
     ), patch(
-        "app.services.internal_fetch.aiohttp.ClientSession",
+        "app.services.gateway.aiohttp.ClientSession",
         return_value=session,
     ):
         with pytest.raises(GatewaySizeExceeded):
@@ -424,14 +424,14 @@ async def test_gateway_range_resume_uses_remaining_budget(monkeypatch) -> None:
     )
     session = _session(response)
     monkeypatch.setattr(
-        "app.services.internal_fetch.get_max_task_size",
+        "app.services.gateway.get_max_task_size",
         lambda: 5,
     )
     with patch(
-        "app.services.internal_fetch.create_public_connector",
+        "app.services.gateway.create_public_connector",
         return_value=MagicMock(),
     ), patch(
-        "app.services.internal_fetch.aiohttp.ClientSession",
+        "app.services.gateway.aiohttp.ClientSession",
         return_value=session,
     ):
         stream = await open_gateway_stream(
@@ -462,14 +462,14 @@ async def test_gateway_valid_range_resume_streams_expected_bytes(monkeypatch) ->
     )
     session = _session(response)
     monkeypatch.setattr(
-        "app.services.internal_fetch.get_max_task_size",
+        "app.services.gateway.get_max_task_size",
         lambda: 5,
     )
     with patch(
-        "app.services.internal_fetch.create_public_connector",
+        "app.services.gateway.create_public_connector",
         return_value=MagicMock(),
     ), patch(
-        "app.services.internal_fetch.aiohttp.ClientSession",
+        "app.services.gateway.aiohttp.ClientSession",
         return_value=session,
     ):
         stream = await open_gateway_stream(
@@ -493,7 +493,7 @@ async def test_gateway_strips_auth_on_cross_origin_redirect(monkeypatch) -> None
     final = _response(200, headers={"Content-Length": "2"}, chunks=(b"ok",))
     session = _session(redirect, return_redirect, final)
     monkeypatch.setattr(
-        "app.services.internal_fetch.get_max_task_size",
+        "app.services.gateway.get_max_task_size",
         lambda: 10,
     )
     options = SourceRequestOptions(
@@ -502,10 +502,10 @@ async def test_gateway_strips_auth_on_cross_origin_redirect(monkeypatch) -> None
         password="password",
     )
     with patch(
-        "app.services.internal_fetch.create_public_connector",
+        "app.services.gateway.create_public_connector",
         return_value=MagicMock(),
     ), patch(
-        "app.services.internal_fetch.aiohttp.ClientSession",
+        "app.services.gateway.aiohttp.ClientSession",
         return_value=session,
     ):
         stream = await open_gateway_stream(
@@ -592,10 +592,10 @@ async def test_gateway_route_rejects_huge_upstream_size_fields_with_502(
         request_headers["Range"] = range_header
 
     with patch(
-        "app.services.internal_fetch.create_public_connector",
+        "app.services.gateway.create_public_connector",
         return_value=MagicMock(),
     ), patch(
-        "app.services.internal_fetch.aiohttp.ClientSession",
+        "app.services.gateway.aiohttp.ClientSession",
         return_value=session,
     ):
         response = client.get(

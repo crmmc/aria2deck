@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
-from app.services.internal_fetch import (
+from app.services.gateway import (
     CAPABILITY_HEADER,
     GatewayDownloadNotFound,
     GatewayDownloadUnavailable,

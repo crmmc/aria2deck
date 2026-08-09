@@ -21,7 +21,7 @@ from aiohttp.abc import AbstractResolver
 from fastapi import FastAPI
 
 from app.routers import internal_fetch
-from app.services.internal_fetch import (
+from app.services.gateway import (
     CAPABILITY_HEADER,
     SourceRequestOptions,
     create_capability,
@@ -309,7 +309,7 @@ def test_real_aria2_downloads_only_through_internal_gateway(
         )
         max_size = [1024]
         monkeypatch.setattr(
-            "app.services.internal_fetch.create_public_connector",
+            "app.services.gateway.create_public_connector",
             lambda: aiohttp.TCPConnector(
                 resolver=LoopbackFixtureResolver(),
                 use_dns_cache=False,
@@ -317,7 +317,7 @@ def test_real_aria2_downloads_only_through_internal_gateway(
             ),
         )
         monkeypatch.setattr(
-            "app.services.internal_fetch.get_max_task_size", lambda: max_size[0]
+            "app.services.gateway.get_max_task_size", lambda: max_size[0]
         )
         app = FastAPI()
         app.include_router(internal_fetch.router)

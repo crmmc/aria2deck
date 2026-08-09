@@ -9,7 +9,7 @@ import pytest
 
 from app.core.config import settings
 from app.domain.errors import ConflictError
-from app.repositories.downloads import (
+from app.repositories.task.downloads import (
     get_global_by_resource_key,
     get_global_download_by_id,
 )
@@ -39,10 +39,10 @@ async def test_failed_retry_creates_new_attempt_ids(temp_db: str) -> None:
         total_bytes=100,
         aria2_client=client,
     )
-    from app.services.aria2_lifecycle_service import fail_download_and_reclaim
+    from app.services.lifecycle.cleanup import fail_download_and_reclaim
 
     changed = await fail_download_and_reclaim(
-        client=client,
+        backend=client,
         download_id=global_download_id_of(first),
         expected_gid="gid-retry-old",
         writer_gid="gid-retry-old",

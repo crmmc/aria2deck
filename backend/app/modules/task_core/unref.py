@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from app.modules.backend.port import BackendPort
-from app.repositories.downloads import cancel_user_task_and_maybe_claim_attempt
+from app.repositories.task.user_tasks import cancel_user_task_and_maybe_claim_attempt
 
 ERROR_NOT_FOUND = "not_found"
 ERROR_FORBIDDEN = "forbidden"

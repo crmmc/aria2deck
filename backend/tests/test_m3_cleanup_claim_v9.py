@@ -314,7 +314,7 @@ async def test_new_api_requires_claim_not_task_id(temp_db: str) -> None:
 
     sig = inspect.signature(cleanup_with_claim)
     params = set(sig.parameters.keys())
-    assert "client" in params
+    assert "backend" in params
     assert "claim" in params
     # The old bypass parameters must not exist on the new API
     assert "task_id" not in params

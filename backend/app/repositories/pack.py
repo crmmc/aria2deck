@@ -18,7 +18,7 @@ from app.db.schema import (
     users,
 )
 from app.domain.pack import PACK_ACTIVE_STATUSES, PACK_TERMINAL_STATUSES
-from app.repositories.downloads import active_physical_commitment_bytes
+from app.repositories.task.downloads import active_physical_commitment_bytes
 from app.repositories.errors import RepositoryConflictError
 from app.domain.content_identity import content_identity_from_content_hash
 

@@ -7,7 +7,7 @@ from app.db.engine import transaction
 from app.db.schema import pack_tasks
 from app.repositories import auth as auth_repo
 from app.services.deletion_cleanup import DeletionCleanupManager
-from app.services.pack import PackTaskManager
+from app.modules.pack import PackTaskManager
 from app.services.storage import get_downloading_dir
 from tests.helpers_v0 import create_pack_task_v0, create_user_v0
 

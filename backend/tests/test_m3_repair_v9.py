@@ -132,7 +132,7 @@ async def test_completed_without_index_recovery_preserves_files(
 
     # Patch handle_v0_download_complete to simulate recovery failure.
     with patch(
-        "app.services.aria2_lifecycle_service.handle_v0_download_complete",
+        "app.services.repair.handle_v0_download_complete",
         new_callable=AsyncMock,
         return_value=False,
     ):

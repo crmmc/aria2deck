@@ -22,10 +22,11 @@ from app.db.schema import global_downloads
 from app.domain.errors import BadRequestError, BadGatewayError, ConflictError, ForbiddenError
 from app.domain.torrent_metadata import MAX_TORRENT_BASE64_LENGTH
 from app.repositories.backend_snapshots import upsert_snapshot
-from app.repositories.downloads import get_global_by_resource_key, get_user_task
+from app.repositories.task.user_tasks import get_user_task
+from app.repositories.task.downloads import get_global_by_resource_key
 from app.services.hash import get_uri_hash
 from app.services.http_probe import ProbeResult
-from app.services.internal_fetch import (
+from app.services.gateway import (
     CAPABILITY_HEADER,
     http_resource_identity,
     source_request_options,

@@ -17,7 +17,8 @@ from app.http.file_response import (
     release_response_leases,
     tracked_response,
 )
-from app.services import file_service, pack as pack_service
+from app.modules import pack as pack_service
+from app.services import file_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/files", tags=["files"])

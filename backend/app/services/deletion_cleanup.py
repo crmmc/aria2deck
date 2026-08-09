@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from app.domain.status import ACTIVE_USER_TASK_STATUSES
 from app.repositories import auth as auth_repo
-from app.repositories import downloads as downloads_repo
+from app.repositories.task import user_tasks as downloads_repo
 from app.repositories import files as files_repo
 from app.services.storage import get_store_dir, is_path_within_base
 from app.services.storage_locks import (
@@ -100,7 +100,7 @@ class DeletionCleanupManager:
 
     @classmethod
     async def recover_startup(cls) -> None:
-        from app.services.pack import PackTaskManager
+        from app.modules.pack import PackTaskManager
 
         for user_id in await auth_repo.list_pending_user_ids():
             await PackTaskManager.cancel_user_jobs(user_id)
@@ -265,7 +265,7 @@ class DeletionCleanupManager:
         lease_token: str,
         claimed_row: dict[str, Any],
     ) -> bool:
-        from app.services.pack import PackTaskManager
+        from app.modules.pack import PackTaskManager
 
         await cls._renew_user_lease(user_id, lease_token)
         if not await PackTaskManager.prepare_user_deletion(user_id):

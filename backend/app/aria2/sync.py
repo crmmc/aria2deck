@@ -17,18 +17,19 @@ from app.aria2.protocol import Aria2Gateway
 from app.domain.lifecycle import ReconcileResult
 from app.modules.backend.aria2_adapter import Aria2BackendAdapter
 from app.modules.task_core.sync import apply_queue_policy
-from app.services import aria2_lifecycle_service as lifecycle
 from app.services import backend_connectivity
+from app.services.lifecycle import _shared, coordinator, repair
+from app.services.lifecycle.repair import list_v0_tracked_downloads
 
 logger = logging.getLogger(__name__)
 
 OWNED_STOPPED_RESULT_CLEANUP_BATCH = 50
-COMPLETE_REPAIR_GRACE_SECONDS = lifecycle.COMPLETE_REPAIR_GRACE_SECONDS
-STALE_QUEUED_GRACE_SECONDS = lifecycle.STALE_QUEUED_GRACE_SECONDS
-MISSING_GID_KEYWORDS = lifecycle.MISSING_GID_KEYWORDS
-MISSING_GID_PATTERNS = lifecycle.MISSING_GID_PATTERNS
-TRANSIENT_RPC_ERROR_KEYWORDS = lifecycle.TRANSIENT_RPC_ERROR_KEYWORDS
-V0_SYNC_TRACKED_STATUSES = lifecycle.V0_SYNC_TRACKED_STATUSES
+COMPLETE_REPAIR_GRACE_SECONDS = repair.COMPLETE_REPAIR_GRACE_SECONDS
+STALE_QUEUED_GRACE_SECONDS = repair.STALE_QUEUED_GRACE_SECONDS
+MISSING_GID_KEYWORDS = _shared.MISSING_GID_KEYWORDS
+MISSING_GID_PATTERNS = _shared.MISSING_GID_PATTERNS
+TRANSIENT_RPC_ERROR_KEYWORDS = _shared.TRANSIENT_RPC_ERROR_KEYWORDS
+V0_SYNC_TRACKED_STATUSES = coordinator.V0_SYNC_TRACKED_STATUSES
 
 
 async def sync_tasks(interval: float) -> None:
@@ -44,12 +45,11 @@ async def sync_tasks(interval: float) -> None:
 
 
 async def _sync_tasks_once() -> None:
-    # Legacy module-level repair/stale-queued helpers still live in lifecycle;
-    # migrating them into coordinator calls requires changing lifecycle.py
-    # (deferred to T18/T20).  Sync itself performs no direct DB writes here.
-    await lifecycle.repair_inconsistent_completed_downloads_v0()
+    # Repair/stale-queued helpers live in services/lifecycle/repair.py;
+    # sync itself performs no direct DB writes here.
+    await repair.repair_inconsistent_completed_downloads_v0()
     client = get_aria2_client()
-    downloads = await lifecycle.list_v0_tracked_downloads()
+    downloads = await list_v0_tracked_downloads()
 
     removable_gids: set[str] = set()
     saw_backend_ok = False
@@ -67,9 +67,9 @@ async def _sync_tasks_once() -> None:
             observed_status = await client.tell_status(gid)
             saw_backend_ok = True
         except Exception as exc:
-            if lifecycle.is_missing_gid_error(exc):
+            if _shared.is_missing_gid_error(exc):
                 saw_backend_ok = True
-            elif lifecycle.is_transient_rpc_error(exc):
+            elif _shared.is_transient_rpc_error(exc):
                 saw_backend_fail = True
                 logger.warning(
                     "[Sync] Transient RPC for gid=%s, will retry next round: %s",
@@ -83,8 +83,8 @@ async def _sync_tasks_once() -> None:
                 )
             observed_error = exc
 
-        result = await lifecycle.reconcile_attempt_signal(
-            client=client,
+        result = await coordinator.reconcile_attempt_signal(
+            backend=Aria2BackendAdapter(client),
             observed_gid=gid,
             event=None,
             observed_status=observed_status,
@@ -111,7 +111,7 @@ async def _sync_tasks_once() -> None:
             await client.get_version()
             saw_backend_ok = True
         except Exception as exc:
-            if lifecycle.is_transient_rpc_error(exc):
+            if _shared.is_transient_rpc_error(exc):
                 saw_backend_fail = True
                 logger.warning(
                     "[Sync] Backend reachability probe failed: %s", exc
@@ -140,7 +140,7 @@ async def _sync_tasks_once() -> None:
         removable_gids=removable_gids,
         max_actions=OWNED_STOPPED_RESULT_CLEANUP_BATCH,
     )
-    await lifecycle.cleanup_stale_queued_downloads_v0()
+    await repair.cleanup_stale_queued_downloads_v0()
 
 
 async def _cleanup_owned_stopped_results(

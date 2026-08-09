@@ -5,7 +5,7 @@ import logging
 from app.core.time_utils import ms_to_iso
 from app.domain.status import TERMINAL_USER_TASK_STATUSES
 from app.domain.errors import NotFoundError
-from app.repositories.downloads import (
+from app.repositories.task.user_tasks import (
     clear_terminal_user_tasks,
     delete_terminal_user_task,
     list_user_tasks,

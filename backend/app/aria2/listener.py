@@ -11,8 +11,9 @@ import aiohttp
 
 from app.aria2.gateway import get_aria2_client
 from app.core.security import redact_url_for_log
-from app.services import aria2_lifecycle_service as lifecycle
+from app.modules.backend.aria2_adapter import Aria2BackendAdapter
 from app.services import backend_connectivity
+from app.services.lifecycle.coordinator import reconcile_attempt_signal
 from app.services.settings_service import (
     get_config_value_sync,
     get_ws_reconnect_factor,
@@ -86,8 +87,8 @@ async def handle_aria2_event(gid: str, event: str) -> None:
         # RPC failure is an observation gap, not a task failure.
         # Pass None and let the coordinator interpret the event.
 
-    await lifecycle.reconcile_attempt_signal(
-        client=client,
+    await reconcile_attempt_signal(
+        backend=Aria2BackendAdapter(client),
         observed_gid=gid,
         event=event,
         observed_status=observed_status,

@@ -8,11 +8,11 @@ import pytest
 from sqlalchemy import select, update
 
 from app.aria2.sync import STALE_QUEUED_GRACE_SECONDS
-from app.services.aria2_lifecycle_service import cleanup_stale_queued_downloads_v0
+from app.services.lifecycle.repair import cleanup_stale_queued_downloads_v0
 from app.services.task_broadcast import clear_connections, set_connections_for_user
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
-from app.repositories.downloads import now_ms
+from app.core.time_utils import now_ms
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_task_v0,

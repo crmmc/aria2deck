@@ -12,14 +12,14 @@ from app.aria2.sync import STALE_QUEUED_GRACE_SECONDS
 from app.core.config import settings
 from app.db.engine import transaction
 from app.db.schema import global_downloads
-from app.repositories.downloads import now_ms
-from app.services.aria2_lifecycle_service import (
+from app.core.time_utils import now_ms
+from app.services.lifecycle.completion import handle_v0_download_complete
+from app.services.lifecycle.handoff import coordinate_reported_size
+from app.services.lifecycle.repair import (
     cleanup_stale_queued_downloads_v0,
-    coordinate_reported_size,
-    handle_v0_download_complete,
     repair_inconsistent_completed_downloads_v0,
 )
-from app.services.download_service import complete_global_download
+from app.services.lifecycle.completion import complete_global_download
 from app.services.repair import purge_terminal_download_dirs
 from app.services.storage import get_downloading_dir
 from tests.create_task_helper import create_download_task, global_download_id_of
@@ -71,7 +71,7 @@ async def test_growth_pause_failed_reclaims_download_dir(temp_db: str) -> None:
     task_dir = _task_dir(download_id)
 
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=await _fetch_global(download_id),
         expected_gid="gid-growth-pause",
         control_gid="gid-growth-pause",
@@ -122,7 +122,7 @@ async def test_repair_inconsistent_completed_reclaims_download_dir(
         )
 
     client = make_aria2_client()
-    await repair_inconsistent_completed_downloads_v0(client=client)
+    await repair_inconsistent_completed_downloads_v0(backend=client)
 
     updated = await _fetch_global(download["id"])
     usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
@@ -156,7 +156,7 @@ async def test_stale_queued_cleanup_reclaims_download_dir(temp_db: str) -> None:
         )
 
     client = make_aria2_client()
-    await cleanup_stale_queued_downloads_v0(client=client)
+    await cleanup_stale_queued_downloads_v0(backend=client)
 
     updated = await _fetch_global(download["id"])
     assert updated["status"] == "failed"
@@ -187,7 +187,7 @@ async def test_completed_success_reclaims_download_dir_shell(temp_db: str) -> No
     source_file.write_bytes(payload)
 
     changed = await handle_v0_download_complete(
-        client=client,
+        backend=client,
         download=await _fetch_global(download_id),
         aria2_status={
             "status": "complete",
@@ -356,7 +356,7 @@ async def test_recover_failed_restore_keeps_only_copy(
         raise RuntimeError("forced recovery failure")
 
     monkeypatch.setattr(
-        "app.services.aria2_lifecycle_service.handle_v0_download_complete",
+        "app.services.repair.handle_v0_download_complete",
         _boom,
     )
 

@@ -112,6 +112,7 @@ from app.routers import (
     users,
     ws,
 )
+from app.modules.backend.aria2_adapter import Aria2BackendAdapter
 from app.services.repair import (
     purge_terminal_download_dirs,
     purge_terminal_residual_gids,
@@ -230,7 +231,7 @@ STARTUP_REPAIR_STEPS: tuple[str, ...] = (
 
 
 async def _run_startup_repair_sequence(
-    client: Any,
+    backend: Any,
 ) -> dict[str, Any]:
     """Run the fixed startup repair sequence, isolating each phase.
 
@@ -250,21 +251,21 @@ async def _run_startup_repair_sequence(
     # 1. recover completed-without-index BEFORE any purge
     await _step(
         "recover_pending_index",
-        recover_completed_downloads_pending_index(client),
+        recover_completed_downloads_pending_index(backend),
         "recover completed-without-index",
     )
 
     # 2. rebuild active accounting / reconcile live attempts
     await _step(
         "rebuild_active_accounting",
-        rebuild_active_download_accounting(client),
+        rebuild_active_download_accounting(backend),
         "rebuild active accounting",
     )
 
     # 3. purge failed/cancelled residual GID
     await _step(
         "purge_residual_gids",
-        purge_terminal_residual_gids(client),
+        purge_terminal_residual_gids(backend),
         "purge terminal residual GID",
     )
 
@@ -334,7 +335,7 @@ async def lifespan(app: FastAPI):
         await refresh_aria2_config()
         await load_runtime_config()
 
-        from app.services.aria2_lifecycle_service import (
+        from app.services.lifecycle.repair import (
             reconcile_legacy_http_downloads_v0,
         )
 
@@ -345,13 +346,15 @@ async def lifespan(app: FastAPI):
         if settings.dev_reset_admin_password:
             await reset_admin_password_for_dev_v0()
 
+        from app.modules.pack import PackTaskManager
         from app.services.deletion_cleanup import DeletionCleanupManager
-        from app.services.pack import PackTaskManager
 
         await DeletionCleanupManager.recover_startup()
         await PackTaskManager.recover_startup()
 
-        repair_results = await _run_startup_repair_sequence(get_aria2_client())
+        repair_results = await _run_startup_repair_sequence(
+            Aria2BackendAdapter(get_aria2_client())
+        )
 
         for step_name in STARTUP_REPAIR_STEPS:
             step_result = repair_results.get(step_name, {})
@@ -395,8 +398,8 @@ async def lifespan(app: FastAPI):
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
         try:
+            from app.modules.pack import PackTaskManager
             from app.services.deletion_cleanup import DeletionCleanupManager
-            from app.services.pack import PackTaskManager
 
             await DeletionCleanupManager.shutdown()
             await PackTaskManager.shutdown()

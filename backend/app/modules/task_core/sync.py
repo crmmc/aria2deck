@@ -4,7 +4,7 @@
 ``task_backend_snapshots`` 投影表，并保留既有的
 ``global_downloads.status`` / ``completed_bytes`` 进度记账与暂停/排队
 policy pass。状态机流转、完成/失败 handoff、终态落库与物理清理一律
-归 ``reconcile_attempt_signal``（``app/services/aria2_lifecycle_service.py``）
+归 ``reconcile_attempt_signal``（``app/services/lifecycle/coordinator.py``）
 处理，本模块不得调用 ``claim_attempt_terminal`` / ``cleanup_with_claim`` /
 ``fail_download_and_reclaim`` 等终态路径。
 
@@ -26,7 +26,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from app.core.config import settings
 from app.core.time_utils import now_ms
+from app.domain.quota import get_disk_available_bytes
 from app.modules.backend.port import BackendPort, Snapshot
 from app.modules.task_core.policy import (
     SYSTEM_QUEUE_CODES,
@@ -35,13 +37,13 @@ from app.modules.task_core.policy import (
     decide_on_snapshot,
 )
 from app.repositories.auth import get_user_by_id
-from app.repositories.downloads import (
+from app.repositories.task.user_tasks import get_representative_active_owner_id
+from app.repositories.task.downloads import (
     get_global_download_by_id,
-    get_representative_active_owner_id,
     list_tracked_global_downloads,
     update_global_download,
 )
-from app.services.download_service import get_disk_available_bytes
+from app.services.settings_service import get_min_free_disk
 from app.services.usage_service import get_usage
 
 _SYNCED_STATUSES = {"active", "waiting", "paused"}
@@ -74,7 +76,9 @@ async def _build_quota_context(tid: int) -> QuotaContext:
     return QuotaContext(
         quota_bytes=quota_bytes,
         quota_used_bytes=quota_used,
-        disk_available=get_disk_available_bytes() > 0,
+        disk_available=get_disk_available_bytes(
+            settings.download_dir, min_free_disk=get_min_free_disk()
+        ) > 0,
     )
 
 

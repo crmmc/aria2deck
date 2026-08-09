@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 
-from app.repositories.downloads import list_user_tasks_for_download
+from app.repositories.task.user_tasks import list_user_tasks_for_download
 from app.services.task_projection import build_rest_task_response
 from app.services.task_projection_rows import attach_snapshots_to_rows
 

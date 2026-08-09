@@ -20,7 +20,7 @@ import pytest
 
 from app.domain.errors import ConflictError, ForbiddenError
 from app.modules.task_core.register import ResourceSpec
-from app.services.aria2_rpc_handler import Aria2RpcHandler, RpcError, RpcErrorCode
+from app.services.rpc import Aria2RpcHandler, RpcError, RpcErrorCode
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -46,7 +46,7 @@ def _install_spy(
 ) -> AsyncMock:
     spy = AsyncMock(return_value=payload)
     monkeypatch.setattr(
-        "app.services.aria2_rpc_handler.task_service.register_and_submit", spy
+        "app.services.rpc.write.task_service.register_and_submit", spy
     )
     return spy
 
@@ -130,7 +130,7 @@ async def test_add_uri_duplicate_maps_to_task_exists(
     user = await create_user_v0(username="t12_dup")
     spy = AsyncMock(side_effect=ConflictError("任务已存在"))
     monkeypatch.setattr(
-        "app.services.aria2_rpc_handler.task_service.register_and_submit", spy
+        "app.services.rpc.write.task_service.register_and_submit", spy
     )
     handler = Aria2RpcHandler(user["id"])
 
@@ -147,7 +147,7 @@ async def test_add_uri_quota_maps_to_quota_exceeded(
     user = await create_user_v0(username="t12_quota")
     spy = AsyncMock(side_effect=ForbiddenError("用户配额不足，无法创建任务"))
     monkeypatch.setattr(
-        "app.services.aria2_rpc_handler.task_service.register_and_submit", spy
+        "app.services.rpc.write.task_service.register_and_submit", spy
     )
     handler = Aria2RpcHandler(user["id"])
 
@@ -176,7 +176,7 @@ async def test_remove_uses_cancel_task(
     client = make_aria2_client()
     spy = AsyncMock(return_value={"ok": True})
     monkeypatch.setattr(
-        "app.services.aria2_rpc_handler.task_service.cancel_task", spy
+        "app.services.rpc.write.task_service.cancel_task", spy
     )
     handler = Aria2RpcHandler(user["id"])
 
@@ -210,7 +210,7 @@ async def test_force_remove_uses_cancel_task(
     )
     spy = AsyncMock(return_value={"ok": True})
     monkeypatch.setattr(
-        "app.services.aria2_rpc_handler.task_service.cancel_task", spy
+        "app.services.rpc.write.task_service.cancel_task", spy
     )
     handler = Aria2RpcHandler(user["id"])
 
@@ -237,7 +237,7 @@ async def test_remove_terminal_task_maps_to_not_found(
     )
     spy = AsyncMock(return_value={"ok": True})
     monkeypatch.setattr(
-        "app.services.aria2_rpc_handler.task_service.cancel_task", spy
+        "app.services.rpc.write.task_service.cancel_task", spy
     )
     handler = Aria2RpcHandler(user["id"])
 
@@ -249,11 +249,11 @@ async def test_remove_terminal_task_maps_to_not_found(
 
 
 def test_handler_no_longer_imports_legacy_write_path() -> None:
-    """aria2_rpc_handler 不再依赖 download_service 的创建/取消入口。"""
+    """rpc 写路径（services/rpc/write.py）不再依赖 download_service 的创建/取消入口。"""
     import ast
     from pathlib import Path
 
-    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "aria2_rpc_handler.py").read_text(encoding="utf-8")
+    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "rpc" / "write.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     imported_names: set[str] = set()
     for node in ast.walk(tree):

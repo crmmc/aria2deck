@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from app.repositories.downloads import get_global_by_resource_key, get_user_task
+from app.repositories.task.user_tasks import get_user_task
+from app.repositories.task.downloads import get_global_by_resource_key
 from app.services.usage_service import get_usage
 from tests.create_task_helper import create_download_task, global_download_id_of
 from tests.fakes import make_aria2_client

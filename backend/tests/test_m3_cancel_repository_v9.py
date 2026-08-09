@@ -8,9 +8,7 @@ from sqlalchemy import select
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_storage_usage, user_tasks
 from app.domain.lifecycle import TerminalizationClaim
-from app.repositories.downloads import (
-    cancel_user_task_and_maybe_claim_attempt,
-)
+from app.repositories.task.user_tasks import cancel_user_task_and_maybe_claim_attempt
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_task_v0,

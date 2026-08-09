@@ -8,16 +8,16 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import func, select
 
-import app.services.download_service as download_service
+import app.services.lifecycle.completion as download_service
 from app.core.config import settings
 from app.db.engine import transaction
 from app.db.schema import stored_file_entries, stored_files, user_files
-from app.repositories.downloads import (
+from app.repositories.task.user_tasks import get_user_task
+from app.repositories.task.downloads import (
     get_global_by_resource_key,
-    get_user_task,
     update_global_download,
 )
-from app.services.download_service import (
+from app.services.lifecycle.completion import (
     complete_global_download,
 )
 from app.services.usage_service import get_usage

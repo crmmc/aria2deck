@@ -3,7 +3,7 @@
 - ``app/modules/task_core/sync.py`` 只写读投影 + 进度/policy，
   不得调用 ``claim_attempt_terminal`` / ``cleanup_with_claim`` /
   ``fail_download_and_reclaim``（这些属 reconcile/终态）。
-- ``app/services/aria2_lifecycle_service.py`` 不写
+- 生命周期模块（``app/services/lifecycle/``）不写
   ``task_backend_snapshots`` 投影（投影写归 sync）。
 """
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 SYNC_PATH = BACKEND_ROOT / "app" / "modules" / "task_core" / "sync.py"
-LIFECYCLE_PATH = BACKEND_ROOT / "app" / "services" / "aria2_lifecycle_service.py"
+LIFECYCLE_DIR = BACKEND_ROOT / "app" / "services" / "lifecycle"
 
 _RECONCILE_ONLY_CALLS = (
     "claim_attempt_terminal",
@@ -41,14 +41,15 @@ def test_sync_module_has_no_reconcile_terminal_calls() -> None:
 def test_sync_module_does_not_import_lifecycle_service() -> None:
     """sync 不应依赖 lifecycle service（reconcile 方向相反）。"""
     source = _strip_comments(SYNC_PATH.read_text(encoding="utf-8"))
-    assert "aria2_lifecycle_service" not in source
+    assert "services.lifecycle" not in source
     assert "reconcile_attempt_signal" not in source
 
 
 def test_lifecycle_service_does_not_write_projection() -> None:
-    """aria2_lifecycle_service.py 不得写 task_backend_snapshots（投影写归 sync）。"""
-    source = _strip_comments(LIFECYCLE_PATH.read_text(encoding="utf-8"))
-    assert "upsert_snapshot" not in source, (
-        f"{LIFECYCLE_PATH.name} 引用了 upsert_snapshot，投影写入归 task_core/sync"
-    )
-    assert "backend_snapshots" not in source
+    """lifecycle 模块不得写 task_backend_snapshots（投影写归 sync）。"""
+    for path in sorted(LIFECYCLE_DIR.glob("*.py")):
+        source = _strip_comments(path.read_text(encoding="utf-8"))
+        assert "upsert_snapshot" not in source, (
+            f"{path.name} 引用了 upsert_snapshot，投影写入归 task_core/sync"
+        )
+        assert "backend_snapshots" not in source

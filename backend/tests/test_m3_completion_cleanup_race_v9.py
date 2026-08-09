@@ -31,11 +31,9 @@ from app.db.schema import (
 )
 from app.domain.lifecycle import make_terminalization_claim
 from app.domain.status import ACTIVE_GLOBAL_DOWNLOAD_STATUSES
-from app.repositories.downloads import claim_attempt_terminal
-from app.services.aria2_lifecycle_service import (
-    fail_download_and_reclaim,
-    handle_v0_download_complete,
-)
+from app.repositories.task.downloads import claim_attempt_terminal
+from app.services.lifecycle.cleanup import fail_download_and_reclaim
+from app.services.lifecycle.completion import handle_v0_download_complete
 from app.services.failed_task_cleanup import cleanup_with_claim
 from app.services.storage import get_downloading_dir
 from tests.fakes import make_aria2_client
@@ -151,7 +149,7 @@ async def test_complete_first_then_fail_does_not_delete_store(temp_db: str) -> N
     )
 
     changed = await handle_v0_download_complete(
-        client=make_aria2_client(tell_status=aria2_status),
+        backend=make_aria2_client(tell_status=aria2_status),
         download=dl,
         aria2_status=aria2_status,
         completion_gid="gid-c1",
@@ -171,7 +169,7 @@ async def test_complete_first_then_fail_does_not_delete_store(temp_db: str) -> N
 
     # Fail arrives after completion → stale
     failed = await fail_download_and_reclaim(
-        client=make_aria2_client(tell_status={}),
+        backend=make_aria2_client(tell_status={}),
         download_id=dl["id"],
         message="late failure",
         error_code="error",
@@ -200,7 +198,7 @@ async def test_fail_first_then_complete_cannot_index(temp_db: str) -> None:
     )
 
     failed = await fail_download_and_reclaim(
-        client=make_aria2_client(tell_status={}),
+        backend=make_aria2_client(tell_status={}),
         download_id=dl["id"],
         message="prior failure",
         error_code="error",
@@ -220,7 +218,7 @@ async def test_fail_first_then_complete_cannot_index(temp_db: str) -> None:
     )
 
     changed = await handle_v0_download_complete(
-        client=make_aria2_client(tell_status=aria2_status),
+        backend=make_aria2_client(tell_status=aria2_status),
         download=dl,
         aria2_status=aria2_status,
         completion_gid="gid-f2",
@@ -417,7 +415,7 @@ async def test_pending_index_recovery_failure_preserves_only_copy(
 
     client = make_aria2_client(tell_status={})
     with patch(
-        "app.services.aria2_lifecycle_service.handle_v0_download_complete",
+        "app.services.repair.handle_v0_download_complete",
         new_callable=AsyncMock,
         return_value=False,
     ):

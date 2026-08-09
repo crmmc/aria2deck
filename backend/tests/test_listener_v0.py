@@ -11,8 +11,8 @@ from app.aria2.listener import handle_aria2_event
 from app.core.config import settings
 from app.db.engine import transaction
 from app.db.schema import global_downloads, stored_files, user_files, user_tasks
-from app.repositories.downloads import mark_global_download_failed
-from app.services import aria2_lifecycle_service
+from app.repositories.task.user_tasks import mark_global_download_failed
+from app.services.lifecycle import completion as completion_mod
 from app.services.usage_service import get_usage, reserve_bytes
 from app.services.storage import get_task_download_dir
 from tests.fakes import make_aria2_client
@@ -981,13 +981,13 @@ async def test_complete_source_resolution_probes_four_times_every_half_second(
     async def fake_sleep(interval: float) -> None:
         sleep_intervals.append(interval)
 
-    monkeypatch.setattr(aria2_lifecycle_service.asyncio, "sleep", fake_sleep)
-    source = await aria2_lifecycle_service.resolve_complete_source_with_retry(
+    monkeypatch.setattr(completion_mod.asyncio, "sleep", fake_sleep)
+    source = await completion_mod.resolve_complete_source_with_retry(
         completion_gid=None,
         task_dir=tmp_path / "missing",
         files=[],
         task_name=None,
-        client=None,
+        backend=None,
     )
 
     assert source is None
@@ -1029,8 +1029,7 @@ async def test_error_event_marks_global_and_user_tasks_failed_and_releases_reser
     _patch_aria2_client(monkeypatch, client)
     broadcast = AsyncMock()
     monkeypatch.setattr(
-        aria2_lifecycle_service,
-        "broadcast_task_update_to_subscribers",
+        "app.services.lifecycle._shared.broadcast_task_update_to_subscribers",
         broadcast,
     )
 
@@ -1238,7 +1237,7 @@ async def test_error_event_serializes_with_inflight_completion(
         return {"status": "completed", "entries_created": 0, "user_files_created": 1}
 
     monkeypatch.setattr(
-        "app.services.aria2_lifecycle_service.complete_global_download_locked",
+        "app.services.lifecycle.completion.complete_global_download_locked",
         fake_complete_global_download_locked,
     )
 
@@ -1327,8 +1326,7 @@ async def test_late_g1_event_does_not_mutate_g2_or_delete_directory(
     _patch_aria2_client(monkeypatch, client)
     broadcast = AsyncMock()
     monkeypatch.setattr(
-        aria2_lifecycle_service,
-        "broadcast_task_update_to_subscribers",
+        "app.services.lifecycle._shared.broadcast_task_update_to_subscribers",
         broadcast,
     )
 

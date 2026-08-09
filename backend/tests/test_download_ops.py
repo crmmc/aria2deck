@@ -9,11 +9,11 @@ from sqlalchemy import func, select
 
 from app.db.engine import transaction
 from app.db.schema import global_downloads, stored_files, user_files, user_tasks
-from app.repositories.downloads import (
+from app.repositories.task.user_tasks import update_active_user_tasks
+from app.repositories.task.downloads import (
     guarded_update_global_download,
-    update_active_user_tasks,
 )
-from app.services.aria2_lifecycle_service import switch_to_followed_download
+from app.services.lifecycle.handoff import switch_to_followed_download
 from app.services.storage import get_task_download_dir
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
@@ -353,7 +353,7 @@ async def test_switch_to_followed_http_to_torrent(temp_db: str) -> None:
     )
 
     result = await switch_to_followed_download(
-        client=mock_client,
+        backend=mock_client,
         download=dl,
         metadata_gid="meta-gid-1",
         followed_gid="real-gid-1",
@@ -417,7 +417,7 @@ async def test_switch_to_followed_uses_real_status(temp_db: str) -> None:
     )
 
     result = await switch_to_followed_download(
-        client=mock_client,
+        backend=mock_client,
         download=dl,
         metadata_gid="meta-gid-waiting",
         followed_gid="real-gid-waiting",
@@ -476,7 +476,7 @@ async def test_switch_to_followed_complete_status_does_not_mark_completed_withou
     )
 
     result = await switch_to_followed_download(
-        client=mock_client,
+        backend=mock_client,
         download=dl,
         metadata_gid="meta-gid-complete",
         followed_gid="real-gid-complete",
@@ -542,7 +542,7 @@ async def test_switch_to_followed_magnet_upgrades_kind(temp_db: str) -> None:
     )
 
     await switch_to_followed_download(
-        client=mock_client,
+        backend=mock_client,
         download=dl,
         metadata_gid="meta-gid-2",
         followed_gid="real-gid-2",
@@ -584,7 +584,7 @@ async def test_switch_to_followed_tell_status_fails(temp_db: str) -> None:
     mock_client = make_aria2_client(tell_status=Exception("connection refused"))
 
     result = await switch_to_followed_download(
-        client=mock_client,
+        backend=mock_client,
         download=dl,
         metadata_gid="meta-gid-3",
         followed_gid="real-gid-3",
@@ -627,7 +627,7 @@ async def test_magnet_handoff_admits_payload_regardless_of_file_count(temp_db: s
     )
 
     changed = await switch_to_followed_download(
-        client=client, download=download, metadata_gid="metadata-gid",
+        backend=client, download=download, metadata_gid="metadata-gid",
         followed_gid="payload-gid", display_name_fallback=None, log_prefix="[Test]",
     )
 

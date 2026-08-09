@@ -16,15 +16,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.download_service import (
+from app.domain.locks import get_download_lifecycle_lock
+from app.services.lifecycle.completion import (
     complete_global_download,
     complete_global_download_locked,
-    get_download_lifecycle_lock,
 )
-from app.services import aria2_lifecycle_service
-from app.services.aria2_lifecycle_service import (
-    fail_download_and_reclaim,
-)
+from app.services.lifecycle import cleanup as lifecycle_cleanup
+from app.services.lifecycle.cleanup import fail_download_and_reclaim
+from app.services.lifecycle import completion as lifecycle_completion
 
 
 # ---------------------------------------------------------------------------
@@ -106,13 +105,13 @@ async def test_no_deadlock_acquiring_false_while_holding():
         return True
 
     with patch.object(
-        aria2_lifecycle_service,
+        lifecycle_cleanup,
         "_fail_download_and_reclaim_operation",
         side_effect=fake_operation,
     ):
         async with lock:
             result = await fail_download_and_reclaim(
-                client=AsyncMock(),
+                backend=AsyncMock(),
                 download_id=download_id,
                 message="test",
                 error_code="test",
@@ -131,18 +130,20 @@ async def test_no_deadlock_acquiring_false_while_holding():
 
 def test_fail_download_and_reclaim_does_not_use_completion_lock():
     """get_task_complete_lock must no longer exist in the lifecycle module."""
-    assert not hasattr(aria2_lifecycle_service, "get_task_complete_lock"), (
-        "get_task_complete_lock should be removed; lifecycle protection "
-        "is solely via get_download_lifecycle_lock."
-    )
+    for module in (lifecycle_cleanup, lifecycle_completion):
+        assert not hasattr(module, "get_task_complete_lock"), (
+            "get_task_complete_lock should be removed; lifecycle protection "
+            "is solely via get_download_lifecycle_lock."
+        )
 
 
 def test_complete_global_download_does_not_use_completion_lock():
     """get_task_complete_lock must no longer exist for complete paths."""
-    assert not hasattr(aria2_lifecycle_service, "get_task_complete_lock"), (
-        "get_task_complete_lock should be removed; completion paths "
-        "must only use get_download_lifecycle_lock."
-    )
+    for module in (lifecycle_cleanup, lifecycle_completion):
+        assert not hasattr(module, "get_task_complete_lock"), (
+            "get_task_complete_lock should be removed; completion paths "
+            "must only use get_download_lifecycle_lock."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +151,8 @@ def test_complete_global_download_does_not_use_completion_lock():
 # ---------------------------------------------------------------------------
 
 def test_get_download_lock_removed():
-    """The _get_download_lock function must no longer exist in download_service."""
-    from app.services import download_service
+    """The _get_download_lock function must no longer exist in the completion module."""
+    from app.services.lifecycle import completion as download_service
 
     assert not hasattr(download_service, "_get_download_lock"), (
         "_get_download_lock should be removed; _ensure_download_submitted "
@@ -160,8 +161,8 @@ def test_get_download_lock_removed():
 
 
 def test_download_locks_dict_removed():
-    """The _download_locks dict must no longer exist in download_service."""
-    from app.services import download_service
+    """The _download_locks dict must no longer exist in the completion module."""
+    from app.services.lifecycle import completion as download_service
 
     assert not hasattr(download_service, "_download_locks"), (
         "_download_locks dict should be removed."
@@ -169,7 +170,8 @@ def test_download_locks_dict_removed():
 
 
 def test_completion_locks_dict_removed():
-    """The _completion_locks dict must no longer exist in aria2_lifecycle_service."""
-    assert not hasattr(aria2_lifecycle_service, "_completion_locks"), (
-        "_completion_locks dict should be removed."
-    )
+    """The _completion_locks dict must no longer exist in lifecycle modules."""
+    for module in (lifecycle_cleanup, lifecycle_completion):
+        assert not hasattr(module, "_completion_locks"), (
+            "_completion_locks dict should be removed."
+        )

@@ -22,7 +22,7 @@ from app.aria2.sync import _sync_tasks_once
 from app.db.engine import transaction
 from app.db.schema import global_downloads
 from app.domain.lifecycle import ReconcileResult
-from app.services import aria2_lifecycle_service as lifecycle
+from app.services.lifecycle import coordinator, repair
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -88,10 +88,10 @@ async def test_each_live_attempt_submits_one_reconcile(temp_db: str) -> None:
 
     with (
         patch("app.aria2.sync.get_aria2_client", return_value=client),
-        patch.object(lifecycle, "reconcile_attempt_signal", new_callable=AsyncMock) as mock_reconcile,
-        patch.object(lifecycle, "list_v0_tracked_downloads", new_callable=AsyncMock) as mock_list,
-        patch.object(lifecycle, "repair_inconsistent_completed_downloads_v0", new_callable=AsyncMock),
-        patch.object(lifecycle, "cleanup_stale_queued_downloads_v0", new_callable=AsyncMock),
+        patch.object(coordinator, "reconcile_attempt_signal", new_callable=AsyncMock) as mock_reconcile,
+        patch.object(sync_mod, "list_v0_tracked_downloads", new_callable=AsyncMock) as mock_list,
+        patch.object(repair, "repair_inconsistent_completed_downloads_v0", new_callable=AsyncMock),
+        patch.object(repair, "cleanup_stale_queued_downloads_v0", new_callable=AsyncMock),
         patch("app.aria2.sync.backend_connectivity.mark_ok", new_callable=AsyncMock),
     ):
         mock_list.return_value = [
@@ -139,10 +139,10 @@ async def test_old_snapshot_not_used_for_direct_db_write(temp_db: str) -> None:
 
     with (
         patch("app.aria2.sync.get_aria2_client", return_value=client),
-        patch.object(lifecycle, "reconcile_attempt_signal", new_callable=AsyncMock) as mock_reconcile,
-        patch.object(lifecycle, "list_v0_tracked_downloads", new_callable=AsyncMock) as mock_list,
-        patch.object(lifecycle, "repair_inconsistent_completed_downloads_v0", new_callable=AsyncMock),
-        patch.object(lifecycle, "cleanup_stale_queued_downloads_v0", new_callable=AsyncMock),
+        patch.object(coordinator, "reconcile_attempt_signal", new_callable=AsyncMock) as mock_reconcile,
+        patch.object(sync_mod, "list_v0_tracked_downloads", new_callable=AsyncMock) as mock_list,
+        patch.object(repair, "repair_inconsistent_completed_downloads_v0", new_callable=AsyncMock),
+        patch.object(repair, "cleanup_stale_queued_downloads_v0", new_callable=AsyncMock),
         patch("app.aria2.sync.backend_connectivity.mark_ok", new_callable=AsyncMock),
     ):
         mock_list.return_value = [{"id": d["id"], "aria2_gid": "g2a"}]
@@ -210,10 +210,10 @@ async def test_stopped_cleanup_preserves_live_attempt_gid(temp_db: str) -> None:
 
     with (
         patch("app.aria2.sync.get_aria2_client", return_value=client),
-        patch.object(lifecycle, "reconcile_attempt_signal", side_effect=_fake_reconcile),
-        patch.object(lifecycle, "list_v0_tracked_downloads", new_callable=AsyncMock) as mock_list,
-        patch.object(lifecycle, "repair_inconsistent_completed_downloads_v0", new_callable=AsyncMock),
-        patch.object(lifecycle, "cleanup_stale_queued_downloads_v0", new_callable=AsyncMock),
+        patch.object(coordinator, "reconcile_attempt_signal", side_effect=_fake_reconcile),
+        patch.object(sync_mod, "list_v0_tracked_downloads", new_callable=AsyncMock) as mock_list,
+        patch.object(repair, "repair_inconsistent_completed_downloads_v0", new_callable=AsyncMock),
+        patch.object(repair, "cleanup_stale_queued_downloads_v0", new_callable=AsyncMock),
         patch("app.aria2.sync.backend_connectivity.mark_ok", new_callable=AsyncMock),
     ):
         mock_list.return_value = [
@@ -261,10 +261,10 @@ async def test_unknown_gid_not_removed(temp_db: str) -> None:
 
     with (
         patch("app.aria2.sync.get_aria2_client", return_value=client),
-        patch.object(lifecycle, "reconcile_attempt_signal", new_callable=AsyncMock) as mock_reconcile,
-        patch.object(lifecycle, "list_v0_tracked_downloads", new_callable=AsyncMock) as mock_list,
-        patch.object(lifecycle, "repair_inconsistent_completed_downloads_v0", new_callable=AsyncMock),
-        patch.object(lifecycle, "cleanup_stale_queued_downloads_v0", new_callable=AsyncMock),
+        patch.object(coordinator, "reconcile_attempt_signal", new_callable=AsyncMock) as mock_reconcile,
+        patch.object(sync_mod, "list_v0_tracked_downloads", new_callable=AsyncMock) as mock_list,
+        patch.object(repair, "repair_inconsistent_completed_downloads_v0", new_callable=AsyncMock),
+        patch.object(repair, "cleanup_stale_queued_downloads_v0", new_callable=AsyncMock),
         patch("app.aria2.sync.backend_connectivity.mark_ok", new_callable=AsyncMock),
     ):
         mock_list.return_value = [{"id": d["id"], "aria2_gid": "known_gid"}]
@@ -308,10 +308,10 @@ async def test_handoff_waiting_source_not_deleted(temp_db: str) -> None:
 
     with (
         patch("app.aria2.sync.get_aria2_client", return_value=client),
-        patch.object(lifecycle, "reconcile_attempt_signal", new_callable=AsyncMock) as mock_reconcile,
-        patch.object(lifecycle, "list_v0_tracked_downloads", new_callable=AsyncMock) as mock_list,
-        patch.object(lifecycle, "repair_inconsistent_completed_downloads_v0", new_callable=AsyncMock),
-        patch.object(lifecycle, "cleanup_stale_queued_downloads_v0", new_callable=AsyncMock),
+        patch.object(coordinator, "reconcile_attempt_signal", new_callable=AsyncMock) as mock_reconcile,
+        patch.object(sync_mod, "list_v0_tracked_downloads", new_callable=AsyncMock) as mock_list,
+        patch.object(repair, "repair_inconsistent_completed_downloads_v0", new_callable=AsyncMock),
+        patch.object(repair, "cleanup_stale_queued_downloads_v0", new_callable=AsyncMock),
         patch("app.aria2.sync.backend_connectivity.mark_ok", new_callable=AsyncMock),
     ):
         mock_list.return_value = [{"id": d["id"], "aria2_gid": "source_gid"}]

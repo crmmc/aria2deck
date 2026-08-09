@@ -489,7 +489,7 @@ class TestLifespan:
             patch("app.core.config.check_secret_key"),
             patch("app.main.ensure_default_admin_v0", new=AsyncMock()),
             patch(
-                "app.services.pack.PackTaskManager.recover_startup",
+                "app.modules.pack.PackTaskManager.recover_startup",
                 new=AsyncMock(side_effect=record_pack_recovery),
             ),
             patch(
@@ -497,7 +497,7 @@ class TestLifespan:
                 new=record_accounting,
             ),
             patch(
-                "app.services.pack.PackTaskManager.submit_pending",
+                "app.modules.pack.PackTaskManager.submit_pending",
                 new=AsyncMock(side_effect=record_pack_submit),
             ),
             patch("app.main.run_startup_repair", new=record_repair),

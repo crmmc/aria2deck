@@ -13,12 +13,12 @@ from typing import Any, Mapping, Sequence
 
 from app.aria2.client import Aria2Client
 from app.modules.backend.port import Snapshot
-from app.repositories.downloads import (
+from app.repositories.task.downloads import (
     assign_submitted_gid,
     clear_terminal_download_gid,
     get_global_download_by_id,
 )
-from app.services.internal_fetch import build_gateway_submission
+from app.services.gateway import build_gateway_submission
 from app.services.settings_service import get_aria2_bt_stop_timeout_seconds
 from app.services.storage import get_task_download_dir
 
@@ -199,6 +199,34 @@ class Aria2BackendAdapter:
             logger.warning(
                 "clear terminal gid failed tid=%s gid=%s", tid, gid, exc_info=True
             )
+
+    async def tell_status(self, gid: str) -> dict[str, Any]:
+        return await self._client.tell_status(gid)
+
+    async def pause_gid(self, gid: str) -> str:
+        return await self._client.pause(gid)
+
+    async def unpause_gid(self, gid: str) -> str:
+        return await self._client.unpause(gid)
+
+    async def tell_active(self) -> list[dict[str, Any]]:
+        return await self._client.tell_active()
+
+    async def tell_waiting(
+        self, offset: int = 0, num: int = 1000
+    ) -> list[dict[str, Any]]:
+        return await self._client.tell_waiting(offset, num)
+
+    async def tell_stopped(
+        self, offset: int = 0, num: int = 1000
+    ) -> list[dict[str, Any]]:
+        return await self._client.tell_stopped(offset, num)
+
+    async def force_remove_gid(self, gid: str) -> str:
+        return await self._client.force_remove(gid)
+
+    async def remove_download_result_gid(self, gid: str) -> str:
+        return await self._client.remove_download_result(gid)
 
     async def join_submission(
         self, *, tid: int, gid: str, uris: list[str]

@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.repositories.backend_snapshots import upsert_snapshot
-from app.services.aria2_rpc_handler import (
+from app.services.rpc import (
     SAFE_INTERNAL_ERROR_MESSAGE,
     Aria2RpcHandler,
     RpcError,
@@ -116,11 +116,11 @@ async def test_multicall_mixed_add_uri_tell_status_remove_uses_new_paths(
     register_spy = AsyncMock(return_value={"id": 777})
     cancel_spy = AsyncMock(return_value={"ok": True})
     monkeypatch.setattr(
-        "app.services.aria2_rpc_handler.task_service.register_and_submit",
+        "app.services.rpc.write.task_service.register_and_submit",
         register_spy,
     )
     monkeypatch.setattr(
-        "app.services.aria2_rpc_handler.task_service.cancel_task",
+        "app.services.rpc.write.task_service.cancel_task",
         cancel_spy,
     )
     handler = Aria2RpcHandler(user["id"])

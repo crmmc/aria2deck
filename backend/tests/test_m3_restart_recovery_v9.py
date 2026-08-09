@@ -92,7 +92,7 @@ async def test_completed_without_index_with_files_attempts_recovery(
 
     with (
         patch(
-            "app.services.aria2_lifecycle_service.handle_v0_download_complete",
+            "app.services.repair.handle_v0_download_complete",
             new_callable=AsyncMock,
             return_value=True,
         ) as mock_complete,
@@ -133,7 +133,7 @@ async def test_completed_without_index_no_files_skipped(temp_db: str) -> None:
     client = make_aria2_client(tell_status={})
 
     with patch(
-        "app.services.aria2_lifecycle_service.handle_v0_download_complete",
+        "app.services.repair.handle_v0_download_complete",
         new_callable=AsyncMock,
     ) as mock_complete:
         result = await recover_completed_downloads_pending_index(client)
@@ -193,7 +193,7 @@ async def test_active_gid_present_reconciled(temp_db: str) -> None:
 async def test_active_gid_missing_terminalized(temp_db: str) -> None:
     """Active attempt whose GID is missing from Aria2 gets terminalized."""
     from app.domain.lifecycle import ReconcileResult
-    from app.services.aria2_lifecycle_service import reconcile_attempt_signal
+    from app.services.lifecycle.coordinator import reconcile_attempt_signal
 
     user = await create_user_v0(username="rebuild-user-missing")
     download = await create_global_download_v0(
@@ -216,7 +216,7 @@ async def test_active_gid_missing_terminalized(temp_db: str) -> None:
     client = make_aria2_client(tell_status=RuntimeError("gid not found"))
 
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid-active-missing",
         event="startup",
         observed_status=None,
@@ -434,7 +434,7 @@ async def test_recovery_failure_preserves_only_copy(temp_db: str) -> None:
     client = make_aria2_client(tell_status={})
 
     with patch(
-        "app.services.aria2_lifecycle_service.handle_v0_download_complete",
+        "app.services.repair.handle_v0_download_complete",
         new_callable=AsyncMock,
         return_value=False,
     ):
@@ -555,9 +555,9 @@ async def test_cleanup_with_claim_no_writer_gids(temp_db: str) -> None:
 @pytest.mark.asyncio
 async def test_live_attempt_not_in_residual_list(temp_db: str) -> None:
     """Live (active/waiting/paused) attempts are never returned as residual."""
-    from app.repositories.downloads import (
-        list_terminal_downloads_with_residual_gid,
-    )
+    from app.repositories.task.downloads import (
+    list_terminal_downloads_with_residual_gid,
+)
 
     for idx, status_val in enumerate(("active", "waiting", "paused")):
         await create_global_download_v0(
@@ -578,9 +578,9 @@ async def test_live_attempt_not_in_residual_list(temp_db: str) -> None:
 @pytest.mark.asyncio
 async def test_pending_index_not_in_residual_list(temp_db: str) -> None:
     """completed + completed_file_id IS NULL is never treated as residual."""
-    from app.repositories.downloads import (
-        list_terminal_downloads_with_residual_gid,
-    )
+    from app.repositories.task.downloads import (
+    list_terminal_downloads_with_residual_gid,
+)
 
     await create_global_download_v0(
         resource_key="http:pidx-residual",
@@ -601,7 +601,7 @@ async def test_pending_index_not_in_residual_list(temp_db: str) -> None:
 @pytest.mark.asyncio
 async def test_live_and_pending_not_in_terminal_dir_ids(temp_db: str) -> None:
     """Neither live nor pending-index ids appear in terminal dir id list."""
-    from app.repositories.downloads import list_terminal_download_ids
+    from app.repositories.task.downloads import list_terminal_download_ids
 
     live = await create_global_download_v0(
         resource_key="http:live-ids",
@@ -633,7 +633,7 @@ async def test_live_and_pending_not_in_terminal_dir_ids(temp_db: str) -> None:
 @pytest.mark.asyncio
 async def test_failed_cancelled_in_terminal_dir_ids(temp_db: str) -> None:
     """failed and cancelled ids do appear in terminal dir id list."""
-    from app.repositories.downloads import list_terminal_download_ids
+    from app.repositories.task.downloads import list_terminal_download_ids
 
     failed = await create_global_download_v0(
         resource_key="http:failed-ids",

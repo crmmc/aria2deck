@@ -21,11 +21,8 @@ from sqlalchemy import select
 
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
-from app.services.aria2_lifecycle_service import (
-    coordinate_reported_size,
-    reconcile_attempt_signal,
-)
-from app.services import aria2_lifecycle_service
+from app.services.lifecycle.coordinator import reconcile_attempt_signal
+from app.services.lifecycle.handoff import coordinate_reported_size
 from app.domain.lifecycle import ReconcileResult
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
@@ -110,7 +107,7 @@ async def test_no_pause_when_size_not_growing(temp_db: str) -> None:
 
     client = make_aria2_client()
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=download,
         expected_gid="gid_nogrow_001",
         control_gid="gid_nogrow_001",
@@ -156,7 +153,7 @@ async def test_grow_pause_admit_unpause(temp_db: str) -> None:
 
     client = make_aria2_client()
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=download,
         expected_gid="gid_grow_002",
         control_gid="gid_grow_002",
@@ -209,7 +206,7 @@ async def test_pause_exception_requery_paused(temp_db: str) -> None:
         },
     )
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=download,
         expected_gid="gid_pexcp_003",
         control_gid="gid_pexcp_003",
@@ -268,7 +265,7 @@ async def test_unpause_exception_requery_active(temp_db: str) -> None:
         },
     )
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=download,
         expected_gid="gid_uexcp_004",
         control_gid="gid_uexcp_004",
@@ -333,7 +330,7 @@ async def test_unpause_real_failure_growth_unpause_failed(temp_db: str) -> None:
         mock_get_dir.return_value.__truediv__ = lambda self, x: f"/dl/{x}"
 
         result = await coordinate_reported_size(
-            client=client,
+            backend=client,
             download=download,
             expected_gid="gid_ufail_005",
             control_gid="gid_ufail_005",
@@ -389,7 +386,7 @@ async def test_gid_changed_no_growth_failure(temp_db: str) -> None:
     # Pass an expected_gid that no longer matches the DB row.
     client = make_aria2_client()
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=download,
         expected_gid="gid_old_before_handoff",
         control_gid="gid_old_before_handoff",
@@ -453,7 +450,7 @@ async def test_pause_missing_gid_db_still_points_no_growth_failure(
         mock_get_dir.return_value.__truediv__ = lambda self, x: f"/dl/{x}"
 
         result = await coordinate_reported_size(
-            client=client,
+            backend=client,
             download=download,
             expected_gid="gid_pmissing_006",
             control_gid="gid_pmissing_006",
@@ -517,7 +514,7 @@ async def test_magnet_metadata_total_zero_no_cleanup(temp_db: str) -> None:
     }
     client = make_aria2_client(tell_status=metadata_status)
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_meta_007",
         event="start",
         observed_status=metadata_status,

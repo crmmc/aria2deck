@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks, users
 from app.repositories import auth as auth_repo
-from app.repositories import downloads as downloads_repo
+from app.repositories.task import user_tasks as downloads_repo
 from app.services import task_service
 from app.services.deletion_cleanup import DeletionCleanupManager
 from tests.helpers_v0 import (

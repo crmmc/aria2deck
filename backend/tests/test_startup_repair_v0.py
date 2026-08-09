@@ -10,8 +10,9 @@ from sqlalchemy import insert, select
 from app.core.config import get_internal_base_url, settings
 from app.db.engine import transaction
 from app.db.schema import global_downloads, stored_files, user_files
-from app.repositories.downloads import get_global_download_by_id, get_user_task_by_id
-from app.services.aria2_lifecycle_service import (
+from app.repositories.task.user_tasks import get_user_task_by_id
+from app.repositories.task.downloads import get_global_download_by_id
+from app.services.lifecycle.repair import (
     LEGACY_HTTP_STOP_ERROR,
     reconcile_legacy_http_downloads_v0,
 )

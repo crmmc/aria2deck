@@ -10,7 +10,7 @@ from sqlalchemy import select
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_storage_usage, user_tasks
 from app.domain.lifecycle import RepairClaim, TerminalizationClaim
-from app.repositories.downloads import (
+from app.repositories.task.downloads import (
     claim_attempt_terminal,
     claim_terminal_reclaim,
 )

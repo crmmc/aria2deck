@@ -1,4 +1,4 @@
-"""M3 T18: cross-module architecture boundary gates (spec §22.6).
+"""M3 T18 + M4 T17: cross-module architecture boundary gates (spec §22.6).
 
 AST-level guards that keep the projection-based architecture intact:
 
@@ -20,6 +20,8 @@ AST-level guards that keep the projection-based architecture intact:
    ``app.aria2.*`` (BackendPort type annotations excepted).
 8. ``services/task_service.py`` ``list_tasks`` / ``list_tasks_page`` never call
    ``fetch_active_live_statuses_by_gid`` (list reads are projection-only).
+9. ``services/settings_service.py`` has no module-level ``app.aria2`` import
+   (M4 T17; the gateway refresh uses a deferred function-body import).
 """
 
 from __future__ import annotations
@@ -102,16 +104,8 @@ def test_rpc_router_does_not_import_client_or_gateway() -> None:
 
 
 def test_rpc_handler_has_no_direct_client_calls() -> None:
-    """Rule 2: aria2_rpc_handler.py must not hold or call an aria2 client."""
-    tree = _tree("services/aria2_rpc_handler.py")
-    source = (APP_ROOT / "services/aria2_rpc_handler.py").read_text(encoding="utf-8")
-    assert "self.client" not in source, "aria2_rpc_handler still uses self.client"
-
-    imported = _imported_names(tree)
-    assert "get_aria2_client" not in imported
-    assert "Aria2Gateway" not in imported
-
-    offenders: list[str] = []
+    """Rule 2: aria2_rpc_handler is gone; rpc write/read/system submodules
+    must not hold or call an aria2 client."""
     client_methods = {
         "tell_status",
         "tell_active",
@@ -120,18 +114,30 @@ def test_rpc_handler_has_no_direct_client_calls() -> None:
         "get_peers",
         "get_servers",
     }
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if (
-            isinstance(func, ast.Attribute)
-            and func.attr in client_methods
-            and isinstance(func.value, ast.Name)
-            and func.value.id == "client"
-        ):
-            offenders.append(f"client.{func.attr}() at line {node.lineno}")
-    assert offenders == []
+    legacy = APP_ROOT / "services" / "aria2_rpc_handler.py"
+    assert not legacy.is_file(), f"legacy aria2_rpc_handler.py must be deleted: {legacy}"
+    for relative in ("services/rpc/write.py", "services/rpc/read.py", "services/rpc/system.py"):
+        tree = _tree(relative)
+        source = (APP_ROOT / relative).read_text(encoding="utf-8")
+        assert "self.client" not in source, f"{relative} uses self.client"
+
+        imported = _imported_names(tree)
+        assert "get_aria2_client" not in imported
+        assert "Aria2Gateway" not in imported
+
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in client_methods
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "client"
+            ):
+                offenders.append(f"client.{func.attr}() at {relative}:{node.lineno}")
+        assert offenders == []
 
 
 def test_stats_service_uses_projection_only() -> None:
@@ -159,8 +165,13 @@ def test_deletion_cleanup_uses_cancel_task_facade_only() -> None:
 
 
 def test_download_service_legacy_symbols_removed() -> None:
-    """Rule 5: download_service.py no longer exports legacy create/cancel."""
-    tree = _tree("services/download_service.py")
+    """Rule 5: download_service.py no longer exists (M4 T08); the symbols are
+    also absent from its successor module lifecycle/completion.py."""
+    download_service = Path(__file__).resolve().parents[1] / "app" / "services" / "download_service.py"
+    assert not download_service.is_file(), (
+        f"download_service.py must be deleted (M4 T08): {download_service}"
+    )
+    tree = _tree("services/lifecycle/completion.py")
     defined = _defined_names(tree)
     forbidden = {
         "create_user_download",
@@ -168,7 +179,7 @@ def test_download_service_legacy_symbols_removed() -> None:
         "cancel_user_task",
     }
     assert forbidden.isdisjoint(defined), (
-        f"download_service.py still defines: {forbidden & defined}"
+        f"lifecycle/completion.py still defines: {forbidden & defined}"
     )
 
 
@@ -228,3 +239,24 @@ def test_task_service_list_paths_are_projection_only() -> None:
     imported = _imported_names(tree)
     assert "fetch_active_live_statuses_by_gid" not in called
     assert "fetch_active_live_statuses_by_gid" not in imported
+
+
+def test_settings_service_has_no_module_level_aria2_import() -> None:
+    """M4 T17: settings_service.py must not import app.aria2 at module level.
+
+    The gateway refresh is deferred to a function-body import inside
+    ``refresh_aria2_config`` so the settings module can load without the
+    aria2 transport stack.
+    """
+    tree = _tree("services/settings_service.py")
+    offenders: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "app.aria2" or alias.name.startswith("app.aria2."):
+                    offenders.append(f"services/settings_service.py:{node.lineno} imports {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == "app.aria2" or module.startswith("app.aria2."):
+                offenders.append(f"services/settings_service.py:{node.lineno} imports from {module}")
+    assert offenders == []

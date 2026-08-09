@@ -3,7 +3,7 @@ from sqlalchemy import select
 
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
-from app.services.aria2_lifecycle_service import reconcile_attempt_signal
+from app.services.lifecycle.coordinator import reconcile_attempt_signal
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_global_download_v0, create_user_task_v0, create_user_v0
 
@@ -58,7 +58,7 @@ async def test_size_known_pause_marks_external_paused_without_auto_resume(temp_d
     )
     status = _paused_status(gid="gid-pause-autoresume")
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid-pause-autoresume",
         event="pause",
         observed_status=status,
@@ -106,7 +106,7 @@ async def test_external_pause_when_unpause_not_attempted(temp_db):
     )
     status = _paused_status(gid="gid-pause-external")
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid-pause-external",
         event="pause",
         observed_status=status,
@@ -158,7 +158,7 @@ async def test_sticky_paused_sync_keeps_external_pause_hint(temp_db):
     )
     status = _paused_status(gid="gid-pause-sticky")
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid-pause-sticky",
         event=None,
         observed_status=status,
@@ -209,7 +209,7 @@ async def test_resume_from_external_pause_clears_error_hint(temp_db):
     status = _active_status(gid="gid-pause-resume")
     status["completedLength"] = "200"
     await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid-pause-resume",
         event="start",
         observed_status=status,

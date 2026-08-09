@@ -7,7 +7,7 @@ from sqlalchemy import select, update
 
 from app.db.engine import transaction
 from app.db.schema import stored_files, user_files
-from app.repositories import downloads as downloads_repo
+from app.repositories.task import user_tasks as downloads_repo
 from app.repositories import files as files_repo
 from app.repositories import shares as shares_repo
 from app.repositories.errors import RepositoryConflictError

@@ -1,6 +1,6 @@
 """T20: coordinator boundary cleanup tests.
 
-Verifies that ``aria2_lifecycle_service.py`` contains exactly one normal
+Verifies that the lifecycle coordinator module contains exactly one normal
 lifecycle arbitration boundary (``reconcile_attempt_signal``) and that old
 bypass paths have been removed or downgraded to thin wrappers (spec §16-17,
 §9.5, task T20).
@@ -30,22 +30,25 @@ from app.db.engine import transaction
 from tests.fakes import make_aria2_client
 from app.db.schema import global_downloads, user_tasks
 from app.domain.lifecycle import ReconcileResult
-from app.services import aria2_lifecycle_service as lifecycle_mod
-from app.services.aria2_lifecycle_service import (
-    reconcile_attempt_signal,
-    resolve_download_for_gid,
-)
+from app.services.lifecycle.coordinator import reconcile_attempt_signal
+from app.services.lifecycle.handoff import resolve_download_for_gid
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_task_v0,
     create_user_v0,
 )
 
-_LIFECYCLE_SRC = Path(__file__).resolve().parent.parent / "app" / "services" / "aria2_lifecycle_service.py"
+_LIFECYCLE_SRC = Path(__file__).resolve().parent.parent / "app" / "services" / "lifecycle" / "coordinator.py"
+_LIFECYCLE_CLEANUP_SRC = Path(__file__).resolve().parent.parent / "app" / "services" / "lifecycle" / "cleanup.py"
+_LIFECYCLE_HANDOFF_SRC = Path(__file__).resolve().parent.parent / "app" / "services" / "lifecycle" / "handoff.py"
 
 
 def _source_text() -> str:
     return _LIFECYCLE_SRC.read_text(encoding="utf-8")
+
+
+def _cleanup_source_text() -> str:
+    return _LIFECYCLE_CLEANUP_SRC.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -72,8 +75,8 @@ def test_no_fabricated_complete_event_call() -> None:
 def test_resolve_download_for_gid_is_pure() -> None:
     """``resolve_download_for_gid`` must not call guarded_update,
     assign_submitted_gid, or any DB write function (spec §6.3, §16.2)."""
-    source = _source_text()
-    tree = ast.parse(source, filename=str(_LIFECYCLE_SRC))
+    source = _LIFECYCLE_HANDOFF_SRC.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(_LIFECYCLE_HANDOFF_SRC))
 
     resolve_func: ast.AsyncFunctionDef | None = None
     for node in ast.walk(tree):
@@ -118,8 +121,8 @@ def test_resolve_download_for_gid_is_pure() -> None:
 def test_fail_download_and_reclaim_uses_claim_and_cleanup() -> None:
     """``_fail_download_and_reclaim_operation`` must call
     ``claim_attempt_terminal`` then ``cleanup_with_claim`` (spec §10.1-10.3)."""
-    source = _source_text()
-    tree = ast.parse(source, filename=str(_LIFECYCLE_SRC))
+    source = _cleanup_source_text()
+    tree = ast.parse(source, filename=str(_LIFECYCLE_CLEANUP_SRC))
 
     operation_func: ast.AsyncFunctionDef | None = None
     for node in ast.walk(tree):
@@ -174,7 +177,7 @@ async def test_old_gid_returns_stale(temp_db: str) -> None:
 
     # Send an event with the OLD gid — coordinator should see stale.
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_old",
         event="start",
         observed_status={"status": "active", "totalLength": "512"},
@@ -211,7 +214,7 @@ async def test_unrelated_gid_returns_ignored(temp_db: str) -> None:
     client = make_aria2_client()
 
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="totally_unknown_gid",
         event="start",
         observed_status={"status": "active"},
@@ -260,7 +263,7 @@ async def test_handoff_does_not_fabricate_complete_event(temp_db: str) -> None:
     client.tell_status.side_effect = _tell_status
 
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="payload_gid",
         event=None,
         observed_status=payload_status,

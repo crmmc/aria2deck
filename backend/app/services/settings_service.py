@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from time import time
 from typing import Any
 
-from app.aria2.gateway import update_cached_aria2_config
 from app.core.download_limiter import download_config
 from app.core.rate_limit_config import rate_limit_config
 from app.repositories import settings as settings_repo
@@ -486,6 +485,8 @@ async def load_runtime_config() -> None:
 
 
 async def refresh_aria2_config() -> None:
+    from app.aria2.gateway import update_cached_aria2_config
+
     rpc_url = await get_config_value("aria2_rpc_url")
     rpc_secret = await get_config_value("aria2_rpc_secret")
     update_cached_aria2_config(

@@ -25,11 +25,8 @@ from sqlalchemy import select
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
 from app.domain.lifecycle import ReconcileResult
-from app.services.aria2_lifecycle_service import (
-    coordinate_reported_size,
-    reconcile_attempt_signal,
-)
-from app.services import aria2_lifecycle_service
+from app.services.lifecycle.coordinator import reconcile_attempt_signal
+from app.services.lifecycle.handoff import coordinate_reported_size
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -139,7 +136,7 @@ async def test_no_pause_when_size_not_growing_concurrent(temp_db: str) -> None:
 
     r1, r2 = await asyncio.gather(
         coordinate_reported_size(
-            client=client1,
+            backend=client1,
             download=download,
             expected_gid="gid_nogrow_race",
             control_gid="gid_nogrow_race",
@@ -147,7 +144,7 @@ async def test_no_pause_when_size_not_growing_concurrent(temp_db: str) -> None:
             acquire_lifecycle_lock=True,
         ),
         coordinate_reported_size(
-            client=client2,
+            backend=client2,
             download=download,
             expected_gid="gid_nogrow_race",
             control_gid="gid_nogrow_race",
@@ -192,7 +189,7 @@ async def test_grow_pause_admit_unpause(temp_db: str) -> None:
 
     client = make_aria2_client()
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=download,
         expected_gid="gid_grow_race",
         control_gid="gid_grow_race",
@@ -250,7 +247,7 @@ async def test_pause_exception_requery_paused_idempotent(temp_db: str) -> None:
         },
     )
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=download,
         expected_gid="gid_pexcp_race",
         control_gid="gid_pexcp_race",
@@ -305,7 +302,7 @@ async def test_unpause_exception_requery_active_idempotent(temp_db: str) -> None
         },
     )
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=download,
         expected_gid="gid_uexcp_race",
         control_gid="gid_uexcp_race",
@@ -369,7 +366,7 @@ async def test_unpause_real_failure_writes_growth_failure(temp_db: str) -> None:
         mock_get_dir.return_value.__truediv__ = lambda self, x: f"/dl/{x}"
 
         result = await coordinate_reported_size(
-            client=client,
+            backend=client,
             download=download,
             expected_gid="gid_ufail_race",
             control_gid="gid_ufail_race",
@@ -423,7 +420,7 @@ async def test_gid_changed_no_growth_failure(temp_db: str) -> None:
 
     client = make_aria2_client()
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=download,
         expected_gid="gid_old_metadata",
         control_gid="gid_old_metadata",
@@ -471,7 +468,7 @@ async def test_task_already_terminal_no_growth_failure(temp_db: str) -> None:
 
     client = make_aria2_client()
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=download,
         expected_gid="gid_terminal_race",
         control_gid="gid_terminal_race",
@@ -525,7 +522,7 @@ async def test_requery_gid_missing_db_changed_no_growth_failure(temp_db: str) ->
         tell_status=_gid_error("gid_old_before_race"),
     )
     result = await coordinate_reported_size(
-        client=client,
+        backend=client,
         download=download,
         expected_gid="gid_old_before_race",
         control_gid="gid_old_before_race",
@@ -589,7 +586,7 @@ async def test_magnet_metadata_total_zero_no_cleanup(temp_db: str) -> None:
     }
     client = make_aria2_client(tell_status=metadata_status)
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_meta_race",
         event="start",
         observed_status=metadata_status,

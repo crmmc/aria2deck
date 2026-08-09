@@ -19,7 +19,7 @@ from app.http.safe_client import (
     create_public_connector,
     normalize_public_http_url,
 )
-from app.repositories.downloads import get_global_download_by_id
+from app.repositories.task.downloads import get_global_download_by_id
 from app.services.settings_service import get_max_task_size
 
 CAPABILITY_HEADER = "X-Aria2Deck-Fetch-Capability"

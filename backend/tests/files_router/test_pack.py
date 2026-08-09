@@ -177,7 +177,7 @@ class TestPackTaskOperations:
         )
 
         with patch(
-            "app.services.pack.PackTaskManager.cancel_pack",
+            "app.modules.pack.PackTaskManager.cancel_pack",
             new_callable=AsyncMock,
             return_value=True,
         ):

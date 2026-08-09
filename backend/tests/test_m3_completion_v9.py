@@ -30,14 +30,12 @@ from app.db.schema import (
     user_storage_usage,
     user_tasks,
 )
-from app.services.aria2_lifecycle_service import (
-    handle_v0_download_complete,
-    fail_download_and_reclaim,
-)
-from app.services.download_service import (
+from app.services.lifecycle.cleanup import fail_download_and_reclaim
+from app.services.lifecycle.completion import handle_v0_download_complete
+from app.domain.locks import get_download_lifecycle_lock
+from app.services.lifecycle.completion import (
     complete_global_download,
     complete_global_download_locked,
-    get_download_lifecycle_lock,
 )
 from app.services.storage import cleanup_task_download_dir, get_downloading_dir
 from tests.fakes import make_aria2_client
@@ -187,7 +185,7 @@ async def test_normal_completion_indexes_and_cleans_dir(temp_db: str) -> None:
     client = make_aria2_client(tell_status=aria2_status)
 
     changed = await handle_v0_download_complete(
-        client=client,
+        backend=client,
         download=download,
         aria2_status=aria2_status,
         completion_gid="gid-t13-normal",
@@ -253,7 +251,7 @@ async def test_fail_claims_first_then_complete_cannot_index(
     # Fail claims first
     client = make_aria2_client(tell_status={})
     failed = await fail_download_and_reclaim(
-        client=client,
+        backend=client,
         download_id=download["id"],
         message="竞态测试：先失败",
         error_code="error",
@@ -275,7 +273,7 @@ async def test_fail_claims_first_then_complete_cannot_index(
     )
 
     changed = await handle_v0_download_complete(
-        client=make_aria2_client(tell_status=aria2_status),
+        backend=make_aria2_client(tell_status=aria2_status),
         download=download,
         aria2_status=aria2_status,
         completion_gid="gid-t13-race-f",
@@ -327,7 +325,7 @@ async def test_complete_claims_first_then_fail_is_stale(temp_db: str) -> None:
     )
 
     changed = await handle_v0_download_complete(
-        client=make_aria2_client(tell_status=aria2_status),
+        backend=make_aria2_client(tell_status=aria2_status),
         download=download,
         aria2_status=aria2_status,
         completion_gid="gid-t13-race-c",
@@ -350,7 +348,7 @@ async def test_complete_claims_first_then_fail_is_stale(temp_db: str) -> None:
     # Now fail tries — should be stale (completed + completed_file_id set)
     client_fail = make_aria2_client(tell_status={})
     failed = await fail_download_and_reclaim(
-        client=client_fail,
+        backend=client_fail,
         download_id=download["id"],
         message="竞态测试：后失败",
         error_code="error",
@@ -419,7 +417,7 @@ async def test_pending_index_not_purged_by_fail_claim(temp_db: str) -> None:
     # returns None. We patch it so the file gets moved to store but
     # completed_file_id is NOT written.
     with patch(
-        "app.services.download_service.complete_active_user_tasks_for_stored_file",
+        "app.services.lifecycle.completion.complete_active_user_tasks_for_stored_file",
         return_value=None,
     ):
         result = await complete_global_download_locked(
@@ -495,11 +493,11 @@ async def test_pending_index_completed_without_file_preserved_by_reclaim(
 
     # Simulate CAS failure so completion returns None
     with patch(
-        "app.services.download_service.get_global_download_for_generation",
+        "app.services.lifecycle.completion.get_global_download_for_generation",
         return_value=None,
     ):
         changed = await handle_v0_download_complete(
-            client=make_aria2_client(tell_status=aria2_status),
+            backend=make_aria2_client(tell_status=aria2_status),
             download=download,
             aria2_status=aria2_status,
             completion_gid="gid-t13-pi2",
@@ -560,7 +558,7 @@ async def test_source_missing_no_followedby_fails_and_cleans(
     client = make_aria2_client(tell_status=aria2_status)
 
     changed = await handle_v0_download_complete(
-        client=client,
+        backend=client,
         download=download,
         aria2_status=aria2_status,
         completion_gid="gid-t13-nometa",
@@ -731,11 +729,11 @@ async def test_source_missing_tries_late_handoff_first(temp_db: str) -> None:
     # _refresh_followed_gid call (which is the first thing
     # switch_to_late_followed_download_if_supported does).
     with patch(
-        "app.services.aria2_lifecycle_service._refresh_followed_gid",
+        "app.services.lifecycle.handoff._refresh_followed_gid",
         return_value=None,
     ) as spy_refresh:
         changed = await handle_v0_download_complete(
-            client=client,
+            backend=client,
             download=download,
             aria2_status=metadata_status,
             completion_gid="gid-meta-late",

@@ -17,10 +17,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.domain.lifecycle import ReconcileResult
-from app.services import aria2_lifecycle_service
-from app.services.aria2_lifecycle_service import (
+from app.services.lifecycle import cleanup as cleanup_mod
+from app.services.lifecycle import coordinator as coordinator_mod
+from app.services.lifecycle import handoff as handoff_mod
+from app.services.lifecycle.coordinator import reconcile_attempt_signal
+from app.services.lifecycle.handoff import (
     ResolveResult,
-    reconcile_attempt_signal,
     resolve_download_for_gid,
 )
 from tests.helpers_v0 import (
@@ -73,7 +75,7 @@ async def test_exact_current_gid_resolves_and_reconciles(temp_db: str):
 
     client = _make_client()
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_current_001",
         event="start",
         observed_status={"status": "active", "totalLength": "1024"},
@@ -119,7 +121,7 @@ async def test_following_finds_source_without_writing_gid(temp_db: str):
     assert resolved.source_gid == "gid_source_002"
     assert resolved.is_handoff_candidate
 
-    from app.repositories.downloads import get_global_download_by_gid
+    from app.repositories.task.downloads import get_global_download_by_gid
 
     # Pure resolve must not write payload GID onto the source attempt.
     db_row = await get_global_download_by_gid("gid_source_002")
@@ -137,7 +139,7 @@ async def test_following_finds_source_without_writing_gid(temp_db: str):
         "files": [{"path": "/tmp/payload.bin", "length": "2048"}],
     }
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=payload_gid,
         event="start",
         observed_status=observed_status,
@@ -178,7 +180,7 @@ async def test_unrelated_gid_returns_ignored(temp_db: str):
 
     client = _make_client()
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_completely_unknown",
         event="start",
         observed_status={"status": "active"},
@@ -193,10 +195,15 @@ async def test_unrelated_gid_returns_ignored(temp_db: str):
 
 @pytest.mark.asyncio
 async def test_pure_resolve_no_repository_writes(temp_db: str):
-    update_spies = [
-        "guarded_update_global_download",
-        "guarded_update_download_and_active_user_tasks",
-    ]
+    update_spies = {
+        "guarded_update_global_download": (
+            "app.repositories.task.downloads.guarded_update_global_download"
+        ),
+        "guarded_update_download_and_active_user_tasks": (
+            "app.repositories.task.downloads."
+            "guarded_update_download_and_active_user_tasks"
+        ),
+    }
 
     user = await create_user_v0(username="t08_pure")
     download = await create_global_download_v0(
@@ -216,8 +223,8 @@ async def test_pure_resolve_no_repository_writes(temp_db: str):
     }
 
     patches = [
-        patch.object(aria2_lifecycle_service, name, new=AsyncMock())
-        for name in update_spies
+        patch(target, new=AsyncMock())
+        for target in update_spies.values()
     ]
     for p in patches:
         p.start()
@@ -233,10 +240,10 @@ async def test_pure_resolve_no_repository_writes(temp_db: str):
         assert resolved_handoff is not None
         assert resolved_handoff.source_gid == "gid_pure_direct"
 
-        for p in patches:
+        for target, p in zip(update_spies, patches):
             mock_obj = p.new
             assert mock_obj.call_count == 0, (
-                f"{p.attribute} was called during pure resolve"
+                f"{target} was called during pure resolve"
             )
     finally:
         for p in patches:
@@ -262,13 +269,13 @@ async def test_transient_rpc_error_returns_waiting(temp_db: str):
 
     fail_mock = AsyncMock(return_value=False)
     with patch.object(
-        aria2_lifecycle_service, "fail_download_and_reclaim", fail_mock
+        cleanup_mod, "fail_download_and_reclaim", fail_mock
     ):
         err = _transient_error()
         client = _make_client(tell_status_side_effect=err)
 
         result = await reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid="gid_transient_003",
             event="start",
             observed_status={"status": "active"},
@@ -281,7 +288,7 @@ async def test_transient_rpc_error_returns_waiting(temp_db: str):
         "fail_download_and_reclaim must not be called on transient RPC error"
     )
 
-    from app.repositories.downloads import get_global_download_status_snapshot
+    from app.repositories.task.downloads import get_global_download_status_snapshot
 
     snapshot = await get_global_download_status_snapshot(download["id"])
     assert snapshot is not None
@@ -333,12 +340,12 @@ async def test_stale_when_current_gid_changed(temp_db: str):
 
     client = _make_client()
     with patch.object(
-        aria2_lifecycle_service,
+        coordinator_mod,
         "get_global_download_status_snapshot",
         new=AsyncMock(return_value=fake_snapshot),
     ):
         result = await reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid="gid_original",
             event="start",
             observed_status={"status": "active"},

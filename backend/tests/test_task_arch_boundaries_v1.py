@@ -61,10 +61,19 @@ def _imports_blocked_module_prefix(
 
 
 def _force_remove_call_lineno(node: ast.AST) -> int | None:
-    """Return the lineno of a ``.force_remove(...)`` call, else None."""
+    """Return the lineno of a ``.force_remove(...)`` call, else None.
+
+    The aria2 adapter's ``force_remove_gid`` port method is the BackendPort
+    delegation seam and is exempt; anything else named ``force_remove`` is
+    the raw aria2 primitive and must not appear under ``app.modules``.
+    """
     if isinstance(node, ast.Call):
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr == "force_remove":
+            # Aria2BackendAdapter.force_remove_gid delegates to
+            # ``self._client.force_remove`` — the single allowed delegation.
+            if isinstance(func.value, ast.Attribute) and func.value.attr == "_client":
+                return None
             return _line_number(node)
         if isinstance(func, ast.Name) and func.id == "force_remove":
             return _line_number(node)
@@ -182,7 +191,7 @@ def test_modules_never_call_force_remove() -> None:
     """No ``.force_remove()`` under ``app.modules``.
 
     The BackendPort adapter uses ``remove`` / ``remove_download_result``;
-    ``force_remove`` stays in the coordinator (aria2_lifecycle_service),
+    ``force_remove`` stays in the coordinator (lifecycle/coordinator.py),
     the cleanup module (failed_task_cleanup), and the legacy cancel facade
     (download_service) per the allowed list in
     ``test_architecture_boundaries.test_force_remove_only_in_coordinator_and_cleanup``.

@@ -24,14 +24,12 @@ from sqlalchemy import select
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_storage_usage, user_tasks
 from app.domain.lifecycle import ReconcileResult
-from app.repositories.downloads import (
+from app.repositories.task.downloads import (
     guarded_update_global_download,
     guarded_update_download_and_active_user_tasks,
 )
-from app.services.aria2_lifecycle_service import (
-    fail_download_and_reclaim,
-    reconcile_attempt_signal,
-)
+from app.services.lifecycle.cleanup import fail_download_and_reclaim
+from app.services.lifecycle.coordinator import reconcile_attempt_signal
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -126,7 +124,7 @@ async def test_stale_gid_after_handoff_no_update(temp_db: str) -> None:
     client = make_aria2_client()
 
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=old_gid,
         event="error",
         observed_status=stale_status,
@@ -189,7 +187,7 @@ async def test_stale_gid_does_not_overwrite_current_attempt(
     client = make_aria2_client()
 
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_stale_ghost",
         event="error",
         observed_status=old_status,
@@ -250,7 +248,7 @@ async def test_payload_following_early_enters_handoff_only(temp_db: str) -> None
     }
 
     # Pure resolve: should find source attempt and NOT write GID.
-    from app.services.aria2_lifecycle_service import resolve_download_for_gid
+    from app.services.lifecycle.handoff import resolve_download_for_gid
 
     resolved = await resolve_download_for_gid(payload_gid, observed_status)
     assert resolved is not None
@@ -273,7 +271,7 @@ async def test_payload_following_early_enters_handoff_only(temp_db: str) -> None
         }
     )
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=payload_gid,
         event="start",
         observed_status=observed_status,
@@ -339,7 +337,7 @@ async def test_payload_following_cas_fail_no_destructive(temp_db: str) -> None:
     # resolve_download_for_gid won't find gid_source_old in any row, so
     # it returns None → IGNORED.
     result = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=payload_gid,
         event="start",
         observed_status=observed_status,
@@ -411,14 +409,14 @@ async def test_concurrent_signals_single_pause_unpause(temp_db: str) -> None:
     # Both signals observe the same active GID with grown size.
     results = await asyncio.gather(
         reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid="gid_conc_022",
             event="start",
             observed_status=dict(grown_status),
             log_prefix="[A]",
         ),
         reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid="gid_conc_022",
             event="start",
             observed_status=dict(grown_status),
@@ -480,7 +478,7 @@ async def test_second_signal_after_terminal_no_cleanup(temp_db: str) -> None:
         mock_get.return_value.__truediv__ = lambda self, x: f"/dl/{x}"
 
         result1 = await reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid="gid_term_022",
             event="error",
             observed_status={
@@ -503,7 +501,7 @@ async def test_second_signal_after_terminal_no_cleanup(temp_db: str) -> None:
 
     # Second signal: same GID, another error.
     result2 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid="gid_term_022",
         event="error",
         observed_status={
@@ -567,7 +565,7 @@ async def test_concurrent_terminalization_single_cleanup(temp_db: str) -> None:
 
         results = await asyncio.gather(
             reconcile_attempt_signal(
-                client=client,
+                backend=client,
                 observed_gid="gid_racetrm_022",
                 event="error",
                 observed_status={
@@ -580,7 +578,7 @@ async def test_concurrent_terminalization_single_cleanup(temp_db: str) -> None:
                 log_prefix="[A]",
             ),
             reconcile_attempt_signal(
-                client=client,
+                backend=client,
                 observed_gid="gid_racetrm_022",
                 event="error",
                 observed_status={
@@ -733,7 +731,7 @@ async def test_claim_zero_rows_no_destructive_action(temp_db: str) -> None:
 
     client = make_aria2_client()
     changed = await fail_download_and_reclaim(
-        client=client,
+        backend=client,
         download_id=download["id"],
         message="should not happen",
         error_code="should_not",

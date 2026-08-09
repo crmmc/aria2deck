@@ -8,12 +8,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.config import settings
-from app.repositories.downloads import (
+from app.domain import quota as domain_quota
+from app.repositories.task.downloads import (
     create_global_download_attempt,
     find_latest_completed_global_download_by_resource_key,
     find_live_global_download_by_resource_key,
 )
-from app.services import download_service
 from tests.helpers_v0 import create_global_download_v0, create_user_file_v0, create_user_v0
 
 
@@ -199,9 +199,10 @@ def test_disk_available_returns_free_minus_reserve(
     monkeypatch: pytest.MonkeyPatch, temp_db: str
 ) -> None:
     fake_usage = SimpleNamespace(free=5 * 1024 * 1024 * 1024)
-    monkeypatch.setattr(download_service.shutil, "disk_usage", lambda _p: fake_usage)
-    monkeypatch.setattr(download_service, "get_min_free_disk", lambda: 1024)
-    result = download_service.get_disk_available_bytes()
+    monkeypatch.setattr(domain_quota.shutil, "disk_usage", lambda _p: fake_usage)
+    result = domain_quota.get_disk_available_bytes(
+        settings.download_dir, min_free_disk=1024
+    )
     assert result == 5 * 1024 * 1024 * 1024 - 1024
 
 
@@ -209,7 +210,8 @@ def test_disk_available_returns_zero_when_full(
     monkeypatch: pytest.MonkeyPatch, temp_db: str
 ) -> None:
     fake_usage = SimpleNamespace(free=512)
-    monkeypatch.setattr(download_service.shutil, "disk_usage", lambda _p: fake_usage)
-    monkeypatch.setattr(download_service, "get_min_free_disk", lambda: 1024)
-    result = download_service.get_disk_available_bytes()
+    monkeypatch.setattr(domain_quota.shutil, "disk_usage", lambda _p: fake_usage)
+    result = domain_quota.get_disk_available_bytes(
+        settings.download_dir, min_free_disk=1024
+    )
     assert result == 0

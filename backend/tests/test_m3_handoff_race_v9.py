@@ -23,8 +23,8 @@ from sqlalchemy import select
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_tasks
 from app.domain.lifecycle import ReconcileResult
-from app.services import aria2_lifecycle_service
-from app.services.aria2_lifecycle_service import reconcile_attempt_signal
+from app.services.lifecycle import coordinator as coordinator_mod
+from app.services.lifecycle.coordinator import reconcile_attempt_signal
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -151,7 +151,7 @@ async def test_magnet_followedby_then_following_single_switch(
 
     # Event 1: source complete with followedBy.
     r1 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=source_gid,
         event="complete",
         observed_status=_source_status(gid=source_gid, followed_by=payload_gid),
@@ -164,7 +164,7 @@ async def test_magnet_followedby_then_following_single_switch(
 
     # Event 2: payload start with following (arrives late).
     r2 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=payload_gid,
         event="start",
         observed_status=_payload_status(gid=payload_gid, following=source_gid),
@@ -215,7 +215,7 @@ async def test_magnet_following_then_followedby_single_switch(
 
     # Event 1: payload start with following (arrives first).
     r1 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=payload_gid,
         event="start",
         observed_status=_payload_status(gid=payload_gid, following=source_gid),
@@ -227,7 +227,7 @@ async def test_magnet_following_then_followedby_single_switch(
 
     # Event 2: source complete with followedBy (arrives later — stale).
     r2 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=source_gid,
         event="complete",
         observed_status=_source_status(gid=source_gid, followed_by=payload_gid),
@@ -282,7 +282,7 @@ async def test_http_torrent_followedby_out_of_order(
 
     # Source complete with followedBy.
     r1 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=source_gid,
         event="complete",
         observed_status=_source_status(gid=source_gid, followed_by=payload_gid),
@@ -294,7 +294,7 @@ async def test_http_torrent_followedby_out_of_order(
 
     # Payload following arrives later — idempotent.
     r2 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=payload_gid,
         event="start",
         observed_status=_payload_status(gid=payload_gid, following=source_gid),
@@ -344,7 +344,7 @@ async def test_http_torrent_following_arrives_first(
 
     # Payload following arrives first.
     r1 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=payload_gid,
         event="start",
         observed_status=_payload_status(gid=payload_gid, following=source_gid),
@@ -356,7 +356,7 @@ async def test_http_torrent_following_arrives_first(
 
     # Source complete with followedBy arrives later — stale.
     r2 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=source_gid,
         event="complete",
         observed_status=_source_status(gid=source_gid, followed_by=payload_gid),
@@ -412,7 +412,7 @@ async def test_payload_statuses_idempotent_after_switch(
 
     # Initial handoff.
     r0 = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=source_gid,
         event="complete",
         observed_status=_source_status(gid=source_gid, followed_by=payload_gid),
@@ -428,7 +428,7 @@ async def test_payload_statuses_idempotent_after_switch(
         )
         client2 = make_aria2_client(tell_status=status)
         r = await reconcile_attempt_signal(
-            client=client2,
+            backend=client2,
             observed_gid=payload_gid,
             event=None,
             observed_status=status,
@@ -484,7 +484,7 @@ async def test_payload_transient_rpc_keeps_source_no_cleanup(
 
     # Following observed but payload RPC unavailable.
     r = await reconcile_attempt_signal(
-        client=client,
+        backend=client,
         observed_gid=payload_gid,
         event="start",
         observed_status=_payload_status(
@@ -566,7 +566,7 @@ async def test_admission_rejection_cleans_only_claim_gids(
         mock_get_dir.return_value.__truediv__ = lambda self, x: f"/dl/{x}"
 
         r = await reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid=payload_gid,
             event="start",
             observed_status=_payload_status(
@@ -650,12 +650,12 @@ async def test_handoff_complete_no_fabricated_event(temp_db: str) -> None:
     client = make_aria2_client(tell_status=_tell)
 
     with patch.object(
-        aria2_lifecycle_service,
+        coordinator_mod,
         "handle_v0_download_complete",
         new=AsyncMock(return_value=False),
     ) as spy_complete:
         r = await reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid=source_gid,
             event="complete",
             observed_status=_source_status(
@@ -721,7 +721,7 @@ async def test_duplicate_handoff_switches_once(temp_db: str) -> None:
     clients = [make_aria2_client(tell_status=_tell) for _ in range(5)]
     tasks = [
         reconcile_attempt_signal(
-            client=c,
+            backend=c,
             observed_gid=source_gid,
             event="complete",
             observed_status=source_st,
@@ -784,7 +784,7 @@ async def test_sequential_duplicate_handoff_switches_once(
     results = []
     for _ in range(3):
         r = await reconcile_attempt_signal(
-            client=client,
+            backend=client,
             observed_gid=source_gid,
             event="complete",
             observed_status=source_st,
