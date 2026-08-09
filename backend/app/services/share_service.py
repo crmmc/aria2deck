@@ -9,7 +9,7 @@ from typing import Any
 import jwt
 
 from app.core.config import settings
-from app.core.security import hash_password, verify_password
+from app.core.security import decrypt_credential, encrypt_credential, hash_password, verify_password
 from app.core.time_utils import ms_to_iso, now_ms
 from app.domain.errors import (
     BadRequestError,
@@ -34,12 +34,16 @@ SHARE_TOKEN_EXPIRE_MINUTES = 30
 
 
 def share_to_out(share: dict[str, Any], file_name: str, file_size: int) -> dict:
+    password: str | None = None
+    if share.get("password_encrypted"):
+        password = decrypt_credential(share["password_encrypted"])
     return {
         "id": int(share["id"]),
         "share_code": share["share_code"],
         "file_name": file_name,
         "file_size": file_size,
         "has_password": share["password_hash"] is not None,
+        "password": password,
         "expires_at": ms_to_iso(share["expires_at_ms"]),
         "max_downloads": share["max_downloads"],
         "download_count": int(share["download_count"]),
@@ -85,6 +89,7 @@ async def create_share(
     password_hash = (
         await asyncio.to_thread(hash_password, password) if password else None
     )
+    password_encrypted = encrypt_credential(password) if password else None
     timestamp = now_ms()
 
     def values_factory() -> dict[str, Any]:
@@ -93,6 +98,7 @@ async def create_share(
             "owner_id": user_id,
             "user_file_id": user_file_id,
             "password_hash": password_hash,
+            "password_encrypted": password_encrypted,
             "expires_at_ms": timestamp + expires_in * 1000 if expires_in else None,
             "max_downloads": max_downloads,
             "download_count": 0,

@@ -258,6 +258,7 @@ export type ShareLink = {
   file_name: string;
   file_size: number;
   has_password: boolean;
+  password: string | null;
   expires_at: string | null;
   max_downloads: number | null;
   download_count: number;

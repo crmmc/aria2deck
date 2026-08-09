@@ -139,6 +139,7 @@ class ShareLinkOut(BaseModel):
     file_name: str
     file_size: int
     has_password: bool
+    password: str | None = None
     expires_at: str | None
     max_downloads: int | None
     download_count: int

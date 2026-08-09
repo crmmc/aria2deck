@@ -62,6 +62,11 @@ export default function SharePageClient() {
       return;
     }
     codeRef.current = urlCode;
+    // 若 URL 带 password 参数，自动填入密码框
+    const urlPassword = new URLSearchParams(window.location.search).get("password");
+    if (urlPassword) {
+      setPassword(urlPassword);
+    }
     api
       .getSiteInfo()
       .then((info) => {

@@ -21,7 +21,7 @@ from app.domain.status import (
     USER_TASK_STATUSES,
 )
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
 PACK_SOURCE_CLEANUP_STATES = (
     "retained",
@@ -346,6 +346,7 @@ share_links = Table(
         nullable=False,
     ),
     Column("password_hash", Text),
+    Column("password_encrypted", Text),
     Column("expires_at_ms", Integer),
     Column("max_downloads", Integer),
     Column("download_count", Integer, nullable=False, server_default="0"),

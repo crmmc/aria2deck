@@ -36,8 +36,9 @@ export default function SharesPage() {
 
   const copy = useClipboard();
   const copyLink = useCallback(
-    (shareCode: string) => {
-      const link = `${window.location.origin}/s/${shareCode}`;
+    (shareCode: string, password?: string | null) => {
+      const base = `${window.location.origin}/s/${shareCode}`;
+      const link = password ? `${base}?password=${encodeURIComponent(password)}` : base;
       copy(link);
     },
     [copy]

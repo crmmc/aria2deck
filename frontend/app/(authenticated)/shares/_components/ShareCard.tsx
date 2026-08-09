@@ -7,7 +7,7 @@ interface ShareCardProps {
   record: ShareLink;
   isSelected: boolean;
   onToggleSelection: (id: number) => void;
-  onCopyLink: (shareCode: string) => void;
+  onCopyLink: (shareCode: string, password?: string | null) => void;
   onRevoke: (id: number) => void;
   onDelete: (id: number) => void;
 }
@@ -21,16 +21,16 @@ export const ShareCard = memo(function ShareCard({
   onDelete,
 }: ShareCardProps) {
   const handleCardClick = useCallback(() => {
-    onCopyLink(record.share_code);
-  }, [record.share_code, onCopyLink]);
+    onCopyLink(record.share_code, record.password);
+  }, [record.share_code, record.password, onCopyLink]);
 
   const handleCheckboxChange = useCallback(() => {
     onToggleSelection(record.id);
   }, [record.id, onToggleSelection]);
 
   const handleCopyClick = useCallback(() => {
-    onCopyLink(record.share_code);
-  }, [record.share_code, onCopyLink]);
+    onCopyLink(record.share_code, record.password);
+  }, [record.share_code, record.password, onCopyLink]);
 
   const handleRevokeClick = useCallback(() => {
     onRevoke(record.id);

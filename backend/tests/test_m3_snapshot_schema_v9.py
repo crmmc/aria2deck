@@ -59,7 +59,7 @@ async def test_fresh_bootstrap_creates_task_backend_snapshots(temp_db: str) -> N
         "updated_at_ms",
     }
     assert "ix_task_backend_snapshots_updated_at" in indexes
-    assert version == SCHEMA_VERSION == 10
+    assert version == SCHEMA_VERSION == 11
 
 
 @pytest.mark.asyncio
@@ -98,7 +98,7 @@ async def test_v8_to_v9_upgrade_creates_task_backend_snapshots(
         async with get_engine().begin() as conn:
             await conn.execute(text("PRAGMA foreign_keys=ON"))
             result = await run_migrations(conn, 8)
-        assert result == 10
+        assert result == 11
 
         async with get_engine().connect() as conn:
             tables = {
@@ -144,7 +144,7 @@ async def test_v8_to_v9_upgrade_creates_task_backend_snapshots(
             "updated_at_ms",
         }
         assert "ix_task_backend_snapshots_updated_at" in indexes
-        assert version == 10
+        assert version == 11
     finally:
         from app.db.engine import dispose_engine
 

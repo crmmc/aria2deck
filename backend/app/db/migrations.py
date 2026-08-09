@@ -358,6 +358,21 @@ async def migrate_v10(conn: AsyncConnection) -> None:
     await _rebuild_schema_meta(conn, 10)
 
 
+async def ensure_v11_share_password_encrypted(conn: AsyncConnection) -> None:
+    """v11: share_links.password_encrypted 列，存储加密后的分享密码明文。"""
+    if "share_links" not in await _table_names(conn):
+        return
+    if "password_encrypted" not in await _column_names(conn, "share_links"):
+        await conn.execute(
+            text("ALTER TABLE share_links ADD COLUMN password_encrypted TEXT")
+        )
+
+
+async def migrate_v11(conn: AsyncConnection) -> None:
+    await ensure_v11_share_password_encrypted(conn)
+    await _rebuild_schema_meta(conn, 11)
+
+
 async def migrate_v1(conn: AsyncConnection) -> None:
     await _add_missing_columns(conn, "app_settings", V1_APP_SETTINGS_ADDED_COLUMNS)
     await _rebuild_schema_meta(conn, 1)
@@ -949,6 +964,7 @@ MIGRATIONS: dict[int, Migration] = {
     8: migrate_v8,
     9: migrate_v9,
     10: migrate_v10,
+    11: migrate_v11,
 }
 
 
