@@ -279,11 +279,13 @@ async def set_rpc_secret(
     prefix: str | None,
     created_at_ms: int | None,
     *,
+    encrypted: str | None = None,
     require_enabled: bool = False,
 ) -> bool:
     values = {
         "rpc_secret_digest": digest,
         "rpc_secret_prefix": prefix,
+        "rpc_secret_encrypted": encrypted,
         "rpc_secret_created_at_ms": created_at_ms,
         "updated_at_ms": now_ms(),
     }

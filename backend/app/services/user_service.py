@@ -4,7 +4,7 @@ import logging
 import secrets
 
 from app.auth import AuthUser
-from app.core.security import credential_digest, credential_prefix, hash_password
+from app.core.security import credential_digest, credential_prefix, decrypt_credential, encrypt_credential, hash_password
 from app.core.time_utils import ms_to_iso, now_ms
 from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.domain.quota import machine_share_percent, usage_percent
@@ -380,10 +380,14 @@ async def get_rpc_access(user_id: int) -> RpcAccessStatus:
     if not db_user:
         raise NotFoundError("用户不存在")
     enabled = db_user["rpc_secret_digest"] is not None
+    secret: str | None = None
+    if enabled and db_user.get("rpc_secret_encrypted"):
+        secret = decrypt_credential(db_user["rpc_secret_encrypted"])
     logger.debug("查询RPC访问状态 user_id=%s enabled=%s", user_id, enabled)
     return RpcAccessStatus(
         enabled=enabled,
         secret_prefix=db_user["rpc_secret_prefix"] if enabled else None,
+        secret=secret,
         created_at=ms_to_iso(db_user["rpc_secret_created_at_ms"]),
     )
 
@@ -400,6 +404,7 @@ async def _issue_rpc_secret(
                 credential_digest("rpc-secret", secret),
                 credential_prefix(secret),
                 created_at_ms,
+                encrypted=encrypt_credential(secret),
                 require_enabled=require_enabled,
             )
         except auth_repo.DuplicateCredentialError:

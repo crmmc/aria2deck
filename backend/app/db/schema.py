@@ -21,7 +21,7 @@ from app.domain.status import (
     USER_TASK_STATUSES,
 )
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
 PACK_SOURCE_CLEANUP_STATES = (
     "retained",
@@ -60,6 +60,7 @@ users = Table(
     Column("quota_bytes", Integer, nullable=False),
     Column("rpc_secret_digest", String(64), unique=True),
     Column("rpc_secret_prefix", String(24)),
+    Column("rpc_secret_encrypted", Text),
     Column("rpc_secret_created_at_ms", Integer),
     Column("is_initial_password", Integer, nullable=False, server_default="0"),
     Column("created_at_ms", Integer, nullable=False),

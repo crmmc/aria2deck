@@ -79,9 +79,10 @@ class ChangePasswordRequest(BaseModel):
 
 
 class RpcAccessStatus(BaseModel):
-    """不含密钥的 RPC 访问状态。"""
+    """RPC 访问状态（含解密密钥）。"""
     enabled: bool
     secret_prefix: str | None = None
+    secret: str | None = None
     created_at: str | None = None
 
 

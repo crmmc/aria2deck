@@ -23,6 +23,7 @@ from app.db.migrations import (
     ensure_v7_content_identity_schema,
     ensure_v8_retry_attempt_schema,
     ensure_v9_backend_snapshot_schema,
+    ensure_v10_rpc_secret_encrypted,
     run_migrations,
 )
 from app.db.schema import SCHEMA_VERSION, app_settings, metadata, schema_meta
@@ -245,6 +246,7 @@ async def _migrate_existing_database(version: int) -> None:
                 await ensure_v7_content_identity_schema(conn)
                 await ensure_v8_retry_attempt_schema(conn)
                 await ensure_v9_backend_snapshot_schema(conn)
+                await ensure_v10_rpc_secret_encrypted(conn)
         finally:
             await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
             await conn.commit()
@@ -279,6 +281,7 @@ async def bootstrap_database() -> None:
         await ensure_v7_content_identity_schema(conn)
         await ensure_v8_retry_attempt_schema(conn)
         await ensure_v9_backend_snapshot_schema(conn)
+        await ensure_v10_rpc_secret_encrypted(conn)
         await conn.execute(
             insert(schema_meta).values(
                 id=1, version=SCHEMA_VERSION, created_at_ms=timestamp_ms

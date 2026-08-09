@@ -64,6 +64,27 @@ def credential_prefix(secret: str) -> str:
     return secret[:16]
 
 
+def _encryption_key() -> bytes:
+    """从 credential_pepper 派生对称加密密钥。"""
+    return hashlib.sha256(get_credential_pepper().encode("utf-8")).digest()
+
+
+def encrypt_credential(plaintext: str) -> str:
+    """用 credential_pepper 派生密钥加密凭证明文，返回 base64 编码。"""
+    key = _encryption_key()
+    data = plaintext.encode("utf-8")
+    encrypted = bytes(d ^ key[i % len(key)] for i, d in enumerate(data))
+    return base64.b64encode(encrypted).decode("ascii")
+
+
+def decrypt_credential(encrypted_b64: str) -> str:
+    """解密 encrypt_credential 加密的凭证明文。"""
+    key = _encryption_key()
+    encrypted = base64.b64decode(encrypted_b64.encode("ascii"))
+    decrypted = bytes(d ^ key[i % len(key)] for i, d in enumerate(encrypted))
+    return decrypted.decode("utf-8")
+
+
 def verify_password(password: str, encoded: str) -> bool:
     data = base64.b64decode(encoded.encode("utf-8"))
     salt = data[:16]

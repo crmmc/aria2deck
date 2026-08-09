@@ -343,6 +343,21 @@ async def migrate_v9(conn: AsyncConnection) -> None:
     await _rebuild_schema_meta(conn, 9)
 
 
+async def ensure_v10_rpc_secret_encrypted(conn: AsyncConnection) -> None:
+    """v10: users.rpc_secret_encrypted 列，存储加密后的 RPC 密钥明文。"""
+    if "users" not in await _table_names(conn):
+        return
+    if "rpc_secret_encrypted" not in await _column_names(conn, "users"):
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN rpc_secret_encrypted TEXT")
+        )
+
+
+async def migrate_v10(conn: AsyncConnection) -> None:
+    await ensure_v10_rpc_secret_encrypted(conn)
+    await _rebuild_schema_meta(conn, 10)
+
+
 async def migrate_v1(conn: AsyncConnection) -> None:
     await _add_missing_columns(conn, "app_settings", V1_APP_SETTINGS_ADDED_COLUMNS)
     await _rebuild_schema_meta(conn, 1)
@@ -933,6 +948,7 @@ MIGRATIONS: dict[int, Migration] = {
     7: migrate_v7,
     8: migrate_v8,
     9: migrate_v9,
+    10: migrate_v10,
 }
 
 
