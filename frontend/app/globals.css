@@ -2200,11 +2200,52 @@ dialog.confirm-overlay {
 
 /* Task Name */
 .task-name {
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 16px;
   margin-bottom: 4px;
+}
+
+.task-card-title-row,
+.task-card-meta,
+.task-progress-row {
+  display: flex;
+  align-items: center;
+}
+
+.task-card-title-row {
+  gap: 12px;
+}
+
+.task-card-title-row .task-name {
+  flex: 1;
+}
+
+.task-card-meta {
+  gap: 10px;
+}
+
+.task-speed {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.task-progress-row {
+  gap: 12px;
+}
+
+.task-progress-row .progress-container {
+  flex: 1;
+}
+
+.task-progress-text {
+  color: var(--text);
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Task Card Footer */
@@ -2222,6 +2263,10 @@ dialog.confirm-overlay {
   align-items: center;
   gap: 8px;
   margin-right: 16px;
+}
+
+.task-footer-left:empty {
+  display: none;
 }
 
 /* Task Footer Right (buttons) */

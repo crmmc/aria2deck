@@ -64,34 +64,60 @@ export const TaskCard = memo(function TaskCard({
     <>
       <div className="space-between flex-start mb-3">
         <div className="overflow-hidden flex-1">
-          <h3 className="task-name" title={task.name || undefined}>
-            {displayName}
-          </h3>
-          <div className="muted tabular-nums text-sm">
-            {formatBytes(task.completed_length)} /{" "}
-            {formatBytes(task.total_length)}
+          <div className="task-card-title-row">
+            <h3 className="task-name" title={task.name || undefined}>
+              {displayName}
+            </h3>
+            <span className={`task-status task-status-${task.status}`}>
+              {task.status === "queued" || task.status === "paused"
+                ? task.status_label || (task.status === "queued" ? "排队中" : "已暂停")
+                : task.status === "active"
+                  ? "下载中"
+                  : task.status === "waiting"
+                    ? "等待中"
+                    : task.status === "error"
+                      ? "失败"
+                      : task.status}
+            </span>
+          </div>
+          <div className="task-card-meta muted tabular-nums text-sm">
+            {task.status === "active" && (
+              <span className="task-speed">{formatBytes(task.download_speed)}/s</span>
+            )}
+            <span>
+              {formatBytes(task.completed_length)} / {formatBytes(task.total_length)}
+            </span>
           </div>
         </div>
-        {task.status === "active" && (
-          <span className="badge active tabular-nums">
-            {formatBytes(task.download_speed)}/s
-          </span>
-        )}
       </div>
 
-      <div className="progress-container mb-3">
+      <div className="task-progress-row mb-3">
         <div
-          className={`progress-bar ${
-            task.status === "active"
-              ? "progress-bar-active progress-bar-primary"
-              : task.status === "error"
-                ? "progress-bar-error"
-                : "progress-bar-primary"
-          }`}
-          style={{
-            width: `${task.total_length ? (task.completed_length / task.total_length) * 100 : 0}%`,
-          }}
-        />
+          className="progress-container"
+          role="progressbar"
+          aria-label={`${displayName} 下载进度`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={task.total_length ? Math.min((task.completed_length / task.total_length) * 100, 100) : 0}
+        >
+          <div
+            className={`progress-bar ${
+              task.status === "active"
+                ? "progress-bar-active progress-bar-primary"
+                : task.status === "error"
+                  ? "progress-bar-error"
+                  : "progress-bar-primary"
+            }`}
+            style={{
+              width: `${task.total_length ? (task.completed_length / task.total_length) * 100 : 0}%`,
+            }}
+          />
+        </div>
+        {task.total_length > 0 && task.status !== "error" && (
+          <span className="task-progress-text">
+            {formatTaskProgressLabel(task)}
+          </span>
+        )}
       </div>
     </>
   );
@@ -127,25 +153,9 @@ export const TaskCard = memo(function TaskCard({
           className="task-card-footer"
         >
           <div className="task-footer-left">
-            <span className={`task-status task-status-${task.status}`}>
-              {task.status === "queued" || task.status === "paused"
-                ? task.status_label || (task.status === "queued" ? "排队中" : "已暂停")
-                : task.status === "active"
-                  ? "下载中"
-                  : task.status === "waiting"
-                    ? "等待中"
-                    : task.status === "error"
-                      ? "失败"
-                      : task.status}
-            </span>
             {task.error && (
-              <span className="text-danger text-sm" title={task.error}>
+              <span className="task-error-text" title={task.error}>
                 {task.error}
-              </span>
-            )}
-            {task.total_length > 0 && task.status !== "error" && (
-              <span className="task-progress-text">
-                {formatTaskProgressLabel(task)}
               </span>
             )}
           </div>
