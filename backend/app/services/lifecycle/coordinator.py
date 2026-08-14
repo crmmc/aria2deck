@@ -455,6 +455,8 @@ async def reconcile_attempt_signal(
                     "admission_rejected",
                     "quota_queued",
                     "disk_queued",
+                    "admission_paused",
+                    "metadata_admission_paused",
                 }
                 # Unknown-size initial submit admission pause is
                 # system-owned: do not brand it as external (policy will
@@ -462,25 +464,42 @@ async def reconcile_attempt_signal(
                 admission_initial_submit_pause = (
                     event != "pause" and size_just_admitted
                 )
-                if (
+                # Already carrying a system-owned pause code (e.g. handoff
+                # just wrote metadata_admission_paused): keep ownership.
+                keep_system_pause_code = prev_error_code in {
+                    "admission_paused",
+                    "metadata_admission_paused",
+                }
+                if keep_system_pause_code and mapped["status"] == "paused":
+                    global_values["error_code"] = prev_error_code
+                    global_values["error_message"] = None
+                elif (
                     mapped["status"] == "paused"
                     and not is_metadata
                     and not size_paused_by_us
-                    and prev_status in {"active", "queued", "waiting"}
+                    and prev_status in {"active", "queued", "waiting", "paused"}
                     and prev_error_code not in protected_error_codes
                     and not admission_initial_submit_pause
                 ):
-                    global_values["error_message"] = "任务已被外部暂停"
-                    global_values["error_code"] = "external_paused"
-                    global_values["disk_reserved_bytes"] = max(
-                        0,
-                        download_ops.safe_int(snapshot.get("completed_bytes")),
-                    )
+                    # Include prev_status=paused so a bare paused row (empty
+                    # error_code after a crash window) can still be branded
+                    # external once — but never overwrite system codes above.
+                    if prev_status != "paused" or prev_error_code in {"", None}:
+                        global_values["error_message"] = "任务已被外部暂停"
+                        global_values["error_code"] = "external_paused"
+                        global_values["disk_reserved_bytes"] = max(
+                            0,
+                            download_ops.safe_int(
+                                snapshot.get("completed_bytes")
+                            ),
+                        )
                 elif mapped["status"] == "active" and prev_error_code in {
                     "external_paused",
                     "admin_paused",
+                    "admission_paused",
+                    "metadata_admission_paused",
                 }:
-                    # Clear sticky external-pause hint when download resumes.
+                    # Clear sticky pause ownership when download resumes.
                     global_values["error_code"] = None
                     global_values["error_message"] = None
 

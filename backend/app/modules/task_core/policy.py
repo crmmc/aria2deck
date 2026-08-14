@@ -18,7 +18,9 @@ from typing import Any, Literal, Mapping
 
 from app.modules.backend.port import BackendPort
 from app.modules.task_core.states import (
+    ERROR_ADMISSION_PAUSED,
     ERROR_DISK_QUEUED,
+    ERROR_METADATA_ADMISSION_PAUSED,
     ERROR_QUOTA_EXCEEDED,
     ERROR_QUOTA_QUEUED,
 )
@@ -94,12 +96,16 @@ def decide_on_snapshot(
     elif db_error == ERROR_DISK_QUEUED and ctx.disk_available:
         return Decision("resume", clear_error_code=True)
 
-    # Unknown-size HTTP tasks are submitted with ``pause=true`` so the
-    # coordinator can admit size before the first write.  The admission
-    # pause is system-owned (``admission_paused``); policy must resume it.
+    # System-owned admission pauses: HTTP ``pause=true`` and magnet
+    # ``pause-metadata`` payload after size is admitted. Policy may resume
+    # only with an explicit ownership code — never from size_known alone.
     if status == "paused":
-        if db_error == "admission_paused":
+        if db_error == ERROR_ADMISSION_PAUSED:
             return Decision("resume", clear_error_code=True)
+        if db_error == ERROR_METADATA_ADMISSION_PAUSED:
+            if _is_size_known(tid_row) and total > 0:
+                return Decision("resume", clear_error_code=True)
+            return Decision("keep", error_code=db_error)
         if db_error in SYSTEM_QUEUE_CODES or ctx.system_pause:
             # Still waiting on the blocking resource: hold the pause.
             return Decision("keep", error_code=db_error)

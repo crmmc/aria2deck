@@ -685,3 +685,129 @@ async def test_duplicate_handoff_is_idempotent(temp_db: str) -> None:
     stored2 = await _fetch_global(download["id"])
     assert stored2["aria2_gid"] == payload_gid
     assert stored2["status"] == "active"
+
+
+# ---------------------------------------------------------------------------
+# pause-metadata ownership: system unpause, never external_paused
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handoff_paused_payload_unpauses_and_clears_system_code(
+    temp_db: str,
+) -> None:
+    """pause-metadata payload is system-owned: admit, unpause, clear code."""
+    user = await create_user_v0(username="t12_meta_pause", quota_bytes=10_000_000)
+    download = await create_global_download_v0(
+        resource_key="magnet:t12-meta-pause",
+        source_uri="magnet:?xt=urn:btih:t12_meta_pause",
+        resource_kind="magnet",
+        status="active",
+        aria2_gid="gid_source_meta_pause",
+        total_bytes=0,
+        size_known=False,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+    )
+
+    payload_gid = "gid_payload_meta_pause"
+    source_status: dict[str, Any] = {
+        "status": "complete",
+        "followedBy": [payload_gid],
+        "totalLength": "0",
+        "completedLength": "0",
+        "files": [{"path": "[METADATA]", "length": "0", "selected": "true"}],
+    }
+    payload_status: dict[str, Any] = {
+        "status": "paused",
+        "following": "gid_source_meta_pause",
+        "totalLength": "8192",
+        "completedLength": "0",
+        "files": [
+            {
+                "path": "/dl/1/file.iso",
+                "length": "8192",
+                "selected": "true",
+            }
+        ],
+        "bittorrent": {"info": {"name": "file.iso"}},
+    }
+
+    async def _tell_status(gid: str) -> dict[str, Any]:
+        if gid == payload_gid:
+            return payload_status
+        return source_status
+
+    client = make_aria2_client()
+    client.tell_status.side_effect = _tell_status
+
+    result = await reconcile_attempt_signal(
+        backend=client,
+        observed_gid="gid_source_meta_pause",
+        event="complete",
+        observed_status=source_status,
+        log_prefix="[T12]",
+    )
+    assert result == ReconcileResult.CHANGED
+
+    stored = await _fetch_global(download["id"])
+    assert stored["aria2_gid"] == payload_gid
+    assert stored["resource_kind"] == "torrent"
+    assert stored["status"] == "active"
+    assert stored["error_code"] is None
+    assert int(stored["total_bytes"]) == 8192
+    assert bool(stored["size_known"]) is True
+    client.unpause.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handoff_system_pause_not_projected_external(temp_db: str) -> None:
+    """After handoff tags metadata_admission_paused, reconcile must not brand external."""
+    user = await create_user_v0(username="t12_no_ext", quota_bytes=10_000_000)
+    download = await create_global_download_v0(
+        resource_key="magnet:t12-no-ext",
+        source_uri="magnet:?xt=urn:btih:t12_no_ext",
+        resource_kind="torrent",
+        status="paused",
+        aria2_gid="gid_payload_no_ext",
+        total_bytes=4096,
+        size_known=True,
+        disk_reserved_bytes=4096,
+        error_code="metadata_admission_paused",
+        completed_bytes=0,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="paused",
+        reserved_bytes=4096,
+    )
+    await _set_usage_reserved(user["id"], 4096)
+
+    paused_status: dict[str, Any] = {
+        "status": "paused",
+        "totalLength": "4096",
+        "completedLength": "0",
+        "files": [
+            {"path": "/dl/1/file.iso", "length": "4096", "selected": "true"}
+        ],
+        "bittorrent": {"info": {"name": "file.iso"}},
+    }
+    client = make_aria2_client(tell_status=paused_status)
+
+    await reconcile_attempt_signal(
+        backend=client,
+        observed_gid="gid_payload_no_ext",
+        event=None,
+        observed_status=paused_status,
+        log_prefix="[T12]",
+    )
+
+    stored = await _fetch_global(download["id"])
+    assert stored["status"] == "paused"
+    assert stored["error_code"] == "metadata_admission_paused"
+    assert stored["error_code"] != "external_paused"
+    client.unpause.assert_not_awaited()

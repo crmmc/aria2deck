@@ -78,6 +78,32 @@ def test_admission_paused_resumes() -> None:
     assert decision.clear_error_code
 
 
+def test_metadata_admission_paused_resumes_when_size_known() -> None:
+    """Magnet pause-metadata ownership resumes only after size is admitted."""
+    row = _row(
+        status="paused",
+        error_code="metadata_admission_paused",
+        total_bytes=500,
+        size_known=True,
+    )
+    decision = decide_on_snapshot(row, "paused", quota=QuotaContext(quota_bytes=10**9))
+    assert decision.action == "resume"
+    assert decision.clear_error_code
+
+
+def test_metadata_admission_paused_holds_without_size() -> None:
+    """Do not resume metadata admission pause before size is known."""
+    row = _row(
+        status="paused",
+        error_code="metadata_admission_paused",
+        total_bytes=0,
+        size_known=False,
+    )
+    decision = decide_on_snapshot(row, "paused", quota=QuotaContext(quota_bytes=10**9))
+    assert decision.action == "keep"
+    assert decision.error_code == "metadata_admission_paused"
+
+
 def test_size_known_paused_without_error_is_external() -> None:
     """Known size + paused without ownership marker → external pause."""
     row = _row(status="paused", error_code=None, total_bytes=500, size_known=True)

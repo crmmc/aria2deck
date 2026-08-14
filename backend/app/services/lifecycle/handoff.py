@@ -17,6 +17,10 @@ from app.domain.lifecycle import ReconcileResult
 from app.domain.locks import get_download_lifecycle_lock
 from app.domain.quota import candidate_size_from_status, get_disk_available_bytes
 from app.domain.status import TERMINAL_DOWNLOAD_STATUSES
+from app.modules.task_core.states import (
+    ERROR_METADATA_ADMISSION_PAUSED,
+    ERROR_UNPAUSE_FAILED,
+)
 from app.repositories.task.downloads import (
     get_global_download_by_gid,
     get_global_download_for_generation,
@@ -432,6 +436,13 @@ async def _handoff_locked(
         payload_status, display_name_fallback
     )
 
+    # pause-metadata / admission pause is system-owned. Tag it before the
+    # CAS so a subsequent reconcile cannot brand it as external_paused if
+    # we crash between commit and unpause.
+    system_owned_pause = (
+        raw_status == "paused" or bool(admission.get("paused_by_us"))
+    ) and raw_status != "complete"
+
     global_values: dict[str, Any] = {
         "aria2_gid": payload_gid,
         "status": mapped_status,
@@ -445,6 +456,9 @@ async def _handoff_locked(
     bt_hash = download_ops.bt_info_hash_from_status(payload_status)
     if bt_hash:
         global_values["bt_info_hash"] = bt_hash
+    if system_owned_pause:
+        global_values["error_code"] = ERROR_METADATA_ADMISSION_PAUSED
+        global_values["error_message"] = None
 
     updated = await guarded_update_download_and_active_user_tasks(
         attempt_id,
@@ -480,10 +494,9 @@ async def _handoff_locked(
         )
 
     # 8. Resume payload if needed (spec §9.2 step 10).
-    should_unpause = raw_status == "paused" or bool(
-        admission.get("paused_by_us")
-    )
-    if should_unpause and raw_status != "complete":
+    # Ownership is metadata_admission_paused (or paused_by_us growth pause).
+    # Never leave a bare paused row for projection to brand external.
+    if system_owned_pause:
         try:
             await backend.unpause_gid(payload_gid)
             # Only re-project when the payload itself was paused. An internal
@@ -492,9 +505,19 @@ async def _handoff_locked(
             if raw_status == "paused":
                 await guarded_update_download_and_active_user_tasks(
                     attempt_id,
-                    {"status": "active"},
+                    {
+                        "status": "active",
+                        "error_code": None,
+                        "error_message": None,
+                    },
                     expected_gid=payload_gid,
                     user_status="active",
+                )
+            else:
+                await guarded_update_download_and_active_user_tasks(
+                    attempt_id,
+                    {"error_code": None, "error_message": None},
+                    expected_gid=payload_gid,
                 )
         except Exception:
             result_str = await _requery_after_control_failure(
@@ -503,17 +526,28 @@ async def _handoff_locked(
                 control_gid=payload_gid,
                 expected_gid=payload_gid,
                 success_statuses=UNPAUSE_SUCCESS_STATUSES,
-                failure_error_code="unpause_failed",
+                failure_error_code=ERROR_UNPAUSE_FAILED,
                 failure_message="磁力任务准入后恢复下载失败",
                 acquire_lifecycle_lock=False,
             )
-            if result_str == "success" and raw_status == "paused":
-                await guarded_update_download_and_active_user_tasks(
-                    attempt_id,
-                    {"status": "active"},
-                    expected_gid=payload_gid,
-                    user_status="active",
-                )
+            if result_str == "success":
+                if raw_status == "paused":
+                    await guarded_update_download_and_active_user_tasks(
+                        attempt_id,
+                        {
+                            "status": "active",
+                            "error_code": None,
+                            "error_message": None,
+                        },
+                        expected_gid=payload_gid,
+                        user_status="active",
+                    )
+                else:
+                    await guarded_update_download_and_active_user_tasks(
+                        attempt_id,
+                        {"error_code": None, "error_message": None},
+                        expected_gid=payload_gid,
+                    )
             elif result_str in ("failed", "missing"):
                 await _broadcast_download_update(attempt_id)
                 return ReconcileResult.TERMINALIZED, None

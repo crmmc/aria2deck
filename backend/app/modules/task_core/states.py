@@ -17,6 +17,10 @@ ERROR_DISK_QUEUED = "disk_queued"
 ERROR_QUOTA_EXCEEDED = "quota_exceeded"
 ERROR_EXTERNAL_PAUSED = "external_paused"
 ERROR_MAX_TASK_SIZE_EXCEEDED = "max_task_size_exceeded"
+# System-owned pause after magnet pause-metadata; only handoff/policy may resume.
+ERROR_METADATA_ADMISSION_PAUSED = "metadata_admission_paused"
+ERROR_ADMISSION_PAUSED = "admission_paused"
+ERROR_UNPAUSE_FAILED = "unpause_failed"
 
 
 class TidState(StrEnum):
