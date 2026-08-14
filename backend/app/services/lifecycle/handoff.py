@@ -18,6 +18,9 @@ from app.domain.locks import get_download_lifecycle_lock
 from app.domain.quota import candidate_size_from_status, get_disk_available_bytes
 from app.domain.status import TERMINAL_DOWNLOAD_STATUSES
 from app.modules.task_core.states import (
+    ERROR_ADMISSION_PAUSED,
+    ERROR_GROWTH_PAUSE_FAILED,
+    ERROR_GROWTH_UNPAUSE_FAILED,
     ERROR_METADATA_ADMISSION_PAUSED,
     ERROR_UNPAUSE_FAILED,
 )
@@ -27,14 +30,15 @@ from app.repositories.task.downloads import (
     get_global_download_status_snapshot,
     guarded_update_download_and_active_user_tasks,
     reconcile_download_size,
+    update_global_download,
 )
 from app.services import download_ops
 from app.services.lifecycle._shared import (
-    UNPAUSE_SUCCESS_STATUSES,
     _broadcast_download_update,
-    _requery_after_control_failure,
     is_missing_gid_error,
     is_transient_rpc_error,
+    system_pause_gid,
+    system_unpause_gid,
 )
 from app.services.lifecycle.cleanup import (
     _remove_download_result_best_effort,
@@ -129,7 +133,6 @@ async def coordinate_reported_size(
     """
     from app.core.config import settings
     from app.services.settings_service import get_max_task_size, get_min_free_disk
-    from app.services.lifecycle._shared import PAUSE_SUCCESS_STATUSES
 
     download_id = int(download["id"])
 
@@ -148,36 +151,50 @@ async def coordinate_reported_size(
     if candidate is None:
         return {"outcome": "unknown_size", "paused_by_us": False}
     old_size = int(current.get("total_bytes") or 0)
+    size_known = bool(current.get("size_known"))
     raw_status = str(status.get("status") or "")
+
+    # M6: once size is trusted, a smaller live candidate is noise (e.g. BT
+    # select-file partial file list). Never shrink reserved/total floor.
+    if size_known and candidate[0] < old_size:
+        return {
+            "outcome": "admitted",
+            "paused_by_us": False,
+            "size_bytes": old_size,
+            "skipped_shrink": True,
+        }
 
     paused_by_us = False
 
     # Pause for safe size accounting when size grew (spec §8.2).
     # Already paused or complete → skip pause (rule 1).
     if candidate[0] > old_size and raw_status not in {"paused", "complete"}:
-        try:
-            await backend.pause_gid(control_gid)
+        # Stamp system ownership on successful pause so a crash between
+        # pause and unpause cannot be branded external_paused (M7).
+        result_str = await system_pause_gid(
+            backend=backend,
+            download_id=download_id,
+            control_gid=control_gid,
+            expected_gid=expected_gid,
+            failure_error_code=ERROR_GROWTH_PAUSE_FAILED,
+            failure_message="任务大小增长时无法安全暂停",
+            ownership_error_code=ERROR_ADMISSION_PAUSED,
+            acquire_lifecycle_lock=acquire_lifecycle_lock,
+        )
+        if result_str == "success":
             paused_by_us = True
-        except Exception:
-            result_str = await _requery_after_control_failure(
-                backend=backend,
-                download_id=download_id,
-                control_gid=control_gid,
-                expected_gid=expected_gid,
-                success_statuses=PAUSE_SUCCESS_STATUSES,
-                failure_error_code="growth_pause_failed",
-                failure_message="任务大小增长时无法安全暂停",
-                acquire_lifecycle_lock=acquire_lifecycle_lock,
-            )
-            if result_str == "success":
-                paused_by_us = True
-            elif result_str == "complete":
-                return {"outcome": "complete", "paused_by_us": False}
-            elif result_str == "rpc_unavailable":
-                return {"outcome": "rpc_unavailable", "paused_by_us": False}
-            else:
-                # failed, stale, missing → already terminalized or no action
-                return {"outcome": "terminalized", "paused_by_us": False}
+        elif result_str == "complete":
+            return {"outcome": "complete", "paused_by_us": False}
+        elif result_str == "rpc_unavailable":
+            return {"outcome": "rpc_unavailable", "paused_by_us": False}
+        elif result_str == "soft_failed":
+            return {
+                "outcome": "pause_soft_failed",
+                "paused_by_us": False,
+                "pause_soft_failed": True,
+            }
+        else:
+            return {"outcome": "terminalized", "paused_by_us": False}
 
     # Budget / reservation atomic operation (spec §8.2).
     result = await reconcile_download_size(
@@ -203,29 +220,34 @@ async def coordinate_reported_size(
         return result
 
     # Idempotent unpause only when we confirmed the pause (spec §8.4).
+    # M6: unpause failure while still paused is a soft system mark — keep the
+    # attempt live (gid/dir) so a later reconcile/policy can resume. Only
+    # missing-GID / hard reclaim paths remain terminal via requery.
     if paused_by_us and resume_after_admission:
-        try:
-            await backend.unpause_gid(control_gid)
-        except Exception:
-            result_str = await _requery_after_control_failure(
-                backend=backend,
-                download_id=download_id,
-                control_gid=control_gid,
-                expected_gid=expected_gid,
-                success_statuses=UNPAUSE_SUCCESS_STATUSES,
-                failure_error_code="growth_unpause_failed",
-                failure_message="任务大小调整后恢复下载失败",
-                acquire_lifecycle_lock=acquire_lifecycle_lock,
+        result_str = await system_unpause_gid(
+            backend=backend,
+            download_id=download_id,
+            control_gid=control_gid,
+            expected_gid=expected_gid,
+            failure_error_code=ERROR_GROWTH_UNPAUSE_FAILED,
+            failure_message="任务大小调整后恢复下载失败",
+            acquire_lifecycle_lock=acquire_lifecycle_lock,
+        )
+        if result_str == "success":
+            # Clear ownership stamped for the growth pause window.
+            await update_global_download(
+                download_id,
+                {"error_code": None, "error_message": None},
             )
-            if result_str == "success":
-                pass  # idempotent success
-            elif result_str == "complete":
-                result["outcome"] = "complete"
-            elif result_str == "rpc_unavailable":
-                result["outcome"] = "rpc_unavailable"
-            else:
-                # failed, stale, missing → terminalized
-                result["outcome"] = "terminalized"
+        elif result_str == "complete":
+            result["outcome"] = "complete"
+        elif result_str == "rpc_unavailable":
+            result["outcome"] = "rpc_unavailable"
+        elif result_str == "soft_failed":
+            result["outcome"] = "admitted"
+            result["unpause_soft_failed"] = True
+        else:
+            result["outcome"] = "terminalized"
 
     return result
 
@@ -340,11 +362,18 @@ async def _handoff_locked(
             return ReconcileResult.WAITING, None
 
         if raw_status == "active":
-            # Pause and confirm (spec §9.2).
-            try:
-                await backend.pause_gid(payload_gid)
-            except Exception:
-                pass
+            # Soft system pause to wait for trusted size (M7 entry).
+            # Success path must also stamp ownership so WAITING is never bare.
+            await system_pause_gid(
+                backend=backend,
+                download_id=attempt_id,
+                control_gid=payload_gid,
+                expected_gid=source_gid,
+                ownership_error_code=ERROR_METADATA_ADMISSION_PAUSED,
+                failure_error_code=ERROR_METADATA_ADMISSION_PAUSED,
+                failure_message="磁力任务 payload 等待可信大小",
+                acquire_lifecycle_lock=False,
+            )
             try:
                 re_status = await backend.tell_status(payload_gid)
             except Exception as re_exc:
@@ -360,28 +389,17 @@ async def _handoff_locked(
                 payload_status = re_status
                 raw_status = "complete"
             else:
-                # Pause not confirmed, fencing still matches (spec §9.2).
-                logger.warning(
+                # Pause not confirmed yet: wait for later reconcile rather than
+                # one-shot terminalize (M6 residual R2 / M7).
+                logger.info(
                     "%s Handoff unknown size: pause not confirmed, "
-                    "terminalizing attempt_id=%s payload=%s",
+                    "waiting attempt_id=%s payload=%s re_status=%s",
                     log_prefix,
                     attempt_id,
                     payload_gid,
+                    re_raw,
                 )
-                changed = await fail_download_and_reclaim(
-                    backend=backend,
-                    download_id=attempt_id,
-                    message="磁力任务 payload 无法确认可信文件大小",
-                    error_code="handoff_unknown_size",
-                    expected_gid=source_gid,
-                    writer_gid=payload_gid,
-                    acquire_lifecycle_lock=False,
-                    log_prefix=log_prefix,
-                )
-                if changed:
-                    await _broadcast_download_update(attempt_id)
-                    return ReconcileResult.TERMINALIZED, None
-                return ReconcileResult.STALE, None
+                return ReconcileResult.WAITING, None
 
         # Other statuses (error/removed) → waiting for next reconcile.
         return ReconcileResult.WAITING, None
@@ -495,10 +513,18 @@ async def _handoff_locked(
 
     # 8. Resume payload if needed (spec §9.2 step 10).
     # Ownership is metadata_admission_paused (or paused_by_us growth pause).
-    # Never leave a bare paused row for projection to brand external.
+    # M7: always soft via system_unpause_gid — never hard reclaim on control fail.
     if system_owned_pause:
-        try:
-            await backend.unpause_gid(payload_gid)
+        result_str = await system_unpause_gid(
+            backend=backend,
+            download_id=attempt_id,
+            control_gid=payload_gid,
+            expected_gid=payload_gid,
+            failure_error_code=ERROR_UNPAUSE_FAILED,
+            failure_message="磁力任务准入后恢复下载失败",
+            acquire_lifecycle_lock=False,
+        )
+        if result_str == "success":
             # Only re-project when the payload itself was paused. An internal
             # size-admission pause of a waiting payload must not overwrite the
             # committed waiting status with active.
@@ -519,40 +545,17 @@ async def _handoff_locked(
                     {"error_code": None, "error_message": None},
                     expected_gid=payload_gid,
                 )
-        except Exception:
-            result_str = await _requery_after_control_failure(
-                backend=backend,
-                download_id=attempt_id,
-                control_gid=payload_gid,
-                expected_gid=payload_gid,
-                success_statuses=UNPAUSE_SUCCESS_STATUSES,
-                failure_error_code=ERROR_UNPAUSE_FAILED,
-                failure_message="磁力任务准入后恢复下载失败",
-                acquire_lifecycle_lock=False,
-            )
-            if result_str == "success":
-                if raw_status == "paused":
-                    await guarded_update_download_and_active_user_tasks(
-                        attempt_id,
-                        {
-                            "status": "active",
-                            "error_code": None,
-                            "error_message": None,
-                        },
-                        expected_gid=payload_gid,
-                        user_status="active",
-                    )
-                else:
-                    await guarded_update_download_and_active_user_tasks(
-                        attempt_id,
-                        {"error_code": None, "error_message": None},
-                        expected_gid=payload_gid,
-                    )
-            elif result_str in ("failed", "missing"):
-                await _broadcast_download_update(attempt_id)
-                return ReconcileResult.TERMINALIZED, None
-            elif result_str == "stale":
-                return ReconcileResult.STALE, None
+        elif result_str == "soft_failed":
+            # Ownership code already stamped by soft path; keep live.
+            await _broadcast_download_update(attempt_id)
+        elif result_str == "missing":
+            await _broadcast_download_update(attempt_id)
+            return ReconcileResult.TERMINALIZED, None
+        elif result_str == "stale":
+            return ReconcileResult.STALE, None
+        elif result_str == "rpc_unavailable":
+            await _broadcast_download_update(attempt_id)
+        # complete: fall through to completion dispatch below
 
     # 9. Payload already complete → dispatch completion (spec §9.2 step 11).
     if raw_status == "complete" or outcome == "complete":

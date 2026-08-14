@@ -321,17 +321,15 @@ async def test_unpause_exception_requery_active_idempotent(temp_db: str) -> None
 
 
 # ---------------------------------------------------------------------------
-# Scenario 4: re-query still paused + fencing valid → growth_unpause_failed
+# Scenario 4: re-query still paused + fencing valid → soft growth_unpause_failed
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_unpause_real_failure_writes_growth_failure(temp_db: str) -> None:
-    """unpause throws, re-query still paused, DB GID unchanged → real failure.
+    """unpause throws, re-query still paused, DB GID unchanged → soft failure.
 
-    This is the only condition under which growth_unpause_failed is justified:
-    the control GID is still current, the attempt is still live, and the
-    download is genuinely stuck in paused state.
+    M6: mark growth_unpause_failed but keep the attempt live (no reclaim).
     """
     user = await create_user_v0(username="t24_ufail", quota_bytes=10_000_000)
     download = await create_global_download_v0(
@@ -343,6 +341,7 @@ async def test_unpause_real_failure_writes_growth_failure(temp_db: str) -> None:
         total_bytes=1024,
         size_known=True,
         completed_bytes=512,
+        disk_reserved_bytes=1024,
     )
     await create_user_task_v0(
         user_id=user["id"],
@@ -378,13 +377,18 @@ async def test_unpause_real_failure_writes_growth_failure(temp_db: str) -> None:
             acquire_lifecycle_lock=False,
         )
 
-    assert result["outcome"] == "terminalized"
+    assert result["outcome"] == "admitted"
+    assert result.get("unpause_soft_failed") is True
     stored = await _fetch_global(download["id"])
-    assert stored["status"] == "failed"
+    assert stored["status"] == "paused"
     assert stored["error_code"] == "growth_unpause_failed"
+    assert stored["aria2_gid"] == "gid_ufail_race"
+    assert int(stored["total_bytes"]) == 4096
     tasks = await _fetch_user_tasks(download["id"])
     assert len(tasks) == 1
-    assert tasks[0]["status"] == "failed"
+    assert tasks[0]["status"] == "paused"
+    mock_dir.assert_not_called()
+    client.force_remove.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

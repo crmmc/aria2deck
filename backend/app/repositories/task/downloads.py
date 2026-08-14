@@ -712,6 +712,14 @@ async def create_global_download_attempt(values: dict[str, Any]) -> dict[str, An
 
 
 async def reset_active_accounting_for_startup() -> None:
+    """Rebuild usage accounting without wiping trusted size floors.
+
+    Pack reservations are recomputed from pack_tasks. For live downloads that
+    already know total_bytes (size_known), keep disk/user reserved at that floor
+    so a crash/restart window does not show frozen_space=0 while reconcile runs
+    (M6 residual R6). Unknown-size live rows still start at 0 and re-admit via
+    the coordinator.
+    """
     timestamp = now_ms()
     used_subquery = (
         select(func.coalesce(func.sum(stored_files.c.size_bytes), 0))
@@ -731,21 +739,73 @@ async def reset_active_accounting_for_startup() -> None:
         )
         .scalar_subquery()
     )
+    task_reserved_subquery = (
+        select(func.coalesce(func.sum(user_tasks.c.reserved_bytes), 0))
+        .where(
+            user_tasks.c.user_id == user_storage_usage.c.user_id,
+            user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+        )
+        .scalar_subquery()
+    )
     async with transaction() as conn:
+        # Unknown-size live downloads: clear physical reservation until admit.
         await conn.execute(
             update(global_downloads)
-            .where(global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES))
+            .where(
+                global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
+                global_downloads.c.size_known == 0,
+            )
             .values(disk_reserved_bytes=0, updated_at_ms=timestamp)
         )
+        # Known-size live downloads: restore floor from total_bytes.
+        await conn.execute(
+            update(global_downloads)
+            .where(
+                global_downloads.c.status.in_(ACTIVE_GLOBAL_DOWNLOAD_STATUSES),
+                global_downloads.c.size_known == 1,
+            )
+            .values(
+                disk_reserved_bytes=global_downloads.c.total_bytes,
+                updated_at_ms=timestamp,
+            )
+        )
+        # Unknown-size user tasks: clear until re-admit.
         await conn.execute(
             update(user_tasks)
-            .where(user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES))
+            .where(
+                user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                user_tasks.c.global_download_id.in_(
+                    select(global_downloads.c.id).where(
+                        global_downloads.c.size_known == 0
+                    )
+                ),
+            )
             .values(reserved_bytes=0, updated_at_ms=timestamp)
+        )
+        # Known-size user tasks: floor from global total_bytes.
+        await conn.execute(
+            update(user_tasks)
+            .where(
+                user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
+                user_tasks.c.global_download_id.in_(
+                    select(global_downloads.c.id).where(
+                        global_downloads.c.size_known == 1
+                    )
+                ),
+            )
+            .values(
+                reserved_bytes=(
+                    select(global_downloads.c.total_bytes)
+                    .where(global_downloads.c.id == user_tasks.c.global_download_id)
+                    .scalar_subquery()
+                ),
+                updated_at_ms=timestamp,
+            )
         )
         await conn.execute(
             update(user_storage_usage).values(
                 used_bytes=used_subquery,
-                reserved_bytes=pack_subquery,
+                reserved_bytes=pack_subquery + task_reserved_subquery,
                 updated_at_ms=timestamp,
             )
         )

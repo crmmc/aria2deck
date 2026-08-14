@@ -21,6 +21,43 @@ ERROR_MAX_TASK_SIZE_EXCEEDED = "max_task_size_exceeded"
 ERROR_METADATA_ADMISSION_PAUSED = "metadata_admission_paused"
 ERROR_ADMISSION_PAUSED = "admission_paused"
 ERROR_UNPAUSE_FAILED = "unpause_failed"
+ERROR_GROWTH_UNPAUSE_FAILED = "growth_unpause_failed"
+ERROR_GROWTH_PAUSE_FAILED = "growth_pause_failed"
+
+# Single source for system-owned pause/resume codes (M7).
+# Projection must not overwrite these with external_paused; policy may
+# resume only with an explicit predicate (never from size_known alone).
+SYSTEM_OWNED_PAUSE_CODES = frozenset(
+    {
+        ERROR_ADMISSION_PAUSED,
+        ERROR_METADATA_ADMISSION_PAUSED,
+        ERROR_UNPAUSE_FAILED,
+        ERROR_GROWTH_UNPAUSE_FAILED,
+        ERROR_GROWTH_PAUSE_FAILED,
+        ERROR_QUOTA_QUEUED,
+        ERROR_DISK_QUEUED,
+    }
+)
+
+# Codes that block branding a pause as external (owned + hard rejects).
+PROJECTION_PROTECTED_ERROR_CODES = SYSTEM_OWNED_PAUSE_CODES | frozenset(
+    {
+        "handoff_unknown_size",
+        "unknown_size",
+        "disk_budget",
+        "disk_budget_exceeded",
+        "max_task_size",
+        "admission_rejected",
+    }
+)
+
+# Sticky codes cleared when aria2 maps to active (owned + external/admin).
+ACTIVE_CLEAR_ERROR_CODES = SYSTEM_OWNED_PAUSE_CODES | frozenset(
+    {
+        ERROR_EXTERNAL_PAUSED,
+        "admin_paused",
+    }
+)
 
 
 class TidState(StrEnum):

@@ -170,6 +170,11 @@ async def test_grow_pause_admit_unpause(temp_db: str) -> None:
     client.pause.assert_called_once_with("gid_grow_002")
     client.unpause.assert_called_once_with("gid_grow_002")
 
+    stored = await _fetch_global(download["id"])
+    # Successful growth pause/unpause must not leave sticky ownership.
+    assert stored["error_code"] is None
+    assert int(stored["total_bytes"]) == 2048
+
 
 # ---------------------------------------------------------------------------
 # 3. pause RPC throws but re-query shows paused → idempotent success
@@ -286,7 +291,7 @@ async def test_unpause_exception_requery_active(temp_db: str) -> None:
 
 # ---------------------------------------------------------------------------
 # 5. unpause fails and re-query still paused + fencing valid →
-#    growth_unpause_failed terminal
+#    soft system mark (M6): keep live, do not reclaim
 # ---------------------------------------------------------------------------
 
 
@@ -302,6 +307,7 @@ async def test_unpause_real_failure_growth_unpause_failed(temp_db: str) -> None:
         total_bytes=1024,
         size_known=True,
         completed_bytes=512,
+        disk_reserved_bytes=1024,
     )
     await create_user_task_v0(
         user_id=user["id"],
@@ -342,15 +348,80 @@ async def test_unpause_real_failure_growth_unpause_failed(temp_db: str) -> None:
             acquire_lifecycle_lock=False,
         )
 
-    assert result["outcome"] == "terminalized"
+    # Size was admitted; unpause soft-fails without killing the task.
+    assert result["outcome"] == "admitted"
+    assert result.get("unpause_soft_failed") is True
 
     stored = await _fetch_global(download["id"])
-    assert stored["status"] == "failed"
+    assert stored["status"] == "paused"
+    assert stored["aria2_gid"] == "gid_ufail_005"
     assert stored["error_code"] == "growth_unpause_failed"
+    assert int(stored["total_bytes"]) == 2048
+    assert int(stored["disk_reserved_bytes"]) == 2048
+    mock_dir.assert_not_called()
+    client.force_remove.assert_not_awaited()
 
     tasks = await _fetch_user_tasks(download["id"])
     assert len(tasks) == 1
-    assert tasks[0]["status"] == "failed"
+    assert tasks[0]["status"] == "paused"
+    assert int(tasks[0]["reserved_bytes"]) == 2048
+
+
+@pytest.mark.asyncio
+async def test_size_known_does_not_shrink_reserved(temp_db: str) -> None:
+    """AC-1: trusted size_known floor must not shrink on smaller live candidate."""
+    user = await create_user_v0(username="t11_noshrink", quota_bytes=10_000_000)
+    download = await create_global_download_v0(
+        resource_key="torrent:t11-noshrink",
+        source_uri="magnet:?xt=urn:btih:t11noshrink",
+        resource_kind="torrent",
+        status="active",
+        aria2_gid="gid_noshrink_010",
+        total_bytes=500_000,
+        size_known=True,
+        completed_bytes=0,
+        disk_reserved_bytes=500_000,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=500_000,
+    )
+    await _set_usage_reserved(user["id"], 500_000)
+
+    client = make_aria2_client()
+    result = await coordinate_reported_size(
+        backend=client,
+        download=download,
+        expected_gid="gid_noshrink_010",
+        control_gid="gid_noshrink_010",
+        status={
+            "status": "active",
+            "totalLength": "1000",
+            "completedLength": "0",
+            "files": [
+                {
+                    "path": "/dl/partial.bin",
+                    "length": "1000",
+                    "selected": "true",
+                }
+            ],
+        },
+        acquire_lifecycle_lock=False,
+    )
+
+    assert result["outcome"] == "admitted"
+    client.pause.assert_not_awaited()
+    client.unpause.assert_not_awaited()
+
+    stored = await _fetch_global(download["id"])
+    assert int(stored["total_bytes"]) == 500_000
+    assert int(stored["disk_reserved_bytes"]) == 500_000
+    assert stored["status"] == "active"
+
+    tasks = await _fetch_user_tasks(download["id"])
+    assert int(tasks[0]["reserved_bytes"]) == 500_000
 
 
 # ---------------------------------------------------------------------------

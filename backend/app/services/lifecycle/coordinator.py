@@ -16,6 +16,13 @@ from app.core.security import sanitize_string
 from app.core.time_utils import now_ms
 from app.domain.lifecycle import ReconcileResult
 from app.domain.locks import get_download_lifecycle_lock
+from app.modules.task_core.states import (
+    ACTIVE_CLEAR_ERROR_CODES,
+    ERROR_ADMISSION_PAUSED,
+    ERROR_EXTERNAL_PAUSED,
+    PROJECTION_PROTECTED_ERROR_CODES,
+    SYSTEM_OWNED_PAUSE_CODES,
+)
 from app.domain.quota import candidate_size_from_status
 from app.domain.status import (
     ACTIVE_USER_TASK_STATUSES,
@@ -370,6 +377,11 @@ async def reconcile_attempt_signal(
                             return ReconcileResult.TERMINALIZED
                         if size_outcome == "rpc_unavailable":
                             pass  # Skip size admission, continue with projection
+                        elif size_outcome == "pause_soft_failed":
+                            # Soft ownership already stamped. Do not project the
+                            # pre-pause working_status over the soft mark.
+                            await _broadcast_download_update(attempt_id)
+                            return ReconcileResult.CHANGED
                         elif size_outcome == "complete":
                             complete_dispatch = (
                                 current_gid, working_status,
@@ -402,6 +414,14 @@ async def reconcile_attempt_signal(
                             await _broadcast_download_update(attempt_id)
                             return ReconcileResult.TERMINALIZED
 
+                        # Unpause soft-fail still returns admitted; ownership
+                        # is stamped — skip projecting pre-control status.
+                        if admission is not None and admission.get(
+                            "unpause_soft_failed"
+                        ):
+                            await _broadcast_download_update(attempt_id)
+                            return ReconcileResult.CHANGED
+
                 prev_status = str(snapshot.get("status") or "")
                 prev_error_code = str(snapshot.get("error_code") or "")
                 size_paused_by_us = bool(
@@ -430,46 +450,25 @@ async def reconcile_attempt_signal(
                 if size_just_admitted:
                     # Mark the pause as system admission ownership so policy
                     # resumes it instead of treating it as external.
-                    global_values["error_code"] = "admission_paused"
+                    global_values["error_code"] = ERROR_ADMISSION_PAUSED
                     global_values["error_message"] = None
                 if not is_metadata:
                     global_values["total_bytes"] = mapped["total_bytes"]
                     if mapped["display_name"]:
                         global_values["display_name"] = mapped["display_name"]
 
-                # Pause projection (arch M2):
-                # - never auto-unpause merely because size_known (removed a554c30 path)
+                # Pause projection (arch M2 / M7):
+                # - never auto-unpause merely because size_known
                 # - never mark metadata-phase pause as external
                 # - never mark pause that size-admission just owned (paused_by_us)
-                # - never overwrite growth/handoff/admission or queue error codes
-                # - only when transitioning into paused from a non-paused live status
-                protected_error_codes = {
-                    "growth_pause_failed",
-                    "growth_unpause_failed",
-                    "unpause_failed",
-                    "handoff_unknown_size",
-                    "unknown_size",
-                    "disk_budget",
-                    "disk_budget_exceeded",
-                    "max_task_size",
-                    "admission_rejected",
-                    "quota_queued",
-                    "disk_queued",
-                    "admission_paused",
-                    "metadata_admission_paused",
-                }
-                # Unknown-size initial submit admission pause is
-                # system-owned: do not brand it as external (policy will
-                # resume it via ``admission_paused``).
+                # - never overwrite SYSTEM_OWNED / protected codes with external
+                # - clear owned/external sticky codes when mapped active
                 admission_initial_submit_pause = (
                     event != "pause" and size_just_admitted
                 )
-                # Already carrying a system-owned pause code (e.g. handoff
-                # just wrote metadata_admission_paused): keep ownership.
-                keep_system_pause_code = prev_error_code in {
-                    "admission_paused",
-                    "metadata_admission_paused",
-                }
+                keep_system_pause_code = (
+                    prev_error_code in SYSTEM_OWNED_PAUSE_CODES
+                )
                 if keep_system_pause_code and mapped["status"] == "paused":
                     global_values["error_code"] = prev_error_code
                     global_values["error_message"] = None
@@ -478,27 +477,23 @@ async def reconcile_attempt_signal(
                     and not is_metadata
                     and not size_paused_by_us
                     and prev_status in {"active", "queued", "waiting", "paused"}
-                    and prev_error_code not in protected_error_codes
+                    and prev_error_code not in PROJECTION_PROTECTED_ERROR_CODES
                     and not admission_initial_submit_pause
                 ):
-                    # Include prev_status=paused so a bare paused row (empty
-                    # error_code after a crash window) can still be branded
-                    # external once — but never overwrite system codes above.
+                    # Bare paused (empty code) can still be branded external once.
                     if prev_status != "paused" or prev_error_code in {"", None}:
                         global_values["error_message"] = "任务已被外部暂停"
-                        global_values["error_code"] = "external_paused"
+                        global_values["error_code"] = ERROR_EXTERNAL_PAUSED
                         global_values["disk_reserved_bytes"] = max(
                             0,
                             download_ops.safe_int(
                                 snapshot.get("completed_bytes")
                             ),
                         )
-                elif mapped["status"] == "active" and prev_error_code in {
-                    "external_paused",
-                    "admin_paused",
-                    "admission_paused",
-                    "metadata_admission_paused",
-                }:
+                elif (
+                    mapped["status"] == "active"
+                    and prev_error_code in ACTIVE_CLEAR_ERROR_CODES
+                ):
                     # Clear sticky pause ownership when download resumes.
                     global_values["error_code"] = None
                     global_values["error_message"] = None

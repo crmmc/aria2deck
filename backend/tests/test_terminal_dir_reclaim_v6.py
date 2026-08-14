@@ -54,7 +54,8 @@ def _task_dir(download_id: int) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_growth_pause_failed_reclaims_download_dir(temp_db: str) -> None:
+async def test_growth_pause_failed_keeps_download_dir(temp_db: str) -> None:
+    """M6 residual: growth pause failure is soft — keep live, do not reclaim."""
     user = await create_user_v0(username="growth_pause_reclaim", quota_bytes=1000)
     client = make_aria2_client(add_uri="gid-growth-pause", pause=OSError("pause failed"))
     task = await create_download_task(
@@ -70,6 +71,13 @@ async def test_growth_pause_failed_reclaims_download_dir(temp_db: str) -> None:
     download_id = int(global_download_id_of(task))
     task_dir = _task_dir(download_id)
 
+    # Re-query after pause failure still active → soft mark, no reclaim.
+    client.tell_status.return_value = {
+        "status": "active",
+        "totalLength": "200",
+        "completedLength": "0",
+    }
+
     result = await coordinate_reported_size(
         backend=client,
         download=await _fetch_global(download_id),
@@ -83,11 +91,14 @@ async def test_growth_pause_failed_reclaims_download_dir(temp_db: str) -> None:
     )
 
     stored = await _fetch_global(download_id)
-    assert result["outcome"] == "terminalized"
-    assert stored["status"] == "failed"
+    assert result["outcome"] == "pause_soft_failed"
+    assert result.get("pause_soft_failed") is True
+    assert stored["status"] == "active"
     assert stored["error_code"] == "growth_pause_failed"
-    assert not task_dir.exists()
-    client.force_remove.assert_awaited_once_with("gid-growth-pause")
+    assert stored["aria2_gid"] == "gid-growth-pause"
+    assert task_dir.exists()
+    client.force_remove.assert_not_awaited()
+    client.pause.assert_awaited()
 
 
 @pytest.mark.asyncio

@@ -327,6 +327,13 @@ def build_rest_task_response(
             # but keep total_length at 0 to avoid a misleading percentage.
             completed_length = _safe_int(live.get("completedLength"))
 
+    # frozen_space is reservation accounting (DB), not live totalLength.
+    # Only when reserved is zero do we fall back to a known DB total so a
+    # freshly admitted size is not shown as frozen_space=0 before reserve.
+    reserved = _safe_int(row.get("reserved_bytes"))
+    db_total = _safe_int(row.get("total_bytes"))
+    frozen_space = max(reserved, db_total if reserved == 0 and db_total > 0 else reserved)
+
     return {
         "id": row["id"],
         "task_id": row["global_download_id"],
@@ -344,5 +351,5 @@ def build_rest_task_response(
         "error_display": error_message,
         "created_at": ms_to_iso(row.get("created_at_ms")),
         "updated_at": ms_to_iso(row.get("updated_at_ms")),
-        "frozen_space": _safe_int(row.get("reserved_bytes")),
+        "frozen_space": frozen_space,
     }

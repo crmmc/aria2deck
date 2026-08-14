@@ -346,17 +346,17 @@ async def test_payload_active_unknown_size_pause_to_waiting(
 
 
 # ---------------------------------------------------------------------------
-# 4b. Payload active with unknown size: pause NOT confirmed → handoff_unknown_size
+# 4b. Payload active with unknown size: pause NOT confirmed → WAITING (M6 R2)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_payload_active_unknown_size_pause_not_confirmed_terminalized(
+async def test_payload_active_unknown_size_pause_not_confirmed_waits(
     temp_db: str,
 ) -> None:
     """Payload active, size unknown, pause cannot be confirmed (re-query
-    still shows active) → terminalize with handoff_unknown_size
-    (spec §9.2)."""
+    still shows active) → WAITING for a later round (M6 residual R2).
+    """
     user = await create_user_v0(username="t12_nopause", quota_bytes=10_000_000)
     download = await create_global_download_v0(
         resource_key="magnet:t12-nopause",
@@ -405,11 +405,16 @@ async def test_payload_active_unknown_size_pause_not_confirmed_terminalized(
             log_prefix="[T12]",
         )
 
-    assert result == ReconcileResult.TERMINALIZED
+    assert result == ReconcileResult.WAITING
 
     stored = await _fetch_global(download["id"])
-    assert stored["status"] == "failed"
-    assert stored["error_code"] == "handoff_unknown_size"
+    assert stored["status"] != "failed"
+    assert stored["error_code"] != "handoff_unknown_size"
+    # Pause RPC succeeded (default fake) but re-query still active: must stamp
+    # ownership so bare paused/waiting cannot become external later.
+    assert stored["error_code"] == "metadata_admission_paused"
+    client.pause.assert_awaited()
+    mock_dir.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
