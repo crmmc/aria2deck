@@ -1,10 +1,12 @@
 """Task 5 — Pause / queue / handoff state machine (pure decisions).
 
-Rules (see task spec + M7 ownership model):
+Rules (see task spec + M7/M9 ownership model):
 - System-owned pause codes (SYSTEM_OWNED_PAUSE_CODES) may auto-resume only
   with an explicit predicate — never from size_known alone.
 - A pause without a system ownership error_code is external: never auto-unpause.
-- active/waiting + system ownership code → clear the code (target reached).
+- active/waiting + system ownership code → clear the code (target reached),
+  except metadata_admission_paused which never clears via this generic branch.
+- apply_decision(resume) clears only after re-query ∈ {active, waiting}.
 """
 
 from __future__ import annotations
@@ -17,26 +19,26 @@ from app.modules.task_core.states import (
     ERROR_ADMISSION_PAUSED,
     ERROR_DISK_QUEUED,
     ERROR_EXTERNAL_PAUSED,
-    ERROR_GROWTH_UNPAUSE_FAILED,
     ERROR_METADATA_ADMISSION_PAUSED,
     ERROR_QUOTA_EXCEEDED,
     ERROR_QUOTA_QUEUED,
     ERROR_UNPAUSE_FAILED,
+    PENDING_RELEASE_CODES,
     SYSTEM_OWNED_PAUSE_CODES,
 )
-from app.repositories.task.downloads import update_global_download
+from app.repositories.task.downloads import (
+    get_global_download_by_id,
+    update_global_download,
+)
+
+_RUNNING_STATUSES = frozenset({"active", "waiting"})
 
 SYSTEM_QUEUE_CODES = frozenset({ERROR_QUOTA_QUEUED, ERROR_DISK_QUEUED})
 
-# Codes policy may auto-resume when status is paused (subset of owned).
-# growth_pause_failed is ownership-only: keep while paused, clear when active.
-_AUTO_RESUME_WHEN_SIZE_KNOWN = frozenset(
-    {
-        ERROR_METADATA_ADMISSION_PAUSED,
-        ERROR_GROWTH_UNPAUSE_FAILED,
-        ERROR_UNPAUSE_FAILED,
-    }
-)
+# PENDING codes that need trusted size before auto-resume (subset of PENDING).
+# admission_paused resumes immediately when paused (create-time HTTP/torrent).
+# growth_pause_failed is owned but not PENDING — never auto-resume.
+_PENDING_RESUME_WHEN_SIZE_KNOWN = PENDING_RELEASE_CODES - {ERROR_ADMISSION_PAUSED}
 
 Action = Literal[
     "keep",
@@ -94,7 +96,13 @@ def decide_on_snapshot(
         )
 
     # Target reached with leftover system ownership: clear code only.
-    if status in {"active", "waiting"} and db_error in SYSTEM_OWNED_PAUSE_CODES:
+    # metadata_admission_paused is excluded: metadata-phase active/waiting must
+    # not drop the credential (Spec §3.1.1 / T9c).
+    if (
+        status in _RUNNING_STATUSES
+        and db_error in SYSTEM_OWNED_PAUSE_CODES
+        and db_error != ERROR_METADATA_ADMISSION_PAUSED
+    ):
         return Decision("clear_error_code", clear_error_code=True)
 
     if db_error == ERROR_QUOTA_QUEUED and ctx.quota_bytes is not None:
@@ -105,9 +113,11 @@ def decide_on_snapshot(
         return Decision("resume", clear_error_code=True)
 
     if status == "paused":
+        # Create-time / growth admission credential: resume without size gate.
         if db_error == ERROR_ADMISSION_PAUSED:
             return Decision("resume", clear_error_code=True)
-        if db_error in _AUTO_RESUME_WHEN_SIZE_KNOWN:
+        # Other PENDING_RELEASE codes: resume only when size is trusted.
+        if db_error in _PENDING_RESUME_WHEN_SIZE_KNOWN:
             if _is_size_known(tid_row) and total > 0:
                 return Decision("resume", clear_error_code=True)
             return Decision("keep", error_code=str(db_error) if db_error else None)
@@ -117,10 +127,26 @@ def decide_on_snapshot(
             return Decision(
                 "mark_external_paused", error_code=ERROR_EXTERNAL_PAUSED
             )
-        # Unknown or external/admin: never auto-resume.
+        # Unknown or external/admin / growth_pause_failed: never auto-resume.
         return Decision("keep", error_code=db_error)
 
     return Decision("noop")
+
+
+async def _observe_backend_status(backend: BackendPort, tid: int) -> str | None:
+    """Best-effort re-query of backend status for ``tid`` after unpause."""
+    row = await get_global_download_by_id(tid)
+    gid = row.get("aria2_gid") if row else None
+    if not gid:
+        return None
+    try:
+        raw = await backend.tell_status(str(gid))
+    except Exception:
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    status = raw.get("status")
+    return str(status) if status is not None else None
 
 
 async def apply_decision(
@@ -130,9 +156,30 @@ async def apply_decision(
 ) -> None:
     """Apply a Decision: backend effect plus minimal DB error_code update."""
     if decision.action == "resume":
-        await backend.unpause(tid)
+        try:
+            await backend.unpause(tid)
+        except Exception:
+            # Still re-query: unpause may have taken effect despite RPC error.
+            pass
+        observed = await _observe_backend_status(backend, tid)
+        if observed in _RUNNING_STATUSES:
+            await update_global_download(
+                tid, {"error_code": None, "error_message": None}
+            )
+            return
+        # Still paused / unknown: keep pending credential or stamp soft fail.
+        # Prefer preserving an existing system code; only write unpause_failed
+        # when the row would otherwise become bare paused.
+        row = await get_global_download_by_id(tid)
+        current_code = row.get("error_code") if row else None
+        if current_code in SYSTEM_OWNED_PAUSE_CODES:
+            return
         await update_global_download(
-            tid, {"error_code": None, "error_message": None}
+            tid,
+            {
+                "error_code": ERROR_UNPAUSE_FAILED,
+                "error_message": "恢复下载未进入运行态",
+            },
         )
     elif decision.action == "clear_error_code":
         await update_global_download(

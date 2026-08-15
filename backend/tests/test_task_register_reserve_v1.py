@@ -178,7 +178,8 @@ async def test_adapter_http_unknown_size_adds_pause(temp_db: str) -> None:
             )
         ).mappings().first()
     assert row is not None
-    assert row["status"] == "waiting"
+    assert row["status"] == "paused"
+    assert row["error_code"] == "admission_paused"
 
 
 @pytest.mark.asyncio

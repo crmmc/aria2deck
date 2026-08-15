@@ -56,9 +56,10 @@ async def _fetch_user_task(task_id: int) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_listener_progress_only_size_fails_unknown_download(
+async def test_listener_progress_only_size_waits_unknown_download(
     temp_db: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """§3.3.1: live active + totalLength=0 waits; does not hard-kill."""
     user = await create_user_v0(username="listener_progress_only", quota_bytes=1000)
     download = await create_global_download_v0(
         resource_key="listener:progress-only", resource_kind="http",
@@ -79,16 +80,15 @@ async def test_listener_progress_only_size_fails_unknown_download(
     updated = await _fetch_global(download["id"])
     updated_task = await _fetch_user_task(task["id"])
     usage = await get_usage(user["id"], user["quota_bytes"])
-    assert updated["status"] == "failed"
-    assert updated["error_code"] == "unknown_size"
-    assert updated["aria2_gid"] is None
+    assert updated["status"] != "failed"
+    assert updated["error_code"] != "unknown_size"
+    assert updated["aria2_gid"] == "gid-listener-progress-only"
     assert updated["size_known"] == 0
-    assert updated_task["status"] == "failed"
-    assert updated_task["reserved_bytes"] == 0
+    assert updated_task["status"] == "active"
     assert usage["reserved_bytes"] == 0
     client.pause.assert_not_awaited()
     client.unpause.assert_not_awaited()
-    client.force_remove.assert_awaited_once_with("gid-listener-progress-only")
+    client.force_remove.assert_not_awaited()
 
 
 @pytest.mark.asyncio

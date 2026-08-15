@@ -124,7 +124,7 @@ async def coordinate_reported_size(
 
     - ``admitted`` – size accepted, proceed with projection.
     - ``stale`` – DB GID changed, no action.
-    - ``unknown_size`` – no trusted size, caller terminalizes.
+    - ``unknown_size`` – no trusted size; live reconcile waits (not hard reclaim).
     - ``complete`` – re-query shows complete, route to completion.
     - ``rpc_unavailable`` – transient RPC, skip size admission.
     - ``terminalized`` – already terminalized (growth failure or missing GID).
@@ -219,10 +219,10 @@ async def coordinate_reported_size(
         # in DB.  Return outcome so caller does physical reclaim.
         return result
 
-    # Idempotent unpause only when we confirmed the pause (spec §8.4).
-    # M6: unpause failure while still paused is a soft system mark — keep the
-    # attempt live (gid/dir) so a later reconcile/policy can resume. Only
-    # missing-GID / hard reclaim paths remain terminal via requery.
+    # Idempotent unpause only when we confirmed the pause (spec §8.4 / M9 §3.3).
+    # system_unpause_gid success means re-query is active|waiting — only then
+    # clear ownership. soft_failed keeps the growth code for multi-round resume.
+    # complete: leave pending to the completion path (no false clear here).
     if paused_by_us and resume_after_admission:
         result_str = await system_unpause_gid(
             backend=backend,
@@ -234,7 +234,7 @@ async def coordinate_reported_size(
             acquire_lifecycle_lock=acquire_lifecycle_lock,
         )
         if result_str == "success":
-            # Clear ownership stamped for the growth pause window.
+            # Clear only after re-query confirmed running (not RPC-only success).
             await update_global_download(
                 download_id,
                 {"error_code": None, "error_message": None},
@@ -244,6 +244,7 @@ async def coordinate_reported_size(
         elif result_str == "rpc_unavailable":
             result["outcome"] = "rpc_unavailable"
         elif result_str == "soft_failed":
+            # Keep growth_unpause_failed (or prior ownership); do not clear.
             result["outcome"] = "admitted"
             result["unpause_soft_failed"] = True
         else:
@@ -511,9 +512,10 @@ async def _handoff_locked(
             backend, source_gid, log_prefix
         )
 
-    # 8. Resume payload if needed (spec §9.2 step 10).
+    # 8. Resume payload if needed (spec §9.2 step 10 / M9 §3.3).
     # Ownership is metadata_admission_paused (or paused_by_us growth pause).
-    # M7: always soft via system_unpause_gid — never hard reclaim on control fail.
+    # Clear codes only on system_unpause_gid success (re-query active|waiting).
+    # soft_failed keeps the system code for multi-round resume (symmetric growth).
     if system_owned_pause:
         result_str = await system_unpause_gid(
             backend=backend,
@@ -546,7 +548,7 @@ async def _handoff_locked(
                     expected_gid=payload_gid,
                 )
         elif result_str == "soft_failed":
-            # Ownership code already stamped by soft path; keep live.
+            # Soft path stamped failure code; keep live, do not clear ownership.
             await _broadcast_download_update(attempt_id)
         elif result_str == "missing":
             await _broadcast_download_update(attempt_id)
@@ -555,7 +557,7 @@ async def _handoff_locked(
             return ReconcileResult.STALE, None
         elif result_str == "rpc_unavailable":
             await _broadcast_download_update(attempt_id)
-        # complete: fall through to completion dispatch below
+        # complete: do not clear here; fall through to completion dispatch
 
     # 9. Payload already complete → dispatch completion (spec §9.2 step 11).
     if raw_status == "complete" or outcome == "complete":

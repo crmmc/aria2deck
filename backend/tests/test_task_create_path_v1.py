@@ -80,7 +80,7 @@ async def test_create_task_magnet_registers_and_submits(temp_db: str) -> None:
         )
 
     assert payload["uri"] == canonical
-    assert payload["status"] in {"active", "waiting"}
+    assert payload["status"] in {"active", "waiting", "paused"}
     assert payload["id"]
     assert payload["task_id"]
 
@@ -175,7 +175,7 @@ async def test_create_torrent_task_submits_base64_torrent(temp_db: str) -> None:
         )
 
     assert payload["uri"] == f"magnet:?xt=urn:btih:{info_hash}"
-    assert payload["status"] == "active"
+    assert payload["status"] == "paused"
     assert payload["total_length"] == 1024
     assert payload["frozen_space"] == 1024
     assert payload["id"]
@@ -186,6 +186,7 @@ async def test_create_torrent_task_submits_base64_torrent(temp_db: str) -> None:
     assert submitted_torrent == torrent_data
     assert submitted_uris == []
     assert opts["seed-time"] == "0"
+    assert opts.get("pause") == "true"
     assert "dir" in opts
 
 
@@ -241,3 +242,4 @@ async def test_create_torrent_task_partial_selection_sets_select_file(
 
     _, _, opts = client.add_torrent.await_args.args
     assert opts["select-file"] == "1,3"
+    assert opts.get("pause") == "true"

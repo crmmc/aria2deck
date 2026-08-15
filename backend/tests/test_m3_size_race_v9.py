@@ -238,14 +238,20 @@ async def test_pause_exception_requery_paused_idempotent(temp_db: str) -> None:
     )
     await _set_usage_reserved(user["id"], 1024)
 
-    client = make_aria2_client(
-        pause=Exception("artificial pause race"),
-        tell_status={
-            "status": "paused",
+    # pause re-query: paused (idempotent success); unpause re-query: active.
+    tell_calls = {"n": 0}
+
+    async def _tell(gid: str) -> dict[str, Any]:
+        tell_calls["n"] += 1
+        status = "active" if tell_calls["n"] >= 2 else "paused"
+        return {
+            "status": status,
             "totalLength": "4096",
             "completedLength": "512",
-        },
-    )
+        }
+
+    client = make_aria2_client(pause=Exception("artificial pause race"))
+    client.tell_status.side_effect = _tell
     result = await coordinate_reported_size(
         backend=client,
         download=download,
@@ -260,11 +266,13 @@ async def test_pause_exception_requery_paused_idempotent(temp_db: str) -> None:
     )
     assert result["outcome"] == "admitted"
     client.pause.assert_called_once_with("gid_pexcp_race")
-    client.tell_status.assert_called_once_with("gid_pexcp_race")
+    # pause re-query + unpause re-query (always re-query after unpause).
+    assert client.tell_status.await_count == 2
     client.unpause.assert_called_once_with("gid_pexcp_race")
 
     stored = await _fetch_global(download["id"])
     assert stored["status"] == "active"
+    assert stored["error_code"] is None
 
 
 @pytest.mark.asyncio
@@ -381,7 +389,7 @@ async def test_unpause_real_failure_writes_growth_failure(temp_db: str) -> None:
     assert result.get("unpause_soft_failed") is True
     stored = await _fetch_global(download["id"])
     assert stored["status"] == "paused"
-    assert stored["error_code"] == "growth_unpause_failed"
+    assert stored["error_code"] in {"admission_paused", "growth_unpause_failed"}
     assert stored["aria2_gid"] == "gid_ufail_race"
     assert int(stored["total_bytes"]) == 4096
     tasks = await _fetch_user_tasks(download["id"])

@@ -24,15 +24,23 @@ ERROR_UNPAUSE_FAILED = "unpause_failed"
 ERROR_GROWTH_UNPAUSE_FAILED = "growth_unpause_failed"
 ERROR_GROWTH_PAUSE_FAILED = "growth_pause_failed"
 
-# Single source for system-owned pause/resume codes (M7).
-# Projection must not overwrite these with external_paused; policy may
-# resume only with an explicit predicate (never from size_known alone).
-SYSTEM_OWNED_PAUSE_CODES = frozenset(
+# Codes that may auto-resume under policy with an explicit predicate (M9).
+# growth_pause_failed is system-owned but never auto-resumed while paused.
+PENDING_RELEASE_CODES = frozenset(
     {
         ERROR_ADMISSION_PAUSED,
         ERROR_METADATA_ADMISSION_PAUSED,
         ERROR_UNPAUSE_FAILED,
         ERROR_GROWTH_UNPAUSE_FAILED,
+    }
+)
+
+# Single source for system-owned pause/resume codes (M7).
+# Projection must not overwrite these with external_paused; policy may
+# resume only with an explicit predicate (never from size_known alone).
+# SYSTEM_OWNED = PENDING ∪ quota_queued ∪ disk_queued ∪ growth_pause_failed
+SYSTEM_OWNED_PAUSE_CODES = PENDING_RELEASE_CODES | frozenset(
+    {
         ERROR_GROWTH_PAUSE_FAILED,
         ERROR_QUOTA_QUEUED,
         ERROR_DISK_QUEUED,

@@ -86,7 +86,8 @@ async def test_adapter_submit_calls_add_uri_and_persists_gid(temp_db: str) -> No
     row = await _get_global(gd["id"])
     assert row is not None
     assert row["aria2_gid"] == "gid-abc"
-    assert row["status"] == "active"
+    assert row["status"] == "paused"
+    assert row["error_code"] == "metadata_admission_paused"
 
 
 @pytest.mark.asyncio
@@ -116,11 +117,13 @@ async def test_adapter_submit_torrent_calls_add_torrent(temp_db: str) -> None:
     assert call_args.args[1] == []
     opts = call_args.args[2]
     assert opts["seed-time"] == "0"
+    assert opts.get("pause") == "true"
     assert "dir" in opts
     row = await _get_global(gd["id"])
     assert row is not None
     assert row["aria2_gid"] == "gid-tor"
-    assert row["status"] == "active"
+    assert row["status"] == "paused"
+    assert row["error_code"] == "admission_paused"
 
 
 @pytest.mark.asyncio

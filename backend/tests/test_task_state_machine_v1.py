@@ -104,6 +104,26 @@ def test_metadata_admission_paused_holds_without_size() -> None:
     assert decision.error_code == "metadata_admission_paused"
 
 
+def test_metadata_admission_paused_active_does_not_generic_clear() -> None:
+    """T9c / §3.1.1: metadata phase active must not clear via generic owned clear."""
+    row = _row(
+        status="active",
+        error_code="metadata_admission_paused",
+        total_bytes=0,
+        size_known=False,
+    )
+    decision = decide_on_snapshot(row, "active", quota=QuotaContext(quota_bytes=10**9))
+    assert decision.action != "clear_error_code"
+    assert decision.clear_error_code is False
+    assert decision.action in {"noop", "keep"}
+
+    waiting = decide_on_snapshot(
+        row, "waiting", quota=QuotaContext(quota_bytes=10**9)
+    )
+    assert waiting.action != "clear_error_code"
+    assert waiting.clear_error_code is False
+
+
 def test_size_known_paused_without_error_is_external() -> None:
     """Known size + paused without ownership marker → external pause."""
     row = _row(status="paused", error_code=None, total_bytes=500, size_known=True)
@@ -193,7 +213,7 @@ def test_active_row_without_issues_is_noop() -> None:
 
 @pytest.mark.asyncio
 async def test_apply_resume_unpauses_and_clears_error_code(temp_db: str) -> None:
-    """AC-5: resume calls backend.unpause and clears error_code in DB."""
+    """AC-5: resume calls backend.unpause and clears error_code only when running."""
     user = await create_user_v0(username="sm1")
     gd = await create_global_download_v0(
         resource_key="http://example.com/q.bin",
@@ -207,15 +227,79 @@ async def test_apply_resume_unpauses_and_clears_error_code(temp_db: str) -> None
         error_message="配额不足，排队中",
     )
     backend = AsyncMock(spec=BackendPort)
+    backend.tell_status = AsyncMock(return_value={"status": "active"})
 
     await apply_decision(backend, gd["id"], Decision("resume", clear_error_code=True))
 
     backend.unpause.assert_awaited_once_with(gd["id"])
+    backend.tell_status.assert_awaited()
     backend.pause.assert_not_called()
     row = await _get_global(gd["id"])
     assert row is not None
     assert row["error_code"] is None
     assert row["error_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_apply_resume_still_paused_keeps_code(temp_db: str) -> None:
+    """T10b / AC-3: apply_decision(resume) still paused must not clear ownership."""
+    await create_user_v0(username="sm-t10b")
+    gd = await create_global_download_v0(
+        resource_key="http://example.com/t10b.bin",
+        source_uri="http://example.com/t10b.bin",
+        resource_kind="http",
+        status="paused",
+        aria2_gid="gid-t10b",
+        total_bytes=100,
+        size_known=True,
+        error_code="admission_paused",
+        error_message=None,
+    )
+    backend = AsyncMock(spec=BackendPort)
+    backend.tell_status = AsyncMock(return_value={"status": "paused"})
+
+    await apply_decision(backend, gd["id"], Decision("resume", clear_error_code=True))
+
+    backend.unpause.assert_awaited_once_with(gd["id"])
+    row = await _get_global(gd["id"])
+    assert row is not None
+    assert row["error_code"] is not None
+    assert row["error_code"] in {"admission_paused", "unpause_failed"}
+
+
+@pytest.mark.asyncio
+async def test_apply_resume_still_paused_second_round_can_resume(temp_db: str) -> None:
+    """T5 / AC-2: after failed release, pending code remains and policy still resumes."""
+    await create_user_v0(username="sm-t5")
+    gd = await create_global_download_v0(
+        resource_key="http://example.com/t5.bin",
+        source_uri="http://example.com/t5.bin",
+        resource_kind="http",
+        status="paused",
+        aria2_gid="gid-t5",
+        total_bytes=100,
+        size_known=True,
+        error_code="admission_paused",
+    )
+    backend = AsyncMock(spec=BackendPort)
+    backend.tell_status = AsyncMock(return_value={"status": "paused"})
+
+    await apply_decision(backend, gd["id"], Decision("resume", clear_error_code=True))
+    row = await _get_global(gd["id"])
+    assert row is not None
+    assert row["error_code"] is not None
+
+    second = decide_on_snapshot(
+        {
+            "error_code": row["error_code"],
+            "size_known": True,
+            "total_bytes": 100,
+            "status": "paused",
+        },
+        "paused",
+        quota=QuotaContext(quota_bytes=10**9),
+    )
+    assert second.action == "resume"
 
 
 @pytest.mark.asyncio

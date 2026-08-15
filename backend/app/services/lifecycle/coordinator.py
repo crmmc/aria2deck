@@ -20,6 +20,7 @@ from app.modules.task_core.states import (
     ACTIVE_CLEAR_ERROR_CODES,
     ERROR_ADMISSION_PAUSED,
     ERROR_EXTERNAL_PAUSED,
+    ERROR_METADATA_ADMISSION_PAUSED,
     PROJECTION_PROTECTED_ERROR_CODES,
     SYSTEM_OWNED_PAUSE_CODES,
 )
@@ -387,20 +388,15 @@ async def reconcile_attempt_signal(
                                 current_gid, working_status,
                             )
                         elif size_outcome == "unknown_size":
-                            changed = await fail_download_and_reclaim(
-                                backend=backend,
-                                download_id=attempt_id,
-                                message="任务运行时无法确认可信文件大小",
-                                error_code="unknown_size",
-                                expected_gid=current_gid,
-                                writer_gid=current_gid,
-                                acquire_lifecycle_lock=False,
-                                log_prefix=log_prefix,
+                            # Spec §3.3.1: no trusted total → WAIT, never hard-kill.
+                            logger.debug(
+                                "%s Live unknown_size, waiting attempt_id=%s "
+                                "raw_status=%s",
+                                log_prefix,
+                                attempt_id,
+                                raw_status,
                             )
-                            if changed:
-                                await _broadcast_download_update(attempt_id)
-                                return ReconcileResult.TERMINALIZED
-                            return ReconcileResult.STALE
+                            return ReconcileResult.WAITING
                         elif size_outcome != "admitted":
                             # disk_budget / max_task_size / no_subscribers:
                             # row already terminal in DB, do physical reclaim
@@ -493,6 +489,11 @@ async def reconcile_attempt_signal(
                 elif (
                     mapped["status"] == "active"
                     and prev_error_code in ACTIVE_CLEAR_ERROR_CODES
+                    # M9 §3.1.1: never clear metadata_admission_paused on bare
+                    # active (metadata download phase). Only handoff / confirmed
+                    # payload release may clear that code.
+                    and prev_error_code != ERROR_METADATA_ADMISSION_PAUSED
+                    and not is_metadata
                 ):
                     # Clear sticky pause ownership when download resumes.
                     global_values["error_code"] = None

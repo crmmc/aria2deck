@@ -13,6 +13,10 @@ from typing import Any, Mapping, Sequence
 
 from app.aria2.client import Aria2Client
 from app.modules.backend.port import Snapshot
+from app.modules.task_core.states import (
+    ERROR_ADMISSION_PAUSED,
+    ERROR_METADATA_ADMISSION_PAUSED,
+)
 from app.repositories.task.downloads import (
     assign_submitted_gid,
     clear_terminal_download_gid,
@@ -57,8 +61,13 @@ class Aria2BackendAdapter:
         submit_options = self._build_base_options(tid)
 
         gid: str
+        stamp_error_code: str | None = None
         if resource_kind == "torrent" and uri.startswith("base64:"):
             self._merge_user_and_server_options(submit_options, options)
+            # Spec §3.2.1 / AC-9: torrent always starts paused so select-file
+            # is applied before any unpause/allocation race.
+            submit_options["pause"] = "true"
+            stamp_error_code = ERROR_ADMISSION_PAUSED
             gid = await self._client.add_torrent(
                 uri[len("base64:"):], [], submit_options
             )
@@ -73,6 +82,7 @@ class Aria2BackendAdapter:
             submit_options.update(gateway_options)
             if unknown_size:
                 submit_options["pause"] = "true"
+                stamp_error_code = ERROR_ADMISSION_PAUSED
             gid = await self._client.add_uri(gateway_uris, submit_options)
             # 多 mirror 场景：capability 中已带 mirrors，需要把剩余 gateway
             # uri 追加到当前 gid，保证 aria2 侧可见。
@@ -90,10 +100,23 @@ class Aria2BackendAdapter:
             self._merge_user_and_server_options(submit_options, options)
             if unknown_size and resource_kind == "magnet":
                 submit_options["pause-metadata"] = "true"
+                stamp_error_code = ERROR_METADATA_ADMISSION_PAUSED
             gid = await self._client.add_uri([uri], submit_options)
 
-        status = "active" if resource_kind == "magnet" or not unknown_size else "waiting"
-        updated = await assign_submitted_gid(download_id=tid, gid=gid, status=status)
+        # Pause / pause-metadata starts must not project a misleading active
+        # status (Spec §3.2.1). Prefer paused to match aria2 pause start.
+        if stamp_error_code is not None:
+            status = "paused"
+        elif resource_kind == "magnet" or not unknown_size:
+            status = "active"
+        else:
+            status = "waiting"
+        updated = await assign_submitted_gid(
+            download_id=tid,
+            gid=gid,
+            status=status,
+            error_code=stamp_error_code,
+        )
         if updated is None:
             raise RuntimeError(f"failed to persist submitted gid for tid {tid}")
         return gid

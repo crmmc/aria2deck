@@ -844,7 +844,15 @@ async def assign_submitted_gid(
     download_id: int,
     gid: str,
     status: str,
+    error_code: str | None = None,
+    error_message: str | None = None,
 ) -> dict[str, Any] | None:
+    """Bind submitted gid in one transaction; optionally stamp create-time codes.
+
+    When ``error_code`` is provided, it is written in the same UPDATE as
+    ``aria2_gid`` + ``status`` (Spec §3.2.0). Default ``None`` leaves the
+    existing error fields untouched for legacy callers.
+    """
     timestamp = now_ms()
     async with transaction() as conn:
         download = await _lock_active_download(
@@ -852,6 +860,14 @@ async def assign_submitted_gid(
         )
         if download is None or download["status"] != "queued":
             return None
+        values: dict[str, Any] = {
+            "aria2_gid": gid,
+            "status": status,
+            "updated_at_ms": timestamp,
+        }
+        if error_code is not None:
+            values["error_code"] = error_code
+            values["error_message"] = error_message
         row = (
             await conn.execute(
                 update(global_downloads)
@@ -861,11 +877,7 @@ async def assign_submitted_gid(
                     global_downloads.c.status == "queued",
                     global_downloads.c.completed_file_id.is_(None),
                 )
-                .values(
-                    aria2_gid=gid,
-                    status=status,
-                    updated_at_ms=timestamp,
-                )
+                .values(**values)
                 .returning(global_downloads)
             )
         ).mappings().first()

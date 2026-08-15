@@ -21,6 +21,7 @@ from app.modules.backend.port import BackendPort, Snapshot
 from app.modules.task_core.states import (
     ERROR_DISK_QUEUED,
     ERROR_EXTERNAL_PAUSED,
+    ERROR_METADATA_ADMISSION_PAUSED,
     ERROR_QUOTA_QUEUED,
 )
 from app.modules.task_core.sync import apply_queue_policy, sync_once
@@ -69,6 +70,7 @@ async def test_quota_queued_resumes_on_sufficient_headroom(temp_db: str) -> None
             )
         ]
     )
+    backend.tell_status = AsyncMock(return_value={"status": "active"})
 
     report = await sync_once(backend)
 
@@ -142,6 +144,7 @@ async def test_disk_queued_resumes_when_disk_available(temp_db: str) -> None:
             )
         ]
     )
+    backend.tell_status = AsyncMock(return_value={"status": "active"})
 
     await sync_once(backend)
 
@@ -178,6 +181,7 @@ async def test_apply_queue_policy_resumes_quota_queued(temp_db: str) -> None:
             )
         ]
     )
+    backend.tell_status = AsyncMock(return_value={"status": "active"})
 
     report = await apply_queue_policy(backend)
 
@@ -186,3 +190,80 @@ async def test_apply_queue_policy_resumes_quota_queued(temp_db: str) -> None:
     row = await _get_global(gd["id"])
     assert row is not None
     assert row["error_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_sync_metadata_admission_paused_active_does_not_clear(
+    temp_db: str,
+) -> None:
+    """T9c policy/sync: metadata phase active keeps metadata_admission_paused."""
+    user = await create_user_v0(username="qp-t9c", quota_bytes=10**9)
+    gd = await create_global_download_v0(
+        resource_key="magnet:?xt=urn:btih:t9c",
+        source_uri="magnet:?xt=urn:btih:t9c",
+        resource_kind="magnet",
+        status="active",
+        aria2_gid="gid-t9c",
+        total_bytes=0,
+        size_known=False,
+        error_code=ERROR_METADATA_ADMISSION_PAUSED,
+    )
+    await create_user_task_v0(
+        user_id=user["id"], global_download_id=gd["id"], status="active"
+    )
+    backend = AsyncMock(spec=BackendPort)
+    backend.tell_many = AsyncMock(
+        return_value=[
+            Snapshot(
+                tid=gd["id"],
+                status="active",
+                raw={"completedLength": "0", "totalLength": "0"},
+            )
+        ]
+    )
+
+    await sync_once(backend)
+
+    backend.unpause.assert_not_called()
+    row = await _get_global(gd["id"])
+    assert row is not None
+    assert row["error_code"] == ERROR_METADATA_ADMISSION_PAUSED
+    assert row["error_code"] != ERROR_EXTERNAL_PAUSED
+
+
+@pytest.mark.asyncio
+async def test_sync_resume_still_paused_keeps_pending_code(temp_db: str) -> None:
+    """T10b via sync: unpause returns but re-query paused keeps ownership code."""
+    user = await create_user_v0(username="qp-t10b", quota_bytes=10**9)
+    gd = await create_global_download_v0(
+        resource_key="http://example.com/sync-t10b.bin",
+        source_uri="http://example.com/sync-t10b.bin",
+        resource_kind="http",
+        status="paused",
+        aria2_gid="gid-sync-t10b",
+        total_bytes=100,
+        size_known=True,
+        error_code="admission_paused",
+    )
+    await create_user_task_v0(
+        user_id=user["id"], global_download_id=gd["id"], status="paused"
+    )
+    backend = AsyncMock(spec=BackendPort)
+    backend.tell_many = AsyncMock(
+        return_value=[
+            Snapshot(
+                tid=gd["id"],
+                status="paused",
+                raw={"completedLength": "0", "totalLength": "100"},
+            )
+        ]
+    )
+    backend.tell_status = AsyncMock(return_value={"status": "paused"})
+
+    await sync_once(backend)
+
+    backend.unpause.assert_awaited_once_with(gd["id"])
+    row = await _get_global(gd["id"])
+    assert row is not None
+    assert row["error_code"] is not None
+    assert row["error_code"] in {"admission_paused", "unpause_failed"}

@@ -218,8 +218,8 @@ async def test_register_and_submit_created_path(temp_db: str) -> None:
         )
 
     assert payload["name"] == "arch-create.bin"
-    assert payload["status"] in {"waiting", "active"}
-    assert payload["status_label"] in {"排队中", "下载中"}
+    assert payload["status"] in {"waiting", "active", "paused"}
+    assert payload["status_label"] in {"排队中", "下载中", "已暂停"}
     assert payload["uri"] == "magnet:?xt=urn:btih:arch-create"
     assert payload["id"]
     assert payload["task_id"]

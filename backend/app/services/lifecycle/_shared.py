@@ -105,22 +105,27 @@ async def system_unpause_gid(
     failure_message: str,
     acquire_lifecycle_lock: bool = True,
 ) -> str:
-    """System-owned unpause: RPC then soft re-query on failure (M7)."""
+    """System-owned unpause: always re-query runtime after RPC (M9 Expand).
+
+    RPC not throwing is not success. Only re-query status in
+    ``UNPAUSE_SUCCESS_STATUSES`` (active/waiting) yields ``"success"``;
+    still paused is soft-failed with the failure code stamped/kept.
+    """
     try:
         await backend.unpause_gid(control_gid)
-        return "success"
     except Exception:
-        return await _requery_after_control_failure(
-            backend=backend,
-            download_id=download_id,
-            control_gid=control_gid,
-            expected_gid=expected_gid,
-            success_statuses=UNPAUSE_SUCCESS_STATUSES,
-            failure_error_code=failure_error_code,
-            failure_message=failure_message,
-            acquire_lifecycle_lock=acquire_lifecycle_lock,
-            soft_control_failure=True,
-        )
+        pass
+    return await _requery_after_control_failure(
+        backend=backend,
+        download_id=download_id,
+        control_gid=control_gid,
+        expected_gid=expected_gid,
+        success_statuses=UNPAUSE_SUCCESS_STATUSES,
+        failure_error_code=failure_error_code,
+        failure_message=failure_message,
+        acquire_lifecycle_lock=acquire_lifecycle_lock,
+        soft_control_failure=True,
+    )
 
 
 def _sanitize_path(file_path: str | None, task_id: int) -> str | None:
@@ -225,25 +230,30 @@ async def _requery_after_control_failure(
         # Prefer aria2-observed status when known. When re-query status is
         # unknown, stamp ownership only and keep existing DB status — never
         # invent paused (M7 Standards cleanup).
+        # M9: preserve existing SYSTEM_OWNED / PENDING credential when present
+        # so soft unpause fail does not rewrite admission/metadata codes into
+        # a different failure code (Standards S-3).
+        from app.modules.task_core.states import SYSTEM_OWNED_PAUSE_CODES
+
         current_row = await get_global_download_for_generation(
             download_id, expected_gid
         )
         if current_row is None:
             return "stale"
 
-        values: dict[str, Any] = {
-            "error_code": failure_error_code,
-            "error_message": failure_message,
-        }
-        status: str | None = None
+        values: dict[str, Any] = {}
+        if current_row.get("error_code") not in SYSTEM_OWNED_PAUSE_CODES:
+            values["error_code"] = failure_error_code
+            values["error_message"] = failure_message
+
         if re_raw in {"active", "waiting", "paused"}:
-            status = re_raw
+            status: str | None = re_raw
             values["status"] = status
         else:
-            existing = str(current_row.get("status") or "").strip()
-            status = existing or None
+            status = str(current_row.get("status") or "").strip() or None
 
-        await update_global_download(download_id, values)
+        if values:
+            await update_global_download(download_id, values)
         if status is not None:
             try:
                 await update_active_user_tasks(

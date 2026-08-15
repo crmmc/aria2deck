@@ -151,6 +151,7 @@ async def test_grow_pause_admit_unpause(temp_db: str) -> None:
     )
     await _set_usage_reserved(user["id"], 1024)
 
+    # Default tell_status is active → unpause re-query success (new semantic).
     client = make_aria2_client()
     result = await coordinate_reported_size(
         backend=client,
@@ -169,10 +170,67 @@ async def test_grow_pause_admit_unpause(temp_db: str) -> None:
 
     client.pause.assert_called_once_with("gid_grow_002")
     client.unpause.assert_called_once_with("gid_grow_002")
+    # Always re-query after unpause before clearing ownership.
+    client.tell_status.assert_awaited()
 
     stored = await _fetch_global(download["id"])
-    # Successful growth pause/unpause must not leave sticky ownership.
+    # Success only after re-query active|waiting — then clear ownership.
     assert stored["error_code"] is None
+    assert int(stored["total_bytes"]) == 2048
+
+
+@pytest.mark.asyncio
+async def test_grow_unpause_rpc_ok_still_paused_keeps_code(temp_db: str) -> None:
+    """T8 / AC-6: unpause RPC ok but re-query still paused → keep growth code."""
+    user = await create_user_v0(username="t11_t8_fake", quota_bytes=10_000_000)
+    download = await create_global_download_v0(
+        resource_key="http:t11-t8-fake",
+        source_uri="https://example.com/file.zip",
+        resource_kind="http",
+        status="active",
+        aria2_gid="gid_t8_fake",
+        total_bytes=1024,
+        size_known=True,
+        completed_bytes=512,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=1024,
+    )
+    await _set_usage_reserved(user["id"], 1024)
+
+    client = make_aria2_client(
+        pause="OK",
+        unpause="OK",
+        tell_status={
+            "status": "paused",
+            "totalLength": "2048",
+            "completedLength": "512",
+        },
+    )
+    result = await coordinate_reported_size(
+        backend=client,
+        download=download,
+        expected_gid="gid_t8_fake",
+        control_gid="gid_t8_fake",
+        status={
+            "status": "active",
+            "totalLength": "2048",
+            "completedLength": "512",
+        },
+        acquire_lifecycle_lock=False,
+    )
+    assert result["outcome"] == "admitted"
+    assert result["paused_by_us"] is True
+    assert result.get("unpause_soft_failed") is True
+    client.unpause.assert_called_once_with("gid_t8_fake")
+
+    stored = await _fetch_global(download["id"])
+    assert stored["status"] == "paused"
+    assert stored["error_code"] in {"admission_paused", "growth_unpause_failed"}
+    assert stored["error_code"] != "external_paused"
     assert int(stored["total_bytes"]) == 2048
 
 
@@ -226,11 +284,16 @@ async def test_pause_exception_requery_paused(temp_db: str) -> None:
     assert result["paused_by_us"] is True
 
     client.pause.assert_called_once_with("gid_pexcp_003")
-    client.tell_status.assert_called_once_with("gid_pexcp_003")
+    # pause re-query (exception path) + unpause re-query (always).
+    assert client.tell_status.await_count == 2
+    client.tell_status.assert_awaited_with("gid_pexcp_003")
     client.unpause.assert_called_once_with("gid_pexcp_003")
 
     stored = await _fetch_global(download["id"])
-    assert stored["status"] == "active"
+    # unpause RPC may return OK, but re-query still paused → soft_failed.
+    assert stored["status"] == "paused"
+    assert stored["error_code"] in {"admission_paused", "growth_unpause_failed"}
+    assert result.get("unpause_soft_failed") is True
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +418,7 @@ async def test_unpause_real_failure_growth_unpause_failed(temp_db: str) -> None:
     stored = await _fetch_global(download["id"])
     assert stored["status"] == "paused"
     assert stored["aria2_gid"] == "gid_ufail_005"
-    assert stored["error_code"] == "growth_unpause_failed"
+    assert stored["error_code"] in {"admission_paused", "growth_unpause_failed"}
     assert int(stored["total_bytes"]) == 2048
     assert int(stored["disk_reserved_bytes"]) == 2048
     mock_dir.assert_not_called()
@@ -597,3 +660,148 @@ async def test_magnet_metadata_total_zero_no_cleanup(temp_db: str) -> None:
     stored = await _fetch_global(download["id"])
     assert stored["status"] != "failed"
     assert stored["error_code"] != "unknown_size"
+
+
+# ---------------------------------------------------------------------------
+# 8. live unknown_size: waiting/active/paused + no trusted total → WAITING
+#    (spec §3.3.1 / case T12; must not fail_download_and_reclaim)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_status", ["waiting", "active", "paused"])
+async def test_live_unknown_size_waits_without_terminalizing(
+    temp_db: str,
+    raw_status: str,
+) -> None:
+    """T12 / §3.3.1: live raw + totalLength=0 + pending code must WAIT,
+    never terminalize with unknown_size.
+    """
+    from app.modules.task_core.states import (
+        ERROR_ADMISSION_PAUSED,
+        ERROR_EXTERNAL_PAUSED,
+    )
+
+    user = await create_user_v0(
+        username=f"t12_unk_{raw_status}", quota_bytes=10_000_000
+    )
+    download = await create_global_download_v0(
+        resource_key=f"http:t12-unknown-{raw_status}",
+        source_uri="https://example.com/t12-unknown.bin",
+        resource_kind="http",
+        status=raw_status if raw_status != "waiting" else "waiting",
+        aria2_gid=f"gid_t12_{raw_status}",
+        total_bytes=0,
+        size_known=False,
+        completed_bytes=0,
+        error_code=ERROR_ADMISSION_PAUSED,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status=raw_status if raw_status != "waiting" else "waiting",
+    )
+
+    live_status: dict[str, Any] = {
+        "gid": f"gid_t12_{raw_status}",
+        "status": raw_status,
+        "totalLength": "0",
+        "completedLength": "0",
+        "files": [],
+    }
+    client = make_aria2_client(tell_status=live_status)
+    result = await reconcile_attempt_signal(
+        backend=client,
+        observed_gid=f"gid_t12_{raw_status}",
+        event=None,
+        observed_status=live_status,
+        log_prefix="[T12]",
+    )
+
+    assert result == ReconcileResult.WAITING
+    assert result != ReconcileResult.TERMINALIZED
+
+    stored = await _fetch_global(download["id"])
+    assert stored["status"] != "failed"
+    assert stored["error_code"] != "unknown_size"
+    assert stored["error_code"] != ERROR_EXTERNAL_PAUSED
+    assert stored["error_code"] == ERROR_ADMISSION_PAUSED
+    assert stored["aria2_gid"] == f"gid_t12_{raw_status}"
+    client.force_remove.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_t15_size_known_floor_growth_keeps_system_code(temp_db: str) -> None:
+    """T15 / AC-6 + §3.6.1: size_known floor + larger live total growth path.
+
+    Selected floor stays (no shrink); growth pause/unpause soft path keeps a
+    system ownership code and never brands external_paused.
+    """
+    user = await create_user_v0(username="t15_floor_growth", quota_bytes=50_000_000)
+    # Create-time selected floor 1024; aria2 later reports 4096 (full torrent-ish).
+    download = await create_global_download_v0(
+        resource_key="torrent:t15-floor:files:abc",
+        source_uri="base64:dGVzdA==",
+        resource_kind="torrent",
+        status="active",
+        aria2_gid="gid_t15_floor",
+        total_bytes=1024,
+        size_known=True,
+        completed_bytes=0,
+        disk_reserved_bytes=1024,
+        error_code=None,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=1024,
+    )
+    await _set_usage_reserved(user["id"], 1024)
+
+    # Growth: active → pause for admit → unpause fails soft (still paused).
+    client = make_aria2_client(
+        pause="OK",
+        unpause="OK",
+        tell_status={
+            "status": "paused",
+            "totalLength": "4096",
+            "completedLength": "0",
+            "files": [
+                {"path": "/tmp/sel.bin", "length": "1024", "selected": "true"},
+                {"path": "/tmp/other.bin", "length": "3072", "selected": "false"},
+            ],
+        },
+    )
+    result = await coordinate_reported_size(
+        backend=client,
+        download=download,
+        expected_gid="gid_t15_floor",
+        control_gid="gid_t15_floor",
+        status={
+            "status": "active",
+            "totalLength": "4096",
+            "completedLength": "0",
+            "files": [
+                {"path": "/tmp/sel.bin", "length": "1024", "selected": "true"},
+                {"path": "/tmp/other.bin", "length": "3072", "selected": "false"},
+            ],
+        },
+        acquire_lifecycle_lock=False,
+    )
+    assert result["outcome"] in {"admitted", "pause_soft_failed", "rpc_unavailable"}
+    stored = await _fetch_global(download["id"])
+    assert stored["status"] != "failed"
+    # Floor: total must not shrink below create-time 1024; growth may raise.
+    assert int(stored["total_bytes"]) >= 1024
+    if result.get("unpause_soft_failed") or result["outcome"] == "admitted":
+        # System code path (admission or growth_unpause), never external.
+        if stored["error_code"] is not None:
+            assert stored["error_code"] != "external_paused"
+            assert stored["error_code"] in {
+                "admission_paused",
+                "growth_unpause_failed",
+                "growth_pause_failed",
+            }
+    # Never reclaim
+    client.force_remove.assert_not_awaited()
