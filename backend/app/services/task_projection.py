@@ -248,14 +248,26 @@ def build_aria2_status(
         is_metadata=False,
     )
 
+    # Ghost-speed guard: match real aria2 semantics — non-active
+    # observations report zero speed (stale last-poll values must not leak
+    # into RPC tellStatus/tellStopped for paused/terminal downloads).
+    live_status = str(live.get("status") or "")
+    live_active = (
+        (live_status == "active") if live_status else (status == "active")
+    )
+
     result = {
         "gid": gid,
         "status": status,
         "totalLength": str(display_total),
         "completedLength": str(live.get("completedLength", completed_bytes)),
         "uploadLength": str(live.get("uploadLength", "0")),
-        "downloadSpeed": str(live.get("downloadSpeed", "0")),
-        "uploadSpeed": str(live.get("uploadSpeed", "0")),
+        "downloadSpeed": (
+            str(live.get("downloadSpeed", "0")) if live_active else "0"
+        ),
+        "uploadSpeed": (
+            str(live.get("uploadSpeed", "0")) if live_active else "0"
+        ),
         "pieceLength": "1048576",
         "numPieces": "0",
         "connections": str(live.get("connections", "0")),
@@ -285,6 +297,17 @@ def projected_speeds(
     if live is None:
         live = row.get("backend_snapshot")
     live = live or {}
+    # Ghost-speed guard: only an "active" observation carries speed; paused/
+    # terminal snapshots keep stale last-poll values that must not surface in
+    # REST/WS/stats. Minimal live dicts without a status key trust the row's
+    # active-like status (explicit-live callers always carry status).
+    live_status = str(live.get("status") or "")
+    if live_status:
+        speed_active = live_status == "active"
+    else:
+        speed_active = effective_status(row) in ACTIVE_LIKE_DOWNLOAD_STATUSES
+    if not speed_active:
+        return 0, 0
     return _safe_int(live.get("downloadSpeed")), _safe_int(live.get("uploadSpeed"))
 
 

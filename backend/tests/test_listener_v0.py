@@ -1379,3 +1379,61 @@ async def test_late_g1_event_does_not_mutate_g2_or_delete_directory(
     client.force_remove.assert_not_awaited()
     client.remove_download_result.assert_not_awaited()
     broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_event_writes_backend_snapshot(
+    temp_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """事件路径快照回归：listener 拿到 observed_status 必须刷新读模型。"""
+    from app.db.schema import task_backend_snapshots
+
+    user = await create_user_v0(username="listener-snap-user")
+    download = await create_global_download_v0(
+        resource_key="rk-listener-snap",
+        source_uri="http://example.com/snap.bin",
+        resource_kind="http",
+        status="active",
+        aria2_gid="gid-listener-snap",
+        total_bytes=8192,
+        completed_bytes=0,
+        size_known=True,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=int(download["id"]),
+        status="active",
+        reserved_bytes=8192,
+    )
+
+    client = make_aria2_client(
+        tell_status={
+            "gid": "gid-listener-snap",
+            "status": "active",
+            "totalLength": "8192",
+            "completedLength": "4096",
+            "downloadSpeed": "1314520",
+            "uploadSpeed": "0",
+            "files": [],
+        }
+    )
+    _patch_aria2_client(monkeypatch, client)
+
+    await handle_aria2_event("gid-listener-snap", "start")
+
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    select(task_backend_snapshots).where(
+                        task_backend_snapshots.c.global_download_id
+                        == int(download["id"])
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+    assert row is not None, "listener 事件未写入 task_backend_snapshots"
+    assert int(row["download_speed"]) == 1314520
+    assert int(row["completed_length"]) == 4096

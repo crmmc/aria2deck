@@ -429,3 +429,42 @@ def test_task_list_projection_retryable_false_for_completed() -> None:
     )
     assert response["retryable"] is False
     assert response["retry_blocked_reason"] is not None
+
+
+def test_projected_speeds_zero_for_paused_snapshot() -> None:
+    """幽灵速度回归：paused 观测不得把上一轮速度带给 REST/WS/stats。"""
+    row = _row(user_status="active", global_status="active")
+    row["backend_snapshot"] = {
+        "status": "paused",
+        "downloadSpeed": "999",
+        "uploadSpeed": "111",
+    }
+    response = build_rest_task_response(row)
+    assert response["download_speed"] == 0
+    assert response["upload_speed"] == 0
+
+
+def test_projected_speeds_zero_for_terminal_row_with_active_snapshot() -> None:
+    row = _row(user_status="failed", global_status="failed")
+    row["backend_snapshot"] = {
+        "status": "active",
+        "downloadSpeed": "777",
+        "uploadSpeed": "0",
+    }
+    response = build_rest_task_response(row)
+    assert response["download_speed"] == 0
+
+
+def test_aria2_status_zero_speed_for_paused_observation() -> None:
+    """RPC 投影：paused/终态观测速度清零，对齐真实 aria2 语义。"""
+    row = _row(user_status="active", global_status="active")
+    row["backend_snapshot"] = {
+        "status": "paused",
+        "totalLength": "2048",
+        "completedLength": "1024",
+        "downloadSpeed": "555",
+        "uploadSpeed": "5",
+    }
+    status = build_aria2_status(row)
+    assert status["downloadSpeed"] == "0"
+    assert status["uploadSpeed"] == "0"

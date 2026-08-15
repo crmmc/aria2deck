@@ -893,3 +893,59 @@ async def test_handoff_system_pause_not_projected_external(temp_db: str) -> None
     assert stored["error_code"] == "metadata_admission_paused"
     assert stored["error_code"] != "external_paused"
     client.unpause.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handoff_complete_payload_writes_final_total(temp_db: str) -> None:
+    """M10 回归锚：payload 在 handoff 时已 complete，CAS 必须写终值 total
+    （完成定值语义），不得回退 0。"""
+    user = await create_user_v0(username="t_complete_total", quota_bytes=10_000_000)
+    download = await create_global_download_v0(
+        resource_key="magnet:t-complete-total",
+        source_uri="magnet:?xt=urn:btih:t_complete_total",
+        resource_kind="magnet",
+        status="active",
+        aria2_gid="gid_src_complete",
+        total_bytes=0,
+        size_known=False,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=0,
+    )
+
+    payload_gid = "gid_payload_complete"
+    source_status: dict[str, Any] = {
+        "status": "complete",
+        "followedBy": [payload_gid],
+        "totalLength": "4096",
+        "completedLength": "4096",
+        "files": [{"path": "[METADATA]", "length": "4096", "selected": "true"}],
+    }
+    payload_status: dict[str, Any] = {
+        "status": "complete",
+        "totalLength": "8192",
+        "completedLength": "8192",
+        "files": [{"path": "/dl/1/done.bin", "length": "8192", "selected": "true"}],
+    }
+
+    async def _tell_status(gid: str) -> dict[str, Any]:
+        return payload_status if gid == payload_gid else source_status
+
+    client = make_aria2_client()
+    client.tell_status.side_effect = _tell_status
+
+    await reconcile_attempt_signal(
+        backend=client,
+        observed_gid="gid_src_complete",
+        event="complete",
+        observed_status=source_status,
+        log_prefix="[TC]",
+    )
+
+    stored = await _fetch_global(download["id"])
+    assert int(stored["total_bytes"]) == 8192, (
+        "handoff complete 分支必须落 payload 终值大小，而不是 0/旧值"
+    )

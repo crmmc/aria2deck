@@ -16,7 +16,7 @@ from app.aria2.gateway import get_aria2_client
 from app.aria2.protocol import Aria2Gateway
 from app.domain.lifecycle import ReconcileResult
 from app.modules.backend.aria2_adapter import Aria2BackendAdapter
-from app.modules.task_core.sync import apply_queue_policy, record_observed_snapshot
+from app.modules.task_core.sync import apply_queue_policy
 from app.services import backend_connectivity
 from app.services.lifecycle import _shared, coordinator, repair
 from app.services.lifecycle.repair import list_v0_tracked_downloads
@@ -66,14 +66,6 @@ async def _sync_tasks_once() -> None:
         try:
             observed_status = await client.tell_status(gid)
             saw_backend_ok = True
-            try:
-                await record_observed_snapshot(
-                    tid=int(download["id"]), observed_status=observed_status
-                )
-            except Exception:
-                logger.debug(
-                    "[Sync] snapshot upsert failed gid=%s", gid, exc_info=True
-                )
         except Exception as exc:
             if _shared.is_missing_gid_error(exc):
                 saw_backend_ok = True

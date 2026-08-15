@@ -465,11 +465,20 @@ async def _handoff_locked(
     # M10: size truth is admission-owned. reconcile_download_size already
     # wrote total_bytes when admitted; map_progress_values no longer carries
     # total. Prefer admission size_bytes, else keep current download total.
-    admitted_total = int(
-        admission.get("size_bytes")
-        if admission.get("size_bytes") is not None
-        else (download.get("total_bytes") or 0)
-    )
+    # "complete" admission carries no size_bytes: the payload is already
+    # finished, so its live total IS the final size (completion semantics),
+    # never a speculative value.
+    admission_size = admission.get("size_bytes")
+    if admission_size is not None:
+        admitted_total = int(admission_size)
+    elif str(admission.get("outcome") or "") == "complete":
+        admitted_total = int(
+            payload_status.get("totalLength")
+            or download.get("total_bytes")
+            or 0
+        )
+    else:
+        admitted_total = int(download.get("total_bytes") or 0)
 
     global_values: dict[str, Any] = {
         "aria2_gid": payload_gid,

@@ -16,6 +16,7 @@ from app.core.security import sanitize_string
 from app.core.time_utils import now_ms
 from app.domain.lifecycle import ReconcileResult
 from app.domain.locks import get_download_lifecycle_lock
+from app.modules.task_core.sync import record_observed_snapshot
 from app.modules.task_core.states import (
     ACTIVE_CLEAR_ERROR_CODES,
     ERROR_ADMISSION_PAUSED,
@@ -103,6 +104,22 @@ async def reconcile_attempt_signal(
 
     attempt_id = int(resolved.download["id"])
     is_handoff = resolved.is_handoff_candidate
+
+    # Observation gate: every successful observation (sync poll / aria2 WS
+    # event) refreshes the snapshot read-model here, in one place, so REST /
+    # WS / stats speed+progress stay fresh on event boundaries too.
+    if observed_status is not None:
+        try:
+            await record_observed_snapshot(
+                tid=attempt_id, observed_status=dict(observed_status)
+            )
+        except Exception:
+            logger.debug(
+                "%s snapshot upsert failed attempt_id=%s",
+                log_prefix,
+                attempt_id,
+                exc_info=True,
+            )
 
     # 2. Attempt lock + reread.
     lifecycle_lock = await get_download_lifecycle_lock(attempt_id)
