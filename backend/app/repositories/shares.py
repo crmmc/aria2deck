@@ -86,13 +86,6 @@ async def count_effective_active_shares(user_file_id: int, timestamp_ms: int) ->
     return int(value or 0)
 
 
-async def create_share_row(values: dict[str, Any]) -> dict[str, Any]:
-    async with transaction() as conn:
-        row = (
-            await conn.execute(insert(share_links).values(**values).returning(share_links))
-        ).mappings().one()
-    return dict(row)
-
 
 async def create_share_row_in_existing_conn(
     conn: AsyncConnection,

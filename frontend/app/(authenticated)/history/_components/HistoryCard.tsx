@@ -116,17 +116,13 @@ export const HistoryCard = memo(function HistoryCard({
               </div>
             </div>
           </div>
-          <div
-            className="task-status-col"
-            style={{ marginLeft: "auto", textAlign: "right" }}
-          >
+          <div className="task-status-col">
             <span className={`task-status ${statusClass}`}>{statusText}</span>
             {reasonText && (
               <div
-                className={`text-sm mt-1 ${
+                className={`task-status-reason text-sm ${
                   record.result === "failed" ? "text-danger" : "muted"
                 }`}
-                style={{ textAlign: "right", maxWidth: "60%", marginLeft: "auto" }}
                 title={reasonText}
               >
                 {reasonText}

@@ -401,3 +401,136 @@ async def test_v12_rebuild_keeps_child_fks_and_constraints(
     assert "ck_global_downloads_status" in str(gd_sql)
     assert leftover == 0
     assert (gd_count, ut_count, snap_count) == (1, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_v12_recovers_from_leftover_temp_table(isolated_db: Path) -> None:
+    """崩溃态自愈：CREATE 成功后崩溃留下的 _v12_new 残表被丢弃，迁移照常完成。"""
+    from app.db.migrations import ensure_v12_download_sources_schema
+
+    async with get_engine().begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY, "
+                "version INTEGER NOT NULL, created_at_ms INTEGER NOT NULL)"
+            )
+        )
+        await conn.execute(text("INSERT INTO schema_meta VALUES (1, 11, 123)"))
+        await conn.execute(
+            text("CREATE TABLE stored_files (id INTEGER PRIMARY KEY)")
+        )
+        # v11 原表 + 崩溃残留的半拷贝临时表
+        await conn.execute(
+            text(
+                "CREATE TABLE global_downloads ("
+                "id INTEGER PRIMARY KEY, "
+                "resource_key TEXT NOT NULL, "
+                "resource_kind TEXT NOT NULL, "
+                "source_uri TEXT NOT NULL, "
+                "status TEXT NOT NULL, "
+                "created_at_ms INTEGER NOT NULL, "
+                "updated_at_ms INTEGER NOT NULL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO global_downloads VALUES "
+                "(1, 'rk', 'http', 'http://example.com/a', 'active', 1, 1)"
+            )
+        )
+        await conn.execute(
+            text("CREATE TABLE global_downloads_v12_new (id INTEGER PRIMARY KEY)")
+        )
+
+        await ensure_v12_download_sources_schema(conn)
+
+        tables = {
+            row[0]
+            for row in (
+                await conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            ).all()
+        }
+        assert "global_downloads_v12_new" not in tables
+        count = (
+            await conn.execute(text("SELECT COUNT(*) FROM global_downloads"))
+        ).scalar_one()
+        assert count == 1
+        source_fk = (
+            await conn.execute(text("PRAGMA foreign_key_list(global_downloads)"))
+        ).mappings().all()
+        assert any(
+            row["table"] == "download_sources"
+            and row["from"] == "source_id"
+            and row["on_delete"].upper() == "SET NULL"
+            for row in source_fk
+        )
+
+
+@pytest.mark.asyncio
+async def test_v12_recovers_from_crashed_swap(isolated_db: Path) -> None:
+    """崩溃态自愈：DROP 原表后、RENAME 前崩溃 —— 残表被扶正为正式表。"""
+    from app.db.migrations import ensure_v12_download_sources_schema
+
+    async with get_engine().begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY, "
+                "version INTEGER NOT NULL, created_at_ms INTEGER NOT NULL)"
+            )
+        )
+        await conn.execute(text("INSERT INTO schema_meta VALUES (1, 11, 123)"))
+        await conn.execute(
+            text(
+                "CREATE TABLE download_sources ("
+                "id INTEGER PRIMARY KEY, "
+                "resource_kind VARCHAR(16) NOT NULL, "
+                "payload_text TEXT NOT NULL, "
+                "content_digest VARCHAR(64), "
+                "resource_identity VARCHAR(128), "
+                "created_at_ms INTEGER NOT NULL, "
+                "updated_at_ms INTEGER NOT NULL)"
+            )
+        )
+        # 崩溃现场：原表已 DROP，重建的新表卡在改名前
+        await conn.execute(
+            text(
+                "CREATE TABLE global_downloads_v12_new ("
+                "id INTEGER PRIMARY KEY, "
+                "resource_key VARCHAR(128) NOT NULL, "
+                "resource_kind VARCHAR(16) NOT NULL, "
+                "source_uri TEXT NOT NULL, "
+                "status VARCHAR(16) NOT NULL, "
+                "source_id INTEGER REFERENCES download_sources (id) "
+                "ON DELETE SET NULL, "
+                "created_at_ms INTEGER NOT NULL, "
+                "updated_at_ms INTEGER NOT NULL)"
+            )
+        )
+
+        await ensure_v12_download_sources_schema(conn)
+
+        tables = {
+            row[0]
+            for row in (
+                await conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            ).all()
+        }
+        assert "global_downloads" in tables
+        assert "global_downloads_v12_new" not in tables
+        fk = (
+            await conn.execute(text("PRAGMA foreign_key_list(global_downloads)"))
+        ).mappings().all()
+        assert any(row["table"] == "download_sources" for row in fk)
+        idx = {
+            row[0]
+            for row in (
+                await conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='index'")
+                )
+            ).all()
+        }
+        assert "ix_global_downloads_resource_key" in idx

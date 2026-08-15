@@ -4038,3 +4038,26 @@ dialog.confirm-overlay {
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   }
 }
+
+/* History card: status badge + reason column (right-aligned) */
+.task-status-col {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+  min-width: 0;
+}
+
+.task-status-reason {
+  margin-top: 0.25rem;
+  max-width: 220px;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+@media (max-width: 640px) {
+  .task-status-reason {
+    max-width: 150px;
+  }
+}

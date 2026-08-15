@@ -8,7 +8,6 @@ from sqlalchemy import insert
 from app.db.engine import transaction
 from app.db.schema import global_downloads
 from app.repositories.backend_snapshots import (
-    delete_snapshot,
     get_snapshot,
     get_snapshots_for_tids,
     upsert_snapshot,
@@ -129,21 +128,3 @@ async def test_get_snapshots_for_tids_returns_mapping(temp_db: str) -> None:
     assert result[tid_b]["status"] == "waiting"
 
     assert await get_snapshots_for_tids([]) == {}
-
-
-@pytest.mark.asyncio
-async def test_delete_snapshot(temp_db: str) -> None:
-    tid = await _create_global_download("http:repo_delete")
-    await upsert_snapshot(
-        global_download_id=tid,
-        download_speed=1,
-        upload_speed=0,
-        total_length=10,
-        completed_length=5,
-        status="active",
-        files_json="[]",
-        raw_json="{}",
-        updated_at_ms=1,
-    )
-    await delete_snapshot(tid)
-    assert await get_snapshot(tid) is None

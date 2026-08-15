@@ -1282,28 +1282,6 @@ async def complete_attempt(
     return dict(row)
 
 
-async def replace_terminal_download_gid(
-    download_id: int,
-    *,
-    expected_gid: str,
-    residual_gid: str,
-) -> bool:
-    async with transaction() as conn:
-        row = (
-            await conn.execute(
-                update(global_downloads)
-                .where(
-                    global_downloads.c.id == download_id,
-                    global_downloads.c.aria2_gid == expected_gid,
-                    global_downloads.c.status.in_(("failed", "cancelled")),
-                    global_downloads.c.completed_file_id.is_(None),
-                )
-                .values(aria2_gid=residual_gid, updated_at_ms=now_ms())
-                .returning(global_downloads.c.id)
-            )
-        ).first()
-    return row is not None
-
 
 async def clear_terminal_download_gid(
     download_id: int,

@@ -87,10 +87,3 @@ async def get_snapshots_for_tids(tids: list[int]) -> dict[int, dict[str, Any]]:
     return {row["global_download_id"]: dict(row) for row in rows}
 
 
-async def delete_snapshot(global_download_id: int) -> None:
-    async with transaction() as conn:
-        await conn.execute(
-            task_backend_snapshots.delete().where(
-                task_backend_snapshots.c.global_download_id == global_download_id
-            )
-        )

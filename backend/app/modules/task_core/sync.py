@@ -140,6 +140,12 @@ async def record_observed_snapshot(
 async def sync_once(backend: BackendPort) -> SyncReport:
     """Run one batch sync round against the backend.
 
+    TEST / TASK-CORE API ONLY — do not wire into the production lifespan.
+    Production sync is the trigger-only observer in app/aria2/sync.py plus
+    the coordinator observation gate; wiring this in would double-write
+    completed_bytes/status.
+    
+
     Lists live tids with a gid, calls ``backend.tell_many``, writes
     ``completed_bytes`` plus ``status`` back to ``global_downloads``, then
     runs the pause / queue policy for each still-live tid.

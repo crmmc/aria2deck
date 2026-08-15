@@ -181,6 +181,9 @@ async def broadcast_task_update_to_subscribers(task_id: int) -> None:
 
 
 async def broadcast_notification(
+    # NOTE: capability present (frontend handles type:"notification"); no
+    # production caller yet. Wiring it to completion/failure/quota events is
+    # a product decision, not a bug.
     user_id: int,
     message: str,
     level: str = "info",

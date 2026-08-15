@@ -389,6 +389,7 @@ V12_USER_TASKS_ADDED_COLUMNS = {
 
 async def ensure_v12_download_sources_schema(conn: AsyncConnection) -> None:
     """v12: download_sources + history retention columns."""
+    await _recover_crashed_v12_swap(conn)
     await conn.execute(
         text(
             "CREATE TABLE IF NOT EXISTS download_sources ("
@@ -451,6 +452,11 @@ async def ensure_v12_download_sources_schema(conn: AsyncConnection) -> None:
     ):
         await _rebuild_global_downloads_source_fk(conn)
 
+    # Indexes are always (re-)created idempotently: a crash between RENAME
+    # and index creation must not leave the schema missing unique/index
+    # protection with the FK already present (rebuild would be skipped).
+    await _ensure_global_downloads_indexes(conn)
+
 
 V12_GLOBAL_DOWNLOADS_CREATE = (
     "CREATE TABLE {name} ("
@@ -488,6 +494,25 @@ V12_GLOBAL_DOWNLOADS_CREATE = (
 )
 
 
+async def _recover_crashed_v12_swap(conn: AsyncConnection) -> None:
+    """Self-heal half-done v12 rebuilds from an earlier crash.
+
+    - original dropped + temp not renamed: finish the swap;
+    - leftover half-copied temp table: discard it.
+    """
+    table_names = await _table_names(conn)
+    if "global_downloads" not in table_names:
+        if "global_downloads_v12_new" in table_names:
+            await conn.execute(
+                text(
+                    "ALTER TABLE global_downloads_v12_new "
+                    "RENAME TO global_downloads"
+                )
+            )
+    elif "global_downloads_v12_new" in table_names:
+        await conn.execute(text("DROP TABLE global_downloads_v12_new"))
+
+
 async def _rebuild_global_downloads_source_fk(conn: AsyncConnection) -> None:
     """Attach source_id FK ON DELETE SET NULL via table rebuild.
 
@@ -497,7 +522,13 @@ async def _rebuild_global_downloads_source_fk(conn: AsyncConnection) -> None:
     dangling after the old table is dropped. The rebuild uses the canonical
     v12 shape (CHECK constraints, aria2_gid UNIQUE, completed_file_id FK)
     rather than pragma-derived column defs.
+
+    Self-heals half-done rebuilds from an earlier crash: a leftover temp
+    table is discarded; a crashed swap (original dropped, temp not yet
+    renamed) is finished before anything else runs.
     """
+    await _recover_crashed_v12_swap(conn)
+
     columns = await _column_names(conn, "global_downloads")
     column_list = ", ".join(sorted(columns))
     # Only reference stored_files when it exists (any real deployment has it);
@@ -521,6 +552,14 @@ async def _rebuild_global_downloads_source_fk(conn: AsyncConnection) -> None:
     await conn.execute(
         text("ALTER TABLE global_downloads_v12_new RENAME TO global_downloads")
     )
+
+
+
+async def _ensure_global_downloads_indexes(conn: AsyncConnection) -> None:
+    """Idempotently (re)create the global_downloads indexes."""
+    if "global_downloads" not in await _table_names(conn):
+        return
+    columns = set(await _column_names(conn, "global_downloads"))
 
     async def _maybe_index(sql: str, required: set[str]) -> None:
         if required <= columns:
