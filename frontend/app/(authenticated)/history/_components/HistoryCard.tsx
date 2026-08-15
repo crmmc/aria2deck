@@ -9,6 +9,7 @@ interface HistoryCardProps {
   onToggleSelection: (id: number) => void;
   onCopyUri: (uri: string) => void;
   onRetry: (record: TaskHistory) => void;
+  onDelete: (record: TaskHistory) => void;
 }
 
 function canShowRetry(record: TaskHistory): boolean {
@@ -28,6 +29,7 @@ export const HistoryCard = memo(function HistoryCard({
   onToggleSelection,
   onCopyUri,
   onRetry,
+  onDelete,
 }: HistoryCardProps) {
   const handleCardClick = useCallback(() => {
     if (record.uri) {
@@ -114,24 +116,24 @@ export const HistoryCard = memo(function HistoryCard({
               </div>
             </div>
           </div>
-          <span
-            className={`task-status ${statusClass}`}
-            style={{ marginLeft: "auto" }}
-          >
-            {statusText}
-          </span>
-        </div>
-
-        {reasonText && (
           <div
-            className={`text-sm mb-3 ${
-              record.result === "failed" ? "text-danger" : "muted"
-            }`}
-            title={reasonText}
+            className="task-status-col"
+            style={{ marginLeft: "auto", textAlign: "right" }}
           >
-            {reasonText}
+            <span className={`task-status ${statusClass}`}>{statusText}</span>
+            {reasonText && (
+              <div
+                className={`text-sm mt-1 ${
+                  record.result === "failed" ? "text-danger" : "muted"
+                }`}
+                style={{ textAlign: "right", maxWidth: "60%", marginLeft: "auto" }}
+                title={reasonText}
+              >
+                {reasonText}
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </div>
 
       <div className="task-card-footer" role="presentation" onClick={(e) => e.stopPropagation()}>
@@ -161,6 +163,16 @@ export const HistoryCard = memo(function HistoryCard({
               重试
             </button>
           )}
+          <button type="button"
+            className="button danger btn-task"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(record);
+            }}
+            title="删除这条历史记录"
+          >
+            删除
+          </button>
         </div>
       </div>
     </div>

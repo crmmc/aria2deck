@@ -48,7 +48,22 @@ describe("HistoryPage", () => {
       { ...baseRecord, id: 2, result: "completed", task_name: "ok-file.zip", retryable: false, retry_blocked_reason: "已完成不可重试" },
     ] as never);
     mockApi.retryTask.mockResolvedValue({ id: 100 } as never);
+    mockApi.deleteHistory = jest.fn().mockResolvedValue({ ok: true } as never);
     mockApi.clearHistory.mockResolvedValue({ ok: true, count: 2 } as never);
+  });
+
+  test("per-record delete button removes the record", async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    expect(screen.getByText("ok-file.zip")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+    await waitFor(() => expect(mockApi.deleteHistory).toHaveBeenCalled());
+
+    await waitFor(() =>
+      expect(screen.queryByText("failed-file.zip")).not.toBeInTheDocument()
+    );
   });
 
   test("completed record shows no retry-blocked warning", async () => {

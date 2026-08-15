@@ -56,6 +56,26 @@ export default function HistoryPage() {
     [copyToClipboard]
   );
 
+  const deleteRecord = useCallback(
+    async (record: TaskHistory) => {
+      try {
+        await api.deleteHistory(record.id);
+        if (!mountedRef.current) return;
+        setRecords((prev) => prev.filter((r) => r.id !== record.id));
+        setSelectedRecords((prev) => {
+          const next = new Set(prev);
+          next.delete(record.id);
+          return next;
+        });
+        showToast("已删除该条历史记录", "success");
+      } catch (err) {
+        showToast("删除失败：" + (err as Error).message, "error");
+        if (mountedRef.current) loadHistory();
+      }
+    },
+    [showToast, loadHistory]
+  );
+
   const retryTask = useCallback(
     async (record: TaskHistory) => {
       if (record.retryable === false) {
@@ -260,6 +280,7 @@ export default function HistoryPage() {
                 onToggleSelection={toggleRecordSelection}
                 onCopyUri={copyUri}
                 onRetry={retryTask}
+                onDelete={deleteRecord}
               />
             ))}
           </div>
