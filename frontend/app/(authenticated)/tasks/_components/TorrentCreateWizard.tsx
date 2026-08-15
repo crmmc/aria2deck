@@ -31,6 +31,7 @@ export function TorrentCreateWizard({
   const [searchQuery, setSearchQuery] = useState("");
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [selectedIndexes, setSelectedIndexes] = useState<Set<number>>(
     () => new Set(preview.files.map((file) => file.index))
   );
@@ -73,12 +74,15 @@ export function TorrentCreateWizard({
   const createTorrent = async () => {
     if (isCreating || selectedIndexes.size === 0) return;
     setIsCreating(true);
+    setSubmitError(null);
     try {
       const task = await api.uploadTorrent(torrentBase64, {
         selected_file_indexes: Array.from(selectedIndexes).sort((a, b) => a - b),
       });
       onCreated(task);
     } catch (err) {
+      // 向导是全屏遮罩：错误必须显示在向导内，页面级 error 会被挡住。
+      setSubmitError((err as Error).message);
       onError((err as Error).message);
       setIsCreating(false);
     }
@@ -185,6 +189,15 @@ export function TorrentCreateWizard({
                 readonly
               />
               <footer className="torrent-wizard-actions">
+                {submitError ? (
+                  <div
+                    className="form-error torrent-submit-error"
+                    role="alert"
+                    style={{ flex: "1 1 100%", marginBottom: "0.5rem" }}
+                  >
+                    {submitError}
+                  </div>
+                ) : null}
                 <button
                   type="button"
                   className="button secondary shadow-none"
