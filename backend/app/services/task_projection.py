@@ -67,6 +67,34 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _display_total(
+    *,
+    db_total: int,
+    size_known: bool,
+    live_total: int | None,
+    active_like: bool = True,
+    is_metadata: bool = False,
+) -> int:
+    """Single display rule for total size (M10 size truth).
+
+    Prefer admitted DB total when size is known. Otherwise fall back to a
+    trustworthy live total (live > 0) while active-like; when not active-like
+    or live is unavailable/zero, keep the DB value. Metadata phase keeps the
+    RPC-compatible behavior of not promoting live metadata size.
+    """
+    if is_metadata:
+        return db_total
+    if size_known and db_total > 0:
+        return db_total
+    if not active_like:
+        return db_total
+    if live_total is None:
+        return db_total
+    if live_total > 0:
+        return live_total
+    return db_total
+
+
 def is_uri_like_path(path: str) -> bool:
     lowered = path.strip().lower()
     return lowered.startswith(("magnet:", "torrent:"))
@@ -205,10 +233,25 @@ def build_aria2_status(
     )
     error_message = row.get("error_message") or row.get("global_error_message") or ""
 
+    # M10: when size is admitted, prefer DB truth over live totalLength noise
+    # (e.g. never-started BT reports totalLength=0). Align live>0 with REST.
+    size_known = bool(row.get("size_known"))
+    live_total_raw = live.get("totalLength") if live else None
+    live_total = (
+        _safe_int(live_total_raw) if live_total_raw is not None else None
+    )
+    display_total = _display_total(
+        db_total=total_bytes,
+        size_known=size_known,
+        live_total=live_total,
+        active_like=True,
+        is_metadata=False,
+    )
+
     result = {
         "gid": gid,
         "status": status,
-        "totalLength": str(live.get("totalLength", total_bytes)),
+        "totalLength": str(display_total),
         "completedLength": str(live.get("completedLength", completed_bytes)),
         "uploadLength": str(live.get("uploadLength", "0")),
         "downloadSpeed": str(live.get("downloadSpeed", "0")),
@@ -309,23 +352,39 @@ def build_rest_task_response(
     total_length = _safe_int(row.get("total_bytes"))
     completed_length = _safe_int(row.get("completed_bytes"))
     effective = effective_status(row)
+    size_known = bool(row.get("size_known"))
 
-    # Prefer live aria2 data for active tasks — fresher and avoids
-    # stale/polluted DB values (e.g. during metadata download phase).
-    if live and effective_status(row) in ACTIVE_LIKE_DOWNLOAD_STATUSES:
+    # Progress display: admitted DB truth wins when size_known; otherwise live
+    # total is only a preview (never overwrites DB — M10).
+    active_like = effective in ACTIVE_LIKE_DOWNLOAD_STATUSES
+    if live and active_like:
         project_bt = should_project_bittorrent(row, live)
         if project_bt:
             live_name = _extract_live_display_name(live)
             if live_name:
                 name = live_name
-        if not (project_bt and is_metadata_phase_status(live)):
-            live_total = _safe_int(live.get("totalLength"))
-            if live_total > 0:
-                total_length = live_total
-                completed_length = _safe_int(live.get("completedLength"))
-        else:
+        is_metadata = bool(project_bt and is_metadata_phase_status(live))
+        live_total_raw = live.get("totalLength")
+        live_total = (
+            _safe_int(live_total_raw) if live_total_raw is not None else None
+        )
+        total_length = _display_total(
+            db_total=total_length,
+            size_known=size_known,
+            live_total=live_total,
+            active_like=True,
+            is_metadata=is_metadata,
+        )
+        if is_metadata:
             # Metadata phase: show downloaded bytes so user sees activity,
-            # but keep total_length at 0 to avoid a misleading percentage.
+            # but keep total_length at DB (usually 0) to avoid a misleading %.
+            completed_length = _safe_int(live.get("completedLength"))
+        elif size_known and _safe_int(row.get("total_bytes")) > 0:
+            # Keep DB total; still refresh completed from live when present.
+            live_completed = live.get("completedLength")
+            if live_completed is not None:
+                completed_length = _safe_int(live_completed)
+        elif live_total is not None and live_total > 0:
             completed_length = _safe_int(live.get("completedLength"))
 
     # frozen_space is reservation accounting (DB), not live totalLength.

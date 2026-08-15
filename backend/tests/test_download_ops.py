@@ -105,9 +105,10 @@ class TestMapProgressValues:
             "completedLength": "500",
         }
         result = map_progress_values(status, None)
+        # M10: total_bytes is admission-owned; progress map only carries
+        # display_name + completed_bytes.
         assert result == {
             "display_name": "Movie",
-            "total_bytes": 1000,
             "completed_bytes": 500,
         }
 
@@ -132,7 +133,10 @@ class TestMapProgressValues:
             "completedLength": "10",
         }
         result = map_progress_values(status, "fallback", skip_total_on_metadata=False)
-        assert result["total_bytes"] == 99
+        # M10: even with skip_total_on_metadata=False, progress map never
+        # projects total_bytes (admission is the sole writer).
+        assert "total_bytes" not in result
+        assert result["completed_bytes"] == 10
 
 
 class TestMapAria2Status:

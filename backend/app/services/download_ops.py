@@ -78,10 +78,8 @@ def map_progress_values(
         and not display_name.startswith(METADATA_NAME_PREFIX)
     ):
         values["display_name"] = display_name
-    if is_metadata:
-        pass
-    else:
-        values["total_bytes"] = safe_int(aria2_status.get("totalLength"))
+    # M10: total_bytes is admission-owned (downloads/handoff). Progress
+    # projection only carries completed_bytes + display_name.
     values["completed_bytes"] = safe_int(aria2_status.get("completedLength"))
     return values
 

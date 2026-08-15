@@ -109,6 +109,7 @@ def _user_task_download_select():
         global_downloads.c.aria2_gid,
         global_downloads.c.status.label("global_status"),
         global_downloads.c.total_bytes,
+        global_downloads.c.size_known,
         global_downloads.c.completed_bytes,
         global_downloads.c.error_code,
         global_downloads.c.error_message.label("global_error_message"),

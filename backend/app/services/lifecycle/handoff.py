@@ -462,11 +462,20 @@ async def _handoff_locked(
         raw_status == "paused" or bool(admission.get("paused_by_us"))
     ) and raw_status != "complete"
 
+    # M10: size truth is admission-owned. reconcile_download_size already
+    # wrote total_bytes when admitted; map_progress_values no longer carries
+    # total. Prefer admission size_bytes, else keep current download total.
+    admitted_total = int(
+        admission.get("size_bytes")
+        if admission.get("size_bytes") is not None
+        else (download.get("total_bytes") or 0)
+    )
+
     global_values: dict[str, Any] = {
         "aria2_gid": payload_gid,
         "status": mapped_status,
         "completed_bytes": progress.get("completed_bytes", 0),
-        "total_bytes": progress.get("total_bytes", 0),
+        "total_bytes": admitted_total,
     }
     if progress.get("display_name"):
         global_values["display_name"] = progress["display_name"]

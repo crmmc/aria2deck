@@ -449,7 +449,8 @@ async def reconcile_attempt_signal(
                     global_values["error_code"] = ERROR_ADMISSION_PAUSED
                     global_values["error_message"] = None
                 if not is_metadata:
-                    global_values["total_bytes"] = mapped["total_bytes"]
+                    # M10: total_bytes is admission-owned only; projection must
+                    # never overwrite admitted truth from live totalLength noise.
                     if mapped["display_name"]:
                         global_values["display_name"] = mapped["display_name"]
 
