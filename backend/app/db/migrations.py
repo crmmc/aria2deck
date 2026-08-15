@@ -452,44 +452,75 @@ async def ensure_v12_download_sources_schema(conn: AsyncConnection) -> None:
         await _rebuild_global_downloads_source_fk(conn)
 
 
+V12_GLOBAL_DOWNLOADS_CREATE = (
+    "CREATE TABLE {name} ("
+    "id INTEGER NOT NULL PRIMARY KEY, "
+    "resource_key VARCHAR(128) NOT NULL, "
+    "resource_kind VARCHAR(16) NOT NULL, "
+    "source_uri TEXT NOT NULL, "
+    "bt_info_hash VARCHAR(40), "
+    "display_name TEXT, "
+    "aria2_gid VARCHAR(32) UNIQUE, "
+    "status VARCHAR(16) NOT NULL, "
+    "total_bytes INTEGER NOT NULL DEFAULT 0, "
+    "completed_bytes INTEGER NOT NULL DEFAULT 0, "
+    "size_known INTEGER NOT NULL DEFAULT 0, "
+    "size_limit_bytes INTEGER NOT NULL DEFAULT 0, "
+    "disk_reserved_bytes INTEGER NOT NULL DEFAULT 0, "
+    "error_code VARCHAR(64), "
+    "error_message TEXT, "
+    "completed_file_id INTEGER{stored_files_fk}, "
+    "created_at_ms INTEGER NOT NULL, "
+    "updated_at_ms INTEGER NOT NULL, "
+    "completed_at_ms INTEGER, "
+    "source_id INTEGER REFERENCES download_sources (id) ON DELETE SET NULL, "
+    "CONSTRAINT ck_global_downloads_resource_kind "
+    "CHECK (resource_kind IN ('http', 'magnet', 'torrent', 'other')), "
+    "CONSTRAINT ck_global_downloads_status "
+    "CHECK (status IN ('queued', 'active', 'waiting', 'paused', "
+    "'completed', 'failed', 'cancelled')), "
+    "CONSTRAINT ck_global_downloads_size_known_bool "
+    "CHECK (size_known IN (0, 1)), "
+    "CONSTRAINT ck_global_downloads_size_limit_non_negative "
+    "CHECK (size_limit_bytes >= 0), "
+    "CONSTRAINT ck_global_downloads_disk_reserved_non_negative "
+    "CHECK (disk_reserved_bytes >= 0))"
+)
+
+
 async def _rebuild_global_downloads_source_fk(conn: AsyncConnection) -> None:
-    """Attach source_id FK ON DELETE SET NULL via table rebuild."""
+    """Attach source_id FK ON DELETE SET NULL via table rebuild.
+
+    Order is create-new -> copy -> drop original -> rename: the original
+    table is never renamed, because SQLite rewrites child FK definitions
+    (user_tasks, task_backend_snapshots) to a renamed parent, leaving them
+    dangling after the old table is dropped. The rebuild uses the canonical
+    v12 shape (CHECK constraints, aria2_gid UNIQUE, completed_file_id FK)
+    rather than pragma-derived column defs.
+    """
     columns = await _column_names(conn, "global_downloads")
     column_list = ", ".join(sorted(columns))
-    await conn.execute(
-        text("ALTER TABLE global_downloads RENAME TO global_downloads_old_v12")
+    # Only reference stored_files when it exists (any real deployment has it);
+    # a FK clause against a missing table breaks INSERT preparation on
+    # minimal legacy/test schemas.
+    table_names = await _table_names(conn)
+    stored_files_fk = (
+        " REFERENCES stored_files (id)" if "stored_files" in table_names else ""
     )
-    pragma_cols = (
-        await conn.execute(text("PRAGMA table_info(global_downloads_old_v12)"))
-    ).all()
-    col_defs: list[str] = []
-    for row in pragma_cols:
-        name = str(row[1])
-        col_type = str(row[2] or "TEXT")
-        notnull = " NOT NULL" if int(row[3] or 0) == 1 and name != "source_id" else ""
-        default = row[4]
-        default_sql = f" DEFAULT {default}" if default is not None else ""
-        pk = " PRIMARY KEY" if int(row[5] or 0) == 1 else ""
-        if name == "source_id":
-            col_defs.append(
-                "source_id INTEGER REFERENCES download_sources(id) ON DELETE SET NULL"
-            )
-        else:
-            col_defs.append(f"{name} {col_type}{notnull}{default_sql}{pk}")
+    create_sql = V12_GLOBAL_DOWNLOADS_CREATE.replace(
+        "{stored_files_fk}", stored_files_fk
+    )
+    await conn.execute(text(create_sql.format(name="global_downloads_v12_new")))
     await conn.execute(
         text(
-            "CREATE TABLE global_downloads ("
-            + ", ".join(col_defs)
-            + ")"
+            f"INSERT INTO global_downloads_v12_new ({column_list}) "
+            f"SELECT {column_list} FROM global_downloads"
         )
     )
+    await conn.execute(text("DROP TABLE global_downloads"))
     await conn.execute(
-        text(
-            f"INSERT INTO global_downloads ({column_list}) "
-            f"SELECT {column_list} FROM global_downloads_old_v12"
-        )
+        text("ALTER TABLE global_downloads_v12_new RENAME TO global_downloads")
     )
-    await conn.execute(text("DROP TABLE global_downloads_old_v12"))
 
     async def _maybe_index(sql: str, required: set[str]) -> None:
         if required <= columns:

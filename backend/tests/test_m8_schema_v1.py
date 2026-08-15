@@ -130,6 +130,9 @@ async def test_v11_to_v12_migration_is_idempotent(isolated_db: Path) -> None:
         )
         await conn.execute(text("INSERT INTO app_settings VALUES (1, 1, 1, 1)"))
         await conn.execute(
+            text("CREATE TABLE stored_files (id INTEGER PRIMARY KEY)")
+        )
+        await conn.execute(
             text(
                 "CREATE TABLE global_downloads ("
                 "id INTEGER PRIMARY KEY, "
@@ -238,3 +241,163 @@ async def test_v11_to_v12_migration_is_idempotent(isolated_db: Path) -> None:
         and row["on_delete"].upper() == "SET NULL"
         for row in source_fk
     )
+
+
+@pytest.mark.asyncio
+async def test_v12_rebuild_keeps_child_fks_and_constraints(
+    isolated_db: Path,
+) -> None:
+    """v11→v12 表重建不得改写子表外键目标（生产事故回归）。
+
+    子表带真实 FK 定义 + 数据行；RENAME 式重建会把 user_tasks /
+    task_backend_snapshots 的外键改写到旧表名并悬空。
+    """
+    async with get_engine().begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY, "
+                "version INTEGER NOT NULL, created_at_ms INTEGER NOT NULL)"
+            )
+        )
+        await conn.execute(text("INSERT INTO schema_meta VALUES (1, 11, 123)"))
+        await conn.execute(
+            text(
+                "CREATE TABLE app_settings ("
+                "id INTEGER PRIMARY KEY, "
+                "max_task_size_bytes INTEGER NOT NULL, "
+                "created_at_ms INTEGER NOT NULL, "
+                "updated_at_ms INTEGER NOT NULL)"
+            )
+        )
+        await conn.execute(text("INSERT INTO app_settings VALUES (1, 1, 1, 1)"))
+        await conn.execute(
+            text("CREATE TABLE stored_files (id INTEGER PRIMARY KEY)")
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE global_downloads ("
+                "id INTEGER PRIMARY KEY, "
+                "resource_key TEXT NOT NULL, "
+                "resource_kind TEXT NOT NULL, "
+                "source_uri TEXT NOT NULL, "
+                "status TEXT NOT NULL, "
+                "completed_file_id INTEGER REFERENCES stored_files (id), "
+                "created_at_ms INTEGER NOT NULL, "
+                "updated_at_ms INTEGER NOT NULL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO global_downloads "
+                "VALUES (1, 'rk', 'http', 'http://example.com/a', "
+                "'completed', NULL, 1, 1)"
+            )
+        )
+        await conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY)"))
+        await conn.execute(text("INSERT INTO users VALUES (1)"))
+        await conn.execute(
+            text(
+                "CREATE TABLE user_tasks ("
+                "id INTEGER PRIMARY KEY, "
+                "user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE, "
+                "global_download_id INTEGER NOT NULL "
+                "REFERENCES global_downloads (id) ON DELETE CASCADE, "
+                "status TEXT NOT NULL, "
+                "created_at_ms INTEGER NOT NULL, "
+                "updated_at_ms INTEGER NOT NULL)"
+            )
+        )
+        await conn.execute(
+            text("INSERT INTO user_tasks VALUES (1, 1, 1, 'completed', 1, 1)")
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE task_backend_snapshots ("
+                "global_download_id INTEGER NOT NULL "
+                "REFERENCES global_downloads (id) ON DELETE CASCADE PRIMARY KEY, "
+                "download_speed INTEGER NOT NULL DEFAULT 0, "
+                "upload_speed INTEGER NOT NULL DEFAULT 0, "
+                "total_length INTEGER NOT NULL DEFAULT 0, "
+                "completed_length INTEGER NOT NULL DEFAULT 0, "
+                "status VARCHAR(32) NOT NULL DEFAULT '', "
+                "files_json TEXT NOT NULL DEFAULT '[]', "
+                "raw_json TEXT NOT NULL DEFAULT '{}', "
+                "updated_at_ms INTEGER NOT NULL)"
+            )
+        )
+        await conn.execute(
+            text("INSERT INTO task_backend_snapshots VALUES (1, 0, 0, 0, 0, '', '[]', '{}', 1)")
+        )
+
+    async with get_engine().connect() as conn:
+        await conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        await conn.commit()
+        try:
+            async with conn.begin():
+                assert await run_migrations(conn, 11) == 12
+        finally:
+            await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+            await conn.commit()
+
+    async with get_engine().connect() as conn:
+        violations = (
+            await conn.execute(text("PRAGMA foreign_key_check"))
+        ).fetchall()
+        ut_fks = (
+            await conn.execute(text("PRAGMA foreign_key_list(user_tasks)"))
+        ).mappings().all()
+        snap_fks = (
+            await conn.execute(
+                text("PRAGMA foreign_key_list(task_backend_snapshots)")
+            )
+        ).mappings().all()
+        gd_fks = (
+            await conn.execute(text("PRAGMA foreign_key_list(global_downloads)"))
+        ).mappings().all()
+        gd_sql = (
+            await conn.execute(
+                text(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE type='table' AND name='global_downloads'"
+                )
+            )
+        ).scalar_one()
+        leftover = (
+            await conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                    "AND (name LIKE '%old_v12%' OR name LIKE '%_new')"
+                )
+            )
+        ).scalar_one()
+        gd_count = (
+            await conn.execute(text("SELECT COUNT(*) FROM global_downloads"))
+        ).scalar_one()
+        ut_count = (
+            await conn.execute(text("SELECT COUNT(*) FROM user_tasks"))
+        ).scalar_one()
+        snap_count = (
+            await conn.execute(
+                text("SELECT COUNT(*) FROM task_backend_snapshots")
+            )
+        ).scalar_one()
+
+    assert violations == []
+    assert any(
+        row["table"] == "global_downloads" and row["from"] == "global_download_id"
+        for row in ut_fks
+    )
+    assert any(row["table"] == "global_downloads" for row in snap_fks)
+    assert any(
+        row["table"] == "download_sources"
+        and row["from"] == "source_id"
+        and row["on_delete"].upper() == "SET NULL"
+        for row in gd_fks
+    )
+    assert any(
+        row["table"] == "stored_files" and row["from"] == "completed_file_id"
+        for row in gd_fks
+    )
+    assert "ck_global_downloads_status" in str(gd_sql)
+    assert leftover == 0
+    assert (gd_count, ut_count, snap_count) == (1, 1, 1)
