@@ -247,11 +247,14 @@ async def test_rpc_remove_dead_backend_surfaces_error(
     assert excinfo.value.code == RpcErrorCode.INTERNAL_ERROR
     assert excinfo.value.message == "Internal error"
 
-    # 读路径仍可用（快照不依赖 backend）
+    # 读路径仍可用（快照不依赖 backend）。unref 先落 DB 终态再调
+    # backend.remove，故 remove 失败后任务已是 cancelled：单一真相下
+    # 状态报 error、速度归零（active 时代残速不得泄漏）。
     status = await handler.handle(
-        "aria2.tellStatus", [f"task-{task['id']}", ["downloadSpeed"]]
+        "aria2.tellStatus", [f"task-{task['id']}", ["status", "downloadSpeed"]]
     )
-    assert status["downloadSpeed"] == "321"
+    assert status["status"] == "error"
+    assert status["downloadSpeed"] == "0"
 
 
 @pytest.mark.asyncio

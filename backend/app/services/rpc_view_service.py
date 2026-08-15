@@ -7,6 +7,7 @@ from app.domain.status import (
     TERMINAL_DOWNLOAD_STATUSES,
 )
 from app.domain.task_policy import (
+    effective_status,
     is_current,
 )
 from app.services.task_projection import build_aria2_status
@@ -25,10 +26,13 @@ async def list_active_statuses(
 ) -> list[dict[str, Any]]:
     rows = await list_user_task_projections(user_id, ACTIVE_LIKE_DOWNLOAD_STATUSES)
     live_by_gid = live_by_gid or {}
+    # Real-aria2 contract: tellActive lists ACTIVE downloads only —
+    # queued/waiting/paused belong to tellWaiting. Also keeps
+    # len(tellActive) == getGlobalStat.numActive.
     return [
         status_from_task(row, live_by_gid.get(str(row.get("aria2_gid"))))
         for row in rows
-        if is_current(row)
+        if is_current(row) and effective_status(row) == "active"
     ]
 
 

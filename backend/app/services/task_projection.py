@@ -6,11 +6,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from app.core.time_utils import now_ms
 from app.domain.status import (
     ACTIVE_LIKE_DOWNLOAD_STATUSES,
     REST_TASK_STATUS_FILTERS,
-    TERMINAL_DOWNLOAD_STATUSES,
 )
 from app.domain.task_policy import (
     InvalidTaskStatusFilter,
@@ -253,12 +251,10 @@ def build_aria2_status(
     )
 
     # Ghost-speed guard: match real aria2 semantics — non-active
-    # observations report zero speed (stale last-poll values must not leak
-    # into RPC tellStatus/tellStopped for paused/terminal downloads).
-    live_status = str(live.get("status") or "")
-    live_active = (
-        (live_status == "active") if live_status else (status == "active")
-    )
+    # observations report zero speed. Gated on the DB-projected status
+    # (single truth): a terminal task with a snapshot frozen in its
+    # active era must not leak residual speed into RPC.
+    live_active = status == "active"
 
     result = {
         "gid": gid,

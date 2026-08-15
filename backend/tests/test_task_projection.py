@@ -455,8 +455,27 @@ def test_projected_speeds_zero_for_terminal_row_with_active_snapshot() -> None:
     assert response["download_speed"] == 0
 
 
-def test_aria2_status_zero_speed_for_paused_observation() -> None:
-    """RPC 投影：paused/终态观测速度清零，对齐真实 aria2 语义。"""
+def test_aria2_status_zero_speed_for_paused_db_with_active_era_snapshot() -> None:
+    """RPC 投影：速度清零以 DB 状态为门（单一真相）。DB 已 paused 而
+    快照冻结在 active 时代（残速 555）→ RPC 速度必须为 0；速度门不再
+    读快照 status，杜绝终态任务永久报非零速度。"""
+    row = _row(user_status="paused", global_status="paused")
+    row["backend_snapshot"] = {
+        "status": "active",
+        "totalLength": "2048",
+        "completedLength": "1024",
+        "downloadSpeed": "555",
+        "uploadSpeed": "5",
+    }
+    status = build_aria2_status(row)
+    assert status["status"] == "paused"
+    assert status["downloadSpeed"] == "0"
+    assert status["uploadSpeed"] == "0"
+
+
+def test_aria2_status_active_db_keeps_live_speed() -> None:
+    """DB active 时信任快照速度——观测门窗口内状态与速度同源于
+    快照细节，不因快照 status 字段与 DB 瞬时不同而清零。"""
     row = _row(user_status="active", global_status="active")
     row["backend_snapshot"] = {
         "status": "paused",
@@ -466,8 +485,8 @@ def test_aria2_status_zero_speed_for_paused_observation() -> None:
         "uploadSpeed": "5",
     }
     status = build_aria2_status(row)
-    assert status["downloadSpeed"] == "0"
-    assert status["uploadSpeed"] == "0"
+    assert status["status"] == "active"
+    assert status["downloadSpeed"] == "555"
 
 
 def _snap(status: str) -> dict:

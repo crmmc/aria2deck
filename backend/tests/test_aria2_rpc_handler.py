@@ -655,6 +655,23 @@ async def test_tell_status_snapshot_details_but_db_status(
 
 
 @pytest.mark.asyncio
+async def test_tell_stopped_lists_cancelled_task(
+    handler: Aria2RpcHandler,
+) -> None:
+    task = await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-cancelled-stopped",
+        status="cancelled",
+        name="cancelled.bin",
+    )
+    _mock_client(handler).tell_status.side_effect = RuntimeError("aria2 unavailable")
+
+    result = await handler.handle("aria2.tellStopped", [0, 10, ["gid", "status"]])
+
+    assert {"gid": f"task-{task['id']}", "status": "error"} in result
+
+
+@pytest.mark.asyncio
 async def test_tell_active_lists_db_active_rows_without_aria2(
     handler: Aria2RpcHandler,
 ) -> None:
