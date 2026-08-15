@@ -468,3 +468,35 @@ def test_aria2_status_zero_speed_for_paused_observation() -> None:
     status = build_aria2_status(row)
     assert status["downloadSpeed"] == "0"
     assert status["uploadSpeed"] == "0"
+
+
+def _snap(status: str, age_ms: int = 0) -> dict:
+    from app.core.time_utils import now_ms
+    return {
+        "status": status,
+        "downloadSpeed": "0",
+        "_snapshot_updated_at_ms": now_ms() - age_ms,
+    }
+
+
+def test_stale_paused_snapshot_does_not_override_active_db() -> None:
+    """298 事故回归：37h 前 paused 时代的残照不得把 RPC 状态劫持成 paused。"""
+    row = _row(user_status="active", global_status="active")
+    row["backend_snapshot"] = _snap("paused", age_ms=37 * 3600 * 1000)
+    status = build_aria2_status(row)
+    assert status["status"] == "active"
+
+
+def test_fresh_paused_snapshot_still_overrides() -> None:
+    row = _row(user_status="active", global_status="active")
+    row["backend_snapshot"] = _snap("paused", age_ms=2_000)
+    status = build_aria2_status(row)
+    assert status["status"] == "paused"
+
+
+def test_explicit_live_without_timestamp_still_wins() -> None:
+    row = _row(user_status="active", global_status="active")
+    status = build_aria2_status(
+        row, {"status": "paused", "downloadSpeed": "0"}
+    )
+    assert status["status"] == "paused"

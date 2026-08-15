@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from app.core.time_utils import now_ms
 from app.domain.status import (
     ACTIVE_LIKE_DOWNLOAD_STATUSES,
     REST_TASK_STATUS_FILTERS,
@@ -208,15 +209,35 @@ def _live_bittorrent_mode(live: dict[str, Any]) -> str:
     return "single"
 
 
+SNAPSHOT_FRESH_WINDOW_MS = 30_000
+
+
+def _snapshot_is_fresh(live: dict[str, Any], *, explicit: bool) -> bool:
+    """Explicit live observations are always fresh; stored snapshots only
+    within SNAPSHOT_FRESH_WINDOW_MS (a stale one must never override DB
+    status — e.g. a paused-era snapshot surviving an unpause heal)."""
+    if explicit:
+        return True
+    updated_at = _safe_int(live.get("_snapshot_updated_at_ms"))
+    if updated_at <= 0:
+        return False
+    return (now_ms() - updated_at) <= SNAPSHOT_FRESH_WINDOW_MS
+
+
 def build_aria2_status(
     row: dict[str, Any], live: dict[str, Any] | None = None
 ) -> dict[str, Any]:
+    explicit_live = live is not None
     if live is None:
         live = row.get("backend_snapshot")
     live = live or {}
     effective = effective_status(row)
     status = aria2_status(effective)
-    if live and effective not in TERMINAL_DOWNLOAD_STATUSES:
+    if (
+        live
+        and effective not in TERMINAL_DOWNLOAD_STATUSES
+        and _snapshot_is_fresh(live, explicit=explicit_live)
+    ):
         status = str(live.get("status") or status)
 
     gid = f"task-{row['id']}"
