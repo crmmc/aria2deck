@@ -1406,3 +1406,73 @@ async def test_sync_recovers_after_first_round_exception(
     list_downloads.assert_awaited_once()
     cleanup_stale.assert_awaited_once()
     assert "Synchronization round failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_sync_round_writes_live_snapshot_for_active_download(
+    temp_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """速度回归：sync 轮询必须刷新 task_backend_snapshots（速度/进度的读模型）。"""
+    from app.db.schema import task_backend_snapshots
+
+    user = await create_user_v0(username="sync-snap-user")
+    download = await create_global_download_v0(
+        resource_key="rk-sync-snap",
+        source_uri="http://example.com/snap.bin",
+        resource_kind="http",
+        status="active",
+        aria2_gid="gid-snap",
+        total_bytes=4096,
+        completed_bytes=0,
+        size_known=True,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=int(download["id"]),
+        status="active",
+        reserved_bytes=4096,
+    )
+
+    client = make_aria2_client(
+        tell_status={
+            "gid": "gid-snap",
+            "status": "active",
+            "totalLength": "4096",
+            "completedLength": "1024",
+            "downloadSpeed": "234567",
+            "uploadSpeed": "0",
+            "files": [],
+        }
+    )
+    client.tell_stopped.return_value = []
+
+    def get_client(*args: object, **kwargs: object) -> object:
+        return client
+
+    monkeypatch.setattr("app.aria2.sync.get_aria2_client", get_client)
+
+    async def stop_after_first_sleep(_interval: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("app.aria2.sync.asyncio.sleep", stop_after_first_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await sync_tasks(interval=0.01)
+
+    async with transaction() as conn:
+        row = (
+            (
+                await conn.execute(
+                    select(task_backend_snapshots).where(
+                        task_backend_snapshots.c.global_download_id
+                        == int(download["id"])
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+    assert row is not None, "sync 轮询未写入 task_backend_snapshots"
+    assert int(row["download_speed"]) == 234567
+    assert int(row["total_length"]) == 4096
+    assert int(row["completed_length"]) == 1024

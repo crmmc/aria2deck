@@ -120,6 +120,23 @@ async def _upsert_snapshot_row(snap: Snapshot) -> None:
     )
 
 
+async def record_observed_snapshot(
+    *,
+    tid: int,
+    observed_status: dict[str, Any],
+) -> None:
+    """Persist one live-observed backend status into task_backend_snapshots.
+
+    The production sync loop is a trigger-only observer for the lifecycle
+    coordinator; this keeps the snapshot read-model fresh so REST lists and
+    WS broadcasts (speed/progress) reflect live downloads.
+    """
+    status = str(observed_status.get("status") or "")
+    if not status:
+        return
+    await _upsert_snapshot_row(Snapshot(tid=tid, status=status, raw=observed_status))
+
+
 async def sync_once(backend: BackendPort) -> SyncReport:
     """Run one batch sync round against the backend.
 
