@@ -543,3 +543,52 @@ def _is_valid_sha256_hash(s: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+
+async def purge_orphan_aria2_downloads(backend: BackendPort) -> dict[str, int]:
+    """Remove zombie aria2 downloads inside the managed downloading root.
+
+    A zombie is an active/waiting download whose dir lives under the managed
+    ``downloading/`` root but whose gid no live DB task owns (left over from
+    gid-cleared terminal tasks; ``force-save`` keeps them forever otherwise,
+    confusing RPC clients and holding bogus progress). Downloads outside the
+    managed root are never touched. Startup-only on purpose: no creates are
+    in flight then, so a just-submitted gid can never race the check.
+    """
+    from pathlib import Path
+
+    from app.core.config import settings
+    from app.services.lifecycle.repair import list_v0_tracked_downloads
+
+    root = str(Path(settings.download_dir).resolve() / "downloading")
+    live_gids: set[str] = set()
+    for row in await list_v0_tracked_downloads():
+        gid = str(row.get("aria2_gid") or "")
+        if gid:
+            live_gids.add(gid)
+
+    found = removed = failed = 0
+    candidates: list[dict[str, Any]] = []
+    candidates.extend(await backend.tell_active())
+    candidates.extend(await backend.tell_waiting(0, 1000))
+    for item in candidates:
+        gid = str(item.get("gid") or "")
+        item_dir = str(item.get("dir") or "")
+        if not gid or gid in live_gids:
+            continue
+        if not item_dir.startswith(root):
+            continue
+        found += 1
+        try:
+            await backend.force_remove_gid(gid)
+            removed += 1
+            logger.info("[Startup] Removed orphan aria2 download gid=%s", gid)
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                "[Startup] Failed to remove orphan download gid=%s error=%s",
+                gid,
+                exc,
+            )
+    return {"found": found, "removed": removed, "failed": failed}

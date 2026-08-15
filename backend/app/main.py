@@ -115,6 +115,7 @@ from app.routers import (
 )
 from app.modules.backend.aria2_adapter import Aria2BackendAdapter
 from app.services.repair import (
+    purge_orphan_aria2_downloads,
     purge_terminal_download_dirs,
     purge_terminal_residual_gids,
     rebuild_active_download_accounting,
@@ -268,6 +269,13 @@ async def _run_startup_repair_sequence(
         "purge_residual_gids",
         purge_terminal_residual_gids(backend),
         "purge terminal residual GID",
+    )
+
+    # 3b. purge zombie aria2 downloads (managed dir, no live DB owner)
+    await _step(
+        "purge_orphan_downloads",
+        purge_orphan_aria2_downloads(backend),
+        "purge orphan aria2 downloads",
     )
 
     # 4. purge safe terminal directories / strict indexed-completed fallback
