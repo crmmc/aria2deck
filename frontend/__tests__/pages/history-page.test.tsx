@@ -51,6 +51,14 @@ describe("HistoryPage", () => {
     mockApi.clearHistory.mockResolvedValue({ ok: true, count: 2 } as never);
   });
 
+  test("completed record shows no retry-blocked warning", async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("ok-file.zip")).toBeInTheDocument();
+    expect(screen.queryByText("已完成不可重试")).not.toBeInTheDocument();
+    // cancelled 类阻塞原因（如已过期）用非红展示，不套 text-danger
+  });
+
   test("renders records and retries via retryTask(id)", async () => {
     render(<HistoryPage />);
 

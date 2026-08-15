@@ -79,8 +79,12 @@ export const HistoryCard = memo(function HistoryCard({
       }
     : {};
 
+  // 重试阻塞原因只对用户期待重试的终态（failed/cancelled）有意义；
+  // completed 属正常成功态，不显示也不标红。
   const blockedReason =
-    retryBlocked && record.retry_blocked_reason
+    retryBlocked &&
+    record.retry_blocked_reason &&
+    (record.result === "failed" || record.result === "cancelled")
       ? record.retry_blocked_reason
       : null;
   const reasonText = blockedReason || record.reason || null;
@@ -121,9 +125,7 @@ export const HistoryCard = memo(function HistoryCard({
         {reasonText && (
           <div
             className={`text-sm mb-3 ${
-              record.result === "failed" || blockedReason
-                ? "text-danger"
-                : "muted"
+              record.result === "failed" ? "text-danger" : "muted"
             }`}
             title={reasonText}
           >
