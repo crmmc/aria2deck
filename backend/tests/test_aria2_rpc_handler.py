@@ -606,7 +606,7 @@ async def test_tell_active_falls_back_to_row_name_without_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_tell_status_prefers_snapshot_over_stale_db(
+async def test_tell_status_snapshot_details_but_db_status(
     handler: Aria2RpcHandler,
 ) -> None:
     task = await create_rpc_task(
@@ -645,7 +645,10 @@ async def test_tell_status_prefers_snapshot_over_stale_db(
         ["gid-live-status", ["status", "completedLength", "bittorrent", "files"]],
     )
 
-    assert result["status"] == "complete"
+    # 单一真相：状态取 DB（协调器经观测门维护）；快照只供细节字段。
+    # DB active + 快照 complete（≤2s 完成窗口内）→ RPC 报 active，
+    # 与网页一致；文件名/进度等细节仍来自快照。
+    assert result["status"] == "active"
     assert result["completedLength"] == "100"
     assert result["bittorrent"]["info"]["name"] == "real-name.bin"
     assert result["files"][0]["path"] == "real-name.bin"

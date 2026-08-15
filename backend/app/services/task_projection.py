@@ -209,36 +209,19 @@ def _live_bittorrent_mode(live: dict[str, Any]) -> str:
     return "single"
 
 
-SNAPSHOT_FRESH_WINDOW_MS = 30_000
-
-
-def _snapshot_is_fresh(live: dict[str, Any], *, explicit: bool) -> bool:
-    """Explicit live observations are always fresh; stored snapshots only
-    within SNAPSHOT_FRESH_WINDOW_MS (a stale one must never override DB
-    status — e.g. a paused-era snapshot surviving an unpause heal)."""
-    if explicit:
-        return True
-    updated_at = _safe_int(live.get("_snapshot_updated_at_ms"))
-    if updated_at <= 0:
-        return False
-    return (now_ms() - updated_at) <= SNAPSHOT_FRESH_WINDOW_MS
-
-
 def build_aria2_status(
     row: dict[str, Any], live: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    explicit_live = live is not None
+    # Status truth is the DB row (maintained by the coordinator observation
+    # gate with full state-machine semantics). The snapshot / live dict only
+    # contributes speed/files/detail fields — never the status. Letting a
+    # raw observation override DB status re-introduced dual truth (a stale
+    # paused-era snapshot hijacked RPC status for a healed task).
     if live is None:
         live = row.get("backend_snapshot")
     live = live or {}
     effective = effective_status(row)
     status = aria2_status(effective)
-    if (
-        live
-        and effective not in TERMINAL_DOWNLOAD_STATUSES
-        and _snapshot_is_fresh(live, explicit=explicit_live)
-    ):
-        status = str(live.get("status") or status)
 
     gid = f"task-{row['id']}"
     total_bytes = _safe_int(row.get("total_bytes"))

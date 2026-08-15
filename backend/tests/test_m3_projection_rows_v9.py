@@ -73,13 +73,7 @@ async def test_projection_row_with_snapshot(temp_db: str) -> None:
     assert row["global_status"] == "active"
 
     # 快照字段已解析
-    assert row["backend_snapshot"] is not None
-    assert {
-        k: v
-        for k, v in row["backend_snapshot"].items()
-        if k != "_snapshot_updated_at_ms"
-    } == raw
-    assert row["backend_snapshot"]["_snapshot_updated_at_ms"] > 0
+    assert row["backend_snapshot"] == raw
     assert row["backend_snapshot"]["downloadSpeed"] == "123"
     assert row["backend_files"] == files
 
@@ -113,11 +107,7 @@ async def test_projection_rows_status_filter(temp_db: str) -> None:
 
     rows = await list_user_task_projections(user_id, statuses=["active"])
     assert len(rows) == 1
-    assert {
-        k: v
-        for k, v in rows[0]["backend_snapshot"].items()
-        if k != "_snapshot_updated_at_ms"
-    } == {}
+    assert rows[0]["backend_snapshot"] == {}
 
     rows = await list_user_task_projections(user_id, statuses=["completed"])
     assert rows == []

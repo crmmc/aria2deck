@@ -42,20 +42,14 @@ def _parse_json_list(value: str | None) -> list[Any]:
 async def attach_snapshots_to_rows(
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """为已有任务行批量附加 backend_snapshot / backend_files。
-
-    快照 dict 额外带 `_snapshot_updated_at_ms` 供消费方判断新鲜度。
-    """
+    """为已有任务行批量附加 backend_snapshot / backend_files。"""
     tids = [int(row["global_download_id"]) for row in rows]
     snapshots = await get_snapshots_for_tids(tids)
     for row in rows:
         snapshot = snapshots.get(int(row["global_download_id"]))
-        parsed = _parse_json_object(snapshot.get("raw_json")) if snapshot else None
-        if parsed is not None:
-            parsed["_snapshot_updated_at_ms"] = int(
-                snapshot.get("updated_at_ms") or 0
-            )
-        row["backend_snapshot"] = parsed
+        row["backend_snapshot"] = (
+            _parse_json_object(snapshot.get("raw_json")) if snapshot else None
+        )
         row["backend_files"] = (
             _parse_json_list(snapshot.get("files_json")) if snapshot else []
         )

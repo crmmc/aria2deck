@@ -470,33 +470,26 @@ def test_aria2_status_zero_speed_for_paused_observation() -> None:
     assert status["uploadSpeed"] == "0"
 
 
-def _snap(status: str, age_ms: int = 0) -> dict:
-    from app.core.time_utils import now_ms
-    return {
-        "status": status,
-        "downloadSpeed": "0",
-        "_snapshot_updated_at_ms": now_ms() - age_ms,
+def _snap(status: str) -> dict:
+    return {"status": status, "downloadSpeed": "0"}
+
+
+def test_snapshot_never_overrides_db_status() -> None:
+    """单一真相回归：快照（无论新旧、无论来源）只供速度/文件细节，
+    状态永远取 DB——37h 陈旧 paused 残照与新鲜 paused 观测都不得
+    把 DB active 的任务劫持成 paused。"""
+    stale = _row(user_status="active", global_status="active")
+    stale["backend_snapshot"] = {
+        **_snap("paused"),
+        "_snapshot_updated_at_ms": 1,
     }
+    assert build_aria2_status(stale)["status"] == "active"
 
+    fresh = _row(user_status="active", global_status="active")
+    fresh["backend_snapshot"] = _snap("paused")
+    assert build_aria2_status(fresh)["status"] == "active"
 
-def test_stale_paused_snapshot_does_not_override_active_db() -> None:
-    """298 事故回归：37h 前 paused 时代的残照不得把 RPC 状态劫持成 paused。"""
-    row = _row(user_status="active", global_status="active")
-    row["backend_snapshot"] = _snap("paused", age_ms=37 * 3600 * 1000)
-    status = build_aria2_status(row)
-    assert status["status"] == "active"
-
-
-def test_fresh_paused_snapshot_still_overrides() -> None:
-    row = _row(user_status="active", global_status="active")
-    row["backend_snapshot"] = _snap("paused", age_ms=2_000)
-    status = build_aria2_status(row)
-    assert status["status"] == "paused"
-
-
-def test_explicit_live_without_timestamp_still_wins() -> None:
-    row = _row(user_status="active", global_status="active")
-    status = build_aria2_status(
-        row, {"status": "paused", "downloadSpeed": "0"}
+    explicit = _row(user_status="active", global_status="active")
+    assert (
+        build_aria2_status(explicit, _snap("paused"))["status"] == "active"
     )
-    assert status["status"] == "paused"
