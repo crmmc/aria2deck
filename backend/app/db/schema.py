@@ -21,7 +21,7 @@ from app.domain.status import (
     USER_TASK_STATUSES,
 )
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
 PACK_SOURCE_CLEANUP_STATES = (
     "retained",
@@ -150,9 +150,35 @@ app_settings = Table(
     Column("download_anonymous_borrow_connections", Integer, nullable=False),
     Column("download_anonymous_per_ip_connections", Integer, nullable=False),
     Column("download_anonymous_per_file_connections", Integer, nullable=False),
+    Column("history_retention_days", Integer, nullable=False, server_default="30"),
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
     CheckConstraint("id = 1", name="ck_app_settings_single_row"),
+    CheckConstraint(
+        "history_retention_days >= 1",
+        name="ck_app_settings_history_retention_days_min",
+    ),
+)
+
+download_sources = Table(
+    "download_sources",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("resource_kind", String(16), nullable=False),
+    Column("payload_text", Text, nullable=False),
+    Column("selection_json", Text),
+    Column("options_json", Text),
+    Column("content_digest", String(64)),
+    Column("resource_identity", String(128)),
+    Column("created_at_ms", Integer, nullable=False),
+    Column("updated_at_ms", Integer, nullable=False),
+    Column("purged_at_ms", Integer),
+    CheckConstraint(
+        _in_check("resource_kind", RESOURCE_KINDS),
+        name="ck_download_sources_resource_kind",
+    ),
+    Index("ix_download_sources_content_digest", "content_digest"),
+    Index("ix_download_sources_resource_identity", "resource_identity"),
 )
 
 stored_files = Table(
@@ -209,6 +235,11 @@ global_downloads = Table(
     Column("resource_key", String(128), nullable=False),
     Column("resource_kind", String(16), nullable=False),
     Column("source_uri", Text, nullable=False),
+    Column(
+        "source_id",
+        Integer,
+        ForeignKey("download_sources.id", ondelete="SET NULL"),
+    ),
     Column("bt_info_hash", String(40)),
     Column("display_name", Text),
     Column("aria2_gid", String(32), unique=True),
@@ -252,6 +283,7 @@ global_downloads = Table(
         sqlite_where=text("status IN ('queued', 'active', 'waiting', 'paused')"),
     ),
     Index("ix_global_downloads_completed_file_id", "completed_file_id"),
+    Index("ix_global_downloads_source_id", "source_id"),
 )
 
 user_tasks = Table(
@@ -274,6 +306,7 @@ user_tasks = Table(
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
     Column("finished_at_ms", Integer),
+    Column("history_expired_at_ms", Integer),
     UniqueConstraint(
         "user_id", "global_download_id", name="uq_user_tasks_user_download"
     ),

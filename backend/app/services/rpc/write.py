@@ -32,6 +32,7 @@ from app.domain.torrent_metadata import (
 )
 from app.http.safe_client import UnsafeTargetError, normalize_public_http_url
 from app.modules.task_core.register import ResourceSpec
+from app.repositories.task.sources import torrent_source_uri_placeholder
 from app.services import task_service
 from app.services.gateway import (
     http_resource_identity,
@@ -109,6 +110,8 @@ async def _handle_add_uri(user_id: int, params: list) -> str:
             display_name=_extract_name_from_uri(uri) or uri,
             size_bytes=0,
             size_known=False,
+            source_payload=uri,
+            source_options=options,
         )
         task = await task_service.register_and_submit(
             user_id=user_id,
@@ -178,14 +181,18 @@ async def _handle_add_torrent(user_id: int, params: list) -> str:
     magnet_uri = f"magnet:?xt=urn:btih:{metadata.info_hash}"
 
     try:
+        selection_indexes = selected_indexes if select_file else None
         resource = ResourceSpec(
             resource_key=resource_key,
-            source_uri=f"base64:{torrent_data}",
+            source_uri=torrent_source_uri_placeholder(metadata.info_hash),
             resource_kind="torrent",
             display_name=metadata.name,
             size_bytes=selected_size,
             size_known=True,
             display_uri=magnet_uri,
+            source_payload=f"base64:{torrent_data}",
+            selection_indexes=selection_indexes,
+            source_options=options,
         )
         task = await task_service.register_and_submit(
             user_id=user_id,

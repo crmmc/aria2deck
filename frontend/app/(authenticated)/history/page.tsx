@@ -58,10 +58,13 @@ export default function HistoryPage() {
 
   const retryTask = useCallback(
     async (record: TaskHistory) => {
-      if (!record.uri) return;
+      if (record.retryable === false) {
+        showToast(record.retry_blocked_reason || "不可重试", "warning");
+        return;
+      }
 
       try {
-        await api.createTask(record.uri);
+        await api.retryTask(record.id);
         showToast("已重新添加下载任务", "success");
       } catch (err) {
         showToast("重试失败：" + (err as Error).message, "error");

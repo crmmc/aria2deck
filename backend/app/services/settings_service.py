@@ -60,6 +60,7 @@ CONFIG_KEY_TO_COLUMN: dict[str, str] = {
     "download_anonymous_borrow_connections": "download_anonymous_borrow_connections",
     "download_anonymous_per_ip_connections": "download_anonymous_per_ip_connections",
     "download_anonymous_per_file_connections": "download_anonymous_per_file_connections",
+    "history_retention_days": "history_retention_days",
 }
 
 INT_CONFIG_COLUMNS = {
@@ -85,6 +86,7 @@ INT_CONFIG_COLUMNS = {
     "download_anonymous_borrow_connections",
     "download_anonymous_per_ip_connections",
     "download_anonymous_per_file_connections",
+    "history_retention_days",
 }
 
 
@@ -304,6 +306,7 @@ def row_to_api_settings(row: Mapping[str, Any]) -> dict[str, Any]:
         "download_anonymous_per_file_connections": int(
             row["download_anonymous_per_file_connections"]
         ),
+        "history_retention_days": max(1, int(row["history_retention_days"])),
     }
 
 

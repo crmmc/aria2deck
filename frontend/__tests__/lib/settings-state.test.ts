@@ -61,4 +61,24 @@ describe("settingsState", () => {
       expect(result2.error).toBe("最小剩余磁盘空间必须为正数");
     }
   });
+
+  test("settings form maps history_retention_days", () => {
+    const state = configToSettingsFormState({
+      max_task_size: 10 * 1024 * 1024 * 1024,
+      min_free_disk: 5 * 1024 * 1024 * 1024,
+      history_retention_days: 7,
+    });
+    expect(state.historyRetentionDays).toBe(7);
+
+    const result = settingsFormStateToPayload({
+      ...initialSettingsFormState,
+      maxTaskSize: "1",
+      minFreeDisk: "1",
+      historyRetentionDays: 14,
+    });
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.payload.history_retention_days).toBe(14);
+    }
+  });
 });

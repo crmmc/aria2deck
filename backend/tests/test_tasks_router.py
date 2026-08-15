@@ -971,7 +971,8 @@ class TestCreateTorrentTask:
         global_download = asyncio.run(get_global_by_resource_key(info_hash))
         assert global_download is not None
         assert global_download["resource_kind"] == "torrent"
-        assert global_download["source_uri"].startswith("base64:")
+        assert global_download["source_uri"] == f"torrent:{info_hash}"
+        assert global_download["source_id"] is not None
         task = asyncio.run(get_user_task(test_user["id"], global_download["id"]))
         assert task is not None
         assert data["id"] == task["id"]

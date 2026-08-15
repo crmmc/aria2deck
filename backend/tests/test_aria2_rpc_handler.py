@@ -1141,6 +1141,64 @@ async def test_purge_download_result_deletes_effective_terminal_rows(
 
 
 @pytest.mark.asyncio
+async def test_remove_download_result_by_gid_reclaims_zero_pid_tid(
+    handler: Aria2RpcHandler,
+) -> None:
+    task = await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-reclaim-by-gid",
+        status="failed",
+        name="reclaim-by-gid.bin",
+    )
+    tid = int(task["global_download_id"])
+
+    with patch(
+        "app.services.history_retention.reclaim_zero_pid_tid",
+        new_callable=AsyncMock,
+    ) as reclaim:
+        reclaim.return_value = {"action": "deleted", "tid": tid, "source_gc": False}
+        result = await handler.handle(
+            "aria2.removeDownloadResult", ["gid-reclaim-by-gid"]
+        )
+
+    assert result == "OK"
+    reclaim.assert_awaited_once_with(tid)
+    assert await get_user_task_by_id(handler.user_id, task["id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_purge_download_result_reclaims_each_deleted_tid(
+    handler: Aria2RpcHandler,
+) -> None:
+    a = await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-purge-a",
+        status="failed",
+        name="purge-a.bin",
+    )
+    b = await create_rpc_task(
+        user_id=handler.user_id,
+        gid="gid-purge-b",
+        status="completed",
+        name="purge-b.bin",
+    )
+    tids = {int(a["global_download_id"]), int(b["global_download_id"])}
+
+    with patch(
+        "app.services.history_retention.reclaim_zero_pid_tid",
+        new_callable=AsyncMock,
+    ) as reclaim:
+        reclaim.return_value = {"action": "deleted", "tid": 0, "source_gc": False}
+        result = await handler.handle("aria2.purgeDownloadResult", [])
+
+    assert result == "OK"
+    called = {call.args[0] for call in reclaim.await_args_list}
+    assert called == tids
+    assert await get_user_task_by_id(handler.user_id, a["id"]) is None
+    assert await get_user_task_by_id(handler.user_id, b["id"]) is None
+
+
+@pytest.mark.asyncio
 async def test_invalid_params_raise_rpc_errors(handler: Aria2RpcHandler) -> None:
     for method in (
         "aria2.remove",

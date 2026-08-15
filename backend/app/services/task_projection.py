@@ -22,6 +22,7 @@ from app.domain.task_policy import (
     stat_counts,
 )
 from app.modules.user_ref.projection import user_visible_label
+from app.services.history_service import history_retry_projection
 
 _REEXPORTED_POLICY_SYMBOLS = (
     InvalidTaskStatusFilter,
@@ -334,6 +335,9 @@ def build_rest_task_response(
     db_total = _safe_int(row.get("total_bytes"))
     frozen_space = max(reserved, db_total if reserved == 0 and db_total > 0 else reserved)
 
+    # Retry projection uses user-task status (matches POST /retry gate).
+    retryable, retry_blocked_reason = history_retry_projection(row)
+
     return {
         "id": row["id"],
         "task_id": row["global_download_id"],
@@ -352,4 +356,6 @@ def build_rest_task_response(
         "created_at": ms_to_iso(row.get("created_at_ms")),
         "updated_at": ms_to_iso(row.get("updated_at_ms")),
         "frozen_space": frozen_space,
+        "retryable": retryable,
+        "retry_blocked_reason": retry_blocked_reason,
     }

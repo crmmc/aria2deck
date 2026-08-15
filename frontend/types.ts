@@ -48,6 +48,8 @@ export type Task = {
   error?: string | null;
   status_label?: string | null;  // backend projection label (user_visible_label)
   created_at: string;
+  retryable?: boolean;
+  retry_blocked_reason?: string | null;
 };
 
 export type TorrentFileNode = {
@@ -139,6 +141,7 @@ export type SystemConfig = {
   download_anonymous_borrow_connections: number;
   download_anonymous_per_ip_connections: number;
   download_anonymous_per_file_connections: number;
+  history_retention_days: number;
 };
 
 // User file reference (user's view of a stored file)
@@ -212,6 +215,8 @@ export type TaskHistory = {
   reason?: string | null;
   created_at: string;
   finished_at: string;
+  retryable?: boolean;
+  retry_blocked_reason?: string | null;
 };
 
 export type StoredFileInfo = {

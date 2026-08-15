@@ -25,6 +25,7 @@ from app.db.migrations import (
     ensure_v9_backend_snapshot_schema,
     ensure_v10_rpc_secret_encrypted,
     ensure_v11_share_password_encrypted,
+    ensure_v12_download_sources_schema,
     run_migrations,
 )
 from app.db.schema import SCHEMA_VERSION, app_settings, metadata, schema_meta
@@ -60,6 +61,7 @@ def default_app_settings(timestamp_ms: int) -> dict:
         "rate_limit_authenticated_download": 0,
         "rate_limit_anonymous_download": 0,
         **download_defaults,
+        "history_retention_days": 30,
         "created_at_ms": timestamp_ms,
         "updated_at_ms": timestamp_ms,
     }
@@ -249,6 +251,7 @@ async def _migrate_existing_database(version: int) -> None:
                 await ensure_v9_backend_snapshot_schema(conn)
                 await ensure_v10_rpc_secret_encrypted(conn)
                 await ensure_v11_share_password_encrypted(conn)
+                await ensure_v12_download_sources_schema(conn)
         finally:
             await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
             await conn.commit()
@@ -285,6 +288,7 @@ async def bootstrap_database() -> None:
         await ensure_v9_backend_snapshot_schema(conn)
         await ensure_v10_rpc_secret_encrypted(conn)
         await ensure_v11_share_password_encrypted(conn)
+        await ensure_v12_download_sources_schema(conn)
         await conn.execute(
             insert(schema_meta).values(
                 id=1, version=SCHEMA_VERSION, created_at_ms=timestamp_ms

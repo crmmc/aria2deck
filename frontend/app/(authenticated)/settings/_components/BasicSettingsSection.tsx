@@ -1,7 +1,7 @@
 import type { SettingsFormState } from "../settingsState";
 
 type BasicSettingsSectionProps = {
-  form: Pick<SettingsFormState, "siteTitle" | "maxTaskSize" | "minFreeDisk">;
+  form: Pick<SettingsFormState, "siteTitle" | "maxTaskSize" | "minFreeDisk" | "historyRetentionDays">;
   onFieldChange: <K extends keyof SettingsFormState>(field: K, value: SettingsFormState[K]) => void;
 };
 
@@ -40,7 +40,7 @@ export function BasicSettingsSection({ form, onFieldChange }: BasicSettingsSecti
         />
       </div>
 
-      <div className="mb-7">
+      <div className="mb-6">
         <label className="form-label-lg" htmlFor="settings-min-disk-space">最小剩余磁盘空间 (GB)</label>
         <p className="muted text-sm mb-2">如果剩余空间低于此值，将停止接受新任务。</p>
         <input
@@ -52,6 +52,21 @@ export function BasicSettingsSection({ form, onFieldChange }: BasicSettingsSecti
           value={form.minFreeDisk}
           onChange={(e) => onFieldChange("minFreeDisk", e.target.value)}
           aria-label="最小剩余磁盘空间 (GB)"
+        />
+      </div>
+
+      <div className="mb-7">
+        <label className="form-label-lg" htmlFor="settings-history-retention-days">历史保留天数</label>
+        <p className="muted text-sm mb-2">超过保留期的失败/取消历史将软过期，不可再重试。最小 1 天。</p>
+        <input
+          id="settings-history-retention-days"
+          className="input"
+          type="number"
+          step="1"
+          min="1"
+          value={form.historyRetentionDays}
+          onChange={(e) => onFieldChange("historyRetentionDays", Number(e.target.value) || 1)}
+          aria-label="历史保留天数"
         />
       </div>
     </>

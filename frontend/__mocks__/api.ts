@@ -102,6 +102,7 @@ export const createMockSystemConfig = (overrides: Partial<SystemConfig> = {}): S
   download_anonymous_borrow_connections: 20,
   download_anonymous_per_ip_connections: 4,
   download_anonymous_per_file_connections: 2,
+  history_retention_days: 30,
   ...overrides,
 });
 
@@ -138,6 +139,7 @@ export const mockApi = {
   // Tasks
   listTasks: jest.fn().mockResolvedValue([createMockTask()]),
   createTask: jest.fn().mockResolvedValue(createMockTask()),
+  retryTask: jest.fn().mockResolvedValue(createMockTask()),
   uploadTorrent: jest.fn().mockResolvedValue(createMockTask()),
   cancelTask: jest.fn().mockResolvedValue({ ok: true }),
 

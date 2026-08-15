@@ -13,8 +13,9 @@ This module does NOT submit to aria2 (submit is stubbed / left for Task 3).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from app.domain.status import ACTIVE_USER_TASK_STATUSES
 from app.modules.task_core.states import ERROR_QUOTA_EXCEEDED
@@ -27,6 +28,12 @@ from app.repositories.task.downloads import (
     create_global_download_attempt,
     find_latest_completed_global_download_by_resource_key,
     find_live_global_download_by_resource_key,
+)
+from app.repositories.task.sources import (
+    content_digest_for_payload,
+    create_download_source,
+    encode_options_json,
+    encode_selection_json,
 )
 from app.repositories.errors import RepositoryConflictError
 from app.services.usage_service import get_usage, release_reserved, reserve_bytes
@@ -53,6 +60,12 @@ class ResourceSpec:
     size_bytes: int = 0
     size_known: bool = False
     display_uri: str | None = None  # override ``uri`` in REST response
+    # S layer (download_sources). payload defaults to source_uri when omitted.
+    source_payload: str | None = None
+    # Partial torrent selection only; full selection leaves this None.
+    selection_indexes: tuple[int, ...] | None = None
+    # User options before select-file injection; filtered by G1 whitelist on write.
+    source_options: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -247,10 +260,23 @@ async def _register_create(
         except ValueError:
             raise RegisterError(ERROR_QUOTA_EXCEEDED, "用户配额不足，无法创建任务")
 
+    payload_text = resource.source_payload or resource.source_uri
+    source_row = await create_download_source(
+        {
+            "resource_kind": resource.resource_kind,
+            "payload_text": payload_text,
+            "selection_json": encode_selection_json(resource.selection_indexes),
+            "options_json": encode_options_json(resource.source_options),
+            "content_digest": content_digest_for_payload(payload_text),
+            "resource_identity": resource.resource_key,
+        }
+    )
+
     global_values = {
         "resource_key": resource.resource_key,
         "resource_kind": resource.resource_kind,
         "source_uri": resource.source_uri,
+        "source_id": int(source_row["id"]),
         "display_name": resource.display_name,
         "status": "queued",
         "total_bytes": size,

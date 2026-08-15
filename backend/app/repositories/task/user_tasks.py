@@ -100,6 +100,7 @@ def _user_task_download_select():
         user_tasks.c.created_at_ms,
         user_tasks.c.updated_at_ms,
         user_tasks.c.finished_at_ms,
+        user_tasks.c.history_expired_at_ms,
         global_downloads.c.resource_key,
         global_downloads.c.resource_kind,
         global_downloads.c.source_uri,
@@ -232,18 +233,24 @@ async def list_user_tasks_page(
     return [dict(row) for row in rows], total
 
 
-async def delete_all_terminal_user_tasks(user_id: int) -> int:
+async def delete_all_terminal_user_tasks(user_id: int) -> list[int]:
+    """Hard-delete all terminal pids for user. Returns global_download_ids (tids)."""
     async with transaction() as conn:
-        result = await conn.execute(
-            delete(user_tasks).where(
-                user_tasks.c.user_id == user_id,
-                _effective_terminal_user_task_condition(),
+        rows = (
+            await conn.execute(
+                delete(user_tasks)
+                .where(
+                    user_tasks.c.user_id == user_id,
+                    _effective_terminal_user_task_condition(),
+                )
+                .returning(user_tasks.c.global_download_id)
             )
-        )
-    return int(result.rowcount or 0)
+        ).all()
+    return [int(row[0]) for row in rows]
 
 
-async def delete_terminal_user_task_by_gid(user_id: int, gid: str) -> bool:
+async def delete_terminal_user_task_by_gid(user_id: int, gid: str) -> int | None:
+    """Hard-delete a terminal pid by aria2 gid. Returns global_download_id if deleted."""
     async with transaction() as conn:
         row = (
             await conn.execute(
@@ -257,10 +264,12 @@ async def delete_terminal_user_task_by_gid(user_id: int, gid: str) -> bool:
                         )
                     )
                 )
-                .returning(user_tasks.c.id)
+                .returning(user_tasks.c.id, user_tasks.c.global_download_id)
             )
         ).first()
-    return row is not None
+    if row is None:
+        return None
+    return int(row[1])
 
 
 async def list_user_tasks_for_download(
@@ -1199,7 +1208,8 @@ async def count_active_user_tasks(global_download_id: int) -> int:
     return int(count)
 
 
-async def delete_terminal_user_task(user_id: int, user_task_id: int) -> bool:
+async def delete_terminal_user_task(user_id: int, user_task_id: int) -> int | None:
+    """Hard-delete a terminal pid. Returns global_download_id if deleted."""
     async with transaction() as conn:
         row = (
             await conn.execute(
@@ -1209,13 +1219,16 @@ async def delete_terminal_user_task(user_id: int, user_task_id: int) -> bool:
                     user_tasks.c.user_id == user_id,
                     _effective_terminal_user_task_condition(),
                 )
-                .returning(user_tasks.c.id)
+                .returning(user_tasks.c.id, user_tasks.c.global_download_id)
             )
         ).first()
-    return row is not None
+    if row is None:
+        return None
+    return int(row[1])
 
 
-async def clear_terminal_user_tasks(user_id: int) -> int:
+async def clear_terminal_user_tasks(user_id: int) -> list[int]:
+    """Hard-delete all terminal pids for user. Returns global_download_ids."""
     async with transaction() as conn:
         rows = (
             await conn.execute(
@@ -1224,7 +1237,7 @@ async def clear_terminal_user_tasks(user_id: int) -> int:
                     user_tasks.c.user_id == user_id,
                     _effective_terminal_user_task_condition(),
                 )
-                .returning(user_tasks.c.id)
+                .returning(user_tasks.c.global_download_id)
             )
         ).all()
-    return len(rows)
+    return [int(row[0]) for row in rows]

@@ -80,6 +80,9 @@ class TestGetConfig:
         assert "download_total_connections" in data
         assert "download_authenticated_reserved_connections" in data
         assert "download_anonymous_base_connections" in data
+        assert "history_retention_days" in data
+        assert isinstance(data["history_retention_days"], int)
+        assert data["history_retention_days"] >= 1
         assert "rate_limit_login" not in data
         assert "download_rate_limit" not in data
         assert "rate_limit_authenticated_download" not in data

@@ -30,6 +30,7 @@ export type SettingsFormState = {
   downloadAnonymousBorrowConnections: number;
   downloadAnonymousPerIpConnections: number;
   downloadAnonymousPerFileConnections: number;
+  historyRetentionDays: number;
 };
 
 export type SettingsFormAction =
@@ -69,6 +70,7 @@ export const initialSettingsFormState: SettingsFormState = {
   downloadAnonymousBorrowConnections: 20,
   downloadAnonymousPerIpConnections: 4,
   downloadAnonymousPerFileConnections: 2,
+  historyRetentionDays: 30,
 };
 
 export function settingsFormReducer(state: SettingsFormState, action: SettingsFormAction): SettingsFormState {
@@ -131,6 +133,7 @@ export function configToSettingsFormState(cfg: Record<string, unknown>): Setting
     downloadAnonymousBorrowConnections: (cfg.download_anonymous_borrow_connections as number) ?? 20,
     downloadAnonymousPerIpConnections: (cfg.download_anonymous_per_ip_connections as number) ?? 4,
     downloadAnonymousPerFileConnections: (cfg.download_anonymous_per_file_connections as number) ?? 2,
+    historyRetentionDays: (cfg.history_retention_days as number) ?? 30,
   };
 }
 
@@ -188,6 +191,7 @@ export function settingsFormStateToPayload(state: SettingsFormState): SettingsPa
       download_anonymous_borrow_connections: state.downloadAnonymousBorrowConnections,
       download_anonymous_per_ip_connections: state.downloadAnonymousPerIpConnections,
       download_anonymous_per_file_connections: state.downloadAnonymousPerFileConnections,
+      history_retention_days: Math.max(1, Math.floor(Number(state.historyRetentionDays) || 30)),
     },
   };
 }

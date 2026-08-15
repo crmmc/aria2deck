@@ -97,6 +97,7 @@ from app.repositories.auth import (
     update_user,
 )
 from app.routers import (
+    admin_history,
     aria2_rpc,
     auth,
     config,
@@ -388,9 +389,22 @@ async def lifespan(app: FastAPI):
             _run_background_task("listen_aria2_events", listen_aria2_events()),
             name="listen_aria2_events",
         )
-        background_tasks.extend((sync_task, listener_task))
+        from app.services.history_retention import (
+            HISTORY_RETENTION_INTERVAL_SECONDS,
+            history_retention_worker,
+        )
+
+        history_retention_task = asyncio.create_task(
+            _run_background_task(
+                "history_retention",
+                history_retention_worker(HISTORY_RETENTION_INTERVAL_SECONDS),
+            ),
+            name="history_retention",
+        )
+        background_tasks.extend((sync_task, listener_task, history_retention_task))
         _register_background_worker(app, "sync", sync_task)
         _register_background_worker(app, "listener", listener_task)
+        _register_background_worker(app, "history_retention", history_retention_task)
         yield
     finally:
         for task in background_tasks:
@@ -523,6 +537,7 @@ def create_app() -> FastAPI:
     app.include_router(files.router)
     app.include_router(history.router)
     app.include_router(history.v2_router)
+    app.include_router(admin_history.router)
     app.include_router(stats.router)
     app.include_router(config.router)
     app.include_router(storage.router)

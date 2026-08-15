@@ -36,6 +36,7 @@ jest.mock("@/lib/api", () => ({
   api: {
     listTasks: jest.fn<Promise<Task[]>, [string?]>(),
     createTask: jest.fn<Promise<Task>, [string, AbortSignal?]>(),
+    retryTask: jest.fn<Promise<Task>, [number]>(),
     previewTorrent: jest.fn<Promise<TorrentPreview>, [string]>(),
     uploadTorrent: jest.fn<Promise<Task>, [string, UploadTorrentRequest?]>(),
     cancelTask: jest.fn<Promise<{ ok: boolean }>, [number]>(),
@@ -140,6 +141,12 @@ describe("TasksPage", () => {
       id: 2,
       name: "new-task.zip",
       uri: "https://example.com/new-task.zip",
+    });
+    mockApi.retryTask.mockResolvedValue({
+      ...activeTask,
+      id: 99,
+      name: "retried.zip",
+      uri: "https://example.com/ubuntu.iso",
     });
     mockApi.previewTorrent.mockResolvedValue(torrentPreview);
     mockApi.uploadTorrent.mockResolvedValue({
@@ -402,6 +409,25 @@ describe("TasksPage", () => {
 
     expect(screen.getByText("ubuntu.iso")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+
+  test("retries error task via retryTask(id) not createTask(uri)", async () => {
+    mockApi.listTasks.mockImplementation(async () => [
+      {
+        ...activeTask,
+        status: "error",
+        error: "network error",
+      },
+    ]);
+
+    render(<TasksPage />);
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => {
+      expect(mockApi.retryTask).toHaveBeenCalledWith(1);
+    });
+    expect(mockApi.createTask).not.toHaveBeenCalled();
   });
 
   test("keeps paused and waiting tasks in list after websocket update", async () => {

@@ -11,6 +11,17 @@ interface HistoryCardProps {
   onRetry: (record: TaskHistory) => void;
 }
 
+function canShowRetry(record: TaskHistory): boolean {
+  // Prefer machine-readable flag; fall back for older payloads without retryable.
+  if (record.retryable === true) return true;
+  // When false or missing, still show for failed/cancelled so blocked reason can be disabled UI.
+  return record.result === "failed" || record.result === "cancelled";
+}
+
+function isRetryBlocked(record: TaskHistory): boolean {
+  return record.retryable === false;
+}
+
 export const HistoryCard = memo(function HistoryCard({
   record,
   isSelected,
@@ -32,9 +43,12 @@ export const HistoryCard = memo(function HistoryCard({
     onCopyUri(record.uri!);
   }, [record.uri, onCopyUri]);
 
+  const retryBlocked = isRetryBlocked(record);
+
   const handleRetryClick = useCallback(() => {
+    if (retryBlocked) return;
     onRetry(record);
-  }, [record, onRetry]);
+  }, [record, onRetry, retryBlocked]);
 
   const statusText =
     record.result === "completed"
@@ -64,6 +78,12 @@ export const HistoryCard = memo(function HistoryCard({
         "aria-label": `复制历史任务链接 ${record.task_name}`,
       }
     : {};
+
+  const blockedReason =
+    retryBlocked && record.retry_blocked_reason
+      ? record.retry_blocked_reason
+      : null;
+  const reasonText = blockedReason || record.reason || null;
 
   return (
     <div
@@ -98,12 +118,16 @@ export const HistoryCard = memo(function HistoryCard({
           </span>
         </div>
 
-        {record.reason && (
+        {reasonText && (
           <div
-            className={`text-sm mb-3 ${record.result === "failed" ? "text-danger" : "muted"}`}
-            title={record.reason}
+            className={`text-sm mb-3 ${
+              record.result === "failed" || blockedReason
+                ? "text-danger"
+                : "muted"
+            }`}
+            title={reasonText}
           >
-            {record.reason}
+            {reasonText}
           </div>
         )}
       </div>
@@ -125,11 +149,12 @@ export const HistoryCard = memo(function HistoryCard({
               复制
             </button>
           )}
-          {record.result === "failed" && record.uri && (
+          {canShowRetry(record) && (
             <button type="button"
-              className="button secondary btn-task"
+              className={`button secondary btn-task${retryBlocked ? " opacity-60" : ""}`}
               onClick={handleRetryClick}
-              title="重新下载"
+              disabled={retryBlocked}
+              title={blockedReason || "重新下载"}
             >
               重试
             </button>

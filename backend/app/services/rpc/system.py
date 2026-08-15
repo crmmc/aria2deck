@@ -75,19 +75,26 @@ async def _handle_remove_download_result(user_id: int, params: list) -> str:
     gid, task_id, history_id = _parse_history_gid(gid_param)
     if history_id is not None:
         raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid_param}")
-    deleted = (
+    deleted_tid = (
         await delete_terminal_user_task(user_id, task_id)
         if task_id is not None
         else await delete_terminal_user_task_by_gid(user_id, str(gid))
     )
-    if not deleted:
+    if deleted_tid is None:
         raise RpcError(RpcErrorCode.TASK_NOT_FOUND, f"Task not found: {gid_param}")
+    from app.services.history_retention import reclaim_zero_pid_tid
+
+    await reclaim_zero_pid_tid(deleted_tid)
     return "OK"
 
 
 async def _handle_purge_download_result(user_id: int, params: list) -> str:
     """aria2.purgeDownloadResult() - 删除用户所有 stopped 订阅"""
-    await delete_all_terminal_user_tasks(user_id)
+    deleted_tids = await delete_all_terminal_user_tasks(user_id)
+    from app.services.history_retention import reclaim_zero_pid_tid
+
+    for tid in set(deleted_tids):
+        await reclaim_zero_pid_tid(tid)
     return "OK"
 
 

@@ -263,6 +263,11 @@ async def cancel_task(
 
 
 async def clear_history(user_id: int) -> dict:
-    count = await clear_terminal_user_tasks(user_id)
+    tids = await clear_terminal_user_tasks(user_id)
+    from app.services.history_retention import reclaim_zero_pid_tid
+
+    for tid in set(tids):
+        await reclaim_zero_pid_tid(tid)
+    count = len(tids)
     logger.info("清空任务记录成功 user_id=%s count=%s", user_id, count)
     return {"ok": True, "count": count}

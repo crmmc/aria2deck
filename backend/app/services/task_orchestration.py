@@ -38,6 +38,7 @@ from app.domain.errors import (
 from app.repositories.task.downloads import (
     get_global_download_by_id,
 )
+from app.repositories.task.sources import torrent_source_uri_placeholder
 from app.services.hash import (
     extract_info_hash_from_magnet,
     get_uri_hash,
@@ -533,6 +534,8 @@ async def _impl_create_task(
         display_name=name,
         size_bytes=total_length,
         size_known=size_known,
+        source_payload=masked_uri,
+        source_options=options,
     )
     return await ts.register_and_submit(
         user_id=user_id,
@@ -632,14 +635,19 @@ async def _impl_create_torrent_task(
     if select_file:
         submit_options["select-file"] = select_file
 
+    # Partial selection only: full selection leaves selection_json null (spec §3.1).
+    selection_indexes = selected_indexes if select_file else None
     resource = ResourceSpec(
         resource_key=resource_key,
-        source_uri=f"base64:{torrent}",
+        source_uri=torrent_source_uri_placeholder(uri_hash),
         resource_kind="torrent",
         display_name=metadata.name,
         size_bytes=selected_size,
         size_known=True,
         display_uri=magnet_uri,
+        source_payload=f"base64:{torrent}",
+        selection_indexes=selection_indexes,
+        source_options=options,
     )
     return await ts.register_and_submit(
         user_id=user_id,

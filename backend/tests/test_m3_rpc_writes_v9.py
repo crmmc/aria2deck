@@ -118,7 +118,9 @@ async def test_add_torrent_uses_register_and_submit(
     assert call["options"] == {"out": "seed.bin"}
     resource = call["resource"]
     assert resource.resource_kind == "torrent"
-    assert resource.source_uri == f"base64:{torrent_data}"
+    assert resource.source_uri.startswith("torrent:")
+    assert not resource.source_uri.startswith("base64:")
+    assert resource.source_payload == f"base64:{torrent_data}"
     assert resource.display_name == "test"
     assert resource.size_known is True
     assert resource.size_bytes == 4

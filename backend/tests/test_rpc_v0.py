@@ -462,8 +462,9 @@ async def test_rpc_add_torrent_creates_v0_task_and_returns_gid(
     assert rows[0]["status"] == "paused"
     assert rows[0]["error_code"] == "admission_paused"
     assert rows[0]["resource_kind"] == "torrent"
-    # torrent 任务的 source_uri 保存 base64 提交体；magnet 展示地址经 display_uri 投影。
-    assert str(rows[0]["source_uri"]).startswith("base64:")
+    # torrent 大 base64 住在 download_sources；tid.source_uri 为短占位。
+    assert str(rows[0]["source_uri"]).startswith("torrent:")
+    assert not str(rows[0]["source_uri"]).startswith("base64:")
     client.add_torrent.assert_awaited_once()
     call_args = client.add_torrent.call_args
     assert call_args[0][0] == torrent_data

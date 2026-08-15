@@ -423,10 +423,13 @@ export default function TasksPage() {
 
   const retryTask = useCallback(
     async (task: Task) => {
-      if (!task.uri) return;
+      if (task.retryable === false) {
+        showToast(task.retry_blocked_reason || "不可重试", "warning");
+        return;
+      }
 
       try {
-        const newTask = await api.createTask(task.uri);
+        const newTask = await api.retryTask(task.id);
         if (isCurrentVisibleStatus(newTask.status)) {
           setTasks((prev) => upsertTaskById(prev, newTask));
         }

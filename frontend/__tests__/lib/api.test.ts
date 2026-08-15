@@ -244,6 +244,26 @@ describe("api methods", () => {
     });
   });
 
+  describe("api.retryTask", () => {
+    it("posts to /api/tasks/:id/retry", async () => {
+      const mockTask = { id: 42, uri: "https://example.com/file" };
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockTask),
+      });
+
+      const result = await api.retryTask(7);
+
+      expect(result).toEqual(mockTask);
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/api/tasks/7/retry"),
+        expect.objectContaining({
+          method: "POST",
+        })
+      );
+    });
+  });
+
   describe("api.cancelTask", () => {
     it("cancels task by subscription id", async () => {
       global.fetch = jest.fn().mockResolvedValue({

@@ -185,6 +185,10 @@ export const api = {
       body: JSON.stringify({ uri }),
       signal,
     }),
+  retryTask: (userTaskId: number) =>
+    request<Task>(`/api/tasks/${userTaskId}/retry`, {
+      method: "POST",
+    }),
   previewTorrent: (torrent: string) =>
     request<TorrentPreview>("/api/tasks/torrent/preview", {
       method: "POST",

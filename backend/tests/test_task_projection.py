@@ -404,3 +404,28 @@ def test_rest_response_filters_metadata_name_uses_db_fallback() -> None:
     # [METADATA] name filtered, falls back to user_name from row
     assert response["name"] == "magnet:?xt=urn:btih:abc"
     assert METADATA_NAME_PREFIX not in response["name"]
+
+
+def test_task_list_projection_retryable_for_terminal_failed() -> None:
+    response = build_rest_task_response(
+        _row(user_status="failed", global_status="failed", name="fail.bin")
+    )
+    assert response["retryable"] is True
+    assert response["retry_blocked_reason"] is None
+
+
+def test_task_list_projection_retryable_false_when_expired() -> None:
+    row = _row(user_status="failed", global_status="failed", name="old.bin")
+    row["history_expired_at_ms"] = 1_700_000_000_000
+    response = build_rest_task_response(row)
+    assert response["retryable"] is False
+    assert response["retry_blocked_reason"] is not None
+    assert "已过期" in response["retry_blocked_reason"]
+
+
+def test_task_list_projection_retryable_false_for_completed() -> None:
+    response = build_rest_task_response(
+        _row(user_status="completed", global_status="completed", name="done.bin")
+    )
+    assert response["retryable"] is False
+    assert response["retry_blocked_reason"] is not None

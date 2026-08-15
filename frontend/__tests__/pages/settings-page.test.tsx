@@ -71,6 +71,7 @@ const baseConfig = {
   download_anonymous_borrow_connections: 20,
   download_anonymous_per_ip_connections: 4,
   download_anonymous_per_file_connections: 2,
+  history_retention_days: 30,
 };
 
 const baseMachineStats = {
@@ -200,6 +201,7 @@ describe("SettingsPage", () => {
     expect(mockApi.getConfig).toHaveBeenCalled();
     expect(mockApi.getMachineStats).toHaveBeenCalled();
     expect(mockApi.getAria2Version).toHaveBeenCalled();
+    expect(screen.getByLabelText("历史保留天数")).toHaveValue(30);
   });
 
   test("expands advanced settings on demand", async () => {

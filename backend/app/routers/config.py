@@ -60,6 +60,11 @@ class ConfigUpdate(BaseModel):
     download_anonymous_borrow_connections: int | None = Field(None, ge=0, le=10000, description="匿名可借用连接数")
     download_anonymous_per_ip_connections: int | None = Field(None, ge=0, le=1000, description="匿名单 IP 最大并发（0=不限制）")
     download_anonymous_per_file_connections: int | None = Field(None, ge=0, le=100, description="匿名单文件最大并发（0=不限制）")
+    history_retention_days: int | None = Field(
+        None,
+        ge=1,
+        description="任务历史（终态）最多保留天数；不含进行中任务",
+    )
 
 
 class Aria2TestRequest(BaseModel):

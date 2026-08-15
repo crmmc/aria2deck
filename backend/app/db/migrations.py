@@ -373,6 +373,166 @@ async def migrate_v11(conn: AsyncConnection) -> None:
     await _rebuild_schema_meta(conn, 11)
 
 
+V12_APP_SETTINGS_ADDED_COLUMNS = {
+    "history_retention_days": (
+        "INTEGER NOT NULL DEFAULT 30 "
+        "CHECK (history_retention_days >= 1)"
+    ),
+}
+V12_GLOBAL_DOWNLOADS_ADDED_COLUMNS = {
+    "source_id": "INTEGER",
+}
+V12_USER_TASKS_ADDED_COLUMNS = {
+    "history_expired_at_ms": "INTEGER",
+}
+
+
+async def ensure_v12_download_sources_schema(conn: AsyncConnection) -> None:
+    """v12: download_sources + history retention columns."""
+    await conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS download_sources ("
+            "id INTEGER NOT NULL PRIMARY KEY, "
+            "resource_kind VARCHAR(16) NOT NULL, "
+            "payload_text TEXT NOT NULL, "
+            "selection_json TEXT, "
+            "options_json TEXT, "
+            "content_digest VARCHAR(64), "
+            "resource_identity VARCHAR(128), "
+            "created_at_ms INTEGER NOT NULL, "
+            "updated_at_ms INTEGER NOT NULL, "
+            "purged_at_ms INTEGER, "
+            "CONSTRAINT ck_download_sources_resource_kind "
+            "CHECK (resource_kind IN ('http', 'magnet', 'torrent', 'other'))"
+            ")"
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_download_sources_content_digest "
+            "ON download_sources (content_digest)"
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_download_sources_resource_identity "
+            "ON download_sources (resource_identity)"
+        )
+    )
+    await _add_missing_columns(
+        conn, "app_settings", V12_APP_SETTINGS_ADDED_COLUMNS
+    )
+    await _add_missing_columns(
+        conn, "global_downloads", V12_GLOBAL_DOWNLOADS_ADDED_COLUMNS
+    )
+    await _add_missing_columns(
+        conn, "user_tasks", V12_USER_TASKS_ADDED_COLUMNS
+    )
+    table_names = await _table_names(conn)
+    if "global_downloads" not in table_names:
+        return
+    if "source_id" in await _column_names(conn, "global_downloads"):
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_global_downloads_source_id "
+                "ON global_downloads (source_id)"
+            )
+        )
+    fk_rows = (
+        await conn.execute(text("PRAGMA foreign_key_list('global_downloads')"))
+    ).mappings().all()
+    has_source_fk = any(
+        str(row["table"]) == "download_sources"
+        and str(row["from"]) == "source_id"
+        for row in fk_rows
+    )
+    if not has_source_fk and "source_id" in await _column_names(
+        conn, "global_downloads"
+    ):
+        await _rebuild_global_downloads_source_fk(conn)
+
+
+async def _rebuild_global_downloads_source_fk(conn: AsyncConnection) -> None:
+    """Attach source_id FK ON DELETE SET NULL via table rebuild."""
+    columns = await _column_names(conn, "global_downloads")
+    column_list = ", ".join(sorted(columns))
+    await conn.execute(
+        text("ALTER TABLE global_downloads RENAME TO global_downloads_old_v12")
+    )
+    pragma_cols = (
+        await conn.execute(text("PRAGMA table_info(global_downloads_old_v12)"))
+    ).all()
+    col_defs: list[str] = []
+    for row in pragma_cols:
+        name = str(row[1])
+        col_type = str(row[2] or "TEXT")
+        notnull = " NOT NULL" if int(row[3] or 0) == 1 and name != "source_id" else ""
+        default = row[4]
+        default_sql = f" DEFAULT {default}" if default is not None else ""
+        pk = " PRIMARY KEY" if int(row[5] or 0) == 1 else ""
+        if name == "source_id":
+            col_defs.append(
+                "source_id INTEGER REFERENCES download_sources(id) ON DELETE SET NULL"
+            )
+        else:
+            col_defs.append(f"{name} {col_type}{notnull}{default_sql}{pk}")
+    await conn.execute(
+        text(
+            "CREATE TABLE global_downloads ("
+            + ", ".join(col_defs)
+            + ")"
+        )
+    )
+    await conn.execute(
+        text(
+            f"INSERT INTO global_downloads ({column_list}) "
+            f"SELECT {column_list} FROM global_downloads_old_v12"
+        )
+    )
+    await conn.execute(text("DROP TABLE global_downloads_old_v12"))
+
+    async def _maybe_index(sql: str, required: set[str]) -> None:
+        if required <= columns:
+            await conn.execute(text(sql))
+
+    await _maybe_index(
+        "CREATE INDEX IF NOT EXISTS ix_global_downloads_status_gid "
+        "ON global_downloads (status, aria2_gid)",
+        {"status", "aria2_gid"},
+    )
+    await _maybe_index(
+        "CREATE INDEX IF NOT EXISTS ix_global_downloads_status_disk_reserved "
+        "ON global_downloads (status, disk_reserved_bytes)",
+        {"status", "disk_reserved_bytes"},
+    )
+    await _maybe_index(
+        "CREATE INDEX IF NOT EXISTS ix_global_downloads_completed_file_id "
+        "ON global_downloads (completed_file_id)",
+        {"completed_file_id"},
+    )
+    await _maybe_index(
+        "CREATE INDEX IF NOT EXISTS ix_global_downloads_resource_key "
+        "ON global_downloads (resource_key)",
+        {"resource_key"},
+    )
+    await _maybe_index(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_global_downloads_live_resource "
+        "ON global_downloads (resource_key) "
+        "WHERE status IN ('queued', 'active', 'waiting', 'paused')",
+        {"resource_key", "status"},
+    )
+    await _maybe_index(
+        "CREATE INDEX IF NOT EXISTS ix_global_downloads_source_id "
+        "ON global_downloads (source_id)",
+        {"source_id"},
+    )
+
+
+async def migrate_v12(conn: AsyncConnection) -> None:
+    await ensure_v12_download_sources_schema(conn)
+    await _rebuild_schema_meta(conn, 12)
+
+
 async def migrate_v1(conn: AsyncConnection) -> None:
     await _add_missing_columns(conn, "app_settings", V1_APP_SETTINGS_ADDED_COLUMNS)
     await _rebuild_schema_meta(conn, 1)
@@ -965,6 +1125,7 @@ MIGRATIONS: dict[int, Migration] = {
     9: migrate_v9,
     10: migrate_v10,
     11: migrate_v11,
+    12: migrate_v12,
 }
 
 

@@ -124,6 +124,28 @@ async def list_tasks_v2(
         raise_http(exc)
 
 
+@router.post("/{user_task_id}/retry", status_code=status.HTTP_201_CREATED)
+async def retry_task(
+    user_task_id: int,
+    user: AuthUser = Depends(require_limited_api_user),
+) -> dict:
+    await ensure_authenticated_allowed(
+        user.id,
+        RateLimitScope.CREATE_TASK,
+        detail="操作过于频繁，请稍后再试",
+    )
+    try:
+        from app.services import task_retry
+
+        return await task_retry.retry_task(
+            user_id=user.id,
+            user_task_id=user_task_id,
+            quota_bytes=int(user.quota_bytes),
+        )
+    except DomainError as exc:
+        raise_http(exc)
+
+
 @router.delete("/{subscription_id}")
 async def cancel_task(
     subscription_id: int,
