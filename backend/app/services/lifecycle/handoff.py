@@ -478,6 +478,11 @@ async def _handoff_locked(
     if system_owned_pause:
         global_values["error_code"] = ERROR_METADATA_ADMISSION_PAUSED
         global_values["error_message"] = None
+    elif raw_status in {"active", "waiting"}:
+        # Payload already running (non-metadata): clear create-time pending
+        # credential (Spec §3.1.1 / M9 — handoff confirms payload release).
+        global_values["error_code"] = None
+        global_values["error_message"] = None
 
     updated = await guarded_update_download_and_active_user_tasks(
         attempt_id,

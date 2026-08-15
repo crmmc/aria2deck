@@ -178,24 +178,35 @@ async def test_completion_with_followed_by_changes_gid_without_creating_files(
         global_download_id=download["id"],
         status="active",
     )
-    client = make_aria2_client(tell_status=[
-        {
-            "gid": "gid-metadata",
-            "status": "complete",
-            "followedBy": ["gid-real"],
-            "totalLength": "0",
-            "completedLength": "0",
-            "files": [],
-        },
-        {
-            "gid": "gid-real",
-            "status": "paused",
-            "totalLength": "2048",
-            "completedLength": "0",
-            "files": [{"path": str(get_task_download_dir(download["id"]) / "file.bin"), "length": "2048"}],
-            "bittorrent": {"info": {"name": "payload"}},
-        },
-    ])
+    payload_paused = {
+        "gid": "gid-real",
+        "status": "paused",
+        "totalLength": "2048",
+        "completedLength": "0",
+        "files": [
+            {
+                "path": str(get_task_download_dir(download["id"]) / "file.bin"),
+                "length": "2048",
+            }
+        ],
+        "bittorrent": {"info": {"name": "payload"}},
+    }
+    payload_active = {**payload_paused, "status": "active"}
+    # M9: handoff unpause always re-queries; final tell must be active|waiting.
+    client = make_aria2_client(
+        tell_status=[
+            {
+                "gid": "gid-metadata",
+                "status": "complete",
+                "followedBy": ["gid-real"],
+                "totalLength": "0",
+                "completedLength": "0",
+                "files": [],
+            },
+            payload_paused,
+            payload_active,
+        ]
+    )
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-metadata", "complete")
@@ -212,6 +223,7 @@ async def test_completion_with_followed_by_changes_gid_without_creating_files(
 
     assert updated["aria2_gid"] == "gid-real"
     assert updated["status"] == "active"
+    assert updated["error_code"] is None
     assert updated_task["status"] == "active"
     assert stored_count == 0
     assert user_file_count == 0
@@ -481,43 +493,58 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
     metadata_file = task_dir / "metadata"
     metadata_file.write_bytes(b"short")
 
-    client = make_aria2_client(tell_status=[
-        {
-            "gid": "gid-metadata",
-            "status": "complete",
-            "totalLength": "9",
-            "completedLength": "9",
-            "files": [
-                {
-                    "path": str(metadata_file),
-                    "length": "9",
-                    "completedLength": "9",
-                }
-            ],
-        },
-        {
-            "gid": "gid-metadata",
-            "status": "complete",
-            "followedBy": ["gid-real"],
-            "totalLength": "9",
-            "completedLength": "9",
-            "files": [
-                {
-                    "path": str(metadata_file),
-                    "length": "9",
-                    "completedLength": "9",
-                }
-            ],
-        },
-        {
-            "gid": "gid-real",
-            "status": "active",
-            "totalLength": "4096",
-            "completedLength": "512",
-            "bittorrent": {"info": {"name": "Real Torrent"}},
-            "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "4096"}],
-        },
-    ])
+    payload_active = {
+        "gid": "gid-real",
+        "status": "active",
+        "totalLength": "4096",
+        "completedLength": "512",
+        "bittorrent": {"info": {"name": "Real Torrent"}},
+        "files": [
+            {
+                "path": str(
+                    get_task_download_dir(download["id"])
+                    / "Real Torrent"
+                    / "file.bin"
+                ),
+                "length": "4096",
+            }
+        ],
+    }
+    # Extra payload tell: growth pause + unpause re-query (M9).
+    client = make_aria2_client(
+        tell_status=[
+            {
+                "gid": "gid-metadata",
+                "status": "complete",
+                "totalLength": "9",
+                "completedLength": "9",
+                "files": [
+                    {
+                        "path": str(metadata_file),
+                        "length": "9",
+                        "completedLength": "9",
+                    }
+                ],
+            },
+            {
+                "gid": "gid-metadata",
+                "status": "complete",
+                "followedBy": ["gid-real"],
+                "totalLength": "9",
+                "completedLength": "9",
+                "files": [
+                    {
+                        "path": str(metadata_file),
+                        "length": "9",
+                        "completedLength": "9",
+                    }
+                ],
+            },
+            payload_active,
+            payload_active,
+            payload_active,
+        ]
+    )
     _patch_aria2_client(monkeypatch, client)
 
     await handle_aria2_event("gid-metadata", "complete")
@@ -583,20 +610,30 @@ async def test_metadata_completion_discovers_followed_task_by_following_gid(
             }
         ],
     }
+    payload_active = {
+        "gid": "gid-real",
+        "status": "active",
+        "totalLength": "4096",
+        "completedLength": "512",
+        "bittorrent": {"info": {"name": "Real Torrent"}},
+        "files": [
+            {
+                "path": str(
+                    get_task_download_dir(download["id"])
+                    / "Real Torrent"
+                    / "file.bin"
+                ),
+                "length": "4096",
+            }
+        ],
+    }
     client = make_aria2_client(
         tell_status=[
             metadata_status,
             metadata_status,
-            {
-                "gid": "gid-real",
-                "status": "active",
-                "totalLength": "4096",
-                "completedLength": "512",
-                "bittorrent": {"info": {"name": "Real Torrent"}},
-                "files": [
-                    {"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "4096"}
-                ],
-            },
+            payload_active,
+            payload_active,
+            payload_active,
         ],
         tell_active=[
             {"gid": "gid-real", "status": "active", "followingGid": "gid-metadata"}

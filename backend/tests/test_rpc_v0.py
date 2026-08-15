@@ -172,9 +172,10 @@ async def test_rpc_add_uri_creates_v0_task_and_returns_gid(
     assert result == f"task-{rows[0]['id']}"
     assert len(rows) == 1
     assert rows[0]["aria2_gid"] == "gid-rpc-add-uri"
-    # T12：未知大小 HTTP 任务以 pause 提交，状态 waiting，由同步协调器
-    # (sync + reconcile_attempt_signal) 准入后恢复为 active。
-    assert rows[0]["status"] == "waiting"
+    # M9：未知大小 HTTP 以 pause 提交，DB 为 paused + admission_paused，
+    # 由同步协调器多轮 unpause 后进入 active。
+    assert rows[0]["status"] == "paused"
+    assert rows[0]["error_code"] == "admission_paused"
     assert rows[0]["source_uri"] == "https://example.com/add.bin"
     client.add_uri.assert_awaited_once()
     uris, opts = client.add_uri.await_args.args
@@ -457,7 +458,9 @@ async def test_rpc_add_torrent_creates_v0_task_and_returns_gid(
     assert result == f"task-{rows[0]['id']}"
     assert len(rows) == 1
     assert rows[0]["aria2_gid"] == "gid-rpc-add-torrent"
-    assert rows[0]["status"] == "active"
+    # M9 AC-9：torrent 创建 pause=true，DB paused + admission_paused。
+    assert rows[0]["status"] == "paused"
+    assert rows[0]["error_code"] == "admission_paused"
     assert rows[0]["resource_kind"] == "torrent"
     # torrent 任务的 source_uri 保存 base64 提交体；magnet 展示地址经 display_uri 投影。
     assert str(rows[0]["source_uri"]).startswith("base64:")

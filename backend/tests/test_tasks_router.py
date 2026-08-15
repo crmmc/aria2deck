@@ -963,7 +963,8 @@ class TestCreateTorrentTask:
         assert response.status_code == 201
         data = response.json()
         assert data["uri"] == f"magnet:?xt=urn:btih:{info_hash}"
-        assert data["status"] == "active"
+        # M9 AC-9：torrent 创建 pause 起步，列表 status 为 paused 直至自动放行。
+        assert data["status"] == "paused"
         assert data["total_length"] == 1024
         assert data["frozen_space"] == 1024
 

@@ -430,10 +430,15 @@ async def test_metadata_followed_by_refreshes_real_task_progress_and_name(
 
     assert updated["aria2_gid"] == "gid-real"
     assert updated["status"] == "active"
+    assert updated["error_code"] is None
     assert updated["display_name"] == "Real Torrent"
     assert updated["total_bytes"] == 2048
     assert updated["completed_bytes"] == 512
-    client.tell_status.assert_awaited_once_with("gid-real")
+    # Handoff fetch + M9 unpause re-query may both tell_status payload gid.
+    assert client.tell_status.await_count >= 1
+    assert all(
+        call.args[0] == "gid-real" for call in client.tell_status.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -839,6 +844,23 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
     task_dir.mkdir(parents=True, exist_ok=True)
     metadata_file = task_dir / "metadata"
     metadata_file.write_bytes(b"short")
+    payload_active = {
+        "gid": "gid-real",
+        "status": "active",
+        "totalLength": "2048",
+        "completedLength": "256",
+        "bittorrent": {"info": {"name": "Real Torrent"}},
+        "files": [
+            {
+                "path": str(
+                    get_task_download_dir(download["id"])
+                    / "Real Torrent"
+                    / "file.bin"
+                ),
+                "length": "2048",
+            }
+        ],
+    }
     client = make_aria2_client(
         tell_status=[
             {
@@ -855,14 +877,9 @@ async def test_metadata_completion_retries_for_late_followed_by_before_file_vali
                     }
                 ],
             },
-            {
-                "gid": "gid-real",
-                "status": "active",
-                "totalLength": "2048",
-                "completedLength": "256",
-                "bittorrent": {"info": {"name": "Real Torrent"}},
-                "files": [{"path": str(get_task_download_dir(download["id"]) / "Real Torrent" / "file.bin"), "length": "2048"}],
-            },
+            payload_active,
+            payload_active,
+            payload_active,
         ],
     )
 

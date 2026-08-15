@@ -619,12 +619,40 @@ async def test_magnet_handoff_admits_payload_regardless_of_file_count(temp_db: s
     await create_user_task_v0(
         user_id=user["id"], global_download_id=download["id"], status="active"
     )
+    # After unpause RPC, re-query must show active|waiting for M9 success clear.
     client = make_aria2_client(
+        unpause="OK",
         tell_status={
-            "status": "paused", "totalLength": "1", "completedLength": "0",
-            "files": [{"path": str(get_task_download_dir(download["id"]) / "payload")}] * 5001,
+            "status": "active",
+            "totalLength": "1",
+            "completedLength": "0",
+            "files": [
+                {"path": str(get_task_download_dir(download["id"]) / "payload")}
+            ]
+            * 5001,
         },
     )
+    # First tell (handoff fetch) still paused; subsequent re-query active.
+    client.tell_status.side_effect = [
+        {
+            "status": "paused",
+            "totalLength": "1",
+            "completedLength": "0",
+            "files": [
+                {"path": str(get_task_download_dir(download["id"]) / "payload")}
+            ]
+            * 5001,
+        },
+        {
+            "status": "active",
+            "totalLength": "1",
+            "completedLength": "0",
+            "files": [
+                {"path": str(get_task_download_dir(download["id"]) / "payload")}
+            ]
+            * 5001,
+        },
+    ]
 
     changed = await switch_to_followed_download(
         backend=client, download=download, metadata_gid="metadata-gid",
@@ -638,7 +666,8 @@ async def test_magnet_handoff_admits_payload_regardless_of_file_count(temp_db: s
     assert changed is True
     assert row["aria2_gid"] == "payload-gid"
     # Payload was paused by aria2 (pause-metadata / admission). After handoff
-    # admission M3 resumes it and projects active when unpause succeeds.
+    # admission M9 unpause re-query active → project active and clear code.
     assert row["status"] == "active"
+    assert row["error_code"] is None
     client.unpause.assert_awaited_once_with("payload-gid")
     client.force_remove.assert_not_awaited()
