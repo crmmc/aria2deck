@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import json
 import logging
 import os
 import socket
@@ -21,7 +20,7 @@ from app.core.config import get_internal_base_url
 from app.db.schema import global_downloads
 from app.domain.errors import BadRequestError, BadGatewayError, ConflictError, ForbiddenError
 from app.domain.torrent_metadata import MAX_TORRENT_BASE64_LENGTH
-from app.repositories.backend_snapshots import upsert_snapshot
+from app.modules.task_core.sync import record_observed_snapshot
 from app.repositories.task.user_tasks import get_user_task
 from app.repositories.task.downloads import get_global_by_resource_key
 from app.services.hash import get_uri_hash
@@ -1157,7 +1156,7 @@ class TestListTasks:
         authenticated_client: TestClient,
         test_user: dict,
     ) -> None:
-        # M3 T08: 列表去实时 aria2，速度来自 task_backend_snapshots。
+        # M3 T08: 列表去实时 aria2，速度来自观测仓快照。
         global_download = asyncio.run(
             create_global_download_v0(
                 resource_key="http:speed-task",
@@ -1179,23 +1178,16 @@ class TestListTasks:
             )
         )
         asyncio.run(
-            upsert_snapshot(
-                global_download_id=global_download["id"],
-                download_speed=8192,
-                upload_speed=256,
-                total_length=100,
-                completed_length=40,
-                status="active",
-                files_json="[]",
-                raw_json=json.dumps(
-                    {
-                        "gid": "gid-speed-task",
-                        "status": "active",
-                        "downloadSpeed": "8192",
-                        "uploadSpeed": "256",
-                    }
-                ),
-                updated_at_ms=1,
+            record_observed_snapshot(
+                tid=int(global_download["id"]),
+                observed_status={
+                    "gid": "gid-speed-task",
+                    "status": "active",
+                    "totalLength": "100",
+                    "completedLength": "40",
+                    "downloadSpeed": "8192",
+                    "uploadSpeed": "256",
+                },
             )
         )
 

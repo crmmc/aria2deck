@@ -1,7 +1,7 @@
 """M3 T09: Web 用户统计切投影。
 
 验证 ``stats_service.get_user_stats``：
-- 数据速度来自 ``task_backend_snapshots``（经 ``list_user_task_projections``），
+- 数据速度来自观测仓快照（经 ``list_user_task_projections``），
   不调用 aria2 实时 RPC；aria2 不可用时统计仍返回
 - 速度只对 current/active 任务聚合，终态任务快照速度不计入
 - 磁盘/配额字段（used/frozen/total/limited）保持现状
@@ -9,12 +9,11 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
 
-from app.repositories.backend_snapshots import upsert_snapshot
+from app.modules.task_core.sync import record_observed_snapshot
 from app.services import stats_service
 from tests.helpers_v0 import (
     create_global_download_v0,
@@ -50,27 +49,17 @@ async def _setup_task(
 
 
 async def _upsert_speed_snapshot(
-    tid: int, *, download_speed: int, upload_speed: int
+    tid: int, *, gid: str, download_speed: int, upload_speed: int
 ) -> None:
     raw = {
-        "gid": "gid-stats",
+        "gid": gid,
         "status": "active",
         "totalLength": "1000",
         "completedLength": "500",
         "downloadSpeed": str(download_speed),
         "uploadSpeed": str(upload_speed),
     }
-    await upsert_snapshot(
-        global_download_id=tid,
-        download_speed=download_speed,
-        upload_speed=upload_speed,
-        total_length=1000,
-        completed_length=500,
-        status="active",
-        files_json=json.dumps([]),
-        raw_json=json.dumps(raw),
-        updated_at_ms=1,
-    )
+    await record_observed_snapshot(tid=tid, observed_status=raw)
 
 
 @pytest.mark.asyncio
@@ -80,7 +69,9 @@ async def test_get_user_stats_never_calls_live_fetch(
     user_id, tid = await _setup_task(
         "stats_nofetch", "nofetch", gid="gid-stats"
     )
-    await _upsert_speed_snapshot(tid, download_speed=12345, upload_speed=67)
+    await _upsert_speed_snapshot(
+        tid, gid="gid-stats", download_speed=12345, upload_speed=67
+    )
 
     async def _boom(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("live aria2 RPC must not be called in stats path")
@@ -132,8 +123,12 @@ async def test_get_user_stats_speeds_come_from_snapshot(temp_db: str) -> None:
         status="completed",
     )
     complete_tid = int(complete_gd["id"])
-    await _upsert_speed_snapshot(active_tid, download_speed=4096, upload_speed=64)
-    await _upsert_speed_snapshot(complete_tid, download_speed=9999, upload_speed=9999)
+    await _upsert_speed_snapshot(
+        active_tid, gid="gid-stats-a", download_speed=4096, upload_speed=64
+    )
+    await _upsert_speed_snapshot(
+        complete_tid, gid="gid-stats-c", download_speed=9999, upload_speed=9999
+    )
 
     result = await stats_service.get_user_stats(user_id=user_id, quota_bytes=0)
 

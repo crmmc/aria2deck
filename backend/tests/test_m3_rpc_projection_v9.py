@@ -1,4 +1,4 @@
-"""M3 T11: RPC handler 读路径全部走投影（task_backend_snapshots）。
+"""M3 T11: RPC handler 读路径全部走投影（observation_store 观测仓）。
 
 验证 ``Aria2RpcHandler`` 的读方法（tellStatus/tellActive/getGlobalStat/
 getFiles/getUris/getPeers/getServers/getVersion）在 aria2 client 完全
@@ -8,18 +8,15 @@ client 读调用。
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
-from app.repositories.backend_snapshots import upsert_snapshot
+from app.modules.task_core.sync import record_observed_snapshot
 from app.services.rpc import Aria2RpcHandler
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_task_v0,
     create_user_v0,
-    now_ms,
 )
 
 
@@ -57,18 +54,10 @@ async def _snapshot(
     raw: dict,
     files: list[dict] | None = None,
 ) -> None:
-    snapshot_files = files if files is not None else raw.get("files") or []
-    await upsert_snapshot(
-        global_download_id=int(gd["id"]),
-        download_speed=int(str(raw.get("downloadSpeed") or 0)),
-        upload_speed=int(str(raw.get("uploadSpeed") or 0)),
-        total_length=int(str(raw.get("totalLength") or 0)),
-        completed_length=int(str(raw.get("completedLength") or 0)),
-        status=str(raw.get("status") or "active"),
-        files_json=json.dumps(snapshot_files),
-        raw_json=json.dumps(raw),
-        updated_at_ms=now_ms(),
-    )
+    observed = dict(raw)
+    if files is not None:
+        observed["files"] = files
+    await record_observed_snapshot(tid=int(gd["id"]), observed_status=observed)
 
 
 def _broken_client():

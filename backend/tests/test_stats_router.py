@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -11,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
-from app.repositories.backend_snapshots import upsert_snapshot
+from app.modules.task_core.sync import record_observed_snapshot
 from app.repositories.usage import apply_usage_delta
 from tests.helpers_v0 import create_global_download_v0, create_user_task_v0
 
@@ -83,30 +82,19 @@ def _create_user_download_task(
 def _upsert_speed_snapshot(
     global_download_id: int,
     *,
+    gid: str,
     download_speed: int,
     upload_speed: int,
 ) -> None:
     raw = {
-        "gid": "gid-snap",
+        "gid": gid,
         "status": "active",
         "totalLength": "1000",
         "completedLength": "500",
         "downloadSpeed": str(download_speed),
         "uploadSpeed": str(upload_speed),
     }
-    asyncio.run(
-        upsert_snapshot(
-            global_download_id=global_download_id,
-            download_speed=download_speed,
-            upload_speed=upload_speed,
-            total_length=1000,
-            completed_length=500,
-            status="active",
-            files_json=json.dumps([]),
-            raw_json=json.dumps(raw),
-            updated_at_ms=1,
-        )
-    )
+    asyncio.run(record_observed_snapshot(tid=global_download_id, observed_status=raw))
 
 
 class TestGetStats:
@@ -318,8 +306,15 @@ class TestGetStatsWithActiveTasks:
             global_status="completed",
             aria2_gid="gid-speed-complete",
         )
-        _upsert_speed_snapshot(active_tid, download_speed=4096, upload_speed=64)
-        _upsert_speed_snapshot(complete_tid, download_speed=9999, upload_speed=9999)
+        _upsert_speed_snapshot(
+            active_tid, gid="gid-speed-active", download_speed=4096, upload_speed=64
+        )
+        _upsert_speed_snapshot(
+            complete_tid,
+            gid="gid-speed-complete",
+            download_speed=9999,
+            upload_speed=9999,
+        )
 
         with patch("shutil.disk_usage", return_value=_disk_usage()):
             response = authenticated_client.get("/api/stats")

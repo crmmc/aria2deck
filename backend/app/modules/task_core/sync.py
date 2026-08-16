@@ -1,7 +1,7 @@
 """Minimal batch sync from backend into Task Core.
 
-职责边界（M3 投影缓存）：本模块只负责 **读投影**——将后端快照写入
-``task_backend_snapshots`` 投影表，并保留既有的
+职责边界（M3 投影缓存）：本模块只负责 **读投影**——将后端快照写入进程内存观测仓
+``observation_store``，并保留既有的
 ``global_downloads.status`` / ``completed_bytes`` 进度记账与暂停/排队
 policy pass。状态机流转、完成/失败 handoff、终态落库与物理清理一律
 归 ``reconcile_attempt_signal``（``app/services/lifecycle/coordinator.py``）
@@ -24,14 +24,13 @@ on the policy pass for queue-eligible tids only.
 from __future__ import annotations
 
 from typing import Any
-
-import json
 from dataclasses import dataclass, field
 
 from app.core.config import settings
 from app.core.time_utils import now_ms
 from app.domain.quota import get_disk_available_bytes
 from app.modules.backend.port import BackendPort, Snapshot
+from app.modules.task_core import observation_store
 from app.modules.task_core.policy import (
     SYSTEM_QUEUE_CODES,
     QuotaContext,
@@ -50,7 +49,7 @@ from app.services.usage_service import get_usage
 
 _SYNCED_STATUSES = {"active", "waiting", "paused"}
 
-# NOTE: sanitize/upsert imports live inside _upsert_snapshot_row to avoid a
+# NOTE: sanitize import lives inside _upsert_snapshot_row to avoid a
 # circular import (task_projection -> app.modules -> task_core.sync).
 
 
@@ -96,30 +95,12 @@ async def _run_policy_for_snapshot(
     return True
 
 
-def _to_int(value: object) -> int:
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-
-
 async def _upsert_snapshot_row(snap: Snapshot) -> None:
-    """Write one sanitized projection row for ``snap`` into task_backend_snapshots."""
-    from app.repositories.backend_snapshots import upsert_snapshot
+    """Record one sanitized snapshot for ``snap`` into the observation store."""
     from app.services.aria2_snapshot_sanitize import sanitize_status
 
     sanitized = sanitize_status(snap.raw)
-    await upsert_snapshot(
-        global_download_id=snap.tid,
-        download_speed=_to_int(sanitized["downloadSpeed"]),
-        upload_speed=_to_int(sanitized["uploadSpeed"]),
-        total_length=_to_int(sanitized["totalLength"]),
-        completed_length=_to_int(sanitized["completedLength"]),
-        status=str(sanitized["status"]),
-        files_json=json.dumps(sanitized.get("files", []), ensure_ascii=False),
-        raw_json=json.dumps(sanitized, ensure_ascii=False),
-        updated_at_ms=now_ms(),
-    )
+    observation_store.record_observed_detail(snap.tid, sanitized, now_ms())
 
 
 async def record_observed_snapshot(
@@ -127,7 +108,7 @@ async def record_observed_snapshot(
     tid: int,
     observed_status: dict[str, Any],
 ) -> None:
-    """Persist one live-observed backend status into task_backend_snapshots.
+    """Persist one live-observed backend status into the observation store.
 
     The production sync loop is a trigger-only observer for the lifecycle
     coordinator; this keeps the snapshot read-model fresh so REST lists and

@@ -1386,7 +1386,7 @@ async def test_event_writes_backend_snapshot(
     temp_db: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """事件路径快照回归：listener 拿到 observed_status 必须刷新读模型。"""
-    from app.db.schema import task_backend_snapshots
+    from app.modules.task_core import observation_store
 
     user = await create_user_v0(username="listener-snap-user")
     download = await create_global_download_v0(
@@ -1421,19 +1421,7 @@ async def test_event_writes_backend_snapshot(
 
     await handle_aria2_event("gid-listener-snap", "start")
 
-    async with transaction() as conn:
-        row = (
-            (
-                await conn.execute(
-                    select(task_backend_snapshots).where(
-                        task_backend_snapshots.c.global_download_id
-                        == int(download["id"])
-                    )
-                )
-            )
-            .mappings()
-            .first()
-        )
-    assert row is not None, "listener 事件未写入 task_backend_snapshots"
-    assert int(row["download_speed"]) == 1314520
-    assert int(row["completed_length"]) == 4096
+    entry = observation_store.get_observed_detail(int(download["id"]))
+    assert entry is not None, "listener 事件未写入 observation_store"
+    assert entry.sanitized["downloadSpeed"] == "1314520"
+    assert entry.sanitized["completedLength"] == "4096"

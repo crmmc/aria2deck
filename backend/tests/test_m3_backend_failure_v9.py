@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 import pytest
@@ -24,8 +23,8 @@ from fastapi.testclient import TestClient
 
 from app.core.security import credential_digest, credential_prefix
 from app.modules.backend.port import Snapshot
+from app.modules.task_core.sync import record_observed_snapshot
 from app.repositories import auth as auth_repo
-from app.repositories.backend_snapshots import upsert_snapshot
 from app.services import task_service
 from app.services.rpc import Aria2RpcHandler, RpcError, RpcErrorCode
 from tests.helpers_v0 import (
@@ -119,17 +118,7 @@ async def _upsert_snapshot(
         "downloadSpeed": str(download_speed),
         "uploadSpeed": str(upload_speed),
     }
-    await upsert_snapshot(
-        global_download_id=int(gd["id"]),
-        download_speed=download_speed,
-        upload_speed=upload_speed,
-        total_length=1000,
-        completed_length=completed,
-        status="active",
-        files_json=json.dumps([]),
-        raw_json=json.dumps(raw),
-        updated_at_ms=now_ms(),
-    )
+    await record_observed_snapshot(tid=int(gd["id"]), observed_status=raw)
 
 
 # ---------------------------------------------------------------------------

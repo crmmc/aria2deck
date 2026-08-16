@@ -1,7 +1,7 @@
 """M3 T10: WebSocket 广播去实时 aria2。
 
 验证 ``broadcast_task_update_to_subscribers``：
-- 广播 payload 的速度/进度来自 ``task_backend_snapshots``（row 内
+- 广播 payload 的速度/进度来自观测仓快照（row 内
   ``backend_snapshot``），不调用实时 aria2 RPC
 - aria2 不可用时广播不报错（不引用 aria2 client）
 - WS 消息结构保持 ``{"type": "task_update", "task": payload}``
@@ -9,12 +9,11 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
 
-from app.repositories.backend_snapshots import upsert_snapshot
+from app.modules.task_core.sync import record_observed_snapshot
 from app.services.task_broadcast import (
     broadcast_task_update_to_subscribers,
     clear_connections,
@@ -69,20 +68,9 @@ async def _upsert_snapshot(tid: int) -> None:
         "completedLength": "400",
         "downloadSpeed": "54321",
         "uploadSpeed": "98",
+        "files": [{"index": "1", "path": "file.bin", "length": "1000"}],
     }
-    await upsert_snapshot(
-        global_download_id=tid,
-        download_speed=54321,
-        upload_speed=98,
-        total_length=1000,
-        completed_length=400,
-        status="active",
-        files_json=json.dumps(
-            [{"index": "1", "path": "file.bin", "length": "1000"}]
-        ),
-        raw_json=json.dumps(raw),
-        updated_at_ms=999,
-    )
+    await record_observed_snapshot(tid=tid, observed_status=raw)
 
 
 @pytest.mark.asyncio

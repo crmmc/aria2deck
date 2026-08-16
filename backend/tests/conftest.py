@@ -27,6 +27,7 @@ from app.db.engine import dispose_engine, reset_engine, transaction
 from app.db.schema import global_downloads, user_tasks
 from app.main import app
 from app.aria2.client import Aria2Client
+from app.modules.task_core import observation_store
 from tests.fakes import make_aria2_client
 from tests.helpers_v0 import create_session_v0, create_user_file_v0, create_user_v0, now_ms
 
@@ -100,6 +101,14 @@ async def create_failed_user_task_v0(
         }
     )
     return result
+
+
+@pytest.fixture(autouse=True)
+def reset_observation_store():
+    """在每个测试前后清空进程内存观测仓，避免跨测试 tid 泄漏"""
+    observation_store.clear()
+    yield
+    observation_store.clear()
 
 
 @pytest.fixture(autouse=True)

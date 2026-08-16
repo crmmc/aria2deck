@@ -603,6 +603,18 @@ async def migrate_v12(conn: AsyncConnection) -> None:
     await _rebuild_schema_meta(conn, 12)
 
 
+async def ensure_v13_drop_backend_snapshots(conn: AsyncConnection) -> None:
+    """v13: drop task_backend_snapshots (replaced by the in-process
+    observation store; M11). Idempotent by itself: DROP IF EXISTS leaves
+    nothing half-done to self-heal."""
+    await conn.execute(text("DROP TABLE IF EXISTS task_backend_snapshots"))
+
+
+async def migrate_v13(conn: AsyncConnection) -> None:
+    await ensure_v13_drop_backend_snapshots(conn)
+    await _rebuild_schema_meta(conn, 13)
+
+
 async def migrate_v1(conn: AsyncConnection) -> None:
     await _add_missing_columns(conn, "app_settings", V1_APP_SETTINGS_ADDED_COLUMNS)
     await _rebuild_schema_meta(conn, 1)
@@ -1196,6 +1208,7 @@ MIGRATIONS: dict[int, Migration] = {
     10: migrate_v10,
     11: migrate_v11,
     12: migrate_v12,
+    13: migrate_v13,
 }
 
 

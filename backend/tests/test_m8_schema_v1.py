@@ -12,7 +12,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.db.bootstrap import SCHEMA_VERSION, default_app_settings
 from app.db.engine import dispose_engine, get_engine, reset_engine
-from app.db.migrations import run_migrations
+from app.db.migrations import migrate_v12, run_migrations
 
 
 @pytest_asyncio.fixture
@@ -93,7 +93,7 @@ async def test_fresh_bootstrap_has_download_sources_and_history_columns(
     assert "history_expired_at_ms" in ut_columns
     assert "history_retention_days" in settings_columns
     assert retention == 30
-    assert version == SCHEMA_VERSION == 12
+    assert version == SCHEMA_VERSION == 13
     assert any(
         row["table"] == "download_sources"
         and row["from"] == "source_id"
@@ -166,8 +166,8 @@ async def test_v11_to_v12_migration_is_idempotent(isolated_db: Path) -> None:
             text("INSERT INTO user_tasks VALUES (1, 1, 1, 'completed', 1, 1)")
         )
 
-        assert await run_migrations(conn, 11) == 12
-        assert await run_migrations(conn, 11) == 12
+        assert await run_migrations(conn, 11) == 13
+        assert await run_migrations(conn, 11) == 13
 
         tables = {
             row[0]
@@ -233,7 +233,7 @@ async def test_v11_to_v12_migration_is_idempotent(isolated_db: Path) -> None:
     assert retention == 30
     assert source_id is None
     assert history_expired is None
-    assert version == 12
+    assert version == 13
     assert any(
         row["table"] == "download_sources"
         and row["from"] == "source_id"
@@ -334,7 +334,8 @@ async def test_v12_rebuild_keeps_child_fks_and_constraints(
         await conn.commit()
         try:
             async with conn.begin():
-                assert await run_migrations(conn, 11) == 12
+                # pin 在 v12：不跑链尾 v13，专注 v12 重建语义
+                await migrate_v12(conn)
         finally:
             await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
             await conn.commit()

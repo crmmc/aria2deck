@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import logging
 from collections.abc import Generator
 from typing import Any
@@ -11,7 +10,7 @@ import pytest
 
 from app.core.config import get_internal_base_url
 from app.modules.backend.aria2_adapter import Aria2BackendAdapter
-from app.repositories.backend_snapshots import upsert_snapshot
+from app.modules.task_core.sync import record_observed_snapshot
 from app.repositories.task.user_tasks import (
     get_user_task,
     list_user_tasks,
@@ -102,18 +101,16 @@ async def test_rpc_tell_active_uses_user_tasks(temp_db: str) -> None:
 
     handler = Aria2RpcHandler(user["id"])
     owned = await list_user_tasks(user["id"])
-    await upsert_snapshot(
-        global_download_id=int(owned[0]["global_download_id"]),
-        download_speed=10,
-        upload_speed=0,
-        total_length=10,
-        completed_length=0,
-        status="active",
-        files_json="[]",
-        raw_json=json.dumps(
-            {"gid": "gid-rpc-active", "status": "active", "downloadSpeed": "10"}
-        ),
-        updated_at_ms=1,
+    await record_observed_snapshot(
+        tid=int(owned[0]["global_download_id"]),
+        observed_status={
+            "gid": "gid-rpc-active",
+            "status": "active",
+            "totalLength": "10",
+            "completedLength": "0",
+            "downloadSpeed": "10",
+            "uploadSpeed": "0",
+        },
     )
     rows = await handler.handle("aria2.tellActive", [])
 

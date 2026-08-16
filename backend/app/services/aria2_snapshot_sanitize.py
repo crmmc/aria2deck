@@ -1,7 +1,7 @@
 """aria2 快照脱敏共享层
 
 把 ``Aria2RpcHandler`` 中面向用户响应的脱敏逻辑抽成可复用模块，
-供 sync 写投影（task_backend_snapshots）和 RPC 读模型共用。
+供 sync 写观测仓（observation_store）和 RPC 读模型共用。
 
 行为与原 ``_sanitize_status/_sanitize_files/_sanitize_uris/_sanitize_bittorrent``
 完全一致，仅做搬迁，不改语义。

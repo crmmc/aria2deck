@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import logging
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -18,7 +17,7 @@ from app.db.schema import (
     user_tasks,
     users,
 )
-from app.repositories.backend_snapshots import upsert_snapshot
+from app.modules.task_core.sync import record_observed_snapshot
 from app.repositories.task.user_tasks import (
     get_user_task_by_id,
     list_user_tasks,
@@ -166,18 +165,12 @@ async def _upsert_rpc_snapshot(
     *,
     files: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Seed the projection snapshot that the RPC read path now consumes."""
-    snapshot_files = files if files is not None else raw.get("files") or []
-    await upsert_snapshot(
-        global_download_id=int(task["global_download_id"]),
-        download_speed=int(str(raw.get("downloadSpeed") or 0)),
-        upload_speed=int(str(raw.get("uploadSpeed") or 0)),
-        total_length=int(str(raw.get("totalLength") or 0)),
-        completed_length=int(str(raw.get("completedLength") or 0)),
-        status=str(raw.get("status") or "active"),
-        files_json=json.dumps(snapshot_files),
-        raw_json=json.dumps(raw),
-        updated_at_ms=now_ms(),
+    """Seed the observed snapshot that the RPC read path now consumes."""
+    observed = dict(raw)
+    if files is not None:
+        observed["files"] = files
+    await record_observed_snapshot(
+        tid=int(task["global_download_id"]), observed_status=observed
     )
 
 

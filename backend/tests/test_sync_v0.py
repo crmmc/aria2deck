@@ -1412,8 +1412,8 @@ async def test_sync_recovers_after_first_round_exception(
 async def test_sync_round_writes_live_snapshot_for_active_download(
     temp_db: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """速度回归：sync 轮询必须刷新 task_backend_snapshots（速度/进度的读模型）。"""
-    from app.db.schema import task_backend_snapshots
+    """速度回归：sync 轮询必须刷新观测仓（速度/进度的读模型）。"""
+    from app.modules.task_core import observation_store
 
     user = await create_user_v0(username="sync-snap-user")
     download = await create_global_download_v0(
@@ -1459,20 +1459,8 @@ async def test_sync_round_writes_live_snapshot_for_active_download(
     with pytest.raises(asyncio.CancelledError):
         await sync_tasks(interval=0.01)
 
-    async with transaction() as conn:
-        row = (
-            (
-                await conn.execute(
-                    select(task_backend_snapshots).where(
-                        task_backend_snapshots.c.global_download_id
-                        == int(download["id"])
-                    )
-                )
-            )
-            .mappings()
-            .first()
-        )
-    assert row is not None, "sync 轮询未写入 task_backend_snapshots"
-    assert int(row["download_speed"]) == 234567
-    assert int(row["total_length"]) == 4096
-    assert int(row["completed_length"]) == 1024
+    entry = observation_store.get_observed_detail(int(download["id"]))
+    assert entry is not None, "sync 轮询未写入 observation_store"
+    assert entry.sanitized["downloadSpeed"] == "234567"
+    assert entry.sanitized["totalLength"] == "4096"
+    assert entry.sanitized["completedLength"] == "1024"

@@ -15,13 +15,11 @@
 """
 
 from __future__ import annotations
-
-import json
 from unittest.mock import AsyncMock
 
 import pytest
 
-from app.repositories.backend_snapshots import upsert_snapshot
+from app.modules.task_core.sync import record_observed_snapshot
 from app.services.rpc import (
     SAFE_INTERNAL_ERROR_MESSAGE,
     Aria2RpcHandler,
@@ -33,7 +31,6 @@ from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_task_v0,
     create_user_v0,
-    now_ms,
 )
 
 
@@ -65,17 +62,7 @@ async def _make_active_task(
 
 
 async def _write_snapshot(gd: dict, raw: dict) -> None:
-    await upsert_snapshot(
-        global_download_id=int(gd["id"]),
-        download_speed=int(str(raw.get("downloadSpeed") or 0)),
-        upload_speed=int(str(raw.get("uploadSpeed") or 0)),
-        total_length=int(str(raw.get("totalLength") or 0)),
-        completed_length=int(str(raw.get("completedLength") or 0)),
-        status=str(raw.get("status") or "active"),
-        files_json=json.dumps(raw.get("files") or []),
-        raw_json=json.dumps(raw),
-        updated_at_ms=now_ms(),
-    )
+    await record_observed_snapshot(tid=int(gd["id"]), observed_status=raw)
 
 
 def _broken_read_client():

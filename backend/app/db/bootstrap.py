@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 
 from sqlalchemy import insert, inspect, select, text
@@ -22,13 +23,14 @@ from app.db.migrations import (
     ensure_v6_credentials_schema,
     ensure_v7_content_identity_schema,
     ensure_v8_retry_attempt_schema,
-    ensure_v9_backend_snapshot_schema,
     ensure_v10_rpc_secret_encrypted,
     ensure_v11_share_password_encrypted,
     ensure_v12_download_sources_schema,
     run_migrations,
 )
 from app.db.schema import SCHEMA_VERSION, app_settings, metadata, schema_meta
+
+logger = logging.getLogger(__name__)
 
 
 def now_ms() -> int:
@@ -210,9 +212,6 @@ async def validate_current_schema_shape() -> None:
             "new.prepared_content_hash",
             "raise(abort",
         ),
-        "ix_task_backend_snapshots_updated_at": (
-            "ontask_backend_snapshots(updated_at_ms)",
-        ),
         "ix_users_delete_due": (
             "onusers(pending_delete,delete_next_retry_at_ms,"
             "delete_lease_expires_at_ms,id)",
@@ -248,13 +247,32 @@ async def _migrate_existing_database(version: int) -> None:
                 await ensure_v6_credentials_schema(conn)
                 await ensure_v7_content_identity_schema(conn)
                 await ensure_v8_retry_attempt_schema(conn)
-                await ensure_v9_backend_snapshot_schema(conn)
                 await ensure_v10_rpc_secret_encrypted(conn)
                 await ensure_v11_share_password_encrypted(conn)
                 await ensure_v12_download_sources_schema(conn)
         finally:
             await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
             await conn.commit()
+
+
+async def _truncate_wal_after_bootstrap() -> int | None:
+    """Truncate the WAL on every bootstrap startup, not only after a
+    migration. Idempotent, sub-second work that keeps the WAL file from
+    lingering; a busy checkpoint only downgrades to a warning (same shape
+    as scrub_legacy_credential_pages)."""
+    try:
+        async with get_engine().connect() as conn:
+            checkpoint = (
+                await conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+            ).first()
+            await conn.commit()
+    except Exception:
+        logger.warning("迁移后 WAL checkpoint 执行失败", exc_info=True)
+        return None
+    busy = int(checkpoint[0]) if checkpoint is not None else None
+    if busy != 0:
+        logger.warning("迁移后 WAL checkpoint busy=%s，WAL 未截断", busy)
+    return busy
 
 
 async def _finish_pending_credential_scrub() -> None:
@@ -272,6 +290,7 @@ async def bootstrap_database() -> None:
         if version is None:
             return
         await _migrate_existing_database(version)
+        await _truncate_wal_after_bootstrap()
         await _finish_pending_credential_scrub()
         await validate_current_schema_shape()
         return
@@ -285,7 +304,6 @@ async def bootstrap_database() -> None:
         await ensure_v6_credentials_schema(conn)
         await ensure_v7_content_identity_schema(conn)
         await ensure_v8_retry_attempt_schema(conn)
-        await ensure_v9_backend_snapshot_schema(conn)
         await ensure_v10_rpc_secret_encrypted(conn)
         await ensure_v11_share_password_encrypted(conn)
         await ensure_v12_download_sources_schema(conn)

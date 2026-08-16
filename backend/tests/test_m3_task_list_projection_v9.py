@@ -9,13 +9,12 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
 
 import app.services.task_service as task_service
-from app.repositories.backend_snapshots import upsert_snapshot
+from app.modules.task_core.sync import record_observed_snapshot
 from tests.helpers_v0 import (
     create_global_download_v0,
     create_user_task_v0,
@@ -50,20 +49,9 @@ async def _upsert_snapshot(tid: int) -> dict[str, Any]:
         "completedLength": "400",
         "downloadSpeed": "12345",
         "uploadSpeed": "67",
+        "files": [{"index": "1", "path": "file.bin", "length": "1000"}],
     }
-    await upsert_snapshot(
-        global_download_id=tid,
-        download_speed=12345,
-        upload_speed=67,
-        total_length=1000,
-        completed_length=400,
-        status="active",
-        files_json=json.dumps(
-            [{"index": "1", "path": "file.bin", "length": "1000"}]
-        ),
-        raw_json=json.dumps(raw),
-        updated_at_ms=999,
-    )
+    await record_observed_snapshot(tid=tid, observed_status=raw)
     return raw
 
 
