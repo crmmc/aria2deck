@@ -13,6 +13,9 @@ from app.core.download_limiter import DownloadLease
 from app.services.storage_locks import ContentReadLease
 
 
+RANGE_READ_CHUNK_SIZE = 256 * 1024
+
+
 def prepare_range_file_response(
     request: Request,
     file_path: Path,
@@ -106,7 +109,7 @@ def prepare_range_file_response(
                 f.seek(start)
                 remaining = content_length
                 while remaining > 0:
-                    chunk = f.read(min(65536, remaining))
+                    chunk = f.read(min(RANGE_READ_CHUNK_SIZE, remaining))
                     if not chunk:
                         break
                     remaining -= len(chunk)
