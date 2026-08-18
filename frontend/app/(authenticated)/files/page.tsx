@@ -10,7 +10,7 @@ import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
 import PackTaskCard from "@/components/PackTaskCard";
 import CreateShareDialog from "@/components/CreateShareDialog";
-import type { FileInfo, BrowseFileInfo, SpaceInfo } from "@/types";
+import type { FileInfo, BrowseFileInfo, SpaceInfo, FileSearchItem } from "@/types";
 import { BrowseFolderView } from "./_components/BrowseFolderView";
 import { SearchModal } from "./_components/SearchModal";
 import { FileToolbar, type SortField, type SortOrder } from "./_components/FileToolbar";
@@ -29,6 +29,8 @@ function formatDate(dateStr: string): string {
   return `${y}/${m}/${d} ${hh}:${mm}`;
 }
 
+const LOCATE_HIGHLIGHT_MS = 1800;
+
 export default function FilesPage() {
   const { showToast, showConfirm } = useToast();
   const [files, setFiles] = useState<FileInfo[]>([]);
@@ -42,11 +44,19 @@ export default function FilesPage() {
   const [sortField, setSortField] = useState<SortField>("created_at");
   const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
 
-  // Search state
+  // Search state (toolbar is the only input source; modal only shows results)
   const [toolbarSearchKeyword, setToolbarSearchKeyword] = useState("");
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [searchKeyword, setSearchKeyword] = useState("");
-  const searchModalInputRef = useRef<HTMLInputElement>(null);
+  const [searchResults, setSearchResults] = useState<FileSearchItem[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchTruncated, setSearchTruncated] = useState(false);
+  const [searchGlobal, setSearchGlobal] = useState(false);
+  const [highlightUserFileId, setHighlightUserFileId] = useState<number | null>(null);
+  const [highlightName, setHighlightName] = useState<string | null>(null);
+  const pendingRootLocateRef = useRef<number | null>(null);
+  const toolbarSearchInputRef = useRef<HTMLInputElement>(null);
 
   // Batch selection state
   const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
@@ -82,11 +92,6 @@ export default function FilesPage() {
   const [pageSize, setPageSize] = useState(10);
   const [totalFiles, setTotalFiles] = useState(0);
 
-  const openSearchModal = useCallback(() => {
-    setSearchKeyword(toolbarSearchKeyword);
-    setShowSearchModal(true);
-  }, [toolbarSearchKeyword]);
-
   const closeSearchModal = useCallback(() => {
     setShowSearchModal(false);
   }, []);
@@ -114,6 +119,17 @@ export default function FilesPage() {
       setSpace(response.space);
       setTotalFiles(response.total);
       setSelectedFiles(new Set());
+      const pendingLocateId = pendingRootLocateRef.current;
+      if (pendingLocateId !== null) {
+        pendingRootLocateRef.current = null;
+        if (response.files.some((f) => f.id === pendingLocateId)) {
+          setHighlightUserFileId(pendingLocateId);
+          window.setTimeout(() => setHighlightUserFileId(null), LOCATE_HIGHLIGHT_MS);
+          setShowSearchModal(false);
+        } else {
+          showToast("定位失败：未在当前列表找到该文件", "error");
+        }
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -125,20 +141,12 @@ export default function FilesPage() {
     loadFiles(currentPage, pageSize);
   }, [currentPage, pageSize, loadFiles]);
 
-  // Focus search modal input when opened
-  useEffect(() => {
-    if (showSearchModal && searchModalInputRef.current) {
-      searchModalInputRef.current.focus();
-    }
-  }, [showSearchModal]);
-
   // Keyboard shortcut for search (Cmd/Ctrl + F)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "f") {
-        if (browseContext) return; // Disable search inside folder
         e.preventDefault();
-        openSearchModal();
+        toolbarSearchInputRef.current?.focus();
       }
       if (e.key === "Escape" && showSearchModal) {
         closeSearchModal();
@@ -146,7 +154,7 @@ export default function FilesPage() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showSearchModal, browseContext, openSearchModal, closeSearchModal]);
+  }, [showSearchModal, closeSearchModal]);
 
   // Sorted files (folders first, then by sort field)
   const sortedFiles = useMemo(() => {
@@ -187,13 +195,6 @@ export default function FilesPage() {
     });
   }, [browseContents, sortField, sortOrder]);
 
-  // Search results for modal
-  const searchResults = useMemo(() => {
-    if (!searchKeyword.trim()) return [];
-    const keyword = searchKeyword.toLowerCase();
-    return files.filter((f) => f.name.toLowerCase().includes(keyword));
-  }, [files, searchKeyword]);
-
   const handleSort = (field: SortField) => {
     if (sortField === field) {
       setSortOrder(sortOrder === "asc" ? "desc" : "asc");
@@ -208,23 +209,94 @@ export default function FilesPage() {
     return sortOrder === "asc" ? "↑" : "↓";
   };
 
+  const runSearch = useCallback(async () => {
+    const keyword = toolbarSearchKeyword.trim();
+    if (!keyword) {
+      showToast("请输入关键词", "warning");
+      return;
+    }
+    setSearchKeyword(keyword);
+    setShowSearchModal(true);
+    setSearchLoading(true);
+    setSearchError(null);
+    try {
+      const params: { q: string; scopeContentHash?: string; scopePath?: string } = { q: keyword };
+      if (!searchGlobal && browseContext) {
+        params.scopeContentHash = browseContext.fileHash;
+        if (browseContext.path.length > 0) {
+          params.scopePath = browseContext.path.join("/");
+        }
+      }
+      const response = await api.searchFiles(params);
+      setSearchResults(response.items);
+      setSearchTruncated(response.truncated);
+    } catch (err) {
+      setSearchResults([]);
+      setSearchTruncated(false);
+      setSearchError((err as Error).message);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [toolbarSearchKeyword, searchGlobal, browseContext, showToast]);
+
+  const locateInsideFolder = useCallback(async (item: FileSearchItem) => {
+    const segments = item.entry_path?.split("/").filter(Boolean) ?? [];
+    const name = segments[segments.length - 1];
+    const parentSegments = segments.slice(0, -1);
+    setBrowseLoading(true);
+    try {
+      const contents = await api.browseFile(
+        item.content_hash,
+        parentSegments.length > 0 ? parentSegments.join("/") : undefined
+      );
+      const keepName = browseContext?.fileHash === item.content_hash
+        ? browseContext.fileName
+        : item.path.split("/").filter(Boolean)[0] || item.name;
+      setBrowseContext({ fileHash: item.content_hash, fileName: keepName, path: parentSegments });
+      setBrowseContents(contents);
+      setSelectedBrowseFiles(new Set());
+      if (!name || !contents.some((c) => c.name === name)) {
+        showToast("定位失败：未在文件夹中找到该文件", "error");
+        return;
+      }
+      setHighlightName(name);
+      window.setTimeout(() => setHighlightName(null), LOCATE_HIGHLIGHT_MS);
+      setShowSearchModal(false);
+    } catch (err) {
+      showToast(`定位失败: ${(err as Error).message}`, "error");
+    } finally {
+      setBrowseLoading(false);
+    }
+  }, [browseContext, showToast]);
+
+  const handleLocate = useCallback((item: FileSearchItem) => {
+    if (item.entry_path == null) {
+      const targetPage = Math.floor(item.root_index / pageSize) + 1;
+      if (browseContext) {
+        setBrowseContext(null);
+        setBrowseContents([]);
+        setSelectedBrowseFiles(new Set());
+      }
+      if (targetPage !== currentPage) {
+        pendingRootLocateRef.current = item.user_file_id;
+        setCurrentPage(targetPage);
+        return;
+      }
+      if (files.some((f) => f.id === item.user_file_id)) {
+        setHighlightUserFileId(item.user_file_id);
+        window.setTimeout(() => setHighlightUserFileId(null), LOCATE_HIGHLIGHT_MS);
+        setShowSearchModal(false);
+      } else {
+        showToast("定位失败：未在当前列表找到该文件", "error");
+      }
+      return;
+    }
+    void locateInsideFolder(item);
+  }, [browseContext, pageSize, currentPage, files, showToast, locateInsideFolder]);
+
   const handleToolbarSearchKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
-      openSearchModal();
-    }
-  };
-
-  // Sync modal input back to toolbar when closing
-  const handleSearchModalInputChange = (value: string) => {
-    setSearchKeyword(value);
-    setToolbarSearchKeyword(value);
-  };
-
-  // Handle search result click
-  const handleSearchResultClick = (file: FileInfo) => {
-    closeSearchModal();
-    if (file.is_directory) {
-      enterFolder(file);
+      void runSearch();
     }
   };
 
@@ -536,7 +608,6 @@ export default function FilesPage() {
       {/* Toolbar - Always visible */}
       <FileToolbar
         isInsideFolder={isInsideFolder}
-        isMobile={isMobile}
         browseContext={browseContext}
         browseContents={browseContents}
         selectedBrowseFiles={selectedBrowseFiles}
@@ -546,6 +617,9 @@ export default function FilesPage() {
         sortField={sortField}
         sortOrder={sortOrder}
         toolbarSearchKeyword={toolbarSearchKeyword}
+        searchGlobal={searchGlobal}
+        searchLoading={searchLoading}
+        searchInputRef={toolbarSearchInputRef}
         isBatchOperating={isBatchOperating}
         onReturnToRoot={returnToRoot}
         onNavigateToBreadcrumb={navigateToBreadcrumb}
@@ -553,6 +627,8 @@ export default function FilesPage() {
         onSortOrderChange={setSortOrder}
         onToolbarSearchKeywordChange={setToolbarSearchKeyword}
         onToolbarSearchKeyDown={handleToolbarSearchKeyDown}
+        onSearchGlobalChange={setSearchGlobal}
+        onSearchSubmit={() => { void runSearch(); }}
         onToggleAllBrowseFiles={toggleAllBrowseFiles}
         onBrowseBatchDownload={handleBrowseBatchDownload}
         onToggleSelectAll={toggleSelectAll}
@@ -570,6 +646,7 @@ export default function FilesPage() {
           browseContents={browseContents}
           sortedBrowseContents={sortedBrowseContents}
           selectedBrowseFiles={selectedBrowseFiles}
+          highlightName={highlightName}
           onSort={handleSort}
           getSortIcon={getSortIcon}
           onToggleAllBrowseFiles={toggleAllBrowseFiles}
@@ -592,6 +669,7 @@ export default function FilesPage() {
             renaming={renaming}
             newName={newName}
             downloadingFile={downloadingFile}
+            highlightUserFileId={highlightUserFileId}
             onSort={handleSort}
             getSortIcon={getSortIcon}
             onToggleSelectAll={toggleSelectAll}
@@ -616,14 +694,15 @@ export default function FilesPage() {
           </>
       )}
 
-      {/* Search Modal */}
+      {/* Search result modal */}
       {showSearchModal && mounted && createPortal(
         <SearchModal
-          searchKeyword={searchKeyword}
-          searchResults={searchResults}
-          inputRef={searchModalInputRef}
-          onInputChange={handleSearchModalInputChange}
-          onResultClick={handleSearchResultClick}
+          keyword={searchKeyword}
+          results={searchResults}
+          loading={searchLoading}
+          error={searchError}
+          truncated={searchTruncated}
+          onLocate={handleLocate}
           onClose={closeSearchModal}
         />,
         document.body

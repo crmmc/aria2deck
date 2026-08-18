@@ -133,6 +133,7 @@ export type SystemConfig = {
   rate_limit_create_pack: number;
   rate_limit_aria2_test: number;
   rate_limit_rpc: number;
+  rate_limit_file_search: number;
   download_total_connections: number;
   download_authenticated_reserved_connections: number;
   download_authenticated_per_user_connections: number;
@@ -171,6 +172,24 @@ export type BrowseFileInfo = {
   name: string;
   size: number;
   is_directory: boolean;
+};
+
+export type FileSearchItem = {
+  user_file_id: number;
+  content_hash: string;
+  name: string;
+  size: number;
+  path: string;
+  is_directory: boolean;
+  entry_path: string | null;
+  rank: 0 | 1 | 2;
+  root_index: number;
+};
+
+export type FileSearchResponse = {
+  items: FileSearchItem[];
+  total: number;
+  truncated: boolean;
 };
 
 export type MachineStats = {

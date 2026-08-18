@@ -1,3 +1,4 @@
+import type { RefObject } from "react";
 import { formatBytes } from "@/lib/utils";
 import type { BrowseFileInfo } from "@/types";
 
@@ -6,7 +7,6 @@ type SortOrder = "asc" | "desc";
 
 type FileToolbarProps = {
   isInsideFolder: boolean;
-  isMobile: boolean;
   browseContext: { fileHash: string; fileName: string; path: string[] } | null;
   browseContents: BrowseFileInfo[];
   selectedBrowseFiles: Set<string>;
@@ -16,6 +16,9 @@ type FileToolbarProps = {
   sortField: SortField;
   sortOrder: SortOrder;
   toolbarSearchKeyword: string;
+  searchGlobal: boolean;
+  searchLoading: boolean;
+  searchInputRef?: RefObject<HTMLInputElement>;
   isBatchOperating: boolean;
   onReturnToRoot: () => void;
   onNavigateToBreadcrumb: (index: number) => void;
@@ -23,6 +26,8 @@ type FileToolbarProps = {
   onSortOrderChange: (order: SortOrder) => void;
   onToolbarSearchKeywordChange: (value: string) => void;
   onToolbarSearchKeyDown: (e: React.KeyboardEvent) => void;
+  onSearchGlobalChange: (value: boolean) => void;
+  onSearchSubmit: () => void;
   onToggleAllBrowseFiles: () => void;
   onBrowseBatchDownload: () => void;
   onToggleSelectAll: () => void;
@@ -33,7 +38,6 @@ type FileToolbarProps = {
 
 export function FileToolbar({
   isInsideFolder,
-  isMobile,
   browseContext,
   browseContents,
   selectedBrowseFiles,
@@ -43,6 +47,9 @@ export function FileToolbar({
   sortField,
   sortOrder,
   toolbarSearchKeyword,
+  searchGlobal,
+  searchLoading,
+  searchInputRef,
   isBatchOperating,
   onReturnToRoot,
   onNavigateToBreadcrumb,
@@ -50,6 +57,8 @@ export function FileToolbar({
   onSortOrderChange,
   onToolbarSearchKeywordChange,
   onToolbarSearchKeyDown,
+  onSearchGlobalChange,
+  onSearchSubmit,
   onToggleAllBrowseFiles,
   onBrowseBatchDownload,
   onToggleSelectAll,
@@ -121,7 +130,7 @@ export function FileToolbar({
           </select>
         </div>
 
-        <div className={`filter-group search-input-group${isInsideFolder ? " opacity-40 pointer-events-none" : ""}`}>
+        <div className="filter-group search-input-group">
           <svg
             width="14"
             height="14"
@@ -137,9 +146,10 @@ export function FileToolbar({
             <path d="m21 21-4.35-4.35" />
           </svg>
           <input
+            ref={searchInputRef}
             type="text"
             className="toolbar-search-input"
-            placeholder={isMobile ? "搜索文件..." : "搜索文件名... (回车搜索)"}
+            placeholder="输入文件名，点查询或按回车"
             value={toolbarSearchKeyword}
             onChange={(e) => onToolbarSearchKeywordChange(e.target.value)}
             onKeyDown={onToolbarSearchKeyDown}
@@ -155,6 +165,23 @@ export function FileToolbar({
               ✕
             </button>
           )}
+          <label className="search-global-toggle">
+            <input
+              type="checkbox"
+              checked={searchGlobal}
+              onChange={(e) => onSearchGlobalChange(e.target.checked)}
+              aria-label="全局"
+            />
+            全局
+          </label>
+          <button
+            type="button"
+            className="button secondary btn-sm"
+            onClick={onSearchSubmit}
+            disabled={searchLoading}
+          >
+            {searchLoading ? "查询中..." : "查询"}
+          </button>
         </div>
 
         <div className="filter-group batch-actions">

@@ -12,6 +12,7 @@ type RateLimitForm = Pick<
   | "rateLimitCreatePack"
   | "rateLimitAria2Test"
   | "rateLimitRpc"
+  | "rateLimitFileSearch"
 >;
 
 type RateLimitFieldKey = keyof RateLimitForm;
@@ -40,6 +41,7 @@ const rateLimitFields: RateLimitFieldDef[] = [
   { id: "settings-rate-create-pack", label: "创建打包限流", description: "每分钟最大创建打包次数", field: "rateLimitCreatePack", min: 1, max: 10000 },
   { id: "settings-rate-aria2-test", label: "aria2 测试限流", description: "每分钟最大连接测试次数", field: "rateLimitAria2Test", min: 1, max: 10000 },
   { id: "settings-rate-rpc", label: "JSON-RPC 限流", description: "每分钟最大 RPC 请求次数", field: "rateLimitRpc", min: 1, max: 10000 },
+  { id: "settings-rate-file-search", label: "文件搜索限流", description: "仅限文件搜索，每分钟最大搜索次数（1–60）", field: "rateLimitFileSearch", min: 1, max: 60 },
 ];
 
 export function RateLimitSettingsSection({ form, onFieldChange }: RateLimitSettingsSectionProps) {

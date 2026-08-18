@@ -52,6 +52,7 @@ CONFIG_KEY_TO_COLUMN: dict[str, str] = {
     "rate_limit_create_pack": "rate_limit_create_pack",
     "rate_limit_aria2_test": "rate_limit_aria2_test",
     "rate_limit_rpc": "rate_limit_rpc",
+    "rate_limit_file_search": "rate_limit_file_search",
     "download_total_connections": "download_total_connections",
     "download_authenticated_reserved_connections": "download_authenticated_reserved_connections",
     "download_authenticated_per_user_connections": "download_authenticated_per_user_connections",
@@ -78,6 +79,7 @@ INT_CONFIG_COLUMNS = {
     "rate_limit_create_pack",
     "rate_limit_aria2_test",
     "rate_limit_rpc",
+    "rate_limit_file_search",
     "download_total_connections",
     "download_authenticated_reserved_connections",
     "download_authenticated_per_user_connections",
@@ -284,6 +286,7 @@ def row_to_api_settings(row: Mapping[str, Any]) -> dict[str, Any]:
         "rate_limit_create_pack": int(row["rate_limit_create_pack"]),
         "rate_limit_aria2_test": int(row["rate_limit_aria2_test"]),
         "rate_limit_rpc": int(row["rate_limit_rpc"]),
+        "rate_limit_file_search": int(row["rate_limit_file_search"]),
         "download_total_connections": int(row["download_total_connections"]),
         "download_authenticated_reserved_connections": int(
             row["download_authenticated_reserved_connections"]
@@ -385,6 +388,7 @@ RATE_LIMIT_KEYS = {
     "rate_limit_create_pack",
     "rate_limit_aria2_test",
     "rate_limit_rpc",
+    "rate_limit_file_search",
 }
 
 

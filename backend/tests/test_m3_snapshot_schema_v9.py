@@ -1,7 +1,7 @@
 """Tests for v9 task_backend_snapshots schema (M3 T01; reworked in M11 T04).
 
 v13 已删除 task_backend_snapshots（观测改走进程内 observation_store）：
-- fresh bootstrap 断言表不再被重建且版本为 13；
+- fresh bootstrap 断言表不再被重建且版本为 14；
 - 升级链测试直接 pin ``migrate_v9`` 验证 append-only 历史 DDL，
   不再跑到链尾。
 """
@@ -38,7 +38,7 @@ async def test_fresh_bootstrap_does_not_create_task_backend_snapshots(
         ).scalar_one()
 
     assert "task_backend_snapshots" not in tables
-    assert version == SCHEMA_VERSION == 13
+    assert version == SCHEMA_VERSION == 14
 
 
 @pytest.mark.asyncio

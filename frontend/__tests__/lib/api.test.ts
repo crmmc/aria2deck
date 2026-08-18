@@ -319,6 +319,54 @@ describe("api methods", () => {
     });
   });
 
+  describe("api.searchFiles", () => {
+    it("sends q only when no scope is given", async () => {
+      const mockResponse = { items: [], total: 0, truncated: false };
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      });
+
+      const result = await api.searchFiles({ q: "女王" });
+
+      expect(result).toEqual(mockResponse);
+      const url = (global.fetch as jest.Mock).mock.calls[0][0] as string;
+      expect(url).toContain("/api/files/search");
+      expect(decodeURIComponent(url)).toContain("q=女王");
+      expect(url).not.toContain("scope_content_hash");
+      expect(url).not.toContain("scope_path");
+    });
+
+    it("sends optional scope params when provided", async () => {
+      const mockResponse = { items: [], total: 0, truncated: false };
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      });
+
+      const result = await api.searchFiles({
+        q: "a",
+        scopeContentHash: "abc",
+        scopePath: "dir",
+      });
+
+      expect(result).toEqual(mockResponse);
+      const url = (global.fetch as jest.Mock).mock.calls[0][0] as string;
+      expect(url).toContain("/api/files/search");
+      expect(url).toContain("q=a");
+      expect(url).toContain("scope_content_hash=abc");
+      expect(url).toContain("scope_path=dir");
+    });
+
+    it("rejects without fetching when q is empty or whitespace", async () => {
+      global.fetch = jest.fn();
+
+      await expect(api.searchFiles({ q: "" })).rejects.toThrow("请输入关键词");
+      await expect(api.searchFiles({ q: "   " })).rejects.toThrow("请输入关键词");
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+  });
+
   describe("api.deleteFile", () => {
     it("deletes file by id", async () => {
       global.fetch = jest.fn().mockResolvedValue({

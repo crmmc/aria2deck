@@ -9,6 +9,7 @@ from typing import Any
 from app.core.config import settings
 from app.core.time_utils import ms_to_iso
 from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
+from app.domain.file_name_match import rank_file_name
 from app.repositories import files as files_repo
 from app.services.storage_locks import (
     ContentReadLease,
@@ -19,6 +20,8 @@ from app.services.task_broadcast import broadcast_task_update_to_subscribers
 from app.services.usage_service import get_visible_space
 
 logger = logging.getLogger(__name__)
+
+SEARCH_RESULT_LIMIT = 200
 
 
 @dataclass(frozen=True)
@@ -140,6 +143,100 @@ async def browse_file(user_id: int, file_hash: str, path: str = "") -> list[dict
         int(row["stored_file_id"]),
         normalize_entry_parent(path),
     )
+
+
+async def search_files(
+    user_id: int,
+    keyword: str,
+    *,
+    scope_content_hash: str | None = None,
+    scope_path: str = "",
+) -> dict[str, Any]:
+    """在当前用户文件中按名称关键词搜索，返回按相关度排序的命中列表。
+
+    keyword 需由调用方 trim；命中数到 SEARCH_RESULT_LIMIT+1 停扫。
+    """
+    root_rows = await files_repo.list_all_user_file_rows(user_id)
+    scan_limit = SEARCH_RESULT_LIMIT + 1
+    path_prefix = scope_path if scope_content_hash else ""
+    matches: list[tuple[int, int, int, dict[str, Any]]] = []
+
+    def top_level_item(
+        row: dict[str, Any], root_index: int, rank: int
+    ) -> tuple[int, int, int, dict[str, Any]]:
+        display_name = str(row["display_name"])
+        return (
+            rank,
+            int(row["user_file_id"]),
+            0,
+            {
+                "user_file_id": int(row["user_file_id"]),
+                "content_hash": str(row["content_hash"]),
+                "name": display_name,
+                "size": int(row["size_bytes"]),
+                "path": f"/{display_name}",
+                "is_directory": bool(row["is_directory"]),
+                "entry_path": None,
+                "rank": rank,
+                "root_index": root_index,
+            },
+        )
+
+    def entry_item(
+        row: dict[str, Any],
+        root_index: int,
+        rank: int,
+        entry_row: dict[str, Any],
+    ) -> tuple[int, int, int, dict[str, Any]]:
+        display_name = str(row["display_name"])
+        relative_path = str(entry_row["relative_path"])
+        return (
+            rank,
+            int(row["user_file_id"]),
+            int(entry_row["id"]),
+            {
+                "user_file_id": int(row["user_file_id"]),
+                "content_hash": str(row["content_hash"]),
+                "name": str(entry_row["name"]),
+                "size": int(entry_row["size_bytes"]),
+                "path": f"/{display_name}/{relative_path}",
+                "is_directory": bool(entry_row["is_dir"]),
+                "entry_path": relative_path,
+                "rank": rank,
+                "root_index": root_index,
+            },
+        )
+
+    for root_index, row in enumerate(root_rows):
+        if scope_content_hash and row["content_hash"] != scope_content_hash:
+            continue
+        # 子目录 scope 下顶层包名不属于该子树，仅 scope 为包根时可命中
+        if not path_prefix:
+            rank = rank_file_name(keyword, str(row["display_name"]))
+            if rank is not None:
+                matches.append(top_level_item(row, root_index, rank))
+                if len(matches) >= scan_limit:
+                    break
+        if not bool(row["is_directory"]):
+            continue
+        entries = await files_repo.search_stored_file_entries(
+            [int(row["stored_file_id"])],
+            path_prefix=path_prefix,
+        )
+        for entry_row in entries:
+            entry_rank = rank_file_name(keyword, str(entry_row["name"]))
+            if entry_rank is None:
+                continue
+            matches.append(entry_item(row, root_index, entry_rank, entry_row))
+            if len(matches) >= scan_limit:
+                break
+        if len(matches) >= scan_limit:
+            break
+
+    matches.sort(key=lambda match: (match[0], match[1], match[2]))
+    truncated = len(matches) > SEARCH_RESULT_LIMIT
+    items = [match[3] for match in matches[:SEARCH_RESULT_LIMIT]]
+    return {"items": items, "total": len(items), "truncated": truncated}
 
 
 async def resolve_download_target(

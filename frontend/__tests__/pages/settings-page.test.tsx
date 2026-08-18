@@ -63,6 +63,7 @@ const baseConfig = {
   rate_limit_create_pack: 5,
   rate_limit_aria2_test: 10,
   rate_limit_rpc: 300,
+  rate_limit_file_search: 20,
   download_total_connections: 100,
   download_authenticated_reserved_connections: 60,
   download_authenticated_per_user_connections: 16,

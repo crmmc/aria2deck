@@ -518,7 +518,9 @@ async def list_user_file_rows(
                 await conn.execute(
                     file_select()
                     .where(user_files.c.user_id == user_id)
-                    .order_by(user_files.c.created_at_ms.desc())
+                    .order_by(
+                        user_files.c.created_at_ms.desc(), user_files.c.id.desc()
+                    )
                     .offset(offset)
                     .limit(limit)
                 )
@@ -527,6 +529,43 @@ async def list_user_file_rows(
             .all()
         )
     return total, [dict(row) for row in rows]
+
+
+async def list_all_user_file_rows(user_id: int) -> list[dict[str, Any]]:
+    stmt = (
+        file_select()
+        .where(user_files.c.user_id == user_id)
+        .order_by(user_files.c.created_at_ms.desc(), user_files.c.id.desc())
+    )
+    async with transaction() as conn:
+        rows = (await conn.execute(stmt)).mappings().all()
+    return [dict(row) for row in rows]
+
+
+async def search_stored_file_entries(
+    stored_file_ids: list[int],
+    *,
+    path_prefix: str = "",
+) -> list[dict[str, Any]]:
+    conditions = [
+        stored_file_entries.c.stored_file_id.in_(stored_file_ids),
+        stored_file_entries.c.relative_path != ".",
+    ]
+    if path_prefix:
+        conditions.append(
+            or_(
+                stored_file_entries.c.relative_path == path_prefix,
+                stored_file_entries.c.relative_path.startswith(
+                    path_prefix + "/", autoescape=True
+                ),
+            )
+        )
+    stmt = (
+        select(stored_file_entries).where(*conditions).order_by(stored_file_entries.c.id)
+    )
+    async with transaction() as conn:
+        rows = (await conn.execute(stmt)).mappings().all()
+    return [dict(row) for row in rows]
 
 
 async def directory_entries(

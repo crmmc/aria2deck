@@ -4061,3 +4061,52 @@ dialog.confirm-overlay {
     max-width: 150px;
   }
 }
+
+/* ==================== FILE LOCATE HIGHLIGHT ==================== */
+
+@keyframes file-locate-pulse {
+  0% {
+    box-shadow: 0 0 0 6px rgba(0, 113, 227, 0.35);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(0, 113, 227, 0);
+  }
+}
+
+.file-locate-highlight {
+  outline: 2px solid var(--primary);
+  animation: file-locate-pulse 1.6s ease-out 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-locate-highlight {
+    animation: none;
+  }
+}
+
+/* ==================== FILE SEARCH RESULT LAYER ==================== */
+
+.search-global-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.search-truncated-hint {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.search-result-path {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -1,5 +1,6 @@
+import { useEffect, useRef } from "react";
 import { AutoSizer } from "react-virtualized-auto-sizer";
-import { List } from "react-window";
+import { List, type ListImperativeAPI } from "react-window";
 import { formatBytes } from "@/lib/utils";
 import type { BrowseFileInfo } from "@/types";
 import type { SortField } from "./FileToolbar";
@@ -17,6 +18,7 @@ type BrowseFolderViewProps = {
   browseContents: BrowseFileInfo[];
   sortedBrowseContents: BrowseFileInfo[];
   selectedBrowseFiles: Set<string>;
+  highlightName?: string | null;
   onSort: (field: SortField) => void;
   getSortIcon: (field: SortField) => string;
   onToggleAllBrowseFiles: () => void;
@@ -37,6 +39,7 @@ export function BrowseFolderView({
   browseContents,
   sortedBrowseContents,
   selectedBrowseFiles,
+  highlightName,
   onSort,
   getSortIcon,
   onToggleAllBrowseFiles,
@@ -45,6 +48,16 @@ export function BrowseFolderView({
   onDownload,
   onUnavailableDelete,
 }: BrowseFolderViewProps) {
+  const listRef = useRef<ListImperativeAPI | null>(null);
+
+  useEffect(() => {
+    if (!highlightName) return;
+    const index = sortedBrowseContents.findIndex((item) => item.name === highlightName);
+    if (index >= 0) {
+      listRef.current?.scrollToRow({ index, align: "center" });
+    }
+  }, [highlightName, sortedBrowseContents]);
+
   if (browseLoading) {
     return (
       <div className="card text-center py-8">
@@ -103,8 +116,13 @@ export function BrowseFolderView({
         <div style={{ maxHeight: "60vh", overflowY: "auto" }}>
           {sortedBrowseContents.map((item) => {
             const itemKey = getBrowseItemKey(browseContext, item);
+            const isHighlighted = highlightName != null && item.name === highlightName;
             return (
-              <div key={item.name} className="mobile-file-card">
+              <div
+                key={item.name}
+                className={`mobile-file-card${isHighlighted ? " file-locate-highlight" : ""}`}
+                aria-current={isHighlighted ? "true" : undefined}
+              >
                 <div className="card-header">
                   <input
                     type="checkbox"
@@ -174,16 +192,19 @@ export function BrowseFolderView({
             return (
               <List
                 style={{ height: safeHeight, width: safeWidth }}
+                listRef={listRef}
                 rowCount={sortedBrowseContents.length}
                 rowHeight={80}
                 rowProps={{}}
                 rowComponent={({ index, style }) => {
                   const item = sortedBrowseContents[index];
                   const itemKey = getBrowseItemKey(browseContext, item);
+                  const isHighlighted = highlightName != null && item.name === highlightName;
                   return (
                     <div style={style} key={item.name}>
                       <div
-                        className="table-row transition-bg"
+                        className={`table-row transition-bg${isHighlighted ? " file-locate-highlight" : ""}`}
+                        aria-current={isHighlighted ? "true" : undefined}
                         style={{
                           display: "grid",
                           gridTemplateColumns: "40px minmax(220px, 1fr) 120px 300px",

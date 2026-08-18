@@ -20,6 +20,7 @@ class RateLimitScope(StrEnum):
     PUBLIC_API = "public_api"
     SHARE_ACCESS = "share_access"
     RPC = "rpc"
+    FILE_SEARCH = "file_search"
 
 
 scoped_rate_limiter = RateLimiter(max_requests=0, window_seconds=60)

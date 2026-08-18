@@ -6,6 +6,7 @@ import type {
   SystemStats,
   SystemConfig,
   FileListResponse,
+  FileSearchResponse,
   BrowseFileInfo,
   MachineStats,
   PackTask,
@@ -312,6 +313,27 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ name: newName }),
     }),
+  searchFiles: ({
+    q,
+    scopeContentHash,
+    scopePath,
+  }: {
+    q: string;
+    scopeContentHash?: string;
+    scopePath?: string;
+  }) => {
+    const keyword = q.trim();
+    if (!keyword) {
+      return Promise.reject(new Error("请输入关键词"));
+    }
+    return request<FileSearchResponse>(
+      withQuery("/api/files/search", {
+        q: keyword,
+        scope_content_hash: scopeContentHash,
+        scope_path: scopePath,
+      })
+    );
+  },
 
   // Pack Tasks
   listPackTasks: () => request<PackTask[]>("/api/files/pack"),

@@ -38,6 +38,7 @@ jest.mock("@/lib/api", () => ({
   api: {
     listFiles: jest.fn(),
     browseFile: jest.fn(),
+    searchFiles: jest.fn(),
     downloadFileUrl: jest.fn(),
     deleteFile: jest.fn(),
     calculatePackSize: jest.fn(),
@@ -233,9 +234,9 @@ describe("Folder in-page browsing", () => {
     await renderAndWait();
     await enterFolder();
 
-    // Get all checkboxes: header + 3 items (file1.txt, file2.txt, subdir)
+    // Get all checkboxes: toolbar global search toggle + header + 3 items (file1.txt, file2.txt, subdir)
     const checkboxes = screen.getAllByRole("checkbox");
-    expect(checkboxes).toHaveLength(4);
+    expect(checkboxes).toHaveLength(5);
   });
 
   test("selecting only files and clicking batch download triggers download", async () => {
@@ -245,9 +246,9 @@ describe("Folder in-page browsing", () => {
     await renderAndWait();
     await enterFolder();
 
-    // After sort: header[0], subdir[1], file1.txt[2], file2.txt[3]
+    // After sort: toolbar-global[0], header[1], subdir[2], file1.txt[3], file2.txt[4]
     const checkboxes = screen.getAllByRole("checkbox");
-    fireEvent.click(checkboxes[2]); // file1.txt
+    fireEvent.click(checkboxes[3]); // file1.txt
 
     // "批量下载" button should appear
     const downloadBtn = await screen.findByRole("button", { name: "批量下载" });
@@ -373,38 +374,50 @@ describe("Folder in-page browsing", () => {
     expect(mockApi.listFiles).toHaveBeenLastCalledWith(2, 10);
   });
 
-  test("search input is disabled inside folder", async () => {
+  test("search input stays enabled inside folder", async () => {
     await renderAndWait();
     await enterFolder();
 
-    // The search input group should have pointer-events-none class
+    // The search input group must not be disabled anymore
     const searchGroup = document.querySelector(".search-input-group");
-    expect(searchGroup?.className).toContain("pointer-events-none");
+    expect(searchGroup?.className).not.toContain("pointer-events-none");
+    expect(screen.getByRole("textbox", { name: "搜索文件" })).toBeEnabled();
   });
 
   test("search results use native buttons", async () => {
+    mockApi.searchFiles.mockResolvedValue({
+      items: [
+        {
+          user_file_id: regularFile.id,
+          content_hash: regularFile.content_hash,
+          name: regularFile.name,
+          size: regularFile.size,
+          path: regularFile.name,
+          is_directory: false,
+          entry_path: null,
+          rank: 0,
+          root_index: 1,
+        },
+      ],
+      total: 1,
+      truncated: false,
+    });
     await renderAndWait();
 
     const searchInput = screen.getByRole("textbox", { name: "搜索文件" });
     fireEvent.change(searchInput, { target: { value: "readme" } });
     fireEvent.keyDown(searchInput, { key: "Enter" });
 
-    const resultButton = await screen.findByRole("button", { name: /readme\.txt/ });
-    expect(resultButton.tagName).toBe("BUTTON");
+    const locateButton = await screen.findByRole("button", { name: "定位" });
+    expect(locateButton.tagName).toBe("BUTTON");
   });
 
-  test("keyboard shortcut opens and closes search modal", async () => {
+  test("keyboard shortcut focuses the toolbar search input", async () => {
     await renderAndWait();
 
     fireEvent.keyDown(window, { key: "f", metaKey: true });
 
-    expect(await screen.findByRole("textbox", { name: "搜索文件名" })).toBeInTheDocument();
-
-    fireEvent.keyDown(window, { key: "Escape" });
-
-    await waitFor(() => {
-      expect(screen.queryByRole("textbox", { name: "搜索文件名" })).not.toBeInTheDocument();
-    });
+    expect(screen.getByRole("textbox", { name: "搜索文件" })).toHaveFocus();
   });
 
   test("sorting works inside folder — directories first", async () => {

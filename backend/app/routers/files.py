@@ -7,7 +7,12 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from app.auth import AuthUser, require_limited_api_user, require_session_user
+from app.auth import (
+    AuthUser,
+    require_api_user,
+    require_limited_api_user,
+    require_session_user,
+)
 from app.core.download_limiter import download_limiter
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
 from app.domain.errors import DomainError
@@ -37,6 +42,24 @@ class FileListResponse(BaseModel):
     files: list[FileInfo]
     total: int
     space: dict
+
+
+class FileSearchItem(BaseModel):
+    user_file_id: int
+    content_hash: str
+    name: str
+    size: int
+    path: str
+    is_directory: bool
+    entry_path: str | None
+    rank: int
+    root_index: int
+
+
+class FileSearchResponse(BaseModel):
+    items: list[FileSearchItem]
+    total: int
+    truncated: bool
 
 
 class RenameRequest(BaseModel):
@@ -80,6 +103,44 @@ async def list_files(
         result["total"],
     )
     return FileListResponse(**result)
+
+
+@router.get("/search", response_model=FileSearchResponse)
+async def search_files(
+    q: str = "",
+    scope_content_hash: str | None = None,
+    scope_path: str = "",
+    user: AuthUser = Depends(require_api_user),
+) -> FileSearchResponse:
+    user_id = _require_user_id(user)
+    keyword = q.strip()
+    if not keyword:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="请输入关键词"
+        )
+    if scope_content_hash and (scope_path.startswith("/") or ".." in scope_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="搜索范围路径不合法"
+        )
+    await ensure_authenticated_allowed(
+        user_id,
+        RateLimitScope.FILE_SEARCH,
+        detail="操作过于频繁，请稍后再试",
+    )
+    result = await file_service.search_files(
+        user_id,
+        keyword,
+        scope_content_hash=scope_content_hash,
+        scope_path=scope_path,
+    )
+    logger.debug(
+        "搜索文件 user_id=%s q=%s total=%s truncated=%s",
+        user_id,
+        keyword,
+        result["total"],
+        result["truncated"],
+    )
+    return FileSearchResponse(**result)
 
 
 @router.get("/{file_hash}/browse")

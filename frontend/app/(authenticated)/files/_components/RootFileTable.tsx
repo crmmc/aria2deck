@@ -1,6 +1,6 @@
-import type { KeyboardEvent, MouseEvent } from "react";
+import { useEffect, useRef, type KeyboardEvent, type MouseEvent } from "react";
 import { AutoSizer } from "react-virtualized-auto-sizer";
-import { List } from "react-window";
+import { List, type ListImperativeAPI } from "react-window";
 import { formatBytes } from "@/lib/utils";
 import type { FileInfo } from "@/types";
 import type { SortField } from "./FileToolbar";
@@ -14,6 +14,7 @@ type RootFileTableProps = {
   renaming: number | null;
   newName: string;
   downloadingFile: number | null;
+  highlightUserFileId?: number | null;
   onSort: (field: SortField) => void;
   getSortIcon: (field: SortField) => string;
   onToggleSelectAll: () => void;
@@ -92,6 +93,7 @@ function RootFileMobileList({
   renaming,
   newName,
   downloadingFile,
+  highlightUserFileId,
   onToggleFileSelection,
   onNewNameChange,
   onRename,
@@ -105,8 +107,14 @@ function RootFileMobileList({
 }: RootFileListProps) {
   return (
     <div style={{ maxHeight: "60vh", overflowY: "auto" }}>
-      {sortedFiles.map((file) => (
-        <div key={file.id} className="mobile-file-card">
+      {sortedFiles.map((file) => {
+        const isHighlighted = highlightUserFileId != null && file.id === highlightUserFileId;
+        return (
+          <div
+            key={file.id}
+            className={`mobile-file-card${isHighlighted ? " file-locate-highlight" : ""}`}
+            aria-current={isHighlighted ? "true" : undefined}
+          >
           <div className="card-header">
             <input
               type="checkbox"
@@ -174,7 +182,8 @@ function RootFileMobileList({
             </button>
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -185,6 +194,7 @@ function RootFileDesktopTable({
   renaming,
   newName,
   downloadingFile,
+  highlightUserFileId,
   onSort,
   getSortIcon,
   onToggleSelectAll,
@@ -199,6 +209,16 @@ function RootFileDesktopTable({
   onDelete,
   formatDate,
 }: RootFileListProps) {
+  const listRef = useRef<ListImperativeAPI | null>(null);
+
+  useEffect(() => {
+    if (highlightUserFileId == null) return;
+    const index = sortedFiles.findIndex((file) => file.id === highlightUserFileId);
+    if (index >= 0) {
+      listRef.current?.scrollToRow({ index, align: "center" });
+    }
+  }, [highlightUserFileId, sortedFiles]);
+
   return (
     <>
       <div className="table-header" style={{ display: "grid", gridTemplateColumns: "40px minmax(220px, 1fr) 120px 180px 300px", paddingRight: "16px" }}>
@@ -230,15 +250,18 @@ function RootFileDesktopTable({
           return (
             <List
               style={{ height: safeHeight, width: safeWidth }}
+              listRef={listRef}
               rowCount={sortedFiles.length}
               rowHeight={80}
               rowProps={{}}
               rowComponent={({ index, style }) => {
                 const file = sortedFiles[index];
+                const isHighlighted = highlightUserFileId != null && file.id === highlightUserFileId;
                 return (
                   <div style={style} key={file.id}>
                     <div
-                      className="table-row transition-bg"
+                      className={`table-row transition-bg${isHighlighted ? " file-locate-highlight" : ""}`}
+                      aria-current={isHighlighted ? "true" : undefined}
                       style={{
                         display: "grid",
                         gridTemplateColumns: "40px minmax(220px, 1fr) 120px 180px 300px",

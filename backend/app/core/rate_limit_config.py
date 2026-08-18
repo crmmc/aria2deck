@@ -23,6 +23,7 @@ class RateLimitConfig:
         "public_api": 60,
         "share_access": 60,
         "rpc": 60,
+        "file_search": 60,
     }
 
     _DB_KEY_MAP: dict[str, tuple[str, int, tuple[str, ...]]] = {
@@ -43,6 +44,7 @@ class RateLimitConfig:
         "rate_limit_public_api": ("public_api", 60, ()),
         "rate_limit_share_access": ("share_access", 5, ()),
         "rate_limit_rpc": ("rpc", 300, ()),
+        "rate_limit_file_search": ("file_search", 20, ()),
     }
 
     def __init__(self) -> None:
@@ -56,6 +58,7 @@ class RateLimitConfig:
         self.public_api: int = 60
         self.share_access: int = 5
         self.rpc: int = 300
+        self.file_search: int = 20
 
     def load_from_settings(self, row: Mapping[str, Any] | None) -> None:
         for db_key, (attr, default, _legacy_keys) in self._DB_KEY_MAP.items():
@@ -69,7 +72,8 @@ class RateLimitConfig:
         logger.info(
             "频率限制配置已加载 account_security=%s authenticated_api=%s "
             "create_task=%s create_torrent=%s create_pack=%s create_share=%s "
-            "aria2_test=%s public_api=%s share_access=%s rpc=%s",
+            "aria2_test=%s public_api=%s share_access=%s rpc=%s "
+            "file_search=%s",
             self.account_security,
             self.authenticated_api,
             self.create_task,
@@ -80,6 +84,7 @@ class RateLimitConfig:
             self.public_api,
             self.share_access,
             self.rpc,
+            self.file_search,
         )
 
     def defaults(self) -> dict[str, str]:
