@@ -84,4 +84,9 @@ CLAUDE.md
 # Local planning artifacts
 .planning/
 .worktrees/
+# 本地临时 e2e 测试基础设施（不入库）
 e2e_test_temp/
+
+# agent 工具产物
+.codegraph/
+.gsd/
