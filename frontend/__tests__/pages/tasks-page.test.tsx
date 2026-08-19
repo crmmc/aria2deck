@@ -2,7 +2,12 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import TasksPage from "@/app/(authenticated)/tasks/page";
 import { api } from "@/lib/api";
 import { useTaskWebSocket } from "@/hooks/useTaskWebSocket";
-import type { Task, TorrentPreview, UploadTorrentRequest } from "@/types";
+import type {
+  BatchCancelTasksResponse,
+  Task,
+  TorrentPreview,
+  UploadTorrentRequest,
+} from "@/types";
 
 const showToastMock = jest.fn();
 const showConfirmMock = jest.fn();
@@ -39,7 +44,7 @@ jest.mock("@/lib/api", () => ({
     retryTask: jest.fn<Promise<Task>, [number]>(),
     previewTorrent: jest.fn<Promise<TorrentPreview>, [string]>(),
     uploadTorrent: jest.fn<Promise<Task>, [string, UploadTorrentRequest?]>(),
-    cancelTask: jest.fn<Promise<{ ok: boolean }>, [number]>(),
+    cancelTasks: jest.fn<Promise<BatchCancelTasksResponse>, [number[]]>(),
   },
 }));
 
@@ -155,7 +160,13 @@ describe("TasksPage", () => {
       name: "Fedora Workstation",
       uri: "magnet:?xt=urn:btih:abc",
     });
-    mockApi.cancelTask.mockResolvedValue({ ok: true });
+    mockApi.cancelTasks.mockResolvedValue({
+      accepted_count: 1,
+      failed_count: 0,
+      results: [
+        { task_id: 1, ok: true, state: "cancelled", accepted: true, error: null },
+      ],
+    });
     Object.assign(navigator, {
       clipboard: {
         writeText: jest.fn().mockResolvedValue(undefined),
@@ -208,7 +219,7 @@ describe("TasksPage", () => {
     expect(screen.getByRole("button", { name: /ubuntu\.iso/ }).tagName).toBe("BUTTON");
   });
 
-  test("batch cancels selected active tasks", async () => {
+  test("batch cancels selected active tasks in one request", async () => {
     render(<TasksPage />);
 
     expect(await screen.findByText("任务")).toBeInTheDocument();
@@ -217,7 +228,21 @@ describe("TasksPage", () => {
 
     await waitFor(() => {
       expect(showConfirmMock).toHaveBeenCalled();
-      expect(mockApi.cancelTask).toHaveBeenCalledWith(1);
+      expect(mockApi.cancelTasks).toHaveBeenCalledTimes(1);
+      expect(mockApi.cancelTasks).toHaveBeenCalledWith([1]);
+    });
+  });
+
+  test("cancels a single task inline via one-element array", async () => {
+    render(<TasksPage />);
+
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle("取消任务"));
+
+    await waitFor(() => {
+      expect(showConfirmMock).toHaveBeenCalled();
+      expect(mockApi.cancelTasks).toHaveBeenCalledTimes(1);
+      expect(mockApi.cancelTasks).toHaveBeenCalledWith([1]);
     });
   });
 

@@ -68,8 +68,12 @@ export default function SharesPage() {
       if (!confirmed) return;
 
       try {
-        await api.deleteShare(id);
-        showToast("分享已删除", "success");
+        const result = await api.deleteShares([id]);
+        if (result.failed_count > 0) {
+          showToast("删除失败：" + (result.results[0]?.error ?? "未知错误"), "error");
+        } else {
+          showToast("分享已删除", "success");
+        }
         if (mountedRef.current) loadShares();
       } catch (err) {
         showToast("删除失败：" + (err as Error).message, "error");
@@ -138,9 +142,16 @@ export default function SharesPage() {
 
     dispatch({ type: "set_operating", operating: true });
     try {
-      await Promise.all(selectedList.map((r) => api.deleteShare(r.id)));
+      const result = await api.deleteShares(selectedList.map((r) => r.id));
       dispatch({ type: "clear_selected" });
-      showToast(`已删除 ${selectedList.length} 条分享记录`, "success");
+      if (result.failed_count > 0) {
+        showToast(
+          `已删除 ${result.accepted_count} 条分享记录，${result.failed_count} 条删除失败`,
+          "warning"
+        );
+      } else {
+        showToast(`已删除 ${result.accepted_count} 条分享记录`, "success");
+      }
     } catch (err) {
       showToast("部分删除失败：" + (err as Error).message, "error");
     } finally {

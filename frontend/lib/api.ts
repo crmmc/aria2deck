@@ -16,6 +16,10 @@ import type {
   StoredFileListResponse,
   FileUsersResponse,
   BulkDeleteResponse,
+  BatchDeleteFilesResponse,
+  BatchDeleteSharesResponse,
+  BatchDeleteHistoryResponse,
+  BatchCancelTasksResponse,
   ShareLink,
   ShareInfo,
   CreateShareRequest,
@@ -206,16 +210,18 @@ export const api = {
         ...(payload?.options ? { options: payload.options } : {}),
       }),
     }),
-  cancelTask: (subscriptionId: number) =>
-    request<{ ok: boolean }>(`/api/tasks/${subscriptionId}`, {
-      method: "DELETE",
+  cancelTasks: (taskIds: number[]) =>
+    request<BatchCancelTasksResponse>("/api/tasks/cancel", {
+      method: "POST",
+      body: JSON.stringify({ task_ids: taskIds }),
     }),
 
   // Task History (independent storage)
   listHistory: () => request<TaskHistory[]>("/api/history"),
-  deleteHistory: (historyId: number) =>
-    request<{ ok: boolean }>(`/api/history/${historyId}`, {
+  deleteHistoryRecords: (historyIds: number[]) =>
+    request<BatchDeleteHistoryResponse>("/api/history", {
       method: "DELETE",
+      body: JSON.stringify({ history_ids: historyIds }),
     }),
   clearHistory: () =>
     request<{ ok: boolean; count: number }>("/api/history", {
@@ -304,9 +310,10 @@ export const api = {
     ),
   downloadFileUrl: (fileHash: string, path?: string) =>
     downloadUrl(`/api/files/${fileHash}/download`, { path }),
-  deleteFile: (fileHash: string) =>
-    request<{ ok: boolean }>(`/api/files/${fileHash}`, {
+  deleteFiles: (fileHashes: string[]) =>
+    request<BatchDeleteFilesResponse>("/api/files", {
       method: "DELETE",
+      body: JSON.stringify({ file_hashes: fileHashes }),
     }),
   renameFile: (fileHash: string, newName: string) =>
     request<{ ok: boolean }>(`/api/files/${fileHash}/rename`, {
@@ -396,9 +403,10 @@ export const api = {
     request<{ ok: boolean }>(`/api/shares/${shareId}/revoke`, {
       method: "PUT",
     }),
-  deleteShare: (shareId: number) =>
-    request<{ ok: boolean }>(`/api/shares/${shareId}`, {
+  deleteShares: (shareIds: number[]) =>
+    request<BatchDeleteSharesResponse>("/api/shares", {
       method: "DELETE",
+      body: JSON.stringify({ share_ids: shareIds }),
     }),
   revokeAllShares: () =>
     request<{ ok: boolean; count: number }>("/api/shares/revoke-all", {

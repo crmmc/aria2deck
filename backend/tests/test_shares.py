@@ -189,10 +189,139 @@ class TestShareManagement:
         assert resp.status_code == 400
     def test_delete_share(self, authenticated_client, user_file):
         share = _create_share(authenticated_client, user_file["id"])
-        resp = authenticated_client.delete(f"/api/shares/{share['id']}")
+        resp = authenticated_client.request(
+            "DELETE", "/api/shares", json={"share_ids": [share["id"]]}
+        )
         assert resp.status_code == 200
         shares = authenticated_client.get("/api/shares").json()
         assert all(s["id"] != share["id"] for s in shares)
+
+class TestBulkDeleteShares:
+    def test_batch_delete_removes_share_rows(self, authenticated_client, user_file):
+        share_a = _create_share(authenticated_client, user_file["id"])
+        share_b = _create_share(authenticated_client, user_file["id"])
+
+        resp = authenticated_client.request(
+            "DELETE",
+            "/api/shares",
+            json={"share_ids": [share_a["id"], share_b["id"]]},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "accepted_count": 2,
+            "failed_count": 0,
+            "results": [
+                {
+                    "share_id": share_a["id"],
+                    "ok": True,
+                    "state": "deleted",
+                    "accepted": True,
+                    "error": None,
+                },
+                {
+                    "share_id": share_b["id"],
+                    "ok": True,
+                    "state": "deleted",
+                    "accepted": True,
+                    "error": None,
+                },
+            ],
+        }
+        assert not _share_row_exists(share_a["id"])
+        assert not _share_row_exists(share_b["id"])
+
+    def test_single_delete_as_batch_of_one(self, authenticated_client, user_file):
+        share = _create_share(authenticated_client, user_file["id"])
+
+        resp = authenticated_client.request(
+            "DELETE", "/api/shares", json={"share_ids": [share["id"]]}
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["accepted_count"] == 1
+        assert not _share_row_exists(share["id"])
+
+    def test_partial_failure_reports_chinese_error(
+        self, authenticated_client, user_file
+    ):
+        share = _create_share(authenticated_client, user_file["id"])
+
+        resp = authenticated_client.request(
+            "DELETE", "/api/shares", json={"share_ids": [share["id"], 99999]}
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["accepted_count"] == 1
+        assert data["failed_count"] == 1
+        by_id = {item["share_id"]: item for item in data["results"]}
+        assert by_id[share["id"]]["ok"] is True
+        assert by_id[99999]["ok"] is False
+        assert by_id[99999]["state"] == "failed"
+        assert by_id[99999]["error"] == "分享不存在"
+        assert not _share_row_exists(share["id"])
+
+    def test_duplicate_ids_processed_once(self, authenticated_client, user_file):
+        share = _create_share(authenticated_client, user_file["id"])
+
+        resp = authenticated_client.request(
+            "DELETE", "/api/shares", json={"share_ids": [share["id"]] * 3}
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["results"]) == 1
+        assert data["accepted_count"] == 1
+        assert data["failed_count"] == 0
+
+    def test_empty_list_rejected(self, authenticated_client):
+        resp = authenticated_client.request(
+            "DELETE", "/api/shares", json={"share_ids": []}
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "至少选择一个条目"
+
+    def test_over_limit_rejected(self, authenticated_client):
+        resp = authenticated_client.request(
+            "DELETE", "/api/shares", json={"share_ids": list(range(1001))}
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "一次最多操作 1000 个条目"
+
+    def test_unauthenticated(self, client, temp_db):
+        resp = client.request("DELETE", "/api/shares", json={"share_ids": [1]})
+        assert resp.status_code == 401
+
+    def test_consumes_single_authenticated_api_unit(
+        self, authenticated_client, test_user, user_file
+    ):
+        import asyncio
+
+        from app.core.rate_limit import api_limiter
+        from app.core.rate_limit_config import rate_limit_config
+
+        share = _create_share(authenticated_client, user_file["id"])
+        asyncio.run(api_limiter.clear_all())
+        original_limit = rate_limit_config.authenticated_api
+        rate_limit_config.authenticated_api = 2
+        try:
+            resp = authenticated_client.request(
+                "DELETE",
+                "/api/shares",
+                json={"share_ids": [share["id"], 99999]},
+            )
+        finally:
+            rate_limit_config.authenticated_api = original_limit
+
+        assert resp.status_code == 200
+        remaining = asyncio.run(
+            api_limiter.get_remaining(
+                test_user["id"], "authenticated_api", limit=2
+            )
+        )
+        assert remaining == 1
+
     def test_revoke_all(self, authenticated_client, user_file):
         for _ in range(3):
             _create_share(authenticated_client, user_file["id"])
@@ -201,6 +330,19 @@ class TestShareManagement:
         assert resp.json()["count"] == 3
         shares = authenticated_client.get("/api/shares").json()
         assert all(s["status"] == "revoked" for s in shares)
+def _share_row_exists(share_id: int) -> bool:
+    async def load() -> bool:
+        async with transaction() as conn:
+            row = (
+                await conn.execute(
+                    select(share_links.c.id).where(share_links.c.id == share_id)
+                )
+            ).first()
+        return row is not None
+
+    return asyncio.run(load())
+
+
 class TestPublicShareAccess:
     def test_get_share_info(self, authenticated_client, client, user_file):
         share = _create_share(authenticated_client, user_file["id"])
@@ -540,19 +682,31 @@ class TestPublicShareAccess:
         assert range_resp.status_code == 410
 class TestDeleteProtection:
     @staticmethod
+    def delete_test_file(authenticated_client):
+        return authenticated_client.request(
+            "DELETE", "/api/files", json={"file_hashes": ["hash_testfile"]}
+        )
+
+    @staticmethod
     def assert_pending(resp) -> None:
-        assert resp.status_code == 202
+        assert resp.status_code == 200
         assert resp.json() == {
-            "ok": True,
-            "state": "pending",
-            "accepted": True,
+            "accepted_count": 1,
+            "failed_count": 0,
+            "results": [
+                {
+                    "content_hash": "hash_testfile",
+                    "ok": True,
+                    "state": "pending",
+                    "accepted": True,
+                    "error": None,
+                }
+            ],
         }
 
     def test_delete_revokes_active_share(self, authenticated_client, user_file):
         share = _create_share(authenticated_client, user_file["id"])
-        self.assert_pending(
-            authenticated_client.delete("/api/files/hash_testfile")
-        )
+        self.assert_pending(self.delete_test_file(authenticated_client))
 
         shared = authenticated_client.get(f"/api/s/{share['share_code']}")
         assert shared.status_code == 404
@@ -560,9 +714,7 @@ class TestDeleteProtection:
     def test_delete_allowed_after_revoke(self, authenticated_client, user_file):
         share = _create_share(authenticated_client, user_file["id"])
         authenticated_client.put(f"/api/shares/{share['id']}/revoke")
-        self.assert_pending(
-            authenticated_client.delete("/api/files/hash_testfile")
-        )
+        self.assert_pending(self.delete_test_file(authenticated_client))
 
     def test_delete_allowed_after_share_downloads_exhausted(
         self, authenticated_client, user_file
@@ -574,11 +726,7 @@ class TestDeleteProtection:
             max_downloads=1,
             download_count=1,
         )
-        self.assert_pending(
-            authenticated_client.delete("/api/files/hash_testfile")
-        )
+        self.assert_pending(self.delete_test_file(authenticated_client))
 
     def test_delete_allowed_no_shares(self, authenticated_client, user_file):
-        self.assert_pending(
-            authenticated_client.delete("/api/files/hash_testfile")
-        )
+        self.assert_pending(self.delete_test_file(authenticated_client))

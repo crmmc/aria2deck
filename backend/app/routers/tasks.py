@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, status
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from app.auth import AuthUser, require_limited_api_user
@@ -11,6 +13,7 @@ from app.domain.errors import DomainError
 from app.http.errors import raise_http
 from app.services import task_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 v2_router = APIRouter(prefix="/api/v2", tags=["tasks"])
 
@@ -18,6 +21,10 @@ v2_router = APIRouter(prefix="/api/v2", tags=["tasks"])
 class TaskCreate(BaseModel):
     uri: str
     options: dict | None = None
+
+
+class BatchCancelTasksRequest(BaseModel):
+    task_ids: list[int]
 
 
 class TorrentCreate(BaseModel):
@@ -146,19 +153,34 @@ async def retry_task(
         raise_http(exc)
 
 
-@router.delete("/{subscription_id}")
-async def cancel_task(
-    subscription_id: int,
+@router.post("/cancel")
+async def cancel_tasks(
+    payload: BatchCancelTasksRequest,
     user: AuthUser = Depends(require_limited_api_user),
 ) -> dict:
-    try:
-        return await task_service.cancel_task(
-            user_id=user.id,
-            user_task_id=subscription_id,
-            quota_bytes=int(user.quota_bytes),
+    if not payload.task_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="至少选择一个条目",
         )
-    except DomainError as exc:
-        raise_http(exc)
+    if len(payload.task_ids) > 1000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="一次最多操作 1000 个条目",
+        )
+    result = await task_service.bulk_cancel_tasks(
+        user_id=user.id,
+        task_ids=payload.task_ids,
+        quota_bytes=int(user.quota_bytes),
+    )
+    logger.info(
+        "批量取消任务已受理 user_id=%s requested=%s accepted=%s failed=%s",
+        user.id,
+        len(payload.task_ids),
+        result["accepted_count"],
+        result["failed_count"],
+    )
+    return result
 
 
 @router.delete("")

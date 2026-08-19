@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.auth import (
@@ -74,6 +74,24 @@ class PackRequest(BaseModel):
 
 class CalculateSizeRequest(BaseModel):
     file_ids: list[int] = Field(..., min_length=1, max_length=1000)
+
+
+class BatchDeleteFilesRequest(BaseModel):
+    file_hashes: list[str]
+
+
+class FileBatchItem(BaseModel):
+    content_hash: str
+    ok: bool
+    state: str
+    accepted: bool
+    error: str | None = None
+
+
+class FilesBatchOperationResponse(BaseModel):
+    accepted_count: int
+    failed_count: int
+    results: list[FileBatchItem]
 
 
 def _require_user_id(user: AuthUser) -> int:
@@ -221,32 +239,31 @@ async def cancel_or_delete_pack_task(
         raise AssertionError("unreachable")
 
 
-@router.delete("/{file_hash}")
-async def delete_file(
-    file_hash: str,
-    response: Response,
+@router.delete("", response_model=FilesBatchOperationResponse)
+async def delete_files(
+    payload: BatchDeleteFilesRequest,
     user: AuthUser = Depends(require_limited_api_user),
-) -> dict:
+) -> FilesBatchOperationResponse:
     user_id = _require_user_id(user)
-    try:
-        result = await file_service.delete_file_by_hash(user_id, file_hash)
-    except DomainError as exc:
-        logger.warning("删除文件失败 user_id=%s file_hash=%s error=%s", user_id, file_hash, exc.detail)
-        raise_http(exc)
-
-    if result.accepted:
-        response.status_code = status.HTTP_202_ACCEPTED
+    if not payload.file_hashes:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="至少选择一个条目",
+        )
+    if len(payload.file_hashes) > 1000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="一次最多操作 1000 个条目",
+        )
+    result = await file_service.bulk_delete_files_by_hashes(user_id, payload.file_hashes)
     logger.info(
-        "删除文件已受理 user_id=%s file_hash=%s state=%s",
+        "批量删除文件已受理 user_id=%s requested=%s accepted=%s failed=%s",
         user_id,
-        file_hash,
-        result.state,
+        len(payload.file_hashes),
+        result["accepted_count"],
+        result["failed_count"],
     )
-    return {
-        "ok": True,
-        "state": result.state,
-        "accepted": result.accepted,
-    }
+    return FilesBatchOperationResponse(**result)
 
 
 @router.put("/{file_hash}/rename")

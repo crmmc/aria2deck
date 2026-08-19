@@ -40,7 +40,7 @@ jest.mock("@/lib/api", () => ({
     browseFile: jest.fn(),
     searchFiles: jest.fn(),
     downloadFileUrl: jest.fn(),
-    deleteFile: jest.fn(),
+    deleteFiles: jest.fn(),
     calculatePackSize: jest.fn(),
     getAvailableSpace: jest.fn(),
     createPackTask: jest.fn(),
@@ -346,6 +346,225 @@ describe("Folder in-page browsing", () => {
 
     await waitFor(() => {
       expect(mockApi.downloadFileUrl).toHaveBeenCalledWith(regularFile.content_hash);
+    });
+  });
+
+  test("root batch delete sends a single batch request", async () => {
+    // jsdom 未实现 <dialog>.showModal，需模拟打开状态才能查询到对话框内内容
+    const originalShowModal = HTMLDialogElement.prototype.showModal;
+    const originalClose = HTMLDialogElement.prototype.close;
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value: function showModal(this: HTMLDialogElement) {
+        this.setAttribute("open", "");
+      },
+    });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", {
+      configurable: true,
+      value: function close(this: HTMLDialogElement) {
+        this.removeAttribute("open");
+      },
+    });
+
+    mockApi.listFiles.mockResolvedValue({
+      files: [regularFile],
+      total: 1,
+      space: { used: 1024, frozen: 0, available: 9216 },
+    } satisfies FileListResponse);
+    mockApi.deleteFiles.mockResolvedValue({
+      accepted_count: 1,
+      failed_count: 0,
+      results: [
+        {
+          content_hash: regularFile.content_hash,
+          ok: true,
+          state: "pending",
+          accepted: true,
+          error: null,
+        },
+      ],
+    });
+
+    render(
+      <ToastProvider>
+        <FilesPage />
+      </ToastProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("readme.txt")).toBeInTheDocument();
+    });
+
+    // Select the file
+    const selectAllBtn = screen.getByRole("button", { name: "全选" });
+    fireEvent.click(selectAllBtn);
+
+    // Click batch delete and confirm
+    const deleteBtn = await screen.findByRole("button", { name: "批量删除" });
+    fireEvent.click(deleteBtn);
+    const confirmBtn = await within(
+      await screen.findByRole("dialog")
+    ).findByRole("button", { name: "删除" });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(mockApi.deleteFiles).toHaveBeenCalledTimes(1);
+    });
+    expect(mockApi.deleteFiles).toHaveBeenCalledWith([
+      regularFile.content_hash,
+    ]);
+
+    await waitFor(() => {
+      expect(screen.getByText(/已删除 1 个文件/)).toBeInTheDocument();
+    });
+
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value: originalShowModal,
+    });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", {
+      configurable: true,
+      value: originalClose,
+    });
+  });
+
+  test("inline delete sends a single-element array request", async () => {
+    // jsdom 未实现 <dialog>.showModal，需模拟打开状态才能查询到对话框内内容
+    const originalShowModal = HTMLDialogElement.prototype.showModal;
+    const originalClose = HTMLDialogElement.prototype.close;
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value: function showModal(this: HTMLDialogElement) {
+        this.setAttribute("open", "");
+      },
+    });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", {
+      configurable: true,
+      value: function close(this: HTMLDialogElement) {
+        this.removeAttribute("open");
+      },
+    });
+
+    mockApi.listFiles.mockResolvedValue({
+      files: [regularFile],
+      total: 1,
+      space: { used: 1024, frozen: 0, available: 9216 },
+    } satisfies FileListResponse);
+    mockApi.deleteFiles.mockResolvedValue({
+      accepted_count: 1,
+      failed_count: 0,
+      results: [
+        {
+          content_hash: regularFile.content_hash,
+          ok: true,
+          state: "pending",
+          accepted: true,
+          error: null,
+        },
+      ],
+    });
+
+    render(
+      <ToastProvider>
+        <FilesPage />
+      </ToastProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("readme.txt")).toBeInTheDocument();
+    });
+
+    // Click the row inline delete button and confirm
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    const confirmBtn = await within(
+      await screen.findByRole("dialog")
+    ).findByRole("button", { name: "删除" });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(mockApi.deleteFiles).toHaveBeenCalledTimes(1);
+    });
+    expect(mockApi.deleteFiles).toHaveBeenCalledWith([
+      regularFile.content_hash,
+    ]);
+
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value: originalShowModal,
+    });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", {
+      configurable: true,
+      value: originalClose,
+    });
+  });
+
+  test("inline delete failure shows error toast and skips reload", async () => {
+    // jsdom 未实现 <dialog>.showModal，需模拟打开状态才能查询到对话框内内容
+    const originalShowModal = HTMLDialogElement.prototype.showModal;
+    const originalClose = HTMLDialogElement.prototype.close;
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value: function showModal(this: HTMLDialogElement) {
+        this.setAttribute("open", "");
+      },
+    });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", {
+      configurable: true,
+      value: function close(this: HTMLDialogElement) {
+        this.removeAttribute("open");
+      },
+    });
+
+    mockApi.listFiles.mockResolvedValue({
+      files: [regularFile],
+      total: 1,
+      space: { used: 1024, frozen: 0, available: 9216 },
+    } satisfies FileListResponse);
+    mockApi.deleteFiles.mockResolvedValue({
+      accepted_count: 0,
+      failed_count: 1,
+      results: [
+        {
+          content_hash: regularFile.content_hash,
+          ok: false,
+          state: "failed",
+          accepted: false,
+          error: "文件不存在",
+        },
+      ],
+    });
+
+    render(
+      <ToastProvider>
+        <FilesPage />
+      </ToastProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("readme.txt")).toBeInTheDocument();
+    });
+
+    // Click the row inline delete button and confirm
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    const confirmBtn = await within(
+      await screen.findByRole("dialog")
+    ).findByRole("button", { name: "删除" });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(mockApi.deleteFiles).toHaveBeenCalledTimes(1);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/删除失败：文件不存在/)).toBeInTheDocument();
+    });
+    // 条目失败时不刷新列表
+    expect(mockApi.listFiles).toHaveBeenCalledTimes(1);
+
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value: originalShowModal,
+    });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", {
+      configurable: true,
+      value: originalClose,
     });
   });
 

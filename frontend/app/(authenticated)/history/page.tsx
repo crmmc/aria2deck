@@ -59,7 +59,12 @@ export default function HistoryPage() {
   const deleteRecord = useCallback(
     async (record: TaskHistory) => {
       try {
-        await api.deleteHistory(record.id);
+        const result = await api.deleteHistoryRecords([record.id]);
+        if (result.failed_count > 0) {
+          showToast("删除失败：" + (result.results[0]?.error ?? "未知错误"), "error");
+          if (mountedRef.current) loadHistory();
+          return;
+        }
         if (!mountedRef.current) return;
         setRecords((prev) => prev.filter((r) => r.id !== record.id));
         setSelectedRecords((prev) => {
@@ -110,14 +115,23 @@ export default function HistoryPage() {
     if (!mountedRef.current) return;
 
     setIsBatchOperating(true);
-    const idsToDelete = new Set(selectedList.map((r) => r.id));
     try {
-      await Promise.all(selectedList.map((r) => api.deleteHistory(r.id)));
-      setRecords((prev) => prev.filter((r) => !idsToDelete.has(r.id)));
+      const result = await api.deleteHistoryRecords(selectedList.map((r) => r.id));
+      const deletedIds = new Set(
+        result.results.filter((r) => r.ok).map((r) => r.history_id)
+      );
+      setRecords((prev) => prev.filter((r) => !deletedIds.has(r.id)));
       setSelectedRecords(new Set());
-      showToast(`已删除 ${selectedList.length} 条历史记录`, "success");
+      if (result.failed_count > 0) {
+        showToast(
+          `已删除 ${result.accepted_count} 条，${result.failed_count} 条删除失败`,
+          "warning"
+        );
+      } else {
+        showToast(`已删除 ${result.accepted_count} 条历史记录`, "success");
+      }
     } catch (err) {
-      showToast("部分删除失败：" + (err as Error).message, "error");
+      showToast("删除失败：" + (err as Error).message, "error");
       if (mountedRef.current) loadHistory();
     } finally {
       if (mountedRef.current) setIsBatchOperating(false);

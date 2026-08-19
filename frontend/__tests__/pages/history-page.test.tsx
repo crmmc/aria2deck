@@ -19,7 +19,7 @@ jest.mock("@/lib/api", () => ({
     listHistory: jest.fn(),
     createTask: jest.fn(),
     retryTask: jest.fn(),
-    deleteHistory: jest.fn(),
+    deleteHistoryRecords: jest.fn(),
     clearHistory: jest.fn(),
   },
 }));
@@ -48,22 +48,53 @@ describe("HistoryPage", () => {
       { ...baseRecord, id: 2, result: "completed", task_name: "ok-file.zip", retryable: false, retry_blocked_reason: "已完成不可重试" },
     ] as never);
     mockApi.retryTask.mockResolvedValue({ id: 100 } as never);
-    mockApi.deleteHistory = jest.fn().mockResolvedValue({ ok: true } as never);
+    mockApi.deleteHistoryRecords = jest
+      .fn()
+      .mockResolvedValue({ accepted_count: 1, failed_count: 0, results: [] } as never);
     mockApi.clearHistory.mockResolvedValue({ ok: true, count: 2 } as never);
   });
 
-  test("per-record delete button removes the record", async () => {
+  test("per-record delete button removes the record via single-element batch", async () => {
     render(<HistoryPage />);
 
     expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
     expect(screen.getByText("ok-file.zip")).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
-    await waitFor(() => expect(mockApi.deleteHistory).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(mockApi.deleteHistoryRecords).toHaveBeenCalledWith([1])
+    );
 
     await waitFor(() =>
       expect(screen.queryByText("failed-file.zip")).not.toBeInTheDocument()
     );
+  });
+
+  test("batch delete sends a single request for all selected records", async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+
+    mockApi.deleteHistoryRecords.mockResolvedValue({
+      accepted_count: 2,
+      failed_count: 0,
+      results: [
+        { history_id: 1, ok: true, state: "deleted", accepted: true, error: null },
+        { history_id: 2, ok: true, state: "deleted", accepted: true, error: null },
+      ],
+    } as never);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+
+    await waitFor(() =>
+      expect(mockApi.deleteHistoryRecords).toHaveBeenCalledTimes(1)
+    );
+    expect(mockApi.deleteHistoryRecords).toHaveBeenCalledWith([1, 2]);
+    await waitFor(() =>
+      expect(screen.queryByText("failed-file.zip")).not.toBeInTheDocument()
+    );
+    expect(screen.queryByText("ok-file.zip")).not.toBeInTheDocument();
   });
 
   test("completed record shows no retry-blocked warning", async () => {

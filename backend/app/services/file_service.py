@@ -8,7 +8,12 @@ from typing import Any
 
 from app.core.config import settings
 from app.core.time_utils import ms_to_iso
-from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
+from app.domain.errors import (
+    BadRequestError,
+    DomainError,
+    ForbiddenError,
+    NotFoundError,
+)
 from app.domain.file_name_match import rank_file_name
 from app.repositories import files as files_repo
 from app.services.storage_locks import (
@@ -352,6 +357,53 @@ async def delete_file_by_hash(user_id: int, file_hash: str) -> DeleteUserFileRef
     for download_id in result.affected_download_ids:
         await broadcast_task_update_to_subscribers(download_id)
     return result
+
+
+async def bulk_delete_files_by_hashes(user_id: int, file_hashes: list[str]) -> dict:
+    accepted_count = 0
+    failed_count = 0
+    results: list[dict] = []
+    for file_hash in dict.fromkeys(file_hashes):
+        try:
+            result = await delete_file_by_hash(user_id, file_hash)
+            accepted_count += 1
+            results.append(
+                {
+                    "content_hash": file_hash,
+                    "ok": True,
+                    "state": result.state,
+                    "accepted": True,
+                    "error": None,
+                }
+            )
+        except DomainError as exc:
+            failed_count += 1
+            results.append(
+                {
+                    "content_hash": file_hash,
+                    "ok": False,
+                    "state": "failed",
+                    "accepted": False,
+                    "error": exc.detail,
+                }
+            )
+        except Exception:
+            failed_count += 1
+            results.append(
+                {
+                    "content_hash": file_hash,
+                    "ok": False,
+                    "state": "failed",
+                    "accepted": False,
+                    "error": "删除受理失败",
+                }
+            )
+            logger.exception("批量删除文件受理失败 user_id=%s file_hash=%s", user_id, file_hash)
+    return {
+        "accepted_count": accepted_count,
+        "failed_count": failed_count,
+        "results": results,
+    }
 
 
 def validate_display_name(name: str) -> str:

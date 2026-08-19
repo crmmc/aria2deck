@@ -4,7 +4,7 @@ import logging
 
 from app.core.time_utils import ms_to_iso
 from app.domain.status import TERMINAL_USER_TASK_STATUSES
-from app.domain.errors import NotFoundError
+from app.domain.errors import DomainError, NotFoundError
 from app.repositories.task.user_tasks import (
     clear_terminal_user_tasks,
     delete_terminal_user_task,
@@ -92,3 +92,59 @@ async def clear_history(user_id: int) -> dict:
     count = len(tids)
     logger.info("清空历史记录成功 user_id=%s count=%s", user_id, count)
     return {"ok": True, "count": count}
+
+
+async def bulk_delete_history(user_id: int, history_ids: list[int]) -> dict:
+    accepted_count = 0
+    failed_count = 0
+    results: list[dict] = []
+    for history_id in dict.fromkeys(history_ids):
+        try:
+            await delete_history(user_id, history_id)
+            accepted_count += 1
+            results.append(
+                {
+                    "history_id": history_id,
+                    "ok": True,
+                    "state": "deleted",
+                    "accepted": True,
+                    "error": None,
+                }
+            )
+        except DomainError as exc:
+            failed_count += 1
+            results.append(
+                {
+                    "history_id": history_id,
+                    "ok": False,
+                    "state": "failed",
+                    "accepted": False,
+                    "error": exc.detail,
+                }
+            )
+        except Exception:
+            failed_count += 1
+            results.append(
+                {
+                    "history_id": history_id,
+                    "ok": False,
+                    "state": "failed",
+                    "accepted": False,
+                    "error": "删除历史记录失败",
+                }
+            )
+            logger.exception(
+                "批量删除历史记录失败 user_id=%s history_id=%s", user_id, history_id
+            )
+    logger.info(
+        "批量删除历史记录完成 user_id=%s requested=%s accepted=%s failed=%s",
+        user_id,
+        len(history_ids),
+        accepted_count,
+        failed_count,
+    )
+    return {
+        "accepted_count": accepted_count,
+        "failed_count": failed_count,
+        "results": results,
+    }

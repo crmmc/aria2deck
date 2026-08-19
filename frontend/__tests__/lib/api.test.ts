@@ -264,20 +264,30 @@ describe("api methods", () => {
     });
   });
 
-  describe("api.cancelTask", () => {
-    it("cancels task by subscription id", async () => {
+  describe("api.cancelTasks", () => {
+    it("posts task ids to /api/tasks/cancel as a single request", async () => {
+      const mockResponse = {
+        accepted_count: 2,
+        failed_count: 0,
+        results: [
+          { task_id: 1, ok: true, state: "cancelled", accepted: true, error: null },
+          { task_id: 2, ok: true, state: "cancelled", accepted: true, error: null },
+        ],
+      };
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ ok: true }),
+        json: () => Promise.resolve(mockResponse),
       });
 
-      const result = await api.cancelTask(123);
-      
-      expect(result).toEqual({ ok: true });
+      const result = await api.cancelTasks([1, 2]);
+
+      expect(result).toEqual(mockResponse);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/tasks/123"),
+        expect.stringContaining("/api/tasks/cancel"),
         expect.objectContaining({
-          method: "DELETE",
+          method: "POST",
+          body: JSON.stringify({ task_ids: [1, 2] }),
         })
       );
     });
@@ -367,22 +377,109 @@ describe("api methods", () => {
     });
   });
 
-  describe("api.deleteFile", () => {
-    it("deletes file by id", async () => {
+  describe("api.deleteFiles", () => {
+    it("sends a single batch delete request with file hashes body", async () => {
+      const mockResponse = {
+        accepted_count: 2,
+        failed_count: 0,
+        results: [
+          {
+            content_hash: "abc123hash",
+            ok: true,
+            state: "pending",
+            accepted: true,
+            error: null,
+          },
+          {
+            content_hash: "def456hash",
+            ok: true,
+            state: "released",
+            accepted: false,
+            error: null,
+          },
+        ],
+      };
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ ok: true }),
+        json: () => Promise.resolve(mockResponse),
       });
 
-      const result = await api.deleteFile("abc123hash");
+      const result = await api.deleteFiles(["abc123hash", "def456hash"]);
 
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual(mockResponse);
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/files/abc123hash"),
+        expect.stringContaining("/api/files"),
         expect.objectContaining({
           method: "DELETE",
+          body: JSON.stringify({ file_hashes: ["abc123hash", "def456hash"] }),
         })
       );
+    });
+
+    it("sends a single-element array for inline single delete", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ accepted_count: 1, failed_count: 0, results: [] }),
+      });
+
+      await api.deleteFiles(["abc123hash"]);
+
+      const [url, options] = (global.fetch as jest.Mock).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      expect(url.endsWith("/api/files")).toBe(true);
+      expect(options.method).toBe("DELETE");
+      expect(JSON.parse(options.body as string)).toEqual({
+        file_hashes: ["abc123hash"],
+      });
+    });
+  });
+
+  describe("api.deleteShares", () => {
+    it("sends a single batch delete request with share ids body", async () => {
+      const mockResponse = {
+        accepted_count: 2,
+        failed_count: 0,
+        results: [
+          { share_id: 1, ok: true, state: "deleted", accepted: true, error: null },
+          { share_id: 2, ok: true, state: "deleted", accepted: true, error: null },
+        ],
+      };
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      });
+
+      const result = await api.deleteShares([1, 2]);
+
+      expect(result).toEqual(mockResponse);
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/api/shares"),
+        expect.objectContaining({
+          method: "DELETE",
+          body: JSON.stringify({ share_ids: [1, 2] }),
+        })
+      );
+    });
+
+    it("sends a single-element array for inline single delete", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ accepted_count: 1, failed_count: 0, results: [] }),
+      });
+
+      await api.deleteShares([7]);
+
+      const [url, options] = (global.fetch as jest.Mock).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      expect(url.endsWith("/api/shares")).toBe(true);
+      expect(options.method).toBe("DELETE");
+      expect(JSON.parse(options.body as string)).toEqual({ share_ids: [7] });
     });
   });
 
@@ -581,20 +678,64 @@ describe("api methods", () => {
     });
   });
 
-  describe("api.deleteHistory", () => {
-    it("deletes history item", async () => {
+  describe("api.deleteHistoryRecords", () => {
+    it("sends a single batch delete request with history ids body", async () => {
+      const mockResponse = {
+        accepted_count: 2,
+        failed_count: 0,
+        results: [
+          {
+            history_id: 1,
+            ok: true,
+            state: "deleted",
+            accepted: true,
+            error: null,
+          },
+          {
+            history_id: 2,
+            ok: true,
+            state: "deleted",
+            accepted: true,
+            error: null,
+          },
+        ],
+      };
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ ok: true }),
+        json: () => Promise.resolve(mockResponse),
       });
 
-      const result = await api.deleteHistory(123);
-      
-      expect(result).toEqual({ ok: true });
+      const result = await api.deleteHistoryRecords([1, 2]);
+
+      expect(result).toEqual(mockResponse);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/history/123"),
-        expect.objectContaining({ method: "DELETE" })
+        expect.stringContaining("/api/history"),
+        expect.objectContaining({
+          method: "DELETE",
+          body: JSON.stringify({ history_ids: [1, 2] }),
+        })
       );
+    });
+
+    it("sends a single-element array for inline single delete", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ accepted_count: 1, failed_count: 0, results: [] }),
+      });
+
+      await api.deleteHistoryRecords([123]);
+
+      const [url, options] = (global.fetch as jest.Mock).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      expect(url.endsWith("/api/history")).toBe(true);
+      expect(options.method).toBe("DELETE");
+      expect(JSON.parse(options.body as string)).toEqual({
+        history_ids: [123],
+      });
     });
   });
 

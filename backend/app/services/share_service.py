@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.core.security import decrypt_credential, encrypt_credential, hash_passw
 from app.core.time_utils import ms_to_iso, now_ms
 from app.domain.errors import (
     BadRequestError,
+    DomainError,
     ForbiddenError,
     GoneError,
     InternalDomainError,
@@ -31,6 +33,8 @@ from app.repositories.errors import RepositoryConflictError
 from app.services.file_service import directory_entries, normalize_entry_parent, validate_subpath
 
 SHARE_TOKEN_EXPIRE_MINUTES = 30
+
+logger = logging.getLogger(__name__)
 
 
 def share_to_out(share: dict[str, Any], file_name: str, file_size: int) -> dict:
@@ -149,6 +153,55 @@ async def delete_share(share_id: int, user_id: int) -> dict:
     if not await shares_repo.delete_share(share_id, user_id):
         raise NotFoundError("分享不存在")
     return {"ok": True}
+
+
+async def bulk_delete_shares(user_id: int, share_ids: list[int]) -> dict:
+    accepted_count = 0
+    failed_count = 0
+    results: list[dict] = []
+    for share_id in dict.fromkeys(share_ids):
+        try:
+            await delete_share(share_id, user_id)
+            accepted_count += 1
+            results.append(
+                {
+                    "share_id": share_id,
+                    "ok": True,
+                    "state": "deleted",
+                    "accepted": True,
+                    "error": None,
+                }
+            )
+        except DomainError as exc:
+            failed_count += 1
+            results.append(
+                {
+                    "share_id": share_id,
+                    "ok": False,
+                    "state": "failed",
+                    "accepted": False,
+                    "error": exc.detail,
+                }
+            )
+        except Exception:
+            failed_count += 1
+            results.append(
+                {
+                    "share_id": share_id,
+                    "ok": False,
+                    "state": "failed",
+                    "accepted": False,
+                    "error": "删除分享失败",
+                }
+            )
+            logger.exception(
+                "批量删除分享失败 user_id=%s share_id=%s", user_id, share_id
+            )
+    return {
+        "accepted_count": accepted_count,
+        "failed_count": failed_count,
+        "results": results,
+    }
 
 
 async def revoke_all_shares(user_id: int) -> dict:

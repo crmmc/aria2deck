@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
+from pydantic import BaseModel
 
 from app.auth import AuthUser, require_limited_api_user
 from app.core.download_limiter import download_limiter
@@ -37,6 +38,24 @@ from app.services import share_service
 
 router = APIRouter(tags=["shares"])
 logger = logging.getLogger(__name__)
+
+
+class BatchDeleteSharesRequest(BaseModel):
+    share_ids: list[int]
+
+
+class ShareBatchItem(BaseModel):
+    share_id: int
+    ok: bool
+    state: str
+    accepted: bool
+    error: str | None = None
+
+
+class SharesBatchOperationResponse(BaseModel):
+    accepted_count: int
+    failed_count: int
+    results: list[ShareBatchItem]
 
 
 def _bearer_token(request: Request) -> str | None:
@@ -137,17 +156,30 @@ async def revoke_share(
     return result
 
 
-@router.delete("/api/shares/{share_id}")
-async def delete_share(
-    share_id: int,
+@router.delete("/api/shares", response_model=SharesBatchOperationResponse)
+async def delete_shares(
+    payload: BatchDeleteSharesRequest,
     user: AuthUser = Depends(require_limited_api_user),
-) -> dict:
-    try:
-        result = await share_service.delete_share(share_id, user.id)
-    except DomainError as exc:
-        raise_http(exc)
-    logger.info("删除分享 user_id=%s share_id=%s", user.id, share_id)
-    return result
+) -> SharesBatchOperationResponse:
+    if not payload.share_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="至少选择一个条目",
+        )
+    if len(payload.share_ids) > 1000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="一次最多操作 1000 个条目",
+        )
+    result = await share_service.bulk_delete_shares(user.id, payload.share_ids)
+    logger.info(
+        "批量删除分享 user_id=%s requested=%s accepted=%s failed=%s",
+        user.id,
+        len(payload.share_ids),
+        result["accepted_count"],
+        result["failed_count"],
+    )
+    return SharesBatchOperationResponse(**result)
 
 
 @router.put("/api/shares/revoke-all")

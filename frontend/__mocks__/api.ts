@@ -142,11 +142,19 @@ export const mockApi = {
   createTask: jest.fn().mockResolvedValue(createMockTask()),
   retryTask: jest.fn().mockResolvedValue(createMockTask()),
   uploadTorrent: jest.fn().mockResolvedValue(createMockTask()),
-  cancelTask: jest.fn().mockResolvedValue({ ok: true }),
+  cancelTasks: jest.fn().mockResolvedValue({
+    accepted_count: 1,
+    failed_count: 0,
+    results: [],
+  }),
 
   // History
   listHistory: jest.fn().mockResolvedValue([createMockTaskHistory()]),
-  deleteHistory: jest.fn().mockResolvedValue({ ok: true }),
+  deleteHistoryRecords: jest.fn().mockResolvedValue({
+    accepted_count: 1,
+    failed_count: 0,
+    results: [],
+  }),
   clearHistory: jest.fn().mockResolvedValue({ ok: true, count: 5 }),
 
   // Stats & Config
@@ -195,7 +203,7 @@ export const mockApi = {
     { name: "folder", size: 0, is_directory: true },
   ] as BrowseFileInfo[]),
   downloadFileUrl: jest.fn().mockReturnValue("http://localhost:8001/api/files/1/download"),
-  deleteFile: jest.fn().mockResolvedValue({ ok: true }),
+  deleteFiles: jest.fn().mockResolvedValue({ accepted_count: 1, failed_count: 0, results: [] }),
   renameFile: jest.fn().mockResolvedValue({ ok: true }),
 
   // Pack Tasks

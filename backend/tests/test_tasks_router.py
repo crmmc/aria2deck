@@ -1361,15 +1361,22 @@ class TestListTasks:
 
 class TestCancelTask:
     def test_cancel_task_unauthorized(self, client: TestClient) -> None:
-        response = client.delete("/api/tasks/1")
+        response = client.post("/api/tasks/cancel", json={"task_ids": [1]})
 
         assert response.status_code == 401
 
-    def test_cancel_task_not_found(self, authenticated_client: TestClient) -> None:
-        response = authenticated_client.delete("/api/tasks/99999")
+    def test_cancel_task_not_found_reports_item_failure(
+        self, authenticated_client: TestClient
+    ) -> None:
+        response = authenticated_client.post(
+            "/api/tasks/cancel", json={"task_ids": [99999]}
+        )
 
-        assert response.status_code == 404
-        assert "任务不存在" in response.json()["detail"]
+        assert response.status_code == 200
+        data = response.json()
+        assert data["accepted_count"] == 0
+        assert data["failed_count"] == 1
+        assert "任务不存在" in data["results"][0]["error"]
 
     def test_cancel_task_success(
         self,
@@ -1394,10 +1401,15 @@ class TestCancelTask:
         with patch(
             "app.services.task_service._get_client", return_value=cancel_client
         ):
-            response = authenticated_client.delete(f"/api/tasks/{task['id']}")
+            response = authenticated_client.post(
+                "/api/tasks/cancel", json={"task_ids": [task["id"]]}
+            )
 
         assert response.status_code == 200
-        assert response.json() == {"ok": True}
+        data = response.json()
+        assert data["accepted_count"] == 1
+        assert data["failed_count"] == 0
+        assert data["results"][0]["state"] == "cancelled"
         stored_task = asyncio.run(
             get_user_task(test_user["id"], global_download_id_of(task))
         )

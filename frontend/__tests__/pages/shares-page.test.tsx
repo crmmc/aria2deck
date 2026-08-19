@@ -18,7 +18,7 @@ jest.mock("@/lib/api", () => ({
   api: {
     listShares: jest.fn(),
     revokeShare: jest.fn(),
-    deleteShare: jest.fn(),
+    deleteShares: jest.fn(),
     revokeAllShares: jest.fn(),
   },
 }));
@@ -46,7 +46,11 @@ describe("SharesPage", () => {
     mockApi.listShares.mockResolvedValue([share] as never);
     mockApi.revokeAllShares.mockResolvedValue({ ok: true, count: 1 } as never);
     mockApi.revokeShare.mockResolvedValue({ ok: true } as never);
-    mockApi.deleteShare.mockResolvedValue({ ok: true } as never);
+    mockApi.deleteShares.mockResolvedValue({
+      accepted_count: 1,
+      failed_count: 0,
+      results: [],
+    } as never);
     Object.assign(navigator, {
       clipboard: {
         writeText: jest.fn().mockResolvedValue(undefined),
@@ -89,14 +93,69 @@ describe("SharesPage", () => {
     ).not.toBeInTheDocument();
   });
 
-  test("deletes a share after confirmation", async () => {
+  test("deletes a share after confirmation via a single-element batch", async () => {
     render(<SharesPage />);
 
     expect(await screen.findByText("分享管理")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
 
     await waitFor(() => {
-      expect(mockApi.deleteShare).toHaveBeenCalledWith(1);
+      expect(mockApi.deleteShares).toHaveBeenCalledTimes(1);
+      expect(mockApi.deleteShares).toHaveBeenCalledWith([1]);
+    });
+  });
+
+  test("batch delete sends a single batch request and shows accepted count", async () => {
+    mockApi.listShares.mockResolvedValue([
+      share,
+      { ...share, id: 2, share_code: "def456", file_name: "other.zip" },
+    ] as never);
+    mockApi.deleteShares.mockResolvedValue({
+      accepted_count: 2,
+      failed_count: 0,
+      results: [],
+    } as never);
+
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
+
+    await waitFor(() => {
+      expect(mockApi.deleteShares).toHaveBeenCalledTimes(1);
+      expect(mockApi.deleteShares).toHaveBeenCalledWith([1, 2]);
+    });
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith(
+        "已删除 2 条分享记录",
+        "success"
+      );
+    });
+  });
+
+  test("batch delete shows warning toast on partial failure", async () => {
+    mockApi.listShares.mockResolvedValue([
+      share,
+      { ...share, id: 2, share_code: "def456", file_name: "other.zip" },
+    ] as never);
+    mockApi.deleteShares.mockResolvedValue({
+      accepted_count: 1,
+      failed_count: 1,
+      results: [],
+    } as never);
+
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith(
+        "已删除 1 条分享记录，1 条删除失败",
+        "warning"
+      );
     });
   });
 

@@ -404,7 +404,15 @@ export default function TasksPage() {
       });
 
       try {
-        await api.cancelTask(id);
+        const result = await api.cancelTasks([id]);
+        const item = result.results[0];
+        if (!item?.ok) {
+          showToast(
+            (isFailedTask ? "删除" : "取消") + "失败：" + (item?.error ?? "未知错误"),
+            "error"
+          );
+          return;
+        }
         deletedTaskIds.add(id);
         setTasks((prev) => prev.filter((t) => t.id !== id));
         setItemSelected(id, false);
@@ -462,12 +470,21 @@ export default function TasksPage() {
 
     setIsBatchOperating(true);
     try {
-      await Promise.all(activeTasks.map((t) => api.cancelTask(t.id)));
-      const cancelledIds = new Set(activeTasks.map((t) => t.id));
+      const result = await api.cancelTasks(activeTasks.map((t) => t.id));
+      const cancelledIds = new Set(
+        result.results.filter((r) => r.ok).map((r) => r.task_id)
+      );
       cancelledIds.forEach((id) => deletedTaskIds.add(id));
       setTasks((prev) => prev.filter((t) => !cancelledIds.has(t.id)));
       clearSelection();
-      showToast(`已取消 ${activeTasks.length} 个任务`, "success");
+      if (result.failed_count > 0) {
+        showToast(
+          `已取消 ${result.accepted_count} 个任务，${result.failed_count} 个取消失败`,
+          "warning"
+        );
+      } else {
+        showToast(`已取消 ${result.accepted_count} 个任务`, "success");
+      }
     } catch (err) {
       showToast("批量取消失败：" + (err as Error).message, "error");
     } finally {

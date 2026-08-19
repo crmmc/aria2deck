@@ -59,10 +59,24 @@ class TestCancelTaskEndpoint:
         with patch(
             "app.services.task_service._get_client", return_value=cancel_client
         ):
-            response = authenticated_client.delete(f"/api/tasks/{task['id']}")
+            response = authenticated_client.post(
+                "/api/tasks/cancel", json={"task_ids": [task["id"]]}
+            )
 
         assert response.status_code == 200
-        assert response.json() == {"ok": True}
+        assert response.json() == {
+            "accepted_count": 1,
+            "failed_count": 0,
+            "results": [
+                {
+                    "task_id": task["id"],
+                    "ok": True,
+                    "state": "cancelled",
+                    "accepted": True,
+                    "error": None,
+                }
+            ],
+        }
 
         global_download = asyncio.run(
             get_global_by_resource_key("http:cancel-endpoint")
@@ -120,10 +134,13 @@ class TestCancelTaskEndpoint:
         with patch(
             "app.services.task_service._get_client", return_value=cancel_client
         ):
-            response = authenticated_client.delete(f"/api/tasks/{first['id']}")
+            response = authenticated_client.post(
+                "/api/tasks/cancel", json={"task_ids": [first["id"]]}
+            )
 
         assert response.status_code == 200
-        assert response.json() == {"ok": True}
+        assert response.json()["accepted_count"] == 1
+        assert response.json()["failed_count"] == 0
 
         global_download = asyncio.run(
             get_global_by_resource_key("http:shared-endpoint")
@@ -144,13 +161,19 @@ class TestCancelTaskEndpoint:
         assert global_download["aria2_gid"] == "gid-shared-endpoint"
         cancel_client.remove.assert_not_awaited()
 
-    def test_cancel_missing_v0_task_returns_404(
+    def test_cancel_missing_v0_task_reports_item_failure(
         self,
         authenticated_client: TestClient,
     ) -> None:
-        response = authenticated_client.delete("/api/tasks/99999")
+        response = authenticated_client.post(
+            "/api/tasks/cancel", json={"task_ids": [99999]}
+        )
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        data = response.json()
+        assert data["accepted_count"] == 0
+        assert data["failed_count"] == 1
+        assert data["results"][0]["error"] == "任务不存在"
 
     def test_cancel_backend_remove_failure_still_cancels_task(
         self,
@@ -171,10 +194,15 @@ class TestCancelTaskEndpoint:
         with patch(
             "app.services.task_service._get_client", return_value=cancel_client
         ):
-            response = authenticated_client.delete(f"/api/tasks/{task['id']}")
+            response = authenticated_client.post(
+                "/api/tasks/cancel", json={"task_ids": [task["id"]]}
+            )
 
         assert response.status_code == 200
-        assert response.json() == {"ok": True}
+        data = response.json()
+        assert data["accepted_count"] == 1
+        assert data["failed_count"] == 0
+        assert data["results"][0]["ok"] is True
 
         stored_task = asyncio.run(
             get_user_task(test_user["id"], global_download_id_of(task))
@@ -192,3 +220,261 @@ class TestCancelTaskEndpoint:
             cancel_client.remove.await_count
             + cancel_client.remove_download_result.await_count
         ) >= 1
+
+
+class TestCancelTasksBatchEndpoint:
+    def test_cancel_tasks_batch_success_retains_records(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        """批量取消成功：响应受理语义，任务记录保留并终态化（AC-7）。"""
+        task_a, _ = _create_download_for_user(
+            user=test_user,
+            resource_key="http:batch-cancel-a",
+            uri="https://example.com/batch-cancel-a.bin",
+            display_name="batch-cancel-a.bin",
+            total_bytes=700,
+            gid="gid-batch-cancel-a",
+        )
+        task_b, _ = _create_download_for_user(
+            user=test_user,
+            resource_key="http:batch-cancel-b",
+            uri="https://example.com/batch-cancel-b.bin",
+            display_name="batch-cancel-b.bin",
+            total_bytes=800,
+            gid="gid-batch-cancel-b",
+        )
+        cancel_client = make_aria2_client()
+
+        with patch(
+            "app.services.task_service._get_client", return_value=cancel_client
+        ):
+            response = authenticated_client.post(
+                "/api/tasks/cancel",
+                json={"task_ids": [task_a["id"], task_b["id"]]},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["accepted_count"] == 2
+        assert data["failed_count"] == 0
+        assert data["results"] == [
+            {
+                "task_id": task_a["id"],
+                "ok": True,
+                "state": "cancelled",
+                "accepted": True,
+                "error": None,
+            },
+            {
+                "task_id": task_b["id"],
+                "ok": True,
+                "state": "cancelled",
+                "accepted": True,
+                "error": None,
+            },
+        ]
+
+        # AC-7：取消 ≠ 删除，任务记录保留且状态终态化，不触发文件删除。
+        for task in (task_a, task_b):
+            stored_task = asyncio.run(
+                get_user_task(test_user["id"], global_download_id_of(task))
+            )
+            assert stored_task is not None
+            assert stored_task["status"] == "cancelled"
+            assert stored_task["reserved_bytes"] == 0
+            assert stored_task["finished_at_ms"] is not None
+            global_download = asyncio.run(
+                get_global_by_resource_key(
+                    "http:batch-cancel-a"
+                    if task is task_a
+                    else "http:batch-cancel-b"
+                )
+            )
+            assert global_download is not None
+            assert global_download["status"] == "cancelled"
+            assert global_download["aria2_gid"] is None
+        usage = asyncio.run(
+            get_usage(test_user["id"], quota_bytes=test_user["quota_bytes"])
+        )
+        assert usage["reserved_bytes"] == 0
+        assert cancel_client.remove.await_count == 2
+
+    def test_cancel_tasks_partial_failure_returns_chinese_error(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        task, _ = _create_download_for_user(
+            user=test_user,
+            resource_key="http:batch-partial",
+            uri="https://example.com/batch-partial.bin",
+            display_name="batch-partial.bin",
+            total_bytes=500,
+            gid="gid-batch-partial",
+        )
+        cancel_client = make_aria2_client()
+
+        with patch(
+            "app.services.task_service._get_client", return_value=cancel_client
+        ):
+            response = authenticated_client.post(
+                "/api/tasks/cancel",
+                json={"task_ids": [task["id"], 99999]},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["accepted_count"] == 1
+        assert data["failed_count"] == 1
+        by_id = {item["task_id"]: item for item in data["results"]}
+        assert by_id[task["id"]]["ok"] is True
+        assert by_id[99999]["ok"] is False
+        assert by_id[99999]["state"] == "failed"
+        assert by_id[99999]["accepted"] is False
+        assert by_id[99999]["error"] == "任务不存在"
+
+        stored_task = asyncio.run(
+            get_user_task(test_user["id"], global_download_id_of(task))
+        )
+        assert stored_task is not None
+        assert stored_task["status"] == "cancelled"
+
+    def test_cancel_tasks_deduplicates_ids(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        task, _ = _create_download_for_user(
+            user=test_user,
+            resource_key="http:batch-dedup",
+            uri="https://example.com/batch-dedup.bin",
+            display_name="batch-dedup.bin",
+            total_bytes=300,
+            gid="gid-batch-dedup",
+        )
+        cancel_client = make_aria2_client()
+
+        with patch(
+            "app.services.task_service._get_client", return_value=cancel_client
+        ):
+            response = authenticated_client.post(
+                "/api/tasks/cancel",
+                json={"task_ids": [task["id"]] * 3},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["results"]) == 1
+        assert data["accepted_count"] == 1
+        assert data["failed_count"] == 0
+        assert cancel_client.remove.await_count == 1
+
+    def test_cancel_tasks_empty_list_rejected(
+        self,
+        authenticated_client: TestClient,
+    ) -> None:
+        response = authenticated_client.post("/api/tasks/cancel", json={"task_ids": []})
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == "至少选择一个条目"
+
+    def test_cancel_tasks_over_limit_rejected(
+        self,
+        authenticated_client: TestClient,
+    ) -> None:
+        response = authenticated_client.post(
+            "/api/tasks/cancel",
+            json={"task_ids": list(range(1001))},
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == "一次最多操作 1000 个条目"
+
+    def test_cancel_tasks_unauthorized(self, client: TestClient) -> None:
+        response = client.post("/api/tasks/cancel", json={"task_ids": [1]})
+
+        assert response.status_code == 401
+
+    def test_cancel_tasks_consumes_single_authenticated_api_unit(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        task, _ = _create_download_for_user(
+            user=test_user,
+            resource_key="http:batch-ratelimit",
+            uri="https://example.com/batch-ratelimit.bin",
+            display_name="batch-ratelimit.bin",
+            total_bytes=400,
+            gid="gid-batch-ratelimit",
+        )
+
+        from app.core.rate_limit import api_limiter
+        from app.core.rate_limit_config import rate_limit_config
+
+        asyncio.run(api_limiter.clear_all())
+        original_limit = rate_limit_config.authenticated_api
+        rate_limit_config.authenticated_api = 2
+        try:
+            with patch(
+                "app.services.task_service._get_client",
+                return_value=make_aria2_client(),
+            ):
+                response = authenticated_client.post(
+                    "/api/tasks/cancel",
+                    json={"task_ids": [task["id"], 99999]},
+                )
+        finally:
+            rate_limit_config.authenticated_api = original_limit
+
+        assert response.status_code == 200
+        remaining = asyncio.run(
+            api_limiter.get_remaining(
+                test_user["id"], "authenticated_api", limit=2
+            )
+        )
+        assert remaining == 1
+
+    def test_cancel_tasks_batch_of_100_records_duration(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ) -> None:
+        """spec §5 风险证据：mock aria2 后端下批量取消 100 个任务的耗时。
+
+        仅记录耗时（stdout 打印 perf-evidence 行），不设硬阈值断言。
+        实测证据（M13 Task 4, 本机 darwin）: 见报告中 TDD Evidence 一节。
+        """
+        import time
+
+        tasks = []
+        for index in range(100):
+            task, _ = _create_download_for_user(
+                user=test_user,
+                resource_key=f"http:bulk100-{index}",
+                uri=f"https://example.com/bulk100-{index}.bin",
+                display_name=f"bulk100-{index}.bin",
+                total_bytes=100,
+                gid=f"gid-bulk100-{index}",
+            )
+            tasks.append(task)
+        cancel_client = make_aria2_client()
+
+        with patch(
+            "app.services.task_service._get_client", return_value=cancel_client
+        ):
+            started = time.perf_counter()
+            response = authenticated_client.post(
+                "/api/tasks/cancel",
+                json={"task_ids": [task["id"] for task in tasks]},
+            )
+            elapsed = time.perf_counter() - started
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["accepted_count"] == 100
+        assert data["failed_count"] == 0
+        assert cancel_client.remove.await_count == 100
+        print(f"\n[perf-evidence] POST /api/tasks/cancel x100 elapsed: {elapsed:.3f}s")

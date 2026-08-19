@@ -460,15 +460,25 @@ def test_delete_file_endpoint_broadcasts_affected_task_update(
     task_id = asyncio.run(_seed_download())
 
     try:
-        response = authenticated_client.delete("/api/files/shared_hash")
+        response = authenticated_client.request(
+            "DELETE", "/api/files", json={"file_hashes": ["shared_hash"]}
+        )
     finally:
         asyncio.run(remove_connections_for_user(test_user["id"]))
 
-    assert response.status_code == 202
+    assert response.status_code == 200
     assert response.json() == {
-        "ok": True,
-        "state": "pending",
-        "accepted": True,
+        "accepted_count": 1,
+        "failed_count": 0,
+        "results": [
+            {
+                "content_hash": "shared_hash",
+                "ok": True,
+                "state": "pending",
+                "accepted": True,
+                "error": None,
+            }
+        ],
     }
     async_mock.send_json.assert_awaited_once()
     payload = async_mock.send_json.await_args.args[0]

@@ -174,34 +174,114 @@ class TestListHistory:
         assert response.status_code == 401
 
 
-class TestDeleteSingleHistory:
-    def test_delete_history_success(
+class TestBatchDeleteHistory:
+    def test_batch_delete_removes_specified_and_keeps_others(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        records = [
+            asyncio.run(
+                _create_user_task_row(
+                    user_id=test_user["id"],
+                    resource_key=f"http:batch-delete-{index}",
+                    status="completed",
+                    name=f"file_{index}.zip",
+                    uri=f"https://example.com/file_{index}.zip",
+                )
+            )
+            for index in range(3)
+        ]
+
+        response = authenticated_client.request(
+            "DELETE",
+            "/api/history",
+            json={"history_ids": [records[0]["id"], records[1]["id"]]},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["accepted_count"] == 2
+        assert data["failed_count"] == 0
+        assert [item["history_id"] for item in data["results"]] == [
+            records[0]["id"],
+            records[1]["id"],
+        ]
+        assert all(item["ok"] is True for item in data["results"])
+        assert all(item["state"] == "deleted" for item in data["results"])
+        assert all(item["accepted"] is True for item in data["results"])
+        assert all(item["error"] is None for item in data["results"])
+
+        remaining = authenticated_client.get("/api/history").json()
+        assert [item["id"] for item in remaining] == [records[2]["id"]]
+
+    def test_batch_delete_partial_failure_continues_with_chinese_error(
         self, authenticated_client: TestClient, history_record: dict
     ) -> None:
-        response = authenticated_client.delete(f"/api/history/{history_record['id']}")
+        response = authenticated_client.request(
+            "DELETE",
+            "/api/history",
+            json={"history_ids": [history_record["id"], 99999]},
+        )
+
         assert response.status_code == 200
-        assert response.json()["ok"] is True
+        data = response.json()
+        assert data["accepted_count"] == 1
+        assert data["failed_count"] == 1
+        assert data["results"][0] == {
+            "history_id": history_record["id"],
+            "ok": True,
+            "state": "deleted",
+            "accepted": True,
+            "error": None,
+        }
+        assert data["results"][1] == {
+            "history_id": 99999,
+            "ok": False,
+            "state": "failed",
+            "accepted": False,
+            "error": "历史记录不存在",
+        }
 
-        verify_response = authenticated_client.get("/api/history")
-        assert verify_response.json() == []
+        assert authenticated_client.get("/api/history").json() == []
 
-    def test_delete_history_not_found(self, authenticated_client: TestClient) -> None:
-        response = authenticated_client.delete("/api/history/99999")
-        assert response.status_code == 404
+    def test_batch_delete_deduplicates_repeated_ids(
+        self, authenticated_client: TestClient, history_record: dict
+    ) -> None:
+        response = authenticated_client.request(
+            "DELETE",
+            "/api/history",
+            json={"history_ids": [history_record["id"], history_record["id"]]},
+        )
 
-    def test_delete_other_user_history(
+        assert response.status_code == 200
+        data = response.json()
+        assert data["accepted_count"] == 1
+        assert data["failed_count"] == 0
+        assert [item["history_id"] for item in data["results"]] == [
+            history_record["id"]
+        ]
+
+    def test_batch_delete_other_user_history_reports_failure(
         self, authenticated_client: TestClient, other_user_history: dict
     ) -> None:
-        response = authenticated_client.delete(f"/api/history/{other_user_history['id']}")
-        assert response.status_code == 404
+        response = authenticated_client.request(
+            "DELETE",
+            "/api/history",
+            json={"history_ids": [other_user_history["id"]]},
+        )
 
-    def test_delete_active_user_task_not_history(
+        assert response.status_code == 200
+        data = response.json()
+        assert data["accepted_count"] == 0
+        assert data["failed_count"] == 1
+        assert data["results"][0]["error"] == "历史记录不存在"
+
+    def test_batch_delete_active_user_task_not_history(
         self, authenticated_client: TestClient, test_user: dict, temp_db: str
     ) -> None:
         task = asyncio.run(
             _create_user_task_row(
                 user_id=test_user["id"],
-                resource_key="http:active-delete-ignore",
+                resource_key="http:active-batch-delete-ignore",
                 status="active",
                 name="active.zip",
                 uri="https://example.com/active.zip",
@@ -209,15 +289,72 @@ class TestDeleteSingleHistory:
             )
         )
 
-        response = authenticated_client.delete(f"/api/history/{task['id']}")
+        response = authenticated_client.request(
+            "DELETE", "/api/history", json={"history_ids": [task["id"]]}
+        )
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        data = response.json()
+        assert data["accepted_count"] == 0
+        assert data["failed_count"] == 1
+        assert data["results"][0]["error"] == "历史记录不存在"
 
-    def test_delete_history_unauthorized(
+    def test_batch_delete_empty_ids_rejected_422(
+        self, authenticated_client: TestClient
+    ) -> None:
+        response = authenticated_client.request(
+            "DELETE", "/api/history", json={"history_ids": []}
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"] == "至少选择一个条目"
+
+    def test_batch_delete_over_limit_rejected_422(
+        self, authenticated_client: TestClient
+    ) -> None:
+        response = authenticated_client.request(
+            "DELETE",
+            "/api/history",
+            json={"history_ids": list(range(1001))},
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"] == "一次最多操作 1000 个条目"
+
+    def test_batch_delete_unauthorized(
         self, client: TestClient, history_record: dict
     ) -> None:
-        response = client.delete(f"/api/history/{history_record['id']}")
+        response = client.request(
+            "DELETE", "/api/history", json={"history_ids": [history_record["id"]]}
+        )
         assert response.status_code == 401
+
+    def test_batch_delete_consumes_single_authenticated_api_unit(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+        history_record: dict,
+    ) -> None:
+        from app.core.rate_limit import api_limiter
+        from app.core.rate_limit_config import rate_limit_config
+
+        asyncio.run(api_limiter.clear_all())
+        original_limit = rate_limit_config.authenticated_api
+        rate_limit_config.authenticated_api = 2
+        try:
+            response = authenticated_client.request(
+                "DELETE",
+                "/api/history",
+                json={"history_ids": [history_record["id"], 99999]},
+            )
+        finally:
+            rate_limit_config.authenticated_api = original_limit
+
+        assert response.status_code == 200
+        remaining = asyncio.run(
+            api_limiter.get_remaining(
+                test_user["id"], "authenticated_api", limit=2
+            )
+        )
+        assert remaining == 1
 
 
 class TestClearHistory:

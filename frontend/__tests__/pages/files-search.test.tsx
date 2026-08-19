@@ -39,7 +39,7 @@ jest.mock("@/lib/api", () => ({
     browseFile: jest.fn(),
     searchFiles: jest.fn(),
     downloadFileUrl: jest.fn(),
-    deleteFile: jest.fn(),
+    deleteFiles: jest.fn(),
     calculatePackSize: jest.fn(),
     getAvailableSpace: jest.fn(),
     createPackTask: jest.fn(),

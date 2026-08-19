@@ -15,6 +15,7 @@ from app.domain.errors import (
     BadGatewayError,
     BadRequestError,
     ConflictError,
+    DomainError,
     NotFoundError,
 )
 from app.repositories.task.user_tasks import (
@@ -260,6 +261,31 @@ async def cancel_task(
 
     logger.info("取消任务成功 user_id=%s task_id=%s", user_id, user_task_id)
     return {"ok": True}
+
+
+async def bulk_cancel_tasks(*, user_id: int, task_ids: list[int], quota_bytes: int) -> dict:
+    """批量取消：逐条复用 cancel_task（记录保留、终态化，不触发文件删除）。"""
+    results: list[dict] = []
+    for task_id in dict.fromkeys(task_ids):
+        try:
+            await cancel_task(
+                user_id=user_id,
+                user_task_id=task_id,
+                quota_bytes=quota_bytes,
+                tolerate_backend_failure=False,
+            )
+            results.append({"task_id": task_id, "ok": True, "state": "cancelled", "accepted": True, "error": None})
+        except DomainError as exc:
+            results.append({"task_id": task_id, "ok": False, "state": "failed", "accepted": False, "error": exc.detail})
+        except Exception:
+            results.append({"task_id": task_id, "ok": False, "state": "failed", "accepted": False, "error": "取消下载任务失败"})
+            logger.exception("批量取消任务失败 user_id=%s task_id=%s", user_id, task_id)
+    accepted_count = sum(1 for item in results if item["ok"])
+    logger.info(
+        "批量取消任务完成 user_id=%s requested=%s accepted=%s failed=%s",
+        user_id, len(task_ids), accepted_count, len(results) - accepted_count,
+    )
+    return {"accepted_count": accepted_count, "failed_count": len(results) - accepted_count, "results": results}
 
 
 async def clear_history(user_id: int) -> dict:

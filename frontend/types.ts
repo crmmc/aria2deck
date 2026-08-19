@@ -268,6 +268,62 @@ export type FileUsersResponse = {
   users: FileUserInfo[];
 };
 
+export type BatchDeleteFileResult = {
+  content_hash: string;
+  ok: boolean;
+  state: string;
+  accepted: boolean;
+  error: string | null;
+};
+
+export type BatchDeleteFilesResponse = {
+  accepted_count: number;
+  failed_count: number;
+  results: BatchDeleteFileResult[];
+};
+
+export type BatchDeleteShareResult = {
+  share_id: number;
+  ok: boolean;
+  state: string;
+  accepted: boolean;
+  error: string | null;
+};
+
+export type BatchDeleteSharesResponse = {
+  accepted_count: number;
+  failed_count: number;
+  results: BatchDeleteShareResult[];
+};
+
+export type BatchDeleteHistoryResult = {
+  history_id: number;
+  ok: boolean;
+  state: string;
+  accepted: boolean;
+  error: string | null;
+};
+
+export type BatchDeleteHistoryResponse = {
+  accepted_count: number;
+  failed_count: number;
+  results: BatchDeleteHistoryResult[];
+};
+
+export type BatchCancelTaskResult = {
+  task_id: number;
+  ok: boolean;
+  state: string;
+  accepted: boolean;
+  error: string | null;
+};
+
+export type BatchCancelTasksResponse = {
+  accepted_count: number;
+  failed_count: number;
+  results: BatchCancelTaskResult[];
+};
+
 export type BulkDeleteResponse = {
   deleted_count: number;
   failed_ids: number[];

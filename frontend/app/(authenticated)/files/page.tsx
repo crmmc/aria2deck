@@ -314,7 +314,12 @@ export default function FilesPage() {
     if (!confirmed) return;
 
     try {
-      await api.deleteFile(file.content_hash);
+      const result = await api.deleteFiles([file.content_hash]);
+      const item = result.results[0];
+      if (!item?.ok) {
+        showToast(`删除失败：${item?.error ?? "未知错误"}`, "error");
+        return;
+      }
       loadFiles(currentPage, pageSize);
     } catch (err) {
       showToast(`删除失败: ${(err as Error).message}`, "error");
@@ -338,10 +343,19 @@ export default function FilesPage() {
 
     setIsBatchOperating(true);
     try {
-      await Promise.all(selectedList.map((f) => api.deleteFile(f.content_hash)));
-      showToast(`已删除 ${selectedList.length} 个文件`, "success");
+      const result = await api.deleteFiles(
+        selectedList.map((f) => f.content_hash)
+      );
+      if (result.failed_count > 0) {
+        showToast(
+          `已受理 ${result.accepted_count} 个文件，${result.failed_count} 个删除失败`,
+          "warning"
+        );
+      } else {
+        showToast(`已删除 ${result.accepted_count} 个文件`, "success");
+      }
       // 删除后当前页可能已空，计算应回到哪一页
-      const remainingTotal = totalFiles - selectedList.length;
+      const remainingTotal = totalFiles - result.accepted_count;
       const maxPage = Math.max(1, Math.ceil(remainingTotal / pageSize));
       const targetPage = Math.min(currentPage, maxPage);
       if (targetPage !== currentPage) {
