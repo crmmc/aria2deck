@@ -17,7 +17,7 @@
 
 **下载管理** — 支持磁力链接、种子文件、HTTP/FTP，可批量添加。BT 种子支持选择性下载（预览文件列表，勾选需要的文件）。WebSocket 实时推送状态，任务完成/失败桌面通知提醒。
 
-**文件管理** — 在线浏览、重命名、下载、删除。多文件打包下载（ZIP / TAR.ZST），支持目录结构浏览。
+**文件管理** — 在线浏览、重命名、下载、删除，支持全库文件名搜索。多文件打包下载（ZIP / TAR.ZST），支持目录结构浏览。
 
 **文件分享** — 生成分享链接，支持密码保护、过期时间、下载次数限制，随时可撤销。
 
@@ -97,7 +97,7 @@ docker run -d \
 
 | 层 | 技术 |
 |----|------|
-| 后端 | FastAPI + SQLModel + aiohttp |
+| 后端 | FastAPI + SQLAlchemy Core + aiohttp |
 | 前端 | Next.js 14 + TypeScript |
 | 数据库 | SQLite |
 | 下载引擎 | aria2 (JSON-RPC) |
@@ -121,6 +121,9 @@ docker run -d \
 | `ARIA2DECK_INITIAL_ADMIN_PASSWORD` | 首次创建管理员时使用，至少 16 个字符 | - |
 | `ARIA2C_CORS_ORIGINS` | 额外允许的 CORS 域名，逗号分隔 | - |
 | `ARIA2C_ALLOW_NULL_ORIGIN` | 是否允许 `Origin: null`，仅受控客户端需要时设为 `true` | `false` |
+| `ARIA2C_DEBUG` | 调试模式（Cookie 关闭 Secure、SQL echo 等），生产保持 `false` | `false` |
+| `ARIA2C_DEV_RESET_ADMIN_PASSWORD` | 开发模式启动时按 `ARIA2DECK_INITIAL_ADMIN_PASSWORD` 重置 admin 密码 | `false` |
+| `ARIA2DECK_INTERNAL_BASE_URL` | 服务自身回源地址（内部请求用；HTTP 时必须指向 loopback、内网 IP 或单标签服务名） | `http://127.0.0.1:8001` |
 
 </details>
 
@@ -180,6 +183,15 @@ make dev-front    # 前端开发服务器（http://localhost:3000）
 ```
 
 开发态页面路径统一使用无后缀路由，例如 `http://localhost:3000/tasks`、`/files`、`/shares`、`/history`、`/storage`、`/settings`。
+
+常用命令与测试：
+
+```bash
+make run                      # 构建前端并在 8001 端口启动完整服务
+make build                    # 前端改动后重新构建并部署静态文件到后端
+cd backend && uv run pytest   # 后端测试（后端改动后必跑）
+cd frontend && bun run test   # 前端测试（前端改动后必跑）
+```
 
 </details>
 
