@@ -28,6 +28,7 @@ from app.modules.pack import PackTaskManager, calculate_folder_size, get_reserve
 from app.repositories.pack import (
     PackAdmissionError,
     create_pending_pack_with_reservation,
+    list_pack_dispatch_task_ids,
     persist_pack_prepared,
 )
 from app.domain.errors import BadRequestError, ForbiddenError
@@ -1351,6 +1352,36 @@ async def test_transient_pack_attempt_persists_retry_and_exits(
     assert current["retry_count"] == 1
     assert current["next_retry_at_ms"] > now_ms()
     assert task["id"] not in PackTaskManager._running_tasks
+
+
+@pytest.mark.asyncio
+async def test_dispatch_retry_due_filter_is_directional(temp_db: str) -> None:
+    """到期筛选双向正确：未到期的任务不被拾起，已到期的被拾起"""
+    user = await create_user_v0(username="pack_retry_due_filter")
+    due_task = await _insert_pack_task(
+        user_id=user["id"], source_ids=[1], source_size_bytes=1,
+        reserved_bytes=100, status="pending",
+    )
+    future_task = await _insert_pack_task(
+        user_id=user["id"], source_ids=[2], source_size_bytes=1,
+        reserved_bytes=100, status="pending",
+    )
+    current = now_ms()
+    async with transaction() as conn:
+        await conn.execute(pack_tasks.update().where(
+            pack_tasks.c.id == due_task["id"]
+        ).values(next_retry_at_ms=current - 1000))
+        await conn.execute(pack_tasks.update().where(
+            pack_tasks.c.id == future_task["id"]
+        ).values(next_retry_at_ms=current + 10_000_000))
+
+    picked = await list_pack_dispatch_task_ids(due_at_ms=current)
+    assert due_task["id"] in picked
+    assert future_task["id"] not in picked
+
+    later = await list_pack_dispatch_task_ids(due_at_ms=current + 20_000_000)
+    assert due_task["id"] in later
+    assert future_task["id"] in later
 
 
 @pytest.mark.asyncio

@@ -72,8 +72,12 @@ class TestApiRateLimiter:
         # 接口 B 不受影响
         assert await limiter.is_allowed(user_id, "endpoint_b", limit=3, window_seconds=60)
 
-    async def test_window_expires(self):
-        """测试时间窗口过后限制解除"""
+    async def test_window_expires(self, monkeypatch):
+        """测试时间窗口过后限制解除（时钟推进，不真实 sleep）"""
+        current_time = [10.0]
+        monkeypatch.setattr(
+            "app.core.rate_limit.monotonic", lambda: current_time[0]
+        )
         limiter = ApiRateLimiter()
         user_id = 1
         endpoint = "test"
@@ -85,8 +89,8 @@ class TestApiRateLimiter:
         # 被阻止
         assert not await limiter.is_allowed(user_id, endpoint, limit=3, window_seconds=1)
 
-        # 等待窗口过期
-        await asyncio.sleep(1.1)
+        # 推进时钟使窗口过期
+        current_time[0] = 11.1
 
         # 应该重新允许
         assert await limiter.is_allowed(user_id, endpoint, limit=3, window_seconds=1)

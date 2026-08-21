@@ -394,3 +394,45 @@ async def test_machine_stats_scans_in_thread_and_uses_short_cache(
     assert (await task)["download_used"] == 123
     assert (await stats_service.get_machine_stats(None))["download_used"] == 123
     assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_machine_stats_expired_cache_triggers_rescan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TTL 过期后缓存不命中，触发重扫并返回新值"""
+    from time import monotonic
+
+    from app.services import stats_service
+
+    calls: list[int] = []
+    sizes = iter([456, 123])
+
+    def scan(_path):
+        calls.append(1)
+        return next(sizes)
+
+    monkeypatch.setattr(stats_service, "get_directory_size_bytes", scan)
+    monkeypatch.setattr(stats_service.shutil, "disk_usage", lambda _path: _disk_usage())
+    monkeypatch.setattr(
+        stats_service,
+        "_machine_size_cache",
+        (str(settings.download_dir), monotonic() - 1, 111),
+    )
+
+    assert (await stats_service.get_machine_stats(None))["download_used"] == 456
+    assert len(calls) == 1
+
+    # 过期项 + 并发调用：锁内 double-check 应复用第一次重扫结果，只扫一次
+    monkeypatch.setattr(
+        stats_service,
+        "_machine_size_cache",
+        (str(settings.download_dir), monotonic() - 1, 123),
+    )
+    results = await asyncio.gather(
+        stats_service.get_machine_stats(None),
+        stats_service.get_machine_stats(None),
+    )
+    assert all(item["download_used"] == 123 for item in results)
+    assert len(calls) == 2
+    assert stats_service._machine_size_cache[2] == 123
