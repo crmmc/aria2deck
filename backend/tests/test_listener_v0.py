@@ -934,7 +934,11 @@ async def test_completed_download_over_actual_size_limit_fails_and_cleans_up(
 
     assert updated["status"] == "failed"
     assert updated["error_code"] == "max_task_size_exceeded"
-    assert updated["error_message"] == "任务大小超过系统限制"
+    assert updated["error_message"] == (
+        "文件大小 0.00 GB 超过系统限制 0.00 GB"
+    )
+    assert updated["total_bytes"] == 5
+    assert updated["size_known"] == 1
     assert updated_task["status"] == "failed"
     assert updated_task["reserved_bytes"] == 0
     assert usage["used_bytes"] == 0

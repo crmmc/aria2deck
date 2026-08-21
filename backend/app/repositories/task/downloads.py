@@ -167,6 +167,7 @@ async def _fail_download_rows(
     message: str,
     error_code: str,
     timestamp: int,
+    size_bytes: int | None = None,
 ) -> None:
     tasks = (
         await conn.execute(
@@ -180,16 +181,20 @@ async def _fail_download_rows(
         await _fail_active_task_row(
             conn, task, message=message, timestamp=timestamp
         )
+    global_values: dict[str, Any] = {
+        "status": "failed",
+        "disk_reserved_bytes": 0,
+        "error_code": error_code,
+        "error_message": message,
+        "updated_at_ms": timestamp,
+    }
+    if size_bytes is not None:
+        global_values["total_bytes"] = size_bytes
+        global_values["size_known"] = 1
     await conn.execute(
         update(global_downloads)
         .where(global_downloads.c.id == download["id"])
-        .values(
-            status="failed",
-            disk_reserved_bytes=0,
-            error_code=error_code,
-            error_message=message,
-            updated_at_ms=timestamp,
-        )
+        .values(**global_values)
     )
 
 
@@ -402,8 +407,13 @@ async def _reconcile_download_size_locked(
     limit = int(download["size_limit_bytes"] or size_limit_bytes)
     if candidate > limit:
         await _fail_download_rows(
-            conn, download, message="任务大小超过系统限制",
+            conn, download,
+            message=(
+                f"文件大小 {candidate / 1024**3:.2f} GB "
+                f"超过系统限制 {limit / 1024**3:.2f} GB"
+            ),
             error_code="max_task_size_exceeded", timestamp=timestamp,
+            size_bytes=candidate,
         )
         return SizeReconcileResult(outcome="max_task_size", rejected_user_ids=[])
 
@@ -425,6 +435,7 @@ async def _reconcile_download_size_locked(
         await _fail_download_rows(
             conn, download, message="磁盘可用空间不足",
             error_code="disk_budget_exceeded", timestamp=timestamp,
+            size_bytes=candidate,
         )
         return SizeReconcileResult(
             outcome="disk_budget", rejected_user_ids=rejected
