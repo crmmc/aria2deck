@@ -139,9 +139,9 @@ def get_config_value_sync(key: str) -> str | None:
     now = time()
     cached = _config_cache.get(key)
     if cached is not None:
-        value, ts = cached
-        if now - ts < _CACHE_TTL:
-            return value
+        # 缓存命中：TTL 内直接返回；过期后 serve-stale 返回最后加载的库值，不回退默认值
+        value, _ts = cached
+        return value
 
     value = _SYNC_DEFAULTS.get(key)
     _config_cache[key] = (value, now)

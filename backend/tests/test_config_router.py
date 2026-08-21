@@ -470,6 +470,67 @@ class TestConfigHelperFunctions:
 
         assert get_config_value_sync("site_title") == "Aria2 控制器"
 
+    def test_get_config_value_sync_serves_stale_library_value_after_ttl(
+        self, temp_db: str
+    ):
+        import time
+
+        from app.services.settings_service import (
+            _CACHE_TTL,
+            _cache_settings_row,
+            clear_config_cache,
+            get_config_value_sync,
+        )
+
+        clear_config_cache()
+        _cache_settings_row(
+            {"max_task_size_bytes": 107374182400},
+            timestamp=time.time() - _CACHE_TTL - 1,
+        )
+
+        assert get_config_value_sync("max_task_size") == "107374182400"
+
+    def test_get_max_task_size_serves_stale_library_value_after_ttl(
+        self, temp_db: str
+    ):
+        import time
+
+        from app.services.settings_service import (
+            _CACHE_TTL,
+            _cache_settings_row,
+            clear_config_cache,
+            get_max_task_size,
+        )
+
+        clear_config_cache()
+        _cache_settings_row(
+            {"max_task_size_bytes": 107374182400},
+            timestamp=time.time() - _CACHE_TTL - 1,
+        )
+
+        assert get_max_task_size() == 107374182400
+
+    def test_get_config_value_sync_stale_read_does_not_pollute_cache(
+        self, temp_db: str
+    ):
+        import time
+
+        from app.services.settings_service import (
+            _CACHE_TTL,
+            _cache_settings_row,
+            clear_config_cache,
+            get_config_value_sync,
+        )
+
+        clear_config_cache()
+        _cache_settings_row(
+            {"max_task_size_bytes": 107374182400},
+            timestamp=time.time() - _CACHE_TTL - 1,
+        )
+
+        assert get_config_value_sync("max_task_size") == "107374182400"
+        assert get_config_value_sync("max_task_size") == "107374182400"
+
     @pytest.mark.asyncio
     async def test_get_config_value_cache_hit(self, temp_db: str):
         from app.services.settings_service import (
