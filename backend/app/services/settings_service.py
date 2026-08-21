@@ -472,7 +472,6 @@ async def update_api_settings_with_runtime_refresh(
     result = await update_api_settings(payload)
     changed_keys = result.changed_keys
 
-    await clear_config_cache_async()
     await load_runtime_config()
 
     if not download_config_changed and not rate_limit_changed:

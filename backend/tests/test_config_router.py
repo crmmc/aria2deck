@@ -532,6 +532,65 @@ class TestConfigHelperFunctions:
         assert get_config_value_sync("max_task_size") == "107374182400"
 
     @pytest.mark.asyncio
+    async def test_save_settings_keeps_cache_when_load_runtime_fails(self, temp_db, monkeypatch):
+        """R1: load_runtime_config 失败时缓存保留 update_api_settings 写入的新库值"""
+        from app.services import settings_service
+
+        async def _boom():
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(settings_service, "load_runtime_config", _boom)
+        settings_service.clear_config_cache()
+
+        with pytest.raises(RuntimeError):
+            await settings_service.update_api_settings_with_runtime_refresh(
+                {"max_task_size": "214748364800"}
+            )
+
+        assert (
+            settings_service.get_config_value_sync("max_task_size") == "214748364800"
+        )
+
+    @pytest.mark.asyncio
+    async def test_save_settings_no_default_window_after_save(self, temp_db):
+        """R2: 保存返回后立即 sync 读应命中新库值，无默认值窗口"""
+        from app.services import settings_service
+
+        settings_service.clear_config_cache()
+
+        await settings_service.update_api_settings_with_runtime_refresh(
+            {"max_task_size": "214748364800"}
+        )
+
+        assert (
+            settings_service.get_config_value_sync("max_task_size") == "214748364800"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_config_value_expired_cache_refreshes_from_db(self, temp_db):
+        """R3: TTL 过期后异步 get_config_value 回库取新值并刷新缓存"""
+        import time
+
+        from app.repositories import settings as settings_repo
+        from app.services.settings_service import (
+            _CACHE_TTL,
+            _cache_settings_row,
+            clear_config_cache,
+            get_config_value,
+            get_config_value_sync,
+        )
+
+        clear_config_cache()
+        _cache_settings_row(
+            {"max_task_size_bytes": 107374182400},
+            timestamp=time.time() - _CACHE_TTL - 1,
+        )
+        await settings_repo.update_settings_row({"max_task_size_bytes": 214748364800})
+
+        assert await get_config_value("max_task_size") == "214748364800"
+        assert get_config_value_sync("max_task_size") == "214748364800"
+
+    @pytest.mark.asyncio
     async def test_get_config_value_cache_hit(self, temp_db: str):
         from app.services.settings_service import (
             clear_config_cache_async,
