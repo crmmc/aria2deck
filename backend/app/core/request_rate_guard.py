@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from fastapi import HTTPException, Request, status
 
-from app.core.rate_limit import RateLimiter, api_limiter, login_limiter, rpc_limiter
+from app.core.rate_limit import RateLimiter, api_limiter
 from app.core.rate_limit_config import rate_limit_config
 
 
@@ -43,34 +43,6 @@ def _raise_rate_limited(detail: str, retry_after: int | None) -> None:
 def client_ip_from_request(request: Request) -> str:
     """从请求对象中提取客户端 IP。"""
     return request.client.host if request.client and request.client.host else "unknown"
-
-
-async def ensure_account_security_allowed(
-    client_ip: str,
-    detail: str = "请求过于频繁，请稍后再试",
-) -> None:
-    """校验账户安全相关请求限流。"""
-    limit = rate_limit_config.limit_for(RateLimitScope.ACCOUNT_SECURITY.value)
-    if limit <= 0:
-        return
-
-    retry_after = await login_limiter.retry_after(
-        client_ip,
-        limit=limit,
-        window_seconds=rate_limit_config.window_for(RateLimitScope.ACCOUNT_SECURITY.value),
-    )
-    if retry_after is not None:
-        _raise_rate_limited(detail, retry_after)
-
-
-async def record_account_security_failure(client_ip: str) -> None:
-    """记录一次账户安全类失败尝试。"""
-    await login_limiter.record_failure(client_ip)
-
-
-async def clear_account_security_failures(client_ip: str) -> None:
-    """清除账户安全类失败记录。"""
-    await login_limiter.clear(client_ip)
 
 
 async def ensure_authenticated_allowed(
@@ -139,20 +111,3 @@ async def ensure_share_access_allowed(
     if not code_allowed:
         _raise_rate_limited(detail, code_retry_after)
 
-
-async def ensure_rpc_allowed(
-    client_ip: str,
-    detail: str = "请求过于频繁，请稍后再试",
-) -> None:
-    """校验 JSON-RPC 请求限流。"""
-    limit = rate_limit_config.limit_for(RateLimitScope.RPC.value)
-    if limit <= 0:
-        return
-
-    allowed, retry_after = await rpc_limiter.check(
-        client_ip,
-        limit=limit,
-        window_seconds=rate_limit_config.window_for(RateLimitScope.RPC.value),
-    )
-    if not allowed:
-        _raise_rate_limited(detail, retry_after)

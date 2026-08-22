@@ -164,25 +164,6 @@ async def list_stored_file_content_hashes() -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-async def stored_file_exists_by_content_hash(content_hash: str) -> bool:
-    async with transaction() as conn:
-        row = (
-            await conn.execute(
-                select(stored_files.c.id).where(
-                    stored_files.c.content_hash == content_hash,
-                    stored_files.c.pending_delete == 0,
-                )
-            )
-        ).first()
-    return row is not None
-
-
-async def list_stored_file_rows() -> list[dict[str, Any]]:
-    async with transaction() as conn:
-        rows = (await conn.execute(select(stored_files))).mappings().all()
-    return [dict(row) for row in rows]
-
-
 async def list_stored_file_real_paths() -> set[str]:
     async with transaction() as conn:
         rows = (await conn.execute(select(stored_files.c.real_path))).all()
@@ -427,21 +408,6 @@ async def ensure_stored_file_with_user_ref(
             )
         ).first()
     return int(stored["id"]), int(user_file[0]) if user_file else None
-
-
-async def delete_user_file(user_id: int, user_file_id: int) -> dict[str, Any] | None:
-    async with transaction() as conn:
-        row = (
-            await conn.execute(
-                delete(user_files)
-                .where(
-                    user_files.c.id == user_file_id,
-                    user_files.c.user_id == user_id,
-                )
-                .returning(user_files)
-            )
-        ).mappings().first()
-    return dict(row) if row else None
 
 
 def file_select():
@@ -953,30 +919,6 @@ async def finish_pack_source_physical_cleanup(
                 cleanup_error=error[:1000] if error else None,
             )
         )
-
-
-async def count_active_shares_for_user_file(user_file_id: int) -> int:
-    timestamp = now_ms()
-    async with transaction() as conn:
-        count = (
-            await conn.execute(
-                select(func.count())
-                .select_from(share_links)
-                .where(
-                    share_links.c.user_file_id == user_file_id,
-                    share_links.c.status == SHARE_ACTIVE_STATUS,
-                    (
-                        share_links.c.expires_at_ms.is_(None)
-                        | (share_links.c.expires_at_ms > timestamp)
-                    ),
-                    (
-                        share_links.c.max_downloads.is_(None)
-                        | (share_links.c.download_count < share_links.c.max_downloads)
-                    ),
-                )
-            )
-        ).scalar_one()
-    return int(count or 0)
 
 
 async def rename_user_file_by_hash(user_id: int, file_hash: str, name: str) -> bool:

@@ -535,17 +535,6 @@ async def repair_task_associations() -> TaskAssociationRepairResult:
     }
 
 
-def _is_valid_sha256_hash(s: str) -> bool:
-    if len(s) != 64:
-        return False
-    try:
-        int(s, 16)
-        return True
-    except ValueError:
-        return False
-
-
-
 async def purge_orphan_aria2_downloads(backend: BackendPort) -> dict[str, int]:
     """Remove zombie aria2 downloads inside the managed downloading root.
 

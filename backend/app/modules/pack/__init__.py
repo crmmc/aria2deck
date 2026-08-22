@@ -89,7 +89,6 @@ logger = logging.getLogger(__name__)
 _pack_queue_lock = asyncio.Lock()
 _running_tasks_lock = asyncio.Lock()
 
-SUPPORTED_FORMATS = ("zip", "tar.zst")
 _ZSTD_LEVEL_MAP = [1, 2, 3, 5, 7, 9, 12, 15, 18, 22]
 _CHUNK_SIZE = 1024 * 1024
 _MAX_ARCHIVE_ENTRIES = 100_000
@@ -1875,16 +1874,6 @@ async def get_server_available_space() -> int:
         shutil.disk_usage(download_path).free - get_min_free_disk(),
     )
     return await physical_budget_remaining_bytes(disk_available)
-
-
-async def get_user_available_space_for_pack(user_id: int) -> int:
-    server_available = await get_server_available_space()
-    from app.repositories.auth import get_user_by_id
-
-    user = await get_user_by_id(user_id)
-    quota = int(user["quota_bytes"]) if user else 0
-    usage = await get_usage(user_id, quota)
-    return min(server_available, int(usage["available_bytes"]))
 
 
 async def get_pack_available_space_info(user_id: int) -> dict[str, int]:

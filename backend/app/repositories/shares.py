@@ -74,19 +74,6 @@ def _effective_active_conditions(user_file_id: int, timestamp_ms: int) -> tuple[
     )
 
 
-async def count_effective_active_shares(user_file_id: int, timestamp_ms: int) -> int:
-    async with transaction() as conn:
-        value = (
-            await conn.execute(
-                select(func.count())
-                .select_from(share_links)
-                .where(*_effective_active_conditions(user_file_id, timestamp_ms))
-            )
-        ).scalar_one()
-    return int(value or 0)
-
-
-
 async def create_share_row_in_existing_conn(
     conn: AsyncConnection,
     values: dict[str, Any],

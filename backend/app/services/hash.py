@@ -102,29 +102,6 @@ def extract_info_hash_from_torrent_base64(torrent_base64: str) -> str | None:
     return extract_info_hash_from_torrent(torrent_data)
 
 
-def _extract_info_dict_bytes(data: bytes) -> bytes | None:
-    """Extract the raw bytes of the 'info' dictionary from torrent data.
-
-    This is a minimal bencode parser that only extracts what we need.
-    """
-    # Find the info dictionary in the torrent
-    # Torrent structure: d...4:info<info_dict>...e
-    info_key = b"4:info"
-    info_start = data.find(info_key)
-    if info_start == -1:
-        return None
-
-    # Move past the key to the value
-    dict_start = info_start + len(info_key)
-
-    # Parse the dictionary to find its end
-    end_pos = _find_bencode_end(data, dict_start)
-    if end_pos == -1:
-        return None
-
-    return data[dict_start:end_pos]
-
-
 def _find_bencode_end(data: bytes, start: int, depth: int = 0) -> int:
     """Find the end position of a bencoded value starting at 'start'.
 

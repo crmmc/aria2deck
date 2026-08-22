@@ -59,6 +59,5 @@ ERROR_DOWNLOAD_STATUSES = (
     DownloadStatus.FAILED.value,
     DownloadStatus.CANCELLED.value,
 )
-FAILED_DOWNLOAD_STATUSES = frozenset(ERROR_DOWNLOAD_STATUSES)
 FAILABLE_GLOBAL_DOWNLOAD_STATUSES = (*ACTIVE_GLOBAL_DOWNLOAD_STATUSES, "completed")
 REST_TASK_STATUS_FILTERS = frozenset(("active", "current", "complete", "error"))

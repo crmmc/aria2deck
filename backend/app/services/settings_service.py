@@ -207,10 +207,6 @@ def get_aria2_bt_stop_timeout_seconds() -> int:
     return _int_config("aria2_bt_stop_timeout_seconds", 7 * 24 * 60 * 60, minimum=0)
 
 
-def get_hidden_file_extensions() -> list[str]:
-    return _decode_hidden_extensions(get_config_value_sync("hidden_file_extensions"))
-
-
 def get_pack_format() -> str:
     return _api_pack_format(get_config_value_sync("pack_format"))
 

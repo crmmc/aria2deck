@@ -111,48 +111,6 @@ def _is_magnet_download(download: dict[str, Any]) -> bool:
     return str(download.get("source_uri") or "").lower().startswith("magnet:")
 
 
-def _has_unresolved_magnet_display_name(download: dict[str, Any]) -> bool:
-    display_name = str(download.get("display_name") or "").strip().lower()
-    if not display_name:
-        return True
-    return display_name.startswith(("magnet:", "torrent:"))
-
-
-def _has_bittorrent_payload_info(aria2_status: dict[str, Any]) -> bool:
-    bittorrent = aria2_status.get("bittorrent")
-    if not isinstance(bittorrent, dict):
-        return False
-
-    info = bittorrent.get("info")
-    if not isinstance(info, dict):
-        return False
-
-    name = str(info.get("name") or "").strip()
-    return bool(name) and not name.startswith(METADATA_NAME_PREFIX)
-
-
-def _has_payload_like_file_path(aria2_status: dict[str, Any]) -> bool:
-    files = aria2_status.get("files")
-    if not isinstance(files, list):
-        return False
-
-    for item in files:
-        if not isinstance(item, dict):
-            continue
-        raw_path = item.get("path")
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            continue
-        name = Path(raw_path).name.lower()
-        if (
-            name
-            and name != "metadata"
-            and not name.endswith(".torrent")
-            and not name.startswith("[metadata]")
-        ):
-            return True
-    return False
-
-
 def is_metadata_handoff_pending(
     download: dict[str, Any],
     aria2_status: dict[str, Any],
@@ -171,47 +129,3 @@ def is_metadata_handoff_pending(
     # turn that metadata completion into final artifact validation.
     return True
 
-MAX_METADATA_LAYOUT_FILES = 5_000
-MAX_METADATA_LAYOUT_DIRECTORIES = 10_000
-MAX_METADATA_PATH_DEPTH = 32
-MAX_METADATA_COMPONENT_BYTES = 255
-MAX_METADATA_RELATIVE_PATH_BYTES = 4096
-METADATA_LAYOUT_ERROR = "磁力任务文件布局无效"
-
-
-def validate_metadata_file_layout(files: Any, task_dir: Path) -> str | None:
-    if not isinstance(files, list) or not files or len(files) > MAX_METADATA_LAYOUT_FILES:
-        return METADATA_LAYOUT_ERROR
-    task_dir = task_dir.resolve(strict=False)
-    paths: set[str] = set()
-    directories: set[tuple[str, ...]] = set()
-    for item in files:
-        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
-            return METADATA_LAYOUT_ERROR
-        path = Path(item["path"])
-        if not path.is_absolute():
-            return METADATA_LAYOUT_ERROR
-        try:
-            relative = path.relative_to(task_dir)
-        except ValueError:
-            return METADATA_LAYOUT_ERROR
-        parts = relative.parts
-        if not parts or any(part in {"", ".", ".."} for part in parts):
-            return METADATA_LAYOUT_ERROR
-        try:
-            relative_text = relative.as_posix()
-            component_sizes = [len(part.encode("utf-8")) for part in parts]
-        except UnicodeEncodeError:
-            return METADATA_LAYOUT_ERROR
-        if (
-            len(parts) > MAX_METADATA_PATH_DEPTH
-            or len(relative_text.encode("utf-8")) > MAX_METADATA_RELATIVE_PATH_BYTES
-            or any(size > MAX_METADATA_COMPONENT_BYTES for size in component_sizes)
-            or relative_text in paths
-        ):
-            return METADATA_LAYOUT_ERROR
-        paths.add(relative_text)
-        directories.update(tuple(parts[:index]) for index in range(1, len(parts)))
-        if len(directories) > MAX_METADATA_LAYOUT_DIRECTORIES:
-            return METADATA_LAYOUT_ERROR
-    return None

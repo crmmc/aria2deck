@@ -255,14 +255,6 @@ async def get_pack_task_row(task_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-async def get_pack_task_row_any(task_id: int) -> dict[str, Any] | None:
-    async with transaction() as conn:
-        row = (
-            await conn.execute(select(pack_tasks).where(pack_tasks.c.id == task_id))
-        ).mappings().first()
-    return dict(row) if row else None
-
-
 async def get_user_pack_task_row(
     user_id: int,
     task_id: int,
@@ -284,27 +276,6 @@ async def get_user_pack_task_row(
             .first()
         )
     return dict(row) if row else None
-
-
-async def get_pack_output_user_file_id(task_id: int) -> int | None:
-    async with transaction() as conn:
-        row = (
-            await conn.execute(
-                select(user_files.c.id)
-                .select_from(
-                    pack_tasks.join(
-                        user_files,
-                        (user_files.c.user_id == pack_tasks.c.user_id)
-                        & (
-                            user_files.c.stored_file_id
-                            == pack_tasks.c.output_stored_file_id
-                        ),
-                    )
-                )
-                .where(pack_tasks.c.id == task_id)
-            )
-        ).first()
-    return int(row[0]) if row else None
 
 
 async def list_pack_task_source_rows(task_id: int) -> list[dict[str, Any]]:
@@ -842,22 +813,6 @@ async def list_pack_recovery_rows() -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-async def list_pending_pack_task_ids() -> list[int]:
-    async with transaction() as conn:
-        rows = (
-            await conn.execute(
-                select(pack_tasks.c.id)
-                .select_from(pack_tasks.join(users))
-                .where(
-                    pack_tasks.c.status == "pending",
-                    users.c.pending_delete == 0,
-                )
-                .order_by(pack_tasks.c.id)
-            )
-        ).all()
-    return [int(row[0]) for row in rows]
-
-
 async def list_pack_dispatch_task_ids(
     *,
     limit: int | None = None,
@@ -938,19 +893,6 @@ async def active_pack_reserved_bytes() -> int:
             )
         ).scalar_one()
     return int(value or 0)
-
-
-async def get_user_quota_bytes(user_id: int) -> int:
-    async with transaction() as conn:
-        row = (
-            await conn.execute(
-                select(users.c.quota_bytes).where(
-                    users.c.id == user_id,
-                    users.c.pending_delete == 0,
-                )
-            )
-        ).first()
-    return int(row[0]) if row else 0
 
 
 def _pack_task_select():

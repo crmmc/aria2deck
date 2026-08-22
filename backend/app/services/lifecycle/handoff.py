@@ -71,22 +71,6 @@ COMPLETE_SOURCE_RETRY_COUNT = 4
 COMPLETE_SOURCE_RETRY_INTERVAL = 0.5
 
 
-async def _guarded_update_global_download(
-    download_id: int,
-    values: Mapping[str, Any],
-    *,
-    expected_gid: str,
-) -> dict[str, Any] | None:
-    from app.repositories.task.downloads import guarded_update_global_download
-
-    return await guarded_update_global_download(
-        download_id,
-        dict(values),
-        expected_gid=expected_gid,
-        return_row=True,
-    )
-
-
 async def update_download_and_active_user_tasks(
     *,
     download_id: int,

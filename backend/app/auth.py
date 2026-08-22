@@ -6,7 +6,7 @@ import secrets
 import time
 from uuid import uuid4
 
-from fastapi import Depends, HTTPException, Request, Response, status
+from fastapi import HTTPException, Request, Response, status
 
 from app.core.config import settings
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
@@ -163,17 +163,6 @@ async def require_limited_session_user(request: Request) -> AuthUser:
 async def require_limited_admin(request: Request) -> AuthUser:
     """Require an administrator session after applying the shared user bucket."""
     user = await require_limited_session_user(request)
-    if not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-    return user
-
-
-async def require_user(request: Request) -> AuthUser:
-    """Backward-compatible user dependency: Cookie session or restricted Bearer API Token."""
-    return await require_api_user(request)
-
-
-async def require_admin(user: AuthUser = Depends(require_session_user)) -> AuthUser:
     if not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user

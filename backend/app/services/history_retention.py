@@ -24,11 +24,6 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-async def gc_source_if_orphaned(source_id: int | None) -> bool:
-    """Strip S payload when no tid references source_id. Returns True if purged."""
-    return await retention_repo.gc_source_if_orphaned(source_id)
-
-
 async def reclaim_zero_pid_tid(tid: int) -> dict[str, Any]:
     """Reclaim terminal tid after hard-delete left zero pid rows (§3.6.3)."""
     return await retention_repo.reclaim_zero_pid_tid(tid)

@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import socket
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from urllib.parse import parse_qsl, unquote, urlparse, urlunparse
 
 from app.core.config import get_credential_pepper
@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 MAX_DOWNLOAD_URI_LENGTH = 8192
 MAX_DOWNLOAD_URI_COUNT = 16
 MAX_EMBEDDED_NETWORK_URI_COUNT = 64
-HTTP_URI_SCHEMES = frozenset({"http", "https"})
 WEBSEED_URI_SCHEMES = frozenset({"http", "https", "ftp"})
 TRACKER_URI_SCHEMES = frozenset({"http", "https", "udp"})
 DOWNLOAD_URI_SCHEMES = WEBSEED_URI_SCHEMES | {"magnet"}
@@ -358,23 +357,4 @@ async def check_torrent_network_endpoints(
     return None
 
 
-async def check_bt_tracker_option(
-    options: Mapping[str, object] | None,
-) -> str | None:
-    if not options or "bt-tracker" not in options:
-        return None
-    value = options["bt-tracker"]
-    if not isinstance(value, str):
-        return "bt-tracker 必须是字符串"
 
-    trackers = value.split(",")
-    if not trackers or len(trackers) > MAX_DOWNLOAD_URI_COUNT:
-        return "bt-tracker 数量无效"
-    for index, tracker in enumerate(trackers):
-        error = await check_url_ssrf(
-            tracker,
-            allowed_schemes=TRACKER_URI_SCHEMES,
-        )
-        if error:
-            return f"bt-tracker[{index}] 不安全: {error}"
-    return None

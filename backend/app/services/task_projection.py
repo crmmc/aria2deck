@@ -8,29 +8,17 @@ from urllib.parse import unquote, urlsplit
 
 from app.domain.status import (
     ACTIVE_LIKE_DOWNLOAD_STATUSES,
-    REST_TASK_STATUS_FILTERS,
 )
 from app.domain.task_policy import (
-    InvalidTaskStatusFilter,
+    InvalidTaskStatusFilter as InvalidTaskStatusFilter,
     aria2_status,
     effective_status,
-    filter_rows_for_status,
-    is_current,
-    is_user_terminal,
+    filter_rows_for_status as filter_rows_for_status,
     legacy_rest_status,
-    stat_counts,
+    stat_counts as stat_counts,
 )
 from app.modules.user_ref.projection import user_visible_label
 from app.services.history_service import history_retry_projection
-
-_REEXPORTED_POLICY_SYMBOLS = (
-    InvalidTaskStatusFilter,
-    REST_TASK_STATUS_FILTERS,
-    filter_rows_for_status,
-    is_current,
-    is_user_terminal,
-    stat_counts,
-)
 
 BT_TRACKER_PLACEHOLDER = "http://aria2deck.invalid/announce"
 INFO_HASH_HEX_PATTERN = re.compile(r"^[a-fA-F0-9]{40}$")
@@ -133,10 +121,6 @@ def _files_from_task(
 
 def is_bt_resource_kind(row: dict[str, Any]) -> bool:
     return str(row.get("resource_kind") or "") in ("magnet", "torrent")
-
-
-def is_torrent_row(row: dict[str, Any]) -> bool:
-    return is_bt_resource_kind(row)
 
 
 def has_bittorrent_payload(live: dict[str, Any] | None) -> bool:

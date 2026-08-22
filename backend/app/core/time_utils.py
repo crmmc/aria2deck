@@ -8,10 +8,6 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def ms_to_iso(timestamp_ms: int | None) -> str | None:
     if timestamp_ms is None:
         return None

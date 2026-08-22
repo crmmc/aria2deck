@@ -31,30 +31,6 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-async def gc_source_if_orphaned(source_id: int | None) -> bool:
-    """Strip S payload when no tid references source_id. Returns True if purged."""
-    if source_id is None:
-        return False
-    sid = int(source_id)
-    ts = now_ms()
-    async with transaction() as conn:
-        ref_count = (
-            await conn.execute(
-                select(func.count())
-                .select_from(global_downloads)
-                .where(global_downloads.c.source_id == sid)
-            )
-        ).scalar_one()
-        if int(ref_count) > 0:
-            return False
-        purged = await strip_orphaned_download_source(
-            conn, sid, timestamp_ms=ts
-        )
-    if purged:
-        logger.info("GC download_source 完成 source_id=%s", sid)
-    return purged
-
-
 async def reclaim_zero_pid_tid(tid: int) -> dict[str, Any]:
     """Reclaim terminal tid after hard-delete left zero pid rows (§3.6.3).
 

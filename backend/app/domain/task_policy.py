@@ -56,14 +56,6 @@ def is_current(row: Mapping[str, Any]) -> bool:
     return effective_status(row) in ACTIVE_LIKE_DOWNLOAD_STATUSES
 
 
-def can_cancel(status: str) -> bool:
-    return status in CANCELABLE_TASK_STATUSES
-
-
-def can_retry(status: str) -> bool:
-    return status in RETRYABLE_TASK_STATUSES
-
-
 def filter_rows_for_status(
     rows: list[dict[str, Any]], status_filter: str | None
 ) -> list[dict[str, Any]]:

@@ -246,13 +246,6 @@ async def resolve_complete_source_with_retry(
     return None
 
 
-def should_defer_stopped_result_cleanup(
-    download: dict[str, Any],
-    aria2_status: dict[str, Any],
-) -> bool:
-    return download_ops.is_metadata_handoff_pending(download, aria2_status)
-
-
 async def _scan_completed_source(source_path: Path) -> StorageScan:
     return await scan_storage_path_async(source_path, scanner=scan_storage_path)
 

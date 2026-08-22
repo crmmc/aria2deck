@@ -138,17 +138,6 @@ def range_file_response(request: Request, file_path: Path, filename: str):
     return response
 
 
-async def release_download_lease(lease: DownloadLease | None) -> None:
-    if lease is None:
-        return
-    release_task = asyncio.create_task(lease.release())
-    try:
-        await asyncio.shield(release_task)
-    except asyncio.CancelledError:
-        await asyncio.shield(release_task)
-        raise
-
-
 async def release_response_leases(
     download_lease: DownloadLease | None,
     read_lease: ContentReadLease | None,
