@@ -48,6 +48,15 @@ def _valid_torrent_payload() -> tuple[str, str]:
     ).hexdigest()
 
 
+def _empty_torrent_payload() -> tuple[str, str]:
+    info_dict = (
+        b"d6:lengthi0e4:name4:test12:piece lengthi16384e"
+        b"6:pieces20:01234567890123456789e"
+    )
+    torrent = b"d8:announce26:http://tracker.example.com4:info" + info_dict + b"e"
+    return base64.b64encode(torrent).decode("ascii"), hashlib.sha1(info_dict).hexdigest()
+
+
 def _torrent_with_network_field(field: bytes, url: bytes) -> str:
     def bstr(value: bytes) -> bytes:
         return str(len(value)).encode("ascii") + b":" + value
@@ -209,9 +218,10 @@ class TestHelperFunctions:
     def test_check_disk_space(self) -> None:
         from app.services.task_service import check_disk_space
 
-        ok, free = check_disk_space()
+        ok, free, min_free = check_disk_space()
         assert isinstance(ok, bool)
         assert isinstance(free, int)
+        assert isinstance(min_free, int)
         assert free > 0
 
 
@@ -246,6 +256,32 @@ class TestCreateTask:
         assert response.status_code == 400
         assert "无效的磁力链接" in response.json()["detail"]
 
+    @patch("app.services.task_service.get_usage")
+    @patch("app.services.task_service.check_disk_space")
+    def test_create_task_magnet_min_space_error_carries_values(
+        self,
+        mock_disk: MagicMock,
+        mock_usage: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
+        mock_usage.return_value = {
+            "used_bytes": 0,
+            "reserved_bytes": 0,
+            "available_bytes": 512 * 1024,
+            "quota_bytes": 100 * 1024 * 1024 * 1024,
+        }
+
+        response = authenticated_client.post(
+            "/api/tasks",
+            json={"uri": "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567"},
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == (
+            "可用空间 0.00 GB 不足（需至少 0.00 GB），无法添加磁力链接"
+        )
+
     @patch("app.services.task_service._get_client")
     @patch("app.services.task_service.check_disk_space")
     def test_create_task_canonicalizes_magnet_before_submit(
@@ -255,7 +291,7 @@ class TestCreateTask:
         authenticated_client: TestClient,
         mock_aria2_client: AsyncMock,
     ) -> None:
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
         mock_get_client.return_value = mock_aria2_client
         info_hash = "0123456789ABCDEF0123456789ABCDEF01234567"
         normalized_hash = info_hash.lower()
@@ -398,7 +434,7 @@ class TestCreateTask:
         mock_disk: MagicMock,
         authenticated_client: TestClient,
     ) -> None:
-        mock_disk.return_value = (False, 100 * 1024 * 1024)
+        mock_disk.return_value = (False, 100 * 1024 * 1024, 200 * 1024 * 1024)
 
         response = authenticated_client.post(
             "/api/tasks",
@@ -406,7 +442,9 @@ class TestCreateTask:
         )
 
         assert response.status_code == 403
-        assert "磁盘空间不足" in response.json()["detail"]
+        assert response.json()["detail"] == (
+            "磁盘空间不足，剩余 0.10 GB，低于最小预留 0.20 GB"
+        )
 
     @patch("app.services.task_service.probe_url_with_get_fallback")
     @patch("app.services.task_service.get_max_task_size")
@@ -476,7 +514,7 @@ class TestCreateTask:
         mock_register_and_submit: AsyncMock,
         authenticated_client: TestClient,
     ) -> None:
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
         mock_get_client.return_value = AsyncMock()
         mock_result = MagicMock()
         mock_result.success = True
@@ -509,7 +547,7 @@ class TestCreateTask:
         authenticated_client: TestClient,
         mock_aria2_client: AsyncMock,
     ) -> None:
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
         mock_get_client.return_value = mock_aria2_client
         mock_result = MagicMock()
         mock_result.success = True
@@ -622,7 +660,7 @@ class TestCreateTask:
     ) -> None:
         initial_url = "http://example.com/start"
         final_url = "http://cdn.example.com/file.zip"
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
         mock_get_client.return_value = mock_aria2_client
         mock_result = MagicMock()
         mock_result.success = True
@@ -711,7 +749,7 @@ class TestCreateTask:
         test_user: dict,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        mock_disk.return_value = (True, 100 * 1024**3)
+        mock_disk.return_value = (True, 100 * 1024**3, 1024 * 1024 * 1024)
         mock_get_client.return_value = mock_aria2_client
         mock_probe.return_value = ProbeResult(
             success=True,
@@ -871,7 +909,7 @@ class TestCreateTorrentTask:
         mock_disk: MagicMock,
         authenticated_client: TestClient,
     ) -> None:
-        mock_disk.return_value = (False, 100 * 1024 * 1024)
+        mock_disk.return_value = (False, 100 * 1024 * 1024, 200 * 1024 * 1024)
         torrent_data, _ = _valid_torrent_payload()
 
         response = authenticated_client.post(
@@ -880,7 +918,36 @@ class TestCreateTorrentTask:
         )
 
         assert response.status_code == 403
-        assert "磁盘空间不足" in response.json()["detail"]
+        assert response.json()["detail"] == (
+            "磁盘空间不足，剩余 0.10 GB，低于最小预留 0.20 GB"
+        )
+
+    @patch("app.services.task_service.get_usage")
+    @patch("app.services.task_service.check_disk_space")
+    def test_create_torrent_magnet_min_space_error_carries_values(
+        self,
+        mock_disk: MagicMock,
+        mock_usage: AsyncMock,
+        authenticated_client: TestClient,
+    ) -> None:
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
+        mock_usage.return_value = {
+            "used_bytes": 0,
+            "reserved_bytes": 0,
+            "available_bytes": 512 * 1024,
+            "quota_bytes": 100 * 1024 * 1024 * 1024,
+        }
+        torrent_data, _ = _empty_torrent_payload()
+
+        response = authenticated_client.post(
+            "/api/tasks/torrent",
+            json={"torrent": torrent_data},
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == (
+            "可用空间 0.00 GB 不足（需至少 0.00 GB），无法添加磁力链接"
+        )
 
     @patch("app.services.task_service.get_usage")
     @patch("app.services.task_service.check_disk_space")
@@ -890,7 +957,7 @@ class TestCreateTorrentTask:
         mock_usage: AsyncMock,
         authenticated_client: TestClient,
     ) -> None:
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
         mock_usage.return_value = {
             "used_bytes": 0,
             "reserved_bytes": 0,
@@ -917,7 +984,7 @@ class TestCreateTorrentTask:
         mock_register_and_submit: AsyncMock,
         authenticated_client: TestClient,
     ) -> None:
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
         mock_usage.return_value = {
             "used_bytes": 0,
             "reserved_bytes": 0,
@@ -949,7 +1016,7 @@ class TestCreateTorrentTask:
         mock_aria2_client: AsyncMock,
         test_user: dict,
     ) -> None:
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
         mock_aria2_client.add_torrent.return_value = "gid-torrent-api"
         mock_get_client.return_value = mock_aria2_client
         torrent_data, info_hash = _valid_torrent_payload()
@@ -993,7 +1060,7 @@ class TestCreateTorrentTask:
         authenticated_client: TestClient,
         mock_aria2_client: AsyncMock,
     ) -> None:
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
         mock_aria2_client.add_torrent.return_value = "gid-torrent-partial"
         mock_get_client.return_value = mock_aria2_client
         torrent_data, info_hash = _multi_file_torrent_payload()
@@ -1028,7 +1095,7 @@ class TestCreateTorrentTask:
         authenticated_client: TestClient,
         mock_aria2_client: AsyncMock,
     ) -> None:
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
         mock_get_client.return_value = mock_aria2_client
         torrent_data, _ = _valid_torrent_payload()
 
@@ -1053,7 +1120,7 @@ class TestCreateTorrentTask:
         authenticated_client: TestClient,
         mock_aria2_client: AsyncMock,
     ) -> None:
-        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024)
+        mock_disk.return_value = (True, 100 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
         mock_aria2_client.add_torrent.return_value = "gid-torrent-full"
         mock_get_client.return_value = mock_aria2_client
         torrent_data, info_hash = _multi_file_torrent_payload()

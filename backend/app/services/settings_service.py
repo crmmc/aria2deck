@@ -446,6 +446,7 @@ def merged_download_settings(payload: Mapping[str, Any]) -> dict[str, int]:
 
 def validate_download_settings(settings_map: Mapping[str, int]) -> None:
     from app.domain.errors import BadRequestError
+    from app.domain.error_text import fmt_count
 
     total = settings_map["download_total_connections"]
     if total <= 0:
@@ -457,7 +458,10 @@ def validate_download_settings(settings_map: Mapping[str, int]) -> None:
         + settings_map["download_anonymous_borrow_connections"]
     )
     if allocated > total:
-        raise BadRequestError("下载并发配置无效：已登录保底与匿名配额总和不能超过系统总连接上限")
+        raise BadRequestError(
+            "下载并发配置无效：已登录保底与匿名配额总和 "
+            f"{fmt_count(allocated)} 超过系统总连接上限 {fmt_count(total)}"
+        )
 
 
 async def update_api_settings_with_runtime_refresh(

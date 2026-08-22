@@ -21,6 +21,7 @@ from app.core.security import (
     MAX_DOWNLOAD_URI_COUNT,
     check_url_ssrf,
 )
+from app.domain.error_text import fmt_gb
 from app.domain.errors import (
     ConflictError,
     DomainError,
@@ -111,11 +112,14 @@ async def _check_quota_and_disk(user_id: int) -> None:
     if disk.free <= min_free:
         raise RpcError(
             RpcErrorCode.QUOTA_EXCEEDED,
-            f"Disk space not enough, free: {disk.free / 1024 / 1024 / 1024:.2f} GB",
+            f"磁盘空间不足，剩余 {fmt_gb(disk.free)}，低于最小预留 {fmt_gb(min_free)}",
         )
     user_available = await _get_user_available_space(user_id)
     if user_available <= 0:
-        raise RpcError(RpcErrorCode.QUOTA_EXCEEDED, "Your quota has been exceeded")
+        raise RpcError(
+            RpcErrorCode.QUOTA_EXCEEDED,
+            f"剩余可用空间 {fmt_gb(max(0, user_available))}，无法添加任务",
+        )
 
 
 async def _get_user_available_space(user_id: int) -> int:

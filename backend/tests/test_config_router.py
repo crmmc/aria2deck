@@ -267,7 +267,7 @@ class TestUpdateConfig:
             },
         )
         assert response.status_code == 400
-        assert "不能超过系统总连接上限" in response.json()["detail"]
+        assert "总和 11 超过系统总连接上限 10" in response.json()["detail"]
 
     def test_update_rejects_removed_download_rate_limit_fields(
         self, admin_client: TestClient

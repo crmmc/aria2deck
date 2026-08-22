@@ -343,8 +343,8 @@ async def update_user(
         raise BadRequestError(
             "修改用户名时必须同时提供按新用户名派生的密码"
         ) from None
-    except auth_repo.QuotaBelowUsageError:
-        raise BadRequestError("用户配额不能低于当前已用空间与冻结空间之和") from None
+    except auth_repo.QuotaBelowUsageError as exc:
+        raise BadRequestError(str(exc)) from None
     except auth_repo.AdminMutationConflictError:
         raise BadRequestError("用户状态已变化，请重试") from None
 

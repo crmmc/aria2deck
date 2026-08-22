@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from app.domain.error_text import over_limit
 from app.domain.status import ACTIVE_USER_TASK_STATUSES
 from app.modules.task_core.states import ERROR_QUOTA_EXCEEDED
 from app.repositories.task.user_tasks import (
@@ -41,6 +42,17 @@ from app.services.usage_service import get_usage, release_reserved, reserve_byte
 RegisterOutcome = Literal["created", "joined_live", "attached_completed"]
 
 DUPLICATE_TASK_MESSAGE = "任务已存在"
+
+
+def _quota_over_total_message(size: int, quota_bytes: int) -> str:
+    return over_limit("文件大小", size, "超过用户配额", quota_bytes)
+
+
+def _remaining_quota_message(
+    size: int, quota_bytes: int, used: int, reserved: int, suffix: str
+) -> str:
+    remaining = max(0, int(quota_bytes) - int(used) - int(reserved))
+    return over_limit("文件大小", size, "超过剩余配额", remaining) + suffix
 
 
 class RegisterError(Exception):
@@ -92,7 +104,7 @@ async def register(
 
     # AC-6: known size over total quota → reject immediately.
     if known and size > int(quota_bytes):
-        raise RegisterError(ERROR_QUOTA_EXCEEDED, "任务大小超过用户配额")
+        raise RegisterError(ERROR_QUOTA_EXCEEDED, _quota_over_total_message(size, quota_bytes))
 
     # 1. Attach to completed + store (instant transfer, no oversell).
     completed = await find_latest_completed_global_download_by_resource_key(
@@ -147,10 +159,21 @@ async def _register_attach(
     # used+reserved+size <= quota. We pre-check to give a stable error code.
     effective_size = int(completed.get("completed_bytes") or size or 0)
     if effective_size > int(quota_bytes):
-        raise RegisterError(ERROR_QUOTA_EXCEEDED, "任务大小超过用户配额")
+        raise RegisterError(
+            ERROR_QUOTA_EXCEEDED, _quota_over_total_message(effective_size, quota_bytes)
+        )
     usage = await get_usage(user_id, quota_bytes)
     if usage["used_bytes"] + usage["reserved_bytes"] + effective_size > int(quota_bytes):
-        raise RegisterError(ERROR_QUOTA_EXCEEDED, "用户配额不足，无法秒传")
+        raise RegisterError(
+            ERROR_QUOTA_EXCEEDED,
+            _remaining_quota_message(
+                effective_size,
+                quota_bytes,
+                usage["used_bytes"],
+                usage["reserved_bytes"],
+                "，无法秒传",
+            ),
+        )
 
     try:
         task = await attach_completed_file_to_user(
@@ -168,7 +191,17 @@ async def _register_attach(
         )
     except ValueError as exc:
         if "quota" in str(exc).lower():
-            raise RegisterError(ERROR_QUOTA_EXCEEDED, "用户配额不足，无法秒传") from exc
+            usage = await get_usage(user_id, quota_bytes)
+            raise RegisterError(
+                ERROR_QUOTA_EXCEEDED,
+                _remaining_quota_message(
+                    effective_size,
+                    quota_bytes,
+                    usage["used_bytes"],
+                    usage["reserved_bytes"],
+                    "，无法秒传",
+                ),
+            ) from exc
         raise
     except RepositoryConflictError as exc:
         raise RegisterError("conflict", str(exc)) from exc
@@ -202,18 +235,40 @@ async def _register_join_live(
     effective_known = live_known or known
 
     if effective_known and effective_size > int(quota_bytes):
-        raise RegisterError(ERROR_QUOTA_EXCEEDED, "任务大小超过用户配额")
+        raise RegisterError(
+            ERROR_QUOTA_EXCEEDED,
+            _quota_over_total_message(effective_size, quota_bytes),
+        )
 
     if effective_known:
         usage = await get_usage(user_id, quota_bytes)
         if usage["used_bytes"] + usage["reserved_bytes"] + effective_size > int(
             quota_bytes
         ):
-            raise RegisterError(ERROR_QUOTA_EXCEEDED, "用户配额不足，无法加入下载")
+            raise RegisterError(
+                ERROR_QUOTA_EXCEEDED,
+                _remaining_quota_message(
+                    effective_size,
+                    quota_bytes,
+                    usage["used_bytes"],
+                    usage["reserved_bytes"],
+                    "，无法加入下载",
+                ),
+            )
         try:
             await reserve_bytes(user_id, effective_size, quota_bytes=quota_bytes)
         except ValueError:
-            raise RegisterError(ERROR_QUOTA_EXCEEDED, "用户配额不足，无法加入下载")
+            usage = await get_usage(user_id, quota_bytes)
+            raise RegisterError(
+                ERROR_QUOTA_EXCEEDED,
+                _remaining_quota_message(
+                    effective_size,
+                    quota_bytes,
+                    usage["used_bytes"],
+                    usage["reserved_bytes"],
+                    "，无法加入下载",
+                ),
+            )
 
     # Minimal v1: create pid referencing the same tid.
     # For a fresh join we set status to match the global live status.
@@ -254,11 +309,30 @@ async def _register_create(
     if known:
         usage = await get_usage(user_id, quota_bytes)
         if usage["used_bytes"] + usage["reserved_bytes"] + size > int(quota_bytes):
-            raise RegisterError(ERROR_QUOTA_EXCEEDED, "用户配额不足，无法创建任务")
+            raise RegisterError(
+                ERROR_QUOTA_EXCEEDED,
+                _remaining_quota_message(
+                    size,
+                    quota_bytes,
+                    usage["used_bytes"],
+                    usage["reserved_bytes"],
+                    "，无法创建任务",
+                ),
+            )
         try:
             await reserve_bytes(user_id, size, quota_bytes=quota_bytes)
         except ValueError:
-            raise RegisterError(ERROR_QUOTA_EXCEEDED, "用户配额不足，无法创建任务")
+            usage = await get_usage(user_id, quota_bytes)
+            raise RegisterError(
+                ERROR_QUOTA_EXCEEDED,
+                _remaining_quota_message(
+                    size,
+                    quota_bytes,
+                    usage["used_bytes"],
+                    usage["reserved_bytes"],
+                    "，无法创建任务",
+                ),
+            )
 
     payload_text = resource.source_payload or resource.source_uri
     source_row = await create_download_source(

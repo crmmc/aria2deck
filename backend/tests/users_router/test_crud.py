@@ -120,7 +120,9 @@ class TestUpdateUser:
             f"/api/users/{test_user['id']}", json={"quota": 299}
         )
         assert response.status_code == 400
-        assert "已用空间与冻结空间" in response.json()["detail"]
+        assert response.json()["detail"] == (
+            "用户配额不能低于当前占用 0.00 GB（已用+冻结），当前设置 0.00 GB"
+        )
 
     def test_update_user_password(self, admin_client: TestClient, test_user: dict):
         response = admin_client.put(f"/api/users/{test_user['id']}", json={"password": "newpassword123"})

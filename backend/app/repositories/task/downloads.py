@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.engine import transaction
+from app.domain.error_text import over_limit
 from app.db.schema import (
     global_downloads,
     pack_tasks,
@@ -347,7 +348,12 @@ async def _resize_subscribers(
 ) -> tuple[int, list[int]]:
     tasks = (
         await conn.execute(
-            select(user_tasks)
+            select(
+                user_tasks.c.id,
+                user_tasks.c.user_id,
+                user_tasks.c.reserved_bytes,
+                users.c.quota_bytes,
+            )
             .select_from(user_tasks.join(users, users.c.id == user_tasks.c.user_id))
             .where(
                 user_tasks.c.global_download_id == download_id,
@@ -356,6 +362,23 @@ async def _resize_subscribers(
             )
         )
     ).mappings().all()
+    usage_rows = (
+        await conn.execute(
+            select(
+                user_storage_usage.c.user_id,
+                user_storage_usage.c.used_bytes,
+                user_storage_usage.c.reserved_bytes,
+            ).where(
+                user_storage_usage.c.user_id.in_(
+                    int(task["user_id"]) for task in tasks
+                )
+            )
+        )
+    ).all()
+    used_by_user = {
+        int(row.user_id): int(row.used_bytes) + int(row.reserved_bytes)
+        for row in usage_rows
+    }
     admitted = 0
     rejected_users: list[int] = []
     for task in tasks:
@@ -365,10 +388,16 @@ async def _resize_subscribers(
             admitted += 1
             continue
         rejected_users.append(int(task["user_id"]))
+        available = int(task["quota_bytes"]) - used_by_user.get(
+            int(task["user_id"]), 0
+        )
         await _fail_active_task_row(
             conn,
             task,
-            message="空间不足，已取消该订阅任务",
+            message=over_limit(
+                "文件大小", target_bytes, "超过剩余配额", max(0, available)
+            )
+            + "，已取消该订阅任务",
             timestamp=timestamp,
         )
     return admitted, rejected_users
@@ -408,10 +437,7 @@ async def _reconcile_download_size_locked(
     if candidate > limit:
         await _fail_download_rows(
             conn, download,
-            message=(
-                f"文件大小 {candidate / 1024**3:.2f} GB "
-                f"超过系统限制 {limit / 1024**3:.2f} GB"
-            ),
+            message=over_limit("文件大小", candidate, "超过系统限制", limit),
             error_code="max_task_size_exceeded", timestamp=timestamp,
             size_bytes=candidate,
         )
@@ -432,8 +458,16 @@ async def _reconcile_download_size_locked(
         disk_available_bytes=disk_available_bytes,
         target_completed_bytes=completed_bytes,
     ):
+        available = (
+            disk_available_bytes()
+            if callable(disk_available_bytes)
+            else disk_available_bytes
+        )
         await _fail_download_rows(
-            conn, download, message="磁盘可用空间不足",
+            conn, download,
+            message=over_limit(
+                "所需空间", candidate, "超过磁盘可用预算", max(0, available)
+            ),
             error_code="disk_budget_exceeded", timestamp=timestamp,
             size_bytes=candidate,
         )

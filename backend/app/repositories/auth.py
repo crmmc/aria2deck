@@ -48,7 +48,19 @@ class AdminMutationConflictError(Exception):
 
 
 class QuotaBelowUsageError(Exception):
-    pass
+    def __init__(self, used_reserved_bytes: int, quota_bytes: int):
+        self.used_reserved_bytes = used_reserved_bytes
+        self.quota_bytes = quota_bytes
+        super().__init__(quota_below_usage_message(used_reserved_bytes, quota_bytes))
+
+
+def quota_below_usage_message(used_reserved_bytes: int, quota_bytes: int) -> str:
+    from app.domain.error_text import fmt_gb
+
+    return (
+        f"用户配额不能低于当前占用 {fmt_gb(used_reserved_bytes)}（已用+冻结），"
+        f"当前设置 {fmt_gb(quota_bytes)}"
+    )
 
 
 API_TOKEN_LAST_USED_WRITE_INTERVAL_MS = 5 * 60 * 1000
@@ -412,7 +424,10 @@ async def update_user_as_admin(
             if usage is not None and int(usage.used_bytes) + int(
                 usage.reserved_bytes
             ) > int(values["quota_bytes"]):
-                raise QuotaBelowUsageError
+                raise QuotaBelowUsageError(
+                    int(usage.used_bytes) + int(usage.reserved_bytes),
+                    int(values["quota_bytes"]),
+                )
         if demoting and actor_id == user_id:
             raise CannotMutateSelfError
         if demoting and bool(target["is_admin"]):

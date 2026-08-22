@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
+from app.domain.error_text import over_limit
 from app.modules.backend.port import BackendPort
 from app.modules.task_core.states import (
     ERROR_ADMISSION_PAUSED,
@@ -67,6 +68,10 @@ class Decision:
     error_code: str | None = None
     clear_error_code: bool = False
     terminal: bool = False
+    # Filled only for terminal_quota_exceeded so apply_decision can render
+    # the E-4 message with actual values.
+    total_bytes: int | None = None
+    quota_bytes: int | None = None
 
 
 def _is_size_known(row: Mapping[str, Any]) -> bool:
@@ -92,7 +97,11 @@ def decide_on_snapshot(
         and total > ctx.quota_bytes
     ):
         return Decision(
-            "terminal_quota_exceeded", error_code=ERROR_QUOTA_EXCEEDED, terminal=True
+            "terminal_quota_exceeded",
+            error_code=ERROR_QUOTA_EXCEEDED,
+            terminal=True,
+            total_bytes=total,
+            quota_bytes=ctx.quota_bytes,
         )
 
     # Target reached with leftover system ownership: clear code only.
@@ -186,13 +195,19 @@ async def apply_decision(
             tid, {"error_code": None, "error_message": None}
         )
     elif decision.action == "terminal_quota_exceeded":
+        if decision.total_bytes is not None and decision.quota_bytes is not None:
+            error_message = over_limit(
+                "文件大小", decision.total_bytes, "超过用户配额", decision.quota_bytes
+            )
+        else:
+            error_message = "文件大小超过用户配额（数值未知）"
         await backend.pause(tid)
         await update_global_download(
             tid,
             {
                 "status": "failed",
                 "error_code": ERROR_QUOTA_EXCEEDED,
-                "error_message": "文件大小超过用户总配额",
+                "error_message": error_message,
             },
         )
     elif decision.action == "mark_resource_queued":

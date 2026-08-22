@@ -317,6 +317,77 @@ async def test_reconcile_size_correct_gid_admitted(temp_db: str) -> None:
     assert stored["completed_bytes"] == 50
 
 
+GB = 1024 ** 3
+
+
+@pytest.mark.asyncio
+async def test_reconcile_size_disk_budget_error_carries_values(temp_db: str) -> None:
+    user = await create_user_v0(username="reconcile_disk_msg", quota_bytes=10 * GB)
+    download = await create_global_download_v0(
+        resource_key="http:reconcile-disk-msg",
+        status="active",
+        aria2_gid="gid-rec-disk",
+        total_bytes=GB,
+        disk_reserved_bytes=GB,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=GB,
+    )
+    await _set_usage(user["id"], reserved=GB)
+
+    result = await reconcile_download_size(
+        download_id=download["id"],
+        expected_gid="gid-rec-disk",
+        candidate_bytes=3 * GB,
+        completed_bytes=0,
+        size_limit_bytes=10 * GB,
+        disk_available_bytes=2 * GB,
+    )
+    assert result.get("outcome") == "disk_budget"
+
+    stored = await _fetch_global(download["id"])
+    assert stored["error_message"] == "所需空间 3.00 GB 超过磁盘可用预算 2.00 GB"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_size_subscriber_quota_error_carries_values(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="reconcile_quota_msg", quota_bytes=2 * GB)
+    download = await create_global_download_v0(
+        resource_key="http:reconcile-quota-msg",
+        status="active",
+        aria2_gid="gid-rec-quota",
+        total_bytes=GB,
+        disk_reserved_bytes=GB,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=GB,
+    )
+    await _set_usage(user["id"], reserved=GB)
+
+    result = await reconcile_download_size(
+        download_id=download["id"],
+        expected_gid="gid-rec-quota",
+        candidate_bytes=3 * GB,
+        completed_bytes=0,
+        size_limit_bytes=10 * GB,
+        disk_available_bytes=10 * GB,
+    )
+    assert result.get("outcome") == "no_subscribers"
+
+    tasks = await _fetch_user_tasks(download["id"])
+    assert tasks[0]["error_message"] == (
+        "文件大小 3.00 GB 超过剩余配额 1.00 GB，已取消该订阅任务"
+    )
+
+
 @pytest.mark.asyncio
 async def test_reconcile_size_wrong_gid_stale(temp_db: str) -> None:
     user = await create_user_v0(username="reconcile_stale", quota_bytes=10_000)

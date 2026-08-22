@@ -32,6 +32,7 @@ from app.repositories.pack import (
     persist_pack_prepared,
 )
 from app.domain.errors import BadRequestError, ForbiddenError
+from app.domain.error_text import fmt_gb
 from app.services.task_broadcast import clear_connections, set_connections_for_user
 import app.services.file_service as file_service
 import app.modules.pack as pack_service
@@ -1439,6 +1440,60 @@ async def test_pack_duplicate_insert_rolls_back_second_reservation(
 
 
 @pytest.mark.asyncio
+async def test_pack_admission_messages_carry_values(temp_db: str) -> None:
+    user = await create_user_v0(username="pack_msg_values", quota_bytes=2 * 1024**3)
+    source = Path(settings.download_dir) / "store" / "msg.bin"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"x")
+    source_ref = await create_user_file_v0(
+        user_id=user["id"],
+        real_path=source,
+        content_hash="pack_msg_source",
+        display_name="msg.bin",
+        size_bytes=1,
+    )
+    source_json = json.dumps([source_ref["id"]], separators=(",", ":"))
+    async with transaction() as conn:
+        await conn.execute(
+            user_storage_usage.update()
+            .where(user_storage_usage.c.user_id == user["id"])
+            .values(used_bytes=1536 * 1024**2, updated_at_ms=now_ms())
+        )
+    with pytest.raises(PackAdmissionError) as quota_exc:
+        await create_pending_pack_with_reservation(
+            user_id=user["id"],
+            source_user_file_ids_json=source_json,
+            source_size_bytes=1,
+            reserved_bytes=614 * 1024**2,
+            output_name="msg",
+            delete_source=False,
+            disk_available_bytes=10 * 1024**3,
+        )
+    assert str(quota_exc.value) == "quota"
+    assert quota_exc.value.message == (
+        "打包需冻结 0.60 GB，超过剩余配额 0.50 GB"
+    )
+    async with transaction() as conn:
+        await conn.execute(
+            user_storage_usage.update()
+            .where(user_storage_usage.c.user_id == user["id"])
+            .values(used_bytes=0, updated_at_ms=now_ms())
+        )
+    with pytest.raises(PackAdmissionError) as disk_exc:
+        await create_pending_pack_with_reservation(
+            user_id=user["id"],
+            source_user_file_ids_json=source_json,
+            source_size_bytes=1,
+            reserved_bytes=2 * 1024**3,
+            output_name="msg",
+            delete_source=False,
+            disk_available_bytes=1024**3,
+        )
+    assert str(disk_exc.value) == "disk"
+    assert disk_exc.value.message == "打包需 2.00 GB，磁盘可用 1.00 GB 不足"
+
+
+@pytest.mark.asyncio
 async def test_pack_disk_rejection_rolls_back_reservation(temp_db: str) -> None:
     user = await create_user_v0(username="pack_disk_rollback", quota_bytes=1000)
     source = Path(settings.download_dir) / "store" / "disk.bin"
@@ -1567,7 +1622,7 @@ async def test_pack_ignores_stale_request_quota(
         size_bytes=1,
     )
 
-    with pytest.raises(ForbiddenError, match="空间不足"):
+    with pytest.raises(ForbiddenError, match="超过剩余配额"):
         await pack_service.create_pack_task_from_user_files(
             user_id=user["id"],
             quota_bytes=10_000_000,
@@ -1675,8 +1730,36 @@ def test_bounded_sink_rejects_disk_floor(
         cancel_event=threading.Event(),
     )
     try:
-        with pytest.raises(pack_service.PackBoundaryError, match="磁盘可用空间不足"):
+        with pytest.raises(pack_service.PackBoundaryError, match="低于最小预留"):
             sink.write(b"x")
+    finally:
+        sink.close()
+
+
+def test_bounded_sink_error_messages_carry_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disk = type("DiskUsage", (), {"free": 512 * 1024**2})()
+    monkeypatch.setattr(pack_service.shutil, "disk_usage", lambda _path: disk)
+    sink = pack_service._BoundedSink(
+        tmp_path / "archive.partial",
+        max_bytes=2 * 1024**3,
+        min_free_bytes=1024**3,
+        cancel_event=threading.Event(),
+    )
+    try:
+        with pytest.raises(pack_service.PackBoundaryError) as exc_info:
+            sink.write(b"x")
+        assert str(exc_info.value) == (
+            "磁盘可用 0.50 GB，低于最小预留 1.00 GB，无法继续打包"
+        )
+        sink.seek(3 * 1024**3)
+        with pytest.raises(pack_service.PackBoundaryError) as exc_info:
+            sink.write(b"x")
+        assert str(exc_info.value) == (
+            "打包输出 3.00 GB 超过预留空间 2.00 GB"
+        )
     finally:
         sink.close()
 
@@ -1828,12 +1911,16 @@ async def test_copy_fallback_rejects_near_disk_floor_without_second_copy(
     )
     _setup_disk_space(monkeypatch, free_bytes=199, min_free=100)
 
-    with pytest.raises(pack_service.PackBoundaryError, match="磁盘可用空间不足"):
+    with pytest.raises(pack_service.PackBoundaryError, match="无法安装打包输出") as exc_info:
         await PackTaskManager._install_prepared_file(
             task["id"], content_hash=content_hash,
             size_bytes=len(content), filename=filename,
             cancel_event=threading.Event(), job=None,
         )
+    assert str(exc_info.value) == (
+        f"磁盘可用 {fmt_gb(99)} 不足，"
+        f"无法安装打包输出（需 {fmt_gb(len(content))}）"
+    )
 
     current = await pack_service.get_pack_task_row(task["id"])
     assert current is not None

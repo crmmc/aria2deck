@@ -62,6 +62,7 @@ from app.repositories.pack import (
     update_pack_task_progress,
 )
 from app.domain.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
+from app.domain.error_text import fmt_gb
 from app.domain.pack import is_pack_active_status, is_pack_terminal_status
 from app.services.settings_service import (
     get_min_free_disk,
@@ -143,12 +144,18 @@ class _BoundedSink(io.BufferedIOBase):
         current_size = os.fstat(self._file.fileno()).st_size
         target_extent = max(current_size, self._file.tell() + memoryview(data).nbytes)
         if target_extent > self._max_bytes:
-            raise PackBoundaryError("打包输出超过预留空间")
+            raise PackBoundaryError(
+                f"打包输出 {fmt_gb(target_extent)} "
+                f"超过预留空间 {fmt_gb(self._max_bytes)}"
+            )
         growth = target_extent - current_size
         if growth:
             free = shutil.disk_usage(self._disk_path).free
             if free - growth < self._min_free_bytes:
-                raise PackBoundaryError("磁盘可用空间不足")
+                raise PackBoundaryError(
+                    f"磁盘可用 {fmt_gb(free)}，"
+                    f"低于最小预留 {fmt_gb(self._min_free_bytes)}，无法继续打包"
+                )
         return self._file.write(data)
 
     def flush(self) -> None:
@@ -319,10 +326,16 @@ def _durable_copy_file(
                     break
                 copied = target_obj.tell() + len(chunk)
                 if copied > max_bytes:
-                    raise PackBoundaryError("打包安装副本超过预留空间")
+                    raise PackBoundaryError(
+                        f"打包安装副本 {fmt_gb(copied)} "
+                        f"超过预留空间 {fmt_gb(max_bytes)}"
+                    )
                 free = shutil.disk_usage(temporary.parent).free
                 if free - len(chunk) < min_free_bytes:
-                    raise PackBoundaryError("磁盘可用空间不足")
+                    raise PackBoundaryError(
+                        f"磁盘可用 {fmt_gb(free)}，"
+                        f"低于最小预留 {fmt_gb(min_free_bytes)}，无法继续打包"
+                    )
                 target_obj.write(chunk)
             target_obj.flush()
             os.fsync(target_obj.fileno())
@@ -1307,7 +1320,10 @@ class PackTaskManager:
         if not await reserve_pack_install_bytes(
             task_id, size_bytes, disk_available
         ):
-            raise PackBoundaryError("磁盘可用空间不足，无法安装打包输出")
+            raise PackBoundaryError(
+                f"磁盘可用 {fmt_gb(disk_available)} 不足，"
+                f"无法安装打包输出（需 {fmt_gb(size_bytes)}）"
+            )
         copied = False
         try:
             await cls._run_optional_thread(
@@ -2017,9 +2033,11 @@ async def create_pack_task_from_user_files(
         )
     except PackAdmissionError as exc:
         if exc.reason == "quota":
-            raise ForbiddenError("空间不足，无法冻结打包输出空间") from exc
+            raise ForbiddenError(
+                exc.message or "空间不足，无法冻结打包输出空间"
+            ) from exc
         if exc.reason == "disk":
-            raise ForbiddenError("磁盘可用空间不足") from exc
+            raise ForbiddenError(exc.message or "磁盘可用空间不足") from exc
         if exc.reason == "duplicate":
             raise ConflictError("相同文件已有进行中的打包任务") from exc
         if exc.reason == "completed":

@@ -266,3 +266,45 @@ def test_handler_no_longer_imports_legacy_write_path() -> None:
     assert "create_user_torrent_download" not in imported_names
     assert "cancel_user_task" not in imported_names
     assert "task_service" in imported_names
+
+
+async def test_rpc_add_uri_disk_gate_message_carries_values(
+    temp_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from app.services.rpc import _shared as rpc_shared
+
+    user = await create_user_v0(username="t12_disk_gate")
+    handler = Aria2RpcHandler(user["id"])
+    monkeypatch.setattr(rpc_shared, "get_min_free_disk", lambda: 2 * 1024**3)
+    monkeypatch.setattr(
+        rpc_shared.shutil,
+        "disk_usage",
+        lambda _p: SimpleNamespace(free=1 * 1024**3, total=10, used=9),
+    )
+
+    with pytest.raises(RpcError) as exc_info:
+        await handler.handle("aria2.addUri", [["https://example.com/disk.bin"]])
+
+    assert exc_info.value.code == RpcErrorCode.QUOTA_EXCEEDED
+    assert exc_info.value.message == "磁盘空间不足，剩余 1.00 GB，低于最小预留 2.00 GB"
+
+
+async def test_rpc_add_uri_quota_gate_message_carries_values(
+    temp_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services.rpc import _shared as rpc_shared
+
+    user = await create_user_v0(username="t12_quota_gate")
+    handler = Aria2RpcHandler(user["id"])
+    monkeypatch.setattr(rpc_shared, "get_min_free_disk", lambda: 0)
+    monkeypatch.setattr(
+        rpc_shared, "_get_user_available_space", AsyncMock(return_value=0)
+    )
+
+    with pytest.raises(RpcError) as exc_info:
+        await handler.handle("aria2.addUri", [["https://example.com/quota0.bin"]])
+
+    assert exc_info.value.code == RpcErrorCode.QUOTA_EXCEEDED
+    assert exc_info.value.message == "剩余可用空间 0.00 GB，无法添加任务"

@@ -26,7 +26,7 @@ from tests.helpers_v0 import (
 )
 from app.db.engine import transaction
 from app.db.schema import global_downloads, user_files, user_tasks
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 
 async def _count_user_files(user_id: int) -> int:
@@ -254,3 +254,122 @@ async def test_register_rejects_duplicate_active_pid(temp_db: str) -> None:
     with pytest.raises(RegisterError) as excinfo:
         await register(user_id=user["id"], quota_bytes=user["quota_bytes"], resource=spec)
     assert excinfo.value.code == "duplicate_task"
+
+
+# --- M17 Task 1: quota errors carry decision inputs ------------------------
+
+_GIB = 1024**3
+
+
+async def _set_used_bytes(user_id: int, used: int) -> None:
+    from app.db.schema import user_storage_usage
+
+    async with transaction() as conn:
+        await conn.execute(
+            update(user_storage_usage)
+            .where(user_storage_usage.c.user_id == user_id)
+            .values(used_bytes=used)
+        )
+
+
+@pytest.mark.asyncio
+async def test_register_quota_over_total_message_carries_values(temp_db: str) -> None:
+    """E-3a: size > quota message carries actual size and quota."""
+    user = await create_user_v0(username="m17_e3a", quota_bytes=10 * _GIB)
+    spec = ResourceSpec(
+        resource_key="magnet:?xt=urn:btih:m17e3a",
+        source_uri="magnet:?xt=urn:btih:m17e3a",
+        resource_kind="magnet",
+        size_bytes=15 * _GIB,
+        size_known=True,
+    )
+    with pytest.raises(RegisterError) as excinfo:
+        await register(user_id=user["id"], quota_bytes=user["quota_bytes"], resource=spec)
+    assert excinfo.value.code == ERROR_QUOTA_EXCEEDED
+    assert str(excinfo.value) == "文件大小 15.00 GB 超过用户配额 10.00 GB"
+
+
+@pytest.mark.asyncio
+async def test_register_attach_quota_message_carries_values(temp_db: str) -> None:
+    """E-3b: attach (秒传) quota message carries size and remaining quota."""
+    owner = await create_user_v0(username="m17_e3b_owner")
+    user = await create_user_v0(username="m17_e3b_attach", quota_bytes=20 * _GIB)
+    await _set_used_bytes(user["id"], 10 * _GIB)
+
+    user_file = await create_user_file_v0(
+        user_id=owner["id"],
+        real_path=__import__("pathlib").Path("/tmp/m17e3b.bin"),
+        content_hash="hash-m17-e3b-attach",
+        display_name="big.bin",
+        size_bytes=15 * _GIB,
+    )
+    await create_global_download_v0(
+        resource_key="magnet:?xt=urn:btih:m17e3battach",
+        source_uri="magnet:?xt=urn:btih:m17e3battach",
+        resource_kind="magnet",
+        status="completed",
+        total_bytes=15 * _GIB,
+        completed_bytes=15 * _GIB,
+        size_known=True,
+        completed_file_id=user_file["stored_file_id"],
+    )
+    spec = ResourceSpec(
+        resource_key="magnet:?xt=urn:btih:m17e3battach",
+        source_uri="magnet:?xt=urn:btih:m17e3battach",
+        resource_kind="magnet",
+        size_bytes=15 * _GIB,
+        size_known=True,
+    )
+    with pytest.raises(RegisterError) as excinfo:
+        await register(user_id=user["id"], quota_bytes=user["quota_bytes"], resource=spec)
+    assert excinfo.value.code == ERROR_QUOTA_EXCEEDED
+    assert str(excinfo.value) == "文件大小 15.00 GB 超过剩余配额 10.00 GB，无法秒传"
+
+
+@pytest.mark.asyncio
+async def test_register_join_live_quota_message_carries_values(temp_db: str) -> None:
+    """E-3b: join live (加入下载) quota message carries size and remaining quota."""
+    owner = await create_user_v0(username="m17_e3b_join_owner")
+    user = await create_user_v0(username="m17_e3b_join", quota_bytes=20 * _GIB)
+    await _set_used_bytes(user["id"], 10 * _GIB)
+
+    gd = await create_global_download_v0(
+        resource_key="magnet:?xt=urn:btih:m17e3bjoin",
+        source_uri="magnet:?xt=urn:btih:m17e3bjoin",
+        resource_kind="magnet",
+        status="active",
+        total_bytes=15 * _GIB,
+        size_known=True,
+    )
+    await create_user_task_v0(
+        user_id=owner["id"], global_download_id=gd["id"], status="active"
+    )
+    spec = ResourceSpec(
+        resource_key="magnet:?xt=urn:btih:m17e3bjoin",
+        source_uri="magnet:?xt=urn:btih:m17e3bjoin",
+        resource_kind="magnet",
+        size_bytes=15 * _GIB,
+        size_known=True,
+    )
+    with pytest.raises(RegisterError) as excinfo:
+        await register(user_id=user["id"], quota_bytes=user["quota_bytes"], resource=spec)
+    assert excinfo.value.code == ERROR_QUOTA_EXCEEDED
+    assert str(excinfo.value) == "文件大小 15.00 GB 超过剩余配额 10.00 GB，无法加入下载"
+
+
+@pytest.mark.asyncio
+async def test_register_create_quota_message_carries_values(temp_db: str) -> None:
+    """E-3b: create (创建任务) quota message carries size and remaining quota."""
+    user = await create_user_v0(username="m17_e3b_create", quota_bytes=20 * _GIB)
+    await _set_used_bytes(user["id"], 10 * _GIB)
+    spec = ResourceSpec(
+        resource_key="magnet:?xt=urn:btih:m17e3bcreate",
+        source_uri="magnet:?xt=urn:btih:m17e3bcreate",
+        resource_kind="magnet",
+        size_bytes=15 * _GIB,
+        size_known=True,
+    )
+    with pytest.raises(RegisterError) as excinfo:
+        await register(user_id=user["id"], quota_bytes=user["quota_bytes"], resource=spec)
+    assert excinfo.value.code == ERROR_QUOTA_EXCEEDED
+    assert str(excinfo.value) == "文件大小 15.00 GB 超过剩余配额 10.00 GB，无法创建任务"

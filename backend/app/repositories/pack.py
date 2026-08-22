@@ -17,6 +17,7 @@ from app.db.schema import (
     user_storage_usage,
     users,
 )
+from app.domain.error_text import fmt_gb
 from app.domain.pack import PACK_ACTIVE_STATUSES, PACK_TERMINAL_STATUSES
 from app.repositories.task.downloads import active_physical_commitment_bytes
 from app.repositories.errors import RepositoryConflictError
@@ -24,8 +25,9 @@ from app.domain.content_identity import content_identity_from_content_hash
 
 
 class PackAdmissionError(ValueError):
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, message: str | None = None):
         self.reason = reason
+        self.message = message
         super().__init__(reason)
 
 
@@ -154,7 +156,20 @@ async def create_pending_pack_with_reservation(
                 )
             ).first()
             if usage is None:
-                raise PackAdmissionError("quota")
+                used_reserved = (
+                    await conn.execute(
+                        select(
+                            func.coalesce(user_storage_usage.c.used_bytes, 0)
+                            + func.coalesce(user_storage_usage.c.reserved_bytes, 0)
+                        ).where(user_storage_usage.c.user_id == user_id)
+                    )
+                ).scalar()
+                available = max(0, int(quota) - int(used_reserved or 0))
+                raise PackAdmissionError(
+                    "quota",
+                    f"打包需冻结 {fmt_gb(reserved_bytes)}，"
+                    f"超过剩余配额 {fmt_gb(available)}",
+                )
             source_rows = (
                 await conn.execute(
                     select(
@@ -182,7 +197,11 @@ async def create_pending_pack_with_reservation(
                 raise PackAdmissionError("source")
             commitment = await active_physical_commitment_bytes(conn)
             if commitment + reserved_bytes > max(0, disk_available_bytes):
-                raise PackAdmissionError("disk")
+                raise PackAdmissionError(
+                    "disk",
+                    f"打包需 {fmt_gb(reserved_bytes)}，"
+                    f"磁盘可用 {fmt_gb(max(0, disk_available_bytes - commitment))} 不足",
+                )
             row = (
                 await conn.execute(
                     insert(pack_tasks)

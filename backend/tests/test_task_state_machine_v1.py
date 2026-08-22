@@ -383,3 +383,46 @@ def test_on_followed_size_eligibility_chain() -> None:
         on_followed_size(size_bytes=100, quota_bytes=None, disk_ok=False)
         == "disk_queued"
     )
+
+
+# --- M17 Task 1: E-4 terminal quota error carries decision inputs ----------
+
+_GIB = 1024**3
+
+
+def test_terminal_quota_decision_carries_values() -> None:
+    """decide_on_snapshot fills total_bytes/quota_bytes on terminal decisions."""
+    row = _row(status="active", error_code=None, total_bytes=15 * _GIB, size_known=True)
+    decision = decide_on_snapshot(
+        row, "active", quota=QuotaContext(quota_bytes=10 * _GIB)
+    )
+    assert decision.action == "terminal_quota_exceeded"
+    assert decision.total_bytes == 15 * _GIB
+    assert decision.quota_bytes == 10 * _GIB
+
+
+@pytest.mark.asyncio
+async def test_apply_terminal_quota_message_carries_values(temp_db: str) -> None:
+    """E-4: persisted error_message uses the E-3a wording with actual values."""
+    user = await create_user_v0(username="m17_e4")
+    gd = await create_global_download_v0(
+        resource_key="http://example.com/m17-e4.bin",
+        source_uri="http://example.com/m17-e4.bin",
+        resource_kind="http",
+        status="active",
+        aria2_gid="gid-m17-e4",
+        total_bytes=15 * _GIB,
+        size_known=True,
+    )
+    backend = AsyncMock(spec=BackendPort)
+
+    decision = decide_on_snapshot(
+        {"total_bytes": 15 * _GIB, "size_known": True},
+        "active",
+        quota=QuotaContext(quota_bytes=10 * _GIB),
+    )
+    await apply_decision(backend, gd["id"], decision)
+
+    row = await _get_global(gd["id"])
+    assert row["error_code"] == ERROR_QUOTA_EXCEEDED
+    assert row["error_message"] == "文件大小 15.00 GB 超过用户配额 10.00 GB"

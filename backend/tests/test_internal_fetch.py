@@ -374,7 +374,7 @@ async def test_gateway_runtime_limit_stops_chunked_or_lying_upstream(
             range_header=None,
         )
         forwarded = bytearray()
-        with pytest.raises(GatewaySizeExceeded):
+        with pytest.raises(GatewaySizeExceeded, match="超过当前生效上限"):
             async for chunk in stream.iter_bytes():
                 forwarded.extend(chunk)
 
@@ -402,7 +402,7 @@ async def test_gateway_rejects_declared_oversize_before_stream(monkeypatch) -> N
         "app.services.gateway.aiohttp.ClientSession",
         return_value=session,
     ):
-        with pytest.raises(GatewaySizeExceeded):
+        with pytest.raises(GatewaySizeExceeded, match="下载内容 .* 超过系统大小限制"):
             await open_gateway_stream(
                 source_uri="https://origin.example/file",
                 options=SourceRequestOptions(),

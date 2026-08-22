@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 
 from app.core.config import get_internal_base_url, settings
+from app.domain.error_text import over_limit
 from app.domain.status import TERMINAL_DOWNLOAD_STATUSES
 from app.http.safe_client import (
     UnsafeTargetError,
@@ -494,18 +495,24 @@ def _stream_budget(
         if content_length is not None and content_length != end - start + 1:
             raise GatewayUpstreamError("上游 Range 长度不匹配")
         if total is not None and total > max_size:
-            raise GatewaySizeExceeded("下载内容超过系统大小限制")
+            raise GatewaySizeExceeded(
+                over_limit("下载内容", total, "超过系统大小限制", max_size)
+            )
     elif requested_range is not None:
         if requested_range.start != 0 or requested_range.end is not None:
             raise GatewayUpstreamError("上游未响应 Range 请求")
 
     if start > max_size:
-        raise GatewaySizeExceeded("Range 起点超过系统大小限制")
+        raise GatewaySizeExceeded(
+            over_limit("Range 起点", start, "超过系统大小限制", max_size)
+        )
     budget = max_size - start
     if requested_range is not None and requested_range.end is not None:
         budget = min(budget, requested_range.end - start + 1)
     if content_length is not None and content_length > budget:
-        raise GatewaySizeExceeded("下载内容超过系统大小限制")
+        raise GatewaySizeExceeded(
+            over_limit("下载内容", content_length, "超过系统大小限制", max_size)
+        )
     return budget
 
 
@@ -538,7 +545,14 @@ class GatewayStream:
                 if len(chunk) > remaining:
                     if remaining > 0:
                         yield chunk[:remaining]
-                    raise GatewaySizeExceeded("下载内容超过系统大小限制")
+                    raise GatewaySizeExceeded(
+                        over_limit(
+                            "下载内容",
+                            forwarded + len(chunk),
+                            "超过当前生效上限",
+                            self.budget,
+                        )
+                    )
                 forwarded += len(chunk)
                 yield chunk
         except GatewaySizeExceeded:

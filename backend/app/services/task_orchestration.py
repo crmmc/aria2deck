@@ -52,6 +52,7 @@ from app.services.gateway import (
     http_resource_identity,
     source_request_options,
 )
+from app.domain.error_text import fmt_gb, over_limit
 from app.services.settings_service import get_max_task_size, get_min_free_disk
 from app.domain.torrent_metadata import (
     MAX_TORRENT_FILE_COUNT,
@@ -95,12 +96,23 @@ async def check_url_safety(url: str) -> None:
         raise BadRequestError(error)
 
 
-def check_disk_space() -> tuple[bool, int]:
+def check_disk_space() -> tuple[bool, int, int]:
     download_path = Path(settings.download_dir)
     download_path.mkdir(parents=True, exist_ok=True)
     disk = shutil.disk_usage(download_path)
     min_free = _ts().get_min_free_disk()
-    return disk.free > min_free, disk.free
+    return disk.free > min_free, disk.free, min_free
+
+
+def _disk_insufficient_message(disk_free: int, min_free: int) -> str:
+    return f"磁盘空间不足，剩余 {fmt_gb(disk_free)}，低于最小预留 {fmt_gb(min_free)}"
+
+
+def _magnet_min_space_message(available_space: int, min_space: int) -> str:
+    return (
+        f"可用空间 {fmt_gb(available_space)} 不足"
+        f"（需至少 {fmt_gb(min_space)}），无法添加磁力链接"
+    )
 
 
 def _validate_options(options: dict | None) -> None:
@@ -434,10 +446,10 @@ async def _impl_create_task(
         uri = f"magnet:?xt=urn:btih:{info_hash}"
     await ts.check_url_safety(uri)
 
-    disk_ok, disk_free = ts.check_disk_space()
+    disk_ok, disk_free, disk_min_free = ts.check_disk_space()
     if not disk_ok:
         logger.warning("创建任务失败 user_id=%s reason=disk_insufficient free=%s", user_id, disk_free)
-        raise ForbiddenError(f"磁盘空间不足，剩余 {disk_free / 1024 / 1024 / 1024:.2f} GB")
+        raise ForbiddenError(_disk_insufficient_message(disk_free, disk_min_free))
 
     usage_info = await ts.get_usage(user_id, quota_bytes)
     available_space = min(usage_info["available_bytes"], disk_free)
@@ -461,7 +473,7 @@ async def _impl_create_task(
                 user_id,
                 available_space,
             )
-            raise ForbiddenError("可用空间不足，无法添加磁力链接")
+            raise ForbiddenError(_magnet_min_space_message(available_space, MAGNET_MIN_SPACE))
 
     elif is_http_url(uri):
         probe_result = await ts.probe_url_with_get_fallback(uri)
@@ -490,7 +502,7 @@ async def _impl_create_task(
                     max_task_size,
                 )
                 raise ForbiddenError(
-                    f"文件大小 {total_length / 1024**3:.2f} GB 超过系统限制 {max_task_size / 1024**3:.2f} GB"
+                    over_limit("文件大小", total_length, "超过系统限制", max_task_size)
                 )
 
             if total_length > available_space:
@@ -501,7 +513,7 @@ async def _impl_create_task(
                     available_space,
                 )
                 raise ForbiddenError(
-                    f"文件大小 {total_length / 1024**3:.2f} GB 超过可用空间 {available_space / 1024**3:.2f} GB"
+                    over_limit("文件大小", total_length, "超过可用空间", available_space)
                 )
 
     else:
@@ -571,10 +583,10 @@ async def _impl_create_torrent_task(
     ts = _ts()
     await ts.check_torrent_network_safety(metadata)
 
-    disk_ok, disk_free = ts.check_disk_space()
+    disk_ok, disk_free, disk_min_free = ts.check_disk_space()
     if not disk_ok:
         logger.warning("创建种子任务失败 user_id=%s reason=disk_insufficient free=%s", user_id, disk_free)
-        raise ForbiddenError(f"磁盘空间不足，剩余 {disk_free / 1024 / 1024 / 1024:.2f} GB")
+        raise ForbiddenError(_disk_insufficient_message(disk_free, disk_min_free))
 
     uri_hash = metadata.info_hash
 
@@ -595,7 +607,7 @@ async def _impl_create_torrent_task(
                 user_id,
                 available_space,
             )
-            raise ForbiddenError("可用空间不足")
+            raise ForbiddenError(_magnet_min_space_message(available_space, MAGNET_MIN_SPACE))
     elif selected_size > available_space:
         logger.warning(
             "创建种子任务失败 user_id=%s reason=user_space_insufficient size=%s available=%s",
@@ -604,7 +616,7 @@ async def _impl_create_torrent_task(
             available_space,
         )
         raise ForbiddenError(
-            f"文件大小 {selected_size / 1024**3:.2f} GB 超过可用空间 {available_space / 1024**3:.2f} GB"
+            over_limit("文件大小", selected_size, "超过可用空间", available_space)
         )
 
     max_task_size = ts.get_max_task_size()
@@ -616,7 +628,7 @@ async def _impl_create_torrent_task(
             max_task_size,
         )
         raise ForbiddenError(
-            f"文件大小 {selected_size / 1024**3:.2f} GB 超过系统限制 {max_task_size / 1024**3:.2f} GB"
+            over_limit("文件大小", selected_size, "超过系统限制", max_task_size)
         )
 
     resource_key = build_selection_resource_key(
