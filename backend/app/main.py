@@ -413,6 +413,24 @@ async def lifespan(app: FastAPI):
         _register_background_worker(app, "sync", sync_task)
         _register_background_worker(app, "listener", listener_task)
         _register_background_worker(app, "history_retention", history_retention_task)
+
+        from app.services.tracker_list_service import (
+            load_from_db as load_tracker_list_cache,
+            run_tracker_list_refresher,
+        )
+
+        try:
+            await load_tracker_list_cache()
+        except Exception:
+            logger.exception("tracker 列表缓存启动加载失败")
+        tracker_refresher_task = asyncio.create_task(
+            _run_background_task(
+                "tracker_list_refresher", run_tracker_list_refresher()
+            ),
+            name="tracker_list_refresher",
+        )
+        background_tasks.append(tracker_refresher_task)
+        _register_background_worker(app, "tracker_refresher", tracker_refresher_task)
         yield
     finally:
         for task in background_tasks:

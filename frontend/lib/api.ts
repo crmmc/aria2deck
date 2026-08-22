@@ -5,6 +5,7 @@ import type {
   UserUpdate,
   SystemStats,
   SystemConfig,
+  TrackerStatus,
   FileListResponse,
   FileSearchResponse,
   BrowseFileInfo,
@@ -254,6 +255,10 @@ export const api = {
     }>("/api/config/aria2/test", {
       method: "POST",
       body: JSON.stringify({ aria2_rpc_url, aria2_rpc_secret }),
+    }),
+  refreshTrackers: () =>
+    request<TrackerStatus>("/api/config/trackers/refresh", {
+      method: "POST",
     }),
   invalidateAllCredentials: () =>
     request<{

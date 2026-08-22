@@ -21,7 +21,7 @@ from app.domain.status import (
     USER_TASK_STATUSES,
 )
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
 PACK_SOURCE_CLEANUP_STATES = (
     "retained",
@@ -152,6 +152,14 @@ app_settings = Table(
     Column("download_anonymous_per_ip_connections", Integer, nullable=False),
     Column("download_anonymous_per_file_connections", Integer, nullable=False),
     Column("history_retention_days", Integer, nullable=False, server_default="30"),
+    Column("tracker_fixed_list", Text, nullable=False, server_default=""),
+    Column("tracker_remote_urls", Text, nullable=False, server_default=""),
+    Column(
+        "tracker_refresh_interval_minutes",
+        Integer,
+        nullable=False,
+        server_default="0",
+    ),
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
     CheckConstraint("id = 1", name="ck_app_settings_single_row"),
@@ -518,4 +526,18 @@ user_storage_usage = Table(
     Column("used_bytes", Integer, nullable=False, server_default="0"),
     Column("reserved_bytes", Integer, nullable=False, server_default="0"),
     Column("updated_at_ms", Integer, nullable=False),
+)
+
+tracker_list_cache = Table(
+    "tracker_list_cache",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("trackers_json", Text, nullable=False, server_default="[]"),
+    Column("remote_trackers_json", Text, nullable=False, server_default="[]"),
+    Column("entry_count", Integer, nullable=False, server_default="0"),
+    Column("updated_at_ms", Integer),
+    Column("last_refresh_at_ms", Integer),
+    Column("last_refresh_status", Text, nullable=False, server_default="never"),
+    Column("last_refresh_failed_urls", Text, nullable=False, server_default="[]"),
+    CheckConstraint("id = 1", name="ck_tracker_list_cache_single_row"),
 )

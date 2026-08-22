@@ -21,6 +21,8 @@ import { WebSocketSettingsSection } from "./_components/WebSocketSettingsSection
 import { RateLimitSettingsSection } from "./_components/RateLimitSettingsSection";
 import { DownloadConnectionSettingsSection } from "./_components/DownloadConnectionSettingsSection";
 import { CredentialSecuritySection } from "./_components/CredentialSecuritySection";
+import { TrackerSettingsSection } from "./_components/TrackerSettingsSection";
+import type { TrackerStatus } from "@/types";
 
 function toPercent(value: number, total: number): number {
   if (!total || total <= 0) return 0;
@@ -91,6 +93,8 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [invalidatingCredentials, setInvalidatingCredentials] = useState(false);
+  const [trackerStatus, setTrackerStatus] = useState<TrackerStatus | null>(null);
+  const [refreshingTrackers, setRefreshingTrackers] = useState(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -129,6 +133,7 @@ export default function SettingsPage() {
         setMachineStats(stats);
         setAria2Status(aria2Ver);
         setTestResult(null);
+        setTrackerStatus((cfg as { tracker_status?: TrackerStatus }).tracker_status ?? null);
       }
     } catch {
       if (!mountedRef.current) return;
@@ -211,6 +216,22 @@ export default function SettingsPage() {
     }
   }
 
+  async function refreshTrackers() {
+    setRefreshingTrackers(true);
+    try {
+      const status = await api.refreshTrackers();
+      if (mountedRef.current) {
+        setTrackerStatus(status);
+        showToast("tracker 列表已刷新", "success");
+      }
+    } catch (err) {
+      if (!mountedRef.current) return;
+      showToast("刷新 tracker 列表失败：" + ((err as Error).message || "未知错误"), "error");
+    } finally {
+      if (mountedRef.current) setRefreshingTrackers(false);
+    }
+  }
+
   const setField = <K extends keyof SettingsFormState>(field: K, value: SettingsFormState[K]) => {
     dispatch({ type: "field", field, value });
   };
@@ -282,6 +303,13 @@ export default function SettingsPage() {
           <HiddenExtensionsSection form={form} dispatch={dispatch} />
           <PackSettingsSection form={form} onFieldChange={setField} />
           <WebSocketSettingsSection form={form} onFieldChange={setField} />
+          <TrackerSettingsSection
+            form={form}
+            trackerStatus={trackerStatus}
+            refreshing={refreshingTrackers}
+            onFieldChange={setField}
+            onRefresh={refreshTrackers}
+          />
 
           <AdvancedSettingsSection>
             <RateLimitSettingsSection form={form} onFieldChange={setField} />

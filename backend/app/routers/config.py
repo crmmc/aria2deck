@@ -17,7 +17,7 @@ from app.schemas import (
     InvalidateCredentialsRequest,
     InvalidateCredentialsResponse,
 )
-from app.services import aria2_admin_service, settings_service, token_service
+from app.services import aria2_admin_service, settings_service, token_service, tracker_list_service
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 logger = logging.getLogger(__name__)
@@ -66,6 +66,9 @@ class ConfigUpdate(BaseModel):
         ge=1,
         description="任务历史（终态）最多保留天数；不含进行中任务",
     )
+    tracker_fixed_list: str | None = None
+    tracker_remote_urls: str | None = None
+    tracker_refresh_interval_minutes: int | None = None
 
 
 class Aria2TestRequest(BaseModel):
@@ -107,6 +110,12 @@ async def update_config(
         ",".join(result.changed_keys) if result.changed_keys else "none",
     )
     return result.settings
+
+
+@router.post("/trackers/refresh")
+async def refresh_trackers(admin=Depends(require_limited_admin)) -> dict:
+    logger.info("手动刷新 tracker 列表 admin_id=%s", admin.id)
+    return await tracker_list_service.refresh_remote_trackers()
 
 
 @router.get("/aria2/version")

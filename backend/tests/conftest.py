@@ -112,6 +112,16 @@ def reset_observation_store():
 
 
 @pytest.fixture(autouse=True)
+def reset_tracker_cache():
+    """在每个测试前后重置 tracker 内存缓存，避免跨测试泄漏"""
+    from app.services import tracker_list_service
+
+    tracker_list_service.reset_tracker_cache()
+    yield
+    tracker_list_service.reset_tracker_cache()
+
+
+@pytest.fixture(autouse=True)
 def reset_rate_limiter():
     """在每个测试前后清理限流器状态"""
     import asyncio

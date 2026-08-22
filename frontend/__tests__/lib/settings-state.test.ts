@@ -81,4 +81,32 @@ describe("settingsState", () => {
       expect(result.payload.history_retention_days).toBe(14);
     }
   });
+
+  test("settings form maps tracker fields to payload", () => {
+    const state = configToSettingsFormState({
+      max_task_size: 1024 * 1024 * 1024,
+      min_free_disk: 1024 * 1024 * 1024,
+      tracker_fixed_list: "udp://t.example.com:6969",
+      tracker_remote_urls: "https://example.com/l.txt",
+      tracker_refresh_interval_minutes: 10,
+    });
+    expect(state.trackerFixedList).toBe("udp://t.example.com:6969");
+    expect(state.trackerRemoteUrls).toBe("https://example.com/l.txt");
+    expect(state.trackerRefreshIntervalMinutes).toBe(10);
+
+    const result = settingsFormStateToPayload({
+      ...initialSettingsFormState,
+      maxTaskSize: "1",
+      minFreeDisk: "1",
+      trackerFixedList: "udp://t.example.com:6969",
+      trackerRemoteUrls: "https://example.com/l.txt",
+      trackerRefreshIntervalMinutes: 10,
+    });
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.payload.tracker_fixed_list).toBe("udp://t.example.com:6969");
+      expect(result.payload.tracker_remote_urls).toBe("https://example.com/l.txt");
+      expect(result.payload.tracker_refresh_interval_minutes).toBe(10);
+    }
+  });
 });

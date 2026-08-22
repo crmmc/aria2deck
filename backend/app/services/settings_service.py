@@ -10,12 +10,17 @@ from typing import Any
 
 from app.core.download_limiter import download_config
 from app.core.rate_limit_config import rate_limit_config
+from app.core.security import TRACKER_URI_SCHEMES, check_url_ssrf
 from app.repositories import settings as settings_repo
+from app.services import tracker_list_service
 
 logger = logging.getLogger(__name__)
 
 _config_cache: dict[str, tuple[str | None, float]] = {}
 _config_cache_lock = asyncio.Lock()
+
+# 持有后台刷新任务引用，防止被 GC 中断
+_background_refresh_tasks: set[asyncio.Task] = set()
 _CACHE_TTL = 60.0
 _SYNC_DEFAULTS: dict[str, str] = {
     "max_task_size": str(10 * 1024 * 1024 * 1024),
@@ -62,6 +67,9 @@ CONFIG_KEY_TO_COLUMN: dict[str, str] = {
     "download_anonymous_per_ip_connections": "download_anonymous_per_ip_connections",
     "download_anonymous_per_file_connections": "download_anonymous_per_file_connections",
     "history_retention_days": "history_retention_days",
+    "tracker_fixed_list": "tracker_fixed_list",
+    "tracker_remote_urls": "tracker_remote_urls",
+    "tracker_refresh_interval_minutes": "tracker_refresh_interval_minutes",
 }
 
 INT_CONFIG_COLUMNS = {
@@ -89,6 +97,7 @@ INT_CONFIG_COLUMNS = {
     "download_anonymous_per_ip_connections",
     "download_anonymous_per_file_connections",
     "history_retention_days",
+    "tracker_refresh_interval_minutes",
 }
 
 
@@ -310,6 +319,11 @@ def row_to_api_settings(row: Mapping[str, Any]) -> dict[str, Any]:
             row["download_anonymous_per_file_connections"]
         ),
         "history_retention_days": max(1, int(row["history_retention_days"])),
+        "tracker_fixed_list": row.get("tracker_fixed_list") or "",
+        "tracker_remote_urls": row.get("tracker_remote_urls") or "",
+        "tracker_refresh_interval_minutes": int(
+            row.get("tracker_refresh_interval_minutes") or 0
+        ),
     }
 
 
@@ -352,7 +366,9 @@ async def get_api_settings() -> dict[str, Any]:
     row = await settings_repo.get_settings_row()
     if row is None:
         raise RuntimeError("app_settings row is missing")
-    return row_to_api_settings(row)
+    api_settings = row_to_api_settings(row)
+    api_settings["tracker_status"] = await tracker_list_service.get_tracker_status()
+    return api_settings
 
 
 async def update_api_settings(payload: Mapping[str, Any]) -> SettingsUpdateResult:
@@ -464,11 +480,60 @@ def validate_download_settings(settings_map: Mapping[str, int]) -> None:
         )
 
 
+TRACKER_CONFIG_KEYS = {
+    "tracker_fixed_list",
+    "tracker_remote_urls",
+    "tracker_refresh_interval_minutes",
+}
+
+
+async def validate_tracker_settings(payload: Mapping[str, Any]) -> None:
+    from app.domain.errors import BadRequestError
+
+    interval = payload.get("tracker_refresh_interval_minutes")
+    if interval is not None and interval != 0 and interval < 5:
+        raise BadRequestError("tracker 刷新间隔必须为 0（仅手动）或不少于 5 分钟")
+
+    raw_urls = payload.get("tracker_remote_urls")
+    if raw_urls:
+        urls = [url.strip() for url in str(raw_urls).splitlines() if url.strip()]
+        for index, url in enumerate(urls, start=1):
+            error = await check_url_ssrf(
+                url, allowed_schemes=frozenset({"http", "https"})
+            )
+            if error:
+                raise BadRequestError(
+                    f"远程 tracker URL 第 {index} 条（{url}）无效：{error}"
+                )
+
+    raw_fixed = payload.get("tracker_fixed_list")
+    if raw_fixed:
+        entries = [
+            entry.strip()
+            for entry in str(raw_fixed).replace(",", "\n").splitlines()
+            if entry.strip()
+        ]
+        for index, entry in enumerate(entries, start=1):
+            scheme = entry.split("://", 1)[0].lower() if "://" in entry else ""
+            if scheme not in TRACKER_URI_SCHEMES:
+                raise BadRequestError(
+                    f"固定 tracker 第 {index} 条（{entry}）无效：仅支持 http/https/udp"
+                )
+            if len(entry) > tracker_list_service.MAX_TRACKER_ENTRY_LENGTH:
+                raise BadRequestError(
+                    f"固定 tracker 第 {index} 条（{entry[:32]}...）无效：长度超过 "
+                    f"{tracker_list_service.MAX_TRACKER_ENTRY_LENGTH}"
+                )
+
+
 async def update_api_settings_with_runtime_refresh(
     payload: Mapping[str, Any],
 ) -> SettingsUpdateResult:
     if any(key in payload for key in DOWNLOAD_CONFIG_KEYS):
         validate_download_settings(merged_download_settings(payload))
+    tracker_config_changed = any(key in payload for key in TRACKER_CONFIG_KEYS)
+    if tracker_config_changed:
+        await validate_tracker_settings(payload)
 
     rate_limit_changed = any(key in payload for key in RATE_LIMIT_KEYS)
     download_config_changed = any(key in payload for key in DOWNLOAD_CONFIG_KEYS)
@@ -482,6 +547,24 @@ async def update_api_settings_with_runtime_refresh(
         logger.debug("运行配置缓存已刷新 changed_keys=%s", changed_keys)
     if "aria2_rpc_url" in changed_keys or "aria2_rpc_secret" in changed_keys:
         await refresh_aria2_config()
+
+    if tracker_config_changed and any(
+        key in changed_keys for key in TRACKER_CONFIG_KEYS
+    ):
+        try:
+            await tracker_list_service.apply_fixed_list(
+                result.settings.get("tracker_fixed_list") or ""
+            )
+        except Exception:
+            logger.warning("tracker 配置变更后重合并失败", exc_info=True)
+        try:
+            task = asyncio.create_task(
+                tracker_list_service.refresh_remote_trackers()
+            )
+            _background_refresh_tasks.add(task)
+            task.add_done_callback(_background_refresh_tasks.discard)
+        except Exception:
+            logger.warning("tracker 配置变更后调度远程刷新失败", exc_info=True)
 
     return result
 

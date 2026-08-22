@@ -73,6 +73,7 @@ from app.modules.task_core.register import (
 from app.modules.task_core.submit import submit_tid
 from app.modules.task_core.states import ERROR_QUOTA_EXCEEDED
 from app.services.usage_service import get_usage
+from app.services import tracker_list_service
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +252,15 @@ async def register_and_submit(
         ts.raise_register_error(exc)
 
     submit_options = dict(options or {})
+    if resource.resource_kind in ("magnet", "torrent"):
+        bt_tracker = tracker_list_service.get_bt_tracker_option()
+        if bt_tracker is not None:
+            submit_options["bt-tracker"] = bt_tracker
+            logger.debug(
+                "注入 bt-tracker tid=%s count=%d",
+                result.tid,
+                bt_tracker.count(",") + 1,
+            )
     if result.outcome == "created":
         try:
             gid = await ts.submit_tid(

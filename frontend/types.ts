@@ -143,6 +143,18 @@ export type SystemConfig = {
   download_anonymous_per_ip_connections: number;
   download_anonymous_per_file_connections: number;
   history_retention_days: number;
+  tracker_fixed_list: string;
+  tracker_remote_urls: string;
+  tracker_refresh_interval_minutes: number;
+  tracker_status: TrackerStatus;
+};
+
+export type TrackerStatus = {
+  entry_count: number;
+  updated_at_ms: number | null;
+  last_refresh_at_ms: number | null;
+  last_refresh_status: "ok" | "partial" | "failed" | "never";
+  last_refresh_failed_urls: string[];
 };
 
 // User file reference (user's view of a stored file)

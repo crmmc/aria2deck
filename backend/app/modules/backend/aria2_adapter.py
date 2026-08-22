@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 _ALLOWED_USER_OPTIONS = frozenset(
     ("out", "header", "max-connection-per-server", "http-user", "http-passwd")
 )
-_SERVER_PASSTHROUGH_OPTIONS = frozenset(("select-file",))
+_SERVER_PASSTHROUGH_OPTIONS = frozenset(("select-file", "bt-tracker"))
 
 
 def _normalize_out_option(value: Any) -> str:

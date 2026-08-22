@@ -625,6 +625,38 @@ async def migrate_v14(conn: AsyncConnection) -> None:
     await _rebuild_schema_meta(conn, 14)
 
 
+V15_APP_SETTINGS_ADDED_COLUMNS = {
+    "tracker_fixed_list": "TEXT NOT NULL DEFAULT ''",
+    "tracker_remote_urls": "TEXT NOT NULL DEFAULT ''",
+    "tracker_refresh_interval_minutes": "INTEGER NOT NULL DEFAULT 0",
+}
+
+
+async def ensure_v15_tracker_list_schema(conn: AsyncConnection) -> None:
+    """v15: app_settings tracker 三列 + tracker_list_cache 单行缓存表。"""
+    await _add_missing_columns(conn, "app_settings", V15_APP_SETTINGS_ADDED_COLUMNS)
+    await conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS tracker_list_cache ("
+            "id INTEGER NOT NULL PRIMARY KEY, "
+            "trackers_json TEXT NOT NULL DEFAULT '[]', "
+            "remote_trackers_json TEXT NOT NULL DEFAULT '[]', "
+            "entry_count INTEGER NOT NULL DEFAULT 0, "
+            "updated_at_ms INTEGER, "
+            "last_refresh_at_ms INTEGER, "
+            "last_refresh_status TEXT NOT NULL DEFAULT 'never', "
+            "last_refresh_failed_urls TEXT NOT NULL DEFAULT '[]', "
+            "CONSTRAINT ck_tracker_list_cache_single_row CHECK (id = 1)"
+            ")"
+        )
+    )
+
+
+async def migrate_v15(conn: AsyncConnection) -> None:
+    await ensure_v15_tracker_list_schema(conn)
+    await _rebuild_schema_meta(conn, 15)
+
+
 async def migrate_v1(conn: AsyncConnection) -> None:
     await _add_missing_columns(conn, "app_settings", V1_APP_SETTINGS_ADDED_COLUMNS)
     await _rebuild_schema_meta(conn, 1)
@@ -1220,6 +1252,7 @@ MIGRATIONS: dict[int, Migration] = {
     12: migrate_v12,
     13: migrate_v13,
     14: migrate_v14,
+    15: migrate_v15,
 }
 
 

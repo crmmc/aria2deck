@@ -483,6 +483,12 @@ class TestLifespan:
         async def run_listener() -> None:
             await run_background("listener")
 
+        async def record_tracker_load() -> None:
+            events.append("tracker-load")
+
+        async def run_tracker_refresher() -> None:
+            await run_background("tracker-refresher")
+
         close_session = AsyncMock()
         dispose = AsyncMock()
         with (
@@ -507,6 +513,14 @@ class TestLifespan:
             ),
             patch("app.main.sync_tasks", new=run_sync),
             patch("app.main.listen_aria2_events", new=run_listener),
+            patch(
+                "app.services.tracker_list_service.load_from_db",
+                new=AsyncMock(side_effect=record_tracker_load),
+            ),
+            patch(
+                "app.services.tracker_list_service.run_tracker_list_refresher",
+                new=run_tracker_refresher,
+            ),
             patch("app.main.Aria2Client.close_session", close_session),
             patch("app.main.dispose_engine", dispose),
         ):
@@ -518,6 +532,7 @@ class TestLifespan:
                         "repair",
                         "cleanup",
                         "pack-submit",
+                        "tracker-load",
                     ]
                     await asyncio.sleep(0)
                     assert events[:5] == [
@@ -527,10 +542,10 @@ class TestLifespan:
                         "cleanup",
                         "pack-submit",
                     ]
-                    assert {"sync", "listener"}.issubset(events)
+                    assert {"sync", "listener", "tracker-refresher"}.issubset(events)
                     raise RuntimeError("application failure")
 
-        assert {"sync-stopped", "listener-stopped"}.issubset(events)
+        assert {"sync-stopped", "listener-stopped", "tracker-refresher-stopped"}.issubset(events)
         close_session.assert_awaited_once()
         dispose.assert_awaited_once()
 

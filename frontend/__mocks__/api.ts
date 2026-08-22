@@ -104,6 +104,16 @@ export const createMockSystemConfig = (overrides: Partial<SystemConfig> = {}): S
   download_anonymous_per_ip_connections: 4,
   download_anonymous_per_file_connections: 2,
   history_retention_days: 30,
+  tracker_fixed_list: "",
+  tracker_remote_urls: "",
+  tracker_refresh_interval_minutes: 0,
+  tracker_status: {
+    entry_count: 0,
+    updated_at_ms: null,
+    last_refresh_at_ms: null,
+    last_refresh_status: "never",
+    last_refresh_failed_urls: [],
+  },
   ...overrides,
 });
 
