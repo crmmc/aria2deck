@@ -2,6 +2,7 @@
 # ruff: noqa: E402
 
 import os
+import shutil
 import tempfile
 from typing import Generator
 from unittest.mock import AsyncMock
@@ -166,6 +167,7 @@ def temp_db() -> Generator[str, None, None]:
     asyncio.run(dispose_engine())
     gc.collect()
 
+    shutil.rmtree(temp_dir, ignore_errors=True)
     settings.database_path = original_db_path
     settings.download_dir = original_download_dir
     reset_engine()
