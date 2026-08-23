@@ -14,6 +14,14 @@ from app.core.config import settings
 from app.db.engine import transaction
 from app.db.schema import users
 
+# SPA 静态资源仅在 make build 后存在，CI 未构建前端时这些路由不生效
+_STATIC_INDEX = (
+    main_module.Path(__file__).resolve().parents[1] / "static" / "tasks.html"
+)
+requires_static_build = pytest.mark.skipif(
+    not _STATIC_INDEX.exists(), reason="前端静态产物未构建（make build）"
+)
+
 
 def test_reset_admin_password_returns_false_without_admin(temp_db: str) -> None:
     async def clear_users() -> None:
@@ -98,12 +106,14 @@ def test_create_app_reads_extra_cors_origins(
     assert "null" not in origins
 
 
+@requires_static_build
 def test_share_page_spa_fallback(client: TestClient, temp_db: str) -> None:
     response = client.get("/s/abc123")
     assert response.status_code == 200
     assert b"<" in response.content[:64]
 
 
+@requires_static_build
 def test_alias_route_serves_index(client: TestClient, temp_db: str) -> None:
     for path in ("/tasks", "/files"):
         response = client.get(path)

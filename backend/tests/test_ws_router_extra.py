@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -66,17 +67,26 @@ def test_websocket_pong_is_ignored(
 def test_websocket_session_still_valid_keeps_connection(
     client: TestClient, user_session: str, test_user: dict
 ) -> None:
-    with patch("app.routers.ws.SESSION_REVALIDATION_INTERVAL_SECONDS", 0.01):
-        with client.websocket_connect(
-            "/ws/tasks",
-            cookies={settings.session_cookie_name: user_session},
-            headers={"origin": TRUSTED_ORIGIN},
-        ) as websocket:
-            import time
+    user = SimpleNamespace(id=test_user["id"])
+    revalidated = threading.Event()
 
-            time.sleep(0.1)
-            websocket.send_text("ping")
-            assert websocket.receive_text() == "pong"
+    async def fake_get_user_by_session(session_id: str):
+        revalidated.set()
+        return user
+
+    with patch("app.routers.ws.SESSION_REVALIDATION_INTERVAL_SECONDS", 0.01):
+        with patch(
+            "app.routers.ws.get_user_by_session",
+            AsyncMock(side_effect=fake_get_user_by_session),
+        ):
+            with client.websocket_connect(
+                "/ws/tasks",
+                cookies={settings.session_cookie_name: user_session},
+                headers={"origin": TRUSTED_ORIGIN},
+            ) as websocket:
+                assert revalidated.wait(timeout=10), "会话复验未在预期时间内执行"
+                websocket.send_text("ping")
+                assert websocket.receive_text() == "pong"
 
 
 def test_websocket_closes_when_revalidation_raises(
