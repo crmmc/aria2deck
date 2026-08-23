@@ -92,7 +92,7 @@ describe("StoragePage", () => {
     expect(await screen.findByText("存储管理")).toBeInTheDocument();
     expect(screen.getByText("movie.mkv")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "1" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "1" })[0]);
     await waitFor(() => {
       expect(mockApi.getFileUsers).toHaveBeenCalledWith(1);
     });
@@ -149,7 +149,7 @@ describe("StoragePage", () => {
     await waitFor(() => {
       expect(mockApi.listStoredFiles).toHaveBeenCalledWith(2, 20, undefined, false);
     });
-    expect(await screen.findByText("第 2 / 3 页，共 41 项")).toBeInTheDocument();
+    expect(await screen.findByText("共 41 项")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "上一页" }));
     await waitFor(() => {
@@ -226,7 +226,7 @@ describe("StoragePage", () => {
       await newPageRequest.promise;
     });
     expect(await screen.findByText("page-two-file")).toBeInTheDocument();
-    expect(screen.getByText("第 2 / 2 页，共 21 项")).toBeInTheDocument();
+    expect(screen.getByText("共 21 项")).toBeInTheDocument();
   });
 
   test("ignores stale responses from older filters", async () => {
@@ -314,7 +314,7 @@ describe("StoragePage", () => {
       );
       expect(pageOneCalls).toHaveLength(2);
     });
-    expect(await screen.findByText("第 1 / 1 页，共 20 项")).toBeInTheDocument();
+    expect(await screen.findByText("共 20 项")).toBeInTheDocument();
   });
 
   test("returns from an emptied last page after refresh", async () => {
@@ -351,6 +351,6 @@ describe("StoragePage", () => {
       );
       expect(pageOneCalls).toHaveLength(2);
     });
-    expect(await screen.findByText("第 1 / 1 页，共 20 项")).toBeInTheDocument();
+    expect(await screen.findByText("共 20 项")).toBeInTheDocument();
   });
 });

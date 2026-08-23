@@ -745,6 +745,39 @@ p {
   padding-bottom: var(--space-3);
 }
 
+.pagination-controls {
+  padding: 12px 14px;
+}
+
+.jump-page-input {
+  width: 52px;
+  height: 28px;
+  min-height: 28px;
+  margin-left: 8px;
+  padding: 0 8px;
+  text-align: center;
+  font-size: 13px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--foreground);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.jump-page-input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.15);
+}
+.jump-page-input::-webkit-outer-spin-button,
+.jump-page-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.jump-page-input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
 /* Text Sizes */
 .text-xs {
   font-size: var(--text-xs);

@@ -9,49 +9,10 @@ import { ModalOverlay } from "@/components/ModalOverlay";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
 import type { StoredFileInfo, FileUserInfo } from "@/types";
+import { PaginationControls } from "@/app/(authenticated)/files/_components/PaginationControls";
 
 const PAGE_SIZE = 20;
 const EMPTY_FILE_IDS: number[] = [];
-
-type StoragePaginationProps = {
-  page: number;
-  totalPages: number;
-  total: number;
-  onPageChange: (page: number) => void;
-};
-
-function StoragePagination({
-  page,
-  totalPages,
-  total,
-  onPageChange,
-}: StoragePaginationProps) {
-  return (
-    <div className="flex items-center justify-end gap-2 py-3 px-2">
-      <span className="text-sm muted">
-        第 {page} / {totalPages} 页，共 {total} 项
-      </span>
-      <button
-        type="button"
-        className="button secondary btn-sm"
-        aria-label="上一页"
-        disabled={page <= 1}
-        onClick={() => onPageChange(Math.max(1, page - 1))}
-      >
-        上一页
-      </button>
-      <button
-        type="button"
-        className="button secondary btn-sm"
-        aria-label="下一页"
-        disabled={page >= totalPages}
-        onClick={() => onPageChange(Math.min(totalPages, page + 1))}
-      >
-        下一页
-      </button>
-    </div>
-  );
-}
 
 export default function StoragePage() {
   const { user } = useAuth();
@@ -316,10 +277,10 @@ export default function StoragePage() {
             </tbody>
             </table>
           </div>
-          <StoragePagination
-            page={page}
-            totalPages={totalPages}
-            total={total}
+          <PaginationControls
+            currentPage={page}
+            pageSize={PAGE_SIZE}
+            totalFiles={total}
             onPageChange={handlePageChange}
           />
         </div>
