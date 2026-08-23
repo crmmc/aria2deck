@@ -1783,12 +1783,14 @@ class PackTaskManager:
         cls._check_cancel(cancel_event)
         try:
             identity = content_identity_from_content_hash(content_hash)
+            canonical = is_canonical_store_path(source_dir, content_hash)
         except ValueError:
+            # legacy key 可能非法（空或含路径分隔符），无法定位 canonical 存储路径，直接回退
             return source_dir
         if (
             identity.version != CONTENT_HASH_V1
             and identity.object_kind != "directory"
-        ) or not is_canonical_store_path(source_dir, content_hash):
+        ) or not canonical:
             return source_dir
         children = []
         with os.scandir(source_dir) as entries:

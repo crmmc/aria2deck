@@ -2472,3 +2472,19 @@ async def test_install_prepared_release_cancelled_unlinks_target(
             filename=prepared.name, cancel_event=_event(), job=None,
         )
     assert not _store_path_for(content_hash).exists()
+
+
+def test_unwrap_stored_directory_invalid_legacy_hash_falls_back(tmp_path):
+    """legacy content_hash 为空或含路径分隔符时必须回退原目录，而不是抛 ValueError。"""
+    import threading
+
+    from app.modules.pack import PackTaskManager
+
+    source = tmp_path / "legacy_dir"
+    source.mkdir()
+    (source / "inner").mkdir()
+    for bad_hash in ("", "sub/dir", "a" * 64):
+        result = PackTaskManager._unwrap_stored_directory(
+            source, bad_hash, threading.Event()
+        )
+        assert result == source, bad_hash
