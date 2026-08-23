@@ -96,3 +96,72 @@ async def test_resolver_returns_only_the_checked_public_addresses(
 def test_url_validation_rejects_private_or_credentialed_target(url: str) -> None:
     with pytest.raises(UnsafeTargetError):
         normalize_public_http_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [None, "http://[::1", "http://example.com:bad/port"],
+)
+def test_url_validation_rejects_invalid_input(url) -> None:
+    with pytest.raises(UnsafeTargetError, match="上游地址无效"):
+        normalize_public_http_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://localhost/x", "http://LOCALHOST.localdomain/x", "http://0.0.0.0/x", "http://[::]/x"],
+)
+def test_url_validation_rejects_local_hostnames(url: str) -> None:
+    with pytest.raises(UnsafeTargetError, match="本机地址"):
+        normalize_public_http_url(url)
+
+
+def test_url_validation_rejects_private_ip_literal() -> None:
+    with pytest.raises(UnsafeTargetError, match="非公网地址"):
+        normalize_public_http_url("http://169.254.1.1/x")
+
+
+@pytest.mark.asyncio
+async def test_resolver_rejects_unparseable_address(monkeypatch) -> None:
+    loop = asyncio.get_running_loop()
+    getaddrinfo = AsyncMock(
+        return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("not-an-ip", 80))]
+    )
+    monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
+    with pytest.raises(UnsafeTargetError, match="域名解析结果无效"):
+        await PublicOnlyResolver().resolve("broken.example", 80)
+
+
+@pytest.mark.asyncio
+async def test_resolver_rejects_empty_resolution(monkeypatch) -> None:
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "getaddrinfo", AsyncMock(return_value=[]))
+    with pytest.raises(UnsafeTargetError, match="域名没有可用的公网地址"):
+        await PublicOnlyResolver().resolve("empty.example", 80)
+
+
+@pytest.mark.asyncio
+async def test_resolver_close_is_noop() -> None:
+    assert await PublicOnlyResolver().close() is None
+
+
+@pytest.mark.asyncio
+async def test_create_public_connector_uses_public_resolver() -> None:
+    from app.http.safe_client import create_public_connector
+
+    connector = create_public_connector()
+    assert isinstance(connector._resolver, PublicOnlyResolver)
+    await connector.close()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/file.zip",
+        "https://EXAMPLE.com/path#frag",
+        "http://93.184.216.34/file",
+        "http://[2606:2800:220:1:248:1893:25c8:1946]/file",
+    ],
+)
+def test_url_validation_accepts_public_targets(url: str) -> None:
+    assert normalize_public_http_url(url) is not None
