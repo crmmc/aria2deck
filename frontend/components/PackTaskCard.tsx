@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
+import { useMounted } from "@/lib/useMounted";
 import { formatBytes } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
 import type { PackTask } from "@/types";
@@ -40,23 +42,25 @@ function getDisplayName(task: PackTask): string {
   return task.folder_path;
 }
 
+interface DropdownPosition {
+  top: number;
+  right: number;
+}
+
 interface PackTaskCardProps {
   onTaskComplete?: () => void;
 }
 
 export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   const { showToast, showConfirm } = useToast();
+  const mounted = useMounted();
   const [tasks, setTasks] = useState<PackTask[]>([]);
   const [expanded, setExpanded] = useState(false);
   const [visible, setVisible] = useState(false);
-  const hideTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const expandTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const timersRef = useRef<Set<NodeJS.Timeout> | null>(null);
-  if (timersRef.current === null) {
-    timersRef.current = new Set();
-  }
-  const timers = timersRef.current;
+  const [position, setPosition] = useState<DropdownPosition | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const taskStatusRef = useRef<Map<number, PackTask["status"]> | null>(null);
   if (taskStatusRef.current === null) {
     taskStatusRef.current = new Map();
@@ -108,45 +112,83 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
     return undefined;
   }, [tasks, loadTasks]);
 
+  const collapse = useCallback(() => {
+    setVisible(false);
+    const timer = setTimeout(() => {
+      setExpanded(false);
+      setPosition(null);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, []);
+
   useEffect(() => {
-    return () => {
-      timers.forEach(clearTimeout);
+    if (!expanded) return undefined;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") collapse();
     };
-  }, [timers]);
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        buttonRef.current?.contains(target) ||
+        panelRef.current?.contains(target)
+      ) {
+        return;
+      }
+      collapse();
+    };
+    const handleReposition = (e: Event) => {
+      if (panelRef.current?.contains(e.target as Node)) return;
+      collapse();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("mousedown", handleMouseDown);
+    window.addEventListener("resize", handleReposition, true);
+    window.addEventListener("scroll", handleReposition, true);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("mousedown", handleMouseDown);
+      window.removeEventListener("resize", handleReposition, true);
+      window.removeEventListener("scroll", handleReposition, true);
+    };
+  }, [expanded, collapse]);
 
-  const handleMouseEnter = () => {
-    if (hideTimerRef.current) {
-      clearTimeout(hideTimerRef.current);
-      timers.delete(hideTimerRef.current);
-      hideTimerRef.current = null;
+  const clearPendingClose = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
     }
-    if (collapseTimerRef.current) {
-      clearTimeout(collapseTimerRef.current);
-      timers.delete(collapseTimerRef.current);
-      collapseTimerRef.current = null;
-    }
+  }, []);
+
+  const expand = useCallback(() => {
+    clearPendingClose();
+    if (expanded) return;
+    const rect = buttonRef.current?.getBoundingClientRect();
+    setPosition(
+      rect
+        ? { top: rect.bottom + 8, right: window.innerWidth - rect.right }
+        : { top: 0, right: 0 }
+    );
     setExpanded(true);
-    const expandTimer = setTimeout(() => {
-      setVisible(true);
-      timers.delete(expandTimer);
-    }, 10);
-    expandTimerRef.current = expandTimer;
-    timers.add(expandTimer);
-  };
+    requestAnimationFrame(() => setVisible(true));
+  }, [expanded, clearPendingClose]);
 
-  const handleMouseLeave = () => {
-    const hideTimer = setTimeout(() => {
-      setVisible(false);
-      timers.delete(hideTimer);
-      const collapseTimer = setTimeout(() => {
-        setExpanded(false);
-        timers.delete(collapseTimer);
-      }, 400);
-      collapseTimerRef.current = collapseTimer;
-      timers.add(collapseTimer);
-    }, 1200);
-    hideTimerRef.current = hideTimer;
-    timers.add(hideTimer);
+  const scheduleClose = useCallback(() => {
+    clearPendingClose();
+    closeTimerRef.current = setTimeout(() => {
+      closeTimerRef.current = null;
+      collapse();
+    }, 200);
+  }, [collapse, clearPendingClose]);
+
+  useEffect(() => () => clearPendingClose(), [clearPendingClose]);
+
+  const handleToggle = () => {
+    if (expanded) {
+      clearPendingClose();
+      collapse();
+      return;
+    }
+    expand();
   };
 
   const activeTasks = useMemo(
@@ -204,20 +246,31 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   if (tasks.length === 0) return null;
 
   return (
-    <div
-      className="relative"
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
-    >
-      <button type="button" className="button secondary pack-task-btn">
+    <div className="relative">
+      <button
+        type="button"
+        className="button secondary pack-task-btn"
+        ref={buttonRef}
+        onClick={handleToggle}
+        onMouseEnter={expand}
+        onMouseLeave={scheduleClose}
+        aria-expanded={expanded}
+        aria-haspopup="true"
+      >
         <span>打包任务</span>
         {activeTasks.length > 0 && (
           <span className="pack-task-badge">{activeTasks.length}</span>
         )}
       </button>
 
-      {expanded && (
-        <div className={`pack-dropdown ${visible ? "pack-dropdown-visible" : "pack-dropdown-hidden"}`}>
+      {expanded && mounted && position && createPortal(
+        <div
+          ref={panelRef}
+          className={`pack-dropdown ${visible ? "pack-dropdown-visible" : "pack-dropdown-hidden"}`}
+          style={{ top: position.top, right: position.right }}
+          onMouseEnter={clearPendingClose}
+          onMouseLeave={scheduleClose}
+        >
           {terminalTasks.length > 0 && (
             <div className="pack-dropdown-header">
               <button type="button"
@@ -302,7 +355,8 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
               )}
             </div>
           ))}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

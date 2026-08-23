@@ -1787,14 +1787,12 @@ dialog.confirm-overlay {
 }
 
 .pack-dropdown {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 8px;
+  position: fixed;
+  margin-top: 0;
   width: 360px;
   max-height: 400px;
   overflow-y: auto;
-  z-index: 100;
+  z-index: 1000;
   padding: 0;
   background: #fff;
   border-radius: 16px;
@@ -2280,7 +2278,7 @@ dialog.confirm-overlay {
   grid-template-rows: auto minmax(0, 1fr);
   border: 1px solid var(--card-border);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.96);
+  background: #fff;
   box-shadow: 0 20px 48px rgba(0, 0, 0, 0.16);
 }
 
@@ -2987,9 +2985,7 @@ dialog.confirm-overlay {
   max-width: 800px;
   height: 80%;
   max-height: 600px;
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: #fff;
   border-radius: 12px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
   display: flex;
@@ -3838,9 +3834,8 @@ dialog.confirm-overlay {
 
   /* Pack dropdown */
   .pack-dropdown {
-    width: 95vw;
-    max-width: 360px;
-    right: -50%;
+    width: min(92vw, 360px);
+    right: 16px;
   }
 
   /* Create user form mobile */

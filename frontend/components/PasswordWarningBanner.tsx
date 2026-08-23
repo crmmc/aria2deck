@@ -55,13 +55,11 @@ export default function PasswordWarningBanner({ user }: Props) {
 
         .password-warning-card {
           width: 280px;
-          background: rgba(255, 255, 255, 0.9);
-          border: 1px solid rgba(255, 255, 255, 0.6);
+          background: #fff;
+          border: 1px solid rgba(0, 0, 0, 0.08);
           border-radius: 16px;
           padding: 16px;
-          box-shadow:
-            0 8px 32px rgba(0, 0, 0, 0.08),
-            0 1px 2px rgba(255, 255, 255, 0.5) inset;
+          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
         }
 
         .password-warning-header {

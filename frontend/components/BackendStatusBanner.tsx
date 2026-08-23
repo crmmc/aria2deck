@@ -115,7 +115,7 @@ export default function BackendStatusBanner({ user }: Props) {
         }
 
         .backend-status-card {
-          background: rgba(255, 248, 235, 0.96);
+          background: #fff8eb;
           border: 1px solid rgba(245, 158, 11, 0.35);
           border-radius: 14px;
           padding: 14px 16px;
