@@ -82,6 +82,10 @@ describe("PackTaskCard", () => {
       jest.advanceTimersByTime(20);
     });
 
+    const dropdown = screen.getByText(/排队中/).closest(".pack-dropdown");
+    expect(dropdown).not.toBeNull();
+    expect(dropdown?.className).not.toMatch(/\bcard\b/);
+
     expect(screen.getByText(/排队中/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
 

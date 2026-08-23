@@ -217,7 +217,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
       </button>
 
       {expanded && (
-        <div className={`card pack-dropdown ${visible ? "pack-dropdown-visible" : "pack-dropdown-hidden"}`}>
+        <div className={`pack-dropdown ${visible ? "pack-dropdown-visible" : "pack-dropdown-hidden"}`}>
           {terminalTasks.length > 0 && (
             <div className="pack-dropdown-header">
               <button type="button"
