@@ -287,7 +287,7 @@ async def resolve_download_target_with_read_lease(
 
 async def resolve_file_ids(
     user_id: int, file_ids: list[int]
-) -> list[tuple[str, int, str]]:
+) -> list[tuple[str, int, str, str]]:
     if not file_ids:
         raise BadRequestError("文件列表不能为空")
     requested_ids = list(dict.fromkeys(file_ids))
@@ -300,6 +300,7 @@ async def resolve_file_ids(
             str(by_id[file_id]["real_path"]),
             int(by_id[file_id]["size_bytes"]),
             str(by_id[file_id]["display_name"] or "未命名"),
+            str(by_id[file_id]["content_hash"] or ""),
         )
         for file_id in requested_ids
     ]

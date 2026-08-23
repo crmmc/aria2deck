@@ -356,12 +356,6 @@ class _InstalledPrepared:
     created_by_this_attempt: bool
 
 
-class _SourceNames(list[str]):
-    def __init__(self, values: list[str], content_hashes: list[str]) -> None:
-        super().__init__(values)
-        self.content_hashes = content_hashes
-
-
 @dataclass(slots=True)
 class _ArchiveItem:
     path: Path
@@ -932,7 +926,8 @@ class PackTaskManager:
                 job,
                 cls._build_archive_items,
                 sources,
-                _SourceNames(source_names, source_hashes),
+                source_names,
+                source_hashes,
                 job.cancel_event,
             )
             pack_format = cls.get_pack_format()
@@ -1613,17 +1608,16 @@ class PackTaskManager:
         cls,
         sources: list[Path],
         source_names: list[str] | None,
+        content_hashes: list[str] | None,
         cancel_event: threading.Event | None = None,
     ) -> list[_ArchiveItem]:
         cls._check_cancel(cancel_event)
-        content_hashes = getattr(source_names, "content_hashes", None)
         if not source_names or len(source_names) != len(sources):
             source_names = [src.name for src in sources]
-            content_hashes = None
         budget = _ArchiveBudget()
         if len(sources) == 1 and sources[0].is_dir():
             source = cls._unwrap_stored_directory(
-                sources[0], (content_hashes or [""])[0], cancel_event
+                sources[0], content_hashes[0], cancel_event
             )
             return cls._collect_directory_items(
                 source,
@@ -1637,7 +1631,7 @@ class PackTaskManager:
         used_roots: set[str] = set()
         for index, (source, raw_name) in enumerate(zip(sources, source_names)):
             cls._check_cancel(cancel_event)
-            content_hash = content_hashes[index] if content_hashes else ""
+            content_hash = content_hashes[index]
             source_for_pack = (
                 cls._unwrap_stored_directory(source, content_hash, cancel_event)
                 if source.is_dir()
@@ -1781,13 +1775,8 @@ class PackTaskManager:
         from app.services.storage import is_canonical_store_path
 
         cls._check_cancel(cancel_event)
-        try:
-            identity = content_identity_from_content_hash(content_hash)
-            canonical = is_canonical_store_path(source_dir, content_hash)
-        except ValueError:
-            # TODO(数据迁移): legacy key 可能非法（空或含路径分隔符），无法定位 canonical
-            # 存储路径，直接回退。待后续将存量非法 hash 迁移为合法 v2 身份后，此兜底可删除。
-            return source_dir
+        identity = content_identity_from_content_hash(content_hash)
+        canonical = is_canonical_store_path(source_dir, content_hash)
         if (
             identity.version != CONTENT_HASH_V1
             and identity.object_kind != "directory"
@@ -1846,7 +1835,7 @@ def _estimate_pack_reservation(items: list[_ArchiveItem]) -> tuple[int, int]:
 
 
 async def _scan_archive_items_for_admission(
-    sources: list[Path], source_names: list[str]
+    sources: list[Path], source_names: list[str], content_hashes: list[str]
 ) -> list[_ArchiveItem]:
     cancel_event = threading.Event()
     scan_task = asyncio.create_task(
@@ -1854,6 +1843,7 @@ async def _scan_archive_items_for_admission(
             PackTaskManager._build_archive_items,
             sources,
             source_names,
+            content_hashes,
             cancel_event,
         )
     )
@@ -1925,7 +1915,7 @@ def pack_task_to_dict(task: dict[str, Any]) -> dict:
 
 async def calculate_user_files_size(user_id: int, file_ids: list[int]) -> int:
     resolved = await resolve_file_ids(user_id, file_ids)
-    return sum(size for _, size, _ in resolved)
+    return sum(size for _, size, _, _ in resolved)
 
 
 async def clear_finished_pack_tasks(user_id: int) -> dict:
@@ -1988,17 +1978,22 @@ async def create_pack_task_from_user_files(
     if len(file_ids) != len(set(file_ids)):
         raise BadRequestError("文件列表包含重复项")
     resolved = await resolve_file_ids(user_id, file_ids)
-    sources = [Path(path).resolve() for path, _size, _name in resolved]
-    source_names = [str(name) for _path, _size, name in resolved]
+    sources = [Path(path).resolve() for path, _size, _name, _h in resolved]
+    source_names = [str(name) for _path, _size, name, _h in resolved]
+    content_hashes = [str(h) for _path, _size, _name, h in resolved]
     base_dir = Path(settings.download_dir).resolve()
     if any(base_dir not in source.parents or not source.exists() for source in sources):
         raise BadRequestError("部分打包源不可用")
     try:
-        items = await _scan_archive_items_for_admission(sources, source_names)
+        items = await _scan_archive_items_for_admission(
+            sources, source_names, content_hashes
+        )
     except PackBoundaryError as exc:
         raise BadRequestError(str(exc)) from exc
     except OSError as exc:
         raise BadRequestError("无法读取打包源") from exc
+    except ValueError as exc:
+        raise BadRequestError("打包源内容标识无效") from exc
     source_size, reserved_bytes = _estimate_pack_reservation(items)
     if source_size == 0:
         raise BadRequestError("选中的文件为空")

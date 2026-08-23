@@ -1548,10 +1548,11 @@ async def test_pack_admission_scans_sources_off_event_loop(
     def record_scan(
         sources: list[Path],
         source_names: list[str] | None,
+        content_hashes: list[str] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> list[pack_service._ArchiveItem]:
         scan_threads.append(threading.get_ident())
-        return real_scan(sources, source_names, cancel_event)
+        return real_scan(sources, source_names, content_hashes, cancel_event)
 
     submit = AsyncMock(return_value=True)
     monkeypatch.setattr(PackTaskManager, "_build_archive_items", record_scan)
@@ -1586,6 +1587,7 @@ async def test_cancelled_pack_admission_waits_for_scan_thread(
     def blocking_scan(
         _sources: list[Path],
         _names: list[str] | None,
+        _hashes: list[str] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> list[pack_service._ArchiveItem]:
         assert cancel_event is not None
@@ -1661,18 +1663,20 @@ def test_archive_scan_enforces_entry_and_path_metadata_limits(
         PackTaskManager._build_archive_items(
             [first, second],
             ["first", "second"],
+            ["h1", "h2"],
         )
 
     monkeypatch.setattr(pack_service, "_MAX_ARCHIVE_ENTRIES", 10)
     monkeypatch.setattr(pack_service, "_MAX_ARCHIVE_PATH_BYTES", 3)
     with pytest.raises(pack_service.PackBoundaryError, match="路径过长"):
-        PackTaskManager._build_archive_items([first], ["long-name"])
+        PackTaskManager._build_archive_items([first], ["long-name"], ["h1"])
     monkeypatch.setattr(pack_service, "_MAX_ARCHIVE_PATH_BYTES", 100)
     monkeypatch.setattr(pack_service, "_MAX_TOTAL_ARCHIVE_PATH_BYTES", 6)
     with pytest.raises(pack_service.PackBoundaryError, match="路径元数据过大"):
         PackTaskManager._build_archive_items(
             [first, second],
             ["first", "second"],
+            ["h1", "h2"],
         )
 
 
@@ -1683,7 +1687,7 @@ def test_archive_writers_enforce_output_extent(
 ) -> None:
     source = tmp_path / "source.bin"
     source.write_bytes(os.urandom(4096))
-    items = PackTaskManager._build_archive_items([source], [source.name])
+    items = PackTaskManager._build_archive_items([source], [source.name], ["h1"])
     output = tmp_path / f"archive.{pack_format}"
 
     with pytest.raises(pack_service.PackBoundaryError, match="超过预留空间"):
@@ -2717,12 +2721,13 @@ async def test_shutdown_waits_for_source_scan_thread(
     def blocking_scan(
         sources: list[Path],
         source_names: list[str] | None,
+        content_hashes: list[str] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> list[pack_service._ArchiveItem]:
         entered.set()
         release.wait(2)
         try:
-            return real_scan(sources, source_names, cancel_event)
+            return real_scan(sources, source_names, content_hashes, cancel_event)
         finally:
             exited.set()
 

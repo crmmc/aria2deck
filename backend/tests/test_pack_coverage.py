@@ -5,6 +5,7 @@ import asyncio
 import errno
 import io
 import json
+import shutil
 import threading
 import zipfile
 from pathlib import Path
@@ -380,7 +381,7 @@ def test_build_archive_items_directory_collection(
     (root / "sub1" / "skip_dir").symlink_to(root / "sub1" / "sub2")
     (root / "sub1" / "skip_link").symlink_to(root / "top.txt")
 
-    items = PackTaskManager._build_archive_items([root], None)
+    items = PackTaskManager._build_archive_items([root], None, ["dirhash"])
     arcnames = [item.arcname for item in items]
     assert arcnames == [
         "sub1/", "top.txt", "sub1/sub2/", "sub1/sub2/leaf.txt",
@@ -389,20 +390,14 @@ def test_build_archive_items_directory_collection(
 
     # 单一目录源不会带前缀；多源目录会展开根名并去重
     multi = PackTaskManager._build_archive_items(
-        [root, root], _prefix_names(["tree", "tree"])
+        [root, root], ["tree", "tree"], ["h1", "h2"]
     )
     roots = {item.arcname.split("/")[0] for item in multi}
     assert roots == {"tree", "tree_1"}
     prefixed = PackTaskManager._build_archive_items(
-        [root, root / "top.txt"], _prefix_names(["tree", "top.txt"])
+        [root, root / "top.txt"], ["tree", "top.txt"], ["h1", "h2"]
     )
     assert prefixed[0].arcname == "tree/"
-
-
-def _prefix_names(values: list[str]) -> Any:
-    from app.modules.pack import _SourceNames
-
-    return _SourceNames(values, [""] * len(values))
 
 
 def test_build_archive_items_cancel(tmp_path: Path) -> None:
@@ -411,7 +406,7 @@ def test_build_archive_items_cancel(tmp_path: Path) -> None:
     cancel = _event()
     cancel.set()
     with pytest.raises(InterruptedError):
-        PackTaskManager._build_archive_items([root], None, cancel)
+        PackTaskManager._build_archive_items([root], None, None, cancel)
 
 
 def test_build_archive_items_wraps_canonical_directory(
@@ -425,22 +420,20 @@ def test_build_archive_items_wraps_canonical_directory(
     inner.mkdir(parents=True)
     (inner / "f.txt").write_bytes(b"x")
 
-    digest = scan_storage_path(inner).content_hash.split(":")[-1]
-    dir_hash = f"v2:dir:{digest}"
+    dir_hash = scan_storage_path(inner).content_hash
     monkeypatch.setattr(storage, "is_canonical_store_path", lambda _p, _h: True)
-    items = PackTaskManager._build_archive_items([root], _prefix_names([dir_hash]))
+    items = PackTaskManager._build_archive_items([root], ["dir"], [dir_hash])
     assert items[0].arcname == "f.txt"
 
     # 子目录数量不为 1 → 原样返回
     (root / "extra").mkdir()
-    items2 = PackTaskManager._build_archive_items([root], _prefix_names([dir_hash]))
+    items2 = PackTaskManager._build_archive_items([root], ["dir"], [dir_hash])
     assert items2[0].arcname == "extra/"
 
-    # 非法 hash → 原样返回
-    assert (
-        PackTaskManager._unwrap_stored_directory(root, "v2:file") is root
-    )
-    items3 = PackTaskManager._build_archive_items([root], _prefix_names(["zzz"]))
+    # 非法 v2 hash → ValueError 由上层转为任务错误
+    with pytest.raises(ValueError):
+        PackTaskManager._unwrap_stored_directory(root, "v2:file")
+    items3 = PackTaskManager._build_archive_items([root], ["dir"], ["zzz"])
     assert items3[0].arcname == "extra/"
 
 
@@ -2094,6 +2087,47 @@ async def test_create_pack_task_from_user_files_errors(
     monkeypatch.undo()
 
 
+
+async def test_admission_single_directory_pack_unwraps_canonical_dir(
+    temp_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """admission 单目录打包必须携带真实 content_hash，canonical 目录剥掉单层根目录。"""
+    from app.services.storage import get_store_path_for_hash
+    from app.services.storage_index import scan_storage_path
+
+    user = await create_user_v0(username="pack_dir_admission", quota_bytes=10**9)
+    inner = Path(settings.download_dir) / "seed" / "bt_dir"
+    inner.mkdir(parents=True, exist_ok=True)
+    (inner / "f.txt").write_bytes(b"data")
+
+    dir_hash = scan_storage_path(inner).content_hash
+    store_dir = get_store_path_for_hash(dir_hash)
+    store_dir.mkdir(parents=True, exist_ok=True)
+    # canonical 存储布局：store/<v2 路径>/<单一同名子目录>/内容
+    (store_dir / "bt_dir").mkdir(exist_ok=True)
+    shutil.copy2(inner / "f.txt", store_dir / "bt_dir" / "f.txt")
+
+    user_file = await create_user_file_v0(
+        user_id=user["id"],
+        real_path=store_dir,
+        content_hash=dir_hash,
+        display_name="bt_dir",
+        size_bytes=4,
+        is_directory=True,
+    )
+    monkeypatch.setattr(PackTaskManager, "submit", AsyncMock(return_value=True))
+
+    items = await pack_service._scan_archive_items_for_admission(
+        [store_dir.resolve()], ["bt_dir"], [dir_hash]
+    )
+    assert [item.arcname for item in items] == ["f.txt"]
+
+    task = await pack_service.create_pack_task_from_user_files(
+        user_id=user["id"], quota_bytes=10**9,
+        file_ids=[user_file["id"]], output_name=None, delete_source=False,
+    )
+    assert task["status"] == "pending"
+
 async def test_create_pack_task_success_path(temp_db: str) -> None:
     user, user_file, _src = await _make_file_user(username="pack_create_ok")
     submitted = []
@@ -2474,8 +2508,8 @@ async def test_install_prepared_release_cancelled_unlinks_target(
     assert not _store_path_for(content_hash).exists()
 
 
-def test_unwrap_stored_directory_invalid_legacy_hash_falls_back(tmp_path):
-    """legacy content_hash 为空或含路径分隔符时必须回退原目录，而不是抛 ValueError。"""
+def test_unwrap_stored_directory_invalid_hash_raises(tmp_path):
+    """非法 content_hash（空/含路径分隔符）应抛 ValueError 由上层转任务错误。"""
     import threading
 
     from app.modules.pack import PackTaskManager
@@ -2483,8 +2517,15 @@ def test_unwrap_stored_directory_invalid_legacy_hash_falls_back(tmp_path):
     source = tmp_path / "legacy_dir"
     source.mkdir()
     (source / "inner").mkdir()
-    for bad_hash in ("", "sub/dir", "a" * 64):
-        result = PackTaskManager._unwrap_stored_directory(
-            source, bad_hash, threading.Event()
+    for bad_hash in ("", "sub/dir", "v2:file"):
+        with pytest.raises(ValueError):
+            PackTaskManager._unwrap_stored_directory(
+                source, bad_hash, threading.Event()
+            )
+    # 合法 legacy key（非空且路径安全）不在此列，走 canonical 判定后原样返回
+    assert (
+        PackTaskManager._unwrap_stored_directory(
+            source, "a" * 64, threading.Event()
         )
-        assert result == source, bad_hash
+        is source
+    )
