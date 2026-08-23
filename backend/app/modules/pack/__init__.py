@@ -1785,7 +1785,8 @@ class PackTaskManager:
             identity = content_identity_from_content_hash(content_hash)
             canonical = is_canonical_store_path(source_dir, content_hash)
         except ValueError:
-            # legacy key 可能非法（空或含路径分隔符），无法定位 canonical 存储路径，直接回退
+            # TODO(数据迁移): legacy key 可能非法（空或含路径分隔符），无法定位 canonical
+            # 存储路径，直接回退。待后续将存量非法 hash 迁移为合法 v2 身份后，此兜底可删除。
             return source_dir
         if (
             identity.version != CONTENT_HASH_V1
