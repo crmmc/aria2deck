@@ -13,7 +13,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, update
 
 from app.core.config import settings
 from app.db.engine import transaction
@@ -1224,7 +1224,9 @@ async def test_validate_source_hashes_v2_and_failures(tmp_path: Path) -> None:
     src.write_bytes(b"payload")
     good = scan_storage_path(src).content_hash
 
-    PackTaskManager._validate_source_hashes([src], [good], _event())
+    tracker = _ProgressTracker(len(b"payload"))
+    PackTaskManager._validate_source_hashes([src], [good], _event(), tracker)
+    assert tracker.snapshot() == (len(b"payload"), len(b"payload"), 100)
     with pytest.raises(PackBoundaryError):
         PackTaskManager._validate_source_hashes(
             [src], ["v2:file:" + "0" * 64], _event()
@@ -1233,6 +1235,42 @@ async def test_validate_source_hashes_v2_and_failures(tmp_path: Path) -> None:
         PackTaskManager._validate_source_hashes([src], ["v2:file"], _event())
     # 非规范 legacy hash 直接跳过校验
     PackTaskManager._validate_source_hashes([src], ["zzz"], _event())
+
+
+async def test_wait_progress_thread_maps_running_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    updates: list[int] = []
+    tracker = _ProgressTracker(10)
+    started = _event()
+    release = _event()
+    job = pack_service._RunningPackJob(task=AsyncMock(), cancel_event=_event())
+
+    async def capture_progress(_task_id: int, progress: int) -> None:
+        updates.append(progress)
+
+    def work() -> str:
+        tracker.add(5)
+        started.set()
+        release.wait(2)
+        tracker.add(5)
+        return "done"
+
+    monkeypatch.setattr(PackTaskManager, "_update_task_progress", capture_progress)
+    worker = PackTaskManager._start_thread(job, work)
+    waiting = asyncio.create_task(
+        PackTaskManager._wait_progress_thread(
+            job, worker, tracker, 1, 0, 40, None
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+    await asyncio.sleep(0.25)
+    release.set()
+
+    assert await waiting == "done"
+    assert 20 in updates
+    assert updates[-1] == 40
+    assert updates == sorted(updates)
 
 
 # ---------------------------------------------------------------- write & prepare internals
@@ -1299,6 +1337,11 @@ async def test_write_and_prepare_reports_progress_and_missing_partial(
     await outer
 
     assert progress_calls
+    progress_values = [progress for _task_id, progress in progress_calls]
+    assert progress_values == sorted(progress_values)
+    assert 40 in progress_values
+    assert 90 in progress_values
+    assert progress_values[-1] == 99
     assert await pack_repo.get_pack_task_row(task["id"])
     assert prepared.exists()
 

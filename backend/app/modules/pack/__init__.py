@@ -97,6 +97,9 @@ _MAX_TOTAL_ARCHIVE_PATH_BYTES = 16 * 1024 * 1024
 _METADATA_FIXED_SLACK = 64 * 1024
 _MATERIALIZED_UPDATE_BYTES = 8 * 1024 * 1024
 _MATERIALIZED_UPDATE_SECONDS = 2.0
+_SOURCE_HASH_PROGRESS_END = 40
+_ARCHIVE_WRITE_PROGRESS_END = 90
+_OUTPUT_HASH_PROGRESS_END = 99
 _PACK_RETRY_DELAYS = (0.25, 1.0, 5.0, 15.0)
 _MAX_ACTIVE_PACK_JOBS = 1
 _DISPATCH_SWEEP_SECONDS = 0.25
@@ -482,6 +485,41 @@ class PackTaskManager:
             job.cancel_event.set()
             await asyncio.gather(task, return_exceptions=True)
             raise
+
+    @classmethod
+    async def _wait_progress_thread(
+        cls,
+        job: _RunningPackJob,
+        worker: asyncio.Task[_T],
+        tracker: _ProgressTracker,
+        task_id: int,
+        start_progress: int,
+        end_progress: int,
+        on_progress: Callable[[int, int], None] | None,
+    ) -> _T:
+        last_progress = -1
+        try:
+            while not worker.done():
+                phase_progress = tracker.snapshot()[2]
+                progress = start_progress + (
+                    phase_progress * (end_progress - start_progress) // 100
+                )
+                if progress != last_progress:
+                    await cls._update_task_progress(task_id, progress)
+                    last_progress = progress
+                    if on_progress:
+                        on_progress(task_id, progress)
+                await asyncio.sleep(0.2)
+            result = await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            job.cancel_event.set()
+            await asyncio.gather(worker, return_exceptions=True)
+            raise
+        if last_progress != end_progress:
+            await cls._update_task_progress(task_id, end_progress)
+            if on_progress:
+                on_progress(task_id, end_progress)
+        return result
 
     @classmethod
     async def _run_optional_thread(
@@ -913,13 +951,24 @@ class PackTaskManager:
             sources, source_names, _file_ids, source_hashes = (
                 await cls._resolve_task_sources(task)
             )
+            validation_tracker = _ProgressTracker(int(task["source_size_bytes"]))
             job.phase = "hashing"
-            await cls._run_thread(
+            validation_task = cls._start_thread(
                 job,
                 cls._validate_source_hashes,
                 sources,
                 source_hashes,
                 job.cancel_event,
+                validation_tracker,
+            )
+            await cls._wait_progress_thread(
+                job,
+                validation_task,
+                validation_tracker,
+                task_id,
+                0,
+                _SOURCE_HASH_PROGRESS_END,
+                on_progress,
             )
             job.phase = "scanning"
             items = await cls._run_thread(
@@ -1000,7 +1049,9 @@ class PackTaskManager:
         sources: list[Path],
         content_hashes: list[str],
         cancel_event: threading.Event,
+        tracker: _ProgressTracker | None = None,
     ) -> None:
+        on_bytes_read = tracker.add if tracker is not None else None
         for source, expected_hash in zip(sources, content_hashes):
             try:
                 identity = content_identity_from_content_hash(expected_hash)
@@ -1011,9 +1062,13 @@ class PackTaskManager:
                     char not in "0123456789abcdef" for char in expected_hash
                 ):
                     continue
-                actual_hash = calculate_legacy_content_hash(source, cancel_event)
+                actual_hash = calculate_legacy_content_hash(
+                    source, cancel_event, on_bytes_read
+                )
             else:
-                actual_hash = scan_storage_path(source, cancel_event).content_hash
+                actual_hash = scan_storage_path(
+                    source, cancel_event, on_bytes_read
+                ).content_hash
             if actual_hash != expected_hash:
                 raise PackBoundaryError("打包源内容校验失败")
 
@@ -1047,7 +1102,12 @@ class PackTaskManager:
         last_materialized = int(task.get("materialized_bytes") or 0)
         last_materialized_at = time.monotonic()
         while not job.writer_task.done():
-            _processed, _total, progress = tracker.snapshot()
+            phase_progress = tracker.snapshot()[2]
+            progress = _SOURCE_HASH_PROGRESS_END + (
+                phase_progress
+                * (_ARCHIVE_WRITE_PROGRESS_END - _SOURCE_HASH_PROGRESS_END)
+                // 100
+            )
             if progress != last_progress:
                 await cls._update_task_progress(int(task["id"]), progress)
                 last_progress = progress
@@ -1067,12 +1127,35 @@ class PackTaskManager:
                 last_materialized_at = now
             await asyncio.sleep(0.2)
         await job.writer_task
+        if last_progress != _ARCHIVE_WRITE_PROGRESS_END:
+            await cls._update_task_progress(
+                int(task["id"]), _ARCHIVE_WRITE_PROGRESS_END
+            )
+            if on_progress:
+                on_progress(int(task["id"]), _ARCHIVE_WRITE_PROGRESS_END)
         if job.cancel_event.is_set():
             raise InterruptedError("pack cancelled")
         size_bytes = partial_path.stat().st_size
         await set_pack_materialized_bytes(int(task["id"]), size_bytes)
+        output_tracker = _ProgressTracker(size_bytes)
+        job.phase = "verifying"
+        hash_task = cls._start_thread(
+            job,
+            scan_storage_path,
+            partial_path,
+            job.cancel_event,
+            output_tracker.add,
+        )
         content_hash = (
-            await cls._run_thread(job, scan_storage_path, partial_path, job.cancel_event)
+            await cls._wait_progress_thread(
+                job,
+                hash_task,
+                output_tracker,
+                int(task["id"]),
+                _ARCHIVE_WRITE_PROGRESS_END,
+                _OUTPUT_HASH_PROGRESS_END,
+                on_progress,
+            )
         ).content_hash
         os.replace(partial_path, prepared_path)
         await cls._run_thread(

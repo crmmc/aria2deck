@@ -103,7 +103,11 @@ def _validate_relative(relative: str) -> None:
         raise _invalid("路径组件过长")
 
 
-def _file_hash(path: Path, event: threading.Event | None) -> str:
+def _file_hash(
+    path: Path,
+    event: threading.Event | None,
+    on_bytes_read: Callable[[int], None] | None = None,
+) -> str:
     digest = hashlib.sha256()
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -120,6 +124,8 @@ def _file_hash(path: Path, event: threading.Event | None) -> str:
         while chunk := file.read(_HASH_CHUNK_SIZE):
             _cancelled(event)
             digest.update(chunk)
+            if on_bytes_read is not None:
+                on_bytes_read(len(chunk))
     _cancelled(event)
     return digest.hexdigest()
 
@@ -163,7 +169,9 @@ def _v2_scan(
 
 
 def calculate_legacy_content_hash(
-    root: Path, event: threading.Event | None = None
+    root: Path,
+    event: threading.Event | None = None,
+    on_bytes_read: Callable[[int], None] | None = None,
 ) -> str:
     root = Path(root)
     try:
@@ -171,7 +179,11 @@ def calculate_legacy_content_hash(
     except FileNotFoundError as exc:
         raise ValueError(f"Path does not exist or is not a file/directory: {root}") from exc
     if not _kind(root_stat):
-        return _file_hash(root, event)
+        return (
+            _file_hash(root, event)
+            if on_bytes_read is None
+            else _file_hash(root, event, on_bytes_read)
+        )
     digest, discovered = hashlib.sha256(), 1
     pending: list[tuple[Path, str, os.stat_result, bool]] = [(root, ".", root_stat, True)]
     while pending:
@@ -179,7 +191,12 @@ def calculate_legacy_content_hash(
         path, relative, item_stat, is_dir = pending.pop()
         if not is_dir:
             digest.update(relative.encode())
-            digest.update(_file_hash(path, event).encode())
+            file_hash = (
+                _file_hash(path, event)
+                if on_bytes_read is None
+                else _file_hash(path, event, on_bytes_read)
+            )
+            digest.update(file_hash.encode())
             continue
         try:
             with os.scandir(path) as iterator:
@@ -198,7 +215,11 @@ def calculate_legacy_content_hash(
     return digest.hexdigest()
 
 
-def scan_storage_path(root: Path, event: threading.Event | None = None) -> StorageScan:
+def scan_storage_path(
+    root: Path,
+    event: threading.Event | None = None,
+    on_bytes_read: Callable[[int], None] | None = None,
+) -> StorageScan:
     root = Path(root)
     _cancelled(event)
     try:
@@ -208,8 +229,13 @@ def scan_storage_path(root: Path, event: threading.Event | None = None) -> Stora
     root_is_dir = _kind(root_stat)
     entries = [_template(".", root_stat, root_is_dir)]
     if not root_is_dir:
+        raw_digest = (
+            _file_hash(root, event)
+            if on_bytes_read is None
+            else _file_hash(root, event, on_bytes_read)
+        )
         return _v2_scan(
-            digest=_v2_file_digest(_file_hash(root, event)),
+            digest=_v2_file_digest(raw_digest),
             size_bytes=root_stat.st_size,
             is_directory=False,
             entries=entries,
@@ -221,7 +247,11 @@ def scan_storage_path(root: Path, event: threading.Event | None = None) -> Stora
         _cancelled(event)
         path, relative, item_stat, is_dir = pending.pop()
         if not is_dir:
-            raw_digest = _file_hash(path, event)
+            raw_digest = (
+                _file_hash(path, event)
+                if on_bytes_read is None
+                else _file_hash(path, event, on_bytes_read)
+            )
             records.append((b"F", relative, item_stat.st_size, _v2_file_digest(raw_digest)))
             total_size += item_stat.st_size
             continue

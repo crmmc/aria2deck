@@ -9,7 +9,11 @@ import pytest
 from app.repositories import files as files_repo
 from app.services import storage_index
 from app.services.hash import calculate_content_hash
-from app.services.storage_index import StorageScanError, scan_storage_path
+from app.services.storage_index import (
+    StorageScanError,
+    calculate_legacy_content_hash,
+    scan_storage_path,
+)
 
 
 def test_scan_keeps_empty_directory_entry(tmp_path: Path) -> None:
@@ -23,6 +27,29 @@ def test_scan_keeps_empty_directory_entry(tmp_path: Path) -> None:
     assert scan.size_bytes == 0
     assert scan.is_directory is True
     assert [entry["relative_path"] for entry in scan.entry_templates] == ["."]
+
+
+def test_scan_reports_bytes_read_for_file_and_directory(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"payload")
+    file_reads: list[int] = []
+
+    scan_storage_path(payload, on_bytes_read=file_reads.append)
+
+    assert sum(file_reads) == len(b"payload")
+
+    root = tmp_path / "directory"
+    root.mkdir()
+    (root / "a.bin").write_bytes(b"alpha")
+    (root / "b.bin").write_bytes(b"beta")
+    directory_reads: list[int] = []
+    legacy_reads: list[int] = []
+
+    scan_storage_path(root, on_bytes_read=directory_reads.append)
+    calculate_legacy_content_hash(root, on_bytes_read=legacy_reads.append)
+
+    assert sum(directory_reads) == len(b"alpha") + len(b"beta")
+    assert sum(legacy_reads) == len(b"alpha") + len(b"beta")
 
 
 def test_scan_rejects_symlinks_and_entry_overflow(
