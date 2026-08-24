@@ -22,6 +22,8 @@ def _insert_pack_task_v0(
     reserved_bytes: int = 0,
     progress: int = 0,
     output_stored_file_id: int | None = None,
+    started_at_ms: int | None = None,
+    step: str | None = None,
 ) -> int:
     import asyncio
 
@@ -39,6 +41,8 @@ def _insert_pack_task_v0(
                         output_stored_file_id=output_stored_file_id,
                         status=status,
                         progress=progress,
+                        started_at_ms=started_at_ms,
+                        step=step,
                         created_at_ms=timestamp,
                         updated_at_ms=timestamp,
                     )
@@ -125,6 +129,31 @@ class TestPackListEndpoints:
         data = response.json()
         assert data["status"] == "done"
         assert data["output_size"] == 321
+        assert data["step"] is None
+        assert data["started_at"] is None
+
+    def test_pack_task_attempt_fields_are_consistent_across_endpoints(
+        self,
+        authenticated_client: TestClient,
+        test_user: dict,
+    ):
+        task_id = _insert_pack_task_v0(
+            user_id=test_user["id"],
+            status="packing",
+            progress=25,
+            started_at_ms=_now_ms() - 10_000,
+            step="compressing",
+        )
+
+        detail = authenticated_client.get(f"/api/files/pack/{task_id}")
+        listing = authenticated_client.get("/api/files/pack")
+
+        assert detail.status_code == 200
+        assert detail.json()["step"] == "compressing"
+        assert detail.json()["started_at"] is not None
+        listed = next(item for item in listing.json() if item["id"] == task_id)
+        assert listed["step"] == detail.json()["step"]
+        assert listed["started_at"] == detail.json()["started_at"]
 
 
 class TestPackCalculateEndpoints:
@@ -243,6 +272,8 @@ class TestPackTaskCreate:
 
         assert response.status_code == 201
         assert response.json()["output_name"] == "test_file"
+        assert response.json()["step"] is None
+        assert response.json()["started_at"] is None
 
     @pytest.mark.parametrize(
         ("output_name", "detail"),

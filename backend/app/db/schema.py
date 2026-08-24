@@ -21,7 +21,7 @@ from app.domain.status import (
     USER_TASK_STATUSES,
 )
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
 PACK_SOURCE_CLEANUP_STATES = (
     "retained",
@@ -423,6 +423,8 @@ pack_tasks = Table(
     Column("source_cleanup_pending", Integer, nullable=False, server_default="0"),
     Column("status", String(16), nullable=False),
     Column("progress", Integer, nullable=False, server_default="0"),
+    Column("started_at_ms", Integer),
+    Column("step", String(16)),
     Column("error_message", Text),
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
@@ -455,6 +457,10 @@ pack_tasks = Table(
         "(prepared_content_hash IS NOT NULL AND prepared_size_bytes IS NOT NULL "
         "AND prepared_filename IS NOT NULL)",
         name="ck_pack_tasks_prepared_fields_together",
+    ),
+    CheckConstraint(
+        "step IS NULL OR step IN ('validating', 'compressing', 'verifying')",
+        name="ck_pack_tasks_step",
     ),
     CheckConstraint(
         _in_check("status", PACK_TASK_STATUSES), name="ck_pack_tasks_status"

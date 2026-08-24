@@ -657,6 +657,20 @@ async def migrate_v15(conn: AsyncConnection) -> None:
     await _rebuild_schema_meta(conn, 15)
 
 
+V16_PACK_TASKS_ADDED_COLUMNS = {
+    "started_at_ms": "INTEGER",
+    "step": (
+        "VARCHAR(16) CHECK (step IS NULL OR "
+        "step IN ('validating', 'compressing', 'verifying'))"
+    ),
+}
+
+
+async def migrate_v16(conn: AsyncConnection) -> None:
+    await _add_missing_columns(conn, "pack_tasks", V16_PACK_TASKS_ADDED_COLUMNS)
+    await _rebuild_schema_meta(conn, 16)
+
+
 async def migrate_v1(conn: AsyncConnection) -> None:
     await _add_missing_columns(conn, "app_settings", V1_APP_SETTINGS_ADDED_COLUMNS)
     await _rebuild_schema_meta(conn, 1)
@@ -1253,6 +1267,7 @@ MIGRATIONS: dict[int, Migration] = {
     13: migrate_v13,
     14: migrate_v14,
     15: migrate_v15,
+    16: migrate_v16,
 }
 
 

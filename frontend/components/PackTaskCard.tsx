@@ -42,6 +42,38 @@ function getDisplayName(task: PackTask): string {
   return task.folder_path;
 }
 
+function getStepText(step: string | null): string {
+  switch (step) {
+    case "validating": return "校验";
+    case "compressing": return "压缩";
+    case "verifying": return "验收";
+    default: return "处理中";
+  }
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) {
+    return `${minutes}分${remainingSeconds.toString().padStart(2, "0")}秒`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return `${hours}小时${(minutes % 60).toString().padStart(2, "0")}分${remainingSeconds.toString().padStart(2, "0")}秒`;
+}
+
+function getTimingText(task: PackTask, nowMs: number): string {
+  const startedMs = task.started_at ? Date.parse(task.started_at) : Number.NaN;
+  if (!Number.isFinite(startedMs)) {
+    return `${getStepText(task.step)} · 已用 -- / 预计剩余 --`;
+  }
+  const elapsed = Math.max(0, Math.floor((nowMs - startedMs) / 1000));
+  const eta = task.progress > 0
+    ? Math.round(elapsed * (100 - task.progress) / task.progress)
+    : null;
+  return `${getStepText(task.step)} · 已用 ${formatDuration(elapsed)} / 预计剩余 ${eta === null ? "--" : formatDuration(Math.max(0, eta))}`;
+}
+
 interface DropdownPosition {
   top: number;
   right: number;
@@ -55,6 +87,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
   const { showToast, showConfirm } = useToast();
   const mounted = useMounted();
   const [tasks, setTasks] = useState<PackTask[]>([]);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [expanded, setExpanded] = useState(false);
   const [visible, setVisible] = useState(false);
   const [position, setPosition] = useState<DropdownPosition | null>(null);
@@ -111,6 +144,13 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
     }
     return undefined;
   }, [tasks, loadTasks]);
+
+  useEffect(() => {
+    if (!tasks.some((task) => task.status === "packing")) return undefined;
+    setNowMs(Date.now());
+    const interval = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [tasks]);
 
   const collapse = useCallback(() => {
     setVisible(false);
@@ -300,7 +340,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
                   </div>
                   <div className="flex-between">
                     <span className="muted text-xs">
-                      {task.progress}% - 已预留: {formatBytes(task.reserved_space)}
+                      {task.status === "pending" ? "排队中" : getTimingText(task, nowMs)}
                     </span>
                     <button type="button"
                       className="button secondary danger btn-sm"

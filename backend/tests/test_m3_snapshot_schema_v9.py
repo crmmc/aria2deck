@@ -38,7 +38,7 @@ async def test_fresh_bootstrap_does_not_create_task_backend_snapshots(
         ).scalar_one()
 
     assert "task_backend_snapshots" not in tables
-    assert version == SCHEMA_VERSION == 15
+    assert version == SCHEMA_VERSION == 16
 
 
 @pytest.mark.asyncio

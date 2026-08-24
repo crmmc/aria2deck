@@ -60,8 +60,8 @@ async def test_v4_to_v5_deletion_migration_is_idempotent(
         )
         await conn.execute(text("INSERT INTO stored_files VALUES (2, 'hash')"))
 
-        assert await run_migrations(conn, 4) == 15
-        assert await run_migrations(conn, 4) == 15
+        assert await run_migrations(conn, 4) == 16
+        assert await run_migrations(conn, 4) == 16
 
         for table_name in ("users", "stored_files"):
             columns = {

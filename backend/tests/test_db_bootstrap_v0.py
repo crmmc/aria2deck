@@ -35,6 +35,7 @@ from app.db.migrations import (
     V12_USER_TASKS_ADDED_COLUMNS,
     V14_APP_SETTINGS_ADDED_COLUMNS,
     V15_APP_SETTINGS_ADDED_COLUMNS,
+    V16_PACK_TASKS_ADDED_COLUMNS,
     run_migrations,
 )
 from app.db.schema import metadata, sessions
@@ -226,7 +227,7 @@ async def test_bootstrap_creates_latest_schema(isolated_db: Path):
             await conn.execute(text("SELECT id FROM app_settings"))
         ).scalar_one()
 
-    assert version == SCHEMA_VERSION == 15
+    assert version == SCHEMA_VERSION == 16
     assert users_exists == "users"
     assert settings_id == 1
 
@@ -307,6 +308,9 @@ def test_current_schema_changes_are_accounted_for_in_migration_contract():
     accounted_columns.setdefault("app_settings", set()).update(
         V15_APP_SETTINGS_ADDED_COLUMNS
     )
+    accounted_columns.setdefault("pack_tasks", set()).update(
+        V16_PACK_TASKS_ADDED_COLUMNS
+    )
     accounted_columns["tracker_list_cache"] = {
         "id",
         "trackers_json",
@@ -326,6 +330,38 @@ def test_current_schema_changes_are_accounted_for_in_migration_contract():
     assert set(current_columns) == set(accounted_columns)
     for table_name, columns in current_columns.items():
         assert set(columns) == accounted_columns[table_name]
+
+
+
+@pytest.mark.asyncio
+async def test_v15_to_v16_adds_pack_attempt_columns_without_backfill(
+    isolated_db: Path,
+) -> None:
+    async with get_engine().begin() as conn:
+        await conn.execute(text(
+            "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY, version INTEGER NOT NULL, "
+            "created_at_ms INTEGER NOT NULL)"
+        ))
+        await conn.execute(text("INSERT INTO schema_meta VALUES (1, 15, 123)"))
+        await conn.execute(text(
+            "CREATE TABLE pack_tasks (id INTEGER PRIMARY KEY, status VARCHAR(16) NOT NULL)"
+        ))
+        await conn.execute(text("INSERT INTO pack_tasks VALUES (1, 'packing')"))
+
+        assert await run_migrations(conn, 15) == 16
+        row = (
+            await conn.execute(text(
+                "SELECT started_at_ms, step FROM pack_tasks WHERE id = 1"
+            ))
+        ).one()
+        columns = {
+            item[1] for item in (
+                await conn.execute(text("PRAGMA table_info(pack_tasks)"))
+            ).all()
+        }
+
+    assert row == (None, None)
+    assert {"started_at_ms", "step"} <= columns
 
 
 def test_app_settings_v1_columns_are_registered_in_migration_map():
@@ -370,8 +406,8 @@ async def test_v2_to_latest_migration_is_idempotent(isolated_db: Path):
                 "id INTEGER PRIMARY KEY, status TEXT NOT NULL)"
             )
         )
-        assert await run_migrations(conn, 2) == 15
-        assert await run_migrations(conn, 2) == 15
+        assert await run_migrations(conn, 2) == 16
+        assert await run_migrations(conn, 2) == 16
 
     async with get_engine().connect() as conn:
         columns = {
@@ -423,8 +459,8 @@ async def test_v3_to_v4_migration_is_idempotent(isolated_db: Path):
                 ),
                 {"id": task_id, "sources": sources},
             )
-        assert await run_migrations(conn, 3) == 15
-        assert await run_migrations(conn, 3) == 15
+        assert await run_migrations(conn, 3) == 16
+        assert await run_migrations(conn, 3) == 16
 
     async with get_engine().connect() as conn:
         columns = {
@@ -496,7 +532,7 @@ async def test_v4_migration_backfills_confirmed_and_unknown_source_identities(
             "(2,1,'[2]',10,0,99,1,0,'completed',NULL,200,200,200),"
             "(3,1,'[3]',10,0,98,1,1,'completed',NULL,200,200,200)"
         ))
-        assert await run_migrations(conn, 3) == 15
+        assert await run_migrations(conn, 3) == 16
 
     async with get_engine().connect() as conn:
         sources = (
@@ -648,7 +684,7 @@ async def test_bootstrap_migrates_existing_v0_schema_to_latest_version(
             ).all()
         }
 
-    assert version == SCHEMA_VERSION == 15
+    assert version == SCHEMA_VERSION == 16
     assert timeout_seconds == DEFAULT_ARIA2_BT_STOP_TIMEOUT_SECONDS
     assert {
         "bt_info_hash",

@@ -457,6 +457,7 @@ async def get_pack_task_status(task_id: int) -> str | None:
 
 
 async def mark_pack_task_packing_if_pending(task_id: int) -> bool:
+    timestamp = now_ms()
     async with transaction() as conn:
         row = (
             await conn.execute(
@@ -466,7 +467,45 @@ async def mark_pack_task_packing_if_pending(task_id: int) -> bool:
                     pack_tasks.c.status == "pending",
                     _active_pack_user(),
                 )
-                .values(status="packing", updated_at_ms=now_ms())
+                .values(
+                    status="packing",
+                    step="validating",
+                    started_at_ms=timestamp,
+                    updated_at_ms=timestamp,
+                )
+                .returning(pack_tasks.c.id)
+            )
+        ).first()
+    return row is not None
+
+
+async def mark_pack_task_step_if_packing(
+    task_id: int,
+    *,
+    step: str,
+    expected_step: str | None = None,
+    match_expected_step: bool = False,
+    require_prepared: bool = False,
+) -> bool:
+    conditions = [
+        pack_tasks.c.id == task_id,
+        pack_tasks.c.status == "packing",
+        _active_pack_user(),
+    ]
+    if match_expected_step:
+        conditions.append(
+            pack_tasks.c.step.is_(None)
+            if expected_step is None
+            else pack_tasks.c.step == expected_step
+        )
+    if require_prepared:
+        conditions.append(pack_tasks.c.prepared_content_hash.is_not(None))
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                update(pack_tasks)
+                .where(*conditions)
+                .values(step=step, updated_at_ms=now_ms())
                 .returning(pack_tasks.c.id)
             )
         ).first()
@@ -530,6 +569,8 @@ async def requeue_interrupted_pack_task(task_id: int) -> bool:
                 .values(
                     status="pending",
                     progress=0,
+                    step=None,
+                    started_at_ms=None,
                     materialized_bytes=0,
                     install_reserved_bytes=0,
                     updated_at_ms=now_ms(),
@@ -575,6 +616,7 @@ async def fail_active_pack_task(task_id: int, error: str) -> dict[str, Any] | No
                 )
                 .values(
                     status="failed",
+                    step=None,
                     error_message=error,
                     reserved_bytes=0,
                     materialized_bytes=0,
@@ -769,6 +811,7 @@ async def finalize_prepared_pack_task(
                 .values(
                     status="completed",
                     progress=100,
+                    step=None,
                     output_stored_file_id=stored["id"],
                     reserved_bytes=0,
                     materialized_bytes=0,
@@ -1024,6 +1067,7 @@ async def cancel_active_pack_task(user_id: int, task_id: int) -> dict[str, Any] 
                 .values(
                     status="cancelled",
                     progress=0,
+                    step=None,
                     reserved_bytes=0,
                     materialized_bytes=0,
                     install_reserved_bytes=0,

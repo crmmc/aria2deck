@@ -39,6 +39,8 @@ function makeTask(overrides: Partial<PackTask> = {}): PackTask {
     status: "pending",
     progress: 10,
     error_message: null,
+    step: null,
+    started_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     ...overrides,
@@ -74,6 +76,79 @@ describe("PackTaskCard", () => {
     expect(screen.queryByRole("button", { name: /打包任务/ })).not.toBeInTheDocument();
   });
 
+  it("shows the approved pending footer", async () => {
+    mockApi.listPackTasks.mockResolvedValue([makeTask({
+      status: "pending",
+      step: null,
+      started_at: null,
+    })]);
+
+    render(<PackTaskCard />);
+    await openDropdown();
+
+    const footerText = screen.getByText("排队中");
+    expect(footerText.closest(".flex-between")).toContainElement(
+      screen.getByRole("button", { name: "取消" })
+    );
+    expect(screen.queryByText(/已用|已预留/)).not.toBeInTheDocument();
+  });
+
+  it("shows the approved step, elapsed time and local ETA without extra requests", async () => {
+    jest.setSystemTime(new Date("2025-01-01T00:00:30.000Z"));
+    mockApi.listPackTasks.mockResolvedValue([makeTask({
+      status: "packing",
+      progress: 25,
+      step: "compressing",
+      started_at: "2025-01-01T00:00:00.000Z",
+    })]);
+
+    render(<PackTaskCard />);
+    await openDropdown();
+
+    const footerText = screen.getByText("压缩 · 已用 30秒 / 预计剩余 1分30秒");
+    expect(footerText.closest(".flex-between")).toContainElement(
+      screen.getByRole("button", { name: "取消" })
+    );
+    expect(screen.queryByText(/已预留/)).not.toBeInTheDocument();
+
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+
+    expect(screen.getByText("压缩 · 已用 31秒 / 预计剩余 1分33秒")).toBeInTheDocument();
+    expect(mockApi.listPackTasks).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows all approved steps and safe placeholders for unknown step or invalid timing", async () => {
+    jest.setSystemTime(new Date("2025-01-01T01:00:00.000Z"));
+    mockApi.listPackTasks.mockResolvedValue([
+      makeTask({ id: 8, status: "packing", progress: 50, step: "validating", started_at: "invalid" }),
+      makeTask({ id: 9, status: "packing", progress: 0, step: "compressing", started_at: "2025-01-01T00:59:50.000Z" }),
+      makeTask({ id: 10, status: "packing", progress: 50, step: "verifying", started_at: "2025-01-01T00:59:50.000Z" }),
+      makeTask({ id: 11, status: "packing", progress: 50, step: "unexpected" as PackTask["step"], started_at: null }),
+    ]);
+
+    render(<PackTaskCard />);
+    await openDropdown();
+
+    expect(screen.getByText("校验 · 已用 -- / 预计剩余 --")).toBeInTheDocument();
+    expect(screen.getByText("压缩 · 已用 10秒 / 预计剩余 --")).toBeInTheDocument();
+    expect(screen.getByText("验收 · 已用 10秒 / 预计剩余 10秒")).toBeInTheDocument();
+    expect(screen.getByText("处理中 · 已用 -- / 预计剩余 --")).toBeInTheDocument();
+  });
+
+  it("does not show timing for terminal tasks", async () => {
+    mockApi.listPackTasks.mockResolvedValue([
+      makeTask({ id: 12, status: "done", step: "verifying", started_at: "2025-01-01T00:00:00.000Z" }),
+    ]);
+
+    render(<PackTaskCard />);
+    await openDropdown();
+
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+    expect(screen.queryByText(/已用|预计剩余/)).not.toBeInTheDocument();
+  });
+
   it("renders dropdown in a portal attached to document.body on click", async () => {
     mockApi.listPackTasks.mockResolvedValue([makeTask({ status: "pending", id: 1 })]);
     const { container } = render(<PackTaskCard />);
@@ -83,7 +158,7 @@ describe("PackTaskCard", () => {
 
     fireEvent.click(trigger);
 
-    const dropdown = screen.getByText(/排队中/).closest(".pack-dropdown");
+    const dropdown = screen.getByText("排队中").closest(".pack-dropdown");
     expect(dropdown).not.toBeNull();
     expect(dropdown?.parentElement).toBe(document.body);
     expect(dropdown?.className).not.toMatch(/\bcard\b/);
@@ -98,11 +173,11 @@ describe("PackTaskCard", () => {
 
     const trigger = await screen.findByRole("button", { name: /打包任务/ });
     fireEvent.click(trigger);
-    expect(screen.getByText(/排队中/)).toBeInTheDocument();
+    expect(screen.getByText("排队中")).toBeInTheDocument();
 
     fireEvent.click(trigger);
     await waitFor(() => {
-      expect(screen.queryByText(/排队中/)).not.toBeInTheDocument();
+      expect(screen.queryByText("排队中")).not.toBeInTheDocument();
     });
   });
 
@@ -116,19 +191,19 @@ describe("PackTaskCard", () => {
     act(() => {
       jest.advanceTimersByTime(100);
     });
-    expect(screen.getByText(/排队中/)).toBeInTheDocument();
+    expect(screen.getByText("排队中")).toBeInTheDocument();
 
     fireEvent.mouseLeave(trigger);
     // 200ms 延迟内不应立刻收起（留出移入面板 8px 间隙的时间）
     act(() => {
       jest.advanceTimersByTime(150);
     });
-    expect(screen.getByText(/排队中/)).toBeInTheDocument();
+    expect(screen.getByText("排队中")).toBeInTheDocument();
 
     act(() => {
       jest.advanceTimersByTime(500);
     });
-    expect(screen.queryByText(/排队中/)).not.toBeInTheDocument();
+    expect(screen.queryByText("排队中")).not.toBeInTheDocument();
   });
 
   it("cancels pending collapse when hovering the panel", async () => {
@@ -141,7 +216,7 @@ describe("PackTaskCard", () => {
     act(() => {
       jest.advanceTimersByTime(100);
     });
-    const panel = screen.getByText(/排队中/).closest(".pack-dropdown");
+    const panel = screen.getByText("排队中").closest(".pack-dropdown");
     expect(panel).not.toBeNull();
 
     fireEvent.mouseLeave(trigger);
@@ -152,7 +227,7 @@ describe("PackTaskCard", () => {
     act(() => {
       jest.advanceTimersByTime(500);
     });
-    expect(screen.getByText(/排队中/)).toBeInTheDocument();
+    expect(screen.getByText("排队中")).toBeInTheDocument();
   });
 
   it("closes dropdown on outside mousedown", async () => {
@@ -166,12 +241,12 @@ describe("PackTaskCard", () => {
     );
 
     await openDropdown();
-    expect(screen.getByText(/排队中/)).toBeInTheDocument();
+    expect(screen.getByText("排队中")).toBeInTheDocument();
 
     fireEvent.mouseDown(screen.getByTestId("outside"));
 
     await waitFor(() => {
-      expect(screen.queryByText(/排队中/)).not.toBeInTheDocument();
+      expect(screen.queryByText("排队中")).not.toBeInTheDocument();
     });
   });
 
@@ -181,16 +256,16 @@ describe("PackTaskCard", () => {
     render(<PackTaskCard />);
 
     await openDropdown();
-    expect(screen.getByText(/排队中/)).toBeInTheDocument();
+    expect(screen.getByText("排队中")).toBeInTheDocument();
 
-    const panel = screen.getByText(/排队中/).closest(".pack-dropdown") as Node;
+    const panel = screen.getByText("排队中").closest(".pack-dropdown") as Node;
     fireEvent.scroll(panel, { bubbles: true });
 
     // 面板内滚动不应触发关闭（动画等待 400ms 后仍应存在）
     act(() => {
       jest.advanceTimersByTime(500);
     });
-    expect(screen.getByText(/排队中/)).toBeInTheDocument();
+    expect(screen.getByText("排队中")).toBeInTheDocument();
   });
 
   it("closes dropdown on Escape", async () => {
@@ -199,12 +274,12 @@ describe("PackTaskCard", () => {
     render(<PackTaskCard />);
 
     await openDropdown();
-    expect(screen.getByText(/排队中/)).toBeInTheDocument();
+    expect(screen.getByText("排队中")).toBeInTheDocument();
 
     fireEvent.keyDown(document, { key: "Escape" });
 
     await waitFor(() => {
-      expect(screen.queryByText(/排队中/)).not.toBeInTheDocument();
+      expect(screen.queryByText("排队中")).not.toBeInTheDocument();
     });
   });
 
@@ -216,7 +291,7 @@ describe("PackTaskCard", () => {
 
     await openDropdown();
 
-    expect(screen.getByText(/排队中/)).toBeInTheDocument();
+    expect(screen.getByText("排队中")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
     await waitFor(() => {

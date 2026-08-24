@@ -29,7 +29,10 @@ from app.repositories.pack import (
     PackAdmissionError,
     create_pending_pack_with_reservation,
     list_pack_dispatch_task_ids,
+    mark_pack_task_packing_if_pending,
+    mark_pack_task_step_if_packing,
     persist_pack_prepared,
+    requeue_interrupted_pack_task,
 )
 from app.domain.errors import BadRequestError, ForbiddenError
 from app.domain.error_text import fmt_gb
@@ -266,7 +269,186 @@ async def test_update_task_error_marks_failed_and_releases_reserved(
     assert stored_task["status"] == "failed"
     assert stored_task["reserved_bytes"] == 0
     assert stored_task["error_message"] == "failed"
+    assert stored_task["step"] is None
     assert usage["reserved_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pack_attempt_timing_and_requeue_state_are_persisted(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="pack_attempt_state")
+    task = await _insert_pack_task(
+        user_id=user["id"], source_ids=[1], source_size_bytes=1,
+        reserved_bytes=100, status="pending",
+    )
+    old_started = now_ms() - 60_000
+    async with transaction() as conn:
+        await conn.execute(pack_tasks.update().where(
+            pack_tasks.c.id == task["id"]
+        ).values(started_at_ms=old_started))
+
+    assert await mark_pack_task_packing_if_pending(task["id"])
+    packing = await pack_service.get_pack_task_row(task["id"])
+    assert packing is not None
+    assert packing["status"] == "packing"
+    assert packing["step"] == "validating"
+    assert packing["started_at_ms"] > old_started
+
+    assert await requeue_interrupted_pack_task(task["id"])
+    pending = await pack_service.get_pack_task_row(task["id"])
+    assert pending is not None
+    assert pending["status"] == "pending"
+    assert pending["step"] is None
+    assert pending["started_at_ms"] is None
+
+
+@pytest.mark.asyncio
+async def test_pack_step_is_persisted_independently_from_progress(
+    temp_db: str,
+) -> None:
+    user = await create_user_v0(username="pack_real_step")
+    task = await _insert_pack_task(
+        user_id=user["id"], source_ids=[1], source_size_bytes=1,
+        reserved_bytes=100, status="pending",
+    )
+    assert await mark_pack_task_packing_if_pending(task["id"])
+
+    await pack_service.update_pack_task_progress(task["id"], 99)
+    validating = await pack_service.get_pack_task_row(task["id"])
+    assert validating is not None
+    assert validating["step"] == "validating"
+
+    assert await mark_pack_task_step_if_packing(
+        task["id"],
+        step="compressing",
+        expected_step="validating",
+        match_expected_step=True,
+    )
+    compressing = await pack_service.get_pack_task_row(task["id"])
+    assert compressing is not None
+    assert compressing["step"] == "compressing"
+
+    assert await mark_pack_task_step_if_packing(
+        task["id"],
+        step="verifying",
+        expected_step="compressing",
+        match_expected_step=True,
+    )
+    verifying = await pack_service.get_pack_task_row(task["id"])
+    assert verifying is not None
+    assert verifying["step"] == "verifying"
+
+
+@pytest.mark.asyncio
+async def test_compressing_cas_failure_does_not_start_writer(
+    temp_db: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = asyncio.current_task()
+    assert current is not None
+    job = pack_service._RunningPackJob(current, threading.Event())
+    transition = AsyncMock(return_value=False)
+    start_thread = AsyncMock()
+    monkeypatch.setattr(pack_service, "mark_pack_task_step_if_packing", transition)
+    monkeypatch.setattr(PackTaskManager, "_start_thread", start_thread)
+
+    with pytest.raises(InterruptedError, match="pack state changed"):
+        await PackTaskManager._write_and_prepare(
+            {"id": 1, "step": "validating", "reserved_bytes": 1},
+            job,
+            [],
+            tmp_path / "output.partial",
+            tmp_path / "output.zip",
+            "output.zip",
+            None,
+        )
+
+    transition.assert_awaited_once_with(
+        1,
+        step="compressing",
+        expected_step="validating",
+        match_expected_step=True,
+    )
+    start_thread.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_verifying_cas_failure_does_not_start_hash_or_persist_prepared(
+    temp_db: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = asyncio.current_task()
+    assert current is not None
+    job = pack_service._RunningPackJob(current, threading.Event())
+    transition = AsyncMock(side_effect=[True, False])
+    scan = AsyncMock()
+    persist = AsyncMock()
+    monkeypatch.setattr(pack_service, "mark_pack_task_step_if_packing", transition)
+    monkeypatch.setattr(pack_service, "scan_storage_path", scan)
+    monkeypatch.setattr(pack_service, "persist_pack_prepared", persist)
+    _mock_write_archive(monkeypatch, b"archive")
+
+    with pytest.raises(InterruptedError, match="pack state changed"):
+        await PackTaskManager._write_and_prepare(
+            {"id": 1, "step": "validating", "reserved_bytes": 100},
+            job,
+            [],
+            tmp_path / "output.partial",
+            tmp_path / "output.zip",
+            "output.zip",
+            None,
+        )
+
+    assert transition.await_args_list[1].kwargs == {
+        "step": "verifying",
+        "expected_step": "compressing",
+        "match_expected_step": True,
+    }
+    scan.assert_not_called()
+    persist.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepared_dispatcher_sets_verifying_and_keeps_started(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await create_user_v0(username="pack_prepared_step")
+    started = now_ms() - 30_000
+    task = await _insert_pack_task(
+        user_id=user["id"], source_ids=[1], source_size_bytes=1,
+        reserved_bytes=100, status="packing",
+    )
+    async with transaction() as conn:
+        await conn.execute(pack_tasks.update().where(
+            pack_tasks.c.id == task["id"]
+        ).values(
+            started_at_ms=started,
+            step="compressing",
+            prepared_content_hash="a" * 64,
+            prepared_size_bytes=1,
+            prepared_filename="prepared.zip",
+        ))
+
+    observed: dict[str, Any] = {}
+
+    async def observe_finalize(*_args: object, **_kwargs: object) -> None:
+        current = await pack_service.get_pack_task_row(task["id"])
+        assert current is not None
+        observed.update(current)
+
+    monkeypatch.setattr(PackTaskManager, "_finalize_prepared", observe_finalize)
+    current = asyncio.current_task()
+    assert current is not None
+    job = pack_service._RunningPackJob(current, threading.Event())
+
+    await PackTaskManager._run_persistent_pack(task["id"], job, None)
+
+    assert observed["step"] == "verifying"
+    assert observed["started_at_ms"] == started
 
 
 @pytest.mark.asyncio

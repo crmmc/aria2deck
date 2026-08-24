@@ -50,6 +50,7 @@ from app.repositories.pack import (
     list_user_pack_cleanup_rows,
     mark_pack_source_cleanup_error,
     mark_pack_task_packing_if_pending,
+    mark_pack_task_step_if_packing,
     mark_source_cleanup_complete,
     persist_pack_prepared,
     physical_budget_remaining_bytes,
@@ -756,6 +757,13 @@ class PackTaskManager:
         if row["status"] in {"pending", "packing"}:
             await clear_pack_install_reservation(task_id)
         if row["status"] == "packing" and row["prepared_content_hash"]:
+            if not await mark_pack_task_step_if_packing(
+                task_id, step="verifying", require_prepared=True
+            ):
+                return
+            row = await get_pack_task_row(task_id)
+            if row is None:
+                return
             measured = await cls._run_thread(
                 startup_job,
                 cls._measure_pack_materialized_bytes,
@@ -937,6 +945,13 @@ class PackTaskManager:
                 raise OSError("打包源清理尚未完成")
             return
         if task["prepared_content_hash"]:
+            if not await mark_pack_task_step_if_packing(
+                task_id, step="verifying", require_prepared=True
+            ):
+                return
+            task = await get_pack_task_row(task_id)
+            if task is None:
+                return
             job.phase = "prepared"
             await cls._finalize_prepared(task, job.cancel_event, job=job)
             return
@@ -1085,6 +1100,16 @@ class PackTaskManager:
         on_progress: Callable[[int, int], None] | None,
     ) -> None:
         tracker = _ProgressTracker(sum(item.size for item in items if not item.is_dir))
+        current_step = task.get("step")
+        if current_step not in {None, "validating"}:
+            raise InterruptedError("pack state changed")
+        if not await mark_pack_task_step_if_packing(
+            int(task["id"]),
+            step="compressing",
+            expected_step=current_step,
+            match_expected_step=True,
+        ):
+            raise InterruptedError("pack state changed")
         job.phase = "writing"
         job.writer_task = cls._start_thread(
             job,
@@ -1138,6 +1163,13 @@ class PackTaskManager:
         size_bytes = partial_path.stat().st_size
         await set_pack_materialized_bytes(int(task["id"]), size_bytes)
         output_tracker = _ProgressTracker(size_bytes)
+        if not await mark_pack_task_step_if_packing(
+            int(task["id"]),
+            step="verifying",
+            expected_step="compressing",
+            match_expected_step=True,
+        ):
+            raise InterruptedError("pack state changed")
         job.phase = "verifying"
         hash_task = cls._start_thread(
             job,
@@ -1989,6 +2021,8 @@ def pack_task_to_dict(task: dict[str, Any]) -> dict:
         "output_path": None,
         "status": response_status,
         "progress": task["progress"],
+        "step": task.get("step"),
+        "started_at": ms_to_iso(task.get("started_at_ms")),
         "error_message": task["error_message"],
         "created_at": ms_to_iso(task["created_at_ms"]),
         "updated_at": ms_to_iso(task["updated_at_ms"]),
