@@ -723,6 +723,20 @@ async def list_stale_queued_download_ids(threshold_ms: int) -> list[int]:
     return [int(row[0]) for row in rows]
 
 
+async def list_pending_submission_candidates() -> list[dict[str, Any]]:
+    """M24：列出 queued + gid NULL 的 planned submission 候选行。"""
+    async with transaction() as conn:
+        rows = (
+            await conn.execute(
+                select(global_downloads).where(
+                    global_downloads.c.status == "queued",
+                    global_downloads.c.aria2_gid.is_(None),
+                )
+            )
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 async def create_global_download(values: dict[str, Any]) -> dict[str, Any]:
     timestamp = now_ms()
     row_values = {

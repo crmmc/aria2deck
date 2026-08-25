@@ -210,19 +210,40 @@ class TestApiRateLimiter:
 class TestApiRateLimitIntegration:
     """API 频率限制集成测试"""
 
+    @patch("app.services.task_service._get_client")
     def test_create_task_rate_limit(
-        self, client: TestClient, test_user: dict, user_session: str
+        self,
+        mock_get_client: AsyncMock,
+        client: TestClient,
+        test_user: dict,
+        user_session: str,
     ):
-        """测试创建任务频率限制"""
+        """数组契约下 create_task 限流为逐项拒绝：HTTP 200，item accepted=false + 中文 error"""
+        class _NoCallClient:
+            async def multicall(self, calls):
+                raise AssertionError("限流项不应触发 aria2 提交")
+
+        mock_get_client.return_value = _NoCallClient()
         client.cookies.set(settings.session_cookie_name, user_session)
 
-        with patch("app.routers.tasks.ensure_authenticated_allowed", new=AsyncMock(side_effect=HTTPException(429, "操作过于频繁，请稍后再试"))):
+        with patch(
+            "app.routers.tasks.ensure_authenticated_allowed",
+            new=AsyncMock(
+                side_effect=HTTPException(429, "操作过于频繁，请稍后再试")
+            ),
+        ):
             response = client.post(
                 "/api/tasks",
-                json={"uri": "https://example.com/file.zip"}
+                json={"tasks": [{"uri": "https://example.com/file.zip"}]},
             )
-            assert response.status_code == 429
-            assert "频繁" in response.json()["detail"]
+            assert response.status_code == 200
+            body = response.json()
+            assert body["accepted_count"] == 0
+            assert body["failed_count"] == 1
+            item = body["results"][0]
+            assert item["accepted"] is False
+            assert "频繁" in item["error"]
+            assert item["task_id"] is None
 
     def test_create_pack_rate_limit(
         self, client: TestClient, test_user: dict, user_session: str

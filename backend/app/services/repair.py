@@ -535,7 +535,10 @@ async def repair_task_associations() -> TaskAssociationRepairResult:
     }
 
 
-async def purge_orphan_aria2_downloads(backend: BackendPort) -> dict[str, int]:
+async def purge_orphan_aria2_downloads(
+    backend: BackendPort,
+    protected_gids: set[str] | frozenset[str] | None = None,
+) -> dict[str, int]:
     """Remove zombie aria2 downloads inside the managed downloading root.
 
     A zombie is an active/waiting download whose dir lives under the managed
@@ -556,6 +559,7 @@ async def purge_orphan_aria2_downloads(backend: BackendPort) -> dict[str, int]:
         gid = str(row.get("aria2_gid") or "")
         if gid:
             live_gids.add(gid)
+    live_gids.update(protected_gids or ())
 
     found = removed = failed = 0
     candidates: list[dict[str, Any]] = []

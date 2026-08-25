@@ -91,6 +91,10 @@ async def reconcile_legacy_http_downloads_v0(client: Aria2Gateway) -> int:
     internal_base = get_internal_base_url()
     failed_count = 0
     for download in await list_active_like_http_downloads():
+        if not download.get("aria2_gid"):
+            # M24 fencing：queued/gid NULL 是 planned submission 候选，
+            # 只能由 recover_planned_submissions 确认或 submit_timeout 终结。
+            continue
         download_id = int(download["id"])
         gid = str(download.get("aria2_gid") or "")
         uris: object = None

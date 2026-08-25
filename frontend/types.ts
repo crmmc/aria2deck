@@ -52,6 +52,25 @@ export type Task = {
   retry_blocked_reason?: string | null;
 };
 
+export type CreateTaskItem = {
+  uri: string;
+  options?: Record<string, unknown>;
+};
+
+export type CreateTaskResult = {
+  input_index: number;
+  accepted: boolean;
+  task_id: number | null;
+  status: TaskStatus | null;
+  error: string | null;
+};
+
+export type BatchCreateTasksResponse = {
+  accepted_count: number;
+  failed_count: number;
+  results: CreateTaskResult[];
+};
+
 export type TorrentFileNode = {
   type: "file";
   name: string;

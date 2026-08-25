@@ -80,11 +80,7 @@ from app.services.task_orchestration import (
 from app.services.settings_service import get_min_free_disk
 
 
-# orchestration 的公共 create_task / preview_torrent_task /
-# create_torrent_task 转发到以下三个 via 函数，使 orchestration 内部对
-# 可替换依赖（check_disk_space / probe_url_with_get_fallback / get_usage /
-# get_max_task_size / register_and_submit 等）的查找经过本模块的 patch
-# 注入点。
+# orchestration 公共 create/preview 转发到 via 函数，可替换依赖经本模块 patch 注入点查找。
 async def _create_task_via(
     *,
     user_id: int,
@@ -119,10 +115,14 @@ async def _create_torrent_task_via(
 
 logger = logging.getLogger(__name__)
 
+# 以下为 HTTP 端点适配层的 client 注入点：既有测试 patch
+# ``app.services.task_service._get_client``。
+async def create_tasks_batch(**kwargs: Any) -> Any:
+    """批量创建薄 wrapper（M24）：复用 _get_client 注入 aria2 client。"""
+    from app.services.task_batch_submission import batch_create_tasks
+    return await batch_create_tasks(client=_get_client(), **kwargs)
 
-# HTTP 端点适配层的 client 注入点：既有测试 patch
-# ``app.services.task_service._get_client``；orchestration 的 _get_backend
-# 经由本函数解析 aria2 client。
+
 def _get_client() -> Any:
     from app.services.task_orchestration import _default_client
 

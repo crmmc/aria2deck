@@ -9,6 +9,7 @@ submit the adapter persists the gid via ``assign_submitted_gid`` so later
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from app.aria2.client import Aria2Client
@@ -43,6 +44,96 @@ def _normalize_out_option(value: Any) -> str:
     return out
 
 
+@dataclass
+class SubmissionCall:
+    """单条 aria2 提交描述符：方法、参数与初始公开状态。
+
+    单任务 submit 与批量 multicall 共享，保证暂停、gateway、tracker、
+    select-file 等选项不漂移。`extra_uris` 仅单任务 mirror 补发使用。
+    """
+
+    method: str
+    params: list[Any]
+    status: str
+    error_code: str | None = None
+    extra_uris: list[str] = field(default_factory=list)
+
+
+def build_submission_call(
+    download: Mapping[str, Any],
+    *,
+    uri: str,
+    options: Mapping[str, Any] | None,
+    planned_gid: str | None = None,
+) -> SubmissionCall:
+    """构建一条 aria2 提交描述符（Spec §6.2）。
+
+    ``planned_gid`` 仅批量路径传入：加入 ``gid``，HTTP 强制 ``pause=true``；
+    单任务路径不传，保持既有 unknown-size 条件暂停行为。
+    """
+    tid = int(download["id"])
+    resource_kind = str(download.get("resource_kind") or "")
+    unknown_size = not bool(download.get("size_known"))
+
+    submit_options: dict[str, Any] = Aria2BackendAdapter._build_base_options(tid)
+    if planned_gid:
+        submit_options["gid"] = planned_gid
+
+    if resource_kind == "torrent" and uri.startswith("base64:"):
+        Aria2BackendAdapter._merge_user_and_server_options(submit_options, options)
+        # Spec §3.2.1 / AC-9: torrent always starts paused so select-file
+        # is applied before any unpause/allocation race.
+        submit_options["pause"] = "true"
+        return SubmissionCall(
+            method="aria2.addTorrent",
+            params=[uri[len("base64:"):], [], submit_options],
+            status="paused",
+            error_code=ERROR_ADMISSION_PAUSED,
+        )
+
+    if resource_kind == "http":
+        mirrors = [str(item) for item in ((options or {}).get("mirrors") or [])]
+        gateway_uris, gateway_options = build_gateway_submission(
+            download_id=tid,
+            source_uri=uri,
+            options=options,
+            source_uris=[uri, *mirrors],
+        )
+        submit_options.update(gateway_options)
+        error_code: str | None = None
+        # 批量路径强制 pause=true（Spec §6.2）；单任务仅 unknown-size 暂停。
+        if planned_gid or unknown_size:
+            submit_options["pause"] = "true"
+            error_code = ERROR_ADMISSION_PAUSED
+        status = "paused" if error_code is not None else "active"
+        return SubmissionCall(
+            method="aria2.addUri",
+            params=[list(gateway_uris), submit_options],
+            status=status,
+            error_code=error_code,
+            extra_uris=list(gateway_uris[1:]),
+        )
+
+    Aria2BackendAdapter._merge_user_and_server_options(submit_options, options)
+    error_code = None
+    if unknown_size and resource_kind == "magnet":
+        submit_options["pause-metadata"] = "true"
+        error_code = ERROR_METADATA_ADMISSION_PAUSED
+
+    if error_code is not None:
+        status = "paused"
+    elif resource_kind == "magnet" or not unknown_size:
+        status = "active"
+    else:
+        status = "waiting"
+    return SubmissionCall(
+        method="aria2.addUri",
+        params=[[uri], submit_options],
+        status=status,
+        error_code=error_code,
+    )
+
+
 class Aria2BackendAdapter:
     """BackendPort implementation backed by aria2 RPC."""
 
@@ -55,40 +146,17 @@ class Aria2BackendAdapter:
         if download is None:
             raise ValueError(f"tid {tid} not found")
 
-        resource_kind = str(download.get("resource_kind") or "")
-        unknown_size = not bool(download.get("size_known"))
+        call = build_submission_call(download, uri=uri, options=options)
 
-        submit_options = self._build_base_options(tid)
-
-        gid: str
-        stamp_error_code: str | None = None
-        if resource_kind == "torrent" and uri.startswith("base64:"):
-            self._merge_user_and_server_options(submit_options, options)
-            # Spec §3.2.1 / AC-9: torrent always starts paused so select-file
-            # is applied before any unpause/allocation race.
-            submit_options["pause"] = "true"
-            stamp_error_code = ERROR_ADMISSION_PAUSED
-            gid = await self._client.add_torrent(
-                uri[len("base64:"):], [], submit_options
-            )
-        elif resource_kind == "http":
-            mirrors = [str(item) for item in (options.get("mirrors") or [])]
-            gateway_uris, gateway_options = build_gateway_submission(
-                download_id=tid,
-                source_uri=uri,
-                options=options,
-                source_uris=[uri, *mirrors],
-            )
-            submit_options.update(gateway_options)
-            if unknown_size:
-                submit_options["pause"] = "true"
-                stamp_error_code = ERROR_ADMISSION_PAUSED
-            gid = await self._client.add_uri(gateway_uris, submit_options)
+        if call.method == "aria2.addTorrent":
+            gid = await self._client.add_torrent(*call.params)
+        else:
+            gid = await self._client.add_uri(*call.params)
             # 多 mirror 场景：capability 中已带 mirrors，需要把剩余 gateway
             # uri 追加到当前 gid，保证 aria2 侧可见。
-            if len(gateway_uris) > 1:
+            if call.extra_uris:
                 try:
-                    await self._client.change_uri(gid, 1, [], gateway_uris[1:])
+                    await self._client.change_uri(gid, 1, [], call.extra_uris)
                 except Exception:
                     logger.warning(
                         "补发 mirror 失败 tid=%s gid=%s",
@@ -96,26 +164,12 @@ class Aria2BackendAdapter:
                         gid,
                         exc_info=True,
                     )
-        else:
-            self._merge_user_and_server_options(submit_options, options)
-            if unknown_size and resource_kind == "magnet":
-                submit_options["pause-metadata"] = "true"
-                stamp_error_code = ERROR_METADATA_ADMISSION_PAUSED
-            gid = await self._client.add_uri([uri], submit_options)
 
-        # Pause / pause-metadata starts must not project a misleading active
-        # status (Spec §3.2.1). Prefer paused to match aria2 pause start.
-        if stamp_error_code is not None:
-            status = "paused"
-        elif resource_kind == "magnet" or not unknown_size:
-            status = "active"
-        else:
-            status = "waiting"
         updated = await assign_submitted_gid(
             download_id=tid,
             gid=gid,
-            status=status,
-            error_code=stamp_error_code,
+            status=call.status,
+            error_code=call.error_code,
         )
         if updated is None:
             raise RuntimeError(f"failed to persist submitted gid for tid {tid}")

@@ -534,6 +534,24 @@ async def test_startup_reconciliation_fails_unverifiable_http_and_releases_reser
     else:
         client.get_uris.return_value = []
 
+    if mode == "missing_gid":
+        # M24 fencing：queued/gid NULL 是 planned submission 候选，
+        # legacy reconciliation 必须跳过，交给 recover/stale cleanup。
+        assert await reconcile_legacy_http_downloads_v0(client) == 0
+
+        stored_download = await get_global_download_by_id(int(download["id"]))
+        stored_task = await get_user_task_by_id(user["id"], task["id"])
+        usage = await get_usage(user["id"], quota_bytes=user["quota_bytes"])
+        assert stored_download is not None and stored_download["status"] == "queued"
+        assert stored_download["aria2_gid"] is None
+        assert stored_task is not None and stored_task["status"] == "queued"
+        assert stored_task["reserved_bytes"] == 7
+        assert usage["reserved_bytes"] == 7
+        assert task_dir.exists()
+        client.get_uris.assert_not_awaited()
+        client.force_remove.assert_not_awaited()
+        return
+
     assert await reconcile_legacy_http_downloads_v0(client) == 1
 
     stored_download = await get_global_download_by_id(int(download["id"]))
@@ -544,11 +562,7 @@ async def test_startup_reconciliation_fails_unverifiable_http_and_releases_reser
     assert stored_task["reserved_bytes"] == 0
     assert usage["reserved_bytes"] == 0
     assert not task_dir.exists()
-    if gid is None:
-        client.get_uris.assert_not_awaited()
-        client.force_remove.assert_not_awaited()
-    else:
-        client.force_remove.assert_awaited_once_with(gid)
+    client.force_remove.assert_awaited_once_with(gid)
 
 
 @pytest.mark.asyncio

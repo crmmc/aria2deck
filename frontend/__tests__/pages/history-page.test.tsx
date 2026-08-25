@@ -17,7 +17,7 @@ jest.mock("@/lib/api", () => ({
   __esModule: true,
   api: {
     listHistory: jest.fn(),
-    createTask: jest.fn(),
+    createTasks: jest.fn(),
     retryTask: jest.fn(),
     deleteHistoryRecords: jest.fn(),
     clearHistory: jest.fn(),
@@ -115,7 +115,7 @@ describe("HistoryPage", () => {
     await waitFor(() => {
       expect(mockApi.retryTask).toHaveBeenCalledWith(1);
     });
-    expect(mockApi.createTask).not.toHaveBeenCalled();
+    expect(mockApi.createTasks).not.toHaveBeenCalled();
   });
 
   test("disables retry and shows reason when history is expired", async () => {
@@ -136,7 +136,7 @@ describe("HistoryPage", () => {
 
     fireEvent.click(retryButton);
     expect(mockApi.retryTask).not.toHaveBeenCalled();
-    expect(mockApi.createTask).not.toHaveBeenCalled();
+    expect(mockApi.createTasks).not.toHaveBeenCalled();
   });
 
   test("disables retry when retryable is false", async () => {
@@ -214,5 +214,355 @@ describe("HistoryPage", () => {
       expect(showConfirmMock).toHaveBeenCalled();
       expect(mockApi.clearHistory).toHaveBeenCalled();
     });
+  });
+
+  test("load failure shows error toast", async () => {
+    mockApi.listHistory.mockRejectedValue(new Error("boom"));
+
+    render(<HistoryPage />);
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("加载历史失败", "error");
+    });
+  });
+
+  test("copy button copies the record uri", async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "复制" })[0]);
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith("https://example.com/failed-file.zip");
+    });
+  });
+
+  test("single delete with failed item shows error and reloads", async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    mockApi.deleteHistoryRecords.mockResolvedValue({
+      accepted_count: 0,
+      failed_count: 1,
+      results: [{ history_id: 1, ok: false, state: "failed", accepted: false, error: "记录不存在" }],
+    } as never);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("删除失败：记录不存在", "error");
+    });
+    await waitFor(() => {
+      expect(mockApi.listHistory).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getByText("failed-file.zip")).toBeInTheDocument();
+  });
+
+  test("single delete rejection shows error toast and reloads", async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    mockApi.deleteHistoryRecords.mockRejectedValue(new Error("服务不可用"));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("删除失败：服务不可用", "error");
+    });
+    await waitFor(() => {
+      expect(mockApi.listHistory).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  test("retry failure shows error toast", async () => {
+    mockApi.retryTask.mockRejectedValue(new Error("配额不足"));
+
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("重试失败：配额不足", "error");
+    });
+  });
+
+  test("batch delete with partial failure shows warning toast", async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+
+    mockApi.deleteHistoryRecords.mockResolvedValue({
+      accepted_count: 1,
+      failed_count: 1,
+      results: [
+        { history_id: 1, ok: true, state: "deleted", accepted: true, error: null },
+        { history_id: 2, ok: false, state: "failed", accepted: false, error: "被引用" },
+      ],
+    } as never);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith(
+        "已删除 1 条，1 条删除失败",
+        "warning"
+      );
+    });
+    // 仅成功删除的记录被移除
+    await waitFor(() => {
+      expect(screen.queryByText("failed-file.zip")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("ok-file.zip")).toBeInTheDocument();
+  });
+
+  test("batch delete rejection shows error toast and reloads", async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    mockApi.deleteHistoryRecords.mockRejectedValue(new Error("服务器错误"));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("删除失败：服务器错误", "error");
+    });
+    await waitFor(() => {
+      expect(mockApi.listHistory).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  test("clear all failure shows error toast", async () => {
+    mockApi.clearHistory.mockRejectedValue(new Error("权限不足"));
+
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("任务历史")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "清空历史" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("清空失败：权限不足", "error");
+    });
+  });
+
+  test("clear all success empties the list", async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "清空历史" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("failed-file.zip")).not.toBeInTheDocument();
+    });
+    expect(await screen.findByText("暂无历史记录")).toBeInTheDocument();
+  });
+
+  test.each([
+    ["failed-file.zip", "file", true],
+    ["nothing-matches", "nomatch", false],
+    ["failed-file.zip", "   ", true],
+  ] as const)("%j search keyword filters records", async (name, keyword, visible) => {
+    mockApi.listHistory.mockResolvedValue([
+      { ...baseRecord, task_name: name },
+    ] as never);
+
+    render(<HistoryPage />);
+
+    expect(await screen.findByText(name)).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索历史" }), {
+      target: { value: keyword },
+    });
+
+    if (visible) {
+      expect(screen.getByText(name)).toBeInTheDocument();
+    } else {
+      expect(screen.queryByText(name)).not.toBeInTheDocument();
+      expect(screen.getByText("暂无历史记录")).toBeInTheDocument();
+    }
+  });
+
+  test.each([
+    ["completed", "ok-file.zip", "failed-file.zip"],
+    ["failed", "failed-file.zip", "ok-file.zip"],
+    ["cancelled", "cancelled-file.zip", "failed-file.zip"],
+  ] as const)("%s filter shows only matching records", async (status, kept, hidden) => {
+    mockApi.listHistory.mockResolvedValue([
+      baseRecord,
+      { ...baseRecord, id: 2, result: "completed", task_name: "ok-file.zip", retryable: false, retry_blocked_reason: "已完成不可重试" },
+      { ...baseRecord, id: 3, result: "cancelled", task_name: "cancelled-file.zip" },
+    ] as never);
+
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("筛选历史"), {
+      target: { value: status },
+    });
+
+    expect(screen.getByText(kept)).toBeInTheDocument();
+    expect(screen.queryByText(hidden)).not.toBeInTheDocument();
+  });
+
+  test("loading state renders placeholder", async () => {
+    let resolveList: (value: unknown) => void = () => {};
+    mockApi.listHistory.mockImplementation(
+      () => new Promise((resolve) => { resolveList = resolve; }) as never
+    );
+
+    const { unmount } = render(<HistoryPage />);
+    expect(screen.getByText("加载中...")).toBeInTheDocument();
+    unmount();
+    resolveList([]);
+  });
+
+  test("unmounting during load skips the toast", async () => {
+    let rejectList: (reason: unknown) => void = () => {};
+    mockApi.listHistory.mockImplementation(
+      () => new Promise((_resolve, reject) => { rejectList = reject; }) as never
+    );
+
+    const { unmount } = render(<HistoryPage />);
+    unmount();
+    rejectList(new Error("late"));
+
+    await Promise.resolve();
+    expect(showToastMock).not.toHaveBeenCalledWith("加载历史失败", "error");
+  });
+
+  test("single delete with empty results falls back to 未知错误", async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    mockApi.deleteHistoryRecords.mockResolvedValue({
+      accepted_count: 0,
+      failed_count: 1,
+      results: [],
+    } as never);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("删除失败：未知错误", "error");
+    });
+  });
+
+  test.each([
+    ["batch delete", "删除", "deleteHistoryRecords"],
+    ["clear all", "清空历史", "clearHistory"],
+  ] as const)("%s cancelled confirmation performs no request", async (_name, buttonLabel, apiName) => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    if (buttonLabel === "删除") {
+      fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    }
+    showConfirmMock.mockResolvedValueOnce(false);
+    fireEvent.click(screen.getAllByRole("button", { name: buttonLabel })[0]);
+
+    await waitFor(() => {
+      expect(showConfirmMock).toHaveBeenCalled();
+    });
+    expect(mockApi[apiName]).not.toHaveBeenCalled();
+  });
+
+  test("select-all button toggles to 取消全选 and back", async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+
+    expect(screen.getByRole("button", { name: "取消全选" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消全选" }));
+    expect(screen.getByRole("button", { name: "全选" })).toBeInTheDocument();
+  });
+
+  test("empty history renders empty state without clear button", async () => {
+    mockApi.listHistory.mockResolvedValue([] as never);
+
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("暂无历史记录")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "清空历史" })).not.toBeInTheDocument();
+  });
+
+  test("unmounting during single delete skips state updates", async () => {
+    let resolveDelete: (value: unknown) => void = () => {};
+    mockApi.deleteHistoryRecords.mockImplementation(
+      () => new Promise((resolve) => { resolveDelete = resolve; }) as never
+    );
+
+    const { unmount } = render(<HistoryPage />);
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+    unmount();
+
+    resolveDelete({ accepted_count: 1, failed_count: 0, results: [] });
+    await Promise.resolve();
+  });
+
+  test("batch operating state disables the delete buttons", async () => {
+    let resolveBatch: (value: unknown) => void = () => {};
+    mockApi.deleteHistoryRecords.mockImplementation(
+      () => new Promise((resolve) => { resolveBatch = resolve; }) as never
+    );
+
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+
+    const clearButton = await screen.findByRole("button", { name: "清空历史" });
+    expect(clearButton).toBeDisabled();
+    expect(clearButton.className).toContain("opacity-60");
+
+    resolveBatch({ accepted_count: 2, failed_count: 0, results: [] });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "清空历史" })).toBeEnabled();
+    });
+  });
+
+  test("clear-all operating state disables the batch delete button", async () => {
+    let resolveClear: (value: unknown) => void = () => {};
+    mockApi.clearHistory.mockImplementation(
+      () => new Promise((resolve) => { resolveClear = resolve; }) as never
+    );
+
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByRole("button", { name: "清空历史" }));
+
+    const batchDelete = (await screen.findAllByRole("button", { name: "删除" }))[0];
+    expect(batchDelete).toBeDisabled();
+    expect(batchDelete.className).toContain("opacity-60");
+
+    resolveClear({ ok: true, count: 2 });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "删除" })).not.toBeInTheDocument();
+      expect(screen.getByText("暂无历史记录")).toBeInTheDocument();
+    });
+  });
+
+  test("unmounting after batch delete confirm skips state updates", async () => {
+    let resolveBatch: (value: unknown) => void = () => {};
+    mockApi.deleteHistoryRecords.mockImplementation(
+      () => new Promise((resolve) => { resolveBatch = resolve; }) as never
+    );
+
+    const { unmount } = render(<HistoryPage />);
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+    unmount();
+
+    resolveBatch({ accepted_count: 2, failed_count: 0, results: [] });
+    await Promise.resolve();
   });
 });

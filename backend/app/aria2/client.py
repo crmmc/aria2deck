@@ -1,8 +1,19 @@
 import asyncio
 
 import aiohttp
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
+
+
+@dataclass
+class MulticallOutcome:
+    """单个 system.multicall 子调用的结果：success 值或 aria2 fault。"""
+
+    ok: bool
+    result: Any = None
+    fault_code: Any = None
+    fault_message: str = ""
 
 
 class Aria2Client:
@@ -35,13 +46,8 @@ class Aria2Client:
             return [f"token:{self._secret}", *params]
         return params
 
-    async def _call(self, method: str, params: list | None = None) -> Any:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": "aria2",
-            "method": method,
-            "params": self._build_params(params or []),
-        }
+    async def _request(self, payload: dict) -> dict[str, Any]:
+        """发送单个 JSON-RPC payload 并返回完整响应对象。"""
         session = await self.get_session()
         async with session.post(self._rpc_url, json=payload) as resp:
             # 检查 HTTP 状态码
@@ -54,9 +60,76 @@ class Aria2Client:
             except Exception as e:
                 text = await resp.text()
                 raise RuntimeError(f"aria2 RPC 返回非 JSON: {text[:200]}") from e
-            if "error" in data:
-                raise RuntimeError(data["error"])
-            return data["result"]
+            if not isinstance(data, dict):
+                raise RuntimeError(f"aria2 RPC 返回非法响应: {data!r}"[:200])
+            return data
+
+    async def _call(self, method: str, params: list | None = None) -> Any:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "aria2",
+            "method": method,
+            "params": self._build_params(params or []),
+        }
+        data = await self._request(payload)
+        if "error" in data:
+            raise RuntimeError(data["error"])
+        return data["result"]
+
+    async def multicall(
+        self, calls: Sequence[Mapping[str, Any]]
+    ) -> list[MulticallOutcome]:
+        """一次 HTTP 请求按序执行 system.multicall。
+
+        secret 只注入每个 nested params 首位，outer params 不带 token。
+        结果逐项解析为 success 或 fault，shape/长度不符视为整批传输错误。
+        """
+        nested = [
+            {
+                "methodName": call["methodName"],
+                "params": self._build_params(list(call.get("params") or [])),
+            }
+            for call in calls
+        ]
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "aria2",
+            "method": "system.multicall",
+            "params": [nested],
+        }
+        data = await self._request(payload)
+        if "error" in data:
+            raise RuntimeError(data["error"])
+        results = data.get("result")
+        if not isinstance(results, list) or len(results) != len(calls):
+            actual = len(results) if isinstance(results, list) else type(results).__name__
+            raise RuntimeError(
+                f"aria2 multicall 结果数量/形状不符: 期望 {len(calls)} 项, "
+                f"实际 {actual}"
+            )
+        outcomes: list[MulticallOutcome] = []
+        for index, item in enumerate(results):
+            if isinstance(item, list) and len(item) == 1:
+                outcomes.append(MulticallOutcome(ok=True, result=item[0]))
+            elif (
+                isinstance(item, dict)
+                and "code" in item
+                and "message" in item
+            ):
+                outcomes.append(
+                    MulticallOutcome(
+                        ok=False,
+                        fault_code=item["code"],
+                        fault_message=str(item["message"]),
+                    )
+                )
+            else:
+                # 只暴露项序号与类型，不携带原始结果值（可能含 URI/凭据）
+                raise RuntimeError(
+                    f"aria2 multicall 返回非法结果项: index={index}, "
+                    f"type={type(item).__name__}"
+                )
+        return outcomes
 
     async def add_uri(
         self, uris: list[str], options: Mapping[str, Any] | None = None

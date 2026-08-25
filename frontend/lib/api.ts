@@ -21,6 +21,8 @@ import type {
   BatchDeleteSharesResponse,
   BatchDeleteHistoryResponse,
   BatchCancelTasksResponse,
+  BatchCreateTasksResponse,
+  CreateTaskItem,
   ShareLink,
   ShareInfo,
   CreateShareRequest,
@@ -185,11 +187,10 @@ export const api = {
   // Tasks (subscription-based)
   listTasks: (statusFilter?: string) =>
     request<Task[]>(withQuery("/api/tasks", { status_filter: statusFilter })),
-  createTask: (uri: string, signal?: AbortSignal) =>
-    request<Task>("/api/tasks", {
+  createTasks: (tasks: CreateTaskItem[]) =>
+    request<BatchCreateTasksResponse>("/api/tasks", {
       method: "POST",
-      body: JSON.stringify({ uri }),
-      signal,
+      body: JSON.stringify({ tasks }),
     }),
   retryTask: (userTaskId: number) =>
     request<Task>(`/api/tasks/${userTaskId}/retry`, {

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import type { Task, TorrentPreview } from "@/types";
 import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
@@ -59,7 +59,6 @@ function isInFlightStatus(status: string): boolean {
 
 const MAX_TORRENT_FILE_SIZE = 10 * 1024 * 1024;
 const MAX_BATCH_TASKS = 30;
-const BATCH_TASK_CONCURRENCY = 3;
 
 function parseBatchUris(value: string): string[] {
   return [...new Set(value.split("\n").map((line) => line.trim()).filter(Boolean))];
@@ -99,14 +98,6 @@ export default function TasksPage() {
     new Set()
   );
   const wsConnectedRef = useRef(false);
-  const batchAddControllerRef = useRef<AbortController | null>(null);
-
-  useEffect(() => {
-    return () => {
-      batchAddControllerRef.current?.abort();
-      batchAddControllerRef.current = null;
-    };
-  }, []);
 
   useEffect(() => {
     if (showBatchAddModal) {
@@ -281,31 +272,49 @@ export default function TasksPage() {
     onDisconnected: handleWsDisconnected,
   });
 
+  const refreshTasks = useCallback(async () => {
+    const currentTasks = await api.listTasks("current");
+    setTasks(() => currentTasks.filter((t) => !deletedTaskIds.has(t.id)));
+  }, [deletedTaskIds]);
+
+  const refreshAfterSubmit = useCallback(async () => {
+    try {
+      await refreshTasks();
+    } catch (err) {
+      showToast("任务已提交，但列表刷新失败，请手动刷新", "warning");
+    }
+  }, [refreshTasks, showToast]);
+
   const createTask = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
       if (isSubmitting) return;
       setError(null);
       setIsSubmitting(true);
+      let accepted = false;
       try {
-        const task = await api.createTask(uri);
-        if (isCurrentVisibleStatus(task.status)) {
-          setTasks((prev) => upsertTaskById(prev, task));
-        }
-        setUri("");
-      } catch (err) {
-        const message = (err as Error).message;
-        if (message.includes("您已拥有此文件")) {
-          showToast("您已拥有此文件", "warning");
-          setError(null);
+        const result = await api.createTasks([{ uri }]);
+        if (result.accepted_count > 0) {
+          accepted = true;
+          setUri("");
+          showToast("任务已提交", "success");
         } else {
-          setError(message);
+          setError(result.results.find((item) => !item.accepted)?.error ?? "提交失败");
+        }
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 502) {
+          setError("提交结果暂无法确认，请刷新任务列表");
+        } else {
+          setError((err as Error).message);
         }
       } finally {
         setIsSubmitting(false);
       }
+      if (accepted) {
+        await refreshAfterSubmit();
+      }
     },
-    [uri, isSubmitting, showToast]
+    [uri, isSubmitting, showToast, refreshAfterSubmit]
   );
 
   const handleTorrentUpload = useCallback(
@@ -505,77 +514,46 @@ export default function TasksPage() {
       return;
     }
 
-    const controller = new AbortController();
-    batchAddControllerRef.current = controller;
     setIsBatchAdding(true);
     setError(null);
-    let nextIndex = 0;
-    let successCount = 0;
-    let failCount = 0;
-    const createdTasks: Task[] = [];
-
-    const worker = async () => {
-      while (!controller.signal.aborted) {
-        const index = nextIndex++;
-        if (index >= uris.length) return;
-        try {
-          const task = await api.createTask(uris[index], controller.signal);
-          if (controller.signal.aborted) return;
-          createdTasks.push(task);
-          successCount++;
-        } catch {
-          if (controller.signal.aborted) return;
-          failCount++;
-        }
-      }
-    };
-
     try {
-      await Promise.all(
-        Array.from(
-          { length: Math.min(BATCH_TASK_CONCURRENCY, uris.length) },
-          () => worker()
-        )
-      );
-      if (
-        controller.signal.aborted ||
-        batchAddControllerRef.current !== controller
-      ) return;
+      const result = await api.createTasks(uris.map((uri) => ({ uri })));
 
-      const visibleTasks = createdTasks.filter((task) =>
-        isCurrentVisibleStatus(task.status)
-      );
-      if (visibleTasks.length > 0) {
-        setTasks((prev) =>
-          visibleTasks.reduce(upsertTaskById, prev)
-        );
-      }
-      setBatchUris("");
-      setShowBatchAddModal(false);
-
-      if (failCount > 0) {
+      if (result.failed_count === 0) {
+        showToast(`已提交 ${result.accepted_count} 个任务`, "success");
+        setBatchUris("");
+        setShowBatchAddModal(false);
+      } else if (result.accepted_count > 0) {
         showToast(
-          `添加完成：成功 ${successCount} 个，失败 ${failCount} 个`,
+          `提交完成：成功${result.accepted_count}个，失败${result.failed_count}个`,
           "warning"
         );
+        setBatchUris("");
+        setShowBatchAddModal(false);
+      } else if (result.results.length === 1) {
+        setError(result.results[0]?.error ?? "提交失败");
+        return;
       } else {
-        showToast(`成功添加 ${successCount} 个任务`, "success");
+        setError(`提交失败：${result.failed_count} 个任务均未成功`);
+        return;
+      }
+      await refreshAfterSubmit();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 502) {
+        setError("提交结果暂无法确认，请刷新任务列表");
+      } else {
+        setError((err as Error).message);
       }
     } finally {
-      if (batchAddControllerRef.current === controller) {
-        batchAddControllerRef.current = null;
-        setIsBatchAdding(false);
-      }
+      setIsBatchAdding(false);
     }
-  }, [batchUris, showToast, isBatchAdding]);
+  }, [batchUris, showToast, isBatchAdding, refreshAfterSubmit]);
 
-  const cancelBatchAdd = useCallback(() => {
-    batchAddControllerRef.current?.abort();
-    batchAddControllerRef.current = null;
-    setIsBatchAdding(false);
+  const closeBatchAdd = useCallback(() => {
+    if (isBatchAdding) return;
     setShowBatchAddModal(false);
     setBatchUris("");
-  }, []);
+  }, [isBatchAdding]);
 
   const filteredTasks = useMemo(() => {
     let filtered = tasks;
@@ -673,7 +651,7 @@ export default function TasksPage() {
             isBatchAdding={isBatchAdding}
             onBatchUrisChange={setBatchUris}
             onSubmit={batchAddTasks}
-            onCancel={cancelBatchAdd}
+            onCancel={closeBatchAdd}
           />
       )}
       {mounted && torrentWizard

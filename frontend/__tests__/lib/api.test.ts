@@ -208,39 +208,63 @@ describe("api methods", () => {
     });
   });
 
-  describe("api.createTask", () => {
-    it("creates task with uri", async () => {
-      const mockTask = { id: 1, uri: "magnet:?xt=..." };
+  describe("api.createTasks", () => {
+    it("sends a single POST with the tasks array body", async () => {
+      const mockResponse = {
+        accepted_count: 1,
+        failed_count: 0,
+        results: [
+          {
+            input_index: 0,
+            accepted: true,
+            task_id: 1,
+            status: "queued" as const,
+            error: null,
+          },
+        ],
+      };
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve(mockTask),
+        json: () => Promise.resolve(mockResponse),
       });
 
-      const result = await api.createTask("magnet:?xt=...");
-      
-      expect(result).toEqual(mockTask);
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/tasks"),
-        expect.objectContaining({
-          method: "POST",
-          body: JSON.stringify({ uri: "magnet:?xt=..." }),
-        })
-      );
+      const result = await api.createTasks([{ uri: "https://example.com/a" }]);
+
+      expect(result).toEqual(mockResponse);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      const [url, options] = (global.fetch as jest.Mock).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      expect(url.endsWith("/api/tasks")).toBe(true);
+      expect(options.method).toBe("POST");
+      expect(JSON.parse(options.body as string)).toEqual({
+        tasks: [{ uri: "https://example.com/a" }],
+      });
     });
 
-    it("passes an abort signal to fetch", async () => {
-      const controller = new AbortController();
+    it("sends the whole array in one request without an abort signal", async () => {
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ id: 1 }),
+        json: () =>
+          Promise.resolve({ accepted_count: 0, failed_count: 0, results: [] }),
       });
 
-      await api.createTask("https://example.com/file", controller.signal);
+      const items = [
+        { uri: "https://example.com/1" },
+        { uri: "https://example.com/2" },
+        { uri: "https://example.com/3", options: { out: "x.zip" } },
+      ];
+      await api.createTasks(items);
 
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/tasks"),
-        expect.objectContaining({ signal: controller.signal })
-      );
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      const [url, options] = (global.fetch as jest.Mock).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      expect(url.endsWith("/api/tasks")).toBe(true);
+      expect(JSON.parse(options.body as string)).toEqual({ tasks: items });
+      expect(options.signal).toBeUndefined();
     });
   });
 
@@ -500,14 +524,18 @@ describe("api methods", () => {
 
   describe("api.downloadShare", () => {
     it("submits token and subpath in a POST form without URL exposure", () => {
+      let submittedForm: HTMLFormElement | undefined;
       const submitSpy = jest
         .spyOn(HTMLFormElement.prototype, "submit")
-        .mockImplementation(() => {});
+        .mockImplementation(function (this: HTMLFormElement) {
+          submittedForm = this;
+        });
 
       api.downloadShare("code/with?chars", "bearer-secret", "folder/a b.txt");
 
       expect(submitSpy).toHaveBeenCalledTimes(1);
-      const form = submitSpy.mock.instances[0] as HTMLFormElement;
+      expect(submittedForm).toBeDefined();
+      const form = submittedForm as HTMLFormElement;
       expect(form.method).toBe("post");
       expect(form.target).toBe("_blank");
       expect(form.action).toContain("/api/s/code%2Fwith%3Fchars/download");
@@ -1119,5 +1147,148 @@ describe("taskWsUrl", () => {
     const url = taskWsUrl();
     expect(url).toContain("/ws/tasks");
     expect(url).toMatch(/^wss?:\/\//);
+  });
+});
+
+describe("api error message parsing", () => {
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  test.each([
+    ["detail field", { detail: "后端错误" }, "后端错误"],
+    ["message field", { message: "服务异常" }, "服务异常"],
+    [
+      "blank detail falls back to message",
+      { detail: "   ", message: "使用 message" },
+      "使用 message",
+    ],
+    ["non-string fields keep raw text", { code: 1 }, '{"code":1}'],
+  ])("uses %s for error message", async (_label, body, expected) => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: () => Promise.resolve(JSON.stringify(body)),
+    });
+
+    await expect(api.getStats()).rejects.toMatchObject({
+      status: 400,
+      message: expected,
+    });
+  });
+
+  it("falls back to status text when body is empty", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: () => Promise.resolve(""),
+    });
+
+    await expect(api.getStats()).rejects.toMatchObject({
+      status: 503,
+      message: "请求失败: 503",
+    });
+  });
+});
+
+describe("api thin wrappers", () => {
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  const ok = (data: unknown) => ({
+    ok: true,
+    json: () => Promise.resolve(data),
+  });
+
+  test.each([
+    ["refreshTrackers", () => api.refreshTrackers(), "/api/config/trackers/refresh", "POST", undefined],
+    [
+      "invalidateAllCredentials",
+      () => api.invalidateAllCredentials(),
+      "/api/config/credentials/invalidate",
+      "POST",
+      { confirm: "INVALIDATE_ALL_CREDENTIALS" },
+    ],
+    [
+      "createPackTask",
+      () => api.createPackTask([1, 2], "out.zip", true),
+      "/api/files/pack",
+      "POST",
+      { file_ids: [1, 2], output_name: "out.zip", delete_source: true },
+    ],
+    [
+      "createPackTask defaults",
+      () => api.createPackTask([3]),
+      "/api/files/pack",
+      "POST",
+      { file_ids: [3], output_name: undefined, delete_source: false },
+    ],
+    [
+      "calculatePackSize",
+      () => api.calculatePackSize([4, 5]),
+      "/api/files/pack/calculate-size",
+      "POST",
+      { file_ids: [4, 5] },
+    ],
+    ["getAvailableSpace", () => api.getAvailableSpace(), "/api/files/pack/available-space", "GET", undefined],
+    ["deletePackTask", () => api.deletePackTask(9), "/api/files/pack/9", "DELETE", undefined],
+    ["clearPackTasks", () => api.clearPackTasks(), "/api/files/pack", "DELETE", undefined],
+    [
+      "listStoredFiles with filters",
+      () => api.listStoredFiles(2, 50, "term", true),
+      "/api/admin/storage/files?page=2&page_size=50&search=term&orphan_only=true",
+      "GET",
+      undefined,
+    ],
+    ["getFileUsers", () => api.getFileUsers(7), "/api/admin/storage/files/7/users", "GET", undefined],
+    [
+      "bulkDeleteStoredFiles",
+      () => api.bulkDeleteStoredFiles([1, 2]),
+      "/api/admin/storage/files",
+      "DELETE",
+      { file_ids: [1, 2] },
+    ],
+    [
+      "createShare",
+      () => api.createShare({ file_ids: [1], expire_hours: 24 } as never),
+      "/api/shares",
+      "POST",
+      { file_ids: [1], expire_hours: 24 },
+    ],
+    ["listShares", () => api.listShares(), "/api/shares", "GET", undefined],
+    ["revokeShare", () => api.revokeShare(3), "/api/shares/3/revoke", "PUT", undefined],
+    [
+      "deleteShares",
+      () => api.deleteShares([5, 6]),
+      "/api/shares",
+      "DELETE",
+      { share_ids: [5, 6] },
+    ],
+    ["revokeAllShares", () => api.revokeAllShares(), "/api/shares/revoke-all", "PUT", undefined],
+    ["getShareInfo", () => api.getShareInfo("ab c"), "/api/s/ab%20c", "GET", undefined],
+    [
+      "accessShare",
+      () => api.accessShare("code1", "pw"),
+      "/api/s/code1/access",
+      "POST",
+      { password: "pw" },
+    ],
+  ])("%s hits expected endpoint", async (_name, invoke, url, method, body) => {
+    global.fetch = jest.fn().mockResolvedValue(ok({}));
+
+    await invoke();
+
+    const [calledUrl, options] = (global.fetch as jest.Mock).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(calledUrl.endsWith(url)).toBe(true);
+    expect(options.method ?? "GET").toBe(method);
+    if (body !== undefined) {
+      expect(JSON.parse(options.body as string)).toEqual(body);
+    } else {
+      expect(options.body).toBeUndefined();
+    }
   });
 });

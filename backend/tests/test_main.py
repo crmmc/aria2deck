@@ -630,6 +630,45 @@ class TestLifespan:
         assert candidate.read_bytes() == b"keep"
 
     @pytest.mark.asyncio
+    async def test_lifespan_candidate_query_failure_skips_orphan_gid_purge(
+        self, temp_db
+    ):
+        """planned 候选两次查询失败时必须跳过 orphan gid purge，其余修复继续。"""
+        from fastapi import FastAPI
+
+        from app.main import lifespan
+
+        purge_orphans = AsyncMock()
+        residual = AsyncMock(return_value={"found": 0, "purged": 0, "failed": 0})
+        terminal_dirs = AsyncMock(return_value={"purged": 0})
+        with (
+            patch("app.core.config.check_secret_key"),
+            patch("app.main.ensure_default_admin_v0", new=AsyncMock()),
+            patch(
+                "app.services.task_batch_submission.recover_planned_submissions",
+                new=AsyncMock(side_effect=RuntimeError("db locked")),
+            ),
+            patch(
+                "app.services.task_batch_submission.list_pending_submission_candidates",
+                new=AsyncMock(side_effect=RuntimeError("db locked")),
+            ),
+            patch("app.main.purge_orphan_aria2_downloads", new=purge_orphans),
+            patch("app.main.purge_terminal_residual_gids", new=residual),
+            patch("app.main.purge_terminal_download_dirs", new=terminal_dirs),
+            patch("app.main.run_startup_repair", new=AsyncMock(return_value=_startup_repair_result())),
+            patch("app.main.sync_tasks", new=AsyncMock()),
+            patch("app.main.listen_aria2_events", new=AsyncMock()),
+            patch("app.main.Aria2Client.close_session", new=AsyncMock()),
+            patch("app.main.dispose_engine", new=AsyncMock()),
+        ):
+            async with lifespan(FastAPI()):
+                await asyncio.sleep(0)
+
+        purge_orphans.assert_not_awaited()
+        residual.assert_awaited_once()
+        terminal_dirs.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_background_task_logs_unexpected_failure(self, caplog):
         """Unexpected worker exits are logged immediately."""
         import logging
@@ -693,3 +732,30 @@ class TestDatabaseIntegrity:
 
         result = await check_wal_integrity()
         assert result is True
+
+
+class TestOpenApiSecuritySchemes:
+    """custom OpenAPI 仅安装 scheme，不改写其他 operations。"""
+
+    def test_schemes_installed_and_tasks_declares_security(self):
+        from app.core.config import settings
+        from app.main import app
+
+        app.openapi_schema = None
+        schema = app.openapi()
+
+        schemes = schema["components"]["securitySchemes"]
+        assert set(schemes) == {"sessionCookie", "apiToken"}
+        assert schemes["sessionCookie"] == {
+            "type": "apiKey",
+            "in": "cookie",
+            "name": settings.session_cookie_name,
+        }
+        assert schemes["apiToken"] == {"type": "http", "scheme": "bearer"}
+
+        tasks_post = schema["paths"]["/api/tasks"]["post"]
+        assert tasks_post["security"] == [{"sessionCookie": []}, {"apiToken": []}]
+
+        # 无关公开 operation 不被全局加 security
+        login_post = schema["paths"]["/api/auth/login"]["post"]
+        assert "security" not in login_post

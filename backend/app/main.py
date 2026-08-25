@@ -213,7 +213,19 @@ async def _database_ready() -> bool:
     return True
 
 
-# Canonical startup repair sequence per spec 15.1 / 15.4.
+def _harden_openapi_schema(schema: dict[str, Any]) -> None:
+    """安装与交付 openapi.yaml 一致的安全方案命名；不改写其他 operations。"""
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "sessionCookie": {
+            "type": "apiKey",
+            "in": "cookie",
+            "name": settings.session_cookie_name,
+        },
+        "apiToken": {"type": "http", "scheme": "bearer"},
+    }
+
+
+# Canonical startup repair sequence.
 #
 # Order (data-safety first):
 #   1. recover completed-without-index  (may hold the only copy)
@@ -234,8 +246,14 @@ STARTUP_REPAIR_STEPS: tuple[str, ...] = (
 
 async def _run_startup_repair_sequence(
     backend: Any,
+    protected_gids: set[str] | None = None,
+    *,
+    skip_orphan_purge: bool = False,
 ) -> dict[str, Any]:
     """Run the fixed startup repair sequence, isolating each phase.
+
+    ``skip_orphan_purge`` 用于 planned submission 候选无法枚举时：
+    保护集不完整，必须跳过 orphan gid purge，其余安全修复继续。
 
     Returns a dict mapping step names to {"ok": bool, "result": ...}.
     Exceptions are logged but never propagated to the caller.
@@ -272,11 +290,17 @@ async def _run_startup_repair_sequence(
     )
 
     # 3b. purge zombie aria2 downloads (managed dir, no live DB owner)
-    await _step(
-        "purge_orphan_downloads",
-        purge_orphan_aria2_downloads(backend),
-        "purge orphan aria2 downloads",
-    )
+    if skip_orphan_purge:
+        logger.warning(
+            "planned submission 候选无法确认，跳过 orphan aria2 purge 防止误删"
+        )
+        results["purge_orphan_downloads"] = {"ok": False, "result": None}
+    else:
+        await _step(
+            "purge_orphan_downloads",
+            purge_orphan_aria2_downloads(backend, protected_gids),
+            "purge orphan aria2 downloads",
+        )
 
     # 4. purge safe terminal directories / strict indexed-completed fallback
     await _step(
@@ -344,6 +368,33 @@ async def lifespan(app: FastAPI):
         await refresh_aria2_config()
         await load_runtime_config()
 
+        # runtime config 加载后立即恢复 planned GID 候选；必须早于
+        # legacy reconciliation / accounting / orphan purge，否则未绑定的
+        # planned GID 可能被抢先终结或删除。
+        from app.services.task_batch_submission import (
+            derive_planned_gid,
+            list_pending_submission_candidates,
+            recover_planned_submissions,
+        )
+
+        unresolved_planned_gids: set[str] = set()
+        planned_candidates_known = True
+        try:
+            unresolved_planned_gids = await recover_planned_submissions(
+                get_aria2_client()
+            )
+        except Exception:
+            logger.exception("启动恢复 planned GID 失败，fail closed 保护全部候选")
+            try:
+                unresolved_planned_gids = {
+                    derive_planned_gid(int(row["id"]))
+                    for row in await list_pending_submission_candidates()
+                }
+            except Exception:
+                # 候选两次均无法枚举：保护集不完整，必须跳过 orphan purge
+                logger.exception("枚举 planned submission 候选失败")
+                planned_candidates_known = False
+
         from app.services.lifecycle.repair import (
             reconcile_legacy_http_downloads_v0,
         )
@@ -362,7 +413,9 @@ async def lifespan(app: FastAPI):
         await PackTaskManager.recover_startup()
 
         repair_results = await _run_startup_repair_sequence(
-            Aria2BackendAdapter(get_aria2_client())
+            Aria2BackendAdapter(get_aria2_client()),
+            protected_gids=unresolved_planned_gids,
+            skip_orphan_purge=not planned_candidates_known,
         )
 
         for step_name in STARTUP_REPAIR_STEPS:
@@ -573,6 +626,19 @@ def create_app() -> FastAPI:
     app.include_router(internal_fetch.router)
     app.include_router(aria2_rpc.router)
     app.include_router(shares.router)
+
+    def custom_openapi() -> dict[str, Any]:
+        if app.openapi_schema:
+            return app.openapi_schema
+        from fastapi.openapi.utils import get_openapi
+
+        app.openapi_schema = get_openapi(
+            title=app.title, version=app.version, routes=app.routes
+        )
+        _harden_openapi_schema(app.openapi_schema)
+        return app.openapi_schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
 
     # 静态导出时，Next.js 产物是 *.html 文件。
     # 这里仅在生产静态托管层把无后缀页面路径映射到对应 HTML，

@@ -3,24 +3,63 @@
 from __future__ import annotations
 
 import logging
+import time
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthUser, require_limited_api_user
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
 from app.domain.errors import DomainError
+from app.domain.task_policy import legacy_rest_status
 from app.http.errors import raise_http
 from app.services import task_service
+from app.services.task_batch_submission import (
+    BatchAllowanceDeniedError,
+    BatchSubmissionUndeterminedError,
+)
+from app.services.task_batch_submission import BatchTaskItem as _BatchTaskItem
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 v2_router = APIRouter(prefix="/api/v2", tags=["tasks"])
 
 
-class TaskCreate(BaseModel):
+class BatchTaskCreateItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     uri: str
-    options: dict | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+class BatchTaskCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tasks: list[BatchTaskCreateItem]
+
+
+PublicTaskStatus = Literal[
+    "queued", "active", "waiting", "paused", "complete", "error"
+]
+
+
+class BatchTaskCreateResultItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_index: int
+    accepted: bool
+    task_id: int | None
+    status: PublicTaskStatus | None
+    error: str | None
+
+
+class BatchTaskCreateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accepted_count: int
+    failed_count: int
+    results: list[BatchTaskCreateResultItem]
 
 
 class BatchCancelTasksRequest(BaseModel):
@@ -37,25 +76,145 @@ class TorrentPreviewCreate(BaseModel):
     torrent: str
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
-async def create_task(
-    payload: TaskCreate,
+BATCH_TASK_LIMIT = 30
+
+
+_HTTP_ERROR_SCHEMA = {
+    "type": "object",
+    "required": ["detail"],
+    "properties": {"detail": {"type": "string"}},
+    "additionalProperties": False,
+}
+
+_VALIDATION_ERROR_SCHEMA = {
+    "type": "object",
+    "required": ["detail"],
+    "additionalProperties": False,
+    "properties": {
+        "detail": {
+            "oneOf": [
+                {"type": "string"},
+                {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["loc", "msg", "type"],
+                        "properties": {
+                            "loc": {"type": "array", "items": {}},
+                            "msg": {"type": "string"},
+                            "type": {"type": "string"},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            ]
+        }
+    },
+}
+
+
+@router.post(
+    "",
+    operation_id="createTasks",
+    openapi_extra={"security": [{"sessionCookie": []}, {"apiToken": []}]},
+    response_model=BatchTaskCreateResponse,
+    responses={
+        "401": {
+            "description": "未认证",
+            "content": {"application/json": {"schema": _HTTP_ERROR_SCHEMA}},
+        },
+        "422": {
+            "description": "请求结构错误、任务数组为空或去重后超过30条",
+            "content": {
+                "application/json": {"schema": _VALIDATION_ERROR_SCHEMA}
+            },
+        },
+        "429": {
+            "description": "authenticated_api请求级限流；逐条create_task限流在200结果中表达",
+            "headers": {
+                "Retry-After": {
+                    "required": True,
+                    "schema": {"type": "string"},
+                }
+            },
+            "content": {"application/json": {"schema": _HTTP_ERROR_SCHEMA}},
+        },
+        "502": {
+            "description": "aria2批量提交和再次核对均无法确定逐条结果",
+            "content": {"application/json": {"schema": _HTTP_ERROR_SCHEMA}},
+        },
+    },
+)
+async def create_tasks(
+    payload: BatchTaskCreateRequest,
     user: AuthUser = Depends(require_limited_api_user),
-) -> dict:
-    await ensure_authenticated_allowed(
-        user.id,
-        RateLimitScope.CREATE_TASK,
-        detail="操作过于频繁，请稍后再试",
-    )
-    try:
-        return await task_service.create_task(
-            user_id=user.id,
-            quota_bytes=user.quota,
-            uri=payload.uri,
-            options=payload.options,
+) -> BatchTaskCreateResponse:
+    if not payload.tasks:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="任务列表不能为空",
         )
-    except DomainError as exc:
-        raise_http(exc)
+    if len({item.uri.strip() for item in payload.tasks}) > BATCH_TASK_LIMIT:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"一次最多创建 {BATCH_TASK_LIMIT} 个任务",
+        )
+
+    async def allow_create_task() -> None:
+        try:
+            await ensure_authenticated_allowed(
+                user.id,
+                RateLimitScope.CREATE_TASK,
+                detail="操作过于频繁，请稍后再试",
+            )
+        except HTTPException as exc:
+            if exc.status_code == 429:
+                raise BatchAllowanceDeniedError() from exc
+            raise
+
+    started = time.monotonic()
+    try:
+        result = await task_service.create_tasks_batch(
+            user_id=user.id,
+            quota_bytes=int(user.quota_bytes),
+            items=[
+                _BatchTaskItem(uri=item.uri, options=item.options)
+                for item in payload.tasks
+            ],
+            allow_create_task=allow_create_task,
+        )
+    except BatchSubmissionUndeterminedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc) or "aria2 批量提交结果暂无法确认",
+        ) from exc
+    logger.info(
+        "批量创建任务完成 user_id=%s requested=%s accepted=%s failed=%s duration_ms=%s",
+        user.id,
+        len(payload.tasks),
+        result.accepted_count,
+        result.failed_count,
+        int((time.monotonic() - started) * 1000),
+    )
+    results = [
+        BatchTaskCreateResultItem(
+            input_index=item.input_index,
+            accepted=item.accepted,
+            task_id=item.task_id,
+            status=cast(
+                "PublicTaskStatus | None",
+                legacy_rest_status(item.status) if item.status else None,
+            ),
+            error=item.error_message if not item.accepted else None,
+        )
+        for item in result.results
+    ]
+    return BatchTaskCreateResponse(
+        accepted_count=result.accepted_count,
+        failed_count=result.failed_count,
+        results=results,
+    )
+
 
 
 @router.post("/torrent/preview")

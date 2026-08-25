@@ -28,6 +28,7 @@ export function BatchAddTasksDialog({
           onClick={onCancel}
           className="modal-close-btn"
           aria-label="关闭批量添加任务"
+          disabled={isBatchAdding}
         >
           ×
         </button>
@@ -50,6 +51,7 @@ export function BatchAddTasksDialog({
           type="button"
           className="button secondary btn-task"
           onClick={onCancel}
+          disabled={isBatchAdding}
         >
           取消
         </button>

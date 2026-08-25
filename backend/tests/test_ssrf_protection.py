@@ -1,203 +1,163 @@
-"""SSRF 防护测试
+"""SSRF 职责边界测试（M24 数组契约后）
 
-测试场景：
-1. 阻止本机地址 (127.0.0.1, localhost)
-2. 阻止私有网络地址 (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
-3. 阻止 AWS 元数据接口 (169.254.169.254)
-4. 阻止解析到内网的域名
-5. 允许公网 HTTP(S) 地址
-6. 拒绝 FTP 和自定义协议
+M24 后 REST 创建任务不再在请求阶段做外部 probe / SSRF 校验：
+aria2 只获得 internal gateway URI（capability 签名），SSRF/DNS/redirect/
+max-size 的拒绝由 internal fetch gateway 承接，证据见：
+- tests/test_security_utils.py：本机/内网/共享地址段、DNS 解析拒绝
+- tests/test_internal_fetch.py：redirect 到内网、oversize、capability 校验
+- tests/test_internal_fetch_aria2.py：真实 aria2 仅经 gateway 下载
+
+本文件保留 REST endpoint 层有意义的安全边界：
+1. 旧 object body（{"uri": ...}）拒绝，不恢复兼容
+2. 原始外部 URI（含内网/本机目标）不直达 aria2 提交调用
+3. 协议白名单逐项拒绝且不触发 aria2 RPC
 """
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import AsyncMock, patch
+from fastapi.testclient import TestClient
 
-from tests.fakes import make_aria2_client
+from app.aria2.client import MulticallOutcome
 
 
-class TestSSRFProtection:
-    """SSRF 防护测试套件"""
+def _find_planned_gid(params: list[Any]) -> str | None:
+    for param in params:
+        if isinstance(param, dict) and isinstance(param.get("gid"), str):
+            return param["gid"]
+        if isinstance(param, list):
+            found = _find_planned_gid(param)
+            if found is not None:
+                return found
+    return None
 
-    def test_block_localhost_ip(self, authenticated_client):
-        """测试阻止 127.0.0.1"""
+
+class CapturingAria2Client:
+    """记录 multicall 调用并按 planned gid 返回 ok outcome。"""
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict]] = []
+
+    async def multicall(self, calls: list[dict]) -> list[MulticallOutcome]:
+        self.calls.append(calls)
+        return [
+            MulticallOutcome(ok=True, result=_find_planned_gid(call.get("params") or []))
+            for call in calls
+        ]
+
+    async def add_uri(self, *args: Any, **kwargs: Any) -> str:
+        raise AssertionError("array 契约不应调用 legacy add_uri")
+
+
+def _submitted_blob(calls: list[list[dict]]) -> str:
+    import json
+
+    return json.dumps(calls, ensure_ascii=False, default=str)
+
+
+class TestLegacyObjectBodyRejected:
+    def test_old_object_body_returns_422(self, authenticated_client: TestClient):
+        """旧 object body 不再兼容，恢复 array-only 契约"""
         response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://127.0.0.1:8080/file.zip"}
+            "/api/tasks", json={"uri": "http://example.com/file.zip"}
         )
-        assert response.status_code == 400
-        assert "本机地址" in response.json()["detail"]
+        assert response.status_code == 422
 
-    def test_block_localhost_name(self, authenticated_client):
-        """测试阻止 localhost"""
+
+class TestExternalURINotDeliveredToAria2:
+    """内网/本机外部 URI 不在请求阶段 400（无外部 probe），
+    但原始 URI 绝不出现在 aria2 提交调用中，下载只会通过
+    internal gateway（gateway 侧 SSRF 拒绝见 test_internal_fetch.py）。"""
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "http://127.0.0.1:8080/file.zip",
+            "http://localhost:8080/file.zip",
+            "http://[::1]:8080/file.zip",
+            "http://0.0.0.0:8080/file.zip",
+            "http://192.168.1.1/file.zip",
+            "http://10.0.0.1/file.zip",
+            "http://100.64.0.1/file.zip",
+            "http://172.16.0.1/file.zip",
+            "http://169.254.169.254/latest/meta-data/",
+            "https://127.0.0.1:8443/file.zip",
+        ],
+    )
+    @patch("app.services.task_service._get_client")
+    def test_private_uri_accepted_but_only_gateway_uri_submitted(
+        self,
+        mock_get_client: Any,
+        authenticated_client: TestClient,
+        uri: str,
+    ):
+        fake = CapturingAria2Client()
+        mock_get_client.return_value = fake
         response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://localhost:8080/file.zip"}
+            "/api/tasks", json={"tasks": [{"uri": uri}]}
         )
-        assert response.status_code == 400
-        assert "本机地址" in response.json()["detail"]
 
-    def test_block_localhost_ipv6(self, authenticated_client):
-        """测试阻止 IPv6 回环地址"""
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accepted_count"] == 1
+        assert body["results"][0]["accepted"] is True
+        assert fake.calls, "accepted HTTP 项应产生 aria2 提交调用"
+        blob = _submitted_blob(fake.calls)
+        assert uri not in blob
+        # 只提交 internal gateway 镜像 URI
+        assert "/_internal/fetch/" in blob
+        # 原始目标 host 不得泄漏进提交调用
+        host = uri.split("//", 1)[1].split("/", 1)[0]
+        assert host not in blob
+
+    @patch("app.services.task_service._get_client")
+    def test_magnet_submitted_canonical_only(
+        self,
+        mock_get_client: Any,
+        authenticated_client: TestClient,
+    ):
+        """magnet 通过 canonical 形式提交，tracker 等外部组件不进入 aria2 调用
+        （与 test_tasks_router.test_canonicalizes_magnet_before_submit 一致）。"""
+        fake = CapturingAria2Client()
+        mock_get_client.return_value = fake
+        magnet_uri = (
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+            "&tr=https://tracker.example/announce"
+        )
         response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://[::1]:8080/file.zip"}
+            "/api/tasks", json={"tasks": [{"uri": magnet_uri}]}
         )
-        assert response.status_code == 400
-        assert "本机地址" in response.json()["detail"]
 
-    def test_block_private_network_192(self, authenticated_client):
-        """测试阻止 192.168.x.x 私有网络"""
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://192.168.1.1/file.zip"}
-        )
-        assert response.status_code == 400
-        assert "内网地址" in response.json()["detail"]
+        assert response.status_code == 200
+        assert response.json()["accepted_count"] == 1
+        blob = _submitted_blob(fake.calls)
+        assert "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567" in blob
+        assert "tracker.example" not in blob
 
-    def test_block_private_network_10(self, authenticated_client):
-        """测试阻止 10.x.x.x 私有网络"""
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://10.0.0.1/file.zip"}
-        )
-        assert response.status_code == 400
-        assert "内网地址" in response.json()["detail"]
 
-    def test_block_shared_network_100_64(self, authenticated_client):
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://100.64.0.1/file.zip"},
-        )
-        assert response.status_code == 400
-        assert "内网地址" in response.json()["detail"]
-
-    def test_block_private_network_172(self, authenticated_client):
-        """测试阻止 172.16-31.x.x 私有网络"""
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://172.16.0.1/file.zip"}
-        )
-        assert response.status_code == 400
-        assert "内网地址" in response.json()["detail"]
-
-    def test_block_aws_metadata(self, authenticated_client):
-        """测试阻止 AWS 元数据接口 (169.254.169.254)"""
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://169.254.169.254/latest/meta-data/"}
-        )
-        assert response.status_code == 400
-        assert "内网地址" in response.json()["detail"]
-
-    def test_block_zero_address(self, authenticated_client):
-        """测试阻止 0.0.0.0"""
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://0.0.0.0:8080/file.zip"}
-        )
-        assert response.status_code == 400
-        assert "本机地址" in response.json()["detail"]
-
-    @pytest.mark.skip(reason="需要真实的 DNS 环境才能测试域名解析")
-    def test_block_domain_resolves_to_private_ip(self, authenticated_client):
-        """测试阻止解析到内网 IP 的域名
-
-        注意：此测试需要一个真实的域名解析到内网 IP，在测试环境中难以模拟
-        """
-        # 假设 internal.example.com 解析到 192.168.1.1
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "http://internal.example.com/file.zip"}
-        )
-        assert response.status_code == 400
-        assert "解析到内网地址" in response.json()["detail"]
-
-    def test_allow_public_ip(self, authenticated_client):
-        """测试允许公网 IP 地址
-
-        注意：此测试会真实创建任务（如果磁盘空间足够），但任务可能会失败
-        """
-        # 8.8.8.8 是公网地址，mock HTTP 探测避免真实网络请求导致测试过慢
-        with patch(
-            "app.services.task_service.probe_url_with_get_fallback",
-            new_callable=AsyncMock,
-        ) as mock_probe:
-            mock_probe.return_value = type("ProbeResult", (), {
-                "success": True,
-                "final_url": "http://8.8.8.8/file.zip",
-                "content_length": 0,
-                "filename": "file.zip",
-                "error": None,
-            })()
-            response = authenticated_client.post(
-                "/api/tasks",
-                json={"uri": "http://8.8.8.8/file.zip"}
-            )
-        # 应该通过 SSRF 检查（不返回 400），但可能因为其他原因失败
-        # 只要不是 400 且不包含 "内网" 或 "本机" 就说明通过了 SSRF 检查
-        if response.status_code == 400:
-            detail = response.json().get("detail", "")
-            assert "内网" not in detail and "本机" not in detail
-
-    def test_allow_public_domain(self, authenticated_client):
-        """测试允许公网域名
-
-        注意：此测试会真实创建任务（如果磁盘空间足够），但任务可能会失败
-        """
-        # mock HTTP 探测避免真实网络请求导致测试波动
-        with patch(
-            "app.services.task_service.probe_url_with_get_fallback",
-            new_callable=AsyncMock,
-        ) as mock_probe, patch(
-            "app.core.security.socket.getaddrinfo"
-        ) as mock_getaddrinfo:
-            mock_probe.return_value = type("ProbeResult", (), {
-                "success": True,
-                "final_url": "http://example.com/file.zip",
-                "content_length": 0,
-                "filename": "file.zip",
-                "error": None,
-            })()
-            mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
-            response = authenticated_client.post(
-                "/api/tasks",
-                json={"uri": "http://example.com/file.zip"}
-            )
-        # 应该通过 SSRF 检查（不返回 400），但可能因为其他原因失败
-        if response.status_code == 400:
-            detail = response.json().get("detail", "")
-            assert "内网" not in detail and "本机" not in detail
-
-    def test_allow_magnet_link(self, authenticated_client):
-        """测试允许磁力链接（不进行 SSRF 检查）"""
-        # magnet 链接不经过 HTTP，不应该被 SSRF 检查拦截
-        magnet_uri = "magnet:?xt=urn:btih:1234567890abcdef&dn=test"
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": magnet_uri}
-        )
-        # 应该通过 SSRF 检查，但可能因为其他原因失败
-        if response.status_code == 400:
-            detail = response.json().get("detail", "")
-            assert "内网" not in detail and "本机" not in detail
-
-    def test_allow_https(self, authenticated_client):
-        """测试 HTTPS 协议同样受到 SSRF 检查"""
-        response = authenticated_client.post(
-            "/api/tasks",
-            json={"uri": "https://127.0.0.1:8443/file.zip"}
-        )
-        assert response.status_code == 400
-        assert "本机地址" in response.json()["detail"]
-
+class TestSchemeAllowlist:
     @pytest.mark.parametrize(
         "uri",
         ["ftp://ftp.example.com/file.zip", "ftp://192.168.1.1/file.zip", "custom:data"],
     )
-    def test_reject_unsupported_scheme_before_aria2(self, authenticated_client, uri):
-        aria2_client = make_aria2_client()
-        with patch("app.services.task_service._get_client", return_value=aria2_client):
-            response = authenticated_client.post("/api/tasks", json={"uri": uri})
+    @patch("app.services.task_service._get_client")
+    def test_reject_unsupported_scheme_per_item_without_aria2(
+        self,
+        mock_get_client: Any,
+        authenticated_client: TestClient,
+        uri: str,
+    ):
+        fake = CapturingAria2Client()
+        mock_get_client.return_value = fake
+        response = authenticated_client.post(
+            "/api/tasks", json={"tasks": [{"uri": uri}]}
+        )
 
-        assert response.status_code == 400
-        assert response.json()["detail"] == "仅支持磁力链接和 HTTP(S) 下载链接"
-        aria2_client.add_uri.assert_not_awaited()
+        assert response.status_code == 200
+        item = response.json()["results"][0]
+        assert item["accepted"] is False
+        assert item["error"] == "仅支持磁力链接和 HTTP(S) 下载链接"
+        assert item["task_id"] is None
+        assert fake.calls == []
