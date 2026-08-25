@@ -206,4 +206,100 @@ describe("useTaskWebSocket", () => {
 
     expect(MockWebSocket.instances.length).toBe(2);
   });
+
+  it("maps notification levels for error, warning and default info", () => {
+    const onNotification = jest.fn();
+
+    render(<HookHarness onTaskUpdate={jest.fn()} onNotification={onNotification} />);
+    const ws = MockWebSocket.instances[0];
+
+    act(() => {
+      ws.open();
+      ws.emitMessage(JSON.stringify({ type: "notification", message: "bad", level: "error" }));
+      ws.emitMessage(JSON.stringify({ type: "notification", message: "warn", level: "warning" }));
+      ws.emitMessage(JSON.stringify({ type: "notification", message: "plain" }));
+      ws.emitMessage(JSON.stringify({ type: "notification", message: "odd", level: "verbose" }));
+    });
+
+    expect(onNotification.mock.calls).toEqual([
+      ["bad", "error"],
+      ["warn", "warning"],
+      ["plain", "info"],
+      ["odd", "info"],
+    ]);
+  });
+
+  it("rejects valid json payloads that are not records or lack a string type", () => {
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    const onTaskUpdate = jest.fn();
+    const onNotification = jest.fn();
+
+    render(<HookHarness onTaskUpdate={onTaskUpdate} onNotification={onNotification} />);
+    const ws = MockWebSocket.instances[0];
+
+    act(() => {
+      ws.open();
+      ws.emitMessage("42");
+      ws.emitMessage(JSON.stringify({ type: 123 }));
+    });
+
+    expect(onTaskUpdate).not.toHaveBeenCalled();
+    expect(onNotification).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[ws] Invalid payload shape",
+      42,
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("updates the pong timestamp when receiving a pong frame", () => {
+    render(<HookHarness onTaskUpdate={jest.fn()} onNotification={jest.fn()} />);
+    const ws = MockWebSocket.instances[0];
+
+    act(() => {
+      ws.open();
+      ws.emitMessage("pong");
+    });
+
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it("sends ping frames on the heartbeat interval while open", () => {
+    render(<HookHarness onTaskUpdate={jest.fn()} onNotification={jest.fn()} />);
+    const ws = MockWebSocket.instances[0];
+
+    act(() => {
+      ws.open();
+      jest.advanceTimersByTime(15000);
+    });
+
+    expect(ws.send).toHaveBeenCalledWith("ping");
+  });
+
+  it("closes the socket when no pong arrives within the timeout", () => {
+    render(<HookHarness onTaskUpdate={jest.fn()} onNotification={jest.fn()} />);
+    const ws = MockWebSocket.instances[0];
+
+    act(() => {
+      ws.open();
+      jest.advanceTimersByTime(60000);
+    });
+
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("logs and closes the socket on websocket errors", () => {
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    render(<HookHarness onTaskUpdate={jest.fn()} onNotification={jest.fn()} />);
+    const ws = MockWebSocket.instances[0];
+
+    act(() => {
+      ws.open();
+      ws.onerror?.(new Event("error"));
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith("[ws] WebSocket error", expect.any(Event));
+    expect(ws.close).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
 });

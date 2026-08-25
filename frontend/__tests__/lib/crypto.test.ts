@@ -136,3 +136,53 @@ describe("hashPassword", () => {
   });
 
 });
+
+jest.mock("@noble/hashes/sha2.js", () => ({
+  sha256: (data: Uint8Array) => {
+    const result = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) {
+      result[i] = (data[i % data.length] || 0) ^ (i * 3 + 1);
+    }
+    return result;
+  },
+}));
+jest.mock("@noble/hashes/pbkdf2.js", () => ({
+  pbkdf2: (
+    _hash: unknown,
+    _password: Uint8Array,
+    salt: Uint8Array,
+    options: { c: number; dkLen: number }
+  ) => {
+    expect(options).toEqual({ c: 10000, dkLen: 32 });
+    const result = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) {
+      result[i] = (salt[i % salt.length] || 0) ^ (i * 5 + 2);
+    }
+    return result;
+  },
+}));
+
+describe("hashPassword noble fallback", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test.each([
+    ["subtle missing", {}],
+    ["subtle without digest", { subtle: {} }],
+  ])("falls back to noble hashing when %s", async (_label, cryptoValue) => {
+    Object.defineProperty(global, "crypto", {
+      value: cryptoValue,
+      writable: true,
+      configurable: true,
+    });
+
+    const result = await hashPassword("password", "user");
+    expect(result).toHaveLength(64);
+    expect(/^[0-9a-f]+$/.test(result)).toBe(true);
+
+    const again = await hashPassword("password", "user");
+    expect(again).toBe(result);
+    expect(await hashPassword("password", "other")).not.toBe(result);
+  });
+});

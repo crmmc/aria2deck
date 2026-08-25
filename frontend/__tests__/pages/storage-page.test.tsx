@@ -1,27 +1,35 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import StoragePage from "@/app/(authenticated)/storage/page";
 import { api } from "@/lib/api";
 
 const replaceMock = jest.fn();
 const showToastMock = jest.fn();
-
-jest.mock("next/navigation", () => ({
-  useRouter: () => ({ replace: replaceMock }),
-}));
-
-jest.mock("@/lib/AuthContext", () => {
-  const user = {
+const authUserState: {
+  user: {
+    id: number;
+    username: string;
+    is_admin: boolean;
+    quota: number;
+    is_initial_password: boolean;
+  } | null;
+} = {
+  user: {
     id: 1,
     username: "admin",
     is_admin: true,
     quota: 1024 * 1024 * 1024,
     is_initial_password: false,
-  };
-  return {
-    __esModule: true,
-    useAuth: () => ({ user }),
-  };
-});
+  },
+};
+
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: replaceMock }),
+}));
+
+jest.mock("@/lib/AuthContext", () => ({
+  __esModule: true,
+  useAuth: () => ({ user: authUserState.user }),
+}));
 
 jest.mock("@/components/Toast", () => ({
   __esModule: true,
@@ -69,6 +77,13 @@ const file = {
 describe("StoragePage", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    authUserState.user = {
+      id: 1,
+      username: "admin",
+      is_admin: true,
+      quota: 1024 * 1024 * 1024,
+      is_initial_password: false,
+    };
     mockApi.listStoredFiles.mockResolvedValue({
       files: [file],
       total: 1,
@@ -133,7 +148,7 @@ describe("StoragePage", () => {
 
   test("paginates and resets to page one when filters change", async () => {
     mockApi.listStoredFiles.mockImplementation(
-      async (page, pageSize, search, orphanOnly) => ({
+      async (page = 1, pageSize = 20, search, _orphanOnly) => ({
         files: [{ ...file, id: page, original_name: search || `file-${page}` }],
         total: 41,
         page,
@@ -280,7 +295,7 @@ describe("StoragePage", () => {
 
   test("returns from an emptied last page after deletion", async () => {
     let deleted = false;
-    mockApi.listStoredFiles.mockImplementation(async (page, pageSize) => {
+    mockApi.listStoredFiles.mockImplementation(async (page = 1, pageSize = 20) => {
       if (page === 2 && !deleted) {
         return {
           files: [{ ...file, id: 21, original_name: "last-file" }],
@@ -319,7 +334,7 @@ describe("StoragePage", () => {
 
   test("returns from an emptied last page after refresh", async () => {
     let pageTwoLoads = 0;
-    mockApi.listStoredFiles.mockImplementation(async (page, pageSize) => {
+    mockApi.listStoredFiles.mockImplementation(async (page = 1, pageSize = 20) => {
       if (page === 2) {
         pageTwoLoads += 1;
         return pageTwoLoads === 1
@@ -352,5 +367,201 @@ describe("StoragePage", () => {
       expect(pageOneCalls).toHaveLength(2);
     });
     expect(await screen.findByText("共 20 项")).toBeInTheDocument();
+  });
+
+  test("shows error toast when loading stored files fails", async () => {
+    mockApi.listStoredFiles.mockRejectedValue(new Error("load failed") as never);
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("加载存储文件失败", "error");
+    });
+    expect(await screen.findByText("存储管理")).toBeInTheDocument();
+    expect(await screen.findByText("暂无存储文件")).toBeInTheDocument();
+  });
+
+  test("selects and clears the whole page via the select-all checkbox", async () => {
+    render(<StoragePage />);
+
+    expect(await screen.findByText("movie.mkv")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选" }));
+    expect(screen.getByRole("button", { name: "删除选中 (1)" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选" }));
+    expect(screen.getByRole("button", { name: "删除选中 (0)" })).toBeDisabled();
+  });
+
+  test("surfaces partial deletion errors alongside the success toast", async () => {
+    mockApi.bulkDeleteStoredFiles.mockResolvedValue({
+      deleted_count: 1,
+      failed_ids: [],
+      errors: ["hash_abc: 文件被占用"],
+    } as never);
+    render(<StoragePage />);
+
+    expect(await screen.findByText("movie.mkv")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择 movie.mkv" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除选中 (1)" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("已删除 1 个文件", "success");
+    });
+    expect(showToastMock).toHaveBeenCalledWith("hash_abc: 文件被占用", "error");
+  });
+
+  test("shows error toast when loading file users fails", async () => {
+    mockApi.getFileUsers.mockRejectedValue(new Error("users failed") as never);
+    render(<StoragePage />);
+
+    expect(await screen.findByText("movie.mkv")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "1" })[0]);
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("加载用户列表失败", "error");
+    });
+  });
+
+  test("shows empty state inside the user modal and closes it", async () => {
+    mockApi.getFileUsers.mockResolvedValue({ file_id: 1, users: [] } as never);
+    render(<StoragePage />);
+
+    expect(await screen.findByText("movie.mkv")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "1" })[0]);
+
+    expect(await screen.findByText("无引用用户")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    await waitFor(() => {
+      expect(screen.queryByLabelText("文件引用用户")).not.toBeInTheDocument();
+    });
+  });
+
+  test.each([
+    {
+      name: "directory entry",
+      file: { ...file, is_directory: true },
+      expected: /📁/,
+    },
+    {
+      name: "missing on disk entry",
+      file: { ...file, exists_on_disk: false },
+      expected: "缺失",
+    },
+  ])("renders table decorations for a $name", async ({ file: variant, expected }) => {
+    mockApi.listStoredFiles.mockResolvedValue({
+      files: [variant],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    } as never);
+    render(<StoragePage />);
+
+    expect(await screen.findByText(/movie\.mkv/)).toBeInTheDocument();
+    expect(screen.getByText(expected)).toBeInTheDocument();
+  });
+
+  test("closes the user modal via the backdrop button", async () => {
+    render(<StoragePage />);
+
+    expect(await screen.findByText("movie.mkv")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "1" })[0]);
+    expect(await screen.findByText("引用用户")).toBeInTheDocument();
+
+    const dialog = screen.getByLabelText("文件引用用户");
+    fireEvent.click(dialog.querySelector(".modal-backdrop-button") as HTMLElement);
+    await waitFor(() => {
+      expect(screen.queryByLabelText("文件引用用户")).not.toBeInTheDocument();
+    });
+  });
+
+  test("ignores stale load failures superseded by a newer request", async () => {
+    mockApi.listStoredFiles.mockResolvedValueOnce({
+      files: [file],
+      total: 21,
+      page: 1,
+      page_size: 20,
+    } as never);
+    render(<StoragePage />);
+    expect(await screen.findByText("movie.mkv")).toBeInTheDocument();
+
+    let rejectStale: (reason?: unknown) => void = () => {};
+    mockApi.listStoredFiles.mockImplementation((page) =>
+      page === 2
+        ? Promise.resolve({ files: [file], total: 21, page, page_size: 20 })
+        : new Promise((_res, rej) => {
+            rejectStale = rej;
+          }) as never,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => {
+      expect(mockApi.listStoredFiles).toHaveBeenLastCalledWith(2, 20, undefined, false);
+    });
+
+    await act(async () => {
+      rejectStale(new Error("stale failure"));
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    expect(showToastMock).not.toHaveBeenCalledWith("加载存储文件失败", "error");
+  });
+
+  test("ignores deletion failure after unmount", async () => {
+    render(<StoragePage />);
+    expect(await screen.findByText("movie.mkv")).toBeInTheDocument();
+
+    let rejectDelete: (reason?: unknown) => void = () => {};
+    mockApi.bulkDeleteStoredFiles.mockReturnValue(
+      new Promise((_res, rej) => {
+        rejectDelete = rej;
+      }) as never,
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择 movie.mkv" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除选中 (1)" }));
+    await waitFor(() => {
+      expect(mockApi.bulkDeleteStoredFiles).toHaveBeenCalled();
+    });
+    cleanup();
+
+    await act(async () => {
+      rejectDelete(new Error("late failure"));
+      await Promise.resolve();
+    });
+  });
+
+  test("ignores file users failure after unmount", async () => {
+    render(<StoragePage />);
+    expect(await screen.findByText("movie.mkv")).toBeInTheDocument();
+
+    let rejectUsers: (reason?: unknown) => void = () => {};
+    mockApi.getFileUsers.mockReturnValue(
+      new Promise((_res, rej) => {
+        rejectUsers = rej;
+      }) as never,
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: "1" })[0]);
+    await waitFor(() => {
+      expect(mockApi.getFileUsers).toHaveBeenCalled();
+    });
+    cleanup();
+
+    await act(async () => {
+      rejectUsers(new Error("late failure"));
+      await Promise.resolve();
+    });
+  });
+
+  test("redirects non-admin users to the tasks page", async () => {
+    authUserState.user = {
+      id: 2,
+      username: "user",
+      is_admin: false,
+      quota: 1024 * 1024 * 1024,
+      is_initial_password: false,
+    };
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(replaceMock).toHaveBeenCalledWith("/tasks");
+    });
+    expect(mockApi.listStoredFiles).not.toHaveBeenCalled();
   });
 });

@@ -196,4 +196,234 @@ describe("SharesPage", () => {
     expect(screen.getAllByText("已过期").length).toBeGreaterThan(0);
     expect(screen.getAllByText("已失效").length).toBeGreaterThan(0);
   });
+
+  test("listShares failure shows error toast", async () => {
+    mockApi.listShares.mockRejectedValue(new Error("boom"));
+
+    render(<SharesPage />);
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("加载分享记录失败", "error");
+    });
+  });
+
+  test("revoke share succeeds, toasts and reloads", async () => {
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "失效" }));
+
+    await waitFor(() => {
+      expect(mockApi.revokeShare).toHaveBeenCalledWith(1);
+      expect(showToastMock).toHaveBeenCalledWith("分享已失效", "success");
+    });
+    await waitFor(() => {
+      expect(mockApi.listShares).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  test("revoke share failure shows error toast", async () => {
+    mockApi.revokeShare.mockRejectedValue(new Error("网络错误"));
+
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "失效" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("操作失败：网络错误", "error");
+    });
+  });
+
+  test("single delete with failed item shows error from results", async () => {
+    mockApi.deleteShares.mockResolvedValue({
+      accepted_count: 0,
+      failed_count: 1,
+      results: [{ id: 1, ok: false, error: "文件不存在" }],
+    } as never);
+
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("删除失败：文件不存在", "error");
+    });
+  });
+
+  test("single delete rejection shows error toast", async () => {
+    mockApi.deleteShares.mockRejectedValue(new Error("服务不可用"));
+
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("删除失败：服务不可用", "error");
+    });
+  });
+
+  test("revoke all failure shows error toast", async () => {
+    mockApi.revokeAllShares.mockRejectedValue(new Error("超时"));
+
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "一键失效全部" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("操作失败：超时", "error");
+    });
+  });
+
+  test("toggling a record checkbox selects it", async () => {
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择分享 demo.zip" }));
+
+    expect(screen.getByText("已选 1 项")).toBeInTheDocument();
+  });
+
+  test("select all twice clears the selection", async () => {
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    expect(screen.getByText("已选 1 项")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "取消全选" }));
+    expect(screen.queryByText(/已选 1 项/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "全选" })).toBeInTheDocument();
+  });
+
+  test("batch delete rejection shows error toast", async () => {
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    mockApi.deleteShares.mockRejectedValue(new Error("服务器错误"));
+    fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("部分删除失败：服务器错误", "error");
+    });
+  });
+
+  test.each([
+    "active",
+    "revoked",
+  ] as const)(
+    "filter status %s via the select filters records",
+    async (status: string) => {
+      mockApi.listShares.mockResolvedValue([
+        share,
+        { ...share, id: 2, share_code: "rev002", file_name: "gone.zip", status: "revoked" },
+      ] as never);
+
+      render(<SharesPage />);
+
+      expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+      fireEvent.change(screen.getByLabelText("分享状态筛选"), {
+        target: { value: status },
+      });
+
+      if (status === "active") {
+        expect(screen.getByText("demo.zip")).toBeInTheDocument();
+        expect(screen.queryByText("gone.zip")).not.toBeInTheDocument();
+      } else {
+        expect(screen.queryByText("demo.zip")).not.toBeInTheDocument();
+        expect(screen.getByText("gone.zip")).toBeInTheDocument();
+      }
+    }
+  );
+
+  test("copy link with password appends encoded password", async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    mockApi.listShares.mockResolvedValue([
+      { ...share, password: "p@ss 字" },
+    ] as never);
+
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "复制链接" }));
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith(
+        `${window.location.origin}/s/abc123?password=${encodeURIComponent("p@ss 字")}`
+      );
+    });
+  });
+
+  test("copy link without password copies the bare link", async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "复制链接" }));
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/s/abc123`);
+    });
+  });
+
+  test.each([
+    ["single delete", "删除"],
+    ["revoke all", "一键失效全部"],
+    ["batch delete", "删除选中"],
+  ] as const)("%s cancelled confirmation performs no request", async (_name, buttonName) => {
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    if (buttonName === "删除选中") {
+      fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    }
+
+    showConfirmMock.mockResolvedValueOnce(false);
+    fireEvent.click(screen.getByRole("button", { name: buttonName }));
+
+    // 确认被取消时不发起任何请求
+    await waitFor(() => {
+      expect(showConfirmMock).toHaveBeenCalled();
+    });
+    expect(mockApi.deleteShares).not.toHaveBeenCalled();
+    expect(mockApi.revokeAllShares).not.toHaveBeenCalled();
+  });
+
+  test("single delete with empty results falls back to 未知错误", async () => {
+    mockApi.deleteShares.mockResolvedValue({
+      accepted_count: 0,
+      failed_count: 1,
+      results: [],
+    } as never);
+
+    render(<SharesPage />);
+
+    expect(await screen.findByText("demo.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("删除失败：未知错误", "error");
+    });
+  });
+
+  test("unmounting during load skips the toast", async () => {
+    let resolveList: (value: unknown) => void = () => {};
+    mockApi.listShares.mockImplementation(
+      () => new Promise((resolve) => { resolveList = resolve; }) as never
+    );
+
+    const { unmount } = render(<SharesPage />);
+    unmount();
+    resolveList(Promise.reject(new Error("late")));
+
+    await Promise.resolve();
+    expect(showToastMock).not.toHaveBeenCalledWith("加载分享记录失败", "error");
+  });
 });

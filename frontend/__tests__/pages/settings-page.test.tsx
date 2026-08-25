@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import SettingsPage from "@/app/(authenticated)/settings/page";
 import { api } from "@/lib/api";
 
@@ -29,6 +29,7 @@ jest.mock("@/lib/api", () => ({
     updateConfig: jest.fn(),
     testAria2Connection: jest.fn(),
     invalidateAllCredentials: jest.fn(),
+    refreshTrackers: jest.fn(),
   },
 }));
 
@@ -110,6 +111,41 @@ interface InitialLoadOptions {
   configError?: Error;
   meError?: Error;
   user?: typeof adminUser;
+  stats?: typeof baseMachineStats;
+}
+
+function renderPending() {
+  const meDeferred = createDeferred<typeof adminUser>();
+  const configDeferred = createDeferred<typeof baseConfig>();
+  const statsDeferred = createDeferred<typeof baseMachineStats>();
+  const versionDeferred = createDeferred<typeof baseAria2Version>();
+  mockApi.me.mockReturnValue(meDeferred.promise as never);
+  mockApi.getConfig.mockReturnValue(configDeferred.promise as never);
+  mockApi.getMachineStats.mockReturnValue(statsDeferred.promise as never);
+  mockApi.getAria2Version.mockReturnValue(versionDeferred.promise as never);
+  render(<SettingsPage />);
+  return { meDeferred, configDeferred, statsDeferred, versionDeferred };
+}
+
+async function renderAdminReadyForUnmount(options: InitialLoadOptions = {}) {
+  const pending = renderPending();
+  await act(async () => {
+    pending.meDeferred.resolve(options.user ?? adminUser);
+    await new Promise((done) => setTimeout(done, 0));
+  });
+  await act(async () => {
+    pending.configDeferred.resolve(options.config ?? baseConfig);
+    pending.statsDeferred.resolve(options.stats ?? baseMachineStats);
+    pending.versionDeferred.resolve(baseAria2Version);
+    await Promise.allSettled([
+      pending.configDeferred.promise,
+      pending.statsDeferred.promise,
+      pending.versionDeferred.promise,
+    ]);
+    await new Promise((done) => setTimeout(done, 0));
+  });
+  await screen.findByText("系统设置");
+  return pending;
 }
 
 async function renderWithInitialLoad(options: InitialLoadOptions = {}) {
@@ -151,7 +187,7 @@ async function renderWithInitialLoad(options: InitialLoadOptions = {}) {
     } else {
       configDeferred.resolve(options.config ?? baseConfig);
     }
-    statsDeferred.resolve(baseMachineStats);
+    statsDeferred.resolve(options.stats ?? baseMachineStats);
     versionDeferred.resolve(baseAria2Version);
     await Promise.allSettled([
       configDeferred.promise,
@@ -179,6 +215,12 @@ describe("SettingsPage", () => {
       ok: true,
       api_token_count: 2,
       rpc_secret_count: 1,
+    } as never);
+    mockApi.refreshTrackers.mockResolvedValue({
+      ok: true,
+      sources: [],
+      total_entries: 10,
+      updated_at: "2024-01-01T00:00:00Z",
     } as never);
   });
 
@@ -389,5 +431,236 @@ describe("SettingsPage", () => {
 
     expect(showToastMock).not.toHaveBeenCalledWith("配置已保存", "success");
     expect(await screen.findByText("加载配置失败")).toBeInTheDocument();
+  });
+
+  test("shows page error when the admin check fails", async () => {
+    await renderWithInitialLoad({ meError: new Error("auth down") });
+
+    expect(await screen.findByText("加载配置失败")).toBeInTheDocument();
+    expect(screen.queryByText("系统设置")).not.toBeInTheDocument();
+  });
+
+  test("shows error toast when invalidating credentials fails", async () => {
+    mockApi.invalidateAllCredentials.mockRejectedValue(new Error("boom") as never);
+    await renderWithInitialLoad();
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("作废失败：boom", "error");
+    });
+  });
+
+  test("refreshes the tracker list and shows success toast", async () => {
+    await renderWithInitialLoad();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    });
+
+    await waitFor(() => {
+      expect(mockApi.refreshTrackers).toHaveBeenCalled();
+      expect(showToastMock).toHaveBeenCalledWith("tracker 列表已刷新", "success");
+    });
+    expect(
+      await screen.findByRole("button", { name: "立即刷新" }),
+    ).toBeEnabled();
+  });
+
+  test("shows error toast when refreshing the tracker list fails", async () => {
+    mockApi.refreshTrackers.mockRejectedValue(new Error("tracker down") as never);
+    await renderWithInitialLoad();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    });
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith(
+        "刷新 tracker 列表失败：tracker down",
+        "error",
+      );
+    });
+  });
+
+  test("renders machine stats section for admins", async () => {
+    await renderWithInitialLoad({
+      stats: {
+        ...baseMachineStats,
+        disk_total: 0,
+        disk_used: 0,
+        disk_free: 0,
+        download_used: 0,
+        system_used: 0,
+      },
+    });
+
+    expect(screen.getByText("机器磁盘空间")).toBeInTheDocument();
+    expect(screen.getByText(/总占用：/)).toBeInTheDocument();
+    expect(screen.getAllByText(/0.0%/).length).toBeGreaterThan(0);
+  });
+
+  test("ignores admin check failure after unmount", async () => {
+    const { meDeferred } = renderPending();
+    cleanup();
+
+    await act(async () => {
+      meDeferred.reject(new Error("late failure"));
+      await new Promise((done) => setTimeout(done, 0));
+    });
+  });
+
+  test("ignores config load failure after unmount", async () => {
+    const pending = renderPending();
+    await act(async () => {
+      pending.meDeferred.resolve(adminUser);
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    cleanup();
+
+    await act(async () => {
+      pending.configDeferred.reject(new Error("late failure"));
+      await new Promise((done) => setTimeout(done, 0));
+    });
+  });
+
+  test("shows fallback message when saving fails with an empty error", async () => {
+    mockApi.updateConfig.mockRejectedValue(new Error("") as never);
+    await renderWithInitialLoad();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    });
+
+    expect(await screen.findByText("保存配置失败")).toBeInTheDocument();
+  });
+
+  test("ignores save failure after unmount", async () => {
+    await renderAdminReadyForUnmount();
+    let rejectSave: (reason?: unknown) => void = () => {};
+    mockApi.updateConfig.mockReturnValue(
+      new Promise((_res, rej) => {
+        rejectSave = rej;
+      }) as never,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    });
+    cleanup();
+
+    await act(async () => {
+      rejectSave(new Error("late failure"));
+      await new Promise((done) => setTimeout(done, 0));
+    });
+  });
+
+  test("ignores connection test failure after unmount", async () => {
+    await renderAdminReadyForUnmount();
+    let rejectTest: (reason?: unknown) => void = () => {};
+    mockApi.testAria2Connection.mockReturnValue(
+      new Promise((_res, rej) => {
+        rejectTest = rej;
+      }) as never,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    });
+    cleanup();
+
+    await act(async () => {
+      rejectTest(new Error("late failure"));
+      await new Promise((done) => setTimeout(done, 0));
+    });
+  });
+
+  test.each([
+    { name: "resolves", resolve: true },
+    { name: "rejects", resolve: false },
+  ])("ignores credential invalidation after unmount ($name)", async ({ resolve }) => {
+    await renderAdminReadyForUnmount();
+    let settleInvalidate: () => void = () => {};
+    mockApi.invalidateAllCredentials.mockReturnValue(
+      new Promise((done, rej) => {
+        settleInvalidate = () =>
+          resolve
+            ? done({ ok: true, api_token_count: 1, rpc_secret_count: 1 })
+            : rej(new Error("late failure"));
+      }) as never,
+    );
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }),
+      );
+    });
+    cleanup();
+
+    await act(async () => {
+      settleInvalidate();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+  });
+
+  test("shows fallback message when invalidation fails with an empty error", async () => {
+    mockApi.invalidateAllCredentials.mockRejectedValue(new Error("") as never);
+    await renderWithInitialLoad();
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("作废失败：未知错误", "error");
+    });
+  });
+
+  test.each([
+    { name: "resolves", resolve: true },
+    { name: "rejects", resolve: false },
+  ])("ignores tracker refresh after unmount ($name)", async ({ resolve }) => {
+    await renderAdminReadyForUnmount();
+    let settleRefresh: () => void = () => {};
+    mockApi.refreshTrackers.mockReturnValue(
+      new Promise((done, rej) => {
+        settleRefresh = () =>
+          resolve
+            ? done({ ok: true, sources: [], total_entries: 1, updated_at: null })
+            : rej(new Error("late failure"));
+      }) as never,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    });
+    cleanup();
+
+    await act(async () => {
+      settleRefresh();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+  });
+
+  test("shows fallback message when tracker refresh fails with an empty error", async () => {
+    mockApi.refreshTrackers.mockRejectedValue(new Error("") as never);
+    await renderWithInitialLoad();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    });
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith(
+        "刷新 tracker 列表失败：未知错误",
+        "error",
+      );
+    });
   });
 });

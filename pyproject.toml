@@ -28,7 +28,11 @@ dev = [
 ]
 
 [tool.coverage.run]
+branch = true
 concurrency = ["thread", "greenlet"]
+
+[tool.coverage.report]
+fail_under = 95
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

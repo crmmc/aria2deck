@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import UsersPage from "@/app/(authenticated)/users/page";
 import { api } from "@/lib/api";
 
@@ -244,5 +244,203 @@ describe("UsersPage", () => {
     });
     expect(showToastMock).toHaveBeenCalledWith("用户已删除", "success");
     expect(screen.queryByText("alice")).not.toBeInTheDocument();
+  });
+
+  test("shows create form error when creating a user fails", async () => {
+    mockApi.createUser.mockRejectedValue(new Error("用户名已存在") as never);
+    const { container } = await renderAdminPage();
+    const { form, usernameInput, passwordInput } = getCreateForm(container);
+
+    fireEvent.change(usernameInput, { target: { value: "dup-user" } });
+    fireEvent.change(passwordInput, { target: { value: "pass123456" } });
+    fireEvent.submit(form);
+
+    expect(await screen.findByText("用户名已存在")).toBeInTheDocument();
+  });
+
+  async function openAliceEditModal() {
+    await renderAdminPage();
+    const managedRow = screen.getByText("alice").closest("tr") as HTMLElement;
+    fireEvent.click(within(managedRow).getByRole("button", { name: "编辑" }));
+    const modal = await screen.findByText("编辑用户");
+    return modal.closest(".modal-content") as HTMLElement;
+  }
+
+  function getEditInputs(modalContent: HTMLElement) {
+    const usernameInput = within(modalContent).getByDisplayValue("alice");
+    const passwordInput = modalContent.querySelector(
+      "input[type='password']",
+    ) as HTMLInputElement;
+    const quotaInput = modalContent.querySelector(
+      "input[type='number']",
+    ) as HTMLInputElement;
+    return { usernameInput, passwordInput, quotaInput };
+  }
+
+  test("closes the edit modal without api call when nothing changed", async () => {
+    const modalContent = await openAliceEditModal();
+
+    fireEvent.click(within(modalContent).getByRole("button", { name: "保存更改" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("编辑用户")).not.toBeInTheDocument();
+    });
+    expect(mockApi.updateUser).not.toHaveBeenCalled();
+  });
+
+  test("closes the edit dialog via the cancel button", async () => {
+    const modalContent = await openAliceEditModal();
+
+    fireEvent.click(within(modalContent).getByRole("button", { name: "取消" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("编辑用户")).not.toBeInTheDocument();
+    });
+  });
+
+  test("closes the delete dialog via the cancel button", async () => {
+    await renderAdminPage();
+    const managedRow = screen.getByText("alice").closest("tr") as HTMLElement;
+    fireEvent.click(within(managedRow).getByRole("button", { name: "删除" }));
+
+    const modal = await screen.findByText("删除用户");
+    const modalContent = modal.closest(".modal-content") as HTMLElement;
+    fireEvent.click(within(modalContent).getByRole("button", { name: "取消" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("删除用户")).not.toBeInTheDocument();
+    });
+    expect(mockApi.deleteUser).not.toHaveBeenCalled();
+    expect(screen.getByText("alice")).toBeInTheDocument();
+  });
+
+  test("shows edit error when quota in edit modal is invalid", async () => {
+    const modalContent = await openAliceEditModal();
+    const { quotaInput } = getEditInputs(modalContent);
+    const form = modalContent.querySelector("form") as HTMLFormElement;
+
+    fireEvent.change(quotaInput, { target: { value: "0" } });
+    fireEvent.submit(form);
+
+    expect(await screen.findByText("配额必须为正数")).toBeInTheDocument();
+    expect(mockApi.updateUser).not.toHaveBeenCalled();
+    expect(screen.getByText("编辑用户")).toBeInTheDocument();
+  });
+
+  test("shows edit error when updating a user fails", async () => {
+    mockApi.updateUser.mockRejectedValue(new Error("更新失败") as never);
+    const modalContent = await openAliceEditModal();
+    const { usernameInput } = getEditInputs(modalContent);
+
+    fireEvent.change(usernameInput, { target: { value: "alice-updated" } });
+    fireEvent.click(within(modalContent).getByRole("button", { name: "保存更改" }));
+
+    expect(await screen.findByText("更新失败")).toBeInTheDocument();
+    expect(screen.getByText("编辑用户")).toBeInTheDocument();
+  });
+
+  test("sends only the changed username when password and quota are untouched", async () => {
+    mockApi.updateUser.mockResolvedValue({ ...managedUser, username: "alice-renamed" } as never);
+    const modalContent = await openAliceEditModal();
+    const { usernameInput } = getEditInputs(modalContent);
+
+    fireEvent.change(usernameInput, { target: { value: "alice-renamed" } });
+    fireEvent.click(within(modalContent).getByRole("button", { name: "保存更改" }));
+
+    await waitFor(() => {
+      expect(mockApi.updateUser).toHaveBeenCalledWith(3, { username: "alice-renamed" }, "alice");
+    });
+    expect(screen.queryByText("编辑用户")).not.toBeInTheDocument();
+    expect(await screen.findByText("alice-renamed")).toBeInTheDocument();
+  });
+
+  test("rejects the edit submit when the user was deleted while editing", async () => {
+    mockApi.deleteUser.mockResolvedValue({ ok: true } as never);
+    const modalContent = await openAliceEditModal();
+
+    const managedRow = screen.getByText("alice").closest("tr") as HTMLElement;
+    fireEvent.click(within(managedRow).getByRole("button", { name: "删除" }));
+    const deleteModal = await screen.findByText("删除用户");
+    const deleteModalContent = deleteModal.closest(".modal-content") as HTMLElement;
+    fireEvent.click(within(deleteModalContent).getByRole("button", { name: "删除" }));
+
+    await waitFor(() => {
+      expect(mockApi.deleteUser).toHaveBeenCalledWith(3);
+    });
+
+    fireEvent.click(within(modalContent).getByRole("button", { name: "保存更改" }));
+
+    expect(await screen.findByText("用户不存在或已被删除")).toBeInTheDocument();
+    expect(mockApi.updateUser).not.toHaveBeenCalled();
+  });
+
+  test("shows error toast when deleting a user fails", async () => {
+    mockApi.deleteUser.mockRejectedValue(new Error("delete failed") as never);
+    await renderAdminPage();
+
+    const managedRow = screen.getByText("alice").closest("tr") as HTMLElement;
+    fireEvent.click(within(managedRow).getByRole("button", { name: "删除" }));
+
+    const modal = await screen.findByText("删除用户");
+    const modalContent = modal.closest(".modal-content") as HTMLElement;
+    fireEvent.click(within(modalContent).getByRole("button", { name: "删除" }));
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith("删除用户失败", "error");
+    });
+    expect(screen.getByText("删除用户")).toBeInTheDocument();
+  });
+
+  test.each([
+    {
+      name: "me resolves after unmount",
+      unmountBeforeMe: true,
+      rejectList: false,
+    },
+    {
+      name: "list users resolves after unmount",
+      unmountBeforeMe: false,
+      rejectList: false,
+    },
+    {
+      name: "initial load rejects after unmount",
+      unmountBeforeMe: false,
+      rejectList: true,
+    },
+  ])("ignores initial load responses after unmount ($name)", async ({ unmountBeforeMe, rejectList }) => {
+    let resolveMe: (value: typeof adminUser) => void = () => {};
+    let settleList: () => void = () => {};
+    mockApi.me.mockReturnValue(
+      new Promise((done) => {
+        resolveMe = done;
+      }) as never,
+    );
+    mockApi.listUsers.mockReturnValue(
+      new Promise((done, rej) => {
+        settleList = () => (rejectList ? rej(new Error("late failure")) : done([adminUser, managedUser]));
+      }) as never,
+    );
+
+    const { unmount } = renderPage();
+    if (unmountBeforeMe) {
+      unmount();
+      await act(async () => {
+        resolveMe(adminUser);
+        await new Promise((done) => setTimeout(done, 0));
+      });
+      return;
+    }
+
+    await act(async () => {
+      resolveMe(adminUser);
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    unmount();
+
+    await act(async () => {
+      settleList();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    expect(pushMock).not.toHaveBeenCalled();
   });
 });
