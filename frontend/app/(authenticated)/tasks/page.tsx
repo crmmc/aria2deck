@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { api, ApiError } from "@/lib/api";
-import type { Task, TorrentPreview } from "@/types";
+import type { CreateTaskResult, Task, TorrentPreview } from "@/types";
 import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
 import { useClipboard } from "@/hooks/useClipboard";
@@ -18,6 +18,10 @@ import {
 
 import { AddTaskForm } from "./_components/AddTaskForm";
 import { BatchAddTasksDialog } from "./_components/BatchAddTasksDialog";
+import type {
+  BatchFailure,
+  BatchFeedback,
+} from "./_components/BatchAddTasksDialog";
 import { TaskToolbar } from "./_components/TaskToolbar";
 import { TaskList } from "./_components/TaskList";
 import { TorrentCreateWizard } from "./_components/TorrentCreateWizard";
@@ -64,6 +68,21 @@ function parseBatchUris(value: string): string[] {
   return [...new Set(value.split("\n").map((line) => line.trim()).filter(Boolean))];
 }
 
+const NO_BATCH_FAILURES: BatchFailure[] = [];
+
+/** 把接口逐条结果压成展示用的失败清单，链接按提交时的输入序号还原。 */
+function collectBatchFailures(
+  results: CreateTaskResult[],
+  submittedUris: string[]
+): BatchFailure[] {
+  return results
+    .filter((item) => !item.accepted)
+    .map((item) => ({
+      uri: submittedUris[item.input_index],
+      reason: item.error ?? "提交失败",
+    }));
+}
+
 export default function TasksPage() {
   const { showToast, showConfirm } = useToast();
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -86,6 +105,7 @@ export default function TasksPage() {
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [isBatchAdding, setIsBatchAdding] = useState(false);
   const [batchUris, setBatchUris] = useState("");
+  const [batchFeedback, setBatchFeedback] = useState<BatchFeedback | null>(null);
   const [torrentWizard, setTorrentWizard] = useState<{
     torrentBase64: string;
     preview: TorrentPreview;
@@ -503,61 +523,65 @@ export default function TasksPage() {
 
   const batchAddTasks = useCallback(async () => {
     if (isBatchAdding) return;
-    const uris = parseBatchUris(batchUris);
+    const submittedUris = parseBatchUris(batchUris);
 
-    if (uris.length === 0) {
+    if (submittedUris.length === 0) {
       showToast("请输入至少一个链接", "warning");
       return;
     }
-    if (uris.length > MAX_BATCH_TASKS) {
+    if (submittedUris.length > MAX_BATCH_TASKS) {
       showToast(`一次最多添加 ${MAX_BATCH_TASKS} 个任务`, "warning");
       return;
     }
 
     setIsBatchAdding(true);
-    setError(null);
+    setBatchFeedback(null);
+    let acceptedCount = 0;
     try {
-      const result = await api.createTasks(uris.map((uri) => ({ uri })));
+      const result = await api.createTasks(submittedUris.map((uri) => ({ uri })));
+      acceptedCount = result.accepted_count;
 
       if (result.failed_count === 0) {
         showToast(`已提交 ${result.accepted_count} 个任务`, "success");
         setBatchUris("");
         setShowBatchAddModal(false);
-      } else if (result.accepted_count > 0) {
-        showToast(
-          `提交完成：成功${result.accepted_count}个，失败${result.failed_count}个`,
-          "warning"
-        );
-        setBatchUris("");
-        setShowBatchAddModal(false);
-      } else if (result.results.length === 1) {
-        setError(result.results[0]?.error ?? "提交失败");
-        return;
       } else {
-        const firstError = result.results.find((r) => r.error)?.error;
-        setError(
-          firstError
-            ? `提交失败：${result.failed_count} 个任务均未成功（${firstError}）`
-            : `提交失败：${result.failed_count} 个任务均未成功`
-        );
-        return;
+        setBatchFeedback({
+          kind: "result",
+          acceptedCount: result.accepted_count,
+          failures: collectBatchFailures(result.results, submittedUris),
+        });
       }
-      await refreshAfterSubmit();
     } catch (err) {
       if (err instanceof ApiError && err.status === 502) {
-        setError("提交结果暂无法确认，请刷新任务列表");
+        setBatchFeedback({
+          kind: "error",
+          message: "提交结果暂无法确认，请刷新任务列表",
+        });
       } else {
-        setError((err as Error).message);
+        setBatchFeedback({ kind: "error", message: (err as Error).message });
       }
     } finally {
       setIsBatchAdding(false);
     }
+    if (acceptedCount > 0) {
+      await refreshAfterSubmit();
+    }
   }, [batchUris, showToast, isBatchAdding, refreshAfterSubmit]);
+
+  const batchFailures =
+    batchFeedback?.kind === "result" ? batchFeedback.failures : NO_BATCH_FAILURES;
+
+  const retryFailedBatch = useCallback(() => {
+    setBatchUris(batchFailures.map((failure) => failure.uri).join("\n"));
+    setBatchFeedback(null);
+  }, [batchFailures]);
 
   const closeBatchAdd = useCallback(() => {
     if (isBatchAdding) return;
     setShowBatchAddModal(false);
     setBatchUris("");
+    setBatchFeedback(null);
   }, [isBatchAdding]);
 
   const filteredTasks = useMemo(() => {
@@ -654,9 +678,11 @@ export default function TasksPage() {
           <BatchAddTasksDialog
             batchUris={batchUris}
             isBatchAdding={isBatchAdding}
+            feedback={batchFeedback}
             onBatchUrisChange={setBatchUris}
             onSubmit={batchAddTasks}
             onCancel={closeBatchAdd}
+            onRetryFailed={retryFailedBatch}
           />
       )}
       {mounted && torrentWizard

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import TasksPage from "@/app/(authenticated)/tasks/page";
 import { api } from "@/lib/api";
 import { useTaskWebSocket } from "@/hooks/useTaskWebSocket";
@@ -387,40 +387,56 @@ describe("TasksPage", () => {
     expect(screen.queryByLabelText("批量下载链接")).not.toBeInTheDocument();
   });
 
-  test("batch partial failure closes dialog with summary toast", async () => {
+  test("batch partial failure keeps the dialog open with an in-dialog result view", async () => {
     mockApi.createTasks.mockResolvedValue({
-      accepted_count: 5,
-      failed_count: 2,
-      results: [],
+      accepted_count: 2,
+      failed_count: 1,
+      results: [
+        { input_index: 0, accepted: true, task_id: 11, status: "queued", error: null },
+        { input_index: 1, accepted: false, task_id: null, status: null, error: "任务已存在" },
+        { input_index: 2, accepted: true, task_id: 12, status: "queued", error: null },
+      ],
     });
 
-    render(<TasksPage />);
+    const { container } = render(<TasksPage />);
     expect(await screen.findByText("任务")).toBeInTheDocument();
     mockApi.listTasks.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
     fireEvent.change(screen.getByLabelText("批量下载链接"), {
       target: {
-        value: Array.from({ length: 7 }, (_, i) => `https://example.com/${i}`).join("\n"),
+        value:
+          "https://example.com/first\nhttps://example.com/duplicated\nhttps://example.com/third",
       },
     });
     fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
 
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    expect(
+      await within(dialog).findByText("已提交 2 个，1 个失败")
+    ).toBeInTheDocument();
+
+    const items = within(dialog).getAllByRole("listitem");
+    expect(items).toHaveLength(1);
+    expect(
+      within(items[0]).getByText("https://example.com/duplicated")
+    ).toBeInTheDocument();
+    expect(within(items[0]).getByText("任务已存在")).toBeInTheDocument();
+    expect(container.querySelector(".form-error")).toBeNull();
+
     await waitFor(() => {
-      expect(mockApi.createTasks).toHaveBeenCalledTimes(1);
-      expect(showToastMock).toHaveBeenCalledWith(
-        "提交完成：成功5个，失败2个",
-        "warning"
-      );
+      expect(mockApi.listTasks).toHaveBeenCalledTimes(1);
     });
-    expect(screen.queryByLabelText("批量下载链接")).not.toBeInTheDocument();
-    expect(mockApi.listTasks).toHaveBeenCalledTimes(1);
+    expect(mockApi.listTasks).toHaveBeenCalledWith("current");
   });
 
-  test("batch partial accepted + refresh reject closes modal and warns", async () => {
+  test("batch partial accepted + refresh reject keeps the result view and warns", async () => {
     mockApi.createTasks.mockResolvedValue({
-      accepted_count: 5,
-      failed_count: 2,
-      results: [],
+      accepted_count: 1,
+      failed_count: 1,
+      results: [
+        { input_index: 0, accepted: true, task_id: 21, status: "queued", error: null },
+        { input_index: 1, accepted: false, task_id: null, status: null, error: "配额不足" },
+      ],
     });
     mockApi.listTasks.mockRejectedValue(new Error("network down"));
     render(<TasksPage />);
@@ -434,19 +450,17 @@ describe("TasksPage", () => {
 
     await waitFor(() => {
       expect(showToastMock).toHaveBeenCalledWith(
-        "提交完成：成功5个，失败2个",
-        "warning"
-      );
-      expect(showToastMock).toHaveBeenCalledWith(
         "任务已提交，但列表刷新失败，请手动刷新",
         "warning"
       );
     });
-    expect(screen.queryByLabelText("批量下载链接")).not.toBeInTheDocument();
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    expect(within(dialog).getByText("已提交 1 个，1 个失败")).toBeInTheDocument();
+    expect(within(dialog).getByText("https://example.com/b")).toBeInTheDocument();
     expect(mockApi.listTasks).toHaveBeenCalledTimes(1);
   });
 
-  test("batch all failed keeps textarea and shows single item error", async () => {
+  test("batch all failed keeps dialog open and lists the item error inside it", async () => {
     mockApi.createTasks.mockResolvedValue({
       accepted_count: 0,
       failed_count: 1,
@@ -460,7 +474,7 @@ describe("TasksPage", () => {
         },
       ],
     });
-    render(<TasksPage />);
+    const { container } = render(<TasksPage />);
     expect(await screen.findByText("任务")).toBeInTheDocument();
     mockApi.listTasks.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
@@ -469,18 +483,26 @@ describe("TasksPage", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
 
-    await waitFor(() => {
-      expect(screen.getByText("配额不足")).toBeInTheDocument();
-    });
-    expect(screen.getByLabelText("批量下载链接")).toHaveValue(
-      "https://example.com/only"
-    );
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    expect(
+      await within(dialog).findByText("已提交 0 个，1 个失败")
+    ).toBeInTheDocument();
+    const items = within(dialog).getAllByRole("listitem");
+    expect(items).toHaveLength(1);
+    expect(
+      within(items[0]).getByText("https://example.com/only")
+    ).toBeInTheDocument();
+    expect(within(items[0]).getByText("配额不足")).toBeInTheDocument();
+    expect(
+      within(dialog).queryByLabelText("批量下载链接")
+    ).not.toBeInTheDocument();
+    expect(container.querySelector(".form-error")).toBeNull();
     expect(mockApi.listTasks).not.toHaveBeenCalled();
   });
 
   test("batch 502 keeps input without refresh", async () => {
     mockApi.createTasks.mockRejectedValue(new ApiError("bad gateway", 502));
-    render(<TasksPage />);
+    const { container } = render(<TasksPage />);
     expect(await screen.findByText("任务")).toBeInTheDocument();
     mockApi.listTasks.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
@@ -489,15 +511,16 @@ describe("TasksPage", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
 
-    await waitFor(() => {
-      expect(
-        screen.getByText("提交结果暂无法确认，请刷新任务列表")
-      ).toBeInTheDocument();
-    });
-    expect(screen.getByLabelText("批量下载链接")).toHaveValue(
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    expect(
+      await within(dialog).findByText("提交结果暂无法确认，请刷新任务列表")
+    ).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("批量下载链接")).toHaveValue(
       "https://example.com/x"
     );
+    expect(container.querySelector(".form-error")).toBeNull();
     expect(mockApi.listTasks).not.toHaveBeenCalled();
+    expect(mockApi.createTasks).toHaveBeenCalledTimes(1);
   });
 
   test("rejects batch input over 30 unique links without requests", async () => {
@@ -557,6 +580,241 @@ describe("TasksPage", () => {
       expect(mockApi.listTasks).toHaveBeenCalledWith("current");
     });
     expect(screen.queryByLabelText("批量下载链接")).not.toBeInTheDocument();
+  });
+
+  test("batch all rejected pairs each link with its own reason and clears state on every close path", async () => {
+    const linkA = "https://a.example/1.zip";
+    const linkB = "magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    mockApi.createTasks.mockResolvedValue({
+      accepted_count: 0,
+      failed_count: 2,
+      results: [
+        { input_index: 1, accepted: false, task_id: null, status: null, error: "任务已存在" },
+        { input_index: 0, accepted: false, task_id: null, status: null, error: "链接无效" },
+      ],
+    });
+
+    const { container } = render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
+
+    const submitBatch = async () => {
+      fireEvent.change(screen.getByLabelText("批量下载链接"), {
+        target: { value: `${linkA}\n${linkB}` },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
+      const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+      await within(dialog).findByText("已提交 0 个，2 个失败");
+      return dialog;
+    };
+
+    const dialog = await submitBatch();
+    const items = within(dialog).getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    const itemA = items.find((item) => item.textContent?.includes(linkA));
+    const itemB = items.find((item) => item.textContent?.includes(linkB));
+    expect(itemA).toBeDefined();
+    expect(itemB).toBeDefined();
+    expect(within(itemA as HTMLElement).getByText("链接无效")).toBeInTheDocument();
+    expect(
+      within(itemA as HTMLElement).queryByText("任务已存在")
+    ).not.toBeInTheDocument();
+    expect(
+      within(itemB as HTMLElement).getByText("任务已存在")
+    ).toBeInTheDocument();
+    expect(
+      within(itemB as HTMLElement).queryByText("链接无效")
+    ).not.toBeInTheDocument();
+    expect(container.querySelector(".form-error")).toBeNull();
+
+    const expectReopenedEmpty = () => {
+      expect(
+        screen.queryByRole("dialog", { name: "批量添加任务" })
+      ).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
+      const reopened = screen.getByRole("dialog", { name: "批量添加任务" });
+      expect(within(reopened).getByLabelText("批量下载链接")).toHaveValue("");
+      expect(within(reopened).queryAllByRole("listitem")).toHaveLength(0);
+    };
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "完成" }));
+    expectReopenedEmpty();
+
+    const escDialog = await submitBatch();
+    fireEvent(escDialog, new Event("cancel"));
+    expectReopenedEmpty();
+
+    const backdropDialog = await submitBatch();
+    const backdrop = backdropDialog.querySelector(".modal-backdrop-button");
+    expect(backdrop).not.toBeNull();
+    fireEvent.click(backdrop as HTMLElement);
+    expectReopenedEmpty();
+  });
+
+  test("retry failed batch refills only the failed links without resubmitting", async () => {
+    mockApi.createTasks.mockResolvedValue({
+      accepted_count: 2,
+      failed_count: 1,
+      results: [
+        { input_index: 0, accepted: true, task_id: 31, status: "queued", error: null },
+        { input_index: 1, accepted: false, task_id: null, status: null, error: "任务已存在" },
+        { input_index: 2, accepted: true, task_id: 32, status: "queued", error: null },
+      ],
+    });
+    render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
+    fireEvent.change(screen.getByLabelText("批量下载链接"), {
+      target: {
+        value:
+          "https://example.com/first\nhttps://example.com/duplicated\nhttps://example.com/third",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
+
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    const retryButton = await within(dialog).findByRole("button", {
+      name: "重试失败项",
+    });
+    fireEvent.click(retryButton);
+
+    expect(within(dialog).getByLabelText("批量下载链接")).toHaveValue(
+      "https://example.com/duplicated"
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "添加任务" })
+    ).toBeInTheDocument();
+    expect(within(dialog).queryAllByRole("listitem")).toHaveLength(0);
+    expect(mockApi.createTasks).toHaveBeenCalledTimes(1);
+  });
+
+  test("view switch moves focus between the retry button and the textarea", async () => {
+    mockApi.createTasks.mockResolvedValue({
+      accepted_count: 2,
+      failed_count: 1,
+      results: [
+        { input_index: 0, accepted: true, task_id: 41, status: "queued", error: null },
+        { input_index: 1, accepted: false, task_id: null, status: null, error: "任务已存在" },
+        { input_index: 2, accepted: true, task_id: 42, status: "queued", error: null },
+      ],
+    });
+    render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
+    fireEvent.change(screen.getByLabelText("批量下载链接"), {
+      target: {
+        value:
+          "https://example.com/first\nhttps://example.com/duplicated\nhttps://example.com/third",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
+
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    const retryButton = await within(dialog).findByRole("button", {
+      name: "重试失败项",
+    });
+    expect(retryButton).toHaveFocus();
+
+    fireEvent.click(retryButton);
+    expect(within(dialog).getByLabelText("批量下载链接")).toHaveFocus();
+  });
+
+  test("batch request-level failure stays in the dialog and keeps the input", async () => {
+    mockApi.createTasks.mockRejectedValue(new Error("网络连接已断开"));
+    const { container } = render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+    mockApi.listTasks.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
+    fireEvent.change(screen.getByLabelText("批量下载链接"), {
+      target: { value: "https://example.com/z" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
+
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    expect(await within(dialog).findByText("网络连接已断开")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("批量下载链接")).toHaveValue(
+      "https://example.com/z"
+    );
+    expect(container.querySelector(".form-error")).toBeNull();
+    expect(mockApi.createTasks).toHaveBeenCalledTimes(1);
+    expect(mockApi.listTasks).not.toHaveBeenCalled();
+
+    mockApi.createTasks.mockClear();
+    mockApi.createTasks.mockRejectedValue(
+      new ApiError("操作过于频繁，请稍后再试", 429)
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加任务" }));
+
+    expect(
+      await within(dialog).findByText("操作过于频繁，请稍后再试")
+    ).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("批量下载链接")).toHaveValue(
+      "https://example.com/z"
+    );
+    expect(mockApi.createTasks).toHaveBeenCalledTimes(1);
+    expect(mockApi.listTasks).not.toHaveBeenCalled();
+  });
+
+  test("single add failure still renders its error outside the dialog", async () => {
+    mockApi.createTasks.mockResolvedValue({
+      accepted_count: 0,
+      failed_count: 1,
+      results: [
+        { input_index: 0, accepted: false, task_id: null, status: null, error: "链接无效" },
+      ],
+    });
+    const { container } = render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+    fireEvent.change(
+      screen.getByPlaceholderText("粘贴磁力链接、HTTP 或 FTP URL..."),
+      { target: { value: "ftp://bad" } }
+    );
+    fireEvent.click(screen.getByRole("button", { name: "+ 添加任务" }));
+
+    await waitFor(() => {
+      expect(container.querySelector(".form-error")?.textContent).toBe("链接无效");
+    });
+    expect(
+      screen.queryByRole("dialog", { name: "批量添加任务" })
+    ).not.toBeInTheDocument();
+  });
+
+  test("keeps close, cancel and submit disabled while the batch request is in flight", async () => {
+    let releaseGate = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    mockApi.createTasks.mockImplementation(async () => {
+      await gate;
+      return { accepted_count: 1, failed_count: 0, results: [] };
+    });
+    render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
+    fireEvent.change(screen.getByLabelText("批量下载链接"), {
+      target: { value: "https://example.com/a" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
+
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    const submitting = await within(dialog).findByRole("button", {
+      name: "添加中...",
+    });
+    expect(submitting).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled();
+    expect(
+      within(dialog).getByRole("button", { name: "关闭批量添加任务" })
+    ).toBeDisabled();
+
+    fireEvent.click(submitting);
+    expect(mockApi.createTasks).toHaveBeenCalledTimes(1);
+
+    releaseGate();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "批量添加任务" })
+      ).not.toBeInTheDocument()
+    );
   });
 
   test("rejects torrent over 10 MiB before reading it", async () => {
@@ -1026,7 +1284,7 @@ describe("TasksPage", () => {
     expect(mockApi.listTasks).not.toHaveBeenCalled();
   });
 
-  test("batch all failed with multiple results keeps dialog and shows count error with first non-null error", async () => {
+  test("batch all failed lists every rejected link with its own reason", async () => {
     mockApi.createTasks.mockResolvedValue({
       accepted_count: 0,
       failed_count: 2,
@@ -1044,16 +1302,22 @@ describe("TasksPage", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
 
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
     expect(
-      await screen.findByText("提交失败：2 个任务均未成功（操作过于频繁，请稍后再试）")
+      await within(dialog).findByText("已提交 0 个，2 个失败")
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("批量下载链接")).toHaveValue(
-      "https://example.com/a\nhttps://example.com/b"
-    );
+    const items = within(dialog).getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    expect(within(items[0]).getByText("https://example.com/a")).toBeInTheDocument();
+    expect(within(items[0]).getByText("提交失败")).toBeInTheDocument();
+    expect(within(items[1]).getByText("https://example.com/b")).toBeInTheDocument();
+    expect(
+      within(items[1]).getByText("操作过于频繁，请稍后再试")
+    ).toBeInTheDocument();
     expect(mockApi.listTasks).not.toHaveBeenCalled();
   });
 
-  test("batch all failed with multiple results and all null errors keeps original count error", async () => {
+  test("batch all failed with all null errors falls back to the generic reason per item", async () => {
     mockApi.createTasks.mockResolvedValue({
       accepted_count: 0,
       failed_count: 2,
@@ -1071,18 +1335,19 @@ describe("TasksPage", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
 
-    expect(
-      await screen.findByText("提交失败：2 个任务均未成功")
-    ).toBeInTheDocument();
-    expect(screen.getByLabelText("批量下载链接")).toHaveValue(
-      "https://example.com/a\nhttps://example.com/b"
-    );
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    const items = await within(dialog).findAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    expect(within(items[0]).getByText("https://example.com/a")).toBeInTheDocument();
+    expect(within(items[0]).getByText("提交失败")).toBeInTheDocument();
+    expect(within(items[1]).getByText("https://example.com/b")).toBeInTheDocument();
+    expect(within(items[1]).getByText("提交失败")).toBeInTheDocument();
     expect(mockApi.listTasks).not.toHaveBeenCalled();
   });
 
   test("shows raw error message when batch create fails with non-502 error", async () => {
     mockApi.createTasks.mockRejectedValue(new ApiError("服务器繁忙", 500));
-    render(<TasksPage />);
+    const { container } = render(<TasksPage />);
     expect(await screen.findByText("任务")).toBeInTheDocument();
     mockApi.listTasks.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
@@ -1091,10 +1356,12 @@ describe("TasksPage", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
 
-    expect(await screen.findByText("服务器繁忙")).toBeInTheDocument();
-    expect(screen.getByLabelText("批量下载链接")).toHaveValue(
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    expect(await within(dialog).findByText("服务器繁忙")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("批量下载链接")).toHaveValue(
       "https://example.com/y"
     );
+    expect(container.querySelector(".form-error")).toBeNull();
     expect(mockApi.listTasks).not.toHaveBeenCalled();
   });
 
@@ -1525,22 +1792,33 @@ describe("TasksPage", () => {
     );
   });
 
-  test("escape closes the batch dialog and clears input", async () => {
+  test("escape closes the batch dialog and clears input and result", async () => {
+    mockApi.createTasks.mockResolvedValue({
+      accepted_count: 0,
+      failed_count: 1,
+      results: [
+        { input_index: 0, accepted: false, task_id: null, status: null, error: "任务已存在" },
+      ],
+    });
     render(<TasksPage />);
     expect(await screen.findByText("任务")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
     fireEvent.change(screen.getByLabelText("批量下载链接"), {
       target: { value: "https://example.com/a" },
     });
+    fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
 
-    fireEvent(
-      screen.getByRole("dialog", { name: "批量添加任务" }),
-      new Event("cancel")
-    );
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    expect(await within(dialog).findByText("任务已存在")).toBeInTheDocument();
+
+    fireEvent(dialog, new Event("cancel"));
 
     expect(screen.queryByLabelText("批量下载链接")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
-    expect(screen.getByLabelText("批量下载链接")).toHaveValue("");
+    const reopened = screen.getByRole("dialog", { name: "批量添加任务" });
+    expect(within(reopened).getByLabelText("批量下载链接")).toHaveValue("");
+    expect(within(reopened).queryAllByRole("listitem")).toHaveLength(0);
+    expect(within(reopened).queryByText("任务已存在")).not.toBeInTheDocument();
   });
 
   test("filters, searches and sorts tasks through the toolbar", async () => {
@@ -1717,8 +1995,16 @@ describe("TasksPage", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
 
-    expect(await screen.findByText("提交失败")).toBeInTheDocument();
-    expect(screen.getByLabelText("批量下载链接")).toBeInTheDocument();
+    const dialog = screen.getByRole("dialog", { name: "批量添加任务" });
+    const items = await within(dialog).findAllByRole("listitem");
+    expect(items).toHaveLength(1);
+    expect(
+      within(items[0]).getByText("https://example.com/only")
+    ).toBeInTheDocument();
+    expect(within(items[0]).getByText("提交失败")).toBeInTheDocument();
+    expect(
+      within(dialog).queryByLabelText("批量下载链接")
+    ).not.toBeInTheDocument();
   });
 
   test("torrent upload change without file is a no-op", async () => {
