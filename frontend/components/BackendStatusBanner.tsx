@@ -47,6 +47,7 @@ export default function BackendStatusBanner({ user }: Props) {
     void loadStatus();
 
     const intervalId = window.setInterval(() => {
+      if (document.hidden) return;
       void loadStatus();
     }, POLL_INTERVAL_MS);
 

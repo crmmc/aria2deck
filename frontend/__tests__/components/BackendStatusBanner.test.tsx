@@ -27,6 +27,23 @@ const admin = {
   is_admin: true,
 };
 
+const hiddenDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, "hidden");
+const visibilityStateDescriptor = Object.getOwnPropertyDescriptor(
+  Document.prototype,
+  "visibilityState",
+);
+
+function stubDocumentVisibility(hidden: boolean) {
+  Object.defineProperty(document, "hidden", {
+    configurable: true,
+    get: () => hidden,
+  });
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    get: () => (hidden ? "hidden" : "visible"),
+  });
+}
+
 describe("BackendStatusBanner", () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -34,6 +51,12 @@ describe("BackendStatusBanner", () => {
   });
 
   afterEach(() => {
+    if (hiddenDescriptor) {
+      Object.defineProperty(document, "hidden", hiddenDescriptor);
+    }
+    if (visibilityStateDescriptor) {
+      Object.defineProperty(document, "visibilityState", visibilityStateDescriptor);
+    }
     jest.useRealTimers();
   });
 
@@ -132,5 +155,32 @@ describe("BackendStatusBanner", () => {
     });
     // Degraded again after recovery: banner returns.
     expect(await screen.findByRole("status")).toBeInTheDocument();
+  });
+
+  test("skips interval polling while hidden and refreshes on becoming visible", async () => {
+    getSystemStatusMock.mockResolvedValue({
+      download_backend: { status: "ok", message: "服务运行正常" },
+    });
+
+    render(<BackendStatusBanner user={user} />);
+
+    // Initial mount poll completes.
+    await waitFor(() => {
+      expect(getSystemStatusMock).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      stubDocumentVisibility(true);
+      jest.advanceTimersByTime(20_000);
+    });
+    // Hidden tab: the 20s interval must not poll again.
+    expect(getSystemStatusMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      stubDocumentVisibility(false);
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    // Becoming visible triggers an immediate refresh.
+    expect(getSystemStatusMock).toHaveBeenCalledTimes(2);
   });
 });
