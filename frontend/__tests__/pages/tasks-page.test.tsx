@@ -1026,13 +1026,40 @@ describe("TasksPage", () => {
     expect(mockApi.listTasks).not.toHaveBeenCalled();
   });
 
-  test("batch all failed with multiple results keeps dialog and shows count error", async () => {
+  test("batch all failed with multiple results keeps dialog and shows count error with first non-null error", async () => {
     mockApi.createTasks.mockResolvedValue({
       accepted_count: 0,
       failed_count: 2,
       results: [
-        { input_index: 0, accepted: false, task_id: null, status: null, error: "配额不足" },
-        { input_index: 1, accepted: false, task_id: null, status: null, error: "链接无效" },
+        { input_index: 0, accepted: false, task_id: null, status: null, error: null },
+        { input_index: 1, accepted: false, task_id: null, status: null, error: "操作过于频繁，请稍后再试" },
+      ],
+    });
+    render(<TasksPage />);
+    expect(await screen.findByText("任务")).toBeInTheDocument();
+    mockApi.listTasks.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
+    fireEvent.change(screen.getByLabelText("批量下载链接"), {
+      target: { value: "https://example.com/a\nhttps://example.com/b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
+
+    expect(
+      await screen.findByText("提交失败：2 个任务均未成功（操作过于频繁，请稍后再试）")
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("批量下载链接")).toHaveValue(
+      "https://example.com/a\nhttps://example.com/b"
+    );
+    expect(mockApi.listTasks).not.toHaveBeenCalled();
+  });
+
+  test("batch all failed with multiple results and all null errors keeps original count error", async () => {
+    mockApi.createTasks.mockResolvedValue({
+      accepted_count: 0,
+      failed_count: 2,
+      results: [
+        { input_index: 0, accepted: false, task_id: null, status: null, error: null },
+        { input_index: 1, accepted: false, task_id: null, status: null, error: null },
       ],
     });
     render(<TasksPage />);

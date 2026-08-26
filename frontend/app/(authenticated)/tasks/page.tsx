@@ -534,7 +534,12 @@ export default function TasksPage() {
         setError(result.results[0]?.error ?? "提交失败");
         return;
       } else {
-        setError(`提交失败：${result.failed_count} 个任务均未成功`);
+        const firstError = result.results.find((r) => r.error)?.error;
+        setError(
+          firstError
+            ? `提交失败：${result.failed_count} 个任务均未成功（${firstError}）`
+            : `提交失败：${result.failed_count} 个任务均未成功`
+        );
         return;
       }
       await refreshAfterSubmit();
