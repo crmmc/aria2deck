@@ -23,6 +23,7 @@ export type SettingsFormState = {
   rateLimitAria2Test: number;
   rateLimitRpc: number;
   rateLimitFileSearch: number;
+  rateLimitCreateShare: number;
   downloadTotalConnections: number;
   downloadAuthenticatedReservedConnections: number;
   downloadAuthenticatedPerUserConnections: number;
@@ -67,6 +68,7 @@ export const initialSettingsFormState: SettingsFormState = {
   rateLimitAria2Test: 10,
   rateLimitRpc: 300,
   rateLimitFileSearch: 20,
+  rateLimitCreateShare: 10,
   downloadTotalConnections: 100,
   downloadAuthenticatedReservedConnections: 60,
   downloadAuthenticatedPerUserConnections: 16,
@@ -134,6 +136,7 @@ export function configToSettingsFormState(cfg: Record<string, unknown>): Setting
     rateLimitAria2Test: (cfg.rate_limit_aria2_test as number) ?? 10,
     rateLimitRpc: (cfg.rate_limit_rpc as number) ?? 300,
     rateLimitFileSearch: (cfg.rate_limit_file_search as number) ?? 20,
+    rateLimitCreateShare: (cfg.rate_limit_create_share as number) ?? 10,
     downloadTotalConnections: (cfg.download_total_connections as number) ?? 100,
     downloadAuthenticatedReservedConnections: (cfg.download_authenticated_reserved_connections as number) ?? 60,
     downloadAuthenticatedPerUserConnections: (cfg.download_authenticated_per_user_connections as number) ?? 16,
@@ -196,6 +199,7 @@ export function settingsFormStateToPayload(state: SettingsFormState): SettingsPa
       rate_limit_aria2_test: state.rateLimitAria2Test,
       rate_limit_rpc: state.rateLimitRpc,
       rate_limit_file_search: state.rateLimitFileSearch,
+      rate_limit_create_share: state.rateLimitCreateShare,
       download_total_connections: state.downloadTotalConnections,
       download_authenticated_reserved_connections: state.downloadAuthenticatedReservedConnections,
       download_authenticated_per_user_connections: state.downloadAuthenticatedPerUserConnections,

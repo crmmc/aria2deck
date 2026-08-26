@@ -21,7 +21,7 @@ from app.domain.status import (
     USER_TASK_STATUSES,
 )
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
 PACK_SOURCE_CLEANUP_STATES = (
     "retained",
@@ -143,6 +143,7 @@ app_settings = Table(
     Column("rate_limit_aria2_test", Integer, nullable=False),
     Column("rate_limit_rpc", Integer, nullable=False),
     Column("rate_limit_file_search", Integer, nullable=False),
+    Column("rate_limit_create_share", Integer, nullable=False),
     Column("download_total_connections", Integer, nullable=False),
     Column("download_authenticated_reserved_connections", Integer, nullable=False),
     Column("download_authenticated_per_user_connections", Integer, nullable=False),

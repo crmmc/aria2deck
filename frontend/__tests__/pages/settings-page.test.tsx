@@ -64,6 +64,7 @@ const baseConfig = {
   rate_limit_create_pack: 5,
   rate_limit_aria2_test: 10,
   rate_limit_rpc: 300,
+  rate_limit_create_share: 10,
   rate_limit_file_search: 20,
   download_total_connections: 100,
   download_authenticated_reserved_connections: 60,
@@ -258,6 +259,55 @@ describe("SettingsPage", () => {
     expect(screen.getByText("下载并发限制")).toBeInTheDocument();
     expect(screen.getByText("账户安全限流")).toBeInTheDocument();
     expect(screen.getByText("系统总下载连接上限")).toBeInTheDocument();
+  });
+
+  test("renders create share rate limit field with config value", async () => {
+    await renderWithInitialLoad();
+
+    fireEvent.click(screen.getByRole("button", { name: /系统高级设置/ }));
+
+    expect(screen.getByLabelText("创建分享限流")).toHaveValue(10);
+  });
+
+  test("clamps create share rate limit input to the allowed range", async () => {
+    await renderWithInitialLoad();
+
+    fireEvent.click(screen.getByRole("button", { name: /系统高级设置/ }));
+    const input = screen.getByLabelText("创建分享限流");
+    fireEvent.change(input, { target: { value: "10001" } });
+
+    expect(input).toHaveValue(10000);
+  });
+
+  test("submits clamped create share rate limit in the save payload", async () => {
+    await renderWithInitialLoad();
+
+    fireEvent.click(screen.getByRole("button", { name: /系统高级设置/ }));
+    const input = screen.getByLabelText("创建分享限流");
+    fireEvent.change(input, { target: { value: "10001" } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    });
+
+    await waitFor(() => {
+      expect(mockApi.updateConfig).toHaveBeenCalled();
+    });
+    const lastCall = mockApi.updateConfig.mock.calls.at(-1)?.[0];
+    expect(lastCall?.rate_limit_create_share).toBe(10000);
+    expect(lastCall?.rate_limit_create_share).not.toBe(10001);
+  });
+
+  test("includes create share rate limit in the save payload", async () => {
+    await renderWithInitialLoad();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+
+    await waitFor(() => {
+      expect(mockApi.updateConfig).toHaveBeenCalled();
+    });
+    const lastCall = mockApi.updateConfig.mock.calls.at(-1)?.[0];
+    expect(lastCall?.rate_limit_create_share).toBe(10);
   });
 
   test("redirects non-admin and does not render admin content", async () => {

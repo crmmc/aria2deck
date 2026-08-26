@@ -197,7 +197,7 @@ async def test_fresh_bootstrap_does_not_recreate_snapshot_table(
 ) -> None:
     tables = await _sqlite_master_tables()
     assert "task_backend_snapshots" not in tables
-    assert await _schema_version() == SCHEMA_VERSION == 16
+    assert await _schema_version() == SCHEMA_VERSION == 17
 
 
 @pytest.mark.asyncio
@@ -214,7 +214,7 @@ async def test_upgrade_bootstrap_does_not_recreate_snapshot_table(
         await bootstrap_database()
 
         assert "task_backend_snapshots" not in await _sqlite_master_tables()
-        assert await _schema_version() == SCHEMA_VERSION == 16
+        assert await _schema_version() == SCHEMA_VERSION == 17
     finally:
         await dispose_engine()
         reset_engine()

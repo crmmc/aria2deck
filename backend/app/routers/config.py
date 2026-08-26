@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.auth import require_limited_admin, require_limited_session_user
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
@@ -53,6 +53,17 @@ class ConfigUpdate(BaseModel):
     rate_limit_aria2_test: int | None = Field(None, ge=1, le=10000, description="aria2测试限流（次/分钟）")
     rate_limit_rpc: int | None = Field(None, ge=1, le=10000, description="JSON-RPC限流（次/分钟）")
     rate_limit_file_search: int | None = Field(None, ge=1, le=60, description="文件搜索限流（次/分钟）")
+    rate_limit_create_share: int | None = Field(None, ge=1, le=10000, description="创建分享限流（次/分钟）")
+
+    @field_validator("rate_limit_create_share", mode="before")
+    @classmethod
+    def _validate_create_share_limit(cls, value):
+        if value is None or (
+            isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 10000
+        ):
+            return value
+        raise ValueError("创建分享限流必须在 1 到 10000 之间")
+
     download_total_connections: int | None = Field(None, ge=0, le=10000, description="系统总下载连接上限（0=不限制）")
     download_authenticated_reserved_connections: int | None = Field(None, ge=0, le=10000, description="已登录保底连接数")
     download_authenticated_per_user_connections: int | None = Field(None, ge=0, le=1000, description="已登录单用户最大并发（0=不限制）")

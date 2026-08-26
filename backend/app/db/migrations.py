@@ -671,6 +671,16 @@ async def migrate_v16(conn: AsyncConnection) -> None:
     await _rebuild_schema_meta(conn, 16)
 
 
+V17_APP_SETTINGS_ADDED_COLUMNS = {
+    "rate_limit_create_share": "INTEGER NOT NULL DEFAULT 10",
+}
+
+
+async def migrate_v17(conn: AsyncConnection) -> None:
+    await _add_missing_columns(conn, "app_settings", V17_APP_SETTINGS_ADDED_COLUMNS)
+    await _rebuild_schema_meta(conn, 17)
+
+
 async def migrate_v1(conn: AsyncConnection) -> None:
     await _add_missing_columns(conn, "app_settings", V1_APP_SETTINGS_ADDED_COLUMNS)
     await _rebuild_schema_meta(conn, 1)
@@ -1268,6 +1278,7 @@ MIGRATIONS: dict[int, Migration] = {
     14: migrate_v14,
     15: migrate_v15,
     16: migrate_v16,
+    17: migrate_v17,
 }
 
 

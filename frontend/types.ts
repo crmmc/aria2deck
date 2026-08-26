@@ -153,6 +153,7 @@ export type SystemConfig = {
   rate_limit_aria2_test: number;
   rate_limit_rpc: number;
   rate_limit_file_search: number;
+  rate_limit_create_share: number;
   download_total_connections: number;
   download_authenticated_reserved_connections: number;
   download_authenticated_per_user_connections: number;

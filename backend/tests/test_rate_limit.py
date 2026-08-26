@@ -286,3 +286,11 @@ class TestApiRateLimitIntegration:
 
         assert blocked.status_code == 429
         assert blocked.headers["Retry-After"].isdigit()
+
+
+def test_create_share_rate_limit_default_is_registered() -> None:
+    """create_share 限流默认 10，且已注册到 DB 键映射（M27）"""
+    from app.core.rate_limit_config import RateLimitConfig, rate_limit_config
+
+    assert rate_limit_config.create_share == 10
+    assert "rate_limit_create_share" in RateLimitConfig._DB_KEY_MAP

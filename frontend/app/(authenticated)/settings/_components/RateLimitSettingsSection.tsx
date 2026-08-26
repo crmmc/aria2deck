@@ -10,6 +10,7 @@ type RateLimitForm = Pick<
   | "rateLimitCreateTask"
   | "rateLimitCreateTorrent"
   | "rateLimitCreatePack"
+  | "rateLimitCreateShare"
   | "rateLimitAria2Test"
   | "rateLimitRpc"
   | "rateLimitFileSearch"
@@ -39,6 +40,7 @@ const rateLimitFields: RateLimitFieldDef[] = [
   { id: "settings-rate-create-task", label: "创建任务限流", description: "每分钟最大创建任务次数", field: "rateLimitCreateTask", min: 1, max: 10000 },
   { id: "settings-rate-create-torrent", label: "创建种子限流", description: "每分钟最大上传种子次数", field: "rateLimitCreateTorrent", min: 1, max: 10000 },
   { id: "settings-rate-create-pack", label: "创建打包限流", description: "每分钟最大创建打包次数", field: "rateLimitCreatePack", min: 1, max: 10000 },
+  { id: "settings-rate-create-share", label: "创建分享限流", description: "每分钟最大创建分享次数", field: "rateLimitCreateShare", min: 1, max: 10000 },
   { id: "settings-rate-aria2-test", label: "aria2 测试限流", description: "每分钟最大连接测试次数", field: "rateLimitAria2Test", min: 1, max: 10000 },
   { id: "settings-rate-rpc", label: "JSON-RPC 限流", description: "每分钟最大 RPC 请求次数", field: "rateLimitRpc", min: 1, max: 10000 },
   { id: "settings-rate-file-search", label: "文件搜索限流", description: "仅限文件搜索，每分钟最大搜索次数（1–60）", field: "rateLimitFileSearch", min: 1, max: 60 },

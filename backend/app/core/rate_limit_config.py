@@ -40,6 +40,7 @@ class RateLimitConfig:
         "rate_limit_create_task": ("create_task", 30, ()),
         "rate_limit_create_torrent": ("create_torrent", 20, ()),
         "rate_limit_create_pack": ("create_pack", 5, ()),
+        "rate_limit_create_share": ("create_share", 10, ()),
         "rate_limit_aria2_test": ("aria2_test", 10, ()),
         "rate_limit_public_api": ("public_api", 60, ()),
         "rate_limit_share_access": ("share_access", 5, ()),

@@ -36,6 +36,7 @@ from app.db.migrations import (
     V14_APP_SETTINGS_ADDED_COLUMNS,
     V15_APP_SETTINGS_ADDED_COLUMNS,
     V16_PACK_TASKS_ADDED_COLUMNS,
+    V17_APP_SETTINGS_ADDED_COLUMNS,
     run_migrations,
 )
 from app.db.schema import metadata, sessions
@@ -227,7 +228,7 @@ async def test_bootstrap_creates_latest_schema(isolated_db: Path):
             await conn.execute(text("SELECT id FROM app_settings"))
         ).scalar_one()
 
-    assert version == SCHEMA_VERSION == 16
+    assert version == SCHEMA_VERSION == 17
     assert users_exists == "users"
     assert settings_id == 1
 
@@ -311,6 +312,9 @@ def test_current_schema_changes_are_accounted_for_in_migration_contract():
     accounted_columns.setdefault("pack_tasks", set()).update(
         V16_PACK_TASKS_ADDED_COLUMNS
     )
+    accounted_columns.setdefault("app_settings", set()).update(
+        V17_APP_SETTINGS_ADDED_COLUMNS
+    )
     accounted_columns["tracker_list_cache"] = {
         "id",
         "trackers_json",
@@ -348,7 +352,7 @@ async def test_v15_to_v16_adds_pack_attempt_columns_without_backfill(
         ))
         await conn.execute(text("INSERT INTO pack_tasks VALUES (1, 'packing')"))
 
-        assert await run_migrations(conn, 15) == 16
+        assert await run_migrations(conn, 15) == 17
         row = (
             await conn.execute(text(
                 "SELECT started_at_ms, step FROM pack_tasks WHERE id = 1"
@@ -406,8 +410,8 @@ async def test_v2_to_latest_migration_is_idempotent(isolated_db: Path):
                 "id INTEGER PRIMARY KEY, status TEXT NOT NULL)"
             )
         )
-        assert await run_migrations(conn, 2) == 16
-        assert await run_migrations(conn, 2) == 16
+        assert await run_migrations(conn, 2) == 17
+        assert await run_migrations(conn, 2) == 17
 
     async with get_engine().connect() as conn:
         columns = {
@@ -459,8 +463,8 @@ async def test_v3_to_v4_migration_is_idempotent(isolated_db: Path):
                 ),
                 {"id": task_id, "sources": sources},
             )
-        assert await run_migrations(conn, 3) == 16
-        assert await run_migrations(conn, 3) == 16
+        assert await run_migrations(conn, 3) == 17
+        assert await run_migrations(conn, 3) == 17
 
     async with get_engine().connect() as conn:
         columns = {
@@ -532,7 +536,7 @@ async def test_v4_migration_backfills_confirmed_and_unknown_source_identities(
             "(2,1,'[2]',10,0,99,1,0,'completed',NULL,200,200,200),"
             "(3,1,'[3]',10,0,98,1,1,'completed',NULL,200,200,200)"
         ))
-        assert await run_migrations(conn, 3) == 16
+        assert await run_migrations(conn, 3) == 17
 
     async with get_engine().connect() as conn:
         sources = (
@@ -684,7 +688,7 @@ async def test_bootstrap_migrates_existing_v0_schema_to_latest_version(
             ).all()
         }
 
-    assert version == SCHEMA_VERSION == 16
+    assert version == SCHEMA_VERSION == 17
     assert timeout_seconds == DEFAULT_ARIA2_BT_STOP_TIMEOUT_SECONDS
     assert {
         "bt_info_hash",
