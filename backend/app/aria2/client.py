@@ -20,7 +20,12 @@ class Aria2Client:
     # 类级别共享 Session，所有实例复用
     _session: aiohttp.ClientSession | None = None
     _session_lock: asyncio.Lock = asyncio.Lock()
-    _timeout = aiohttp.ClientTimeout(total=30)
+    # 10s：aria2 的 add/tellStatus 正常在毫秒级（conf 中 file-allocation=none，
+    # 添加任务不做预分配）。超时上限只用于兜住 aria2 卡顿，不该让用户请求长时间
+    # 挂住——提交路径超时后由 reconciliation → 502「结果暂无法确认」→ 300s
+    # submit_timeout stale cleanup 这条既有链路收尾。
+    # WebSocket 监听有自己的超时设置（listener.py），不受此值影响。
+    _timeout = aiohttp.ClientTimeout(total=10)
 
     def __init__(self, rpc_url: str, secret: str = "") -> None:
         self._rpc_url = rpc_url
