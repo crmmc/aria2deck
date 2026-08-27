@@ -319,7 +319,9 @@ function SidebarContent({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
         onMouseLeave={() => sidebarExpanded && setSidebarExpanded(false)}
       >
         <div className="sidebar-header">
-          <div className="sidebar-logo">AD</div>
+          <div className="sidebar-logo" role="img" aria-label="Aria2Deck">
+            <img className="aria2deck-logo-mark" src="/aria2deck-logo-concept.png" alt="" />
+          </div>
           {sidebarExpanded && <span className="sidebar-title">{siteTitle}</span>}
         </div>
 
