@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { Suspense, useState } from "react";
 import { ModalOverlay } from "@/components/ModalOverlay";
@@ -319,7 +320,16 @@ function SidebarContent({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
         onMouseLeave={() => sidebarExpanded && setSidebarExpanded(false)}
       >
         <div className="sidebar-header">
-          <div className="sidebar-logo">AD</div>
+          <div className="sidebar-logo">
+            <Image
+              className="aria2deck-logo-mark"
+              src="/aria2deck-logo-concept.png"
+              alt="Aria2Deck"
+              width={32}
+              height={32}
+              priority
+            />
+          </div>
           {sidebarExpanded && <span className="sidebar-title">{siteTitle}</span>}
         </div>
 
