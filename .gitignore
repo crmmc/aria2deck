@@ -8,6 +8,12 @@ dist/
 wheels/
 *.egg-info
 
+# Tool caches (可随时重建)
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.cursor/
+
 # Virtual environments
 .venv
 venv/
@@ -31,7 +37,6 @@ backend/aria2/*.aria2
 backend/aria2/DHT*.dat
 backend/aria2/*.7z
 backend/.coverage
-backend/aria2deck.db
 
 # Frontend
 frontend/node_modules/
@@ -40,6 +45,7 @@ frontend/out/
 frontend/.env.local
 frontend/.env*.local
 frontend/coverage/
+*.tsbuildinfo
 
 # IDE
 .vscode/
@@ -60,17 +66,13 @@ Thumbs.db
 .kiro/
 .serena/
 .claude/
+.trellis/
 AGENTS.md
 
 # Development docs (not for repo)
 docs/*
 !docs/screenshots/
 reform/
-PRD_Tracking/
-审查报告.md
-边界问题集.md
-aria2官方文档.md
-FEATURES.md
 
 # Temporary files
 *.tmp
@@ -84,8 +86,6 @@ CLAUDE.md
 # Local planning artifacts
 .planning/
 .worktrees/
-# 本地临时 e2e 测试基础设施（不入库）
-e2e_test_temp/
 
 # agent 工具产物
 .codegraph/
