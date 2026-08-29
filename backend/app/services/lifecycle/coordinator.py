@@ -297,6 +297,11 @@ async def reconcile_attempt_signal(
                     error_code,
                     working_status.get("errorMessage"),
                 )
+                # Persist the resolved torrent name with the terminal write so
+                # history shows it instead of the "未知任务" fallback.
+                display_name = download_ops.extract_display_name(
+                    working_status, None
+                )
                 changed = await fail_download_and_reclaim(
                     backend=backend,
                     download_id=attempt_id,
@@ -306,6 +311,7 @@ async def reconcile_attempt_signal(
                     writer_gid=current_gid,
                     acquire_lifecycle_lock=False,
                     log_prefix=log_prefix,
+                    display_name=display_name,
                 )
                 if changed:
                     await _broadcast_download_update(attempt_id)

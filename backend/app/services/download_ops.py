@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,7 @@ def bt_info_hash_from_status(status: dict[str, Any] | None) -> str | None:
 
 
 def extract_display_name(
-    aria2_status: dict[str, Any],
+    aria2_status: Mapping[str, Any],
     fallback: str | None,
 ) -> str | None:
     raw_name = aria2_status.get("bittorrent", {}).get("info", {}).get("name") or (

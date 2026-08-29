@@ -124,6 +124,7 @@ async def _terminate_active_task_row(
     terminal_status: str,
     message: str,
     timestamp: int,
+    display_name: str | None = None,
 ) -> None:
     reserved = int(task["reserved_bytes"] or 0)
     if reserved:
@@ -133,19 +134,22 @@ async def _terminate_active_task_row(
             delta=-reserved,
             timestamp=timestamp,
         )
+    values: dict[str, Any] = {
+        "status": terminal_status,
+        "reserved_bytes": 0,
+        "error_message": message,
+        "updated_at_ms": timestamp,
+        "finished_at_ms": timestamp,
+    }
+    if display_name:
+        values["display_name"] = display_name
     await conn.execute(
         update(user_tasks)
         .where(
             user_tasks.c.id == task["id"],
             user_tasks.c.status.in_(ACTIVE_USER_TASK_STATUSES),
         )
-        .values(
-            status=terminal_status,
-            reserved_bytes=0,
-            error_message=message,
-            updated_at_ms=timestamp,
-            finished_at_ms=timestamp,
-        )
+        .values(**values)
     )
 
 
@@ -155,9 +159,15 @@ async def _fail_active_task_row(
     *,
     message: str,
     timestamp: int,
+    display_name: str | None = None,
 ) -> None:
     await _terminate_active_task_row(
-        conn, task, terminal_status="failed", message=message, timestamp=timestamp
+        conn,
+        task,
+        terminal_status="failed",
+        message=message,
+        timestamp=timestamp,
+        display_name=display_name,
     )
 
 
@@ -169,6 +179,7 @@ async def _fail_download_rows(
     error_code: str,
     timestamp: int,
     size_bytes: int | None = None,
+    display_name: str | None = None,
 ) -> None:
     tasks = (
         await conn.execute(
@@ -180,7 +191,8 @@ async def _fail_download_rows(
     ).mappings().all()
     for task in tasks:
         await _fail_active_task_row(
-            conn, task, message=message, timestamp=timestamp
+            conn, task, message=message, timestamp=timestamp,
+            display_name=display_name,
         )
     global_values: dict[str, Any] = {
         "status": "failed",
@@ -192,6 +204,8 @@ async def _fail_download_rows(
     if size_bytes is not None:
         global_values["total_bytes"] = size_bytes
         global_values["size_known"] = 1
+    if display_name:
+        global_values["display_name"] = display_name
     await conn.execute(
         update(global_downloads)
         .where(global_downloads.c.id == download["id"])
@@ -431,6 +445,7 @@ async def _reconcile_download_size_locked(
     size_limit_bytes: int,
     disk_available_bytes: DiskAvailable,
     timestamp: int,
+    display_name: str | None = None,
 ) -> SizeReconcileResult:
     download_id = int(download["id"])
     limit = int(download["size_limit_bytes"] or size_limit_bytes)
@@ -439,7 +454,7 @@ async def _reconcile_download_size_locked(
             conn, download,
             message=over_limit("文件大小", candidate, "超过系统限制", limit),
             error_code="max_task_size_exceeded", timestamp=timestamp,
-            size_bytes=candidate,
+            size_bytes=candidate, display_name=display_name,
         )
         return SizeReconcileResult(outcome="max_task_size", rejected_user_ids=[])
 
@@ -469,7 +484,7 @@ async def _reconcile_download_size_locked(
                 "所需空间", candidate, "超过磁盘可用预算", max(0, available)
             ),
             error_code="disk_budget_exceeded", timestamp=timestamp,
-            size_bytes=candidate,
+            size_bytes=candidate, display_name=display_name,
         )
         return SizeReconcileResult(
             outcome="disk_budget", rejected_user_ids=rejected
@@ -878,6 +893,7 @@ async def reconcile_download_size(
     completed_bytes: int,
     size_limit_bytes: int,
     disk_available_bytes: DiskAvailable,
+    display_name: str | None = None,
 ) -> SizeReconcileResult:
     candidate = max(0, candidate_bytes, completed_bytes)
     timestamp = now_ms()
@@ -895,6 +911,7 @@ async def reconcile_download_size(
             size_limit_bytes=size_limit_bytes,
             disk_available_bytes=disk_available_bytes,
             timestamp=timestamp,
+            display_name=display_name,
         )
 
 
@@ -1527,6 +1544,7 @@ async def claim_attempt_terminal(
     expected_statuses: Sequence[str],
     writer_gids: Sequence[str] | None = None,
     result_gids: Sequence[str] | None = None,
+    display_name: str | None = None,
 ) -> TerminalizationClaim | None:
     """Conditionally transition an attempt to a terminal state (spec §10.2).
 
@@ -1540,6 +1558,15 @@ async def claim_attempt_terminal(
         if expected_gid is None
         else global_downloads.c.aria2_gid == expected_gid
     )
+    values: dict[str, Any] = {
+        "status": terminal_status,
+        "disk_reserved_bytes": 0,
+        "error_code": error_code,
+        "error_message": error_message,
+        "updated_at_ms": timestamp,
+    }
+    if display_name:
+        values["display_name"] = display_name
     async with transaction() as conn:
         row = (
             (
@@ -1553,13 +1580,7 @@ async def claim_attempt_terminal(
                         ),
                         global_downloads.c.completed_file_id.is_(None),
                     )
-                    .values(
-                        status=terminal_status,
-                        disk_reserved_bytes=0,
-                        error_code=error_code,
-                        error_message=error_message,
-                        updated_at_ms=timestamp,
-                    )
+                    .values(**values)
                     .returning(global_downloads)
                 )
             )
@@ -1588,6 +1609,7 @@ async def claim_attempt_terminal(
                 terminal_status=terminal_status,
                 message=error_message or "",
                 timestamp=timestamp,
+                display_name=display_name,
             )
 
     if writer_gids is not None:

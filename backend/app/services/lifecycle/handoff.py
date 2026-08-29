@@ -181,6 +181,9 @@ async def coordinate_reported_size(
             return {"outcome": "terminalized", "paused_by_us": False}
 
     # Budget / reservation atomic operation (spec §8.2).
+    # Extract the resolved torrent name so a space-rejection terminal write can
+    # persist it instead of leaving the history row as "未知任务".
+    display_name = download_ops.extract_display_name(status, None)
     result = await reconcile_download_size(
         download_id=download_id,
         expected_gid=expected_gid,
@@ -192,6 +195,7 @@ async def coordinate_reported_size(
         disk_available_bytes=lambda: get_disk_available_bytes(
             settings.download_dir, min_free_disk=get_min_free_disk()
         ),
+        display_name=display_name,
     )
     result["paused_by_us"] = paused_by_us
 

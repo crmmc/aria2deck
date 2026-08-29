@@ -66,6 +66,7 @@ async def _fail_download_and_reclaim_operation(
     clear_gid: bool,
     acquire_lifecycle_lock: bool,
     log_prefix: str,
+    display_name: str | None = None,
 ) -> bool:
     """Claim terminal state, then reclaim physical resources.
 
@@ -102,6 +103,7 @@ async def _fail_download_and_reclaim_operation(
             expected_statuses=tuple(expected_statuses),
             writer_gids=writer_gids,
             result_gids=result_gids,
+            display_name=display_name,
         )
         if claim is None:
             return False
@@ -130,6 +132,7 @@ async def fail_download_and_reclaim(
     acquire_completion_lock: bool = False,
     acquire_lifecycle_lock: bool = True,
     log_prefix: str = "[Fail]",
+    display_name: str | None = None,
 ) -> bool:
     """Mark failed and best-effort reclaim aria2 writer + downloading/<id>.
 
@@ -154,6 +157,7 @@ async def fail_download_and_reclaim(
             clear_gid=clear_gid,
             acquire_lifecycle_lock=acquire_lifecycle_lock,
             log_prefix=log_prefix,
+            display_name=display_name,
         )
     )
     try:
