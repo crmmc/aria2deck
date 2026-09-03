@@ -15,7 +15,7 @@ import { BrowseFolderView } from "./_components/BrowseFolderView";
 import { SearchModal } from "./_components/SearchModal";
 import { FileToolbar, type SortField, type SortOrder } from "./_components/FileToolbar";
 import { PackDialog } from "./_components/PackDialog";
-import { PaginationControls } from "./_components/PaginationControls";
+import { PaginationControls } from "@/components/ui/PaginationControls";
 import { RootFileTable } from "./_components/RootFileTable";
 import { SpaceUsageCard } from "./_components/SpaceUsageCard";
 

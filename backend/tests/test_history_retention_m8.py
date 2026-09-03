@@ -197,7 +197,7 @@ async def test_projection_failed_unexpired_retryable(temp_db: str) -> None:
     created = await _create_http_task(user)
     await _mark_terminal(pid=created["pid"], tid=created["tid"], status="failed")
 
-    items = await history_service.list_history(user["id"])
+    items = (await history_service.list_history_page(user_id=user["id"], page=1, page_size=100))["items"]
     match = next(i for i in items if i["id"] == created["pid"])
     assert match["retryable"] is True
     assert match["retry_blocked_reason"] is None
@@ -233,7 +233,7 @@ async def test_t12b_due_soft_expire_history_and_gc(temp_db: str) -> None:
     assert source["purged_at_ms"] is not None
     assert not (source["payload_text"] or "").strip()
 
-    items = await history_service.list_history(user["id"])
+    items = (await history_service.list_history_page(user_id=user["id"], page=1, page_size=100))["items"]
     match = next(i for i in items if i["id"] == created["pid"])
     assert match["retryable"] is False
     assert match["retry_blocked_reason"] is not None
@@ -332,7 +332,7 @@ async def test_completed_projection_not_retryable(temp_db: str) -> None:
     created = await _create_http_task(user)
     await _mark_terminal(pid=created["pid"], tid=created["tid"], status="completed")
 
-    items = await history_service.list_history(user["id"])
+    items = (await history_service.list_history_page(user_id=user["id"], page=1, page_size=100))["items"]
     match = next(i for i in items if i["id"] == created["pid"])
     assert match["retryable"] is False
     assert match["retry_blocked_reason"] is not None
@@ -374,7 +374,7 @@ async def test_t10_delete_failed_history_removes_pid_and_tid_shell(
     assert result["ok"] is True
 
     assert await _pid_exists(created["pid"]) is False
-    items = await history_service.list_history(user["id"])
+    items = (await history_service.list_history_page(user_id=user["id"], page=1, page_size=100))["items"]
     assert all(i["id"] != created["pid"] for i in items)
 
     # failed + no completed_file_id → tid shell deleted

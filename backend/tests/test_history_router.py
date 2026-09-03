@@ -102,16 +102,16 @@ def other_user_history(test_admin: dict, temp_db: str) -> dict:
 
 class TestListHistory:
     def test_list_history_empty(self, authenticated_client: TestClient) -> None:
-        response = authenticated_client.get("/api/history")
+        response = authenticated_client.get("/api/v2/history")
         assert response.status_code == 200
-        assert response.json() == []
+        assert response.json() == {"items": [], "total": 0, "page": 1, "page_size": 20}
 
     def test_list_history_with_terminal_user_tasks(
         self, authenticated_client: TestClient, history_record: dict
     ) -> None:
-        response = authenticated_client.get("/api/history")
+        response = authenticated_client.get("/api/v2/history")
         assert response.status_code == 200
-        data = response.json()
+        data = response.json()["items"]
         assert len(data) == 1
         assert data[0]["id"] == history_record["id"]
         assert data[0]["task_name"] == "test_file.zip"
@@ -135,10 +135,10 @@ class TestListHistory:
             )
         )
 
-        response = authenticated_client.get("/api/history")
+        response = authenticated_client.get("/api/v2/history")
 
         assert response.status_code == 200
-        data = response.json()
+        data = response.json()["items"]
         assert len(data) == 1
         assert data[0]["result"] == "failed"
         assert data[0]["reason"] == "Connection timeout"
@@ -157,20 +157,20 @@ class TestListHistory:
             )
         )
 
-        response = authenticated_client.get("/api/history")
+        response = authenticated_client.get("/api/v2/history")
 
         assert response.status_code == 200
-        assert response.json() == []
+        assert response.json()["items"] == []
 
     def test_list_history_user_isolation(
         self, authenticated_client: TestClient, other_user_history: dict
     ) -> None:
-        response = authenticated_client.get("/api/history")
+        response = authenticated_client.get("/api/v2/history")
         assert response.status_code == 200
-        assert response.json() == []
+        assert response.json()["items"] == []
 
     def test_list_history_unauthorized(self, client: TestClient) -> None:
-        response = client.get("/api/history")
+        response = client.get("/api/v2/history")
         assert response.status_code == 401
 
 
@@ -210,7 +210,7 @@ class TestBatchDeleteHistory:
         assert all(item["accepted"] is True for item in data["results"])
         assert all(item["error"] is None for item in data["results"])
 
-        remaining = authenticated_client.get("/api/history").json()
+        remaining = authenticated_client.get("/api/v2/history").json()["items"]
         assert [item["id"] for item in remaining] == [records[2]["id"]]
 
     def test_batch_delete_partial_failure_continues_with_chinese_error(
@@ -241,7 +241,7 @@ class TestBatchDeleteHistory:
             "error": "历史记录不存在",
         }
 
-        assert authenticated_client.get("/api/history").json() == []
+        assert authenticated_client.get("/api/v2/history").json()["items"] == []
 
     def test_batch_delete_deduplicates_repeated_ids(
         self, authenticated_client: TestClient, history_record: dict
@@ -357,65 +357,6 @@ class TestBatchDeleteHistory:
         assert remaining == 1
 
 
-class TestClearHistory:
-    def test_clear_history_success(
-        self, authenticated_client: TestClient, history_record: dict
-    ) -> None:
-        response = authenticated_client.delete("/api/history")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is True
-        assert data["count"] == 1
-
-        verify_response = authenticated_client.get("/api/history")
-        assert verify_response.json() == []
-
-    def test_clear_history_empty(self, authenticated_client: TestClient) -> None:
-        response = authenticated_client.delete("/api/history")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is True
-        assert data["count"] == 0
-
-    def test_clear_history_user_isolation(
-        self, authenticated_client: TestClient, other_user_history: dict
-    ) -> None:
-        response = authenticated_client.delete("/api/history")
-        assert response.status_code == 200
-        assert response.json()["count"] == 0
-
-    def test_clear_history_unauthorized(self, client: TestClient) -> None:
-        response = client.delete("/api/history")
-        assert response.status_code == 401
-
-    def test_clear_history_multiple_terminal_records(
-        self, authenticated_client: TestClient, test_user: dict, temp_db: str
-    ) -> None:
-        for index in range(5):
-            asyncio.run(
-                _create_user_task_row(
-                    user_id=test_user["id"],
-                    resource_key=f"http:clear-history-{index}",
-                    status="completed",
-                    name=f"file_{index}.zip",
-                    uri=f"https://example.com/file_{index}.zip",
-                    total_bytes=1024 * (index + 1),
-                )
-            )
-
-        list_response = authenticated_client.get("/api/history")
-        assert len(list_response.json()) == 5
-
-        response = authenticated_client.delete("/api/history")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is True
-        assert data["count"] == 5
-
-        verify_response = authenticated_client.get("/api/history")
-        assert verify_response.json() == []
-
-
 class TestHistoryListOrdering:
     def test_list_history_ordered_by_id_desc(
         self, authenticated_client: TestClient, test_user: dict, temp_db: str
@@ -431,9 +372,9 @@ class TestHistoryListOrdering:
                 )
             )
 
-        response = authenticated_client.get("/api/history")
+        response = authenticated_client.get("/api/v2/history")
         assert response.status_code == 200
-        data = response.json()
+        data = response.json()["items"]
         assert len(data) == 3
         assert data[0]["task_name"] == "file_2.zip"
         assert data[1]["task_name"] == "file_1.zip"
@@ -441,7 +382,7 @@ class TestHistoryListOrdering:
 
 
 class TestV2HistoryPagination:
-    def test_v2_history_is_stable_paginated_and_keeps_old_array(
+    def test_v2_history_is_stable_paginated(
         self,
         authenticated_client: TestClient,
         test_user: dict,
@@ -464,12 +405,10 @@ class TestV2HistoryPagination:
                 )
             )
 
-        old = authenticated_client.get("/api/history")
         first = authenticated_client.get("/api/v2/history?page=1&page_size=2")
         second = authenticated_client.get("/api/v2/history?page=2&page_size=2")
         empty = authenticated_client.get("/api/v2/history?page=9&page_size=2")
 
-        assert isinstance(old.json(), list)
         assert [item["id"] for item in first.json()["items"]] == [
             records[1]["id"],
             records[2]["id"],
@@ -479,3 +418,116 @@ class TestV2HistoryPagination:
         assert second.json()["items"][0]["id"] == records[0]["id"]
         assert empty.json() == {"items": [], "total": 3, "page": 9, "page_size": 2}
         assert authenticated_client.get("/api/v2/history?page=0").status_code == 422
+
+
+class TestV2HistoryFilters:
+    def _seed_terminal_records(self, user_id: int) -> list[dict]:
+        specs = [
+            ("completed", "alpha-report.zip", "http:filter-completed"),
+            ("failed", "beta-movie.mkv", "http:filter-failed"),
+            ("cancelled", "ALPHA-doc.pdf", "http:filter-cancelled"),
+        ]
+        return [
+            asyncio.run(
+                _create_user_task_row(
+                    user_id=user_id,
+                    resource_key=resource_key,
+                    status=status,
+                    name=name,
+                    uri=f"https://example.com/{name}",
+                )
+            )
+            for status, name, resource_key in specs
+        ]
+
+    def test_status_filter_returns_only_matching_terminal_status(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        records = self._seed_terminal_records(test_user["id"])
+
+        response = authenticated_client.get("/api/v2/history?status=failed")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert [item["id"] for item in data["items"]] == [records[1]["id"]]
+        assert data["items"][0]["result"] == "failed"
+
+    def test_status_all_matches_every_terminal_status(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        self._seed_terminal_records(test_user["id"])
+
+        response = authenticated_client.get("/api/v2/history?status=all")
+
+        assert response.status_code == 200
+        assert response.json()["total"] == 3
+
+    def test_invalid_status_rejected_with_400(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        self._seed_terminal_records(test_user["id"])
+
+        response = authenticated_client.get("/api/v2/history?status=active")
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "无效的历史状态筛选"
+
+    def test_name_query_matches_case_insensitively_and_paginates_total(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        self._seed_terminal_records(test_user["id"])
+
+        response = authenticated_client.get("/api/v2/history?q=ALPHA")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        assert {item["task_name"] for item in data["items"]} == {
+            "alpha-report.zip",
+            "ALPHA-doc.pdf",
+        }
+
+    def test_name_query_blank_is_ignored(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        self._seed_terminal_records(test_user["id"])
+
+        response = authenticated_client.get("/api/v2/history?q=%20%20")
+
+        assert response.status_code == 200
+        assert response.json()["total"] == 3
+
+    def test_status_and_query_compose(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        records = self._seed_terminal_records(test_user["id"])
+
+        response = authenticated_client.get("/api/v2/history?status=cancelled&q=alpha")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert [item["id"] for item in data["items"]] == [records[2]["id"]]
+
+    def test_filtered_total_drives_pagination(
+        self, authenticated_client: TestClient, test_user: dict, temp_db: str
+    ) -> None:
+        for index in range(3):
+            asyncio.run(
+                _create_user_task_row(
+                    user_id=test_user["id"],
+                    resource_key=f"http:page-filter-{index}",
+                    status="failed",
+                    name=f"paged_{index}.zip",
+                    uri=f"https://example.com/paged_{index}.zip",
+                )
+            )
+
+        first = authenticated_client.get("/api/v2/history?status=failed&page=1&page_size=2")
+        second = authenticated_client.get("/api/v2/history?status=failed&page=2&page_size=2")
+
+        assert first.json()["total"] == 3
+        assert len(first.json()["items"]) == 2
+        assert second.json()["total"] == 3
+        assert len(second.json()["items"]) == 1

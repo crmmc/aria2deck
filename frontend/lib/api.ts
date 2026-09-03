@@ -14,6 +14,7 @@ import type {
   RpcAccessStatus,
   SystemStatus,
   TaskHistory,
+  HistoryPageResponse,
   StoredFileListResponse,
   FileUsersResponse,
   BulkDeleteResponse,
@@ -219,15 +220,24 @@ export const api = {
     }),
 
   // Task History (independent storage)
-  listHistory: () => request<TaskHistory[]>("/api/history"),
+  listHistoryPage: (params: {
+    page: number;
+    pageSize: number;
+    status?: string;
+    q?: string;
+  }) =>
+    request<HistoryPageResponse>(
+      withQuery("/api/v2/history", {
+        page: params.page,
+        page_size: params.pageSize,
+        status: params.status,
+        q: params.q,
+      })
+    ),
   deleteHistoryRecords: (historyIds: number[]) =>
     request<BatchDeleteHistoryResponse>("/api/history", {
       method: "DELETE",
       body: JSON.stringify({ history_ids: historyIds }),
-    }),
-  clearHistory: () =>
-    request<{ ok: boolean; count: number }>("/api/history", {
-      method: "DELETE",
     }),
 
   // Stats & Config

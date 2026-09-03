@@ -272,6 +272,13 @@ export type TaskHistory = {
   retry_blocked_reason?: string | null;
 };
 
+export type HistoryPageResponse = {
+  items: TaskHistory[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
 export type StoredFileInfo = {
   id: number;
   content_hash: string;

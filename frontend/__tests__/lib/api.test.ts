@@ -688,21 +688,47 @@ describe("api methods", () => {
     });
   });
 
-  describe("api.listHistory", () => {
-    it("fetches task history", async () => {
-      const mockHistory = [{ id: 1, name: "task1" }];
+  describe("api.listHistoryPage", () => {
+    it("fetches a page of task history with filters", async () => {
+      const mockPage = {
+        items: [{ id: 1, task_name: "task1" }],
+        total: 1,
+        page: 2,
+        page_size: 20,
+      };
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve(mockHistory),
+        json: () => Promise.resolve(mockPage),
       });
 
-      const result = await api.listHistory();
-      
-      expect(result).toEqual(mockHistory);
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/history"),
-        expect.any(Object)
-      );
+      const result = await api.listHistoryPage({
+        page: 2,
+        pageSize: 20,
+        status: "failed",
+        q: "task",
+      });
+
+      expect(result).toEqual(mockPage);
+      const [url] = (global.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
+      expect(url).toContain("/api/v2/history?");
+      expect(url).toContain("page=2");
+      expect(url).toContain("page_size=20");
+      expect(url).toContain("status=failed");
+      expect(url).toContain("q=task");
+    });
+
+    it("omits empty filters from the query string", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ items: [], total: 0, page: 1, page_size: 20 }),
+      });
+
+      await api.listHistoryPage({ page: 1, pageSize: 20 });
+
+      const [url] = (global.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
+      expect(url).toBeTruthy();
+      expect(url).not.toContain("status=");
+      expect(url).not.toContain("q=");
     });
   });
 
@@ -764,23 +790,6 @@ describe("api methods", () => {
       expect(JSON.parse(options.body as string)).toEqual({
         history_ids: [123],
       });
-    });
-  });
-
-  describe("api.clearHistory", () => {
-    it("clears all history", async () => {
-      global.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ ok: true, count: 5 }),
-      });
-
-      const result = await api.clearHistory();
-      
-      expect(result).toEqual({ ok: true, count: 5 });
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/history"),
-        expect.objectContaining({ method: "DELETE" })
-      );
     });
   });
 

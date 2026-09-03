@@ -258,6 +258,8 @@ async def list_user_tasks_page(
     page_size: int,
     status_filter: str | None = None,
     statuses: Iterable[str] | None = None,
+    history_status: str | None = None,
+    name_query: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     if page < 1 or page_size < 1:
         raise ValueError("invalid page")
@@ -268,6 +270,16 @@ async def list_user_tasks_page(
     status_condition = _rest_task_status_condition(status_filter)
     if status_condition is not None:
         conditions.append(status_condition)
+    if history_status is not None:
+        conditions.append(user_tasks.c.status == history_status)
+    if name_query:
+        pattern = f"%{name_query}%"
+        conditions.append(
+            or_(
+                user_tasks.c.display_name.ilike(pattern),
+                global_downloads.c.display_name.ilike(pattern),
+            )
+        )
 
     join = user_tasks.join(
         global_downloads, user_tasks.c.global_download_id == global_downloads.c.id

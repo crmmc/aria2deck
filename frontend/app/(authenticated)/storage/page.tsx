@@ -9,7 +9,7 @@ import { ModalOverlay } from "@/components/ModalOverlay";
 import { api } from "@/lib/api";
 import { formatBytes } from "@/lib/utils";
 import type { StoredFileInfo, FileUserInfo } from "@/types";
-import { PaginationControls } from "@/app/(authenticated)/files/_components/PaginationControls";
+import { PaginationControls } from "@/components/ui/PaginationControls";
 
 const PAGE_SIZE = 20;
 const EMPTY_FILE_IDS: number[] = [];
