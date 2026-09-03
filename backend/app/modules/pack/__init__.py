@@ -627,13 +627,7 @@ class PackTaskManager:
             await asyncio.sleep(_DISPATCH_SWEEP_SECONDS)
 
     @classmethod
-    async def shutdown(cls) -> None:
-        dispatcher = cls._dispatcher_task
-        if dispatcher is not None:
-            dispatcher.cancel()
-            await asyncio.gather(dispatcher, return_exceptions=True)
-        async with _running_tasks_lock:
-            jobs = list(cls._running_tasks.values())
+    async def _cancel_jobs(cls, jobs: list[_RunningPackJob]) -> None:
         for job in jobs:
             job.cancel_event.set()
             job.task.cancel()
@@ -648,24 +642,23 @@ class PackTaskManager:
             )
 
     @classmethod
+    async def shutdown(cls) -> None:
+        dispatcher = cls._dispatcher_task
+        if dispatcher is not None:
+            dispatcher.cancel()
+            await asyncio.gather(dispatcher, return_exceptions=True)
+        async with _running_tasks_lock:
+            jobs = list(cls._running_tasks.values())
+        await cls._cancel_jobs(jobs)
+
+    @classmethod
     async def cancel_user_jobs(cls, user_id: int) -> None:
         async with _running_tasks_lock:
             cls._blocked_user_ids.add(user_id)
             jobs = [
                 job for job in cls._running_tasks.values() if job.user_id == user_id
             ]
-        for job in jobs:
-            job.cancel_event.set()
-            job.task.cancel()
-        if jobs:
-            await asyncio.gather(
-                *(job.task for job in jobs),
-                return_exceptions=True,
-            )
-            await asyncio.gather(
-                *(cls._wait_thread_tasks(job) for job in jobs),
-                return_exceptions=True,
-            )
+        await cls._cancel_jobs(jobs)
 
     @classmethod
     async def prepare_user_deletion(cls, user_id: int) -> bool:
