@@ -1855,6 +1855,14 @@ describe("TasksPage", () => {
     expect(within(reopened).queryByText("任务已存在")).not.toBeInTheDocument();
   });
 
+  test("sort select defaults to download speed", async () => {
+    mockApi.listTasks.mockResolvedValue([activeTask]);
+    render(<TasksPage />);
+    expect(await screen.findByText(activeTask.name!)).toBeInTheDocument();
+    // 默认排序为下载速度，打开页面即生效
+    expect(screen.getByLabelText("排序方式")).toHaveValue("speed");
+  });
+
   test("filters, searches and sorts tasks through the toolbar", async () => {
     const tasks: Task[] = [
       activeTask,

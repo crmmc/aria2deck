@@ -81,7 +81,7 @@ export function TaskToolbar({
           className="select"
           aria-label="排序方式"
         >
-          <option value="default">默认</option>
+          <option value="default">最近更新</option>
           <option value="speed">下载速度</option>
           <option value="progress">下载进度</option>
         </select>

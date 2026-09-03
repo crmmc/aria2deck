@@ -101,7 +101,7 @@ export default function TasksPage() {
     return "all";
   });
   const [searchKeyword, setSearchKeyword] = useState("");
-  const [sortBy, setSortBy] = useState<string>("default");
+  const [sortBy, setSortBy] = useState<string>("speed");
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [isBatchAdding, setIsBatchAdding] = useState(false);
   const [batchUris, setBatchUris] = useState("");
