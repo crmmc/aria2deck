@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class RateLimitConfig:
     """请求频率限制配置的内存缓存，支持数据库热更新。"""
 
-    _WINDOWS: dict[str, int] = {
+    _WINDOWS: ClassVar[dict[str, int]] = {
         "account_security": 300,
         "authenticated_api": 60,
         "create_task": 60,
@@ -26,7 +26,7 @@ class RateLimitConfig:
         "file_search": 60,
     }
 
-    _DB_KEY_MAP: dict[str, tuple[str, int, tuple[str, ...]]] = {
+    _DB_KEY_MAP: ClassVar[dict[str, tuple[str, int, tuple[str, ...]]]] = {
         "rate_limit_account_security": (
             "account_security",
             5,

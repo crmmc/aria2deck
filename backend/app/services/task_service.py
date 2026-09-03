@@ -18,10 +18,57 @@ from app.domain.errors import (
     DomainError,
     NotFoundError,
 )
+from app.modules.task_core.unref import (
+    ERROR_ALREADY_TERMINAL,
+    ERROR_FORBIDDEN,
+    ERROR_NOT_FOUND,
+    UnrefError,
+    unref,
+)
 from app.repositories.task.user_tasks import (
     clear_terminal_user_tasks,
     get_user_task_by_id,
     list_user_tasks_page,
+)
+from app.services.settings_service import get_min_free_disk
+
+# Re-export orchestration 符号：保持 `app.services.task_service.<name>`
+# 的 import 与 patch 路径兼容（orchestration 内部对可替换依赖一律经
+# task_service 模块属性查找，patch 本模块即生效）。
+from app.services.task_orchestration import (
+    MAGNET_MIN_SPACE,
+    MAX_TORRENT_BASE64_LENGTH,
+    SUBMISSION_FAILED_MESSAGE,
+    Aria2BackendAdapter,
+    _get_backend,
+    _impl_create_task,
+    _impl_create_torrent_task,
+    _impl_preview_torrent_task,
+    _TolerantBackend,
+    _validate_options,  # noqa: F401  # 保留 task_service 私有 patch 兼容路径
+    check_disk_space,
+    check_torrent_network_safety,
+    check_url_safety,
+    create_task,
+    create_torrent_task,
+    extract_info_hash_from_magnet,
+    get_max_task_size,
+    get_uri_hash,
+    get_usage,
+    http_resource_identity,
+    is_http_url,
+    is_magnet_link,
+    mask_url_credentials,
+    parse_torrent_or_error,
+    preview_torrent_task,
+    probe_url_with_get_fallback,
+    raise_register_error,
+    register,
+    register_and_submit,
+    set_task_backend_override,
+    source_request_options,
+    submit_tid,
+    torrent_preview_response,
 )
 from app.services.task_projection import (
     InvalidTaskStatusFilter,
@@ -32,52 +79,8 @@ from app.services.task_projection_rows import (
     attach_snapshots_to_rows,
     list_user_task_projections,
 )
-from app.modules.task_core.unref import (
-    ERROR_ALREADY_TERMINAL,
-    ERROR_FORBIDDEN,
-    ERROR_NOT_FOUND,
-    UnrefError,
-    unref,
-)
 
-# Re-export orchestration 符号：保持 `app.services.task_service.<name>`
-# 的 import 与 patch 路径兼容（orchestration 内部对可替换依赖一律经
-# task_service 模块属性查找，patch 本模块即生效）。
-from app.services.task_orchestration import (
-    MAGNET_MIN_SPACE,
-    MAX_TORRENT_BASE64_LENGTH,
-    SUBMISSION_FAILED_MESSAGE,
-    Aria2BackendAdapter,
-    _TolerantBackend,
-    _get_backend,
-    _impl_create_task,
-    _impl_create_torrent_task,
-    _impl_preview_torrent_task,
-    _validate_options,
-    check_disk_space,
-    check_torrent_network_safety,
-    check_url_safety,
-    create_task,
-    create_torrent_task,
-    extract_info_hash_from_magnet,
-    get_max_task_size,
-    get_uri_hash,
-    get_usage,
-    http_resource_identity,    is_http_url,
-    is_magnet_link,
-    mask_url_credentials,
-    parse_torrent_or_error,
-    preview_torrent_task,
-    probe_url_with_get_fallback,
-    register,
-    register_and_submit,
-    raise_register_error,
-    set_task_backend_override,
-    source_request_options,
-    submit_tid,
-    torrent_preview_response,
-)
-from app.services.settings_service import get_min_free_disk
+__all__ = ("ERROR_ALREADY_TERMINAL", "ERROR_FORBIDDEN", "ERROR_NOT_FOUND", "MAGNET_MIN_SPACE", "MAX_TORRENT_BASE64_LENGTH", "SUBMISSION_FAILED_MESSAGE", "Any", "Aria2BackendAdapter", "BadGatewayError", "BadRequestError", "ConflictError", "DomainError", "InvalidTaskStatusFilter", "NotFoundError", "UnrefError", "attach_snapshots_to_rows", "build_rest_task_response", "bulk_cancel_tasks", "cancel_task", "check_disk_space", "check_torrent_network_safety", "check_url_safety", "clear_history", "clear_terminal_user_tasks", "create_task", "create_task_response", "create_tasks_batch", "create_torrent_task", "extract_info_hash_from_magnet", "filter_rows_for_status", "get_max_task_size", "get_min_free_disk", "get_uri_hash", "get_usage", "get_user_task_by_id", "http_resource_identity", "is_http_url", "is_magnet_link", "list_task_response", "list_tasks", "list_tasks_page", "list_user_task_projections", "list_user_tasks_page", "logger", "logging", "mask_url_credentials", "parse_torrent_or_error", "preview_torrent_task", "probe_url_with_get_fallback", "raise_register_error", "register", "register_and_submit", "set_task_backend_override", "source_request_options", "submit_tid", "torrent_preview_response", "unref")
 
 
 # orchestration 公共 create/preview 转发到 via 函数，可替换依赖经本模块 patch 注入点查找。
@@ -92,11 +95,8 @@ async def _create_task_via(
         user_id=user_id, quota_bytes=quota_bytes, uri=uri, options=options
     )
 
-
 async def _preview_torrent_task_via(*, user_id: int, torrent: str) -> dict:
     return await _impl_preview_torrent_task(user_id=user_id, torrent=torrent)
-
-
 async def _create_torrent_task_via(
     *,
     user_id: int,

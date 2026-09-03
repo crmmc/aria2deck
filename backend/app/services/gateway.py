@@ -231,7 +231,7 @@ def create_capability(
     ).encode("utf-8")
     encoded_payload = _encode(payload)
     message = (
-        f"{download_id}\n{source_uri}\n{encoded_payload}".encode("utf-8")
+        f"{download_id}\n{source_uri}\n{encoded_payload}".encode()
     )
     signature = hmac.new(_capability_key(), message, hashlib.sha256).digest()
     capability = f"{encoded_payload}.{_encode(signature)}"
@@ -294,7 +294,7 @@ def verify_capability(
         raise InvalidCapabilityError("下载凭证无效") from exc
     signature = _decode(encoded_signature)
     message = (
-        f"{download_id}\n{source_uri}\n{encoded_payload}".encode("utf-8")
+        f"{download_id}\n{source_uri}\n{encoded_payload}".encode()
     )
     expected = hmac.new(_capability_key(), message, hashlib.sha256).digest()
     if len(signature) != len(expected) or not hmac.compare_digest(
@@ -629,7 +629,8 @@ async def open_gateway_stream(
             current_url = next_url
             redirect_count += 1
 
-        assert response is not None
+        if response is None:
+            raise GatewayUpstreamError("上游响应缺少状态")
         if response.status < 200:
             raise GatewayUpstreamError("上游返回不支持的协议切换响应")
         if 300 <= response.status < 400:

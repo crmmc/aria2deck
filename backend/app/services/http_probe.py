@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
+
 from app.core.security import redact_url_for_log
 from app.http.safe_client import (
     UnsafeTargetError,
@@ -78,7 +79,6 @@ def _parse_content_disposition(header: str) -> str | None:
                 return unquote(encoded, encoding=charset or "utf-8")
             except (UnicodeDecodeError, LookupError) as e:
                 logger.debug(f"Failed to decode filename with charset {charset}: {e}")
-                pass
 
     # Try regular filename parameter
     match = re.search(r'filename\s*=\s*"([^"]+)"', header, re.IGNORECASE)
@@ -261,7 +261,7 @@ async def probe_http_url(
             success=False,
             error="Request timeout",
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001  # external boundary preserves failure isolation
         safe_url = redact_url_for_log(url)
         logger.warning(
             "HTTP probe unexpected error url=%s error=%s",
@@ -302,7 +302,7 @@ async def probe_url_with_get_fallback(
         ) as session:
             return await _probe_request(session, "GET", url, max_redirects)
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001  # external boundary preserves failure isolation
         safe_url = redact_url_for_log(url)
         logger.warning(
             "GET probe failed url=%s error=%s",

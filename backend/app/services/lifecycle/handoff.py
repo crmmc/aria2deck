@@ -12,11 +12,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from app.modules.backend.port import BackendPort
 from app.domain.lifecycle import ReconcileResult
 from app.domain.locks import get_download_lifecycle_lock
 from app.domain.quota import candidate_size_from_status, get_disk_available_bytes
 from app.domain.status import TERMINAL_DOWNLOAD_STATUSES
+from app.modules.backend.port import BackendPort
 from app.modules.task_core.states import (
     ERROR_ADMISSION_PAUSED,
     ERROR_GROWTH_PAUSE_FAILED,
@@ -744,7 +744,7 @@ async def _find_followed_gid_by_following(
     for label, call, args in list_calls:
         try:
             rows = await call(*args)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             logger.debug(
                 "%s Failed to scan aria2 %s tasks for following=%s error=%s",
                 log_prefix,
@@ -771,7 +771,7 @@ async def _refresh_followed_gid(
     for attempt in range(COMPLETE_SOURCE_RETRY_COUNT):
         try:
             status = await backend.tell_status(gid)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             logger.debug(
                 "%s Failed to refresh metadata status gid=%s error=%s",
                 log_prefix,

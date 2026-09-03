@@ -200,8 +200,10 @@ async def validate_current_schema_shape() -> None:
             "wherestatusin('pending','packing')",
         ),
         "ix_pack_task_sources_identity": (
-            "onpack_task_sources(original_user_file_id,stored_file_id,"
-            "user_file_created_at_ms)",
+            (
+                "onpack_task_sources(original_user_file_id,stored_file_id,"
+                "user_file_created_at_ms)"
+            ),
         ),
         "ix_pack_task_sources_task_cleanup": (
             "onpack_task_sources(task_id,cleanup_state)",
@@ -217,12 +219,16 @@ async def validate_current_schema_shape() -> None:
             "raise(abort",
         ),
         "ix_users_delete_due": (
-            "onusers(pending_delete,delete_next_retry_at_ms,"
-            "delete_lease_expires_at_ms,id)",
+            (
+                "onusers(pending_delete,delete_next_retry_at_ms,"
+                "delete_lease_expires_at_ms,id)"
+            ),
         ),
         "ix_stored_files_delete_due": (
-            "onstored_files(pending_delete,delete_next_retry_at_ms,"
-            "delete_lease_expires_at_ms,id)",
+            (
+                "onstored_files(pending_delete,delete_next_retry_at_ms,"
+                "delete_lease_expires_at_ms,id)"
+            ),
         ),
     }
     invalid_objects = []

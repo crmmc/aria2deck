@@ -3,12 +3,11 @@ from pathlib import Path
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 
-
 BASE_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_SECRET_KEY = "aria2deck-default-secret-key-change-in-production"
-SHARE_JWT_SECRET_ENV = "ARIA2DECK_SHARE_JWT_SECRET"
-LEGACY_SHARE_JWT_SECRET_ENV = "ARIA2C_SECRET_KEY"
-INITIAL_ADMIN_PASSWORD_ENV = "ARIA2DECK_INITIAL_ADMIN_PASSWORD"
+DEFAULT_SECRET_KEY = "aria2deck-default-secret-key-change-in-production"  # noqa: S105  # development fallback, replaced by deployment configuration
+SHARE_JWT_SECRET_ENV = "ARIA2DECK_SHARE_JWT_SECRET"  # noqa: S105  # environment variable name, not a credential
+LEGACY_SHARE_JWT_SECRET_ENV = "ARIA2C_SECRET_KEY"  # noqa: S105  # legacy environment variable name
+INITIAL_ADMIN_PASSWORD_ENV = "ARIA2DECK_INITIAL_ADMIN_PASSWORD"  # noqa: S105  # environment variable name, not a password
 CREDENTIAL_PEPPER_ENV = "ARIA2DECK_CREDENTIAL_PEPPER"
 INTERNAL_BASE_URL_ENV = "ARIA2DECK_INTERNAL_BASE_URL"
 MIN_INITIAL_ADMIN_PASSWORD_LENGTH = 16
@@ -28,7 +27,7 @@ class Settings(BaseSettings):
     cors_origins: str = ""
     allow_null_origin: bool = False
     download_dir: str = str(BASE_DIR / "downloads")
-    host: str = "0.0.0.0"
+    host: str = "0.0.0.0"  # noqa: S104  # configurable service listener default
     port: int = 8001
     internal_base_url: str = Field(
         default="",

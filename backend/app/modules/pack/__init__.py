@@ -11,16 +11,24 @@ import tarfile
 import threading
 import time
 import zipfile
-from collections.abc import Buffer
+from collections.abc import Buffer, Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Callable, TypeVar, cast
+from typing import Any, BinaryIO, ClassVar, TypeVar, cast
 
 import zstandard as zstd
 
 from app.core.config import settings
 from app.core.time_utils import ms_to_iso
+from app.domain.error_text import fmt_gb
+from app.domain.errors import (
+    BadRequestError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+)
+from app.domain.pack import is_pack_active_status, is_pack_terminal_status
 from app.repositories.errors import RepositoryConflictError
 from app.repositories.files import (
     cleanup_pack_source_reference,
@@ -62,28 +70,29 @@ from app.repositories.pack import (
     settle_user_pack_markers,
     update_pack_task_progress,
 )
-from app.domain.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from app.domain.error_text import fmt_gb
-from app.domain.pack import is_pack_active_status, is_pack_terminal_status
+from app.repositories.usage import rebuild_usage_from_authoritative_state
+from app.services.file_service import resolve_file_ids
 from app.services.settings_service import (
     get_min_free_disk,
+)
+from app.services.settings_service import (
     get_pack_compression_level as get_configured_pack_compression_level,
+)
+from app.services.settings_service import (
     get_pack_format as get_configured_pack_format,
 )
-from app.services.file_service import resolve_file_ids
-from app.services.storage_locks import (
-    get_content_hash_lock,
-    wait_for_content_readers_locked,
-)
-from app.services.task_broadcast import broadcast_task_update_to_subscribers
 from app.services.storage_index import (
     CONTENT_HASH_V1,
     calculate_legacy_content_hash,
     content_identity_from_content_hash,
     scan_storage_path,
 )
+from app.services.storage_locks import (
+    get_content_hash_lock,
+    wait_for_content_readers_locked,
+)
+from app.services.task_broadcast import broadcast_task_update_to_subscribers
 from app.services.usage_service import get_usage
-from app.repositories.usage import rebuild_usage_from_authoritative_state
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +191,7 @@ def cleanup_pack_output(output_path: Path) -> bool:
             recursive=False,
             allow_missing=True,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         logger.warning("Failed to clean up pack output %s: %s", output_path, exc)
         return False
 
@@ -445,8 +454,8 @@ class _CancelAwareReader(io.RawIOBase):
 
 
 class PackTaskManager:
-    _running_tasks: dict[int, _RunningPackJob] = {}
-    _blocked_user_ids: set[int] = set()
+    _running_tasks: ClassVar[dict[int, _RunningPackJob]] = {}
+    _blocked_user_ids: ClassVar[set[int]] = set()
     _dispatcher_task: asyncio.Task[None] | None = None
 
     @classmethod
@@ -1295,10 +1304,9 @@ class PackTaskManager:
                 cls._cleanup_pack_dir(task_id)
             return None
         cls._cleanup_pack_dir(task_id)
-        if completed["source_cleanup_pending"]:
-            if not await cls._replay_source_cleanup(
-                completed, job=job, cancel_event=cancel_event
-            ):
+        if completed["source_cleanup_pending"] and not await cls._replay_source_cleanup(
+            completed, job=job, cancel_event=cancel_event
+        ):
                 raise OSError("打包源清理尚未完成")
         return completed
 
@@ -1691,32 +1699,30 @@ class PackTaskManager:
             max_bytes=max_bytes,
             min_free_bytes=min_free_bytes,
             cancel_event=cancel_event,
-        ) as sink:
-            with compressor.stream_writer(
-                cast(BinaryIO, sink), closefd=False
-            ) as zst_stream:
-                with tarfile.open(fileobj=zst_stream, mode="w|") as archive:
-                    for item in items:
-                        if cancel_event.is_set():
-                            raise InterruptedError("pack cancelled")
+        ) as sink, compressor.stream_writer(
+            cast(BinaryIO, sink), closefd=False
+        ) as zst_stream, tarfile.open(fileobj=zst_stream, mode="w|") as archive:
+            for item in items:
+                if cancel_event.is_set():
+                    raise InterruptedError("pack cancelled")
 
-                        if item.is_dir:
-                            stat_result = item.path.stat()
-                            info = tarfile.TarInfo(item.arcname.rstrip("/") + "/")
-                            info.type = tarfile.DIRTYPE
-                            info.mode = stat_result.st_mode & 0o777
-                            info.mtime = int(stat_result.st_mtime)
-                            archive.addfile(info)
-                            continue
+                if item.is_dir:
+                    stat_result = item.path.stat()
+                    info = tarfile.TarInfo(item.arcname.rstrip("/") + "/")
+                    info.type = tarfile.DIRTYPE
+                    info.mode = stat_result.st_mode & 0o777
+                    info.mtime = int(stat_result.st_mtime)
+                    archive.addfile(info)
+                    continue
 
-                        stat_result = item.path.stat()
-                        info = tarfile.TarInfo(item.arcname)
-                        info.size = stat_result.st_size
-                        info.mode = stat_result.st_mode & 0o777
-                        info.mtime = int(stat_result.st_mtime)
-                        with item.path.open("rb") as source:
-                            reader = _CancelAwareReader(source, cancel_event, tracker)
-                            archive.addfile(info, fileobj=reader)
+                stat_result = item.path.stat()
+                info = tarfile.TarInfo(item.arcname)
+                info.size = stat_result.st_size
+                info.mode = stat_result.st_mode & 0o777
+                info.mtime = int(stat_result.st_mtime)
+                with item.path.open("rb") as source:
+                    reader = _CancelAwareReader(source, cancel_event, tracker)
+                    archive.addfile(info, fileobj=reader)
 
     @classmethod
     def _build_archive_items(

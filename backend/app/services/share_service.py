@@ -3,14 +3,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import jwt
 
 from app.core.config import settings
-from app.core.security import decrypt_credential, encrypt_credential, hash_password, verify_password
+from app.core.security import (
+    decrypt_credential,
+    encrypt_credential,
+    hash_password,
+    verify_password,
+)
 from app.core.time_utils import ms_to_iso, now_ms
 from app.domain.errors import (
     BadRequestError,
@@ -30,7 +35,11 @@ from app.domain.shares import (
 )
 from app.repositories import shares as shares_repo
 from app.repositories.errors import RepositoryConflictError
-from app.services.file_service import directory_entries, normalize_entry_parent, validate_subpath
+from app.services.file_service import (
+    directory_entries,
+    normalize_entry_parent,
+    validate_subpath,
+)
 
 SHARE_TOKEN_EXPIRE_MINUTES = 30
 
@@ -64,7 +73,7 @@ def generate_share_code() -> str:
 def create_access_token(share_code: str) -> str:
     payload = {
         "sub": share_code,
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=SHARE_TOKEN_EXPIRE_MINUTES),
+        "exp": datetime.now(UTC) + timedelta(minutes=SHARE_TOKEN_EXPIRE_MINUTES),
         "type": "share_access",
     }
     return jwt.encode(payload, settings.secret_key, algorithm="HS256")

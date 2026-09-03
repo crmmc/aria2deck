@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
 import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Literal, overload
 
 from sqlalchemy import case, exists, func, insert, literal, or_, select, update
@@ -9,7 +9,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.engine import transaction
-from app.domain.error_text import over_limit
 from app.db.schema import (
     global_downloads,
     pack_tasks,
@@ -19,6 +18,7 @@ from app.db.schema import (
     user_tasks,
     users,
 )
+from app.domain.error_text import over_limit
 from app.domain.lifecycle import (
     RepairClaim,
     TerminalizationClaim,
@@ -31,6 +31,7 @@ from app.domain.status import (
     TERMINAL_USER_TASK_STATUSES,
 )
 from app.repositories.errors import RepositoryConflictError
+
 
 async def active_physical_commitment_bytes(conn: Any) -> int:
     """Future disk write commitment for admission / visible headroom.

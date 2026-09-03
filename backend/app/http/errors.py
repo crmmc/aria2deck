@@ -18,7 +18,6 @@ from app.domain.errors import (
     UnauthorizedError,
 )
 
-
 _HTTP_STATUS_BY_ERROR_TYPE: dict[type[DomainError], int] = {
     BadRequestError: status.HTTP_400_BAD_REQUEST,
     UnauthorizedError: status.HTTP_401_UNAUTHORIZED,

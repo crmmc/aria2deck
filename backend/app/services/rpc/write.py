@@ -10,8 +10,6 @@ Behaviour is unchanged from the legacy handler.
 
 from __future__ import annotations
 
-from typing import Any
-
 from app.core.config import get_internal_base_url
 from app.core.security import (
     WEBSEED_URI_SCHEMES,
@@ -119,7 +117,7 @@ async def _handle_add_uri(user_id: int, params: list) -> str:
             resource=resource,
             options=options,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         _raise_create_download_error(user_id, exc)
 
     return await _gid_for_created_task(task, resource_key)
@@ -200,7 +198,7 @@ async def _handle_add_torrent(user_id: int, params: list) -> str:
             resource=resource,
             options=submit_options,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         _raise_create_download_error(user_id, exc)
 
     return await _gid_for_created_task(task, resource_key)

@@ -25,6 +25,7 @@ dev = [
     "pytest-cov>=7.0.0",
     "pytest-timeout>=2.3.1",
     "mypy>=1.19.1",
+    "ruff>=0.16.5",
 ]
 
 [tool.coverage.run]
@@ -56,3 +57,26 @@ show_error_codes = true
 module = "app.aria2.*"
 disallow_untyped_defs = true
 check_untyped_defs = true
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# 默认规则之外追加 S（bandit 安全规则子集），不收窄、不豁免
+extend-select = ["S"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试豁免：断言、夹具凭据与临时路径、种子 sha1、风格与遗留导入噪音全免；
+# F821/E9/S501 等真 bug 与严重安全规则仍对测试生效
+"backend/tests/**" = [
+    "S101", "S105", "S106", "S107", "S108", "S310", "S324", "S603", "S608",
+    "F401", "F811", "F841", "RUF012", "RUF059", "RUF100",
+    "I001", "E402",
+    "SIM102", "SIM114", "SIM117", "SIM222",
+    "PLR0402", "PLR1711", "RET501",
+    "PIE810", "FLY002", "C401", "C402", "C408", "PERF102",
+    "UP035", "UP017", "UP037", "PYI034", "PYI036",
+]

@@ -167,7 +167,7 @@ async def _rebuild_from_source(
         )
 
     if kind == "torrent":
-        torrent = payload[7:] if payload.startswith("base64:") else payload
+        torrent = payload.removeprefix("base64:")
         indexes = _parse_selection_indexes(source.get("selection_json"))
         return await task_service.create_torrent_task(
             user_id=user_id,

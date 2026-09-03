@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import stat
 import threading
@@ -9,6 +10,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
 
 from app.domain.content_identity import (
     CONTENT_HASH_V1,
@@ -188,7 +192,7 @@ def calculate_legacy_content_hash(
     pending: list[tuple[Path, str, os.stat_result, bool]] = [(root, ".", root_stat, True)]
     while pending:
         _cancelled(event)
-        path, relative, item_stat, is_dir = pending.pop()
+        path, relative, _item_stat, is_dir = pending.pop()
         if not is_dir:
             digest.update(relative.encode())
             file_hash = (
@@ -208,7 +212,9 @@ def calculate_legacy_content_hash(
                     discovered += 1
         except OSError as exc:
             raise _invalid("无法扫描目录") from exc
-        for name, child_path, child_stat in reversed(sorted(children, key=lambda item: item[0])):
+        for name, child_path, child_stat in sorted(
+            children, key=lambda item: item[0], reverse=True
+        ):
             child_relative = name if relative == "." else f"{relative}/{name}"
             _validate_relative(child_relative)
             pending.append((child_path, child_relative, child_stat, _kind(child_stat)))
@@ -267,7 +273,9 @@ def scan_storage_path(
                     discovered += 1
         except OSError as exc:
             raise _invalid("无法扫描目录") from exc
-        for name, child_path, child_stat in reversed(sorted(children, key=lambda item: item[0].encode())):
+        for name, child_path, child_stat in sorted(
+            children, key=lambda item: item[0].encode(), reverse=True
+        ):
             child_relative = name if relative == "." else f"{relative}/{name}"
             _validate_relative(child_relative)
             child_is_dir = _kind(child_stat)
@@ -304,8 +312,8 @@ async def scan_storage_path_async(
                 break
         try:
             worker.result()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001  # cancelled worker cleanup must not mask cancellation
+            logger.debug("取消扫描时后台 worker 失败 error_type=%s", type(exc).__name__)
         raise
 
 

@@ -47,7 +47,7 @@ CREDENTIAL_DIGEST_DOMAINS = frozenset({"api-token", "rpc-secret"})
 def _credential_digest(kind: str, secret: str, pepper: str) -> str:
     return hmac.new(
         pepper.encode("utf-8"),
-        f"aria2deck:{kind}:v1\0{secret}".encode("utf-8"),
+        f"aria2deck:{kind}:v1\0{secret}".encode(),
         hashlib.sha256,
     ).hexdigest()
 
@@ -296,7 +296,7 @@ async def check_url_ssrf(
             "localhost.localdomain",
             "127.0.0.1",
             "::1",
-            "0.0.0.0",
+            "0.0.0.0",  # noqa: S104  # SSRF blacklist literal, not a bind address
             "::",
         }
         if hostname.lower() in blocked_hosts:
@@ -328,7 +328,7 @@ async def check_url_ssrf(
                 return f"域名 {hostname} 解析到非公网或内网地址，禁止下载"
     except (TypeError, ValueError):
         return "无效的下载链接"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         logger.warning(
             "SSRF 校验异常 url=%s error_type=%s",
             redact_url_for_log(url),

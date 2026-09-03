@@ -96,7 +96,7 @@ def extract_info_hash_from_torrent_base64(torrent_base64: str) -> str | None:
     """
     try:
         torrent_data = base64.b64decode(torrent_base64, validate=True)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001  # external boundary preserves failure isolation
         logger.warning(f"Failed to decode base64 torrent: {e}")
         return None
     return extract_info_hash_from_torrent(torrent_data)
@@ -220,7 +220,7 @@ def get_uri_hash(uri: str, torrent_base64: str | None = None) -> str | None:
         return extract_info_hash_from_torrent_base64(torrent_base64)
 
     # HTTP(S) URL
-    if uri_lower.startswith("http://") or uri_lower.startswith("https://"):
+    if uri_lower.startswith(("http://", "https://")):
         return calculate_url_hash(uri)
 
     # FTP URL
@@ -238,4 +238,4 @@ def is_magnet_link(uri: str) -> bool:
 def is_http_url(uri: str) -> bool:
     """Check if a URI is an HTTP(S) URL."""
     lower = uri.lower()
-    return lower.startswith("http://") or lower.startswith("https://")
+    return lower.startswith(("http://", "https://"))

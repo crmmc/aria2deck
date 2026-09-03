@@ -97,7 +97,7 @@ def parse_torrent_bytes(raw: bytes) -> TorrentMetadata:
         raise TorrentMetadataError("missing info dictionary")
 
     info_bytes = raw[info_span[0] : info_span[1]]
-    info_hash = hashlib.sha1(info_bytes).hexdigest().lower()
+    info_hash = hashlib.sha1(info_bytes, usedforsecurity=False).hexdigest().lower()
     name = _decode_component(info.get(b"name"), field="name")
 
     files = _extract_files(name, info)

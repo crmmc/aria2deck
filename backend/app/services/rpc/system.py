@@ -12,7 +12,7 @@ Behaviour is unchanged from the legacy handler.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 from app.repositories.task.user_tasks import (
     delete_all_terminal_user_tasks,
@@ -164,7 +164,7 @@ class Aria2RpcHandler:
     """
 
     # 支持的 RPC 方法列表
-    SUPPORTED_METHODS = [
+    SUPPORTED_METHODS: ClassVar[list[str]] = [
         "aria2.addUri",
         "aria2.addTorrent",
         "aria2.remove",
@@ -397,7 +397,7 @@ class Aria2RpcHandler:
                     results.append(
                         {"faultCode": exc.code, "faultString": fault_string}
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
                     logger.warning(
                         "system.multicall method failed user_id=%s index=%s error_type=%s",
                         self.user_id,

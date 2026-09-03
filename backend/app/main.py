@@ -1,5 +1,3 @@
-# ruff: noqa: E402
-
 import asyncio
 import logging
 import os
@@ -14,7 +12,6 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from sqlalchemy import text
-
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +38,7 @@ def setup_logging():
 
     # 控制台 handler
     console_handler = logging.StreamHandler()
-    setattr(console_handler, "_aria2deck_handler", True)
+    console_handler._aria2deck_handler = True
     console_handler.setLevel(log_level)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
@@ -59,12 +56,12 @@ def setup_logging():
         backupCount=5,
         encoding="utf-8",
     )
-    setattr(file_handler, "_aria2deck_handler", True)
+    file_handler._aria2deck_handler = True
     file_handler.setLevel(log_level)
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
 
-    logging.info(f"日志已配置: 级别={log_level_str}, 文件={log_file}")
+    logger.info("日志已配置: 级别=%s, 文件=%s", log_level_str, log_file)
 
 
 # 初始化日志
@@ -72,11 +69,6 @@ setup_logging()
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-
-from app.http.request_body_limit import (
-    MAX_HTTP_REQUEST_BODY_BYTES,
-    RequestBodyLimitMiddleware,
-)
 
 from app.aria2.client import Aria2Client
 from app.aria2.gateway import get_aria2_client, update_cached_aria2_config
@@ -90,6 +82,11 @@ from app.db.engine import (
     dispose_engine,
     get_engine,
 )
+from app.http.request_body_limit import (
+    MAX_HTTP_REQUEST_BODY_BYTES,
+    RequestBodyLimitMiddleware,
+)
+from app.modules.backend.aria2_adapter import Aria2BackendAdapter
 from app.repositories.auth import (
     count_admins,
     create_user,
@@ -113,7 +110,6 @@ from app.routers import (
     users,
     ws,
 )
-from app.modules.backend.aria2_adapter import Aria2BackendAdapter
 from app.services.repair import (
     purge_orphan_aria2_downloads,
     purge_terminal_download_dirs,
@@ -208,7 +204,7 @@ async def _database_ready() -> bool:
     try:
         async with get_engine().connect() as connection:
             await connection.execute(text("SELECT 1"))
-    except Exception:
+    except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
         return False
     return True
 
@@ -363,7 +359,10 @@ async def lifespan(app: FastAPI):
                 "WAL 文件检查发现问题，但不影响启动。建议检查磁盘空间和文件系统。"
             )
 
-        from app.services.settings_service import load_runtime_config, refresh_aria2_config
+        from app.services.settings_service import (
+            load_runtime_config,
+            refresh_aria2_config,
+        )
 
         await refresh_aria2_config()
         await load_runtime_config()
@@ -469,6 +468,8 @@ async def lifespan(app: FastAPI):
 
         from app.services.tracker_list_service import (
             load_from_db as load_tracker_list_cache,
+        )
+        from app.services.tracker_list_service import (
             run_tracker_list_refresher,
         )
 

@@ -65,7 +65,7 @@ async def system_pause_gid(
 
     try:
         await backend.pause_gid(control_gid)
-    except Exception:
+    except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
         return await _requery_after_control_failure(
             backend=backend,
             download_id=download_id,
@@ -113,8 +113,8 @@ async def system_unpause_gid(
     """
     try:
         await backend.unpause_gid(control_gid)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001  # lifecycle control failure is followed by status re-query
+        logger.debug("恢复任务 RPC 失败，将继续复查 error_type=%s", type(exc).__name__)
     return await _requery_after_control_failure(
         backend=backend,
         download_id=download_id,
@@ -271,7 +271,7 @@ async def _requery_after_control_failure(
 
     try:
         re_status = await backend.tell_status(control_gid)
-    except Exception as re_exc:
+    except Exception as re_exc:  # noqa: BLE001  # external boundary preserves failure isolation
         if is_missing_gid_error(re_exc):
             current = await get_global_download_for_generation(
                 download_id, expected_gid

@@ -461,8 +461,8 @@ def merged_download_settings(payload: Mapping[str, Any]) -> dict[str, int]:
 
 
 def validate_download_settings(settings_map: Mapping[str, int]) -> None:
-    from app.domain.errors import BadRequestError
     from app.domain.error_text import fmt_count
+    from app.domain.errors import BadRequestError
 
     total = settings_map["download_total_connections"]
     if total <= 0:

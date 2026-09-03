@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from time import monotonic
 from pathlib import Path
+from time import monotonic
 
 from app.core.config import settings
 from app.services.task_projection import speed_totals, stat_counts
@@ -26,7 +26,7 @@ def get_directory_size_bytes(path: Path) -> int:
         if entry.is_file():
             try:
                 total += entry.stat().st_size
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
                 logger.warning("统计目录大小失败 path=%s error=%s", entry, exc)
     return total
 

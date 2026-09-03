@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import secrets
 import time
+from dataclasses import dataclass
 from uuid import uuid4
 
 from fastapi import HTTPException, Request, Response, status
@@ -12,7 +12,6 @@ from app.core.config import settings
 from app.core.request_rate_guard import RateLimitScope, ensure_authenticated_allowed
 from app.core.security import credential_digest
 from app.repositories import auth as auth_repo
-
 
 logger = logging.getLogger(__name__)
 

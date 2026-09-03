@@ -7,7 +7,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ class DownloadIdentity(StrEnum):
 class DownloadConfig:
     """下载并发配置的内存缓存。"""
 
-    _DB_KEY_MAP: dict[str, tuple[str, int, tuple[str, ...]]] = {
+    _DB_KEY_MAP: ClassVar[dict[str, tuple[str, int, tuple[str, ...]]]] = {
         "download_total_connections": (
             "total_connections",
             100,

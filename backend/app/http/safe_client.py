@@ -31,7 +31,7 @@ def normalize_public_http_url(url: str) -> str:
     if hostname.lower() in {
         "localhost",
         "localhost.localdomain",
-        "0.0.0.0",
+        "0.0.0.0",  # noqa: S104  # SSRF blacklist literal, not a bind address
         "::",
     }:
         raise UnsafeTargetError("不允许访问本机地址")

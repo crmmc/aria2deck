@@ -10,9 +10,9 @@ import logging
 from typing import Any
 
 from app.aria2.protocol import Aria2Gateway
-from app.modules.backend.port import BackendPort
 from app.core.config import get_internal_base_url
 from app.core.time_utils import now_ms
+from app.modules.backend.port import BackendPort
 from app.repositories.task.downloads import (
     list_active_like_http_downloads,
     list_inconsistent_completed_download_ids,
@@ -66,7 +66,7 @@ async def _stop_legacy_http_job(
 ) -> None:
     try:
         await client.force_remove(gid)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         if not is_missing_gid_error(exc):
             logger.error(
                 "[Startup] Failed to stop legacy HTTP job download_id=%s "
@@ -78,7 +78,7 @@ async def _stop_legacy_http_job(
 
     try:
         await client.remove_download_result(gid)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         logger.warning(
             "[Startup] Failed to remove legacy HTTP result download_id=%s "
             "error_type=%s",
@@ -101,7 +101,7 @@ async def reconcile_legacy_http_downloads_v0(client: Aria2Gateway) -> int:
         if gid:
             try:
                 uris = await client.get_uris(gid)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
                 logger.warning(
                     "[Startup] HTTP URI verification failed download_id=%s error_type=%s",
                     download_id,

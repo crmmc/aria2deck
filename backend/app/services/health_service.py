@@ -39,7 +39,7 @@ def _worker_failures(application: object) -> list[str]:
 
         try:
             completed = done()
-        except Exception:
+        except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
             failures.append(f"{name} 状态异常")
             continue
 
@@ -63,7 +63,7 @@ async def _database_ready(application: object) -> bool:
         if not isinstance(result, Awaitable):
             return False
         return (await result) is True
-    except Exception:
+    except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
         return False
 
 

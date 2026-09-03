@@ -544,7 +544,7 @@ async def _rebuild_global_downloads_source_fk(conn: AsyncConnection) -> None:
     await conn.execute(text(create_sql.format(name="global_downloads_v12_new")))
     await conn.execute(
         text(
-            f"INSERT INTO global_downloads_v12_new ({column_list}) "
+            f"INSERT INTO global_downloads_v12_new ({column_list}) "  # noqa: S608 - column_list is an internal migration constant and SQL identifiers cannot be bound
             f"SELECT {column_list} FROM global_downloads"
         )
     )
@@ -944,9 +944,7 @@ async def _backfill_v4_pack_sources(conn: AsyncConnection) -> None:
                 state, error = "unknown", "升级时无法确认待清理源文件身份"
             elif identity is None:
                 state, error = "retained", "升级时无法确认历史源身份，按已保留处理"
-            elif active and uncertain:
-                state, error = "retained", None
-            elif not bool(task["delete_source"]):
+            elif active and uncertain or not bool(task["delete_source"]):
                 state, error = "retained", None
             elif active:
                 state, error = "pending", None
@@ -1233,7 +1231,9 @@ async def ensure_v7_content_identity_schema(conn: AsyncConnection) -> None:
         "length(content_digest) != 64 OR content_digest GLOB \"*[^0-9a-f]*\" OR "
         "content_hash != \"v2:\" || content_object_kind || \":\" || content_digest)"
     )
-    row = await conn.execute(text(f"SELECT 1 FROM stored_files WHERE {invalid} LIMIT 1"))
+    row = await conn.execute(
+        text(f"SELECT 1 FROM stored_files WHERE {invalid} LIMIT 1")  # noqa: S608  # internal migration predicate; identifiers cannot be bound
+    )
     if row.first():
         raise RuntimeError("v7 内容身份迁移发现无效记录")
     await conn.execute(

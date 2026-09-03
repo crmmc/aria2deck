@@ -15,8 +15,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any
 
 from app.core.config import get_credential_pepper, get_internal_base_url
 from app.domain.task_policy import legacy_rest_status
@@ -38,6 +39,7 @@ from app.repositories.task.downloads import (
     get_global_download_by_id,
     list_pending_submission_candidates,
 )
+from app.services import tracker_list_service
 from app.services.gateway import http_resource_identity, source_request_options
 from app.services.hash import (
     extract_info_hash_from_magnet,
@@ -47,7 +49,6 @@ from app.services.hash import (
 )
 from app.services.lifecycle.repair import _has_only_internal_gateway_uris
 from app.services.storage import get_task_download_dir
-from app.services import tracker_list_service
 
 logger = logging.getLogger(__name__)
 
@@ -64,16 +65,16 @@ def derive_planned_gid(tid: int) -> str:
     使用项目 credential pepper 的 domain-separated HMAC-SHA256，
     message 只含十进制 tid；崩溃后可由持久 tid 重新计算，无需迁移。
     """
-    key = f"{_PLANNED_GID_DOMAIN}:{get_credential_pepper()}".encode("utf-8")
+    key = f"{_PLANNED_GID_DOMAIN}:{get_credential_pepper()}".encode()
     digest = hmac.new(key, str(tid).encode("ascii"), hashlib.sha256).hexdigest()
     return digest[:16]
 
 __all__ = [
     "BatchAllowanceDeniedError",
-    "BatchTaskItem",
-    "BatchTaskItemResult",
     "BatchCreateResult",
     "BatchSubmissionUndeterminedError",
+    "BatchTaskItem",
+    "BatchTaskItemResult",
     "batch_create_tasks",
     "confirm_planned_submission",
     "derive_planned_gid",
@@ -401,7 +402,8 @@ async def _reconcile_candidate(
     fail_on_missing: bool = True,
 ) -> str:
     download = candidate.download
-    assert download is not None
+    if download is None:
+        raise RuntimeError("批量提交候选缺少下载记录")
     if not status_o.ok:
         if _is_missing_gid_fault(status_o):
             if not fail_on_missing:
@@ -594,7 +596,7 @@ async def _submit_candidates(
         return
     try:
         outcomes = await client.multicall(calls)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         logger.warning(
             "multicall 传输失败 call_count=%s error_type=%s",
             len(calls),
@@ -604,7 +606,7 @@ async def _submit_candidates(
             await _resolve_by_reconciliation(
                 client=client, candidates=candidates, results=results
             )
-        except Exception:
+        except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
             logger.warning("reconciliation multicall 失败，结果不可确认")
             raise BatchSubmissionUndeterminedError(UNDETERMINED_MESSAGE) from exc
         return
@@ -639,7 +641,7 @@ async def _submit_candidates(
             await _resolve_by_reconciliation(
                 client=client, candidates=faulted, results=results
             )
-        except Exception:
+        except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
             raise BatchSubmissionUndeterminedError(UNDETERMINED_MESSAGE)
 
 

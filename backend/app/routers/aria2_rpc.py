@@ -511,7 +511,7 @@ async def jsonrpc_handler(request: Request) -> Response:
     """
     try:
         body = await request.json()
-    except Exception:
+    except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
         client_ip = request.client.host if request.client else "unknown"
         request_id = getattr(request.state, "request_id", "-")
         logger.warning("RPC请求解析JSON失败 ip=%s request_id=%s", client_ip, request_id)

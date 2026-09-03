@@ -19,15 +19,14 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from app.modules.backend.port import BackendPort
-
+from app.aria2.gateway import get_aria2_client
 from app.core.config import get_internal_base_url, settings
 from app.core.security import (
     check_torrent_network_endpoints,
     check_url_ssrf,
     mask_url_credentials,
 )
-from app.aria2.gateway import get_aria2_client
+from app.domain.error_text import fmt_gb, over_limit
 from app.domain.errors import (
     BadGatewayError,
     BadRequestError,
@@ -35,25 +34,6 @@ from app.domain.errors import (
     ForbiddenError,
     PayloadTooLargeError,
 )
-from app.repositories.task.downloads import (
-    get_global_download_by_id,
-)
-from app.repositories.task.sources import torrent_source_uri_placeholder
-from app.services.hash import (
-    extract_info_hash_from_magnet,
-    get_uri_hash,
-    is_http_url,
-    is_magnet_link,
-)
-from app.services.http_probe import probe_url_with_get_fallback
-from app.services.gateway import (
-    CAPABILITY_HEADER,
-    create_capability,
-    http_resource_identity,
-    source_request_options,
-)
-from app.domain.error_text import fmt_gb, over_limit
-from app.services.settings_service import get_max_task_size, get_min_free_disk
 from app.domain.torrent_metadata import (
     MAX_TORRENT_FILE_COUNT,
     TorrentMetadata,
@@ -65,17 +45,102 @@ from app.domain.torrent_metadata import (
     validate_selected_indexes,
 )
 from app.modules.backend.aria2_adapter import Aria2BackendAdapter
+from app.modules.backend.port import BackendPort
 from app.modules.task_core.register import (
     RegisterError,
     ResourceSpec,
     register,
 )
-from app.modules.task_core.submit import submit_tid
 from app.modules.task_core.states import ERROR_QUOTA_EXCEEDED
-from app.services.usage_service import get_usage
+from app.modules.task_core.submit import submit_tid
+from app.repositories.task.downloads import (
+    get_global_download_by_id,
+)
+from app.repositories.task.sources import torrent_source_uri_placeholder
 from app.services import tracker_list_service
+from app.services.gateway import (
+    CAPABILITY_HEADER,
+    create_capability,
+    http_resource_identity,
+    source_request_options,
+)
+from app.services.hash import (
+    extract_info_hash_from_magnet,
+    get_uri_hash,
+    is_http_url,
+    is_magnet_link,
+)
+from app.services.http_probe import probe_url_with_get_fallback
+from app.services.settings_service import get_max_task_size, get_min_free_disk
+from app.services.usage_service import get_usage
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "CAPABILITY_HEADER",
+    "ERROR_QUOTA_EXCEEDED",
+    "MAGNET_MIN_SPACE",
+    "MAX_TORRENT_BASE64_LENGTH",
+    "MAX_TORRENT_FILE_COUNT",
+    "SUBMISSION_FAILED_MESSAGE",
+    "Any",
+    "Aria2BackendAdapter",
+    "BackendPort",
+    "BadGatewayError",
+    "BadRequestError",
+    "ConflictError",
+    "ForbiddenError",
+    "Path",
+    "PayloadTooLargeError",
+    "RegisterError",
+    "ResourceSpec",
+    "TorrentMetadata",
+    "TorrentMetadataError",
+    "build_select_file_option",
+    "build_selection_resource_key",
+    "check_disk_space",
+    "check_torrent_network_endpoints",
+    "check_torrent_network_safety",
+    "check_url_safety",
+    "check_url_ssrf",
+    "create_capability",
+    "create_task",
+    "create_torrent_task",
+    "extract_info_hash_from_magnet",
+    "fmt_gb",
+    "get_aria2_client",
+    "get_global_download_by_id",
+    "get_internal_base_url",
+    "get_max_task_size",
+    "get_min_free_disk",
+    "get_uri_hash",
+    "get_usage",
+    "http_resource_identity",
+    "is_http_url",
+    "is_magnet_link",
+    "logger",
+    "logging",
+    "mask_url_credentials",
+    "over_limit",
+    "parse_torrent_base64_async",
+    "parse_torrent_or_error",
+    "preview_torrent_task",
+    "probe_url_with_get_fallback",
+    "raise_register_error",
+    "register",
+    "register_and_submit",
+    "selected_total_size",
+    "set_task_backend_override",
+    "settings",
+    "shutil",
+    "source_request_options",
+    "submit_tid",
+    "threading",
+    "torrent_preview_response",
+    "torrent_source_uri_placeholder",
+    "tracker_list_service",
+    "validate_selected_indexes",
+]
 
 
 def _ts() -> Any:
@@ -282,7 +347,7 @@ async def register_and_submit(
                     backend=backend,
                     error_message=SUBMISSION_FAILED_MESSAGE,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
                 logger.warning(
                     "提交失败后回滚任务失败 user_id=%s pid=%s",
                     user_id,
@@ -302,7 +367,7 @@ async def register_and_submit(
                     backend=backend,
                     error_message=SUBMISSION_FAILED_MESSAGE,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
                 logger.warning(
                     "提交失败后回滚任务失败 user_id=%s pid=%s",
                     user_id,

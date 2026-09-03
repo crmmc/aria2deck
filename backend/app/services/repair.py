@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from app.modules.backend.port import BackendPort
+from app.repositories.files import (
+    create_stored_file_with_entries,
+    get_stored_file_by_content_hash,
+    list_stored_file_content_hashes,
+)
 from app.repositories.task.downloads import (
     claim_terminal_reclaim,
     get_global_download_by_id,
@@ -16,13 +21,8 @@ from app.repositories.task.downloads import (
     list_terminal_download_ids,
     list_terminal_downloads_with_residual_gid,
     reopen_completed_download_for_index_repair,
-    restore_incomplete_completed_download,
     reset_active_accounting_for_startup,
-)
-from app.repositories.files import (
-    create_stored_file_with_entries,
-    get_stored_file_by_content_hash,
-    list_stored_file_content_hashes,
+    restore_incomplete_completed_download,
 )
 from app.services.failed_task_cleanup import cleanup_with_claim
 from app.services.lifecycle.completion import handle_v0_download_complete
@@ -97,7 +97,7 @@ async def purge_terminal_residual_gids(backend: BackendPort) -> dict[str, int]:
                 purged += 1
             else:
                 failed += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             failed += 1
             logger.warning(
                 "Failed to purge residual gid download_id=%s gid=%s error=%s",
@@ -147,7 +147,7 @@ async def purge_terminal_download_dirs() -> dict[str, int]:
         try:
             await cleanup_task_download_dir(download_id)
             purged += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             failed += 1
             logger.warning(
                 "Failed to purge terminal download dir id=%s error=%s",
@@ -188,7 +188,9 @@ async def recover_completed_downloads_pending_index(
             skipped += 1
             continue
 
-        async def _restore_incomplete() -> None:
+        async def _restore_incomplete(
+            *, download_id: int = download_id, original_gid_str: str | None = original_gid_str
+        ) -> None:
             restored = await restore_incomplete_completed_download(
                 download_id,
                 aria2_gid=original_gid_str,
@@ -261,7 +263,7 @@ async def recover_completed_downloads_pending_index(
             else:
                 failed += 1
                 await _restore_incomplete()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             failed += 1
             logger.warning(
                 "Failed to recover pending-index download id=%s error=%s",
@@ -288,8 +290,8 @@ async def rebuild_active_download_accounting(
     size admission, handoff, completion, error/removed terminalization and
     missing-GID inside a single coordinator boundary.
     """
-    from app.services.lifecycle.coordinator import reconcile_attempt_signal
     from app.domain.lifecycle import ReconcileResult
+    from app.services.lifecycle.coordinator import reconcile_attempt_signal
 
     downloads = await list_active_global_downloads()
 
@@ -311,7 +313,7 @@ async def rebuild_active_download_accounting(
                 observed_status=None,
                 log_prefix="[Startup]",
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             failed += 1
             logger.warning(
                 "Startup reconcile failed download_id=%s gid=%s error=%s",
@@ -408,7 +410,7 @@ async def scan_and_create_stored_files() -> StoredFileScanResult:
             if get_store_path_for_hash(content_hash).resolve(strict=False) != item_path.resolve(strict=False):
                 raise ValueError("store path is not canonical")
             status = await _create_stored_file_for_path(item_path, content_hash)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             error = f"Failed to create StoredFile for {content_hash}: {exc}"
             logger.error(error)
             results["unresolved"] += 1
@@ -457,7 +459,7 @@ async def _create_stored_file_for_path(
                 actual_hash,
             )
             return "unresolved"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         logger.warning("Could not verify content hash for %s: %s", path, exc)
         return "unresolved"
 
@@ -492,10 +494,10 @@ async def _create_stored_file_for_path(
         )
         logger.info("Created StoredFile for orphan: %s", content_hash)
         return "created"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         try:
             concurrent = await get_stored_file_by_content_hash(content_hash)
-        except Exception as confirmation_exc:
+        except Exception as confirmation_exc:  # noqa: BLE001  # external boundary preserves failure isolation
             logger.warning(
                 "Failed to create StoredFile: %s; confirmation failed: %s",
                 exc,
@@ -577,7 +579,7 @@ async def purge_orphan_aria2_downloads(
             await backend.force_remove_gid(gid)
             removed += 1
             logger.info("[Startup] Removed orphan aria2 download gid=%s", gid)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             failed += 1
             logger.warning(
                 "[Startup] Failed to remove orphan download gid=%s error=%s",

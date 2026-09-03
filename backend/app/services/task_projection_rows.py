@@ -23,7 +23,8 @@ gid 不一致（tid 复用 / handoff 换 gid）一律 miss 并逐出，保证内
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from app.core.time_utils import now_ms
 from app.domain.status import TERMINAL_DOWNLOAD_STATUSES

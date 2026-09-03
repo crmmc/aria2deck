@@ -20,11 +20,7 @@ from typing import Any, Literal
 from app.domain.error_text import over_limit
 from app.domain.status import ACTIVE_USER_TASK_STATUSES
 from app.modules.task_core.states import ERROR_QUOTA_EXCEEDED
-from app.repositories.task.user_tasks import (
-    attach_completed_file_to_user,
-    create_user_task,
-    get_user_task,
-)
+from app.repositories.errors import RepositoryConflictError
 from app.repositories.task.downloads import (
     create_global_download_attempt,
     find_latest_completed_global_download_by_resource_key,
@@ -36,7 +32,11 @@ from app.repositories.task.sources import (
     encode_options_json,
     encode_selection_json,
 )
-from app.repositories.errors import RepositoryConflictError
+from app.repositories.task.user_tasks import (
+    attach_completed_file_to_user,
+    create_user_task,
+    get_user_task,
+)
 from app.services.usage_service import get_usage, release_reserved, reserve_bytes
 
 RegisterOutcome = Literal["created", "joined_live", "attached_completed"]

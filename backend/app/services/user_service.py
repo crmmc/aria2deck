@@ -4,7 +4,13 @@ import logging
 import secrets
 
 from app.auth import AuthUser
-from app.core.security import credential_digest, credential_prefix, decrypt_credential, encrypt_credential, hash_password
+from app.core.security import (
+    credential_digest,
+    credential_prefix,
+    decrypt_credential,
+    encrypt_credential,
+    hash_password,
+)
 from app.core.time_utils import ms_to_iso, now_ms
 from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.domain.quota import machine_share_percent, usage_percent

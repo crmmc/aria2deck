@@ -12,7 +12,6 @@ from starlette.types import Receive, Scope, Send
 from app.core.download_limiter import DownloadLease
 from app.services.storage_locks import ContentReadLease
 
-
 RANGE_READ_CHUNK_SIZE = 256 * 1024
 
 
@@ -91,7 +90,8 @@ def prepare_range_file_response(
         return full_response()
     start_value, end_value = parsed_ranges[0]
     if start_value is None:
-        assert end_value is not None
+        if end_value is None:
+            raise range_error()
         start = max(0, file_size - end_value)
         end = file_size - 1
     else:

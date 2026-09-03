@@ -3,7 +3,6 @@ from fastapi.responses import JSONResponse
 
 from app.services.health_service import readiness_errors
 
-
 router = APIRouter(prefix="/api/health", tags=["health"])
 
 

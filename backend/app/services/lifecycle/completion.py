@@ -14,11 +14,11 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from app.modules.backend.port import BackendPort
 from app.core.config import settings
 from app.core.time_utils import now_ms
 from app.domain.locks import get_download_lifecycle_lock
 from app.domain.quota import get_disk_available_bytes
+from app.modules.backend.port import BackendPort
 from app.repositories.errors import RepositoryConflictError
 from app.repositories.files import (
     create_stored_file_with_entries,
@@ -33,8 +33,8 @@ from app.repositories.task.downloads import (
 from app.repositories.task.user_tasks import complete_active_user_tasks_for_stored_file
 from app.services import download_ops
 from app.services.lifecycle.cleanup import (
-    _remove_download_result_best_effort,
     _reclaim_terminal_with_claim,
+    _remove_download_result_best_effort,
     fail_download_and_reclaim,
 )
 from app.services.lifecycle.handoff import (
@@ -233,7 +233,7 @@ async def resolve_complete_source_with_retry(
             refreshed_files = refreshed_status.get("files", [])
             if isinstance(refreshed_files, list):
                 latest_files = refreshed_files
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             logger.debug(
                 "[WS] Failed to refresh complete status gid=%s error=%s",
                 completion_gid,
@@ -584,14 +584,13 @@ async def handle_v0_download_complete(
         task_name=task_name,
         backend=backend,
     )
-    if source_path is None:
-        if await switch_to_late_followed_download_if_supported(
-            backend=backend,
-            download=current,
-            metadata_gid=completion_gid,
-            display_name_fallback=display_name_fallback,
-            log_prefix=log_prefix,
-        ):
+    if source_path is None and await switch_to_late_followed_download_if_supported(
+        backend=backend,
+        download=current,
+        metadata_gid=completion_gid,
+        display_name_fallback=display_name_fallback,
+        log_prefix=log_prefix,
+    ):
             return True
 
     original_name = task_name or (source_path.name if source_path else "")
@@ -683,7 +682,7 @@ async def handle_v0_download_complete(
         await _remove_download_result_best_effort(backend, completion_gid, log_prefix)
         try:
             await cleanup_task_download_dir(download_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             logger.warning(
                 "%s Failed to reclaim completed download dir id=%s error=%s",
                 log_prefix,

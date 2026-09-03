@@ -17,11 +17,11 @@ from app.db.schema import (
     user_storage_usage,
     users,
 )
+from app.domain.content_identity import content_identity_from_content_hash
 from app.domain.error_text import fmt_gb
 from app.domain.pack import PACK_ACTIVE_STATUSES, PACK_TERMINAL_STATUSES
-from app.repositories.task.downloads import active_physical_commitment_bytes
 from app.repositories.errors import RepositoryConflictError
-from app.domain.content_identity import content_identity_from_content_hash
+from app.repositories.task.downloads import active_physical_commitment_bytes
 
 
 class PackAdmissionError(ValueError):

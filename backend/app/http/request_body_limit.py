@@ -4,7 +4,6 @@ from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-
 # Leaves room for JSON framing around the 14 MiB Base64 torrent field.
 MAX_HTTP_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 REQUEST_BODY_TOO_LARGE_DETAIL = "请求体过大，最大支持 16 MiB"

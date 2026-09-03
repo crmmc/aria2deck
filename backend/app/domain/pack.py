@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 PACK_ACTIVE_STATUSES = ("pending", "packing")
 PACK_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 
