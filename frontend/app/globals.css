@@ -186,8 +186,6 @@
 
 body {
   margin: 0;
-  overflow: hidden;
-  /* 防止 body 滚动，滚动应在 glass-frame 内部 */
   font-family:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
     Helvetica, Arial, sans-serif;
@@ -230,7 +228,7 @@ a:hover {
   padding: 40px;
   width: 100%;
   min-height: auto;
-  overflow-y: auto;
+  overflow-y: visible;
 }
 
 .glass-frame::before {
@@ -276,7 +274,8 @@ a:hover {
 
 /* Full height variant for main content pages */
 .glass-frame.full-height {
-  height: calc(100vh - 32px);
+  height: auto;
+  min-height: calc(100vh - 32px);
 }
 
 /* Inner Cards */
@@ -2622,6 +2621,21 @@ dialog.confirm-overlay {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* Desktop: keep the toolbar visible while the page scrolls */
+@media (min-width: 768px) {
+  .filter-toolbar {
+    position: sticky;
+    top: 16px;
+    z-index: 10;
+    /* 半透明 + 模糊玻璃质感，吸附时与面板风格一致 */
+    background: rgba(255, 255, 255, 0.6);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+  }
 }
 
 .filter-toolbar .path-breadcrumb {

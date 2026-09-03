@@ -1,6 +1,4 @@
 import { useEffect, useRef } from "react";
-import { AutoSizer } from "react-virtualized-auto-sizer";
-import { List, type ListImperativeAPI } from "react-window";
 import { formatBytes } from "@/lib/utils";
 import type { BrowseFileInfo } from "@/types";
 import type { SortField } from "./FileToolbar";
@@ -48,14 +46,16 @@ export function BrowseFolderView({
   onDownload,
   onUnavailableDelete,
 }: BrowseFolderViewProps) {
-  const listRef = useRef<ListImperativeAPI | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!highlightName) return;
-    const index = sortedBrowseContents.findIndex((item) => item.name === highlightName);
-    if (index >= 0) {
-      listRef.current?.scrollToRow({ index, align: "center" });
-    }
+    const frame = requestAnimationFrame(() => {
+      containerRef.current
+        ?.querySelector('[aria-current="true"]')
+        ?.scrollIntoView({ block: "center" });
+    });
+    return () => cancelAnimationFrame(frame);
   }, [highlightName, sortedBrowseContents]);
 
   if (browseLoading) {
@@ -81,7 +81,7 @@ export function BrowseFolderView({
   }
 
   return (
-    <div className="card p-0 overflow-hidden file-table-wrapper" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+    <div ref={containerRef} className="card p-0 overflow-hidden file-table-wrapper" data-testid="file-list">
       {!isMobile && (
         <div className="table-header" style={{ display: "grid", gridTemplateColumns: "40px minmax(220px, 1fr) 120px 300px", paddingRight: "16px" }}>
           <div className="table-cell text-left">
@@ -185,98 +185,82 @@ export function BrowseFolderView({
           })}
         </div>
       ) : (
-        <div style={{ flex: 1, minHeight: 320 }}>
-          <AutoSizer renderProp={({ height, width }) => {
-            const safeHeight = typeof height === "number" && height > 0 ? height : 400;
-            const safeWidth = typeof width === "number" && width > 0 ? width : 1200;
+        <div>
+          {sortedBrowseContents.map((item) => {
+            const itemKey = getBrowseItemKey(browseContext, item);
+            const isHighlighted = highlightName != null && item.name === highlightName;
             return (
-              <List
-                style={{ height: safeHeight, width: safeWidth }}
-                listRef={listRef}
-                rowCount={sortedBrowseContents.length}
-                rowHeight={80}
-                rowProps={{}}
-                rowComponent={({ index, style }) => {
-                  const item = sortedBrowseContents[index];
-                  const itemKey = getBrowseItemKey(browseContext, item);
-                  const isHighlighted = highlightName != null && item.name === highlightName;
-                  return (
-                    <div style={style} key={item.name}>
-                      <div
-                        className={`table-row transition-bg${isHighlighted ? " file-locate-highlight" : ""}`}
-                        aria-current={isHighlighted ? "true" : undefined}
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: "40px minmax(220px, 1fr) 120px 300px",
-                          height: "100%",
-                          alignItems: "flex-start",
-                          overflow: "hidden",
-                        }}
-                      >
-                        <div className="table-cell" style={{ paddingTop: "20px" }}>
-                          <input
-                            type="checkbox"
-                            checked={selectedBrowseFiles.has(itemKey)}
-                            onChange={() => onToggleBrowseFileSelection(item)}
-                            className="checkbox-sm cursor-pointer"
-                            aria-label="选择文件"
-                          />
-                        </div>
-                        <div className="table-cell" data-label="名称" style={{ paddingTop: "14px", paddingBottom: "14px", overflow: "hidden" }}>
-                          <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
-                            <span className="file-icon" style={{ flexShrink: 0 }}>
-                              {item.is_directory ? "📁" : "📄"}
-                            </span>
-                            {item.is_directory ? (
-                              <button type="button"
-                                className="file-name-btn"
-                                onClick={() => onNavigateIntoSubfolder(item.name)}
-                                title={item.name}
-                                style={{ wordBreak: "break-all", textAlign: "left", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
-                              >
-                                {item.name}
-                              </button>
-                            ) : (
-                              <span className="text-base" title={item.name} style={{ wordBreak: "break-all", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{item.name}</span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="table-cell text-right muted text-base" data-label="大小" style={{ paddingTop: "20px" }}>
-                          {item.is_directory ? "-" : formatBytes(item.size)}
-                        </div>
-                        <div className="table-cell text-right" style={{ paddingTop: "14px" }}>
-                          <div className="flex gap-2 flex-end">
-                            {item.is_directory ? (
-                              <button type="button"
-                                className="button secondary btn-sm"
-                                onClick={() => onNavigateIntoSubfolder(item.name)}
-                              >
-                                打开
-                              </button>
-                            ) : (
-                              <button type="button"
-                                className="button secondary btn-sm"
-                                onClick={() =>
-                                  onDownload(
-                                    browseContext.fileHash,
-                                    item.name,
-                                    undefined,
-                                    [...browseContext.path, item.name].join("/")
-                                  )}
-                              >
-                                下载
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
+              <div key={item.name}>
+                <div
+                  className={`table-row transition-bg${isHighlighted ? " file-locate-highlight" : ""}`}
+                  aria-current={isHighlighted ? "true" : undefined}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "40px minmax(220px, 1fr) 120px 300px",
+                    alignItems: "flex-start",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div className="table-cell" style={{ paddingTop: "20px" }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedBrowseFiles.has(itemKey)}
+                      onChange={() => onToggleBrowseFileSelection(item)}
+                      className="checkbox-sm cursor-pointer"
+                      aria-label="选择文件"
+                    />
+                  </div>
+                  <div className="table-cell" data-label="名称" style={{ paddingTop: "14px", paddingBottom: "14px", overflow: "hidden" }}>
+                    <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+                      <span className="file-icon" style={{ flexShrink: 0 }}>
+                        {item.is_directory ? "📁" : "📄"}
+                      </span>
+                      {item.is_directory ? (
+                        <button type="button"
+                          className="file-name-btn"
+                          onClick={() => onNavigateIntoSubfolder(item.name)}
+                          title={item.name}
+                          style={{ wordBreak: "break-all", textAlign: "left", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+                        >
+                          {item.name}
+                        </button>
+                      ) : (
+                        <span className="text-base" title={item.name} style={{ wordBreak: "break-all", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{item.name}</span>
+                      )}
                     </div>
-                  );
-                }}
-              />
+                  </div>
+                  <div className="table-cell text-right muted text-base" data-label="大小" style={{ paddingTop: "20px" }}>
+                    {item.is_directory ? "-" : formatBytes(item.size)}
+                  </div>
+                  <div className="table-cell text-right" style={{ paddingTop: "14px" }}>
+                    <div className="flex gap-2 flex-end">
+                      {item.is_directory ? (
+                        <button type="button"
+                          className="button secondary btn-sm"
+                          onClick={() => onNavigateIntoSubfolder(item.name)}
+                        >
+                          打开
+                        </button>
+                      ) : (
+                        <button type="button"
+                          className="button secondary btn-sm"
+                          onClick={() =>
+                            onDownload(
+                              browseContext.fileHash,
+                              item.name,
+                              undefined,
+                              [...browseContext.path, item.name].join("/")
+                            )}
+                        >
+                          下载
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
             );
-          }}
-          />
+          })}
         </div>
       )}
     </div>

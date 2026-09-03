@@ -3,32 +3,10 @@ import FilesPage from "@/app/(authenticated)/files/page";
 import { ToastProvider } from "@/components/Toast";
 import { api } from "@/lib/api";
 import type { FileInfo, BrowseFileInfo, FileListResponse, FileSearchItem, FileSearchResponse } from "@/types";
-import type { ListProps } from "react-window";
-import type { AutoSizerProps } from "react-virtualized-auto-sizer";
 
 // Mock next/navigation
 jest.mock("next/navigation", () => ({
   useRouter: () => ({ push: jest.fn() }),
-}));
-
-// Mock react-virtualized-auto-sizer — render children with fixed dimensions
-jest.mock("react-virtualized-auto-sizer", () => ({
-  __esModule: true,
-  AutoSizer: ({ renderProp }: AutoSizerProps) => {
-    if (!renderProp) return null;
-    return renderProp({ height: 600, width: 1200 });
-  },
-}));
-
-// Mock react-window — render all rows without virtualization
-jest.mock("react-window", () => ({
-  List: ({ rowCount, rowComponent: Row, rowProps, style }: ListProps<Record<string, unknown>>) => (
-    <div style={style} data-testid="virtual-list">
-      {Array.from({ length: rowCount }, (_, i) => (
-        <Row key={i} index={i} style={{}} {...rowProps} />
-      ))}
-    </div>
-  ),
 }));
 
 // Mock api module

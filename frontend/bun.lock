@@ -9,8 +9,6 @@
         "next": "14.2.5",
         "react": "18.3.1",
         "react-dom": "18.3.1",
-        "react-virtualized-auto-sizer": "^2.0.2",
-        "react-window": "^2.2.5",
       },
       "devDependencies": {
         "@next/swc-darwin-arm64": "14.2.5",
@@ -21,8 +19,6 @@
         "@types/node": "20.14.9",
         "@types/react": "18.3.3",
         "@types/react-dom": "18.3.0",
-        "@types/react-virtualized-auto-sizer": "^1.0.8",
-        "@types/react-window": "^2.0.0",
         "eslint": "^8.57.1",
         "eslint-config-next": "14.2.5",
         "jest": "^29.7.0",
@@ -281,10 +277,6 @@
     "@types/react": ["@types/react@18.3.3", "https://registry.npmmirror.com/@types/react/-/react-18.3.3.tgz", { "dependencies": { "@types/prop-types": "*", "csstype": "^3.0.2" } }, "sha512-hti/R0pS0q1/xx+TsI73XIqk26eBsISZ2R0wUijXIngRK9R/e7Xw/cXVxQK7R5JjW+SV4zGcn5hXjudkN/pLIw=="],
 
     "@types/react-dom": ["@types/react-dom@18.3.0", "https://registry.npmmirror.com/@types/react-dom/-/react-dom-18.3.0.tgz", { "dependencies": { "@types/react": "*" } }, "sha512-EhwApuTmMBmXuFOikhQLIBUn6uFg81SwLMOAUgodJF14SOBOCMdU04gDoYi0WOJJHD144TL32z4yDqCW3dnkQg=="],
-
-    "@types/react-virtualized-auto-sizer": ["@types/react-virtualized-auto-sizer@1.0.8", "https://mirrors.tencent.com/npm/@types/react-virtualized-auto-sizer/-/react-virtualized-auto-sizer-1.0.8.tgz", { "dependencies": { "react-virtualized-auto-sizer": "*" } }, "sha512-keJpNyhiwfl2+N12G1ocCVA5ZDBArbPLe/S90X3kt7fam9naeHdaYYWbpe2sHczp70JWJ+2QLhBE8kLvLuVNjA=="],
-
-    "@types/react-window": ["@types/react-window@2.0.0", "https://mirrors.tencent.com/npm/@types/react-window/-/react-window-2.0.0.tgz", { "dependencies": { "react-window": "*" } }, "sha512-E8hMDtImEpMk1SjswSvqoSmYvk7GEtyVaTa/GJV++FdDNuMVVEzpAClyJ0nqeKYBrMkGiyH6M1+rPLM0Nu1exQ=="],
 
     "@types/stack-utils": ["@types/stack-utils@2.0.3", "https://registry.npmmirror.com/@types/stack-utils/-/stack-utils-2.0.3.tgz", {}, "sha512-9aEbYZ3TbYMznPdcdr3SmIrLXwC/AKZXQeCf9Pgao5CKb8CyHuEX5jzWPTkvregvhRJHcpRO6BFoGW9ycaOkYw=="],
 
@@ -1001,10 +993,6 @@
     "react-dom": ["react-dom@18.3.1", "https://registry.npmmirror.com/react-dom/-/react-dom-18.3.1.tgz", { "dependencies": { "loose-envify": "^1.1.0", "scheduler": "^0.23.2" }, "peerDependencies": { "react": "^18.3.1" } }, "sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw=="],
 
     "react-is": ["react-is@18.3.1", "https://registry.npmmirror.com/react-is/-/react-is-18.3.1.tgz", {}, "sha512-/LLMVyas0ljjAtoYiPqYiL8VWXzUUdThrmU5+n20DZv+a+ClRoevUzw5JxU+Ieh5/c87ytoTBV9G1FiKfNJdmg=="],
-
-    "react-virtualized-auto-sizer": ["react-virtualized-auto-sizer@2.0.2", "https://registry.npmmirror.com/react-virtualized-auto-sizer/-/react-virtualized-auto-sizer-2.0.2.tgz", { "peerDependencies": { "react": "^18.0.0 || ^19.0.0", "react-dom": "^18.0.0 || ^19.0.0" } }, "sha512-FvnVDed3nn7Xt2m2ioo+O1VBpP1uMIl8ygtpkzfhYoRb1e06on6hp2DEBg9AquCXqtP1bhgVT4lS+xpBwrXq7Q=="],
-
-    "react-window": ["react-window@2.2.5", "https://registry.npmmirror.com/react-window/-/react-window-2.2.5.tgz", { "peerDependencies": { "react": "^18.0.0 || ^19.0.0", "react-dom": "^18.0.0 || ^19.0.0" } }, "sha512-6viWvPSZvVuMIe9hrl4IIZoVfO/npiqOb03m4Z9w+VihmVzBbiudUrtUqDpsWdKvd/Ai31TCR25CBcFFAUm28w=="],
 
     "redent": ["redent@3.0.0", "https://registry.npmmirror.com/redent/-/redent-3.0.0.tgz", { "dependencies": { "indent-string": "^4.0.0", "strip-indent": "^3.0.0" } }, "sha512-6tDA8g98We0zd0GvVeMT9arEOnTw9qM03L9cJXaCjrip1OO764RDBLBfrB4cwzNGDj5OA5ioymC9GkizgWJDUg=="],
 

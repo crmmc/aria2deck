@@ -110,6 +110,17 @@ export default function FilesPage() {
     };
   }, [showSearchModal]);
 
+  // 搜索定位：高亮行渲染后滚动到可视区域中央
+  useEffect(() => {
+    if (highlightUserFileId == null) return;
+    const frame = requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-file-id="${highlightUserFileId}"]`)
+        ?.scrollIntoView({ block: "center" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [highlightUserFileId]);
+
   const loadFiles = useCallback(async (page: number, size: number) => {
     setLoading(true);
     setError(null);

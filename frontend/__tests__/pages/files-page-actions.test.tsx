@@ -3,39 +3,9 @@ import FilesPage from "@/app/(authenticated)/files/page";
 import { ToastProvider } from "@/components/Toast";
 import { api } from "@/lib/api";
 import type { FileInfo, BrowseFileInfo, FileListResponse, FileSearchItem, FileSearchResponse } from "@/types";
-import type { ListProps } from "react-window";
-import type { AutoSizerProps } from "react-virtualized-auto-sizer";
 
 jest.mock("next/navigation", () => ({
   useRouter: () => ({ push: jest.fn() }),
-}));
-
-jest.mock("react-virtualized-auto-sizer", () => ({
-  __esModule: true,
-  AutoSizer: ({ renderProp }: AutoSizerProps) => {
-    if (!renderProp) return null;
-    return renderProp({ height: 600, width: 1200 });
-  },
-}));
-
-jest.mock("react-window", () => ({
-  List: ({ rowCount, rowComponent: Row, rowProps, style }: ListProps<Record<string, unknown>>) => (
-    <div style={style} data-testid="virtual-list">
-      {Array.from({ length: rowCount }, (_, i) => (
-        <Row
-          key={i}
-          index={i}
-          style={{}}
-          ariaAttributes={{
-            "aria-posinset": i + 1,
-            "aria-setsize": rowCount,
-            role: "listitem",
-          }}
-          {...rowProps}
-        />
-      ))}
-    </div>
-  ),
 }));
 
 jest.mock("@/lib/api", () => ({
@@ -589,12 +559,12 @@ describe("FilesPage folder browsing errors and selection", () => {
     await enterFolder();
 
     fireEvent.click(screen.getByRole("button", { name: /大小/ }));
-    const order = screen.getByTestId("virtual-list").textContent ?? "";
+    const order = screen.getByTestId("file-list").textContent ?? "";
     expect(order.indexOf("subdir")).toBeLessThan(order.indexOf("file2.txt"));
     expect(order.indexOf("file2.txt")).toBeLessThan(order.indexOf("file1.txt"));
 
     fireEvent.click(screen.getByRole("button", { name: /大小/ }));
-    const ascOrder = screen.getByTestId("virtual-list").textContent ?? "";
+    const ascOrder = screen.getByTestId("file-list").textContent ?? "";
     expect(ascOrder.indexOf("file1.txt")).toBeLessThan(ascOrder.indexOf("file2.txt"));
   });
 });
