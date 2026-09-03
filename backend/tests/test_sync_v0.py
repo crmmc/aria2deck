@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import func, select, update
 
+from app.aria2.client import Aria2Client
 from app.aria2.sync import (
     STALE_QUEUED_GRACE_SECONDS,
     _cleanup_owned_stopped_results,
@@ -1158,7 +1159,13 @@ async def test_active_full_bytes_with_verify_integrity_pending_stays_active(
 @pytest.mark.asyncio
 async def test_repair_inconsistent_completed_download_marks_failed_and_releases_reserved(
     temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    raw_client = AsyncMock(spec=Aria2Client)
+    raw_client.force_remove.return_value = "OK"
+    raw_client.remove_download_result.return_value = "OK"
+    monkeypatch.setattr("app.aria2.gateway.get_aria2_client", lambda: raw_client)
+
     user = await create_user_v0(username="sync_repair_completed", quota_bytes=1000)
     await reserve_bytes(user["id"], 200, quota_bytes=user["quota_bytes"])
     download = await create_global_download_v0(
@@ -1195,6 +1202,9 @@ async def test_repair_inconsistent_completed_download_marks_failed_and_releases_
     assert updated_task["status"] == "failed"
     assert updated_task["reserved_bytes"] == 0
     assert usage["reserved_bytes"] == 0
+    raw_client.force_remove.assert_awaited_once_with("gid-repair-completed")
+    raw_client.remove_download_result.assert_awaited_once_with("gid-repair-completed")
+    assert not hasattr(raw_client, "force_remove_gid")
 
 
 @pytest.mark.asyncio

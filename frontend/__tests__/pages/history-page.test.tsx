@@ -70,6 +70,23 @@ describe("HistoryPage", () => {
     );
   });
 
+  test("single delete clears the deleted record from selection", async () => {
+    render(<HistoryPage />);
+
+    expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择 failed-file.zip" }));
+    expect(screen.getByText("已选 1 项")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByTitle("删除这条历史记录")[0]);
+
+    await waitFor(() => {
+      expect(screen.queryByText("failed-file.zip")).not.toBeInTheDocument();
+      expect(screen.queryByText("已选 1 项")).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "全选" })).toBeInTheDocument();
+    expect(mockApi.listHistory).toHaveBeenCalledTimes(1);
+  });
+
   test("batch delete sends a single request for all selected records", async () => {
     render(<HistoryPage />);
 

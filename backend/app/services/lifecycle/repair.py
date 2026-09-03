@@ -12,6 +12,7 @@ from typing import Any
 from app.aria2.protocol import Aria2Gateway
 from app.core.config import get_internal_base_url
 from app.core.time_utils import now_ms
+from app.modules.backend.aria2_adapter import Aria2BackendAdapter
 from app.modules.backend.port import BackendPort
 from app.repositories.task.downloads import (
     list_active_like_http_downloads,
@@ -123,7 +124,7 @@ async def reconcile_legacy_http_downloads_v0(client: Aria2Gateway) -> int:
                 gid=gid,
             )
         changed = await fail_download_and_reclaim(
-            backend=client,
+            backend=Aria2BackendAdapter(client),
             download_id=download_id,
             message="HTTP 下载未通过内部网关校验，已停止",
             error_code="unsafe_http_download_uri",
@@ -144,7 +145,7 @@ async def repair_inconsistent_completed_downloads_v0(
     if backend is None:
         from app.aria2.gateway import get_aria2_client
 
-        backend = get_aria2_client()
+        backend = Aria2BackendAdapter(get_aria2_client())
     threshold_ms = now_ms() - int(COMPLETE_REPAIR_GRACE_SECONDS * 1000)
     for snapshot in await list_inconsistent_completed_download_ids(threshold_ms):
         download_id = int(snapshot["id"])
@@ -173,7 +174,7 @@ async def cleanup_stale_queued_downloads_v0(
     if backend is None:
         from app.aria2.gateway import get_aria2_client
 
-        backend = get_aria2_client()
+        backend = Aria2BackendAdapter(get_aria2_client())
     threshold_ms = now_ms() - int(grace_seconds * 1000)
     for download_id in await list_stale_queued_download_ids(threshold_ms):
         logger.warning("[Sync] Cleaning stale v0 queued download_id=%s", download_id)

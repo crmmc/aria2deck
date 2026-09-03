@@ -135,7 +135,7 @@ export default function FilesPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     loadFiles(currentPage, pageSize);

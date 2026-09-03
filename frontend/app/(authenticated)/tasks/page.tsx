@@ -279,7 +279,7 @@ export default function TasksPage() {
         const message = err instanceof Error ? err.message : "未知错误";
         showToast(`同步任务状态失败: ${message}`, "warning");
       });
-  }, [showToast]);
+  }, [showToast, deletedTaskIds]);
 
   const handleWsDisconnected = useCallback(() => {
     wsConnectedRef.current = false;

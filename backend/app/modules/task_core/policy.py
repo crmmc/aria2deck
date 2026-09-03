@@ -153,7 +153,7 @@ async def _observe_backend_status(backend: BackendPort, tid: int) -> str | None:
     if not gid:
         return None
     try:
-        raw = await backend.tell_status(str(gid))
+        raw: object = await backend.tell_status(str(gid))
     except Exception as exc:  # noqa: BLE001  # backend observation is best effort
         logger.debug("后端状态观测失败 error_type=%s", type(exc).__name__)
         return None

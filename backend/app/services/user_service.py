@@ -360,6 +360,8 @@ async def update_user(
     if payload.password is not None:
         await remove_connections_for_user(user_id)
 
+    # Arguments are IDs, field-presence booleans, and request ID; no password or hash is logged.
+    # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
     logger.info(
         "更新用户成功 actor_id=%s target_user_id=%s set_username=%s set_password=%s set_is_admin=%s set_quota=%s request_id=%s",
         actor.id,

@@ -37,6 +37,7 @@ from app.db.migrations import (
     V15_APP_SETTINGS_ADDED_COLUMNS,
     V16_PACK_TASKS_ADDED_COLUMNS,
     V17_APP_SETTINGS_ADDED_COLUMNS,
+    ensure_v8_retry_attempt_schema,
     run_migrations,
 )
 from app.db.schema import metadata, sessions
@@ -392,6 +393,28 @@ def test_deletion_v5_columns_are_registered_in_migration_map():
 def test_credential_v6_columns_replace_plaintext_columns():
     assert V6_CREDENTIAL_COLUMNS["users"]["removed"] == {"rpc_secret"}
     assert V6_CREDENTIAL_COLUMNS["api_tokens"]["removed"] == {"token"}
+
+
+@pytest.mark.asyncio
+async def test_v8_schema_handles_single_quote_in_index_metadata(temp_db: str) -> None:
+    index_name = "ix_global_downloads_quoted'name"
+    async with get_engine().begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE INDEX \"ix_global_downloads_quoted'name\" "
+                "ON global_downloads (status)"
+            )
+        )
+        await ensure_v8_retry_attempt_schema(conn)
+        await ensure_v8_retry_attempt_schema(conn)
+        index_names = {
+            row[1]
+            for row in (
+                await conn.execute(text("PRAGMA index_list('global_downloads')"))
+            ).all()
+        }
+
+    assert index_name in index_names
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -97,6 +98,8 @@ def parse_torrent_bytes(raw: bytes) -> TorrentMetadata:
         raise TorrentMetadataError("missing info dictionary")
 
     info_bytes = raw[info_span[0] : info_span[1]]
+    # BitTorrent v1 requires a SHA1 info-hash for protocol identity, not security.
+    # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
     info_hash = hashlib.sha1(info_bytes, usedforsecurity=False).hexdigest().lower()
     name = _decode_component(info.get(b"name"), field="name")
 
@@ -119,7 +122,7 @@ def parse_torrent_bytes(raw: bytes) -> TorrentMetadata:
 
 def validate_selected_indexes(
     metadata: TorrentMetadata,
-    selected_file_indexes: list[object] | tuple[object, ...] | None,
+    selected_file_indexes: Sequence[object] | None,
 ) -> tuple[int, ...]:
     if selected_file_indexes is None:
         return tuple(file.index for file in metadata.files)

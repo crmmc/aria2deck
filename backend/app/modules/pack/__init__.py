@@ -770,9 +770,10 @@ class PackTaskManager:
                 task_id, step="verifying", require_prepared=True
             ):
                 return
-            row = await get_pack_task_row(task_id)
-            if row is None:
+            refreshed_row: dict[str, Any] | None = await get_pack_task_row(task_id)
+            if refreshed_row is None:
                 return
+            row = refreshed_row
             measured = await cls._run_thread(
                 startup_job,
                 cls._measure_pack_materialized_bytes,
@@ -1729,7 +1730,7 @@ class PackTaskManager:
         cls,
         sources: list[Path],
         source_names: list[str] | None,
-        content_hashes: list[str] | None,
+        content_hashes: list[str],
         cancel_event: threading.Event | None = None,
     ) -> list[_ArchiveItem]:
         cls._check_cancel(cancel_event)

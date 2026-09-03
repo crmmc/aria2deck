@@ -16,8 +16,9 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from app.aria2.gateway import get_aria2_client
 from app.core.config import get_internal_base_url, settings
@@ -412,12 +413,15 @@ async def register_and_submit(
         "display_name": resource.display_name,
         "reserved_bytes": resource.size_bytes if resource.size_known else 0,
     }
-    payload = ts.create_task_response(
-        task_row=task_row,
-        global_download=global_download,
-        fallback_uri=resource.display_uri or resource.source_uri,
-        fallback_name=resource.display_name,
-        fallback_total_length=resource.size_bytes,
+    payload = cast(
+        dict[str, Any],
+        ts.create_task_response(
+            task_row=task_row,
+            global_download=global_download,
+            fallback_uri=resource.display_uri or resource.source_uri,
+            fallback_name=resource.display_name,
+            fallback_total_length=resource.size_bytes,
+        ),
     )
     if resource.display_uri:
         payload["uri"] = resource.display_uri
@@ -489,7 +493,7 @@ async def create_torrent_task(
     user_id: int,
     quota_bytes: int,
     torrent: str,
-    selected_file_indexes: list[object] | None,
+    selected_file_indexes: Sequence[object] | None,
     options: dict | None,
 ) -> dict:
     """经 task_service 适配层执行创建流程，保留其 patch 注入点。"""
@@ -624,11 +628,14 @@ async def _impl_create_task(
         source_payload=masked_uri,
         source_options=options,
     )
-    return await ts.register_and_submit(
-        user_id=user_id,
-        quota_bytes=quota_bytes,
-        resource=resource,
-        options=options,
+    return cast(
+        dict[str, Any],
+        await ts.register_and_submit(
+            user_id=user_id,
+            quota_bytes=quota_bytes,
+            resource=resource,
+            options=options,
+        ),
     )
 
 
@@ -647,7 +654,7 @@ async def _impl_create_torrent_task(
     user_id: int,
     quota_bytes: int,
     torrent: str,
-    selected_file_indexes: list[object] | None,
+    selected_file_indexes: Sequence[object] | None,
     options: dict | None,
 ) -> dict:
     if len(torrent) > MAX_TORRENT_BASE64_LENGTH:
@@ -736,9 +743,12 @@ async def _impl_create_torrent_task(
         selection_indexes=selection_indexes,
         source_options=options,
     )
-    return await ts.register_and_submit(
-        user_id=user_id,
-        quota_bytes=quota_bytes,
-        resource=resource,
-        options=submit_options,
+    return cast(
+        dict[str, Any],
+        await ts.register_and_submit(
+            user_id=user_id,
+            quota_bytes=quota_bytes,
+            resource=resource,
+            options=submit_options,
+        ),
     )

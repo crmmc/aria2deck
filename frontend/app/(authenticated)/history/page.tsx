@@ -78,7 +78,7 @@ export default function HistoryPage() {
         if (mountedRef.current) loadHistory();
       }
     },
-    [showToast, loadHistory]
+    [showToast, loadHistory, setSelectedRecords]
   );
 
   const retryTask = useCallback(

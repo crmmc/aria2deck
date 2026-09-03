@@ -94,6 +94,8 @@ async def _authenticate_from_params(
     else:
         secret, remaining_params = extract_secret_from_params(params)
     if not secret:
+        # Arguments are client IP and request ID only; no token value is logged.
+        # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
         logger.warning("RPC缺少Token ip=%s request_id=%s", client_ip, outer_request_id)
         return None, None, build_jsonrpc_error(
             1,  # Unauthorized

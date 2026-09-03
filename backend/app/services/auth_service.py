@@ -132,6 +132,8 @@ async def change_password(
 
     if not user.is_initial_password:
         if not verify_password(old_password, user.password_hash):
+            # Arguments are user ID and request ID only; no password or hash is logged.
+            # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
             logger.warning(
                 "修改密码失败 user_id=%s reason=old_password_mismatch request_id=%s",
                 user.id,

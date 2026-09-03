@@ -1,14 +1,14 @@
 """任务 HTTP 端点适配层。
 
 业务实现已下沉到 app.services.task_orchestration；本模块保留 REST/RPC
-端点适配函数（cancel_task / list_tasks / list_tasks_page / clear_history
-等）及其错误映射，并 re-export orchestration 符号保持既有 import/patch
-路径兼容。
+端点适配函数及错误映射，并 re-export orchestration 符号保持既有
+import/patch 路径兼容。
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from app.domain.errors import (
@@ -102,7 +102,7 @@ async def _create_torrent_task_via(
     user_id: int,
     quota_bytes: int,
     torrent: str,
-    selected_file_indexes: list[object] | None,
+    selected_file_indexes: Sequence[object] | None,
     options: dict | None,
 ) -> dict:
     return await _impl_create_torrent_task(

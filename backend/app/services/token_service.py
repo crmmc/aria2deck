@@ -17,6 +17,8 @@ def generate_api_token() -> str:
 
 async def list_tokens(user_id: int) -> list[dict]:
     rows = await auth_repo.list_api_tokens(user_id)
+    # Arguments are user ID and row count only; no token material is logged.
+    # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
     logger.debug("查询Token列表 user_id=%s count=%s", user_id, len(rows))
     return [
         {
@@ -42,6 +44,8 @@ async def create_token(user_id: int, name: str | None) -> dict:
             )
         except auth_repo.DuplicateCredentialError:
             continue
+        # Arguments are IDs and the display name; the generated token and digest are not logged.
+        # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
         logger.info(
             "创建API Token user_id=%s token_id=%s token_name=%s",
             user_id,
@@ -62,6 +66,8 @@ async def create_token(user_id: int, name: str | None) -> dict:
 async def delete_token(user_id: int, token_id: int) -> dict:
     deleted = await auth_repo.delete_api_token(user_id, token_id)
     if not deleted:
+        # Arguments are database IDs and a fixed reason; no token material is logged.
+        # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
         logger.warning(
             "删除Token失败 user_id=%s token_id=%s reason=not_found_or_forbidden",
             user_id,
@@ -69,12 +75,16 @@ async def delete_token(user_id: int, token_id: int) -> dict:
         )
         raise NotFoundError("Token 不存在")
 
+    # Arguments are database IDs only; no token material is logged.
+    # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
     logger.info("删除Token成功 user_id=%s token_id=%s", user_id, token_id)
     return {"ok": True}
 
 
 async def invalidate_all_credential_digests(*, actor_id: int) -> dict:
     counts = await auth_repo.invalidate_all_credential_digests()
+    # Arguments are the actor ID and deletion counts; no credential digest is logged.
+    # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
     logger.warning(
         "管理员作废全部凭证摘要 actor_id=%s api_token_count=%s rpc_secret_count=%s",
         actor_id,

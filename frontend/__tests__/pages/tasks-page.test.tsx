@@ -1441,6 +1441,40 @@ describe("TasksPage", () => {
     expect(screen.queryByText("ubuntu.iso")).not.toBeInTheDocument();
   });
 
+  test("websocket connection sync does not restore an already deleted task", async () => {
+    let wsCallbacks: { onConnected?: () => void } | null = null;
+    mockUseTaskWebSocket.mockImplementation((callbacks) => {
+      wsCallbacks = callbacks;
+    });
+
+    render(<TasksPage />);
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("取消任务"));
+    await waitFor(() => {
+      expect(screen.queryByText("ubuntu.iso")).not.toBeInTheDocument();
+    });
+
+    const currentCallsBefore = mockApi.listTasks.mock.calls.filter(
+      ([statusFilter]) => statusFilter === "current"
+    ).length;
+    act(() => {
+      wsCallbacks?.onConnected?.();
+    });
+    await flushAsync();
+
+    expect(
+      mockApi.listTasks.mock.calls.filter(
+        ([statusFilter]) => statusFilter === "current"
+      )
+    ).toHaveLength(currentCallsBefore + 1);
+    expect(screen.queryByText("ubuntu.iso")).not.toBeInTheDocument();
+    expect(showToastMock).not.toHaveBeenCalledWith(
+      "ubuntu.iso 下载完成",
+      "success"
+    );
+  });
+
   test("ignores websocket updates for already deleted tasks", async () => {
     let wsCallbacks: {
       onTaskUpdate: (task: Task) => void;

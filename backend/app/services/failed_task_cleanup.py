@@ -66,7 +66,7 @@ async def get_representative_owner_id(task_id: int) -> int | None:
 
 
 @overload
-def cleanup_with_claim(
+async def cleanup_with_claim(
     backend: BackendPort,
     claim: TerminalizationClaim,
     *,
@@ -75,7 +75,7 @@ def cleanup_with_claim(
 
 
 @overload
-def cleanup_with_claim(
+async def cleanup_with_claim(
     backend: BackendPort,
     claim: RepairClaim,
     *,

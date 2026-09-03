@@ -406,7 +406,7 @@ def test_build_archive_items_cancel(tmp_path: Path) -> None:
     cancel = _event()
     cancel.set()
     with pytest.raises(InterruptedError):
-        PackTaskManager._build_archive_items([root], None, None, cancel)
+        PackTaskManager._build_archive_items([root], None, ["dirhash"], cancel)
 
 
 def test_build_archive_items_wraps_canonical_directory(
@@ -1001,6 +1001,35 @@ async def test_recover_startup_isolates_task_failure(
     monkeypatch.setattr(PackTaskManager, "_recover_one_startup", broken)
     await PackTaskManager.recover_startup()
     assert await pack_repo.get_pack_task_row(task["id"]) is not None
+
+
+async def test_recover_one_startup_returns_if_refreshed_row_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_reservation = AsyncMock()
+    mark_verifying = AsyncMock(return_value=True)
+    reread = AsyncMock(return_value=None)
+    run_thread = AsyncMock()
+    finalize = AsyncMock()
+    monkeypatch.setattr(pack_service, "clear_pack_install_reservation", clear_reservation)
+    monkeypatch.setattr(pack_service, "mark_pack_task_step_if_packing", mark_verifying)
+    monkeypatch.setattr(pack_service, "get_pack_task_row", reread)
+    monkeypatch.setattr(PackTaskManager, "_run_thread", run_thread)
+    monkeypatch.setattr(PackTaskManager, "_finalize_prepared", finalize)
+    row = {"id": 42, "status": "packing", "prepared_content_hash": "v2:file:abc"}
+    startup_job = pack_service._RunningPackJob(
+        task=AsyncMock(), cancel_event=_event()
+    )
+
+    await PackTaskManager._recover_one_startup(row, startup_job)
+
+    clear_reservation.assert_awaited_once_with(42)
+    mark_verifying.assert_awaited_once_with(
+        42, step="verifying", require_prepared=True
+    )
+    reread.assert_awaited_once_with(42)
+    run_thread.assert_not_awaited()
+    finalize.assert_not_awaited()
 
 
 async def test_recover_one_startup_packing_without_prepared(temp_db: str) -> None:

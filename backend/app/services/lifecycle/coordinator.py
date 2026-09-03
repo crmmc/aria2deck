@@ -302,10 +302,11 @@ async def reconcile_attempt_signal(
                 display_name = download_ops.extract_display_name(
                     working_status, None
                 )
+                safe_message = sanitize_string(message) or ""
                 changed = await fail_download_and_reclaim(
                     backend=backend,
                     download_id=attempt_id,
-                    message=sanitize_string(message),
+                    message=safe_message,
                     error_code=error_code,
                     expected_gid=current_gid,
                     writer_gid=current_gid,
@@ -582,5 +583,3 @@ async def reconcile_attempt_signal(
             await _broadcast_download_update(attempt_id)
             return ReconcileResult.COMPLETED
         return ReconcileResult.WAITING
-
-    return ReconcileResult.WAITING
