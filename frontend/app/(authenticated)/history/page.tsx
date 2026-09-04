@@ -59,7 +59,7 @@ export default function HistoryPage() {
     } finally {
       if (mountedRef.current && requestId === requestIdRef.current) setLoading(false);
     }
-  }, [currentPage, pageSize, filterStatus, debouncedKeyword, showToast]);
+  }, [currentPage, pageSize, filterStatus, debouncedKeyword, showToast, setSelectedRecords]);
 
   useEffect(() => {
     const mounted = mountedRef;

@@ -553,20 +553,22 @@ describe("api methods", () => {
   });
 
   describe("api.browseShare", () => {
-    it("uses a bearer header and keeps the token out of the URL", async () => {
+    it("uses a bearer header, paginates and keeps the token out of the URL", async () => {
+      const page = { items: [], total: 0, page: 2, page_size: 200 };
       const fetchMock = jest.fn().mockResolvedValue({
         ok: true,
         status: 200,
-        json: () => Promise.resolve([]),
+        json: () => Promise.resolve(page),
       });
       global.fetch = fetchMock;
 
-      await api.browseShare("code/one", "bearer-secret", "folder/a");
+      const result = await api.browseShare("code/one", "bearer-secret", "folder/a", 2, 200);
 
       const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toContain("/api/s/code%2Fone/browse?subpath=folder%2Fa");
+      expect(url).toContain("/api/s/code%2Fone/browse?subpath=folder%2Fa&page=2&page_size=200");
       expect(url).not.toContain("bearer-secret");
       expect(options.headers).toEqual({ Authorization: "Bearer bearer-secret" });
+      expect(result).toEqual(page);
     });
   });
 
@@ -1040,33 +1042,33 @@ describe("api methods", () => {
 
   describe("api.browseFile", () => {
     it("browses file without path", async () => {
-      const mockFiles = [{ name: "file1.txt" }];
+      const page = { items: [{ name: "file1.txt" }], total: 1, page: 1, page_size: 200 };
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve(mockFiles),
+        json: () => Promise.resolve(page),
       });
 
       const result = await api.browseFile("abc123hash");
 
-      expect(result).toEqual(mockFiles);
+      expect(result).toEqual(page);
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/files/abc123hash/browse"),
+        expect.stringContaining("/api/files/abc123hash/browse?page=1&page_size=200"),
         expect.any(Object)
       );
     });
 
-    it("browses file with path", async () => {
-      const mockFiles = [{ name: "subfile.txt" }];
+    it("browses file with path and page", async () => {
+      const page = { items: [{ name: "subfile.txt" }], total: 3, page: 2, page_size: 200 };
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve(mockFiles),
+        json: () => Promise.resolve(page),
       });
 
-      const result = await api.browseFile("abc123hash", "subdir");
+      const result = await api.browseFile("abc123hash", "subdir", 2, 200);
 
-      expect(result).toEqual(mockFiles);
+      expect(result).toEqual(page);
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/files/abc123hash/browse?path=subdir"),
+        expect.stringContaining("/api/files/abc123hash/browse?path=subdir&page=2&page_size=200"),
         expect.any(Object)
       );
     });

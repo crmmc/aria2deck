@@ -24,13 +24,15 @@ from app.http.file_response import (
     tracked_response,
 )
 from app.schemas import (
+    BrowseEntryOut,
+    BrowsePageResponse,
     CreateShareRequest,
     ShareAccessRequest,
     ShareAccessResponse,
     ShareInfoOut,
     ShareLinkOut,
 )
-from app.services import share_service
+from app.services import file_service, share_service
 from app.services.storage_locks import (
     acquire_content_read_lease_locked,
     get_content_hash_lock,
@@ -249,23 +251,34 @@ async def submit_shared_file_download(
     )
 
 
-@router.get("/api/s/{code}/browse")
+@router.get("/api/s/{code}/browse", response_model=BrowsePageResponse)
 async def browse_shared_directory(
     code: str,
     request: Request,
     subpath: str = Query(default=""),
-) -> list[dict]:
+    page: int = 1,
+    page_size: int = file_service.BROWSE_DEFAULT_PAGE_SIZE,
+) -> BrowsePageResponse:
     await ensure_public_allowed(
         client_ip_from_request(request),
         RateLimitScope.PUBLIC_API,
         detail="请求过于频繁",
     )
+    page, page_size = file_service.clamp_browse_page(page, page_size)
     try:
-        return await share_service.browse_shared_directory(
+        entries, total = await share_service.browse_shared_directory(
             code,
             _bearer_token(request),
             subpath,
+            page=page,
+            page_size=page_size,
         )
     except DomainError as exc:
         raise_http(exc)
         raise AssertionError("unreachable")
+    return BrowsePageResponse(
+        items=[BrowseEntryOut(**entry) for entry in entries],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )

@@ -273,9 +273,12 @@ class TestBrowseDirectoryRealFiles:
         )
         assert response.status_code == 200
         data = response.json()
-        names = {item["name"] for item in data}
+        names = {item["name"] for item in data["items"]}
         assert "nested" in names
         assert "a.txt" in names
+        assert data["total"] == 2
+        assert data["page"] == 1
+        assert data["page_size"] == 200
 
     def test_browse_directory_base_not_exists(
         self, authenticated_client: TestClient, test_user: dict, temp_db: str
@@ -291,7 +294,9 @@ class TestBrowseDirectoryRealFiles:
 
         response = authenticated_client.get("/api/files/browse_nonexistent_base/browse")
         assert response.status_code == 200
-        assert response.json() == []
+        data = response.json()
+        assert data["items"] == []
+        assert data["total"] == 0
 
     def test_browse_directory_subpath_not_exists(
         self, authenticated_client: TestClient, test_user: dict, temp_db: str
@@ -353,7 +358,7 @@ class TestBrowseDirectoryRealFiles:
 
         response = authenticated_client.get("/api/files/browse_contents_test/browse")
         assert response.status_code == 200
-        assert len(response.json()) == 3
+        assert len(response.json()["items"]) == 3
 
 
 class TestDownloadFileRealFiles:

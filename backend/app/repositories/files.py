@@ -534,9 +534,15 @@ async def search_stored_file_entries(
     return [dict(row) for row in rows]
 
 
-async def directory_entries(
-    stored_file_id: int, parent_path: str
-) -> tuple[bool | None, list[dict[str, Any]]]:
+async def directory_entries_page(
+    stored_file_id: int, parent_path: str, *, limit: int, offset: int
+) -> tuple[bool | None, list[dict[str, Any]], int]:
+    """按 parent_path 分页读取单层目录条目。
+
+    返回 (父目录状态, 当前页条目, 总数)：None = 存储文件不存在/待删，
+    False = parent_path 不是目录，True = 正常。COUNT 与 LIMIT/OFFSET 均在
+    SQL 层完成，禁止退化为取全量行后切片。
+    """
     async with transaction() as conn:
         active = (
             await conn.execute(
@@ -547,7 +553,7 @@ async def directory_entries(
             )
         ).first()
         if active is None:
-            return None, []
+            return None, [], 0
         parent_is_dir: bool | None = True
         if parent_path:
             parent = (
@@ -561,29 +567,42 @@ async def directory_entries(
                 )
             ).first()
             if parent is None:
-                return None, []
+                return None, [], 0
             parent_is_dir = bool(parent[0])
             if not parent_is_dir:
-                return False, []
+                return False, [], 0
 
+        conditions = (
+            stored_file_entries.c.stored_file_id == stored_file_id,
+            stored_file_entries.c.parent_path == parent_path,
+            stored_file_entries.c.relative_path != ".",
+        )
+        total = int(
+            (
+                await conn.execute(
+                    select(func.count())
+                    .select_from(stored_file_entries)
+                    .where(*conditions)
+                )
+            ).scalar_one()
+            or 0
+        )
         rows = (
             (
                 await conn.execute(
                     select(stored_file_entries)
-                    .where(
-                        stored_file_entries.c.stored_file_id == stored_file_id,
-                        stored_file_entries.c.parent_path == parent_path,
-                        stored_file_entries.c.relative_path != ".",
-                    )
+                    .where(*conditions)
                     .order_by(
                         stored_file_entries.c.sort_key, stored_file_entries.c.name
                     )
+                    .limit(limit)
+                    .offset(offset)
                 )
             )
             .mappings()
             .all()
         )
-    return parent_is_dir, [dict(row) for row in rows]
+    return parent_is_dir, [dict(row) for row in rows], total
 
 
 async def resolve_user_file_ids(

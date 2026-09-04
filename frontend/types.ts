@@ -202,8 +202,18 @@ export type SpaceInfo = {
 // Browse file info (for BT directory contents)
 export type BrowseFileInfo = {
   name: string;
+  path: string;
   size: number;
+  is_dir: boolean;
   is_directory: boolean;
+  modified_at: number;
+};
+
+export type BrowsePageResponse = {
+  items: BrowseFileInfo[];
+  total: number;
+  page: number;
+  page_size: number;
 };
 
 export type FileSearchItem = {
