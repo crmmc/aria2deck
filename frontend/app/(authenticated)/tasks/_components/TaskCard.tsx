@@ -109,7 +109,7 @@ export const TaskCard = memo(function TaskCard({
                   : "progress-bar-primary"
             }`}
             style={{
-              width: `${task.total_length ? (task.completed_length / task.total_length) * 100 : 0}%`,
+              width: `${task.total_length ? Math.min((task.completed_length / task.total_length) * 100, 100) : 0}%`,
             }}
           />
         </div>
