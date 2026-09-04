@@ -132,7 +132,7 @@ def _mock_write_archive(
     monkeypatch.setattr(
         PackTaskManager,
         "_write_archive_sync",
-        lambda output_path, *_args: output_path.write_bytes(content),
+        lambda output_path, *_args: (output_path.write_bytes(content), _v2_file_key(content))[1],
     )
 
 
@@ -293,6 +293,8 @@ async def test_pack_attempt_timing_and_requeue_state_are_persisted(
     assert packing is not None
     assert packing["status"] == "packing"
     assert packing["step"] == "validating"
+    assert packing["step_progress"] == 0
+    assert packing["step_started_at_ms"] == packing["started_at_ms"]
     assert packing["started_at_ms"] > old_started
 
     assert await requeue_interrupted_pack_task(task["id"])
@@ -306,7 +308,10 @@ async def test_pack_attempt_timing_and_requeue_state_are_persisted(
 @pytest.mark.asyncio
 async def test_pack_step_is_persisted_independently_from_progress(
     temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    timestamps = iter([1_000, 1_100, 2_000, 2_100, 3_000])
+    monkeypatch.setattr("app.repositories.pack.now_ms", lambda: next(timestamps))
     user = await create_user_v0(username="pack_real_step")
     task = await _insert_pack_task(
         user_id=user["id"], source_ids=[1], source_size_bytes=1,
@@ -314,10 +319,14 @@ async def test_pack_step_is_persisted_independently_from_progress(
     )
     assert await mark_pack_task_packing_if_pending(task["id"])
 
-    await pack_service.update_pack_task_progress(task["id"], 99)
+    await pack_service.update_pack_task_progress(task["id"], 20, 50)
     validating = await pack_service.get_pack_task_row(task["id"])
     assert validating is not None
     assert validating["step"] == "validating"
+    assert validating["progress"] == 20
+    assert validating["step_progress"] == 50
+    assert validating["started_at_ms"] == 1_000
+    assert validating["step_started_at_ms"] == 1_000
 
     assert await mark_pack_task_step_if_packing(
         task["id"],
@@ -328,6 +337,11 @@ async def test_pack_step_is_persisted_independently_from_progress(
     compressing = await pack_service.get_pack_task_row(task["id"])
     assert compressing is not None
     assert compressing["step"] == "compressing"
+    assert compressing["step_progress"] == 0
+    assert compressing["started_at_ms"] == 1_000
+    assert compressing["step_started_at_ms"] == 2_000
+
+    await pack_service.update_pack_task_progress(task["id"], 70, 75)
 
     assert await mark_pack_task_step_if_packing(
         task["id"],
@@ -338,6 +352,10 @@ async def test_pack_step_is_persisted_independently_from_progress(
     verifying = await pack_service.get_pack_task_row(task["id"])
     assert verifying is not None
     assert verifying["step"] == "verifying"
+    assert verifying["progress"] == 70
+    assert verifying["step_progress"] == 0
+    assert verifying["started_at_ms"] == 1_000
+    assert verifying["step_started_at_ms"] == 3_000
 
 
 @pytest.mark.asyncio
@@ -375,7 +393,7 @@ async def test_compressing_cas_failure_does_not_start_writer(
 
 
 @pytest.mark.asyncio
-async def test_verifying_cas_failure_does_not_start_hash_or_persist_prepared(
+async def test_verifying_cas_failure_does_not_rescan_persisted_prepared(
     temp_db: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -408,7 +426,7 @@ async def test_verifying_cas_failure_does_not_start_hash_or_persist_prepared(
         "match_expected_step": True,
     }
     scan.assert_not_called()
-    persist.assert_not_awaited()
+    persist.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -418,6 +436,8 @@ async def test_prepared_dispatcher_sets_verifying_and_keeps_started(
 ) -> None:
     user = await create_user_v0(username="pack_prepared_step")
     started = now_ms() - 30_000
+    old_step_started = started + 1_000
+    refreshed_step_started = started + 20_000
     task = await _insert_pack_task(
         user_id=user["id"], source_ids=[1], source_size_bytes=1,
         reserved_bytes=100, status="packing",
@@ -428,6 +448,8 @@ async def test_prepared_dispatcher_sets_verifying_and_keeps_started(
         ).values(
             started_at_ms=started,
             step="compressing",
+            step_progress=73,
+            step_started_at_ms=old_step_started,
             prepared_content_hash="a" * 64,
             prepared_size_bytes=1,
             prepared_filename="prepared.zip",
@@ -441,6 +463,9 @@ async def test_prepared_dispatcher_sets_verifying_and_keeps_started(
         observed.update(current)
 
     monkeypatch.setattr(PackTaskManager, "_finalize_prepared", observe_finalize)
+    monkeypatch.setattr(
+        "app.repositories.pack.now_ms", lambda: refreshed_step_started
+    )
     current = asyncio.current_task()
     assert current is not None
     job = pack_service._RunningPackJob(current, threading.Event())
@@ -448,6 +473,8 @@ async def test_prepared_dispatcher_sets_verifying_and_keeps_started(
     await PackTaskManager._run_persistent_pack(task["id"], job, None)
 
     assert observed["step"] == "verifying"
+    assert observed["step_progress"] == 0
+    assert observed["step_started_at_ms"] == refreshed_step_started
     assert observed["started_at_ms"] == started
 
 

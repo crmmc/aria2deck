@@ -383,7 +383,7 @@ class TestPathGates:
 
     def test_schema_version_unchanged(self) -> None:
         source = (self.ROOT / "backend/app/db/schema.py").read_text()
-        assert "SCHEMA_VERSION = 17" in source
+        assert "SCHEMA_VERSION = 18" in source
 
     def test_no_task_submission_manager_abstraction(self) -> None:
         for path in (self.ROOT / "backend/app").rglob("*.py"):
