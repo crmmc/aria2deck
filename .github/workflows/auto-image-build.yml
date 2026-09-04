@@ -72,7 +72,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # dev 推送：双标签 dev-<sha> + 移动标签 dev（测试服务器固定拉 :dev）
-      # main 推送：sha 标签（保持原有行为）
+      # main 推送：双标签 <sha> + 移动标签 latest（生产/验证环境拉 :latest）
       - name: Compute image name and tags
         id: vars
         run: |
@@ -80,6 +80,8 @@ jobs:
           SHA_TAG="${GITHUB_SHA::7}"
           if [ "${GITHUB_REF_NAME}" = "dev" ]; then
             echo "tags=${IMAGE}:dev,${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
+            echo "tags=${IMAGE}:latest,${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
           else
             echo "tags=${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
           fi
@@ -104,3 +106,4 @@ jobs:
       - name: Summary
         run: |
           echo "Pushed image tags: ${{ steps.vars.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+
