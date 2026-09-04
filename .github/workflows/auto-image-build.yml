@@ -2,10 +2,15 @@ name: Auto Image Build
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, "feat/**"]
 
 permissions:
   contents: read
+
+concurrency:
+  # 同分支连续 push 取消旧构建，避免 runner 分钟堆积
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
@@ -71,19 +76,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # dev 推送：双标签 dev-<sha> + 移动标签 dev（测试服务器固定拉 :dev）
-      # main 推送：双标签 <sha> + 移动标签 latest（生产/验证环境拉 :latest）
+      # dev 推送：移动标签 :dev + :<sha>
+      # main 推送：移动标签 :latest + :<sha>
+      # feat/** 推送：移动标签 :feat-<分支名> + :<sha>（测试服务器可直接拉分支镜像）
       - name: Compute image name and tags
         id: vars
         run: |
           IMAGE="${REGISTRY}/${GITHUB_REPOSITORY,,}"
           SHA_TAG="${GITHUB_SHA::7}"
-          if [ "${GITHUB_REF_NAME}" = "dev" ]; then
+          BRANCH="${GITHUB_REF_NAME}"
+          if [ "${BRANCH}" = "dev" ]; then
             echo "tags=${IMAGE}:dev,${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
-          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
+          elif [ "${BRANCH}" = "main" ]; then
             echo "tags=${IMAGE}:latest,${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
           else
-            echo "tags=${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
+            SAFE_BRANCH="${BRANCH//\//-}"
+            echo "tags=${IMAGE}:${SAFE_BRANCH},${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Set up Docker Buildx
