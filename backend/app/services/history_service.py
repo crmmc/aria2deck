@@ -3,12 +3,10 @@ from __future__ import annotations
 import logging
 
 from app.core.time_utils import ms_to_iso
+from app.domain.errors import BadRequestError, DomainError, NotFoundError
 from app.domain.status import TERMINAL_USER_TASK_STATUSES
-from app.domain.errors import DomainError, NotFoundError
 from app.repositories.task.user_tasks import (
-    clear_terminal_user_tasks,
     delete_terminal_user_task,
-    list_user_tasks,
     list_user_tasks_page,
 )
 from app.services.history_retention import reclaim_zero_pid_tid
@@ -49,18 +47,35 @@ def _history_response(row: dict) -> dict:
     }
 
 
-async def list_history(user_id: int) -> list[dict]:
-    records = await list_user_tasks(user_id, TERMINAL_USER_TASK_STATUSES)
-    logger.debug("查询历史记录 user_id=%s count=%s", user_id, len(records))
-    return [_history_response(row) for row in records]
-
-
-async def list_history_page(*, user_id: int, page: int, page_size: int) -> dict:
+async def list_history_page(
+    *,
+    user_id: int,
+    page: int,
+    page_size: int,
+    status: str | None = None,
+    q: str | None = None,
+) -> dict:
+    if status == "all":
+        status = None
+    if status is not None and status not in TERMINAL_USER_TASK_STATUSES:
+        raise BadRequestError("无效的历史状态筛选")
+    name_query = q.strip() if q else None
+    if not name_query:
+        name_query = None
     records, total = await list_user_tasks_page(
         user_id,
         page=page,
         page_size=page_size,
         statuses=TERMINAL_USER_TASK_STATUSES,
+        history_status=status,
+        name_query=name_query,
+    )
+    logger.debug(
+        "查询历史记录分页 user_id=%s page=%s page_size=%s total=%s",
+        user_id,
+        page,
+        page_size,
+        total,
     )
     return {
         "items": [_history_response(row) for row in records],
@@ -83,15 +98,6 @@ async def delete_history(user_id: int, history_id: int) -> dict:
     await reclaim_zero_pid_tid(tid)
     logger.info("删除历史记录成功 user_id=%s history_id=%s tid=%s", user_id, history_id, tid)
     return {"ok": True}
-
-
-async def clear_history(user_id: int) -> dict:
-    tids = await clear_terminal_user_tasks(user_id)
-    for tid in set(tids):
-        await reclaim_zero_pid_tid(tid)
-    count = len(tids)
-    logger.info("清空历史记录成功 user_id=%s count=%s", user_id, count)
-    return {"ok": True, "count": count}
 
 
 async def bulk_delete_history(user_id: int, history_ids: list[int]) -> dict:

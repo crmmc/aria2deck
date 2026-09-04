@@ -4,7 +4,6 @@ from collections import deque
 from math import ceil
 from time import monotonic
 
-
 _SWEEP_INTERVAL = 64
 _SWEEP_BATCH_SIZE = 128
 

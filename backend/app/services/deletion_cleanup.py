@@ -11,15 +11,15 @@ from uuid import uuid4
 
 from app.domain.status import ACTIVE_USER_TASK_STATUSES
 from app.repositories import auth as auth_repo
-from app.repositories.task import user_tasks as downloads_repo
 from app.repositories import files as files_repo
+from app.repositories.task import user_tasks as downloads_repo
 from app.services.storage import get_store_dir, is_path_within_base
 from app.services.storage_locks import (
     get_content_hash_lock,
     wait_for_content_readers_locked,
 )
-from app.services.task_service import cancel_task
 from app.services.task_broadcast import broadcast_task_update_to_subscribers
+from app.services.task_service import cancel_task
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ import {
   measurePageCapacity,
   MIN_PAGE_CAPACITY,
   PaginationControls,
-} from "@/app/(authenticated)/files/_components/PaginationControls";
+} from "@/components/ui/PaginationControls";
 
 type RenderOptions = {
   currentPage?: number;

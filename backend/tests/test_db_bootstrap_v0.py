@@ -37,6 +37,9 @@ from app.db.migrations import (
     V15_APP_SETTINGS_ADDED_COLUMNS,
     V16_PACK_TASKS_ADDED_COLUMNS,
     V17_APP_SETTINGS_ADDED_COLUMNS,
+    V18_PACK_TASKS_ADDED_COLUMNS,
+    ensure_v8_retry_attempt_schema,
+    migrate_v18,
     run_migrations,
 )
 from app.db.schema import metadata, sessions
@@ -228,7 +231,7 @@ async def test_bootstrap_creates_latest_schema(isolated_db: Path):
             await conn.execute(text("SELECT id FROM app_settings"))
         ).scalar_one()
 
-    assert version == SCHEMA_VERSION == 17
+    assert version == SCHEMA_VERSION
     assert users_exists == "users"
     assert settings_id == 1
 
@@ -315,6 +318,9 @@ def test_current_schema_changes_are_accounted_for_in_migration_contract():
     accounted_columns.setdefault("app_settings", set()).update(
         V17_APP_SETTINGS_ADDED_COLUMNS
     )
+    accounted_columns.setdefault("pack_tasks", set()).update(
+        V18_PACK_TASKS_ADDED_COLUMNS
+    )
     accounted_columns["tracker_list_cache"] = {
         "id",
         "trackers_json",
@@ -352,10 +358,11 @@ async def test_v15_to_v16_adds_pack_attempt_columns_without_backfill(
         ))
         await conn.execute(text("INSERT INTO pack_tasks VALUES (1, 'packing')"))
 
-        assert await run_migrations(conn, 15) == 17
+        assert await run_migrations(conn, 15) == SCHEMA_VERSION
         row = (
             await conn.execute(text(
-                "SELECT started_at_ms, step FROM pack_tasks WHERE id = 1"
+                "SELECT started_at_ms, step, step_progress, step_started_at_ms "
+                "FROM pack_tasks WHERE id = 1"
             ))
         ).one()
         columns = {
@@ -364,8 +371,56 @@ async def test_v15_to_v16_adds_pack_attempt_columns_without_backfill(
             ).all()
         }
 
-    assert row == (None, None)
+    assert row == (None, None, 0, None)
     assert {"started_at_ms", "step"} <= columns
+
+
+@pytest.mark.asyncio
+async def test_v17_to_v18_adds_constrained_pack_step_progress_columns(
+    isolated_db: Path,
+) -> None:
+    async with get_engine().begin() as conn:
+        await conn.execute(text(
+            "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY, version INTEGER NOT NULL, "
+            "created_at_ms INTEGER NOT NULL)"
+        ))
+        await conn.execute(text("INSERT INTO schema_meta VALUES (1, 17, 123)"))
+        await conn.execute(text(
+            "CREATE TABLE pack_tasks (id INTEGER PRIMARY KEY, status VARCHAR(16) NOT NULL)"
+        ))
+        await conn.execute(text("INSERT INTO pack_tasks VALUES (1, 'packing')"))
+
+        assert await run_migrations(conn, 17) == SCHEMA_VERSION
+        row = (
+            await conn.execute(text(
+                "SELECT step_progress, step_started_at_ms FROM pack_tasks WHERE id = 1"
+            ))
+        ).one()
+        assert row == (0, None)
+
+        for invalid_progress in (-1, 101):
+            with pytest.raises(IntegrityError):
+                async with conn.begin_nested():
+                    await conn.execute(
+                        text("UPDATE pack_tasks SET step_progress = :progress WHERE id = 1"),
+                        {"progress": invalid_progress},
+                    )
+
+        await migrate_v18(conn)
+        await migrate_v18(conn)
+        columns = [
+            item[1]
+            for item in (
+                await conn.execute(text("PRAGMA table_info(pack_tasks)"))
+            ).all()
+        ]
+        version = (
+            await conn.execute(text("SELECT version FROM schema_meta WHERE id = 1"))
+        ).scalar_one()
+
+    assert columns.count("step_progress") == 1
+    assert columns.count("step_started_at_ms") == 1
+    assert version == SCHEMA_VERSION
 
 
 def test_app_settings_v1_columns_are_registered_in_migration_map():
@@ -395,6 +450,28 @@ def test_credential_v6_columns_replace_plaintext_columns():
 
 
 @pytest.mark.asyncio
+async def test_v8_schema_handles_single_quote_in_index_metadata(temp_db: str) -> None:
+    index_name = "ix_global_downloads_quoted'name"
+    async with get_engine().begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE INDEX \"ix_global_downloads_quoted'name\" "
+                "ON global_downloads (status)"
+            )
+        )
+        await ensure_v8_retry_attempt_schema(conn)
+        await ensure_v8_retry_attempt_schema(conn)
+        index_names = {
+            row[1]
+            for row in (
+                await conn.execute(text("PRAGMA index_list('global_downloads')"))
+            ).all()
+        }
+
+    assert index_name in index_names
+
+
+@pytest.mark.asyncio
 async def test_v2_to_latest_migration_is_idempotent(isolated_db: Path):
     async with get_engine().begin() as conn:
         await conn.execute(
@@ -410,8 +487,8 @@ async def test_v2_to_latest_migration_is_idempotent(isolated_db: Path):
                 "id INTEGER PRIMARY KEY, status TEXT NOT NULL)"
             )
         )
-        assert await run_migrations(conn, 2) == 17
-        assert await run_migrations(conn, 2) == 17
+        assert await run_migrations(conn, 2) == SCHEMA_VERSION
+        assert await run_migrations(conn, 2) == SCHEMA_VERSION
 
     async with get_engine().connect() as conn:
         columns = {
@@ -463,8 +540,8 @@ async def test_v3_to_v4_migration_is_idempotent(isolated_db: Path):
                 ),
                 {"id": task_id, "sources": sources},
             )
-        assert await run_migrations(conn, 3) == 17
-        assert await run_migrations(conn, 3) == 17
+        assert await run_migrations(conn, 3) == SCHEMA_VERSION
+        assert await run_migrations(conn, 3) == SCHEMA_VERSION
 
     async with get_engine().connect() as conn:
         columns = {
@@ -536,7 +613,7 @@ async def test_v4_migration_backfills_confirmed_and_unknown_source_identities(
             "(2,1,'[2]',10,0,99,1,0,'completed',NULL,200,200,200),"
             "(3,1,'[3]',10,0,98,1,1,'completed',NULL,200,200,200)"
         ))
-        assert await run_migrations(conn, 3) == 17
+        assert await run_migrations(conn, 3) == SCHEMA_VERSION
 
     async with get_engine().connect() as conn:
         sources = (
@@ -688,7 +765,7 @@ async def test_bootstrap_migrates_existing_v0_schema_to_latest_version(
             ).all()
         }
 
-    assert version == SCHEMA_VERSION == 17
+    assert version == SCHEMA_VERSION
     assert timeout_seconds == DEFAULT_ARIA2_BT_STOP_TIMEOUT_SECONDS
     assert {
         "bt_info_hash",

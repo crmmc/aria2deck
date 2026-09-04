@@ -154,8 +154,10 @@ async def get_tracker_status() -> dict[str, Any]:
 
 async def _fetch_url(url: str) -> str:
     """拉取单个远程源：15s 超时、1MiB 响应体上限，超限/非 2xx 视为该源失败。"""
-    async with aiohttp.ClientSession(timeout=REMOTE_FETCH_TIMEOUT) as session:
-        async with session.get(url) as response:
+    async with (
+        aiohttp.ClientSession(timeout=REMOTE_FETCH_TIMEOUT) as session,
+        session.get(url) as response,
+    ):
             response.raise_for_status()
             chunks: list[bytes] = []
             size = 0

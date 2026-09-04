@@ -1991,6 +1991,59 @@ async def test_list_user_tasks_page_invalid_filter(temp_db: str) -> None:
         )
 
 
+async def test_list_user_tasks_page_history_status_and_name_query(temp_db: str) -> None:
+    user = await create_user_v0(username="page_history_filter")
+    gd_completed = await create_global_download_v0(
+        resource_key="magnet:page-hist-done",
+        status="completed",
+        display_name="alpha-report.zip",
+    )
+    gd_failed = await create_global_download_v0(
+        resource_key="magnet:page-hist-fail",
+        status="failed",
+        display_name="beta-movie.mkv",
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=gd_completed["id"],
+        status="completed",
+        display_name="alpha-report.zip",
+    )
+    # user_tasks.display_name 为 NULL：只能靠 global_downloads.display_name 命中
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=gd_failed["id"],
+        status="failed",
+    )
+
+    rows, total = await ut.list_user_tasks_page(
+        user["id"], page=1, page_size=10, history_status="failed"
+    )
+    assert total == 1
+    assert rows[0]["global_download_id"] == gd_failed["id"]
+
+    rows, total = await ut.list_user_tasks_page(
+        user["id"], page=1, page_size=10, name_query="BETA"
+    )
+    assert total == 1
+    assert rows[0]["global_download_id"] == gd_failed["id"]
+
+    rows, total = await ut.list_user_tasks_page(
+        user["id"], page=1, page_size=10, name_query="alpha"
+    )
+    assert total == 1
+    assert rows[0]["global_download_id"] == gd_completed["id"]
+
+    rows, total = await ut.list_user_tasks_page(
+        user["id"],
+        page=1,
+        page_size=10,
+        history_status="failed",
+        name_query="alpha",
+    )
+    assert total == 0
+
+
 async def test_attach_completed_file_reserved_drift(temp_db: str) -> None:
     user = await create_user_v0(username="attach_drift", quota_bytes=1_000_000)
     path = Path(settings.download_dir) / "store" / "attach_drift_hash"

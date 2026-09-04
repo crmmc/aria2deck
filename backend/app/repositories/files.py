@@ -20,9 +20,9 @@ from app.db.schema import (
     user_tasks,
     users,
 )
+from app.domain.content_identity import ContentIdentity
 from app.domain.shares import SHARE_ACTIVE_STATUS
 from app.repositories.errors import RepositoryConflictError
-from app.domain.content_identity import ContentIdentity
 
 
 class PackSourceProtectedError(RuntimeError):

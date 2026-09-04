@@ -224,7 +224,10 @@ def safe_delete_path(
 
 
 def get_store_path_for_hash(content_hash: str) -> Path:
-    from app.services.storage_index import CONTENT_HASH_V2, content_identity_from_content_hash
+    from app.services.storage_index import (
+        CONTENT_HASH_V2,
+        content_identity_from_content_hash,
+    )
 
     identity = content_identity_from_content_hash(content_hash)
     store_dir = get_store_dir()

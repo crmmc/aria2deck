@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import overload
 
-from app.modules.backend.port import BackendPort
 from app.domain.lifecycle import RepairClaim, TerminalizationClaim
-from app.repositories.task.user_tasks import get_representative_active_owner_id
+from app.modules.backend.port import BackendPort
 from app.repositories.task.downloads import (
     clear_terminal_download_gid,
 )
+from app.repositories.task.user_tasks import get_representative_active_owner_id
 from app.services.storage import cleanup_task_download_dir, get_downloading_dir
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ async def get_representative_owner_id(task_id: int) -> int | None:
 
 
 @overload
-def cleanup_with_claim(
+async def cleanup_with_claim(
     backend: BackendPort,
     claim: TerminalizationClaim,
     *,
@@ -75,7 +75,7 @@ def cleanup_with_claim(
 
 
 @overload
-def cleanup_with_claim(
+async def cleanup_with_claim(
     backend: BackendPort,
     claim: RepairClaim,
     *,
@@ -115,7 +115,7 @@ async def cleanup_with_claim(
     for wgid in writer_gids:
         try:
             await backend.force_remove_gid(wgid)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             if _writer_already_stopped(exc):
                 logger.debug(
                     "[CLEANUP] writer_already_stopped %s attempt_id=%s gid=%s",
@@ -146,7 +146,7 @@ async def cleanup_with_claim(
     try:
         await cleanup_task_download_dir(attempt_id)
         directory_cleaned = True
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         logger.warning(
             "[CLEANUP] fs_failed %s attempt_id=%s "
             "path=%s error_type=%s error=%s",
@@ -162,7 +162,7 @@ async def cleanup_with_claim(
     for rgid in result_gids:
         try:
             await backend.remove_download_result_gid(rgid)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             result_removed = False
             logger.debug(
                 "[CLEANUP] result_remove_failed %s attempt_id=%s gid=%s error=%s",

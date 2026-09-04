@@ -122,11 +122,8 @@ def is_metadata_handoff_pending(
         return False
     if first_followed_gid(aria2_status) is not None:
         return False
-    if following_gid(aria2_status) is not None:
-        return False
-
     # A magnet's metadata GID can briefly look like a completed payload before
     # aria2 exposes followedBy. Do not let display names or file-path heuristics
     # turn that metadata completion into final artifact validation.
-    return True
+    return following_gid(aria2_status) is None
 

@@ -151,6 +151,8 @@ async def _add_missing_columns(
     for column_name, column_sql in column_definitions.items():
         if column_name not in column_names:
             await conn.execute(
+                # Table, column, and type are source-defined migration constants; DDL cannot bind them.
+                # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
                 text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
             )
 
@@ -197,8 +199,13 @@ async def ensure_v8_retry_attempt_schema(conn: AsyncConnection) -> None:
     for row in rows:
         index_name = str(row[1])
         origin = str(row[3] or "")
+        quoted_index_name = index_name.replace("'", "''")
         columns = (
-            await conn.execute(text(f"PRAGMA index_info('{index_name}')"))
+            await conn.execute(
+                # The name is SQLite schema metadata escaped as a string literal; PRAGMA cannot bind it.
+                # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                text(f"PRAGMA index_info('{quoted_index_name}')")
+            )
         ).all()
         column_names = {str(col[2]) for col in columns}
         if column_names != {"resource_key"}:
@@ -530,7 +537,9 @@ async def _rebuild_global_downloads_source_fk(conn: AsyncConnection) -> None:
     await _recover_crashed_v12_swap(conn)
 
     columns = await _column_names(conn, "global_downloads")
-    column_list = ", ".join(sorted(columns))
+    column_list = ", ".join(
+        '"' + column.replace('"', '""') + '"' for column in sorted(columns)
+    )
     # Only reference stored_files when it exists (any real deployment has it);
     # a FK clause against a missing table breaks INSERT preparation on
     # minimal legacy/test schemas.
@@ -543,8 +552,10 @@ async def _rebuild_global_downloads_source_fk(conn: AsyncConnection) -> None:
     )
     await conn.execute(text(create_sql.format(name="global_downloads_v12_new")))
     await conn.execute(
+        # Inspector column names are SQLite-quoted identifiers; identifiers cannot be bound.
+        # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
         text(
-            f"INSERT INTO global_downloads_v12_new ({column_list}) "
+            f"INSERT INTO global_downloads_v12_new ({column_list}) "  # noqa: S608 - inspector identifiers are SQLite-quoted and cannot be bound
             f"SELECT {column_list} FROM global_downloads"
         )
     )
@@ -681,6 +692,19 @@ async def migrate_v17(conn: AsyncConnection) -> None:
     await _rebuild_schema_meta(conn, 17)
 
 
+V18_PACK_TASKS_ADDED_COLUMNS = {
+    "step_progress": (
+        "INTEGER NOT NULL DEFAULT 0 CHECK (step_progress >= 0 AND step_progress <= 100)"
+    ),
+    "step_started_at_ms": "INTEGER",
+}
+
+
+async def migrate_v18(conn: AsyncConnection) -> None:
+    await _add_missing_columns(conn, "pack_tasks", V18_PACK_TASKS_ADDED_COLUMNS)
+    await _rebuild_schema_meta(conn, 18)
+
+
 async def migrate_v1(conn: AsyncConnection) -> None:
     await _add_missing_columns(conn, "app_settings", V1_APP_SETTINGS_ADDED_COLUMNS)
     await _rebuild_schema_meta(conn, 1)
@@ -754,6 +778,8 @@ async def _create_v4_prepared_triggers(conn: AsyncConnection) -> None:
     for operation in ("INSERT", "UPDATE"):
         name = f"trg_pack_tasks_prepared_fields_{operation.lower()}"
         await conn.execute(
+            # Trigger name, operation, and predicate come only from source-defined constants.
+            # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
             text(
                 f"CREATE TRIGGER IF NOT EXISTS {name} BEFORE {operation} ON pack_tasks "
                 f"WHEN {invalid} BEGIN SELECT RAISE(ABORT, "
@@ -944,9 +970,7 @@ async def _backfill_v4_pack_sources(conn: AsyncConnection) -> None:
                 state, error = "unknown", "升级时无法确认待清理源文件身份"
             elif identity is None:
                 state, error = "retained", "升级时无法确认历史源身份，按已保留处理"
-            elif active and uncertain:
-                state, error = "retained", None
-            elif not bool(task["delete_source"]):
+            elif active and uncertain or not bool(task["delete_source"]):
                 state, error = "retained", None
             elif active:
                 state, error = "pending", None
@@ -1204,6 +1228,8 @@ async def _create_v7_identity_triggers(conn: AsyncConnection) -> None:
     )
     for operation in ("INSERT", "UPDATE"):
         await conn.execute(
+            # Trigger operation and identity predicate come only from source-defined constants.
+            # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
             text(
                 f"CREATE TRIGGER IF NOT EXISTS trg_stored_files_content_identity_"
                 f"{operation.lower()} BEFORE {operation} ON stored_files "
@@ -1233,7 +1259,11 @@ async def ensure_v7_content_identity_schema(conn: AsyncConnection) -> None:
         "length(content_digest) != 64 OR content_digest GLOB \"*[^0-9a-f]*\" OR "
         "content_hash != \"v2:\" || content_object_kind || \":\" || content_digest)"
     )
-    row = await conn.execute(text(f"SELECT 1 FROM stored_files WHERE {invalid} LIMIT 1"))
+    row = await conn.execute(
+        # The identity predicate is source-defined; stored row values are not interpolated.
+        # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        text(f"SELECT 1 FROM stored_files WHERE {invalid} LIMIT 1")  # noqa: S608  # internal migration predicate; identifiers cannot be bound
+    )
     if row.first():
         raise RuntimeError("v7 内容身份迁移发现无效记录")
     await conn.execute(
@@ -1279,6 +1309,7 @@ MIGRATIONS: dict[int, Migration] = {
     15: migrate_v15,
     16: migrate_v16,
     17: migrate_v17,
+    18: migrate_v18,
 }
 
 

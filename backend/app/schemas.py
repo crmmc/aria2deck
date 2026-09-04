@@ -1,7 +1,7 @@
 """数据模型定义"""
 import re
-from pydantic import BaseModel, Field, field_validator
 
+from pydantic import BaseModel, Field, field_validator
 
 # 用户名允许的字符：字母、数字、下划线、中文
 USERNAME_PATTERN = re.compile(r'^[\w\u4e00-\u9fff]+$')

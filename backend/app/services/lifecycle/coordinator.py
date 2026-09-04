@@ -11,12 +11,16 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from app.modules.backend.port import BackendPort
 from app.core.security import sanitize_string
 from app.core.time_utils import now_ms
 from app.domain.lifecycle import ReconcileResult
 from app.domain.locks import get_download_lifecycle_lock
-from app.modules.task_core.sync import record_observed_snapshot
+from app.domain.quota import candidate_size_from_status
+from app.domain.status import (
+    ACTIVE_USER_TASK_STATUSES,
+    TERMINAL_DOWNLOAD_STATUSES,
+)
+from app.modules.backend.port import BackendPort
 from app.modules.task_core.states import (
     ACTIVE_CLEAR_ERROR_CODES,
     ERROR_ADMISSION_PAUSED,
@@ -25,11 +29,7 @@ from app.modules.task_core.states import (
     PROJECTION_PROTECTED_ERROR_CODES,
     SYSTEM_OWNED_PAUSE_CODES,
 )
-from app.domain.quota import candidate_size_from_status
-from app.domain.status import (
-    ACTIVE_USER_TASK_STATUSES,
-    TERMINAL_DOWNLOAD_STATUSES,
-)
+from app.modules.task_core.sync import record_observed_snapshot
 from app.repositories.task.downloads import (
     get_global_download_by_gid,
     get_global_download_status_snapshot,
@@ -48,12 +48,12 @@ from app.services.lifecycle.cleanup import (
     _terminalize_missing_gid_locked,
     fail_download_and_reclaim,
 )
+from app.services.lifecycle.completion import handle_v0_download_complete
 from app.services.lifecycle.handoff import (
     _handoff_locked,
     coordinate_reported_size,
     resolve_download_for_gid,
 )
-from app.services.lifecycle.completion import handle_v0_download_complete
 from app.services.task_projection import (
     has_live_bt_evidence,
     is_bt_resource_kind,
@@ -302,10 +302,11 @@ async def reconcile_attempt_signal(
                 display_name = download_ops.extract_display_name(
                     working_status, None
                 )
+                safe_message = sanitize_string(message) or ""
                 changed = await fail_download_and_reclaim(
                     backend=backend,
                     download_id=attempt_id,
-                    message=sanitize_string(message),
+                    message=safe_message,
                     error_code=error_code,
                     expected_gid=current_gid,
                     writer_gid=current_gid,
@@ -471,10 +472,12 @@ async def reconcile_attempt_signal(
                     # resumes it instead of treating it as external.
                     global_values["error_code"] = ERROR_ADMISSION_PAUSED
                     global_values["error_message"] = None
-                if not is_metadata:
+                if (
+                    not is_metadata
+                    and mapped["display_name"]
+                ):
                     # M10: total_bytes is admission-owned only; projection must
                     # never overwrite admitted truth from live totalLength noise.
-                    if mapped["display_name"]:
                         global_values["display_name"] = mapped["display_name"]
 
                 # Pause projection (arch M2 / M7):
@@ -580,5 +583,3 @@ async def reconcile_attempt_signal(
             await _broadcast_download_update(attempt_id)
             return ReconcileResult.COMPLETED
         return ReconcileResult.WAITING
-
-    return ReconcileResult.WAITING

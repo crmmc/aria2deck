@@ -28,7 +28,7 @@ async def get_aria2_version(admin_id: int | None) -> dict:
             "version": version_info.get("version"),
             "enabled_features": version_info.get("enabledFeatures", []),
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         await backend_connectivity.mark_fail()
         logger.warning(
             "获取aria2版本失败 admin_id=%s error_type=%s",
@@ -69,7 +69,7 @@ async def test_aria2_connection(
             "version": version_info.get("version"),
             "enabled_features": version_info.get("enabledFeatures", []),
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         await backend_connectivity.mark_fail()
         logger.warning(
             "测试aria2连接失败 admin_id=%s url=%s error_type=%s",

@@ -4,11 +4,9 @@ import asyncio
 import logging
 from typing import Any
 
-
 from app.repositories.task.user_tasks import list_user_tasks_for_download
 from app.services.task_projection import build_rest_task_response
 from app.services.task_projection_rows import attach_snapshots_to_rows
-
 
 logger = logging.getLogger(__name__)
 MAX_WS_CONNECTIONS_PER_USER = 5
@@ -142,7 +140,7 @@ async def _close_sockets(sockets: list[Any], code: int) -> None:
     for ws in sockets:
         try:
             await ws.close(code=code)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             logger.debug("WebSocket close failed: %s", exc)
 
 
@@ -173,7 +171,7 @@ async def broadcast_task_update_to_subscribers(task_id: int) -> None:
         for ws in sockets:
             try:
                 await ws.send_json({"type": "task_update", "task": payload})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
                 logger.debug("WebSocket send failed for user %s: %s", owner_id, exc)
                 failed_sockets.append(ws)
 
@@ -196,7 +194,7 @@ async def broadcast_notification(
     for ws in sockets:
         try:
             await ws.send_json(notification)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             logger.debug("Notification send failed user_id=%s error=%s", user_id, exc)
             failed_sockets.append(ws)
 

@@ -17,7 +17,12 @@ from app.schemas import (
     InvalidateCredentialsRequest,
     InvalidateCredentialsResponse,
 )
-from app.services import aria2_admin_service, settings_service, token_service, tracker_list_service
+from app.services import (
+    aria2_admin_service,
+    settings_service,
+    token_service,
+    tracker_list_service,
+)
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 logger = logging.getLogger(__name__)

@@ -12,7 +12,6 @@ Behavior:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from app.modules.backend.port import BackendPort
 from app.repositories.task.user_tasks import cancel_user_task_and_maybe_claim_attempt

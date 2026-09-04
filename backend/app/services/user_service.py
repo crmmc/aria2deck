@@ -4,7 +4,13 @@ import logging
 import secrets
 
 from app.auth import AuthUser
-from app.core.security import credential_digest, credential_prefix, decrypt_credential, encrypt_credential, hash_password
+from app.core.security import (
+    credential_digest,
+    credential_prefix,
+    decrypt_credential,
+    encrypt_credential,
+    hash_password,
+)
 from app.core.time_utils import ms_to_iso, now_ms
 from app.domain.errors import BadRequestError, ForbiddenError, NotFoundError
 from app.domain.quota import machine_share_percent, usage_percent
@@ -354,6 +360,8 @@ async def update_user(
     if payload.password is not None:
         await remove_connections_for_user(user_id)
 
+    # Arguments are IDs, field-presence booleans, and request ID; no password or hash is logged.
+    # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
     logger.info(
         "更新用户成功 actor_id=%s target_user_id=%s set_username=%s set_password=%s set_is_admin=%s set_quota=%s request_id=%s",
         actor.id,

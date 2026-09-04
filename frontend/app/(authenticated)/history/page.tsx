@@ -1,20 +1,27 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "@/lib/api";
 import type { TaskHistory } from "@/types";
 import { useToast } from "@/components/Toast";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { PaginationControls } from "@/components/ui/PaginationControls";
 import { ToolbarGroup, ToolbarSearchInput, ToolbarShell } from "@/components/ui/Toolbar";
 import { useClipboard } from "@/hooks/useClipboard";
 import { useSelection } from "@/hooks/useSelection";
 import { HistoryCard } from "./_components/HistoryCard";
 
+const DEFAULT_PAGE_SIZE = 20;
+const SEARCH_DEBOUNCE_MS = 300;
+
 export default function HistoryPage() {
   const { showToast, showConfirm } = useToast();
   const copyToClipboard = useClipboard();
   const [records, setRecords] = useState<TaskHistory[]>([]);
+  const [total, setTotal] = useState(0);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
   const {
     selected: selectedRecords,
@@ -25,29 +32,58 @@ export default function HistoryPage() {
   } = useSelection<number>();
   const [filterStatus, setFilterStatus] = useState<string>("all");
   const [searchKeyword, setSearchKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [isBatchOperating, setIsBatchOperating] = useState(false);
   const mountedRef = useRef(true);
+  const requestIdRef = useRef(0);
 
   const loadHistory = useCallback(async () => {
     if (!mountedRef.current) return;
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     try {
-      const history = await api.listHistory();
-      if (mountedRef.current) setRecords(history);
+      const result = await api.listHistoryPage({
+        page: currentPage,
+        pageSize,
+        status: filterStatus,
+        q: debouncedKeyword,
+      });
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      setRecords(result.items);
+      // 新一页/新条件的结果成为当前数据时，清空残留选中，避免工具栏显示旧页计数、批量操作命中空列表
+      setSelectedRecords(new Set());
+      setTotal(result.total);
     } catch {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
       showToast("加载历史失败", "error");
     } finally {
-      if (mountedRef.current) setLoading(false);
+      if (mountedRef.current && requestId === requestIdRef.current) setLoading(false);
     }
-  }, [showToast]);
+  }, [currentPage, pageSize, filterStatus, debouncedKeyword, showToast]);
 
   useEffect(() => {
     const mounted = mountedRef;
     mounted.current = true;
-    loadHistory();
     return () => { mounted.current = false; };
+  }, []);
+
+  useEffect(() => {
+    loadHistory();
   }, [loadHistory]);
+
+  // 搜索防抖：输入停止 300ms 后才触发后端查询；关键词真正变化时同步回到第 1 页，
+  // 保证条件变化只发一笔"第 1 页 + 新条件"的请求
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const next = searchKeyword.trim();
+      setDebouncedKeyword((prev) => {
+        if (prev === next) return prev;
+        setCurrentPage(1);
+        return next;
+      });
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchKeyword]);
 
   const copyUri = useCallback(
     (uri: string) => {
@@ -66,19 +102,24 @@ export default function HistoryPage() {
           return;
         }
         if (!mountedRef.current) return;
-        setRecords((prev) => prev.filter((r) => r.id !== record.id));
         setSelectedRecords((prev) => {
           const next = new Set(prev);
           next.delete(record.id);
           return next;
         });
         showToast("已删除该条历史记录", "success");
+        // 当前页删空且非第 1 页时回退到上一页（页码变化会触发重新拉取）
+        if (records.length === 1 && currentPage > 1) {
+          setCurrentPage((page) => page - 1);
+        } else {
+          loadHistory();
+        }
       } catch (err) {
         showToast("删除失败：" + (err as Error).message, "error");
         if (mountedRef.current) loadHistory();
       }
     },
-    [showToast, loadHistory]
+    [showToast, loadHistory, setSelectedRecords, records.length, currentPage]
   );
 
   const retryTask = useCallback(
@@ -120,7 +161,6 @@ export default function HistoryPage() {
       const deletedIds = new Set(
         result.results.filter((r) => r.ok).map((r) => r.history_id)
       );
-      setRecords((prev) => prev.filter((r) => !deletedIds.has(r.id)));
       setSelectedRecords(new Set());
       if (result.failed_count > 0) {
         showToast(
@@ -130,6 +170,13 @@ export default function HistoryPage() {
       } else {
         showToast(`已删除 ${result.accepted_count} 条历史记录`, "success");
       }
+      // 当前页被删空且非第 1 页时回退到上一页（页码变化会触发重新拉取）
+      const remaining = records.filter((r) => !deletedIds.has(r.id));
+      if (remaining.length === 0 && currentPage > 1) {
+        setCurrentPage((page) => page - 1);
+      } else {
+        loadHistory();
+      }
     } catch (err) {
       showToast("删除失败：" + (err as Error).message, "error");
       if (mountedRef.current) loadHistory();
@@ -138,57 +185,9 @@ export default function HistoryPage() {
     }
   }
 
-  async function clearAllHistory() {
-    if (records.length === 0) {
-      showToast("没有历史记录", "warning");
-      return;
-    }
-
-    const confirmed = await showConfirm({
-      title: "清空历史",
-      message: `确定要清空全部 ${records.length} 条历史记录吗？`,
-      confirmText: "清空",
-      danger: true,
-    });
-    if (!confirmed) return;
-
-    setIsBatchOperating(true);
-    try {
-      await api.clearHistory();
-      setRecords([]);
-      setSelectedRecords(new Set());
-      showToast(`已清空全部历史记录`, "success");
-    } catch (err) {
-      showToast("清空失败：" + (err as Error).message, "error");
-    } finally {
-      if (mountedRef.current) setIsBatchOperating(false);
-    }
-  }
-
-  const filteredRecords = useMemo(() => {
-    let filtered = records;
-
-    if (searchKeyword.trim()) {
-      const keyword = searchKeyword.toLowerCase();
-      filtered = filtered.filter((r) =>
-        r.task_name.toLowerCase().includes(keyword)
-      );
-    }
-
-    if (filterStatus === "completed") {
-      filtered = filtered.filter((r) => r.result === "completed");
-    } else if (filterStatus === "cancelled") {
-      filtered = filtered.filter((r) => r.result === "cancelled");
-    } else if (filterStatus === "failed") {
-      filtered = filtered.filter((r) => r.result === "failed");
-    }
-
-    return filtered;
-  }, [records, searchKeyword, filterStatus]);
-
   const toggleSelectAll = useCallback(() => {
-    toggleAllRecords(filteredRecords.map((r) => r.id));
-  }, [toggleAllRecords, filteredRecords]);
+    toggleAllRecords(records.map((r) => r.id));
+  }, [toggleAllRecords, records]);
 
   return (
     <div className="glass-frame full-height animate-in">
@@ -205,7 +204,7 @@ export default function HistoryPage() {
             className="button secondary btn-sm"
             onClick={toggleSelectAll}
           >
-            {selectedCount === filteredRecords.length && filteredRecords.length > 0
+            {selectedCount === records.length && records.length > 0
               ? "取消全选"
               : "全选"}
           </button>
@@ -223,22 +222,16 @@ export default function HistoryPage() {
               </button>
             </>
           )}
-          {records.length > 0 && (
-            <button type="button"
-              className={`button secondary btn-sm${isBatchOperating ? " opacity-60" : ""}`}
-              onClick={clearAllHistory}
-              disabled={isBatchOperating}
-            >
-              清空历史
-            </button>
-          )}
         </ToolbarGroup>
 
         <ToolbarGroup className="toolbar-select-group">
           <span className="muted text-sm">筛选:</span>
           <select
             value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
+            onChange={(e) => {
+              setFilterStatus(e.target.value);
+              setCurrentPage(1);
+            }}
             className="select"
             aria-label="筛选历史"
           >
@@ -264,7 +257,7 @@ export default function HistoryPage() {
           <div className="empty-state">
             <p className="muted">加载中...</p>
           </div>
-        ) : filteredRecords.length === 0 ? (
+        ) : records.length === 0 ? (
           <EmptyState
             icon={
               <svg
@@ -286,7 +279,7 @@ export default function HistoryPage() {
           />
         ) : (
           <div className="card task-card-container">
-            {filteredRecords.map((record) => (
+            {records.map((record) => (
               <HistoryCard
                 key={record.id}
                 record={record}
@@ -300,6 +293,16 @@ export default function HistoryPage() {
           </div>
         )}
       </div>
+
+      {total > 0 && (
+        <PaginationControls
+          currentPage={currentPage}
+          pageSize={pageSize}
+          totalFiles={total}
+          onPageChange={setCurrentPage}
+          onPageSizeChange={setPageSize}
+        />
+      )}
     </div>
   );
 }

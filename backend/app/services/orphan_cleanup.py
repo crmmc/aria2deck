@@ -65,7 +65,7 @@ async def cleanup_orphan_files() -> int:
             if deleted:
                 orphan_count += 1
                 logger.info("Deleted orphan file: %s", object_path)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             logger.error("Failed to delete orphan file %s: %s", object_path, exc)
 
     if orphan_count > 0:

@@ -23,10 +23,6 @@ from app.http.file_response import (
     release_response_leases,
     tracked_response,
 )
-from app.services.storage_locks import (
-    acquire_content_read_lease_locked,
-    get_content_hash_lock,
-)
 from app.schemas import (
     CreateShareRequest,
     ShareAccessRequest,
@@ -35,6 +31,10 @@ from app.schemas import (
     ShareLinkOut,
 )
 from app.services import share_service
+from app.services.storage_locks import (
+    acquire_content_read_lease_locked,
+    get_content_hash_lock,
+)
 
 router = APIRouter(tags=["shares"])
 logger = logging.getLogger(__name__)

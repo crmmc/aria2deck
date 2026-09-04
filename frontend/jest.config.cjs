@@ -24,6 +24,7 @@ const config = {
     'app/(authenticated)/tasks/page.tsx',
     'app/(authenticated)/users/page.tsx',
     'components/{CreateShareDialog,PackTaskCard,PasswordWarningBanner,StatsWidget,Toast}.tsx',
+    'components/ui/PaginationControls.tsx',
     'hooks/useTaskWebSocket.ts',
     'lib/**/*.{ts,tsx}',
     '!**/*.d.ts',

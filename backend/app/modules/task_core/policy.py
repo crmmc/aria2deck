@@ -11,10 +11,14 @@ Rules (see task spec + M7/M9 ownership model):
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 from app.domain.error_text import over_limit
+
+logger = logging.getLogger(__name__)
 from app.modules.backend.port import BackendPort
 from app.modules.task_core.states import (
     ERROR_ADMISSION_PAUSED,
@@ -149,8 +153,9 @@ async def _observe_backend_status(backend: BackendPort, tid: int) -> str | None:
     if not gid:
         return None
     try:
-        raw = await backend.tell_status(str(gid))
-    except Exception:
+        raw: object = await backend.tell_status(str(gid))
+    except Exception as exc:  # noqa: BLE001  # backend observation is best effort
+        logger.debug("后端状态观测失败 error_type=%s", type(exc).__name__)
         return None
     if not isinstance(raw, Mapping):
         return None
@@ -167,9 +172,9 @@ async def apply_decision(
     if decision.action == "resume":
         try:
             await backend.unpause(tid)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001  # unpause failure is followed by status re-query
             # Still re-query: unpause may have taken effect despite RPC error.
-            pass
+            logger.debug("恢复任务失败，将继续复查 error_type=%s", type(exc).__name__)
         observed = await _observe_backend_status(backend, tid)
         if observed in _RUNNING_STATUSES:
             await update_global_download(

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import logging
 import os
-from pathlib import Path
 import shutil
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from pathlib import Path
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import settings
-
 
 logger = logging.getLogger(__name__)
 CREDENTIAL_SCRUB_MARKER_SUFFIX = ".v6-credential-scrub"
@@ -141,7 +140,7 @@ async def check_database_integrity() -> bool:
             result = await conn.execute(text("PRAGMA integrity_check"))
             rows = result.fetchall()
         return len(rows) == 1 and rows[0][0] == "ok"
-    except Exception:
+    except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
         return False
 
 
@@ -150,12 +149,11 @@ async def check_wal_integrity() -> bool:
         async with get_engine().connect() as conn:
             await conn.execute(text("PRAGMA wal_checkpoint(PASSIVE)"))
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
         return False
 
 
 async def dispose_engine() -> None:
-    global _engine
     if _engine is not None:
         await _engine.dispose()
 

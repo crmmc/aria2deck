@@ -29,13 +29,65 @@ from app.repositories.task.downloads import (
     DiskAvailable,
     _complete_user_task_with_file,
     _fail_active_task_row,
-    _lock_active_download,
-    _reconcile_download_size_locked,
+    _lock_active_download,  # noqa: F401  # 保留既有模块属性兼容路径
+    _reconcile_download_size_locked,  # noqa: F401  # 保留既有模块属性兼容路径
     _strict_adjust_usage_reserved,
     now_ms,
     refreshable_user_task_display_name_condition,
 )
 
+__all__ = [
+    "ACTIVE_GLOBAL_DOWNLOAD_STATUSES",
+    "ACTIVE_USER_TASK_STATUSES",
+    "ERROR_DOWNLOAD_STATUSES",
+    "FAILABLE_GLOBAL_DOWNLOAD_STATUSES",
+    "REST_TASK_STATUS_FILTERS",
+    "TERMINAL_USER_TASK_STATUSES",
+    "Any",
+    "DiskAvailable",
+    "DownloadAdmissionError",
+    "IntegrityError",
+    "Iterable",
+    "RepositoryConflictError",
+    "TerminalizationClaim",
+    "attach_completed_file_to_user",
+    "cancel_active_user_task",
+    "cancel_user_task_and_maybe_claim_attempt",
+    "clear_terminal_user_tasks",
+    "complete_active_user_tasks_for_stored_file",
+    "count_active_user_tasks",
+    "create_user_task",
+    "delete",
+    "delete_all_terminal_user_tasks",
+    "delete_terminal_user_task",
+    "delete_terminal_user_task_by_gid",
+    "exists",
+    "func",
+    "get_representative_active_owner_id",
+    "get_user_task",
+    "get_user_task_by_gid",
+    "get_user_task_by_id",
+    "global_downloads",
+    "insert",
+    "list_user_tasks",
+    "list_user_tasks_for_download",
+    "list_user_tasks_page",
+    "make_terminalization_claim",
+    "mark_global_download_failed",
+    "now_ms",
+    "or_",
+    "refreshable_user_task_display_name_condition",
+    "repair_completed_download_with_stored_file",
+    "select",
+    "stored_files",
+    "transaction",
+    "update",
+    "update_active_user_tasks",
+    "user_files",
+    "user_storage_usage",
+    "user_tasks",
+    "users",
+]
 
 
 class DownloadAdmissionError(ValueError):
@@ -206,6 +258,8 @@ async def list_user_tasks_page(
     page_size: int,
     status_filter: str | None = None,
     statuses: Iterable[str] | None = None,
+    history_status: str | None = None,
+    name_query: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     if page < 1 or page_size < 1:
         raise ValueError("invalid page")
@@ -216,6 +270,16 @@ async def list_user_tasks_page(
     status_condition = _rest_task_status_condition(status_filter)
     if status_condition is not None:
         conditions.append(status_condition)
+    if history_status is not None:
+        conditions.append(user_tasks.c.status == history_status)
+    if name_query:
+        pattern = f"%{name_query}%"
+        conditions.append(
+            or_(
+                user_tasks.c.display_name.ilike(pattern),
+                global_downloads.c.display_name.ilike(pattern),
+            )
+        )
 
     join = user_tasks.join(
         global_downloads, user_tasks.c.global_download_id == global_downloads.c.id

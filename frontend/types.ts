@@ -245,8 +245,10 @@ export type PackTask = {
   delete_source: boolean;
   status: "pending" | "packing" | "done" | "failed" | "cancelled";
   progress: number;
+  step_progress: number;
   step: "validating" | "compressing" | "verifying" | null;
   started_at: string | null;
+  step_started_at: string | null;
   error_message: string | null;
   created_at: string;
   updated_at: string;
@@ -270,6 +272,13 @@ export type TaskHistory = {
   finished_at: string;
   retryable?: boolean;
   retry_blocked_reason?: string | null;
+};
+
+export type HistoryPageResponse = {
+  items: TaskHistory[];
+  total: number;
+  page: number;
+  page_size: number;
 };
 
 export type StoredFileInfo = {

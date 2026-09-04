@@ -1,4 +1,6 @@
-.PHONY: install build run dev-front dev-back dev-aria2 clean docker-build docker-up docker-down docker-logs
+.PHONY: install build run dev-front dev-back dev-aria2 clean docker-build docker-up docker-down docker-logs \
+        lint lint-back lint-front typecheck typecheck-back typecheck-front \
+        test test-back test-front dup security check
 
 # Variables
 PYTHON = python3
@@ -66,6 +68,53 @@ dev-back:
 dev-aria2:
 	@echo "Starting local aria2 test backend..."
 	bash $(BACKEND_DIR)/aria2/start.sh
+
+# ---- 本地质量工具链（提交前跑一次 `make check`）----
+
+lint-back:
+	@echo "Linting backend (ruff)..."
+	uv run ruff check $(BACKEND_DIR)/app $(BACKEND_DIR)/tests
+
+lint-front:
+	@echo "Linting frontend (eslint)..."
+	cd $(FRONTEND_DIR) && $(BUN) run lint
+
+lint: lint-back lint-front
+
+typecheck-back:
+	@echo "Type checking backend (mypy)..."
+	cd $(BACKEND_DIR) && uv run mypy app
+
+typecheck-front:
+	@echo "Type checking frontend (tsc)..."
+	cd $(FRONTEND_DIR) && $(BUN) run typecheck
+
+typecheck: typecheck-back typecheck-front
+
+test-back:
+	@echo "Testing backend (pytest + coverage 95% gate)..."
+	# 显式传 fail-under/branch：coverage 从 backend/ 运行时读不到仓库根 pyproject.toml，
+	# 隐式依赖配置会让门禁静默失效
+	cd $(BACKEND_DIR) && uv run pytest --cov=app --cov-branch --cov-fail-under=95 --cov-report=term-missing
+
+test-front:
+	@echo "Testing frontend (jest + coverage 95% gate)..."
+	cd $(FRONTEND_DIR) && $(BUN) run test -- --runInBand --coverage
+
+test: test-back test-front
+
+# 重复代码检测（信息参考，不参与门禁）
+dup:
+	@echo "Detecting duplicated code (jscpd)..."
+	bunx jscpd $(BACKEND_DIR)/app $(FRONTEND_DIR)/app $(FRONTEND_DIR)/components $(FRONTEND_DIR)/hooks $(FRONTEND_DIR)/lib --min-tokens 70
+
+# 深度安全扫描（首次运行需联网拉取规则集）
+security:
+	uvx semgrep scan --config auto --error $(BACKEND_DIR)/app $(FRONTEND_DIR)/app $(FRONTEND_DIR)/components $(FRONTEND_DIR)/hooks $(FRONTEND_DIR)/lib
+
+# 提交前一键门禁：lint + 类型检查 + 测试（含覆盖率门禁）
+check: lint typecheck test
+	@echo "All quality checks passed ✅"
 
 # Clean
 clean:

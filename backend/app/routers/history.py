@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from app.auth import AuthUser, require_limited_api_user
+from app.domain.errors import DomainError
+from app.http.errors import raise_http
 from app.services import history_service
 
 logger = logging.getLogger(__name__)
@@ -17,31 +19,31 @@ class BatchDeleteHistoryRequest(BaseModel):
     history_ids: list[int]
 
 
-@router.get("")
-async def list_history(user: AuthUser = Depends(require_limited_api_user)) -> list[dict]:
-    return await history_service.list_history(user.id)
-
-
 @v2_router.get("/history")
 async def list_history_v2(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    status: str | None = Query(default=None),
+    q: str | None = Query(default=None),
     user: AuthUser = Depends(require_limited_api_user),
 ) -> dict:
-    return await history_service.list_history_page(
-        user_id=user.id,
-        page=page,
-        page_size=page_size,
-    )
+    try:
+        return await history_service.list_history_page(
+            user_id=user.id,
+            page=page,
+            page_size=page_size,
+            status=status,
+            q=q,
+        )
+    except DomainError as exc:
+        raise_http(exc)
 
 
 @router.delete("")
 async def delete_history(
-    payload: BatchDeleteHistoryRequest | None = None,
+    payload: BatchDeleteHistoryRequest,
     user: AuthUser = Depends(require_limited_api_user),
 ) -> dict:
-    if payload is None:
-        return await history_service.clear_history(user.id)
     if not payload.history_ids:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

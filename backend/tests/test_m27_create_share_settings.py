@@ -18,7 +18,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.core.rate_limit import api_limiter
 from app.core.rate_limit_config import rate_limit_config
-from app.db.bootstrap import bootstrap_database
+from app.db.bootstrap import SCHEMA_VERSION, bootstrap_database
 from app.db.engine import dispose_engine, get_engine, reset_engine
 from app.db.migrations import migrate_v17, run_migrations
 from app.main import app
@@ -303,7 +303,7 @@ async def test_v16_to_v17_adds_create_share_column(tmp_path: Path) -> None:
             )
 
         async with get_engine().begin() as conn:
-            assert await run_migrations(conn, 16) == 17
+            assert await run_migrations(conn, 16) == SCHEMA_VERSION
 
             columns = {
                 row[1]
@@ -325,9 +325,9 @@ async def test_v16_to_v17_adds_create_share_column(tmp_path: Path) -> None:
                     text("SELECT version FROM schema_meta WHERE id = 1")
                 )
             ).scalar_one()
-            assert version == 17
+            assert version == SCHEMA_VERSION
 
-            assert await run_migrations(conn, 17) == 17
+            assert await run_migrations(conn, 17) == SCHEMA_VERSION
             await migrate_v17(conn)
             value_again = (
                 await conn.execute(

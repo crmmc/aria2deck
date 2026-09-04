@@ -101,7 +101,7 @@ export default function TasksPage() {
     return "all";
   });
   const [searchKeyword, setSearchKeyword] = useState("");
-  const [sortBy, setSortBy] = useState<string>("default");
+  const [sortBy, setSortBy] = useState<string>("speed");
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [isBatchAdding, setIsBatchAdding] = useState(false);
   const [batchUris, setBatchUris] = useState("");
@@ -279,7 +279,7 @@ export default function TasksPage() {
         const message = err instanceof Error ? err.message : "未知错误";
         showToast(`同步任务状态失败: ${message}`, "warning");
       });
-  }, [showToast]);
+  }, [showToast, deletedTaskIds]);
 
   const handleWsDisconnected = useCallback(() => {
     wsConnectedRef.current = false;

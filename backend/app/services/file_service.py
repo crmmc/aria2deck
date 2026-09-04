@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.core.config import settings
 from app.core.time_utils import ms_to_iso
 from app.domain.errors import (
     BadRequestError,
@@ -118,8 +116,7 @@ async def list_files(
 ) -> dict[str, Any]:
     if page_size not in (10, 20, 30, 50, 100):
         page_size = 10
-    if page < 1:
-        page = 1
+    page = max(page, 1)
     offset = (page - 1) * page_size
     total, rows = await files_repo.list_user_file_rows(
         user_id,

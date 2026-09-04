@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def now_ms() -> int:
@@ -11,4 +11,4 @@ def now_ms() -> int:
 def ms_to_iso(timestamp_ms: int | None) -> str | None:
     if timestamp_ms is None:
         return None
-    return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat()

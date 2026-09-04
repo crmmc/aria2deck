@@ -15,7 +15,7 @@ import { BrowseFolderView } from "./_components/BrowseFolderView";
 import { SearchModal } from "./_components/SearchModal";
 import { FileToolbar, type SortField, type SortOrder } from "./_components/FileToolbar";
 import { PackDialog } from "./_components/PackDialog";
-import { PaginationControls } from "./_components/PaginationControls";
+import { PaginationControls } from "@/components/ui/PaginationControls";
 import { RootFileTable } from "./_components/RootFileTable";
 import { SpaceUsageCard } from "./_components/SpaceUsageCard";
 
@@ -110,6 +110,17 @@ export default function FilesPage() {
     };
   }, [showSearchModal]);
 
+  // 搜索定位：高亮行渲染后滚动到可视区域中央
+  useEffect(() => {
+    if (highlightUserFileId == null) return;
+    const frame = requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-file-id="${highlightUserFileId}"]`)
+        ?.scrollIntoView({ block: "center" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [highlightUserFileId]);
+
   const loadFiles = useCallback(async (page: number, size: number) => {
     setLoading(true);
     setError(null);
@@ -135,7 +146,7 @@ export default function FilesPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     loadFiles(currentPage, pageSize);

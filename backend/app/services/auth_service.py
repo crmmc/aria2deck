@@ -11,6 +11,13 @@ from app.auth import (
     user_from_row,
 )
 from app.core.config import settings
+from app.core.security import (
+    hash_password,
+    verify_password,
+    verify_password_constant_time,
+)
+from app.domain.errors import BadRequestError, NotFoundError, UnauthorizedError
+from app.repositories import auth as auth_repo
 from app.services.rate_limit_service import (
     ACCOUNT_SECURITY_SCOPE,
     clear_login_failures,
@@ -22,9 +29,6 @@ from app.services.task_broadcast import (
     remove_connections_for_session,
     remove_connections_for_user,
 )
-from app.core.security import hash_password, verify_password, verify_password_constant_time
-from app.domain.errors import BadRequestError, NotFoundError, UnauthorizedError
-from app.repositories import auth as auth_repo
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +79,8 @@ async def login(
         )
         raise UnauthorizedError("用户名或密码错误")
 
-    assert user_row is not None
+    if user_row is None:
+        raise UnauthorizedError("用户名或密码错误")
     user = user_from_row(user_row)
 
     await clear_login_failures(username)
@@ -127,6 +132,8 @@ async def change_password(
 
     if not user.is_initial_password:
         if not verify_password(old_password, user.password_hash):
+            # Arguments are user ID and request ID only; no password or hash is logged.
+            # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
             logger.warning(
                 "修改密码失败 user_id=%s reason=old_password_mismatch request_id=%s",
                 user.id,

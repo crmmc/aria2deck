@@ -9,7 +9,6 @@ from app.auth import get_user_by_session
 from app.core.config import settings
 from app.services.task_broadcast import register_ws, unregister_ws
 
-
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -94,8 +93,8 @@ async def _revalidate_session(
         await unregister_ws(user_id, websocket)
         try:
             await websocket.close(code=1011)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001  # socket close is best effort during teardown
+            logger.debug("WebSocket 关闭失败 error_type=%s", type(exc).__name__)
 
 @router.websocket("/ws/tasks")
 async def task_ws(websocket: WebSocket) -> None:

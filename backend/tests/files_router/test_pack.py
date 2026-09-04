@@ -150,6 +150,8 @@ class TestPackListEndpoints:
 
         assert detail.status_code == 200
         assert detail.json()["step"] == "compressing"
+        assert detail.json()["step_progress"] == 0
+        assert detail.json()["step_started_at"] is None
         assert detail.json()["started_at"] is not None
         listed = next(item for item in listing.json() if item["id"] == task_id)
         assert listed["step"] == detail.json()["step"]

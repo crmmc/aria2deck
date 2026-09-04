@@ -10,10 +10,10 @@ import asyncio
 import logging
 from collections.abc import Iterable
 
-from app.modules.backend.port import BackendPort
 from app.domain.lifecycle import ReconcileResult
 from app.domain.locks import get_download_lifecycle_lock
 from app.domain.status import FAILABLE_GLOBAL_DOWNLOAD_STATUSES
+from app.modules.backend.port import BackendPort
 from app.repositories.task.downloads import (
     claim_attempt_terminal,
     claim_terminal_reclaim,
@@ -174,7 +174,7 @@ async def _remove_download_result_best_effort(
 ) -> None:
     try:
         await backend.remove_download_result_gid(gid)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         logger.debug(
             "%s Failed to remove aria2 result gid=%s error=%s", log_prefix, gid, exc
         )
@@ -187,7 +187,7 @@ async def _stop_untracked_gid_best_effort(
 ) -> None:
     try:
         await backend.force_remove_gid(gid)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         logger.debug(
             "%s Failed to stop untracked aria2 gid=%s error=%s",
             log_prefix, gid, exc,

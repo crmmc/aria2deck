@@ -23,8 +23,8 @@ on the policy pass for queue-eligible tids only.
 
 from __future__ import annotations
 
-from typing import Any
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.core.config import settings
 from app.core.time_utils import now_ms
@@ -38,12 +38,12 @@ from app.modules.task_core.policy import (
     decide_on_snapshot,
 )
 from app.repositories.auth import get_user_by_id
-from app.repositories.task.user_tasks import get_representative_active_owner_id
 from app.repositories.task.downloads import (
     get_global_download_by_id,
     list_tracked_global_downloads,
     update_global_download,
 )
+from app.repositories.task.user_tasks import get_representative_active_owner_id
 from app.services.settings_service import get_min_free_disk
 from app.services.usage_service import get_usage
 

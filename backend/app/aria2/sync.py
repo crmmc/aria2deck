@@ -61,7 +61,7 @@ async def _sync_tasks_once() -> None:
         try:
             observed_status = await client.tell_status(gid)
             saw_backend_ok = True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             if _shared.is_missing_gid_error(exc):
                 saw_backend_ok = True
             elif _shared.is_transient_rpc_error(exc):
@@ -105,7 +105,7 @@ async def _sync_tasks_once() -> None:
         try:
             await client.get_version()
             saw_backend_ok = True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             if _shared.is_transient_rpc_error(exc):
                 saw_backend_fail = True
                 logger.warning(
@@ -146,7 +146,7 @@ async def _cleanup_owned_stopped_results(
     """Remove stopped aria2 results only after aria2deck has consumed them."""
     try:
         stopped = await client.tell_stopped(0, 1000)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         logger.warning(
             "[Sync] Failed to list stopped aria2 tasks, skipping owned result cleanup: %s",
             exc,
@@ -171,7 +171,7 @@ async def _cleanup_owned_stopped_results(
             await client.remove_download_result(gid)
             actions += 1
             logger.info("[Sync] Removed owned stopped aria2 result gid=%s", gid)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             logger.debug(
                 "[Sync] Failed to remove owned stopped result gid=%s error=%s",
                 gid,

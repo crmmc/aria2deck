@@ -406,7 +406,7 @@ def test_build_archive_items_cancel(tmp_path: Path) -> None:
     cancel = _event()
     cancel.set()
     with pytest.raises(InterruptedError):
-        PackTaskManager._build_archive_items([root], None, None, cancel)
+        PackTaskManager._build_archive_items([root], None, ["dirhash"], cancel)
 
 
 def test_build_archive_items_wraps_canonical_directory(
@@ -459,20 +459,36 @@ def test_archive_writers_handle_files_and_dirs(
     output = tmp_path / f"out.{pack_format}"
     tracker = _ProgressTracker(100)
     if pack_format == "zip":
-        PackTaskManager._write_zip_sync(output, 5, items, tracker, _event(), 10_000, 0)
+        stream_hash = PackTaskManager._write_zip_sync(
+            output, 5, items, tracker, _event(), 10_000, 0
+        )
         with zipfile.ZipFile(output) as zf:
             assert sorted(zf.namelist()) == ["d/", "f.txt"]
             assert zf.read("f.txt") == b"file-data"
+            assert zf.getinfo("f.txt").flag_bits & 0x08
     else:
-        PackTaskManager._write_tar_zst_sync(
+        stream_hash = PackTaskManager._write_tar_zst_sync(
             output, 5, items, tracker, _event(), 10_000, 0
         )
         import tarfile
         import zstandard as zstd
 
         with zstd.open(output) as raw, tarfile.open(fileobj=raw, mode="r|*") as tf:
-            assert sorted(tf.getnames()) == ["d", "f.txt"]
+            names: list[str] = []
+            contents: dict[str, bytes] = {}
+            for member in tf:
+                names.append(member.name)
+                if member.isfile():
+                    extracted = tf.extractfile(member)
+                    assert extracted is not None
+                    contents[member.name] = extracted.read()
+            assert sorted(names) == ["d", "f.txt"]
+            assert contents == {"f.txt": b"file-data"}
+    from app.services.storage_index import scan_storage_path
+
     assert tracker.snapshot()[0] == 9
+    assert stream_hash == scan_storage_path(output).content_hash
+    assert stream_hash.startswith("v2:file:")
 
     cancel = _event()
     cancel.set()
@@ -1003,6 +1019,35 @@ async def test_recover_startup_isolates_task_failure(
     assert await pack_repo.get_pack_task_row(task["id"]) is not None
 
 
+async def test_recover_one_startup_returns_if_refreshed_row_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_reservation = AsyncMock()
+    mark_verifying = AsyncMock(return_value=True)
+    reread = AsyncMock(return_value=None)
+    run_thread = AsyncMock()
+    finalize = AsyncMock()
+    monkeypatch.setattr(pack_service, "clear_pack_install_reservation", clear_reservation)
+    monkeypatch.setattr(pack_service, "mark_pack_task_step_if_packing", mark_verifying)
+    monkeypatch.setattr(pack_service, "get_pack_task_row", reread)
+    monkeypatch.setattr(PackTaskManager, "_run_thread", run_thread)
+    monkeypatch.setattr(PackTaskManager, "_finalize_prepared", finalize)
+    row = {"id": 42, "status": "packing", "prepared_content_hash": "v2:file:abc"}
+    startup_job = pack_service._RunningPackJob(
+        task=AsyncMock(), cancel_event=_event()
+    )
+
+    await PackTaskManager._recover_one_startup(row, startup_job)
+
+    clear_reservation.assert_awaited_once_with(42)
+    mark_verifying.assert_awaited_once_with(
+        42, step="verifying", require_prepared=True
+    )
+    reread.assert_awaited_once_with(42)
+    run_thread.assert_not_awaited()
+    finalize.assert_not_awaited()
+
+
 async def test_recover_one_startup_packing_without_prepared(temp_db: str) -> None:
     user, user_file, _src = await _make_file_user(username="pack_recover_requeue")
     task = await _insert_pack_task(
@@ -1246,7 +1291,7 @@ async def test_wait_progress_thread_maps_running_phase(
     release = _event()
     job = pack_service._RunningPackJob(task=AsyncMock(), cancel_event=_event())
 
-    async def capture_progress(_task_id: int, progress: int) -> None:
+    async def capture_progress(_task_id: int, progress: int, _step_progress: int) -> None:
         updates.append(progress)
 
     def work() -> str:
@@ -1308,11 +1353,12 @@ async def test_write_and_prepare_reports_progress_and_missing_partial(
 
     original_write = PackTaskManager._write_archive_sync
 
-    def slow_writer(output_path: Path, *args: Any) -> None:
+    def slow_writer(output_path: Path, *args: Any) -> str:
         writer_started.set()
         file_ready.wait(5)
-        original_write(output_path, *args)
+        content_hash = original_write(output_path, *args)
         release.wait(5)
+        return content_hash
 
     monkeypatch.setattr(PackTaskManager, "_write_archive_sync", slow_writer)
     job = pack_service._RunningPackJob(task=AsyncMock(), cancel_event=_event())
@@ -1341,7 +1387,7 @@ async def test_write_and_prepare_reports_progress_and_missing_partial(
     assert progress_values == sorted(progress_values)
     assert 40 in progress_values
     assert 90 in progress_values
-    assert progress_values[-1] == 99
+    assert progress_values[-1] == 90
     assert await pack_repo.get_pack_task_row(task["id"])
     assert prepared.exists()
 
@@ -1362,8 +1408,9 @@ async def test_write_and_prepare_cancelled_after_writer(
     pack_dir.mkdir(parents=True, exist_ok=True)
     partial = pack_dir / "o.tar.zst.partial"
 
-    def writer_then_cancel(output_path: Path, *_args: Any) -> None:
+    def writer_then_cancel(output_path: Path, *_args: Any) -> str:
         output_path.write_bytes(b"data!")
+        return "v2:file:" + "0" * 64
 
     monkeypatch.setattr(PackTaskManager, "_write_archive_sync", writer_then_cancel)
     job = pack_service._RunningPackJob(task=AsyncMock(), cancel_event=_event())
@@ -1397,7 +1444,7 @@ async def test_write_and_prepare_persist_failure(
     pack_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
         PackTaskManager, "_write_archive_sync",
-        lambda output_path, *_a: output_path.write_bytes(b"tiny"),
+        lambda output_path, *_a: (output_path.write_bytes(b"tiny"), "v2:file:" + "0" * 64)[1],
     )
     monkeypatch.setattr(pack_service, "persist_pack_prepared", AsyncMock(return_value=False))
     job = pack_service._RunningPackJob(task=AsyncMock(), cancel_event=_event())
@@ -1408,6 +1455,128 @@ async def test_write_and_prepare_persist_failure(
             "o.tar.zst", None,
         )
     assert not (pack_dir / "o.tar.zst").exists()
+
+
+async def test_install_prepared_with_progress_maps_scan_bytes_and_notifies_final(
+    temp_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.storage_index import scan_storage_path
+
+    content = b"0123456789"
+    scratch = _write_store_file("progress-source.bin", content)
+    content_hash = scan_storage_path(scratch).content_hash
+    task_id = 701
+    filename = "progress-prepared.bin"
+    prepared = (
+        Path(settings.download_dir) / "downloading" / f"pack_{task_id}" / filename
+    )
+    prepared.parent.mkdir(parents=True, exist_ok=True)
+    prepared.write_bytes(content)
+
+    half_reported = _event()
+    release_scan = _event()
+
+    def slow_scan(
+        path: Path,
+        cancel_event: threading.Event,
+        on_bytes_read: Any,
+    ) -> Any:
+        on_bytes_read(len(content) // 2)
+        half_reported.set()
+        assert release_scan.wait(5)
+        on_bytes_read(len(content) - len(content) // 2)
+        return scan_storage_path(path, cancel_event)
+
+    updates: list[tuple[int, int, int]] = []
+
+    async def capture_progress(
+        observed_task_id: int,
+        progress: int,
+        step_progress: int,
+    ) -> None:
+        updates.append((observed_task_id, progress, step_progress))
+
+    notifications: list[tuple[int, int]] = []
+    monkeypatch.setattr(pack_service, "scan_storage_path", slow_scan)
+    monkeypatch.setattr(PackTaskManager, "_update_task_progress", capture_progress)
+
+    installing = asyncio.create_task(
+        PackTaskManager._install_prepared_with_progress(
+            task_id,
+            {
+                "prepared_content_hash": content_hash,
+                "prepared_size_bytes": len(content),
+                "prepared_filename": filename,
+            },
+            _event(),
+            None,
+            lambda observed_task_id, progress: notifications.append(
+                (observed_task_id, progress)
+            ),
+        )
+    )
+    assert await asyncio.to_thread(half_reported.wait, 2)
+    for _ in range(20):
+        if any(step_progress == 50 for _, _, step_progress in updates):
+            break
+        await asyncio.sleep(0.05)
+    assert any(step_progress == 50 for _, _, step_progress in updates)
+    release_scan.set()
+
+    installed = await installing
+
+    assert installed.created_by_this_attempt is True
+    assert updates == [
+        (task_id, 90, 0),
+        (task_id, 94, 50),
+        (task_id, 99, 100),
+    ]
+    assert notifications == [(task_id, 90), (task_id, 94), (task_id, 99)]
+    installed.path.unlink()
+
+
+async def test_install_prepared_with_progress_cancellation_stops_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.modules.pack import _InstalledPrepared
+
+    cancel_event = _event()
+    install_started = asyncio.Event()
+    install_stopped = asyncio.Event()
+
+    async def wait_for_cancel(*_args: Any, **kwargs: Any) -> _InstalledPrepared:
+        tracker = kwargs["progress_tracker"]
+        assert isinstance(tracker, _ProgressTracker)
+        install_started.set()
+        while not kwargs["cancel_event"].is_set():
+            await asyncio.sleep(0)
+        install_stopped.set()
+        return _InstalledPrepared(Path("/nonexistent"), False)
+
+    monkeypatch.setattr(PackTaskManager, "_install_prepared_file", wait_for_cancel)
+    monkeypatch.setattr(PackTaskManager, "_update_task_progress", AsyncMock())
+    installing = asyncio.create_task(
+        PackTaskManager._install_prepared_with_progress(
+            702,
+            {
+                "prepared_content_hash": "v2:file:" + "0" * 64,
+                "prepared_size_bytes": 10,
+                "prepared_filename": "cancel.bin",
+            },
+            cancel_event,
+            None,
+            None,
+        )
+    )
+    await install_started.wait()
+    installing.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await installing
+
+    assert cancel_event.is_set()
+    assert install_stopped.is_set()
 
 
 # ---------------------------------------------------------------- finalize internals

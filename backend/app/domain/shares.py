@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 SHARE_ACTIVE_STATUS = "active"
 SHARE_REVOKED_STATUS = "revoked"
 MAX_ACTIVE_SHARES_PER_FILE = 10

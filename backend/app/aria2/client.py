@@ -1,9 +1,9 @@
 import asyncio
-
-import aiohttp
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
+
+import aiohttp
 
 
 @dataclass
@@ -66,7 +66,9 @@ class Aria2Client:
                 text = await resp.text()
                 raise RuntimeError(f"aria2 RPC 返回非 JSON: {text[:200]}") from e
             if not isinstance(data, dict):
-                raise RuntimeError(f"aria2 RPC 返回非法响应: {data!r}"[:200])
+                raise RuntimeError(  # noqa: TRY004  # preserve the established RPC error contract
+                    f"aria2 RPC 返回非法响应: {data!r}"[:200]
+                )
             return data
 
     async def _call(self, method: str, params: list | None = None) -> Any:

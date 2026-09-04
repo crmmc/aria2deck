@@ -9,10 +9,11 @@ submit the adapter persists the gid via ``assign_submitted_gid`` so later
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any
 
-from app.aria2.client import Aria2Client
+from app.aria2.protocol import Aria2Gateway
 from app.modules.backend.port import Snapshot
 from app.modules.task_core.states import (
     ERROR_ADMISSION_PAUSED,
@@ -137,7 +138,7 @@ def build_submission_call(
 class Aria2BackendAdapter:
     """BackendPort implementation backed by aria2 RPC."""
 
-    def __init__(self, client: Aria2Client) -> None:
+    def __init__(self, client: Aria2Gateway) -> None:
         self._client = client
 
     async def submit(self, *, tid: int, uri: str, options: dict[str, Any]) -> str:
@@ -212,7 +213,8 @@ class Aria2BackendAdapter:
                 continue
             try:
                 raw = await self._client.tell_status(str(gid))
-            except Exception:
+            except Exception as exc:  # noqa: BLE001  # per-task status polling is best effort
+                logger.debug("读取 aria2 状态失败 tid=%s error_type=%s", tid, type(exc).__name__)
                 continue
             snapshots.append(
                 Snapshot(
@@ -258,7 +260,7 @@ class Aria2BackendAdapter:
         try:
             await self._client.remove(gid)
             writer_stopped = True
-        except Exception:
+        except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
             try:
                 await self._client.remove_download_result(gid)
                 writer_stopped = True

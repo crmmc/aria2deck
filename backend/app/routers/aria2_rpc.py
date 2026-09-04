@@ -94,6 +94,8 @@ async def _authenticate_from_params(
     else:
         secret, remaining_params = extract_secret_from_params(params)
     if not secret:
+        # Arguments are client IP and request ID only; no token value is logged.
+        # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
         logger.warning("RPC缺少Token ip=%s request_id=%s", client_ip, outer_request_id)
         return None, None, build_jsonrpc_error(
             1,  # Unauthorized
@@ -511,7 +513,7 @@ async def jsonrpc_handler(request: Request) -> Response:
     """
     try:
         body = await request.json()
-    except Exception:
+    except Exception:  # noqa: BLE001  # external boundary preserves failure isolation
         client_ip = request.client.host if request.client else "unknown"
         request_id = getattr(request.state, "request_id", "-")
         logger.warning("RPC请求解析JSON失败 ip=%s request_id=%s", client_ip, request_id)

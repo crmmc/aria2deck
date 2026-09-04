@@ -61,7 +61,7 @@ def _calculate_backoff(
         factor = get_ws_reconnect_factor()
 
     base_delay = min(RECONNECT_BASE_DELAY * (factor**attempt), max_delay)
-    jitter_offset = base_delay * jitter * (2 * random.random() - 1)
+    jitter_offset = base_delay * jitter * (2 * random.random() - 1)  # noqa: S311  # reconnect timing jitter is not cryptographic
     return base_delay + jitter_offset
 
 
@@ -78,7 +78,7 @@ async def handle_aria2_event(gid: str, event: str) -> None:
     observed_status: dict | None = None
     try:
         observed_status = await client.tell_status(gid)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
         logger.warning(
             "[WS] Failed to fetch aria2 status gid=%s error_type=%s",
             gid,
@@ -104,8 +104,8 @@ async def _run_ordered_event(
     if previous is not None:
         try:
             await previous
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001  # event ordering must isolate prior task failures
+            logger.debug("事件链等待失败 error_type=%s", type(exc).__name__)
     await handle_aria2_event(gid, event)
 
 
@@ -188,7 +188,7 @@ async def listen_aria2_events() -> None:
                                                 gid,
                                             )
                                             _schedule_event(str(gid), event)
-                            except Exception as exc:
+                            except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
                                 logger.warning(
                                     "[WS] Failed to parse message error_type=%s",
                                     type(exc).__name__,
@@ -214,7 +214,7 @@ async def listen_aria2_events() -> None:
             await _shutdown_event_tasks()
             raise
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # external boundary preserves failure isolation
             logger.warning(
                 "[WS] Connection failed url=%s error_type=%s",
                 redacted_ws_url,
