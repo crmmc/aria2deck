@@ -23,6 +23,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -52,6 +54,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -76,6 +80,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # main 推送：移动标签 :latest + :<sha>
       # 其余任意分支：移动标签 :<分支名>（/替换为-） + :<sha>，供部署测试
@@ -83,12 +89,14 @@ jobs:
         id: vars
         run: |
           IMAGE="${REGISTRY}/${GITHUB_REPOSITORY,,}"
-          SHA_TAG="${GITHUB_SHA::7}"
+          SHA_TAG="${GITHUB_SHA::12}"
           BRANCH="${GITHUB_REF_NAME}"
           if [ "${BRANCH}" = "main" ]; then
             echo "tags=${IMAGE}:latest,${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
           else
-            SAFE_BRANCH="${BRANCH//\//-}"
+            # br- 前缀保留 latest 等命名空间；非法字符替换为 -；截断防超 docker 128 字符上限
+            SAFE_BRANCH="br-${BRANCH//[^a-zA-Z0-9._-]/-}"
+            SAFE_BRANCH="${SAFE_BRANCH:0:64}"
             echo "tags=${IMAGE}:${SAFE_BRANCH},${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
           fi
 
