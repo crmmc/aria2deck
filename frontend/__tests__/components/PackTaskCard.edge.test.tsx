@@ -38,9 +38,11 @@ function makeTask(overrides: Partial<PackTask> = {}): PackTask {
     delete_source: false,
     status: "pending",
     progress: 10,
+    step_progress: 0,
     error_message: null,
     step: null,
     started_at: null,
+    step_started_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     ...overrides,
@@ -91,9 +93,11 @@ describe("PackTaskCard edge cases", () => {
       makeTask({
         id: 22,
         status: "packing",
-        progress: 50,
+        progress: 65,
+        step_progress: 50,
         step: "compressing",
-        started_at: "2025-01-01T01:00:00.000Z",
+        started_at: "2024-01-01T01:00:00.000Z",
+        step_started_at: "2025-01-01T01:00:00.000Z",
       }),
     ]);
 
