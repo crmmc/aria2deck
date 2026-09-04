@@ -50,6 +50,8 @@ export default function HistoryPage() {
       });
       if (!mountedRef.current || requestId !== requestIdRef.current) return;
       setRecords(result.items);
+      // 新一页/新条件的结果成为当前数据时，清空残留选中，避免工具栏显示旧页计数、批量操作命中空列表
+      setSelectedRecords(new Set());
       setTotal(result.total);
     } catch {
       if (!mountedRef.current || requestId !== requestIdRef.current) return;
