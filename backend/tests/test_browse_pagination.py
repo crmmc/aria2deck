@@ -186,9 +186,9 @@ class TestRepositoryPagination:
             },
             entries,
         )
-        # page=10^15、page_size=200 → offset=2e17，远超 int64 也要安全返回空页
+        # page=10^18、page_size=200 → offset≈2e20，超过 SQLite int64 上限也要安全返回空页
         parent_is_dir, items, total = await files_repo.directory_entries_page(
-            int(row["id"]), "", limit=200, offset=(10**15 - 1) * 200
+            int(row["id"]), "", limit=200, offset=(10**18 - 1) * 200
         )
         assert parent_is_dir is True
         assert items == []
