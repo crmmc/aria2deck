@@ -94,8 +94,8 @@ jobs:
           if [ "${BRANCH}" = "main" ]; then
             echo "tags=${IMAGE}:latest,${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
           else
-            # br- 前缀保留 latest 等命名空间；非法字符替换为 -；截断防超 docker 128 字符上限
-            SAFE_BRANCH="br-${BRANCH//[^a-zA-Z0-9._-]/-}"
+            # docker 标签字符集 [a-zA-Z0-9._-]，非法字符替换为 -；截断防超 128 字符上限
+            SAFE_BRANCH="${BRANCH//[^a-zA-Z0-9._-]/-}"
             SAFE_BRANCH="${SAFE_BRANCH:0:64}"
             echo "tags=${IMAGE}:${SAFE_BRANCH},${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
           fi
