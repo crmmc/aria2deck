@@ -2,7 +2,8 @@ name: Auto Image Build
 
 on:
   push:
-    branches: [main, dev, "feat/**"]
+    # 任意分支推送都构建镜像（main 打 :latest，其余打分支名标签）
+    branches: ["**"]
 
 permissions:
   contents: read
@@ -76,18 +77,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # dev 推送：移动标签 :dev + :<sha>
       # main 推送：移动标签 :latest + :<sha>
-      # feat/** 推送：移动标签 :feat-<分支名> + :<sha>（测试服务器可直接拉分支镜像）
+      # 其余任意分支：移动标签 :<分支名>（/替换为-） + :<sha>，供部署测试
       - name: Compute image name and tags
         id: vars
         run: |
           IMAGE="${REGISTRY}/${GITHUB_REPOSITORY,,}"
           SHA_TAG="${GITHUB_SHA::7}"
           BRANCH="${GITHUB_REF_NAME}"
-          if [ "${BRANCH}" = "dev" ]; then
-            echo "tags=${IMAGE}:dev,${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
-          elif [ "${BRANCH}" = "main" ]; then
+          if [ "${BRANCH}" = "main" ]; then
             echo "tags=${IMAGE}:latest,${IMAGE}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
           else
             SAFE_BRANCH="${BRANCH//\//-}"
