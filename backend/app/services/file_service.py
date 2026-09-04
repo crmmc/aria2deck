@@ -25,6 +25,13 @@ from app.services.usage_service import get_visible_space
 logger = logging.getLogger(__name__)
 
 SEARCH_RESULT_LIMIT = 200
+BROWSE_DEFAULT_PAGE_SIZE = 200
+BROWSE_MAX_PAGE_SIZE = 200
+
+
+def clamp_browse_page(page: int, page_size: int) -> tuple[int, int]:
+    """钳制目录浏览分页参数：page >= 1，page_size ∈ [1, BROWSE_MAX_PAGE_SIZE]。"""
+    return max(page, 1), min(max(page_size, 1), BROWSE_MAX_PAGE_SIZE)
 
 
 @dataclass(frozen=True)
@@ -75,15 +82,21 @@ async def get_user_file_by_hash(
     return await files_repo.get_user_file_by_hash(user_id, content_hash)
 
 
-async def directory_entries(
-    stored_file_id: int, parent_path: str
-) -> list[dict[str, Any]]:
-    parent_is_dir, rows = await files_repo.directory_entries(stored_file_id, parent_path)
+async def directory_entries_page(
+    stored_file_id: int,
+    parent_path: str,
+    *,
+    limit: int,
+    offset: int,
+) -> tuple[list[dict[str, Any]], int]:
+    parent_is_dir, rows, total = await files_repo.directory_entries_page(
+        stored_file_id, parent_path, limit=limit, offset=offset
+    )
     if parent_is_dir is None:
         raise NotFoundError("路径不存在")
     if parent_is_dir is False:
         raise BadRequestError("路径不是文件夹")
-    return [
+    entries = [
         {
             "name": row["name"],
             "path": row["relative_path"],
@@ -94,6 +107,7 @@ async def directory_entries(
         }
         for row in rows
     ]
+    return entries, total
 
 
 async def get_user_space_info(user_id: int, quota_bytes: int) -> dict[str, int]:
@@ -135,15 +149,25 @@ async def list_files(
     }
 
 
-async def browse_file(user_id: int, file_hash: str, path: str = "") -> list[dict]:
+async def browse_file(
+    user_id: int,
+    file_hash: str,
+    path: str = "",
+    *,
+    page: int = 1,
+    page_size: int = BROWSE_DEFAULT_PAGE_SIZE,
+) -> tuple[list[dict], int]:
     row = await get_user_file_by_hash(user_id, file_hash)
     if not row:
         raise NotFoundError("文件不存在")
     if not row["is_directory"]:
         raise BadRequestError("此文件不是文件夹")
-    return await directory_entries(
+    page, page_size = clamp_browse_page(page, page_size)
+    return await directory_entries_page(
         int(row["stored_file_id"]),
         normalize_entry_parent(path),
+        limit=page_size,
+        offset=(page - 1) * page_size,
     )
 
 

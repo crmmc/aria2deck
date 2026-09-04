@@ -1,13 +1,15 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { ShareInfo } from "@/types";
+import { BrowseFileInfo, ShareInfo } from "@/types";
 import { api } from "@/lib/api";
+import { PaginationControls } from "@/components/ui/PaginationControls";
 import { ShareHeader } from "./_components/ShareHeader";
 import { SharePasswordForm } from "./_components/SharePasswordForm";
 import { ShareDirectoryView } from "./_components/ShareDirectoryView";
 import { ShareDownloadActions } from "./_components/ShareDownloadActions";
 
-type DirItem = { name: string; is_dir: boolean; size: number; path: string };
+// 目录浏览分页页大小（与后端 BROWSE_DEFAULT_PAGE_SIZE 保持一致）
+const BROWSE_PAGE_SIZE = 200;
 
 export default function SharePageClient() {
   const [shareInfo, setShareInfo] = useState<ShareInfo | null>(null);
@@ -18,9 +20,12 @@ export default function SharePageClient() {
   const [passwordError, setPasswordError] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [currentPath, setCurrentPath] = useState("");
-  const [dirItems, setDirItems] = useState<DirItem[]>([]);
+  const [dirItems, setDirItems] = useState<BrowseFileInfo[]>([]);
+  const [dirPage, setDirPage] = useState(1);
+  const [dirTotal, setDirTotal] = useState(0);
   const [loadingDir, setLoadingDir] = useState(false);
   const [dirError, setDirError] = useState("");
+  const browseRequestIdRef = useRef(0);
   const codeRef = useRef("");
   const shareInfoRef = useRef<ShareInfo | null>(null);
   const siteTitleRef = useRef("aria2 控制器");
@@ -33,21 +38,31 @@ export default function SharePageClient() {
     }
   };
 
-  const loadDirectory = async (shareCode: string, token: string, path: string) => {
-    if (!mountedRef.current) return;
+  // requestId 守卫丢弃过期响应：并发导航/翻页时旧响应不得覆盖新数据
+  const loadDirectory = async (shareCode: string, token: string, path: string, page: number) => {
+    const requestId = ++browseRequestIdRef.current;
     setLoadingDir(true);
     setDirError("");
     try {
-      const items = await api.browseShare(shareCode, token || undefined, path || undefined);
-      if (mountedRef.current) {
-        setDirItems(items);
-        setCurrentPath(path);
-      }
+      const result = await api.browseShare(
+        shareCode,
+        token || undefined,
+        path || undefined,
+        page,
+        BROWSE_PAGE_SIZE
+      );
+      if (!mountedRef.current || requestId !== browseRequestIdRef.current) return;
+      setDirItems(result.items);
+      setDirTotal(result.total);
+      setDirPage(page);
+      setCurrentPath(path);
     } catch (err: unknown) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || requestId !== browseRequestIdRef.current) return;
       setDirError(err instanceof Error ? err.message : "加载目录失败");
     } finally {
-      if (mountedRef.current) setLoadingDir(false);
+      if (mountedRef.current && requestId === browseRequestIdRef.current) {
+        setLoadingDir(false);
+      }
     }
   };
 
@@ -84,7 +99,7 @@ export default function SharePageClient() {
         setShareInfo(info);
         updateDocumentTitle(info);
         if (info.is_directory && !info.has_password) {
-          loadDirectory(urlCode, "", "");
+          loadDirectory(urlCode, "", "", 1);
         }
       })
       .catch((err: unknown) => {
@@ -108,7 +123,7 @@ export default function SharePageClient() {
       const res = await api.accessShare(codeRef.current, password);
       if (mountedRef.current) {
         setAccessToken(res.access_token);
-        if (shareInfo?.is_directory) loadDirectory(codeRef.current, res.access_token, "");
+        if (shareInfo?.is_directory) loadDirectory(codeRef.current, res.access_token, "", 1);
       }
     } catch (err: unknown) {
       if (!mountedRef.current) return;
@@ -127,14 +142,19 @@ export default function SharePageClient() {
     api.downloadShare(codeRef.current, accessToken || undefined, itemPath);
   };
 
-  const handleDirClick = (itemPath: string) => loadDirectory(codeRef.current, accessToken, itemPath);
+  // 进入子目录/返回上级在事件处理器内同步重置页码，只发一笔「第 1 页」请求
+  const handleDirClick = (itemPath: string) =>
+    loadDirectory(codeRef.current, accessToken, itemPath, 1);
 
   const handleGoBack = () => {
     if (!currentPath) return;
     const parts = currentPath.split("/").filter(Boolean);
     parts.pop();
-    loadDirectory(codeRef.current, accessToken, parts.join("/"));
+    loadDirectory(codeRef.current, accessToken, parts.join("/"), 1);
   };
+
+  const handleDirPageChange = (page: number) =>
+    loadDirectory(codeRef.current, accessToken, currentPath, page);
 
   if (loading) {
     return (
@@ -206,15 +226,25 @@ export default function SharePageClient() {
         )}
 
         {shareInfo.is_directory && (
-          <ShareDirectoryView
-            currentPath={currentPath}
-            dirItems={dirItems}
-            loadingDir={loadingDir}
-            dirError={dirError}
-            onGoBack={handleGoBack}
-            onDirClick={handleDirClick}
-            onItemDownload={handleItemDownload}
-          />
+          <>
+            <ShareDirectoryView
+              currentPath={currentPath}
+              dirItems={dirItems}
+              loadingDir={loadingDir}
+              dirError={dirError}
+              onGoBack={handleGoBack}
+              onDirClick={handleDirClick}
+              onItemDownload={handleItemDownload}
+            />
+            {!loadingDir && dirTotal > BROWSE_PAGE_SIZE && (
+              <PaginationControls
+                currentPage={dirPage}
+                pageSize={BROWSE_PAGE_SIZE}
+                totalFiles={dirTotal}
+                onPageChange={handleDirPageChange}
+              />
+            )}
+          </>
         )}
       </div>
     </div>

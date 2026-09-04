@@ -36,7 +36,9 @@ from app.domain.shares import (
 from app.repositories import shares as shares_repo
 from app.repositories.errors import RepositoryConflictError
 from app.services.file_service import (
-    directory_entries,
+    BROWSE_DEFAULT_PAGE_SIZE,
+    clamp_browse_page,
+    directory_entries_page,
     normalize_entry_parent,
     validate_subpath,
 )
@@ -323,13 +325,23 @@ async def record_shared_download(
         raise GoneError("分享已失效或下载次数已用完")
 
 
-async def browse_shared_directory(code: str, token: str | None, subpath: str) -> list[dict]:
+async def browse_shared_directory(
+    code: str,
+    token: str | None,
+    subpath: str,
+    *,
+    page: int = 1,
+    page_size: int = BROWSE_DEFAULT_PAGE_SIZE,
+) -> tuple[list[dict], int]:
     share = await check_share_access(code, token)
     if not share["is_directory"]:
         raise BadRequestError("该文件不是目录")
-    entries = await directory_entries(
+    page, page_size = clamp_browse_page(page, page_size)
+    entries, total = await directory_entries_page(
         int(share["stored_file_id"]),
         normalize_entry_parent(subpath),
+        limit=page_size,
+        offset=(page - 1) * page_size,
     )
     await shares_repo.touch_share(int(share["id"]), now_ms())
-    return entries
+    return entries, total

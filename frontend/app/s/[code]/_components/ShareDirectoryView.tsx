@@ -1,10 +1,9 @@
 import { formatBytes } from "@/lib/utils";
-
-type DirItem = { name: string; is_dir: boolean; size: number; path: string };
+import type { BrowseFileInfo } from "@/types";
 
 type ShareDirectoryViewProps = {
   currentPath: string;
-  dirItems: DirItem[];
+  dirItems: BrowseFileInfo[];
   loadingDir: boolean;
   dirError: string;
   onGoBack: () => void;

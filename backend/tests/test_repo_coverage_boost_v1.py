@@ -693,13 +693,20 @@ async def test_user_file_listing_search_directory_resolve(temp_db: str) -> None:
     hits = await files_repo.search_stored_file_entries([sid], path_prefix="dir")
     assert {h["relative_path"] for h in hits} == {"dir", "dir/a.txt"}
 
-    parent_is_dir, children = await files_repo.directory_entries(sid, "dir")
+    parent_is_dir, children, dir_total = await files_repo.directory_entries_page(
+        sid, "dir", limit=10, offset=0
+    )
     assert parent_is_dir is True
     assert [c["name"] for c in children] == ["a.txt"]
-    is_file, empty = await files_repo.directory_entries(sid, "dir/a.txt")
-    assert is_file is False and empty == []
-    missing, empty2 = await files_repo.directory_entries(sid, "nope")
-    assert missing is None and empty2 == []
+    assert dir_total == 1
+    is_file, empty, file_total = await files_repo.directory_entries_page(
+        sid, "dir/a.txt", limit=10, offset=0
+    )
+    assert is_file is False and empty == [] and file_total == 0
+    missing, empty2, missing_total = await files_repo.directory_entries_page(
+        sid, "nope", limit=10, offset=0
+    )
+    assert missing is None and empty2 == [] and missing_total == 0
 
     uf_rows = await files_repo.resolve_user_file_ids(user["id"], [rows[0]["user_file_id"], 999, rows[0]["user_file_id"]])
     assert len(uf_rows) == 1
@@ -1876,8 +1883,11 @@ async def test_ensure_stored_file_with_entries(temp_db: str) -> None:
             _entry("inner.txt", ".", "inner.txt", False),
         ],
     )
-    _, children = await files_repo.directory_entries(sid, ".")
+    _, children, children_total = await files_repo.directory_entries_page(
+        sid, ".", limit=10, offset=0
+    )
     assert [c["name"] for c in children] == ["inner.txt"]
+    assert children_total == 1
 
 
 async def test_reconcile_download_size_max_task_size(temp_db: str) -> None:

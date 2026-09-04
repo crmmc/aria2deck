@@ -166,3 +166,21 @@ class ShareAccessRequest(BaseModel):
 class ShareAccessResponse(BaseModel):
     """分享密码验证响应"""
     access_token: str
+
+
+class BrowseEntryOut(BaseModel):
+    """目录条目（文件/分享浏览接口共用）"""
+    name: str
+    path: str
+    size: int
+    is_dir: bool
+    is_directory: bool
+    modified_at: int
+
+
+class BrowsePageResponse(BaseModel):
+    """目录浏览分页响应"""
+    items: list[BrowseEntryOut]
+    total: int
+    page: int
+    page_size: int

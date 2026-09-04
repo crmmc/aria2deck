@@ -9,6 +9,7 @@ import type {
   FileListResponse,
   FileSearchResponse,
   BrowseFileInfo,
+  BrowsePageResponse,
   MachineStats,
   PackTask,
   RpcAccessStatus,
@@ -31,6 +32,9 @@ import type {
   UploadTorrentRequest,
 } from "@/types";
 import { hashPassword } from "./crypto";
+
+// 目录浏览分页的固定页大小（与后端 BROWSE_DEFAULT_PAGE_SIZE 一致）
+export const BROWSE_PAGE_SIZE = 200;
 
 function getApiBase(): string {
   if (process.env.NEXT_PUBLIC_API_BASE) {
@@ -320,9 +324,13 @@ export const api = {
   // Files (UserFile-based)
   listFiles: (page = 1, pageSize = 10) =>
     request<FileListResponse>(withQuery("/api/files", { page, page_size: pageSize })),
-  browseFile: (fileHash: string, path?: string) =>
-    request<BrowseFileInfo[]>(
-      withQuery(`/api/files/${fileHash}/browse`, { path })
+  browseFile: (fileHash: string, path?: string, page = 1, pageSize = BROWSE_PAGE_SIZE) =>
+    request<BrowsePageResponse>(
+      withQuery(`/api/files/${fileHash}/browse`, {
+        path,
+        page,
+        page_size: pageSize,
+      })
     ),
   downloadFileUrl: (fileHash: string, path?: string) =>
     downloadUrl(`/api/files/${fileHash}/download`, { path }),
@@ -445,9 +453,19 @@ export const api = {
       subpath,
     });
   },
-  browseShare: (code: string, token?: string, subpath?: string) => {
-    return request<Array<{ name: string; is_dir: boolean; size: number; path: string }>>(
-      withQuery(`/api/s/${encodeURIComponent(code)}/browse`, { subpath }),
+  browseShare: (
+    code: string,
+    token?: string,
+    subpath?: string,
+    page = 1,
+    pageSize = BROWSE_PAGE_SIZE
+  ) => {
+    return request<BrowsePageResponse>(
+      withQuery(`/api/s/${encodeURIComponent(code)}/browse`, {
+        subpath,
+        page,
+        page_size: pageSize,
+      }),
       token ? { headers: { Authorization: `Bearer ${token}` } } : undefined
     );
   },

@@ -10,7 +10,13 @@ import { useMounted } from "@/lib/useMounted";
 import { useToast } from "@/components/Toast";
 import PackTaskCard from "@/components/PackTaskCard";
 import CreateShareDialog from "@/components/CreateShareDialog";
-import type { FileInfo, BrowseFileInfo, SpaceInfo, FileSearchItem } from "@/types";
+import type {
+  FileInfo,
+  BrowseFileInfo,
+  BrowsePageResponse,
+  SpaceInfo,
+  FileSearchItem,
+} from "@/types";
 import { BrowseFolderView } from "./_components/BrowseFolderView";
 import { SearchModal } from "./_components/SearchModal";
 import { FileToolbar, type SortField, type SortOrder } from "./_components/FileToolbar";
@@ -30,6 +36,8 @@ function formatDate(dateStr: string): string {
 }
 
 const LOCATE_HIGHLIGHT_MS = 1800;
+// 目录浏览分页页大小（与后端 BROWSE_DEFAULT_PAGE_SIZE 保持一致）
+const BROWSE_PAGE_SIZE = 200;
 
 export default function FilesPage() {
   const { showToast, showConfirm } = useToast();
@@ -70,6 +78,9 @@ export default function FilesPage() {
   } | null>(null);
   const [browseContents, setBrowseContents] = useState<BrowseFileInfo[]>([]);
   const [browseLoading, setBrowseLoading] = useState(false);
+  const [browsePage, setBrowsePage] = useState(1);
+  const [browseTotal, setBrowseTotal] = useState(0);
+  const browseRequestIdRef = useRef(0);
   const [selectedBrowseFiles, setSelectedBrowseFiles] = useState<Set<string>>(new Set());
   const isInsideFolder = browseContext !== null;
 
@@ -250,23 +261,60 @@ export default function FilesPage() {
     }
   }, [toolbarSearchKeyword, searchGlobal, browseContext, showToast]);
 
+  // 目录浏览分页加载：requestId 守卫丢弃过期响应（并发导航/翻页竞态）
+  const loadBrowsePage = useCallback(
+    async (
+      fileHash: string,
+      path: string | undefined,
+      page: number
+    ): Promise<BrowsePageResponse | null> => {
+      const requestId = ++browseRequestIdRef.current;
+      setBrowseLoading(true);
+      try {
+        const result = await api.browseFile(fileHash, path, page, BROWSE_PAGE_SIZE);
+        if (requestId !== browseRequestIdRef.current) return null; // 已有更新的请求，丢弃本响应
+        setBrowseContents(result.items);
+        setBrowseTotal(result.total);
+        setBrowsePage(page);
+        return result;
+      } catch (err) {
+        if (requestId !== browseRequestIdRef.current) return null;
+        throw err;
+      } finally {
+        if (requestId === browseRequestIdRef.current) setBrowseLoading(false);
+      }
+    },
+    []
+  );
+
+  // 退出目录视图：作废在途目录请求并清空分页状态
+  const clearBrowseState = useCallback(() => {
+    browseRequestIdRef.current += 1;
+    setBrowseContext(null);
+    setBrowseContents([]);
+    setSelectedBrowseFiles(new Set());
+    setBrowseTotal(0);
+    setBrowsePage(1);
+  }, []);
+
   const locateInsideFolder = useCallback(async (item: FileSearchItem) => {
     const segments = item.entry_path?.split("/").filter(Boolean) ?? [];
     const name = segments[segments.length - 1];
     const parentSegments = segments.slice(0, -1);
-    setBrowseLoading(true);
+    const keepName = browseContext?.fileHash === item.content_hash
+      ? browseContext.fileName
+      : item.path.split("/").filter(Boolean)[0] || item.name;
+    setBrowsePage(1);
     try {
-      const contents = await api.browseFile(
+      const result = await loadBrowsePage(
         item.content_hash,
-        parentSegments.length > 0 ? parentSegments.join("/") : undefined
+        parentSegments.length > 0 ? parentSegments.join("/") : undefined,
+        1
       );
-      const keepName = browseContext?.fileHash === item.content_hash
-        ? browseContext.fileName
-        : item.path.split("/").filter(Boolean)[0] || item.name;
+      if (!result) return;
       setBrowseContext({ fileHash: item.content_hash, fileName: keepName, path: parentSegments });
-      setBrowseContents(contents);
       setSelectedBrowseFiles(new Set());
-      if (!name || !contents.some((c) => c.name === name)) {
+      if (!name || !result.items.some((c) => c.name === name)) {
         showToast("定位失败：未在文件夹中找到该文件", "error");
         return;
       }
@@ -275,18 +323,14 @@ export default function FilesPage() {
       setShowSearchModal(false);
     } catch (err) {
       showToast(`定位失败: ${(err as Error).message}`, "error");
-    } finally {
-      setBrowseLoading(false);
     }
-  }, [browseContext, showToast]);
+  }, [browseContext, showToast, loadBrowsePage]);
 
   const handleLocate = useCallback((item: FileSearchItem) => {
     if (item.entry_path == null) {
       const targetPage = Math.floor(item.root_index / pageSize) + 1;
       if (browseContext) {
-        setBrowseContext(null);
-        setBrowseContents([]);
-        setSelectedBrowseFiles(new Set());
+        clearBrowseState();
       }
       if (targetPage !== currentPage) {
         pendingRootLocateRef.current = item.user_file_id;
@@ -303,7 +347,7 @@ export default function FilesPage() {
       return;
     }
     void locateInsideFolder(item);
-  }, [browseContext, pageSize, currentPage, files, showToast, locateInsideFolder]);
+  }, [browseContext, pageSize, currentPage, files, showToast, locateInsideFolder, clearBrowseState]);
 
   const handleToolbarSearchKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
@@ -511,35 +555,32 @@ export default function FilesPage() {
     }
   };
 
-  // Folder in-page navigation
+  // Folder in-page navigation（导航事件内同步重置页码，保证只发一笔「第 1 页」请求）
   const enterFolder = async (file: FileInfo) => {
     setBrowseContext({ fileHash: file.content_hash, fileName: file.name, path: [] });
     setSelectedBrowseFiles(new Set());
-    setBrowseLoading(true);
+    setBrowsePage(1);
+    setBrowseTotal(0);
     try {
-      const contents = await api.browseFile(file.content_hash);
-      setBrowseContents(contents);
+      const result = await loadBrowsePage(file.content_hash, undefined, 1);
+      if (!result) return;
     } catch (err) {
       showToast(`打开文件夹失败: ${(err as Error).message}`, "error");
       setBrowseContext(null);
-    } finally {
-      setBrowseLoading(false);
     }
   };
 
   const navigateIntoSubfolder = async (name: string) => {
     if (!browseContext) return;
     const newPath = [...browseContext.path, name];
-    setBrowseLoading(true);
+    setBrowsePage(1);
     try {
-      const contents = await api.browseFile(browseContext.fileHash, newPath.join("/"));
-      setBrowseContents(contents);
+      const result = await loadBrowsePage(browseContext.fileHash, newPath.join("/"), 1);
+      if (!result) return;
       setBrowseContext(prev => prev ? { ...prev, path: newPath } : prev);
       setSelectedBrowseFiles(new Set());
     } catch (err) {
       showToast(`打开文件夹失败: ${(err as Error).message}`, "error");
-    } finally {
-      setBrowseLoading(false);
     }
   };
 
@@ -547,26 +588,36 @@ export default function FilesPage() {
     if (!browseContext) return;
     // index -1 means root of the folder
     const newPath = index < 0 ? [] : browseContext.path.slice(0, index + 1);
-    setBrowseLoading(true);
+    setBrowsePage(1);
     try {
-      const contents = await api.browseFile(
+      const result = await loadBrowsePage(
         browseContext.fileHash,
-        newPath.length > 0 ? newPath.join("/") : undefined
+        newPath.length > 0 ? newPath.join("/") : undefined,
+        1
       );
-      setBrowseContents(contents);
+      if (!result) return;
       setBrowseContext(prev => prev ? { ...prev, path: newPath } : prev);
       setSelectedBrowseFiles(new Set());
     } catch (err) {
       showToast(`导航失败: ${(err as Error).message}`, "error");
-    } finally {
-      setBrowseLoading(false);
     }
   };
 
+  // 目录内翻页：换页后旧页选中项不可见，清空避免批量操作命中隐藏项（与根列表翻页一致）
+  const handleBrowsePageChange = useCallback(
+    (page: number) => {
+      if (!browseContext) return;
+      const path = browseContext.path.length > 0 ? browseContext.path.join("/") : undefined;
+      setSelectedBrowseFiles(new Set());
+      loadBrowsePage(browseContext.fileHash, path, page).catch((err) => {
+        showToast(`翻页失败: ${(err as Error).message}`, "error");
+      });
+    },
+    [browseContext, loadBrowsePage, showToast]
+  );
+
   const returnToRoot = () => {
-    setBrowseContext(null);
-    setBrowseContents([]);
-    setSelectedBrowseFiles(new Set());
+    clearBrowseState();
   };
 
   // Browse file selection helpers
@@ -664,24 +715,34 @@ export default function FilesPage() {
 
       {/* Folder contents table (inside folder) */}
       {isInsideFolder ? (
-        <BrowseFolderView
-          isMobile={isMobile}
-          browseLoading={browseLoading}
-          browseContext={browseContext}
-          browseContents={browseContents}
-          sortedBrowseContents={sortedBrowseContents}
-          selectedBrowseFiles={selectedBrowseFiles}
-          highlightName={highlightName}
-          onSort={handleSort}
-          getSortIcon={getSortIcon}
-          onToggleAllBrowseFiles={toggleAllBrowseFiles}
-          onToggleBrowseFileSelection={toggleBrowseFileSelection}
-          onNavigateIntoSubfolder={navigateIntoSubfolder}
-          onDownload={handleDownload}
-          onUnavailableDelete={() => {
-            showToast("文件夹内暂不支持在此页面单文件直接删除", "warning");
-          }}
-        />
+        <>
+          <BrowseFolderView
+            isMobile={isMobile}
+            browseLoading={browseLoading}
+            browseContext={browseContext}
+            browseContents={browseContents}
+            sortedBrowseContents={sortedBrowseContents}
+            selectedBrowseFiles={selectedBrowseFiles}
+            highlightName={highlightName}
+            onSort={handleSort}
+            getSortIcon={getSortIcon}
+            onToggleAllBrowseFiles={toggleAllBrowseFiles}
+            onToggleBrowseFileSelection={toggleBrowseFileSelection}
+            onNavigateIntoSubfolder={navigateIntoSubfolder}
+            onDownload={handleDownload}
+            onUnavailableDelete={() => {
+              showToast("文件夹内暂不支持在此页面单文件直接删除", "warning");
+            }}
+          />
+          {!browseLoading && browseTotal > BROWSE_PAGE_SIZE && (
+            <PaginationControls
+              currentPage={browsePage}
+              pageSize={BROWSE_PAGE_SIZE}
+              totalFiles={browseTotal}
+              onPageChange={handleBrowsePageChange}
+            />
+          )}
+        </>
       ) : (
         /* Root file table */
           <>

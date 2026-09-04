@@ -42,9 +42,9 @@ async def test_pending_file_is_hidden_from_all_user_paths(
     assert await shares_repo.get_owned_file(
         test_user["id"], user_file["id"]
     ) is None
-    assert await files_repo.directory_entries(
-        user_file["stored_file_id"], ""
-    ) == (None, [])
+    assert await files_repo.directory_entries_page(
+        user_file["stored_file_id"], "", limit=10, offset=0
+    ) == (None, [], 0)
     with pytest.raises(RepositoryConflictError, match="用户或存储文件正在删除"):
         await downloads_repo.attach_completed_file_to_user(
             user_id=test_user["id"],

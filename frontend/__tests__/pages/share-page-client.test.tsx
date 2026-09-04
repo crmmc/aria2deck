@@ -25,6 +25,14 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
+function sf(name: string, isDir: boolean, size: number, path: string) {
+  return { name, is_dir: isDir, is_directory: isDir, size, path, modified_at: 1_700_000_000_000 };
+}
+
+function shareResponse(items: ReturnType<typeof sf>[], total = items.length) {
+  return { items, total, page: 1, page_size: 200 };
+}
+
 describe("SharePageClient", () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -82,10 +90,9 @@ describe("SharePageClient", () => {
       is_expired: false,
       is_exhausted: false,
     } as never);
-    mockApi.browseShare.mockResolvedValue([
-      { name: "sub.txt", is_dir: false, size: 12, path: "sub.txt" },
-      { name: "nested", is_dir: true, size: 0, path: "nested" },
-    ] as never);
+    mockApi.browseShare.mockResolvedValue(
+      shareResponse([sf("sub.txt", false, 12, "sub.txt"), sf("nested", true, 0, "nested")]) as never
+    );
 
     render(<SharePageClient />);
 
@@ -175,9 +182,7 @@ describe("SharePageClient", () => {
 
   test("shows directory loading state, supports item download and go back", async () => {
     window.history.pushState({}, "", "/s/dirnav");
-    const firstBrowseDeferred = createDeferred<
-      Array<{ name: string; is_dir: boolean; size: number; path: string }>
-    >();
+    const firstBrowseDeferred = createDeferred<ReturnType<typeof shareResponse>>();
 
     mockApi.getShareInfo.mockResolvedValue({
       file_name: "folder",
@@ -189,22 +194,20 @@ describe("SharePageClient", () => {
     } as never);
     mockApi.browseShare
       .mockReturnValueOnce(firstBrowseDeferred.promise as never)
-      .mockResolvedValueOnce([
-        { name: "inside.txt", is_dir: false, size: 22, path: "nested/inside.txt" },
-      ] as never)
-      .mockResolvedValueOnce([
-        { name: "root.txt", is_dir: false, size: 10, path: "root.txt" },
-        { name: "nested", is_dir: true, size: 0, path: "nested" },
-      ] as never);
+      .mockResolvedValueOnce(
+        shareResponse([sf("inside.txt", false, 22, "nested/inside.txt")]) as never
+      )
+      .mockResolvedValueOnce(
+        shareResponse([sf("root.txt", false, 10, "root.txt"), sf("nested", true, 0, "nested")]) as never
+      );
 
     render(<SharePageClient />);
 
     expect(await screen.findByText("加载目录中...")).toBeInTheDocument();
 
-    firstBrowseDeferred.resolve([
-      { name: "root.txt", is_dir: false, size: 10, path: "root.txt" },
-      { name: "nested", is_dir: true, size: 0, path: "nested" },
-    ]);
+    firstBrowseDeferred.resolve(
+      shareResponse([sf("root.txt", false, 10, "root.txt"), sf("nested", true, 0, "nested")])
+    );
 
     expect(await screen.findByText("nested")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "下载" }));
@@ -212,10 +215,10 @@ describe("SharePageClient", () => {
 
     fireEvent.click(screen.getByText("nested"));
     expect(await screen.findByRole("button", { name: "↵ 返回上级" })).toBeInTheDocument();
-    expect(mockApi.browseShare).toHaveBeenLastCalledWith("dirnav", undefined, "nested");
+    expect(mockApi.browseShare).toHaveBeenLastCalledWith("dirnav", undefined, "nested", 1, 200);
     fireEvent.click(screen.getByRole("button", { name: "↵ 返回上级" }));
     expect(await screen.findByText("root.txt")).toBeInTheDocument();
-    expect(mockApi.browseShare).toHaveBeenLastCalledWith("dirnav", undefined, undefined);
+    expect(mockApi.browseShare).toHaveBeenLastCalledWith("dirnav", undefined, undefined, 1, 200);
   });
 
   test("uses access token when browsing and downloading an unlocked directory", async () => {
@@ -230,13 +233,12 @@ describe("SharePageClient", () => {
     } as never);
     mockApi.accessShare.mockResolvedValue({ access_token: "dir-token" } as never);
     mockApi.browseShare
-      .mockResolvedValueOnce([
-        { name: "nested", is_dir: true, size: 0, path: "nested" },
-        { name: "locked.txt", is_dir: false, size: 42, path: "locked.txt" },
-      ] as never)
-      .mockResolvedValueOnce([
-        { name: "inside.txt", is_dir: false, size: 10, path: "nested/inside.txt" },
-      ] as never);
+      .mockResolvedValueOnce(
+        shareResponse([sf("nested", true, 0, "nested"), sf("locked.txt", false, 42, "locked.txt")]) as never
+      )
+      .mockResolvedValueOnce(
+        shareResponse([sf("inside.txt", false, 10, "nested/inside.txt")]) as never
+      );
 
     render(<SharePageClient />);
 
@@ -247,7 +249,7 @@ describe("SharePageClient", () => {
 
     expect(await screen.findByText("locked.txt")).toBeInTheDocument();
     expect(mockApi.accessShare).toHaveBeenCalledWith("secret-folder", "secret");
-    expect(mockApi.browseShare).toHaveBeenCalledWith("secret-folder", "dir-token", undefined);
+    expect(mockApi.browseShare).toHaveBeenCalledWith("secret-folder", "dir-token", undefined, 1, 200);
 
     fireEvent.click(screen.getByRole("button", { name: "下载" }));
     expect(mockApi.downloadShare).toHaveBeenCalledWith(
@@ -261,7 +263,9 @@ describe("SharePageClient", () => {
     expect(mockApi.browseShare).toHaveBeenLastCalledWith(
       "secret-folder",
       "dir-token",
-      "nested"
+      "nested",
+      1,
+      200
     );
   });
 
@@ -307,5 +311,57 @@ describe("SharePageClient", () => {
     await waitFor(() => {
       expect(document.title).toBe("demo.zip - Late Site");
     });
+  });
+});
+
+describe("SharePageClient directory pagination", () => {
+  const dirInfo = {
+    file_name: "folder",
+    file_size: 0,
+    is_directory: true,
+    has_password: false,
+    is_expired: false,
+    is_exhausted: false,
+  };
+
+  function sharePage(items: ReturnType<typeof sf>[], total: number, page: number) {
+    return { items, total, page, page_size: 200 };
+  }
+
+  test("large directory shows pagination and loads the next page", async () => {
+    window.history.pushState({}, "", "/s/bigdir");
+    mockApi.getShareInfo.mockResolvedValue(dirInfo as never);
+    mockApi.browseShare
+      .mockResolvedValueOnce(
+        sharePage([sf("a.txt", false, 1, "a.txt"), sf("b.txt", false, 2, "b.txt")], 300, 1) as never
+      )
+      .mockResolvedValueOnce(sharePage([sf("c.txt", false, 3, "c.txt")], 300, 2) as never);
+
+    render(<SharePageClient />);
+
+    expect(await screen.findByText("a.txt")).toBeInTheDocument();
+    expect(screen.getByText(/共 300 项/)).toBeInTheDocument();
+    expect(screen.queryByText("c.txt")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+
+    await waitFor(() => {
+      expect(mockApi.browseShare).toHaveBeenLastCalledWith("bigdir", undefined, undefined, 2, 200);
+    });
+    expect(await screen.findByText("c.txt")).toBeInTheDocument();
+    expect(screen.queryByText("a.txt")).not.toBeInTheDocument();
+  });
+
+  test("small directory hides pagination controls", async () => {
+    window.history.pushState({}, "", "/s/smalldir");
+    mockApi.getShareInfo.mockResolvedValue(dirInfo as never);
+    mockApi.browseShare.mockResolvedValue(
+      shareResponse([sf("only.txt", false, 5, "only.txt")]) as never
+    );
+
+    render(<SharePageClient />);
+
+    expect(await screen.findByText("only.txt")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "下一页" })).not.toBeInTheDocument();
   });
 });
