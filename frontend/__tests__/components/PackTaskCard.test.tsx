@@ -38,9 +38,11 @@ function makeTask(overrides: Partial<PackTask> = {}): PackTask {
     delete_source: false,
     status: "pending",
     progress: 10,
+    step_progress: 0,
     error_message: null,
     step: null,
     started_at: null,
+    step_started_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     ...overrides,
@@ -97,15 +99,19 @@ describe("PackTaskCard", () => {
     jest.setSystemTime(new Date("2025-01-01T00:00:30.000Z"));
     mockApi.listPackTasks.mockResolvedValue([makeTask({
       status: "packing",
-      progress: 25,
+      progress: 52,
+      step_progress: 25,
       step: "compressing",
-      started_at: "2025-01-01T00:00:00.000Z",
+      started_at: "2024-01-01T00:00:00.000Z",
+      step_started_at: "2025-01-01T00:00:00.000Z",
     })]);
 
     render(<PackTaskCard />);
     await openDropdown();
 
     const footerText = screen.getByText("压缩 · 已用 30秒 / 预计剩余 1分30秒");
+    const progressFill = document.querySelector(".pack-progress-fill");
+    expect(progressFill).toHaveStyle({ width: "25%" });
     expect(footerText.closest(".flex-between")).toContainElement(
       screen.getByRole("button", { name: "取消" })
     );
@@ -122,19 +128,83 @@ describe("PackTaskCard", () => {
   it("shows all approved steps and safe placeholders for unknown step or invalid timing", async () => {
     jest.setSystemTime(new Date("2025-01-01T01:00:00.000Z"));
     mockApi.listPackTasks.mockResolvedValue([
-      makeTask({ id: 8, status: "packing", progress: 50, step: "validating", started_at: "invalid" }),
-      makeTask({ id: 9, status: "packing", progress: 0, step: "compressing", started_at: "2025-01-01T00:59:50.000Z" }),
-      makeTask({ id: 10, status: "packing", progress: 50, step: "verifying", started_at: "2025-01-01T00:59:50.000Z" }),
-      makeTask({ id: 11, status: "packing", progress: 50, step: "unexpected" as PackTask["step"], started_at: null }),
+      makeTask({ id: 8, status: "packing", progress: 50, step_progress: 50, step: "validating", step_started_at: "invalid" }),
+      makeTask({ id: 9, status: "packing", progress: 0, step_progress: 0, step: "compressing", step_started_at: "2025-01-01T00:59:50.000Z" }),
+      makeTask({ id: 10, status: "packing", progress: 50, step_progress: 50, step: "verifying", step_started_at: "2025-01-01T00:59:50.000Z" }),
+      makeTask({ id: 11, status: "packing", progress: 50, step_progress: 50, step: "unexpected" as PackTask["step"], step_started_at: null }),
     ]);
 
     render(<PackTaskCard />);
     await openDropdown();
 
     expect(screen.getByText("校验 · 已用 -- / 预计剩余 --")).toBeInTheDocument();
-    expect(screen.getByText("压缩 · 已用 10秒 / 预计剩余 --")).toBeInTheDocument();
+    expect(screen.getByText("压缩 · 已用 -- / 预计剩余 --")).toBeInTheDocument();
     expect(screen.getByText("验收 · 已用 10秒 / 预计剩余 10秒")).toBeInTheDocument();
     expect(screen.getByText("处理中 · 已用 -- / 预计剩余 --")).toBeInTheDocument();
+  });
+
+  it("shows zero ETA at step completion and a placeholder for a future step start", async () => {
+    jest.setSystemTime(new Date("2025-01-01T01:00:00.000Z"));
+    mockApi.listPackTasks.mockResolvedValue([
+      makeTask({
+        id: 12,
+        status: "packing",
+        step_progress: 100,
+        step: "compressing",
+        step_started_at: "2025-01-01T00:59:50.000Z",
+      }),
+      makeTask({
+        id: 13,
+        status: "packing",
+        step_progress: 50,
+        step: "validating",
+        step_started_at: "2025-01-01T01:00:01.000Z",
+      }),
+    ]);
+
+    render(<PackTaskCard />);
+    await openDropdown();
+
+    expect(screen.getByText("压缩 · 已用 10秒 / 预计剩余 0秒")).toBeInTheDocument();
+    expect(screen.getByText("校验 · 已用 -- / 预计剩余 --")).toBeInTheDocument();
+  });
+
+  it("uses the new step start after polling switches the active phase", async () => {
+    jest.setSystemTime(new Date("2025-01-01T00:01:00.000Z"));
+    mockApi.listPackTasks
+      .mockResolvedValueOnce([makeTask({
+        id: 14,
+        status: "packing",
+        progress: 20,
+        step_progress: 50,
+        step: "validating",
+        step_started_at: "2025-01-01T00:00:00.000Z",
+      })])
+      .mockResolvedValueOnce([makeTask({
+        id: 14,
+        status: "packing",
+        progress: 50,
+        step_progress: 25,
+        step: "compressing",
+        step_started_at: "2025-01-01T00:00:59.000Z",
+      })]);
+
+    render(<PackTaskCard />);
+    await openDropdown();
+    expect(
+      screen.getByText("校验 · 已用 1分00秒 / 预计剩余 1分00秒")
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      jest.advanceTimersByTime(2000);
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("压缩 · 已用 3秒 / 预计剩余 9秒")
+      ).toBeInTheDocument();
+    });
+    expect(mockApi.listPackTasks).toHaveBeenCalledTimes(2);
   });
 
   it("does not show timing for terminal tasks", async () => {

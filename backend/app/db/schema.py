@@ -21,7 +21,7 @@ from app.domain.status import (
     USER_TASK_STATUSES,
 )
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 RESOURCE_KINDS = ("http", "magnet", "torrent", "other")
 PACK_SOURCE_CLEANUP_STATES = (
     "retained",
@@ -424,7 +424,9 @@ pack_tasks = Table(
     Column("source_cleanup_pending", Integer, nullable=False, server_default="0"),
     Column("status", String(16), nullable=False),
     Column("progress", Integer, nullable=False, server_default="0"),
+    Column("step_progress", Integer, nullable=False, server_default="0"),
     Column("started_at_ms", Integer),
+    Column("step_started_at_ms", Integer),
     Column("step", String(16)),
     Column("error_message", Text),
     Column("created_at_ms", Integer, nullable=False),
@@ -439,6 +441,10 @@ pack_tasks = Table(
         name="ck_pack_tasks_install_reserved_bytes_non_negative",
     ),
     CheckConstraint("retry_count >= 0", name="ck_pack_tasks_retry_count_non_negative"),
+    CheckConstraint(
+        "step_progress >= 0 AND step_progress <= 100",
+        name="ck_pack_tasks_step_progress_range",
+    ),
     CheckConstraint(
         "next_retry_at_ms IS NULL OR next_retry_at_ms >= 0",
         name="ck_pack_tasks_next_retry_non_negative",

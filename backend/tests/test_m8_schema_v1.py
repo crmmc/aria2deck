@@ -93,7 +93,7 @@ async def test_fresh_bootstrap_has_download_sources_and_history_columns(
     assert "history_expired_at_ms" in ut_columns
     assert "history_retention_days" in settings_columns
     assert retention == 30
-    assert version == SCHEMA_VERSION == 17
+    assert version == SCHEMA_VERSION
     assert any(
         row["table"] == "download_sources"
         and row["from"] == "source_id"
@@ -166,8 +166,8 @@ async def test_v11_to_v12_migration_is_idempotent(isolated_db: Path) -> None:
             text("INSERT INTO user_tasks VALUES (1, 1, 1, 'completed', 1, 1)")
         )
 
-        assert await run_migrations(conn, 11) == 17
-        assert await run_migrations(conn, 11) == 17
+        assert await run_migrations(conn, 11) == SCHEMA_VERSION
+        assert await run_migrations(conn, 11) == SCHEMA_VERSION
 
         tables = {
             row[0]
@@ -233,7 +233,7 @@ async def test_v11_to_v12_migration_is_idempotent(isolated_db: Path) -> None:
     assert retention == 30
     assert source_id is None
     assert history_expired is None
-    assert version == 17
+    assert version == SCHEMA_VERSION
     assert any(
         row["table"] == "download_sources"
         and row["from"] == "source_id"

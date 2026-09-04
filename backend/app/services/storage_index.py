@@ -24,7 +24,11 @@ from app.domain.content_identity import (
     v2_content_identity,
 )
 
-__all__ = ["CONTENT_HASH_V2", "content_identity_from_content_hash"]
+__all__ = [
+    "CONTENT_HASH_V2",
+    "content_identity_from_content_hash",
+    "content_identity_from_raw_file_digest",
+]
 
 MAX_STORAGE_ENTRIES = 100_000
 MAX_STORAGE_PATH_DEPTH = 32
@@ -134,10 +138,14 @@ def _file_hash(
     return digest.hexdigest()
 
 
-def _v2_file_digest(raw_digest: str) -> str:
+def content_identity_from_raw_file_digest(raw_digest: str) -> ContentIdentity:
     digest = hashlib.sha256(_FILE_DOMAIN)
     digest.update(bytes.fromhex(raw_digest))
-    return digest.hexdigest()
+    return v2_content_identity("file", digest.hexdigest())
+
+
+def _v2_file_digest(raw_digest: str) -> str:
+    return content_identity_from_raw_file_digest(raw_digest).digest
 
 
 def _directory_digest(records: list[tuple[bytes, str, int, str | None]]) -> str:
@@ -241,7 +249,7 @@ def scan_storage_path(
             else _file_hash(root, event, on_bytes_read)
         )
         return _v2_scan(
-            digest=_v2_file_digest(raw_digest),
+            digest=content_identity_from_raw_file_digest(raw_digest).digest,
             size_bytes=root_stat.st_size,
             is_directory=False,
             entries=entries,

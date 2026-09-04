@@ -63,15 +63,22 @@ function formatDuration(seconds: number): string {
 }
 
 function getTimingText(task: PackTask, nowMs: number): string {
-  const startedMs = task.started_at ? Date.parse(task.started_at) : Number.NaN;
-  if (!Number.isFinite(startedMs)) {
+  const startedMs = task.step_started_at ? Date.parse(task.step_started_at) : Number.NaN;
+  const stepProgress = task.step_progress;
+  if (
+    !Number.isFinite(startedMs)
+    || !Number.isFinite(stepProgress)
+    || stepProgress <= 0
+    || stepProgress > 100
+  ) {
     return `${getStepText(task.step)} · 已用 -- / 预计剩余 --`;
   }
   const elapsed = Math.max(0, Math.floor((nowMs - startedMs) / 1000));
-  const eta = task.progress > 0
-    ? Math.round(elapsed * (100 - task.progress) / task.progress)
-    : null;
-  return `${getStepText(task.step)} · 已用 ${formatDuration(elapsed)} / 预计剩余 ${eta === null ? "--" : formatDuration(Math.max(0, eta))}`;
+  if (elapsed <= 0) {
+    return `${getStepText(task.step)} · 已用 -- / 预计剩余 --`;
+  }
+  const eta = Math.round(elapsed * (100 - stepProgress) / stepProgress);
+  return `${getStepText(task.step)} · 已用 ${formatDuration(elapsed)} / 预计剩余 ${formatDuration(Math.max(0, eta))}`;
 }
 
 interface DropdownPosition {
@@ -335,7 +342,7 @@ export default function PackTaskCard({ onTaskComplete }: PackTaskCardProps) {
                   <div className="pack-progress-bar">
                     <div
                       className="pack-progress-fill"
-                      style={{ width: `${task.progress}%` }}
+                      style={{ width: `${task.step_progress}%` }}
                     />
                   </div>
                   <div className="flex-between">

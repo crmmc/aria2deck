@@ -10,7 +10,7 @@ from sqlalchemy import text
 from app.auth import get_user_by_rpc_secret
 from app.core.config import settings
 from app.core.security import credential_digest
-from app.db.bootstrap import bootstrap_database
+from app.db.bootstrap import SCHEMA_VERSION, bootstrap_database
 from app.db.engine import (
     credential_scrub_marker_path,
     dispose_engine,
@@ -60,8 +60,8 @@ async def test_v4_to_v5_deletion_migration_is_idempotent(
         )
         await conn.execute(text("INSERT INTO stored_files VALUES (2, 'hash')"))
 
-        assert await run_migrations(conn, 4) == 17
-        assert await run_migrations(conn, 4) == 17
+        assert await run_migrations(conn, 4) == SCHEMA_VERSION
+        assert await run_migrations(conn, 4) == SCHEMA_VERSION
 
         for table_name in ("users", "stored_files"):
             columns = {

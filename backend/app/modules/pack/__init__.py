@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import io
 import json
 import logging
@@ -85,6 +86,7 @@ from app.services.storage_index import (
     CONTENT_HASH_V1,
     calculate_legacy_content_hash,
     content_identity_from_content_hash,
+    content_identity_from_raw_file_digest,
     scan_storage_path,
 )
 from app.services.storage_locks import (
@@ -177,6 +179,47 @@ class _BoundedSink(io.BufferedIOBase):
     def close(self) -> None:
         if not self._file.closed:
             self._file.close()
+        super().close()
+
+
+class _AppendOnlyHashingSink(io.BufferedIOBase):
+    def __init__(self, sink: _BoundedSink) -> None:
+        self._sink = sink
+        self._digest = hashlib.sha256()
+
+    def writable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return False
+
+    def tell(self) -> int:
+        return self._sink.tell()
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        del offset, whence
+        raise io.UnsupportedOperation("append-only sink is not seekable")
+
+    def fileno(self) -> int:
+        return self._sink.fileno()
+
+    def write(self, data: Buffer, /) -> int:
+        written = self._sink.write(data)
+        if written:
+            self._digest.update(memoryview(data)[:written])
+        return written
+
+    def flush(self) -> None:
+        self._sink.flush()
+
+    def hexdigest(self) -> str:
+        if not self.closed:
+            raise ValueError("output hash requested before sink close")
+        return self._digest.hexdigest()
+
+    def close(self) -> None:
+        if not self.closed:
+            self._sink.close()
         super().close()
 
 
@@ -402,7 +445,7 @@ class _RunningPackJob:
     task: asyncio.Task[None]
     cancel_event: threading.Event
     user_id: int | None = None
-    writer_task: asyncio.Task[None] | None = None
+    writer_task: asyncio.Task[str] | None = None
     thread_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     phase: str = "queued"
 
@@ -508,25 +551,27 @@ class PackTaskManager:
         on_progress: Callable[[int, int], None] | None,
     ) -> _T:
         last_progress = -1
+        last_step_progress = -1
         try:
             while not worker.done():
                 phase_progress = tracker.snapshot()[2]
                 progress = start_progress + (
                     phase_progress * (end_progress - start_progress) // 100
                 )
-                if progress != last_progress:
-                    await cls._update_task_progress(task_id, progress)
-                    last_progress = progress
-                    if on_progress:
+                if progress != last_progress or phase_progress != last_step_progress:
+                    await cls._update_task_progress(task_id, progress, phase_progress)
+                    if progress != last_progress and on_progress:
                         on_progress(task_id, progress)
+                    last_progress = progress
+                    last_step_progress = phase_progress
                 await asyncio.sleep(0.2)
             result = await asyncio.shield(worker)
         except asyncio.CancelledError:
             job.cancel_event.set()
             await asyncio.gather(worker, return_exceptions=True)
             raise
-        if last_progress != end_progress:
-            await cls._update_task_progress(task_id, end_progress)
+        if last_progress != end_progress or last_step_progress != 100:
+            await cls._update_task_progress(task_id, end_progress, 100)
             if on_progress:
                 on_progress(task_id, end_progress)
         return result
@@ -956,7 +1001,9 @@ class PackTaskManager:
             if task is None:
                 return
             job.phase = "prepared"
-            await cls._finalize_prepared(task, job.cancel_event, job=job)
+            await cls._finalize_prepared(
+                task, job.cancel_event, job=job, on_progress=on_progress
+            )
             return
         if task["status"] != "pending":
             return
@@ -1023,7 +1070,9 @@ class PackTaskManager:
             refreshed = await get_pack_task_row(task_id)
             if refreshed and refreshed["prepared_content_hash"]:
                 job.phase = "prepared"
-                await cls._finalize_prepared(refreshed, job.cancel_event, job=job)
+                await cls._finalize_prepared(
+                    refreshed, job.cancel_event, job=job, on_progress=on_progress
+                )
         except InterruptedError:
             raise
         except asyncio.CancelledError:
@@ -1127,6 +1176,7 @@ class PackTaskManager:
             get_min_free_disk(),
         )
         last_progress = -1
+        last_step_progress = -1
         last_materialized = int(task.get("materialized_bytes") or 0)
         last_materialized_at = time.monotonic()
         while not job.writer_task.done():
@@ -1136,11 +1186,14 @@ class PackTaskManager:
                 * (_ARCHIVE_WRITE_PROGRESS_END - _SOURCE_HASH_PROGRESS_END)
                 // 100
             )
-            if progress != last_progress:
-                await cls._update_task_progress(int(task["id"]), progress)
-                last_progress = progress
-                if on_progress:
+            if progress != last_progress or phase_progress != last_step_progress:
+                await cls._update_task_progress(
+                    int(task["id"]), progress, phase_progress
+                )
+                if progress != last_progress and on_progress:
                     on_progress(int(task["id"]), progress)
+                last_progress = progress
+                last_step_progress = phase_progress
             try:
                 current_extent = partial_path.stat().st_size
             except FileNotFoundError:
@@ -1154,10 +1207,12 @@ class PackTaskManager:
                 last_materialized = current_extent
                 last_materialized_at = now
             await asyncio.sleep(0.2)
-        await job.writer_task
-        if last_progress != _ARCHIVE_WRITE_PROGRESS_END:
+        content_hash = await job.writer_task
+        if not isinstance(content_hash, str):
+            raise PackBoundaryError("打包输出内容身份无效")
+        if last_progress != _ARCHIVE_WRITE_PROGRESS_END or last_step_progress != 100:
             await cls._update_task_progress(
-                int(task["id"]), _ARCHIVE_WRITE_PROGRESS_END
+                int(task["id"]), _ARCHIVE_WRITE_PROGRESS_END, 100
             )
             if on_progress:
                 on_progress(int(task["id"]), _ARCHIVE_WRITE_PROGRESS_END)
@@ -1165,33 +1220,6 @@ class PackTaskManager:
             raise InterruptedError("pack cancelled")
         size_bytes = partial_path.stat().st_size
         await set_pack_materialized_bytes(int(task["id"]), size_bytes)
-        output_tracker = _ProgressTracker(size_bytes)
-        if not await mark_pack_task_step_if_packing(
-            int(task["id"]),
-            step="verifying",
-            expected_step="compressing",
-            match_expected_step=True,
-        ):
-            raise InterruptedError("pack state changed")
-        job.phase = "verifying"
-        hash_task = cls._start_thread(
-            job,
-            scan_storage_path,
-            partial_path,
-            job.cancel_event,
-            output_tracker.add,
-        )
-        content_hash = (
-            await cls._wait_progress_thread(
-                job,
-                hash_task,
-                output_tracker,
-                int(task["id"]),
-                _ARCHIVE_WRITE_PROGRESS_END,
-                _OUTPUT_HASH_PROGRESS_END,
-                on_progress,
-            )
-        ).content_hash
         os.replace(partial_path, prepared_path)
         await cls._run_thread(
             job, _fsync_file_and_parent, prepared_path, job.cancel_event
@@ -1205,6 +1233,62 @@ class PackTaskManager:
         if not persisted:
             cleanup_pack_output(prepared_path)
             raise InterruptedError("pack state changed")
+        if not await mark_pack_task_step_if_packing(
+            int(task["id"]),
+            step="verifying",
+            expected_step="compressing",
+            match_expected_step=True,
+        ):
+            raise InterruptedError("pack state changed")
+        job.phase = "verifying"
+
+    @classmethod
+    async def _install_prepared_with_progress(
+        cls,
+        task_id: int,
+        task: dict[str, Any],
+        cancel_event: threading.Event,
+        job: _RunningPackJob | None,
+        on_progress: Callable[[int, int], None] | None,
+    ) -> _InstalledPrepared:
+        tracker = _ProgressTracker(int(task["prepared_size_bytes"] or 0))
+        install_task = asyncio.create_task(
+            cls._install_prepared_file(
+                task_id,
+                content_hash=str(task["prepared_content_hash"] or ""),
+                size_bytes=int(task["prepared_size_bytes"] or 0),
+                filename=str(task["prepared_filename"] or ""),
+                cancel_event=cancel_event,
+                job=job,
+                progress_tracker=tracker,
+            )
+        )
+        last_progress = -1
+        last_step_progress = -1
+        try:
+            while not install_task.done():
+                step_progress = tracker.snapshot()[2]
+                if step_progress != last_step_progress:
+                    progress = _ARCHIVE_WRITE_PROGRESS_END + (
+                        step_progress * (_OUTPUT_HASH_PROGRESS_END - _ARCHIVE_WRITE_PROGRESS_END)
+                        // 100
+                    )
+                    await cls._update_task_progress(task_id, progress, step_progress)
+                    if progress != last_progress and on_progress:
+                        on_progress(task_id, progress)
+                    last_progress = progress
+                    last_step_progress = step_progress
+                await asyncio.sleep(0.2)
+            installed = await asyncio.shield(install_task)
+        except asyncio.CancelledError:
+            cancel_event.set()
+            await asyncio.gather(install_task, return_exceptions=True)
+            raise
+        if last_step_progress != 100:
+            await cls._update_task_progress(task_id, _OUTPUT_HASH_PROGRESS_END, 100)
+            if on_progress:
+                on_progress(task_id, _OUTPUT_HASH_PROGRESS_END)
+        return installed
 
     @classmethod
     async def _finalize_prepared(
@@ -1213,6 +1297,7 @@ class PackTaskManager:
         cancel_event: threading.Event,
         *,
         job: _RunningPackJob | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, Any] | None:
         if cancel_event.is_set():
             raise InterruptedError("pack cancelled")
@@ -1239,13 +1324,12 @@ class PackTaskManager:
         terminal = False
         content_lock = await get_content_hash_lock(content_hash)
         async with content_lock:
-            installed = await cls._install_prepared_file(
+            installed = await cls._install_prepared_with_progress(
                 task_id,
-                content_hash=content_hash,
-                size_bytes=size_bytes,
-                filename=filename,
-                cancel_event=cancel_event,
-                job=job,
+                task,
+                cancel_event,
+                job,
+                on_progress,
             )
             try:
                 completed = await finalize_prepared_pack_task(
@@ -1349,6 +1433,7 @@ class PackTaskManager:
         filename: str,
         cancel_event: threading.Event,
         job: _RunningPackJob | None,
+        progress_tracker: _ProgressTracker | None = None,
     ) -> _InstalledPrepared:
         identity = content_identity_from_content_hash(content_hash)
         from app.services.storage import (
@@ -1365,12 +1450,22 @@ class PackTaskManager:
                     return False
                 if identity.version == CONTENT_HASH_V1:
                     actual_hash = await cls._run_optional_thread(
-                        job, cancel_event, calculate_legacy_content_hash, path, cancel_event
+                        job,
+                        cancel_event,
+                        calculate_legacy_content_hash,
+                        path,
+                        cancel_event,
+                        progress_tracker.add if progress_tracker is not None else None,
                     )
                 else:
                     actual_hash = (
                         await cls._run_optional_thread(
-                            job, cancel_event, scan_storage_path, path, cancel_event
+                            job,
+                            cancel_event,
+                            scan_storage_path,
+                            path,
+                            cancel_event,
+                            progress_tracker.add if progress_tracker is not None else None,
                         )
                     ).content_hash
                 return actual_hash == content_hash
@@ -1605,9 +1700,9 @@ class PackTaskManager:
         cancel_event: threading.Event,
         max_bytes: int,
         min_free_bytes: int,
-    ) -> None:
+    ) -> str:
         if pack_format == "zip":
-            cls._write_zip_sync(
+            return cls._write_zip_sync(
                 output_path,
                 compression_level,
                 items,
@@ -1616,8 +1711,7 @@ class PackTaskManager:
                 max_bytes,
                 min_free_bytes,
             )
-            return
-        cls._write_tar_zst_sync(
+        return cls._write_tar_zst_sync(
             output_path,
             compression_level,
             items,
@@ -1637,14 +1731,15 @@ class PackTaskManager:
         cancel_event: threading.Event,
         max_bytes: int,
         min_free_bytes: int,
-    ) -> None:
+    ) -> str:
         with (
             _BoundedSink(
                 output_path,
                 max_bytes=max_bytes,
                 min_free_bytes=min_free_bytes,
                 cancel_event=cancel_event,
-            ) as sink,
+            ) as bounded_sink,
+            _AppendOnlyHashingSink(bounded_sink) as sink,
             zipfile.ZipFile(
                 sink,
                 mode="w",
@@ -1673,6 +1768,7 @@ class PackTaskManager:
                             break
                         target.write(chunk)
                         tracker.add(len(chunk))
+        return content_identity_from_raw_file_digest(sink.hexdigest()).content_hash
 
     @classmethod
     def _write_tar_zst_sync(
@@ -1684,18 +1780,21 @@ class PackTaskManager:
         cancel_event: threading.Event,
         max_bytes: int,
         min_free_bytes: int,
-    ) -> None:
+    ) -> str:
         mapped_level = _ZSTD_LEVEL_MAP[max(0, min(9, compression_level))]
         compressor = zstd.ZstdCompressor(level=mapped_level, threads=-1)
 
-        with _BoundedSink(
-            output_path,
-            max_bytes=max_bytes,
-            min_free_bytes=min_free_bytes,
-            cancel_event=cancel_event,
-        ) as sink, compressor.stream_writer(
-            cast(BinaryIO, sink), closefd=False
-        ) as zst_stream, tarfile.open(fileobj=zst_stream, mode="w|") as archive:
+        with (
+            _BoundedSink(
+                output_path,
+                max_bytes=max_bytes,
+                min_free_bytes=min_free_bytes,
+                cancel_event=cancel_event,
+            ) as bounded_sink,
+            _AppendOnlyHashingSink(bounded_sink) as sink,
+            compressor.stream_writer(cast(BinaryIO, sink), closefd=False) as zst_stream,
+            tarfile.open(fileobj=zst_stream, mode="w|") as archive,
+        ):
             for item in items:
                 if cancel_event.is_set():
                     raise InterruptedError("pack cancelled")
@@ -1717,6 +1816,7 @@ class PackTaskManager:
                 with item.path.open("rb") as source:
                     reader = _CancelAwareReader(source, cancel_event, tracker)
                     archive.addfile(info, fileobj=reader)
+        return content_identity_from_raw_file_digest(sink.hexdigest()).content_hash
 
     @classmethod
     def _build_archive_items(
@@ -1908,8 +2008,10 @@ class PackTaskManager:
 
 
     @classmethod
-    async def _update_task_progress(cls, task_id: int, progress: int) -> None:
-        await update_pack_task_progress(task_id, progress)
+    async def _update_task_progress(
+        cls, task_id: int, progress: int, step_progress: int | None = None
+    ) -> None:
+        await update_pack_task_progress(task_id, progress, step_progress)
 
     @classmethod
     async def cancel_pack(cls, task_id: int) -> bool:
@@ -2021,8 +2123,10 @@ def pack_task_to_dict(task: dict[str, Any]) -> dict:
         "output_path": None,
         "status": response_status,
         "progress": task["progress"],
+        "step_progress": task.get("step_progress", 0),
         "step": task.get("step"),
         "started_at": ms_to_iso(task.get("started_at_ms")),
+        "step_started_at": ms_to_iso(task.get("step_started_at_ms")),
         "error_message": task["error_message"],
         "created_at": ms_to_iso(task["created_at_ms"]),
         "updated_at": ms_to_iso(task["updated_at_ms"]),
