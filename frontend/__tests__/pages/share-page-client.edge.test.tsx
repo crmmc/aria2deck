@@ -130,7 +130,7 @@ describe("SharePageClient edge cases", () => {
     window.history.pushState({}, "", "/s/unmounted");
     const siteDeferred = createDeferred<{ site_title: string }>();
     const shareDeferred = createDeferred<ReturnType<typeof fileShare>>();
-    const browseDeferred = createDeferred<unknown[]>();
+    const browseDeferred = createDeferred<ReturnType<typeof shareResponse>>();
     mockApi.getSiteInfo.mockReturnValue(siteDeferred.promise as never);
     mockApi.getShareInfo.mockReturnValue(shareDeferred.promise as never);
     mockApi.browseShare.mockReturnValue(browseDeferred.promise as never);

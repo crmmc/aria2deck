@@ -161,6 +161,39 @@ class TestRepositoryPagination:
         assert tail_total == 20_000
         assert tail_page[0]["name"] == "file-19900.txt"
 
+    async def test_directory_entries_page_survives_huge_offset(self, temp_db: str) -> None:
+        """超大 page 的 (page-1)*page_size 不得击穿 SQLite int64 导致 500。"""
+        entries = [
+            {
+                "relative_path": f"f-{i:03d}.txt",
+                "parent_path": "",
+                "name": f"f-{i:03d}.txt",
+                "size_bytes": 1,
+                "is_dir": 0,
+                "mtime_ms": TIMESTAMP,
+                "sort_key": _sort_key("", False, f"f-{i:03d}.txt"),
+            }
+            for i in range(5)
+        ]
+        row, _ = await files_repo.create_stored_file_with_entries(
+            {
+                "content_hash": "huge_offset_hash",
+                "real_path": "/tmp/huge_offset",
+                "size_bytes": 0,
+                "is_directory": 1,
+                "original_name": "huge_offset",
+                "created_at_ms": TIMESTAMP,
+            },
+            entries,
+        )
+        # page=10^15、page_size=200 → offset=2e17，远超 int64 也要安全返回空页
+        parent_is_dir, items, total = await files_repo.directory_entries_page(
+            int(row["id"]), "", limit=200, offset=(10**15 - 1) * 200
+        )
+        assert parent_is_dir is True
+        assert items == []
+        assert total == 5
+
     async def test_directory_entries_unbounded_function_removed(self) -> None:
         """防止无上限目录查询路径复活。"""
         assert not hasattr(files_repo, "directory_entries")

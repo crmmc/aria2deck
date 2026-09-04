@@ -587,6 +587,9 @@ async def directory_entries_page(
             ).scalar_one()
             or 0
         )
+        # 超大 page 会把 (page-1)*page_size 推出 SQLite int64 范围导致 500；
+        # 针到 total 内，越界页自然返回空 items + 正确 total
+        safe_offset = min(offset, total)
         rows = (
             (
                 await conn.execute(
@@ -596,7 +599,7 @@ async def directory_entries_page(
                         stored_file_entries.c.sort_key, stored_file_entries.c.name
                     )
                     .limit(limit)
-                    .offset(offset)
+                    .offset(safe_offset)
                 )
             )
             .mappings()
