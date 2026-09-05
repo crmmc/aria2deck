@@ -242,7 +242,7 @@ async def _requery_after_control_failure(
     """
     # Deferred to avoid an import cycle: cleanup.py imports helpers from
     # this module.
-    from app.repositories.task.downloads import update_global_download
+    from app.repositories.task.downloads import guarded_update_global_download
     from app.repositories.task.user_tasks import update_active_user_tasks
     from app.services.lifecycle.cleanup import fail_download_and_reclaim
 
@@ -279,7 +279,11 @@ async def _requery_after_control_failure(
             status = str(current_row.get("status") or "").strip() or None
 
         if values:
-            await update_global_download(download_id, values)
+            # Fenced to the generation read above: a GID handoff between the
+            # read and this write must not stamp the replacement GID's row.
+            await guarded_update_global_download(
+                download_id, values, expected_gid=expected_gid
+            )
         if status is not None:
             try:
                 await update_active_user_tasks(

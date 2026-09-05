@@ -318,6 +318,11 @@ async def scan_storage_path_async(
                 continue
             except InterruptedError:
                 break
+            except Exception as exc:  # noqa: BLE001  # cleanup must not mask cancellation
+                # worker 在取消清理期间抛出业务异常：记录后退出循环走最终清理，
+                # 不让业务异常覆盖调用方的取消语义（CodeRabbit #8）
+                logger.debug("取消扫描清理期间 worker 异常 error_type=%s", type(exc).__name__)
+                break
         try:
             worker.result()
         except Exception as exc:  # noqa: BLE001  # cancelled worker cleanup must not mask cancellation
