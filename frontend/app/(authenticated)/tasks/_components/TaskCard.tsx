@@ -6,11 +6,15 @@ function getTaskDisplayName(task: Task): string {
   return task.name || "未知文件";
 }
 
-function formatTaskProgressLabel(task: Task): string {
+function getTaskProgress(task: Task): number {
   if (task.total_length <= 0) {
-    return "0%";
+    return 0;
   }
-  const progress = (task.completed_length / task.total_length) * 100;
+  return Math.min((task.completed_length / task.total_length) * 100, 100);
+}
+
+function formatTaskProgressLabel(task: Task): string {
+  const progress = getTaskProgress(task);
   if (task.status !== "complete" && task.completed_length < task.total_length) {
     return `${Math.min(progress, 99.9).toFixed(1)}%`;
   }
@@ -37,6 +41,7 @@ export const TaskCard = memo(function TaskCard({
   onRetry,
 }: TaskCardProps) {
   const displayName = getTaskDisplayName(task);
+  const progress = getTaskProgress(task);
 
   const handleCardClick = useCallback(() => {
     if (task.uri) {
@@ -98,7 +103,7 @@ export const TaskCard = memo(function TaskCard({
           aria-label={`${displayName} 下载进度`}
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-valuenow={task.total_length ? Math.min((task.completed_length / task.total_length) * 100, 100) : 0}
+          aria-valuenow={progress}
         >
           <div
             className={`progress-bar ${
@@ -109,7 +114,7 @@ export const TaskCard = memo(function TaskCard({
                   : "progress-bar-primary"
             }`}
             style={{
-              width: `${task.total_length ? Math.min((task.completed_length / task.total_length) * 100, 100) : 0}%`,
+              width: `${progress}%`,
             }}
           />
         </div>
