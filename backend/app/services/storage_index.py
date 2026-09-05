@@ -21,6 +21,7 @@ from app.domain.content_identity import (
     ContentIdentity,
     content_identity_from_content_hash,
     content_identity_from_row,
+    is_v2_digest,
     v2_content_identity,
 )
 
@@ -139,6 +140,10 @@ def _file_hash(
 
 
 def content_identity_from_raw_file_digest(raw_digest: str) -> ContentIdentity:
+    # bytes.fromhex 接受 "" 与任意偶数长度十六进制，未校验会产出格式合法
+    # 但错误的 v2:file 身份（CodeRabbit PR#8 二审）
+    if not is_v2_digest(raw_digest):
+        raise ValueError("invalid raw file digest")
     digest = hashlib.sha256(_FILE_DOMAIN)
     digest.update(bytes.fromhex(raw_digest))
     return v2_content_identity("file", digest.hexdigest())
@@ -317,6 +322,11 @@ async def scan_storage_path_async(
             except asyncio.CancelledError:
                 continue
             except InterruptedError:
+                break
+            except Exception as exc:  # noqa: BLE001  # cleanup must not mask cancellation
+                # worker 在取消清理期间抛出业务异常：记录后退出循环走最终清理，
+                # 不让业务异常覆盖调用方的取消语义（CodeRabbit #8）
+                logger.debug("取消扫描清理期间 worker 异常 error_type=%s", type(exc).__name__)
                 break
         try:
             worker.result()

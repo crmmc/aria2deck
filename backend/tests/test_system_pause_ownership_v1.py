@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -1483,3 +1483,131 @@ def test_path_ac_no_rpc_only_clear_production_paths() -> None:
     assert "_observe_backend_status" in apply_body
     # clear on resume only after observed running statuses
     assert "_RUNNING_STATUSES" in apply_body or "active" in apply_body
+
+
+# ---------------------------------------------------------------------------
+# 09-05 fix-pause-ownership-loss: pause ownership must survive every success
+# path; a stamp that cannot land must not become silent success.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pause_rpc_error_requery_paused_success_stamps_ownership(
+    temp_db: str,
+) -> None:
+    """RPC throws but re-query shows paused → success must still own the pause.
+
+    Pre-fix: the except branch returned the re-query result directly, so the
+    ownership stamp was skipped and the pause could later be branded
+    external_paused.
+    """
+    download = await create_global_download_v0(
+        resource_key="http:m7-pause-requery-stamp",
+        source_uri="https://example.com/requery-stamp.bin",
+        resource_kind="http",
+        status="active",
+        aria2_gid="gid_requery_stamp",
+        total_bytes=100,
+        size_known=True,
+    )
+    client = make_aria2_client(
+        pause=Exception("pause rpc timed out"),
+        tell_status={
+            "status": "paused",
+            "totalLength": "100",
+            "completedLength": "0",
+        },
+    )
+    result = await system_pause_gid(
+        backend=client,
+        download_id=int(download["id"]),
+        control_gid="gid_requery_stamp",
+        expected_gid="gid_requery_stamp",
+        failure_error_code=ERROR_GROWTH_PAUSE_FAILED,
+        failure_message="任务大小增长时无法安全暂停",
+        ownership_error_code=ERROR_METADATA_ADMISSION_PAUSED,
+        acquire_lifecycle_lock=False,
+    )
+    assert result == "success"
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                select(global_downloads).where(
+                    global_downloads.c.id == download["id"]
+                )
+            )
+        ).mappings().one()
+    assert row["error_code"] == ERROR_METADATA_ADMISSION_PAUSED
+
+
+@pytest.mark.asyncio
+async def test_pause_stamp_generation_miss_returns_stale_without_rpc(
+    temp_db: str,
+) -> None:
+    """Stamp cannot land (row GID moved) → "stale", never silent success.
+
+    Pre-fix: the pause RPC fired first and a missed generation read silently
+    returned "success", leaving a paused gid with no ownership code.
+    """
+    download = await create_global_download_v0(
+        resource_key="http:m7-pause-stale",
+        source_uri="https://example.com/pause-stale.bin",
+        resource_kind="http",
+        status="active",
+        aria2_gid="gid_actual_current",
+        total_bytes=100,
+        size_known=True,
+    )
+    client = make_aria2_client(pause="OK")
+    result = await system_pause_gid(
+        backend=client,
+        download_id=int(download["id"]),
+        control_gid="gid_moved_on",
+        expected_gid="gid_moved_on",
+        failure_error_code=ERROR_GROWTH_PAUSE_FAILED,
+        failure_message="任务大小增长时无法安全暂停",
+        ownership_error_code=ERROR_ADMISSION_PAUSED,
+        acquire_lifecycle_lock=False,
+    )
+    assert result == "stale"
+    client.pause.assert_not_awaited()
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                select(global_downloads).where(
+                    global_downloads.c.id == download["id"]
+                )
+            )
+        ).mappings().one()
+    assert row["error_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_pause_stamp_fence_race_returns_stale(temp_db: str) -> None:
+    """Intent-first stamp loses the fence race → "stale", pause RPC not sent."""
+    download = await create_global_download_v0(
+        resource_key="http:m7-pause-fence-race",
+        source_uri="https://example.com/fence-race.bin",
+        resource_kind="http",
+        status="active",
+        aria2_gid="gid_fence_race",
+        total_bytes=100,
+        size_known=True,
+    )
+    client = make_aria2_client(pause="OK")
+    with patch(
+        "app.repositories.task.downloads.guarded_update_global_download",
+        new=AsyncMock(return_value=False),
+    ):
+        result = await system_pause_gid(
+            backend=client,
+            download_id=int(download["id"]),
+            control_gid="gid_fence_race",
+            expected_gid="gid_fence_race",
+            failure_error_code=ERROR_GROWTH_PAUSE_FAILED,
+            failure_message="任务大小增长时无法安全暂停",
+            ownership_error_code=ERROR_ADMISSION_PAUSED,
+            acquire_lifecycle_lock=False,
+        )
+    assert result == "stale"
+    client.pause.assert_not_awaited()

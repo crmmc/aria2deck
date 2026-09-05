@@ -352,3 +352,199 @@ async def test_stale_when_current_gid_changed(temp_db: str):
             log_prefix="[T08]",
         )
     assert result == ReconcileResult.STALE
+
+
+# ---------------------------------------------------------------------------
+# 09-05 fix-pause-ownership-loss: projection must never clear system pause
+# ownership from a (possibly stale) active observation, and an unconfirmed
+# unpause (rpc_unavailable) must not project the pre-control status.
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_download_row(download_id) -> dict:
+    from sqlalchemy import select  # noqa: PLC0415  # local import keeps module head unchanged
+
+    from app.db.engine import transaction
+    from app.db.schema import global_downloads
+
+    async with transaction() as conn:
+        row = (
+            await conn.execute(
+                select(global_downloads).where(global_downloads.c.id == download_id)
+            )
+        ).mappings().one()
+    return dict(row)
+
+
+@pytest.mark.asyncio
+async def test_projection_active_keeps_system_pause_codes(temp_db: str):
+    """A (possibly stale) active observation must not clear owned pause codes.
+
+    Pre-fix: the generic ACTIVE_CLEAR branch wiped system pause codes on
+    projected active, so the next paused observation branded the task
+    external_paused (permanent dead end by design). Sweep finding: the
+    exposure covered every SYSTEM_OWNED code (queue codes included), so the
+    regression locks quota_queued as well.
+    """
+    from app.modules.task_core.states import (
+        ERROR_ADMISSION_PAUSED,
+        ERROR_EXTERNAL_PAUSED,
+        ERROR_GROWTH_UNPAUSE_FAILED,
+        ERROR_QUOTA_QUEUED,
+    )
+
+    user = await create_user_v0(username="t09_stale_active", quota_bytes=10_000_000)
+
+    growth_case = await create_global_download_v0(
+        resource_key="http:t09-growth-unpause-code",
+        source_uri="https://example.com/t09-growth.bin",
+        resource_kind="http",
+        status="paused",
+        aria2_gid="gid_t09_growth",
+        total_bytes=2048,
+        completed_bytes=0,
+        disk_reserved_bytes=2048,
+        size_known=True,
+        error_code=ERROR_GROWTH_UNPAUSE_FAILED,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=growth_case["id"],
+        status="paused",
+        reserved_bytes=2048,
+    )
+
+    admission_case = await create_global_download_v0(
+        resource_key="http:t09-admission-code",
+        source_uri="https://example.com/t09-admission.bin",
+        resource_kind="http",
+        status="paused",
+        aria2_gid="gid_t09_admission",
+        total_bytes=2048,
+        completed_bytes=0,
+        disk_reserved_bytes=2048,
+        size_known=True,
+        error_code=ERROR_ADMISSION_PAUSED,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=admission_case["id"],
+        status="paused",
+        reserved_bytes=2048,
+    )
+
+    external_case = await create_global_download_v0(
+        resource_key="http:t09-external-code",
+        source_uri="https://example.com/t09-external.bin",
+        resource_kind="http",
+        status="paused",
+        aria2_gid="gid_t09_external",
+        total_bytes=2048,
+        completed_bytes=0,
+        disk_reserved_bytes=2048,
+        size_known=True,
+        error_code=ERROR_EXTERNAL_PAUSED,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=external_case["id"],
+        status="paused",
+        reserved_bytes=2048,
+    )
+
+    quota_case = await create_global_download_v0(
+        resource_key="http:t09-quota-code",
+        source_uri="https://example.com/t09-quota.bin",
+        resource_kind="http",
+        status="paused",
+        aria2_gid="gid_t09_quota",
+        total_bytes=2048,
+        completed_bytes=0,
+        disk_reserved_bytes=2048,
+        size_known=True,
+        error_code=ERROR_QUOTA_QUEUED,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=quota_case["id"],
+        status="paused",
+        reserved_bytes=2048,
+    )
+
+    client = _make_client()
+    observed = {"status": "active", "totalLength": "2048", "completedLength": "0"}
+    for gid in ("gid_t09_growth", "gid_t09_admission", "gid_t09_external", "gid_t09_quota"):
+        result = await reconcile_attempt_signal(
+            backend=client,
+            observed_gid=gid,
+            event=None,
+            observed_status=dict(observed),
+            log_prefix="[T09]",
+        )
+        assert result == ReconcileResult.CHANGED
+
+    growth_row = await _fetch_download_row(growth_case["id"])
+    assert growth_row["error_code"] == ERROR_GROWTH_UNPAUSE_FAILED
+    admission_row = await _fetch_download_row(admission_case["id"])
+    assert admission_row["error_code"] == ERROR_ADMISSION_PAUSED
+    quota_row = await _fetch_download_row(quota_case["id"])
+    assert quota_row["error_code"] == ERROR_QUOTA_QUEUED
+    # external_paused MUST still clear on observed active (operator release
+    # path via an external client — protected semantics, do not regress).
+    external_row = await _fetch_download_row(external_case["id"])
+    assert external_row["error_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_admission_unpause_rpc_unavailable_keeps_pause_state(temp_db: str):
+    """Growth admission unpause transient failure → no stale active projection.
+
+    Pre-fix: the coordinator projected the pre-pause observed "active" over
+    the row while the payload was actually paused, opening the
+    external_paused branding window on the next sync round.
+    """
+    from app.modules.task_core.states import ERROR_ADMISSION_PAUSED
+
+    user = await create_user_v0(username="t09_rpc_unavailable", quota_bytes=10_000_000)
+    download = await create_global_download_v0(
+        resource_key="http:t09-rpc-unavailable",
+        source_uri="https://example.com/t09-rpc.bin",
+        resource_kind="http",
+        status="paused",
+        aria2_gid="gid_t09_rpc",
+        total_bytes=1024,
+        completed_bytes=0,
+        disk_reserved_bytes=1024,
+        size_known=True,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="paused",
+        reserved_bytes=1024,
+    )
+
+    transient = ConnectionError("cannot connect to host localhost:6800")
+    client = AsyncMock()
+    client.pause_gid.return_value = "OK"
+    client.unpause_gid.side_effect = transient
+    client.tell_status.side_effect = transient
+
+    result = await reconcile_attempt_signal(
+        backend=client,
+        observed_gid="gid_t09_rpc",
+        event=None,
+        observed_status={
+            "status": "active",
+            "totalLength": "2048",
+            "completedLength": "0",
+        },
+        log_prefix="[T09]",
+    )
+    assert result == ReconcileResult.CHANGED
+
+    row = await _fetch_download_row(download["id"])
+    # Row must stay paused with the ownership credential intact; the next
+    # sync round retries the unpause via policy instead of branding.
+    assert row["status"] == "paused"
+    assert row["error_code"] == ERROR_ADMISSION_PAUSED

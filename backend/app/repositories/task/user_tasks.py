@@ -273,11 +273,16 @@ async def list_user_tasks_page(
     if history_status is not None:
         conditions.append(user_tasks.c.status == history_status)
     if name_query:
-        pattern = f"%{name_query}%"
+        # 转义 LIKE 通配符，搜索词按字面子串匹配（CodeRabbit #8：
+        # 未转义时 %/_/\ 会被当作通配符）
+        escaped = (
+            name_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
         conditions.append(
             or_(
-                user_tasks.c.display_name.ilike(pattern),
-                global_downloads.c.display_name.ilike(pattern),
+                user_tasks.c.display_name.ilike(pattern, escape="\\"),
+                global_downloads.c.display_name.ilike(pattern, escape="\\"),
             )
         )
 

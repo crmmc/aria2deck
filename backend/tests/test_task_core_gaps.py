@@ -42,10 +42,12 @@ def _patch_downloads(monkeypatch, rows_by_tid):
 def _patch_updates(monkeypatch):
     updates = []
 
-    async def fake_update(tid, values):
+    async def fake_update(tid, values, expected_gid=None):
         updates.append((tid, values))
+        return True
 
     monkeypatch.setattr(pol, "update_global_download", fake_update)
+    monkeypatch.setattr(pol, "guarded_update_global_download", fake_update)
     return updates
 
 
