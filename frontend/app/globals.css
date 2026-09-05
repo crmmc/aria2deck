@@ -2223,7 +2223,7 @@ dialog.confirm-overlay {
 }
 
 .task-card-meta {
-  gap: 10px;
+  gap: 12px;
 }
 
 .task-speed {
@@ -2240,7 +2240,7 @@ dialog.confirm-overlay {
 }
 
 .task-progress-text {
-  color: var(--text);
+  color: var(--foreground);
   flex: 0 0 auto;
   font-size: 13px;
   font-weight: 600;
