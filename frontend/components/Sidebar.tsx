@@ -14,6 +14,23 @@ type SidebarProps = {
 };
 
 // Icons as components for reuse
+const Aria2DeckLogo = () => (
+  <svg
+    className="aria2deck-logo-mark"
+    width="32"
+    height="32"
+    viewBox="0 0 32 32"
+    fill="none"
+    aria-hidden="true"
+  >
+    <rect x="2" y="2" width="28" height="28" rx="9" fill="currentColor" />
+    <path d="M16 7.5v10" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
+    <path d="m11.75 14.25 4.25 4.25 4.25-4.25" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+    <path d="M10 22h12" stroke="white" strokeWidth="2.25" strokeLinecap="round" />
+    <path d="M12.5 25h7" stroke="white" strokeWidth="2" strokeLinecap="round" opacity="0.65" />
+  </svg>
+);
+
 const TasksIcon = () => (
   <svg
     width="20"
@@ -319,7 +336,9 @@ function SidebarContent({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
         onMouseLeave={() => sidebarExpanded && setSidebarExpanded(false)}
       >
         <div className="sidebar-header">
-          <div className="sidebar-logo">AD</div>
+          <div className="sidebar-logo" role="img" aria-label="Aria2Deck">
+            <Aria2DeckLogo />
+          </div>
           {sidebarExpanded && <span className="sidebar-title">{siteTitle}</span>}
         </div>
 
