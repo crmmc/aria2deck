@@ -51,17 +51,44 @@ async def system_pause_gid(
     ownership_error_code: str | None = None,
     acquire_lifecycle_lock: bool = True,
 ) -> str:
-    """System-owned pause: RPC then soft re-query on failure (M7).
+    """System-owned pause: stamp intent first, then RPC, soft re-query on failure (M7).
 
     Lifecycle code must use this instead of ``backend.pause_gid`` so control
     failures never hard-reclaim while the GID still exists.
 
-    When ``ownership_error_code`` is set, a successful pause stamps that code
-    so projection/policy never treat the window as a bare external pause.
-    Existing SYSTEM_OWNED codes are preserved (not overwritten).
+    When ``ownership_error_code`` is set, the credential is stamped BEFORE
+    the pause RPC (intent-first, 09-05 fix-pause-ownership-loss) so every
+    success path — including "RPC threw but re-query shows paused" — leaves
+    ownership on the row, and a crash between RPC and stamp cannot strand a
+    bare pause that projection would brand external. When the pause is
+    confirmed failed, the just-stamped intent is replaced by the failure
+    code (M6 soft-pause contract). A stamp that cannot land (generation
+    moved) returns ``"stale"`` instead of silent success; existing
+    SYSTEM_OWNED codes are preserved (not overwritten).
     """
     from app.modules.task_core.states import SYSTEM_OWNED_PAUSE_CODES
-    from app.repositories.task.downloads import update_global_download
+    from app.repositories.task.downloads import (
+        get_global_download_for_generation,
+        guarded_update_global_download,
+    )
+
+    intent_stamped = False
+
+    if ownership_error_code:
+        current = await get_global_download_for_generation(
+            download_id, expected_gid
+        )
+        if current is None:
+            return "stale"
+        if current.get("error_code") not in SYSTEM_OWNED_PAUSE_CODES:
+            stamped = await guarded_update_global_download(
+                download_id,
+                {"error_code": ownership_error_code, "error_message": None},
+                expected_gid=expected_gid,
+            )
+            if not stamped:
+                return "stale"
+            intent_stamped = True
 
     try:
         await backend.pause_gid(control_gid)
@@ -76,22 +103,14 @@ async def system_pause_gid(
             failure_message=failure_message,
             acquire_lifecycle_lock=acquire_lifecycle_lock,
             soft_control_failure=True,
+            # The intent credential we stamped this round is ours to replace
+            # when the pause is confirmed failed; a pre-existing SYSTEM_OWNED
+            # code stays preserved (M9 S-3).
+            replace_intent_code=(
+                ownership_error_code if intent_stamped else None
+            ),
         )
 
-    if ownership_error_code:
-        current = await get_global_download_for_generation(
-            download_id, expected_gid
-        )
-        if current is not None:
-            existing = current.get("error_code")
-            if existing not in SYSTEM_OWNED_PAUSE_CODES:
-                await update_global_download(
-                    download_id,
-                    {
-                        "error_code": ownership_error_code,
-                        "error_message": None,
-                    },
-                )
     return "success"
 
 
@@ -207,6 +226,7 @@ async def _requery_after_control_failure(
     failure_message: str,
     acquire_lifecycle_lock: bool,
     soft_control_failure: bool = False,
+    replace_intent_code: str | None = None,
 ) -> str:
     """Re-query aria2 after a pause/unpause RPC exception (spec §8.3/§8.4).
 
@@ -232,7 +252,9 @@ async def _requery_after_control_failure(
         # invent paused (M7 Standards cleanup).
         # M9: preserve existing SYSTEM_OWNED / PENDING credential when present
         # so soft unpause fail does not rewrite admission/metadata codes into
-        # a different failure code (Standards S-3).
+        # a different failure code (Standards S-3). Exception: the pause
+        # intent stamped this round (replace_intent_code) is replaced by the
+        # failure code once the pause is confirmed failed (M6 contract).
         from app.modules.task_core.states import SYSTEM_OWNED_PAUSE_CODES
 
         current_row = await get_global_download_for_generation(
@@ -242,7 +264,11 @@ async def _requery_after_control_failure(
             return "stale"
 
         values: dict[str, Any] = {}
-        if current_row.get("error_code") not in SYSTEM_OWNED_PAUSE_CODES:
+        existing_code = current_row.get("error_code")
+        if existing_code not in SYSTEM_OWNED_PAUSE_CODES or (
+            replace_intent_code is not None
+            and existing_code == replace_intent_code
+        ):
             values["error_code"] = failure_error_code
             values["error_message"] = failure_message
 

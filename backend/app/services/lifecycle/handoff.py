@@ -29,8 +29,8 @@ from app.repositories.task.downloads import (
     get_global_download_for_generation,
     get_global_download_status_snapshot,
     guarded_update_download_and_active_user_tasks,
+    guarded_update_global_download,
     reconcile_download_size,
-    update_global_download,
 )
 from app.services import download_ops
 from app.services.lifecycle._shared import (
@@ -177,6 +177,10 @@ async def coordinate_reported_size(
                 "paused_by_us": False,
                 "pause_soft_failed": True,
             }
+        elif result_str == "stale":
+            # Intent-first stamp could not land (generation moved): the row
+            # is no longer ours to control; do not terminalize it.
+            return {"outcome": "stale", "paused_by_us": False}
         else:
             return {"outcome": "terminalized", "paused_by_us": False}
 
@@ -222,10 +226,12 @@ async def coordinate_reported_size(
             acquire_lifecycle_lock=acquire_lifecycle_lock,
         )
         if result_str == "success":
-            # Clear only after re-query confirmed running (not RPC-only success).
-            await update_global_download(
+            # Clear only after re-query confirmed running (not RPC-only), and
+            # only on the generation we confirmed (fenced clear).
+            await guarded_update_global_download(
                 download_id,
                 {"error_code": None, "error_message": None},
+                expected_gid=expected_gid,
             )
         elif result_str == "complete":
             result["outcome"] = "complete"
@@ -326,7 +332,9 @@ async def _handoff_locked(
     # A transient totalLength=0 from the payload means aria2 has not yet
     # reported the payload size.  Wait for the next reconcile rather than
     # terminalizing or committing with stale data.
-    require_trusted = not bool(download.get("size_known"))
+    # size_known comes from the in-lock snapshot, never the lock-external
+    # ``download`` copy (09-05 fix-pause-ownership-loss).
+    require_trusted = not bool(snapshot.get("size_known"))
     size_candidate = candidate_size_from_status(
         payload_status, require_trusted_total=require_trusted
     )

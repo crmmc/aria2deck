@@ -33,6 +33,7 @@ from app.modules.task_core.states import (
 )
 from app.repositories.task.downloads import (
     get_global_download_by_id,
+    guarded_update_global_download,
     update_global_download,
 )
 
@@ -170,6 +171,8 @@ async def apply_decision(
 ) -> None:
     """Apply a Decision: backend effect plus minimal DB error_code update."""
     if decision.action == "resume":
+        row = await get_global_download_by_id(tid)
+        gid = str(row.get("aria2_gid") or "") if row else ""
         try:
             await backend.unpause(tid)
         except Exception as exc:  # noqa: BLE001  # unpause failure is followed by status re-query
@@ -177,9 +180,18 @@ async def apply_decision(
             logger.debug("恢复任务失败，将继续复查 error_type=%s", type(exc).__name__)
         observed = await _observe_backend_status(backend, tid)
         if observed in _RUNNING_STATUSES:
-            await update_global_download(
-                tid, {"error_code": None, "error_message": None}
-            )
+            # Fenced clear: only the generation we observed running may drop
+            # the credential (09-05 fix-pause-ownership-loss).
+            if gid:
+                await guarded_update_global_download(
+                    tid,
+                    {"error_code": None, "error_message": None},
+                    expected_gid=gid,
+                )
+            else:
+                await update_global_download(
+                    tid, {"error_code": None, "error_message": None}
+                )
             return
         # Still paused / unknown: keep pending credential or stamp soft fail.
         # Prefer preserving an existing system code; only write unpause_failed

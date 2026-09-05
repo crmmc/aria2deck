@@ -25,7 +25,6 @@ from app.modules.task_core.states import (
     ACTIVE_CLEAR_ERROR_CODES,
     ERROR_ADMISSION_PAUSED,
     ERROR_EXTERNAL_PAUSED,
-    ERROR_METADATA_ADMISSION_PAUSED,
     PROJECTION_PROTECTED_ERROR_CODES,
     SYSTEM_OWNED_PAUSE_CODES,
 )
@@ -379,7 +378,7 @@ async def reconcile_attempt_signal(
                 # acquire_lifecycle_lock=False because we already hold the lock.
                 if not is_metadata:
                     require_trusted = not bool(
-                        resolved.download.get("size_known")
+                        snapshot.get("size_known")
                     )
                     size_candidate = candidate_size_from_status(
                         working_status, require_trusted_total=require_trusted
@@ -401,7 +400,14 @@ async def reconcile_attempt_signal(
                             await _broadcast_download_update(attempt_id)
                             return ReconcileResult.TERMINALIZED
                         if size_outcome == "rpc_unavailable":
-                            pass  # Skip size admission, continue with projection
+                            # Control outcome undetermined (transient RPC): the
+                            # live status may already differ from the
+                            # pre-control working_status, so projecting it
+                            # could clear/overwrite pause ownership (M9 §3.3).
+                            # Keep the stamped row and let the next round
+                            # re-observe and retry via policy.
+                            await _broadcast_download_update(attempt_id)
+                            return ReconcileResult.CHANGED
                         elif size_outcome == "pause_soft_failed":
                             # Soft ownership already stamped. Do not project the
                             # pre-pause working_status over the soft mark.
@@ -456,10 +462,12 @@ async def reconcile_attempt_signal(
 
                 # Whether the admission path just learned a trusted size in
                 # this reconcile (unknown before, admitted now).
+                # size_known is read from the in-lock snapshot (the
+                # pre-admission truth), never the lock-external download copy.
                 size_just_admitted = (
                     admission is not None
                     and str(admission.get("outcome") or "") == "admitted"
-                    and not bool(resolved.download.get("size_known"))
+                    and not bool(snapshot.get("size_known"))
                 )
 
                 global_values: dict[str, Any] = {
@@ -516,10 +524,14 @@ async def reconcile_attempt_signal(
                 elif (
                     mapped["status"] == "active"
                     and prev_error_code in ACTIVE_CLEAR_ERROR_CODES
-                    # M9 §3.1.1: never clear metadata_admission_paused on bare
-                    # active (metadata download phase). Only handoff / confirmed
-                    # payload release may clear that code.
-                    and prev_error_code != ERROR_METADATA_ADMISSION_PAUSED
+                    # M9 §3.1.1 / 09-05 fix-pause-ownership-loss: projection
+                    # may only clear non-system codes (external/admin). Every
+                    # SYSTEM_OWNED credential is released exclusively by a
+                    # confirmed unpause (system_unpause_gid success) or by the
+                    # policy pass on a fresh snapshot — never by a possibly
+                    # stale projected active, which stranded system pauses
+                    # into external_paused dead ends.
+                    and prev_error_code not in SYSTEM_OWNED_PAUSE_CODES
                     and not is_metadata
                 ):
                     # Clear sticky pause ownership when download resumes.
