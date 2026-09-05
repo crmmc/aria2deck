@@ -202,8 +202,18 @@ export type SpaceInfo = {
 // Browse file info (for BT directory contents)
 export type BrowseFileInfo = {
   name: string;
+  path: string;
   size: number;
+  is_dir: boolean;
   is_directory: boolean;
+  modified_at: number;
+};
+
+export type BrowsePageResponse = {
+  items: BrowseFileInfo[];
+  total: number;
+  page: number;
+  page_size: number;
 };
 
 export type FileSearchItem = {
@@ -245,8 +255,10 @@ export type PackTask = {
   delete_source: boolean;
   status: "pending" | "packing" | "done" | "failed" | "cancelled";
   progress: number;
+  step_progress: number;
   step: "validating" | "compressing" | "verifying" | null;
   started_at: string | null;
+  step_started_at: string | null;
   error_message: string | null;
   created_at: string;
   updated_at: string;

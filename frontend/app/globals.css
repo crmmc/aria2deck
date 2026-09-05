@@ -35,16 +35,17 @@
 .sidebar-logo {
   width: 32px;
   height: 32px;
-  background: var(--primary);
-  color: white;
-  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 700;
-  font-size: 14px;
   flex-shrink: 0;
-  box-shadow: 0 2px 8px rgba(0, 113, 227, 0.3);
+}
+
+.aria2deck-logo-mark {
+  color: var(--primary);
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .sidebar-title {
@@ -2199,11 +2200,52 @@ dialog.confirm-overlay {
 
 /* Task Name */
 .task-name {
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 16px;
   margin-bottom: 4px;
+}
+
+.task-card-title-row,
+.task-card-meta,
+.task-progress-row {
+  display: flex;
+  align-items: center;
+}
+
+.task-card-title-row {
+  gap: 12px;
+}
+
+.task-card-title-row .task-name {
+  flex: 1;
+}
+
+.task-card-meta {
+  gap: 12px;
+}
+
+.task-speed {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.task-progress-row {
+  gap: 12px;
+}
+
+.task-progress-row .progress-container {
+  flex: 1;
+}
+
+.task-progress-text {
+  color: var(--foreground);
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Task Card Footer */
@@ -2221,6 +2263,10 @@ dialog.confirm-overlay {
   align-items: center;
   gap: 8px;
   margin-right: 16px;
+}
+
+.task-footer-left:empty {
+  display: none;
 }
 
 /* Task Footer Right (buttons) */

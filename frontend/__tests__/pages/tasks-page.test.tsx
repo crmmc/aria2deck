@@ -313,6 +313,25 @@ describe("TasksPage", () => {
     expect(screen.queryByText("100%")).not.toBeInTheDocument();
   });
 
+  test("caps an active near-complete task label at 99.9 percent", async () => {
+    mockApi.listTasks.mockResolvedValue([
+      {
+        ...activeTask,
+        total_length: 10_000,
+        completed_length: 9_999,
+        download_speed: 0,
+      },
+    ]);
+
+    render(<TasksPage />);
+
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+    expect(screen.getByText("99.9%")).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "ubuntu.iso 下载进度" })
+    ).toHaveAttribute("aria-valuenow", "99.99");
+  });
+
   test("uses a native button for the task copy target", async () => {
     render(<TasksPage />);
 

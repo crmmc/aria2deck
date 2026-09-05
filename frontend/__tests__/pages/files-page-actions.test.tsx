@@ -90,14 +90,23 @@ const betaFile: FileInfo = {
 };
 
 const browseItems: BrowseFileInfo[] = [
-  { name: "file1.txt", size: 100, is_directory: false },
-  { name: "file2.txt", size: 200, is_directory: false },
-  { name: "subdir", size: 0, is_directory: true },
+  bf("file1.txt", 100, false),
+  bf("file2.txt", 200, false),
+  bf("subdir", 0, true),
 ];
 
 const subfolderItems: BrowseFileInfo[] = [
-  { name: "deep.txt", size: 50, is_directory: false },
+  bf("deep.txt", 50, false),
 ];
+
+function bf(name: string, size: number, isDirectory: boolean, path = name): BrowseFileInfo {
+  return { name, size, is_directory: isDirectory, is_dir: isDirectory, path, modified_at: 1_700_000_000_000 };
+}
+
+function browseResponse(items: BrowseFileInfo[], total = items.length) {
+  return { items, total, page: 1, page_size: 200 };
+}
+
 
 function listResponse(files: FileInfo[], total: number): FileListResponse {
   return {
@@ -120,7 +129,7 @@ async function renderAndWait(files: FileInfo[] = [folderFile, alphaFile, betaFil
 }
 
 async function enterFolder() {
-  mockApi.browseFile.mockResolvedValue(browseItems);
+  mockApi.browseFile.mockResolvedValue(browseResponse(browseItems));
   fireEvent.click(screen.getByRole("button", { name: "MyFolder" }));
   await waitFor(() => {
     expect(screen.getByText("file1.txt")).toBeInTheDocument();
@@ -128,7 +137,7 @@ async function enterFolder() {
 }
 
 async function openSubfolder() {
-  mockApi.browseFile.mockResolvedValue(subfolderItems);
+  mockApi.browseFile.mockResolvedValue(browseResponse(subfolderItems));
   fireEvent.click(screen.getByRole("button", { name: "打开" }));
   await waitFor(() => {
     expect(screen.getByText("deep.txt")).toBeInTheDocument();
@@ -600,7 +609,7 @@ describe("FilesPage search locate branches", () => {
       root_index: 0,
     };
     mockApi.searchFiles.mockResolvedValue({ items: [ghost], total: 1, truncated: false } satisfies FileSearchResponse);
-    mockApi.browseFile.mockResolvedValue([{ name: "other.txt", size: 1, is_directory: false }]);
+    mockApi.browseFile.mockResolvedValue(browseResponse([bf("other.txt", 1, false)]));
 
     await renderAndWait();
     const dialog = await runQuery("ghost");
@@ -627,13 +636,13 @@ describe("FilesPage search locate branches", () => {
 
     await renderAndWait();
     await enterFolder();
-    mockApi.browseFile.mockResolvedValue([{ name: "inner.txt", size: 50, is_directory: false }]);
+    mockApi.browseFile.mockResolvedValue(browseResponse([bf("inner.txt", 50, false)]));
     const dialog = await runQuery("inner");
 
     fireEvent.click(within(dialog).getByRole("button", { name: "定位" }));
 
     await waitFor(() => {
-      expect(mockApi.browseFile).toHaveBeenLastCalledWith("hash_folder", "sub");
+      expect(mockApi.browseFile).toHaveBeenLastCalledWith("hash_folder", "sub", 1, 200);
     });
     // 同一文件夹内定位：面包屑根名保持当前文件夹名
     expect(screen.getByRole("button", { name: "MyFolder" })).toBeInTheDocument();
@@ -742,7 +751,7 @@ describe("FilesPage remaining branches", () => {
       root_index: 0,
     };
     mockApi.searchFiles.mockResolvedValue({ items: [topInner], total: 1, truncated: false } satisfies FileSearchResponse);
-    mockApi.browseFile.mockResolvedValue([{ name: "top.txt", size: 10, is_directory: false }]);
+    mockApi.browseFile.mockResolvedValue(browseResponse([bf("top.txt", 10, false)]));
 
     await renderAndWait();
     const dialog = await runQuery("top");
@@ -751,7 +760,7 @@ describe("FilesPage remaining branches", () => {
 
     // 无父路径时 browseFile 不带 path，且路径首段缺失时回退到条目名
     await waitFor(() => {
-      expect(mockApi.browseFile).toHaveBeenCalledWith("hash_folder", undefined);
+      expect(mockApi.browseFile).toHaveBeenCalledWith("hash_folder", undefined, 1, 200);
     });
     await waitFor(() => {
       expect(screen.getAllByText("top.txt").length).toBeGreaterThan(0);

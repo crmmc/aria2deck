@@ -46,9 +46,18 @@ const folderFile: FileInfo = {
 };
 
 const browseItems: BrowseFileInfo[] = [
-  { name: "file1.txt", size: 100, is_directory: false },
-  { name: "subdir", size: 0, is_directory: true },
+  bf("file1.txt", 100, false),
+  bf("subdir", 0, true),
 ];
+
+function bf(name: string, size: number, isDirectory: boolean, path = name): BrowseFileInfo {
+  return { name, size, is_directory: isDirectory, is_dir: isDirectory, path, modified_at: 1_700_000_000_000 };
+}
+
+function browseResponse(items: BrowseFileInfo[], total = items.length) {
+  return { items, total, page: 1, page_size: 200 };
+}
+
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -66,7 +75,7 @@ describe("FilesPage mobile folder view", () => {
       total: 1,
       space: { used: 1024, frozen: 0, available: 9216 },
     } satisfies FileListResponse);
-    mockApi.browseFile.mockResolvedValue(browseItems);
+    mockApi.browseFile.mockResolvedValue(browseResponse(browseItems));
 
     render(
       <ToastProvider>

@@ -37,6 +37,14 @@ function fileShare(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function sf(name: string, isDir: boolean, size: number, path: string) {
+  return { name, is_dir: isDir, is_directory: isDir, size, path, modified_at: 1_700_000_000_000 };
+}
+
+function shareResponse(items: ReturnType<typeof sf>[], total = items.length) {
+  return { items, total, page: 1, page_size: 200 };
+}
+
 describe("SharePageClient edge cases", () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -122,7 +130,7 @@ describe("SharePageClient edge cases", () => {
     window.history.pushState({}, "", "/s/unmounted");
     const siteDeferred = createDeferred<{ site_title: string }>();
     const shareDeferred = createDeferred<ReturnType<typeof fileShare>>();
-    const browseDeferred = createDeferred<unknown[]>();
+    const browseDeferred = createDeferred<ReturnType<typeof shareResponse>>();
     mockApi.getSiteInfo.mockReturnValue(siteDeferred.promise as never);
     mockApi.getShareInfo.mockReturnValue(shareDeferred.promise as never);
     mockApi.browseShare.mockReturnValue(browseDeferred.promise as never);
@@ -133,7 +141,7 @@ describe("SharePageClient edge cases", () => {
     await act(async () => {
       siteDeferred.resolve({ site_title: "Late Site" });
       shareDeferred.resolve(fileShare({ is_directory: true }));
-      browseDeferred.resolve([{ name: "late.txt", is_dir: false, size: 1, path: "late.txt" }]);
+      browseDeferred.resolve(shareResponse([sf("late.txt", false, 1, "late.txt")]));
       await Promise.resolve();
       await Promise.resolve();
     });

@@ -93,7 +93,9 @@ typecheck: typecheck-back typecheck-front
 
 test-back:
 	@echo "Testing backend (pytest + coverage 95% gate)..."
-	cd $(BACKEND_DIR) && uv run pytest --cov=app --cov-report=term-missing
+	# 显式传 fail-under/branch：coverage 从 backend/ 运行时读不到仓库根 pyproject.toml，
+	# 隐式依赖配置会让门禁静默失效
+	cd $(BACKEND_DIR) && uv run pytest --cov=app --cov-branch --cov-fail-under=95 --cov-report=term-missing
 
 test-front:
 	@echo "Testing frontend (jest + coverage 95% gate)..."

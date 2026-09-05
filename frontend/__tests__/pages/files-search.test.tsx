@@ -61,8 +61,17 @@ const targetFile: FileInfo = {
 };
 
 const browseItems: BrowseFileInfo[] = [
-  { name: "file1.txt", size: 100, is_directory: false },
+  bf("file1.txt", 100, false),
 ];
+
+function bf(name: string, size: number, isDirectory: boolean, path = name): BrowseFileInfo {
+  return { name, size, is_directory: isDirectory, is_dir: isDirectory, path, modified_at: 1_700_000_000_000 };
+}
+
+function browseResponse(items: BrowseFileInfo[], total = items.length) {
+  return { items, total, page: 1, page_size: 200 };
+}
+
 
 const topSearchItem: FileSearchItem = {
   user_file_id: regularFile.id,
@@ -247,9 +256,7 @@ describe("Files page search", () => {
       total: 1,
       truncated: false,
     } satisfies FileSearchResponse);
-    mockApi.browseFile.mockResolvedValue([
-      { name: "inner.txt", size: 50, is_directory: false },
-    ]);
+    mockApi.browseFile.mockResolvedValue(browseResponse([bf("inner.txt", 50, false)]));
 
     await renderAndWait();
     const dialog = await runQuery("inner");
@@ -257,7 +264,7 @@ describe("Files page search", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "定位" }));
 
     await waitFor(() => {
-      expect(mockApi.browseFile).toHaveBeenCalledWith("hash_folder", "sub");
+      expect(mockApi.browseFile).toHaveBeenCalledWith("hash_folder", "sub", 1, 200);
     });
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "搜索结果" })).not.toBeInTheDocument();
@@ -314,7 +321,7 @@ describe("Files page search", () => {
       total: 0,
       truncated: false,
     } satisfies FileSearchResponse);
-    mockApi.browseFile.mockResolvedValue(browseItems);
+    mockApi.browseFile.mockResolvedValue(browseResponse(browseItems));
 
     await renderAndWait();
     fireEvent.click(screen.getByRole("button", { name: "MyFolder" }));
@@ -331,7 +338,7 @@ describe("Files page search", () => {
   });
 
   test("search input stays usable inside a folder", async () => {
-    mockApi.browseFile.mockResolvedValue(browseItems);
+    mockApi.browseFile.mockResolvedValue(browseResponse(browseItems));
 
     await renderAndWait();
     fireEvent.click(screen.getByRole("button", { name: "MyFolder" }));

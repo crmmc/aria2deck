@@ -692,6 +692,19 @@ async def migrate_v17(conn: AsyncConnection) -> None:
     await _rebuild_schema_meta(conn, 17)
 
 
+V18_PACK_TASKS_ADDED_COLUMNS = {
+    "step_progress": (
+        "INTEGER NOT NULL DEFAULT 0 CHECK (step_progress >= 0 AND step_progress <= 100)"
+    ),
+    "step_started_at_ms": "INTEGER",
+}
+
+
+async def migrate_v18(conn: AsyncConnection) -> None:
+    await _add_missing_columns(conn, "pack_tasks", V18_PACK_TASKS_ADDED_COLUMNS)
+    await _rebuild_schema_meta(conn, 18)
+
+
 async def migrate_v1(conn: AsyncConnection) -> None:
     await _add_missing_columns(conn, "app_settings", V1_APP_SETTINGS_ADDED_COLUMNS)
     await _rebuild_schema_meta(conn, 1)
@@ -1296,6 +1309,7 @@ MIGRATIONS: dict[int, Migration] = {
     15: migrate_v15,
     16: migrate_v16,
     17: migrate_v17,
+    18: migrate_v18,
 }
 
 

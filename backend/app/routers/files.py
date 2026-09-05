@@ -23,6 +23,7 @@ from app.http.file_response import (
     tracked_response,
 )
 from app.modules import pack as pack_service
+from app.schemas import BrowseEntryOut, BrowsePageResponse
 from app.services import file_service
 
 logger = logging.getLogger(__name__)
@@ -161,20 +162,33 @@ async def search_files(
     return FileSearchResponse(**result)
 
 
-@router.get("/{file_hash}/browse")
+@router.get("/{file_hash}/browse", response_model=BrowsePageResponse)
 async def browse_file(
     file_hash: str,
     path: str = "",
+    page: int = 1,
+    page_size: int = file_service.BROWSE_DEFAULT_PAGE_SIZE,
     user: AuthUser = Depends(require_limited_api_user),
-) -> list[dict]:
+) -> BrowsePageResponse:
     user_id = _require_user_id(user)
+    page, page_size = file_service.clamp_browse_page(page, page_size)
     try:
-        files = await file_service.browse_file(user_id, file_hash, path)
+        entries, total = await file_service.browse_file(
+            user_id, file_hash, path, page=page, page_size=page_size
+        )
     except DomainError as exc:
         logger.warning("浏览文件失败 user_id=%s file_hash=%s error=%s", user_id, file_hash, exc.detail)
         raise_http(exc)
-    logger.debug("浏览文件成功 user_id=%s file_hash=%s count=%s", user_id, file_hash, len(files))
-    return files
+    logger.debug(
+        "浏览文件成功 user_id=%s file_hash=%s count=%s total=%s",
+        user_id, file_hash, len(entries), total,
+    )
+    return BrowsePageResponse(
+        items=[BrowseEntryOut(**entry) for entry in entries],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get("/{file_hash}/download")

@@ -419,7 +419,7 @@ class TestPublicShareAccess:
         response = client.get(url, headers={"Authorization": f"Bearer {token}"})
 
         assert response.status_code == 200
-        assert response.json() == []
+        assert response.json()["items"] == []
         download = client.post(
             f"/api/s/{share['share_code']}/download",
             data={"token": token, "subpath": "nested file.txt"},

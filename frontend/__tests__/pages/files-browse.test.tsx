@@ -1,5 +1,5 @@
 import { readFileSync } from "fs";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import FilesPage from "@/app/(authenticated)/files/page";
 import { ToastProvider } from "@/components/Toast";
 import { api } from "@/lib/api";
@@ -54,14 +54,23 @@ const regularFile: FileInfo = {
 };
 
 const browseItems: BrowseFileInfo[] = [
-  { name: "file1.txt", size: 100, is_directory: false },
-  { name: "file2.txt", size: 200, is_directory: false },
-  { name: "subdir", size: 0, is_directory: true },
+  bf("file1.txt", 100, false),
+  bf("file2.txt", 200, false),
+  bf("subdir", 0, true),
 ];
 
 const subfolderItems: BrowseFileInfo[] = [
-  { name: "deep.txt", size: 50, is_directory: false },
+  bf("deep.txt", 50, false),
 ];
+
+function bf(name: string, size: number, isDirectory: boolean, path = name): BrowseFileInfo {
+  return { name, size, is_directory: isDirectory, is_dir: isDirectory, path, modified_at: 1_700_000_000_000 };
+}
+
+function browseResponse(items: BrowseFileInfo[], total = items.length) {
+  return { items, total, page: 1, page_size: 200 };
+}
+
 
 function setupListFiles(files: FileInfo[] = [folderFile, regularFile]) {
   mockApi.listFiles.mockResolvedValue({
@@ -93,7 +102,7 @@ async function renderAndWait() {
 
 /** Enter the folder from root */
 async function enterFolder() {
-  mockApi.browseFile.mockResolvedValue(browseItems);
+  mockApi.browseFile.mockResolvedValue(browseResponse(browseItems));
   // Click the folder name button
   const folderBtn = screen.getByRole("button", { name: "MyFolder" });
   fireEvent.click(folderBtn);
@@ -152,7 +161,7 @@ describe("Folder in-page browsing", () => {
     await enterFolder();
 
     // Navigate into subdir
-    mockApi.browseFile.mockResolvedValue(subfolderItems);
+    mockApi.browseFile.mockResolvedValue(browseResponse(subfolderItems));
     const openBtn = screen.getByRole("button", { name: "打开" });
     fireEvent.click(openBtn);
 
@@ -163,7 +172,7 @@ describe("Folder in-page browsing", () => {
     // Breadcrumb should contain "subdir"
     expect(screen.getByRole("button", { name: "subdir" })).toBeInTheDocument();
     // browseFile called with path "subdir"
-    expect(mockApi.browseFile).toHaveBeenCalledWith(folderFile.content_hash, "subdir");
+    expect(mockApi.browseFile).toHaveBeenCalledWith(folderFile.content_hash, "subdir", 1, 200);
   });
 
   test("clicking breadcrumb navigates back to folder root", async () => {
@@ -171,7 +180,7 @@ describe("Folder in-page browsing", () => {
     await enterFolder();
 
     // Navigate into subdir
-    mockApi.browseFile.mockResolvedValue(subfolderItems);
+    mockApi.browseFile.mockResolvedValue(browseResponse(subfolderItems));
     const subdirBtn = screen.getByRole("button", { name: "subdir" });
     fireEvent.click(subdirBtn);
     await waitFor(() => {
@@ -179,7 +188,7 @@ describe("Folder in-page browsing", () => {
     });
 
     // Click "MyFolder" in breadcrumb to go back to folder root
-    mockApi.browseFile.mockResolvedValue(browseItems);
+    mockApi.browseFile.mockResolvedValue(browseResponse(browseItems));
     const myFolderBreadcrumb = screen.getByRole("button", { name: "MyFolder" });
     fireEvent.click(myFolderBreadcrumb);
 
@@ -187,7 +196,7 @@ describe("Folder in-page browsing", () => {
       expect(screen.getByText("file1.txt")).toBeInTheDocument();
     });
     // browseFile called without path (root of folder)
-    expect(mockApi.browseFile).toHaveBeenLastCalledWith(folderFile.content_hash, undefined);
+    expect(mockApi.browseFile).toHaveBeenLastCalledWith(folderFile.content_hash, undefined, 1, 200);
   });
 
   test("clicking 根目录 returns to file list", async () => {
@@ -632,5 +641,116 @@ describe("Folder in-page browsing", () => {
 
     expect(subdirPos).toBeLessThan(file1Pos);
     expect(subdirPos).toBeLessThan(file2Pos);
+  });
+});
+
+describe("Folder browse pagination", () => {
+  function createDeferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  function pageItems(count: number, offset: number): BrowseFileInfo[] {
+    return Array.from(
+      { length: count },
+      (_, i) => bf(`file-${String(offset + i).padStart(4, "0")}.txt`, 10, false)
+    );
+  }
+
+  async function openBigFolder() {
+    mockApi.browseFile.mockResolvedValue(browseResponse(pageItems(200, 0), 600));
+    await renderAndWait();
+    fireEvent.click(screen.getByRole("button", { name: "MyFolder" }));
+    await waitFor(() => {
+      expect(screen.getByText("file-0000.txt")).toBeInTheDocument();
+    });
+  }
+
+  test("renders one page of rows for a big directory and shows pagination", async () => {
+    await openBigFolder();
+
+    expect(mockApi.browseFile).toHaveBeenCalledWith(folderFile.content_hash, undefined, 1, 200);
+    // 渲染行数与 page_size 同量级，而非目录总数
+    expect(document.querySelectorAll(".table-row")).toHaveLength(200);
+    expect(screen.queryByText("file-0200.txt")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下一页" })).toBeInTheDocument();
+    expect(screen.getByText(/共 600 项/)).toBeInTheDocument();
+  });
+
+  test("small folder hides pagination controls", async () => {
+    await renderAndWait();
+    await enterFolder();
+
+    expect(screen.getByText("file1.txt")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "下一页" })).not.toBeInTheDocument();
+  });
+
+  test("paging requests the next page once", async () => {
+    await openBigFolder();
+    expect(mockApi.browseFile).toHaveBeenCalledTimes(1);
+
+    mockApi.browseFile.mockResolvedValue(browseResponse(pageItems(200, 200), 600));
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("file-0200.txt")).toBeInTheDocument();
+    });
+    expect(mockApi.browseFile).toHaveBeenLastCalledWith(folderFile.content_hash, undefined, 2, 200);
+    expect(mockApi.browseFile).toHaveBeenCalledTimes(2);
+    expect(document.querySelectorAll(".table-row")).toHaveLength(200);
+    expect(screen.queryByText("file-0000.txt")).not.toBeInTheDocument();
+  });
+
+  test("pending page response is discarded after returning to root", async () => {
+    await openBigFolder();
+
+    const staleDeferred = createDeferred<ReturnType<typeof browseResponse>>();
+    mockApi.browseFile.mockReturnValueOnce(staleDeferred.promise);
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => {
+      expect(screen.getByText("加载中...")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /根目录/ }));
+    await waitFor(() => {
+      expect(screen.getByText("readme.txt")).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      staleDeferred.resolve(browseResponse(pageItems(200, 200), 600));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("file-0200.txt")).not.toBeInTheDocument();
+    expect(screen.getByText("readme.txt")).toBeInTheDocument();
+  });
+
+  test("entering a subfolder from page 2 resets to page 1 with a single request", async () => {
+    await openBigFolder();
+
+    mockApi.browseFile.mockResolvedValue(
+      browseResponse([bf("subdir", 0, true), ...pageItems(199, 200)], 600)
+    );
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => {
+      expect(screen.getByText("file-0200.txt")).toBeInTheDocument();
+    });
+    const callsBeforeNavigation = mockApi.browseFile.mock.calls.length;
+
+    mockApi.browseFile.mockResolvedValue(browseResponse(subfolderItems));
+    fireEvent.click(screen.getByRole("button", { name: "打开" }));
+    await waitFor(() => {
+      expect(screen.getByText("deep.txt")).toBeInTheDocument();
+    });
+
+    // 导航只发一笔请求且页码归一
+    expect(mockApi.browseFile.mock.calls.length).toBe(callsBeforeNavigation + 1);
+    expect(mockApi.browseFile).toHaveBeenLastCalledWith(folderFile.content_hash, "subdir", 1, 200);
+    // 子目录是小目录，分页控件隐藏
+    expect(screen.queryByRole("button", { name: "下一页" })).not.toBeInTheDocument();
   });
 });

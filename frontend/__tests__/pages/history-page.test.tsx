@@ -225,6 +225,34 @@ describe("HistoryPage", () => {
       ).toBe(false);
     });
 
+    test("changing page clears stale selection from the previous page", async () => {
+      mockPage(twoRecords, { total: 60, page: 1 });
+      render(<HistoryPage />);
+      expect(await screen.findByText("failed-file.zip")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("checkbox", { name: "选择 failed-file.zip" }));
+      expect(await screen.findByText("已选 1 项")).toBeInTheDocument();
+
+      // 翻页后返回另一批记录，残留选中必须被清空，否则工具栏计数与批量删除都指向旧页
+      mockPage(
+        [
+          {
+            ...baseRecord,
+            id: 3,
+            task_name: "page2-file.zip",
+            result: "completed",
+            retryable: false,
+            retry_blocked_reason: null,
+          },
+        ],
+        { total: 60, page: 2 }
+      );
+      fireEvent.click(screen.getByRole("button", { name: "2" }));
+
+      expect(await screen.findByText("page2-file.zip")).toBeInTheDocument();
+      expect(screen.queryByText("已选 1 项")).not.toBeInTheDocument();
+    });
+
     test("stale paged response cannot overwrite newer filter results", async () => {
       mockPage(twoRecords, { total: 60 });
       render(<HistoryPage />);
