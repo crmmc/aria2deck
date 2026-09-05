@@ -613,3 +613,16 @@ async def test_scan_skips_registered_hash_and_loose_files(temp_db):
         )
     result = await rp.scan_and_create_stored_files()
     assert result == {"found": 0, "created": 0, "unresolved": 0, "errors": []}
+
+
+@pytest.mark.parametrize(
+    "bad_digest",
+    ["", "00", "a" * 63, "z" * 64, "A" * 64],
+    ids=["empty", "short-hex", "odd-length", "non-hex", "uppercase"],
+)
+def test_content_identity_rejects_invalid_raw_digest(bad_digest: str) -> None:
+    """CodeRabbit PR#8 二审：非 64 位小写十六进制不得派生 v2:file 身份。"""
+    from app.services.storage_index import content_identity_from_raw_file_digest
+
+    with pytest.raises(ValueError, match="invalid raw file digest"):
+        content_identity_from_raw_file_digest(bad_digest)
