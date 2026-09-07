@@ -101,6 +101,23 @@ async def test_rpc_tell_active_uses_user_tasks(temp_db: str) -> None:
 
     handler = Aria2RpcHandler(user["id"])
     owned = await list_user_tasks(user["id"])
+    from sqlalchemy import update
+
+    from app.db.engine import transaction
+    from app.db.schema import global_downloads, user_tasks
+
+    async with transaction() as conn:
+        await conn.execute(
+            update(global_downloads)
+            .where(global_downloads.c.id == int(owned[0]["global_download_id"]))
+            .values(status="active", error_code=None, error_message=None)
+        )
+        await conn.execute(
+            update(user_tasks)
+            .where(user_tasks.c.id == int(owned[0]["id"]))
+            .values(status="active")
+        )
+    owned = await list_user_tasks(user["id"])
     await record_observed_snapshot(
         tid=int(owned[0]["global_download_id"]),
         observed_status={

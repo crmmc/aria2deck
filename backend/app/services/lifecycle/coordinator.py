@@ -494,9 +494,7 @@ async def reconcile_attempt_signal(
                 # - never mark pause that size-admission just owned (paused_by_us)
                 # - never overwrite SYSTEM_OWNED / protected codes with external
                 # - clear owned/external sticky codes when mapped active
-                admission_initial_submit_pause = (
-                    event != "pause" and size_just_admitted
-                )
+                admission_initial_submit_pause = size_just_admitted
                 keep_system_pause_code = (
                     prev_error_code in SYSTEM_OWNED_PAUSE_CODES
                 )

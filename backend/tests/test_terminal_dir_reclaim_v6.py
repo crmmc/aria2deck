@@ -71,6 +71,14 @@ async def test_growth_pause_failed_keeps_download_dir(temp_db: str) -> None:
     download_id = int(global_download_id_of(task))
     task_dir = _task_dir(download_id)
 
+    from app.repositories.task.downloads import update_global_download
+
+    # Growth pause applies after confirmed admission, not at create time.
+    await update_global_download(
+        download_id,
+        {"status": "active", "error_code": None, "error_message": None},
+    )
+
     # Re-query after pause failure still active → soft mark, no reclaim.
     client.tell_status.return_value = {
         "status": "active",

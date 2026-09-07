@@ -130,7 +130,7 @@ async def test_create_task_http_registers_and_submits(temp_db: str) -> None:
 
     assert payload["uri"] == final_url
     assert payload["name"] == "file.zip"
-    assert payload["status"] == "active"
+    assert payload["status"] == "paused"
     assert payload["total_length"] == 1024
     assert payload["id"]
     assert payload["task_id"]
@@ -140,6 +140,8 @@ async def test_create_task_http_registers_and_submits(temp_db: str) -> None:
     assert uris[0].endswith(f"/_internal/fetch/{payload['task_id']}/0")
     assert opts["seed-time"] == "0"
     assert opts["out"] == "payload"
+    assert opts["pause"] == "true"
+    assert opts["pause-metadata"] == "true"
 
 
 # --------------------------------------------------------------------------- #

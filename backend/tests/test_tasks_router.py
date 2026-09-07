@@ -838,7 +838,7 @@ class TestListTasks:
         assert len(data) == 1
         assert data[0]["id"] == task["id"]
         assert data[0]["task_id"] == global_download_id_of(task)
-        assert data[0]["status"] == "active"
+        assert data[0]["status"] == "paused"
         assert data[0]["name"] == "list-v0.bin"
         assert data[0]["uri"] == "https://example.com/list-v0.bin"
         assert data[0]["total_length"] == 1234

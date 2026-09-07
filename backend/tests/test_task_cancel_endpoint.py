@@ -155,9 +155,9 @@ class TestCancelTaskEndpoint:
         assert first_task is not None
         assert first_task["status"] == "cancelled"
         assert second_task is not None
-        assert second_task["status"] == "active"
+        assert second_task["status"] == "paused"
         assert global_download is not None
-        assert global_download["status"] == "active"
+        assert global_download["status"] == "paused"
         assert global_download["aria2_gid"] == "gid-shared-endpoint"
         cancel_client.remove.assert_not_awaited()
 

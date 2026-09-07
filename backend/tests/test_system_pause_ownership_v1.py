@@ -894,6 +894,7 @@ async def test_t1_http_unknown_submit_stamps_admission_paused(temp_db: str) -> N
     assert gid == "gid-t1"
     _, opts = client.add_uri.await_args.args
     assert opts.get("pause") == "true"
+    assert opts.get("pause-metadata") == "true"
     row = await _fetch_download(download["id"])
     assert row["error_code"] == ERROR_ADMISSION_PAUSED
     assert row["error_code"] != ERROR_EXTERNAL_PAUSED
@@ -904,7 +905,7 @@ async def test_t1_http_unknown_submit_stamps_admission_paused(temp_db: str) -> N
 
 @pytest.mark.asyncio
 async def test_t2_magnet_submit_stamps_metadata_admission_paused(temp_db: str) -> None:
-    """T2 / AC-1: magnet submit uses pause-metadata and stamps metadata_admission_paused."""
+    """T2 / AC-2: magnet submit uses pause-metadata (not pause=true) and stamps metadata_admission_paused."""
     from app.modules.backend.aria2_adapter import Aria2BackendAdapter
 
     magnet = "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01"
@@ -921,6 +922,7 @@ async def test_t2_magnet_submit_stamps_metadata_admission_paused(temp_db: str) -
     gid = await adapter.submit(tid=download["id"], uri=magnet, options={})
     assert gid == "gid-t2"
     _, opts = client.add_uri.await_args.args
+    assert "pause" not in opts
     assert opts.get("pause-metadata") == "true"
     row = await _fetch_download(download["id"])
     assert row["error_code"] == ERROR_METADATA_ADMISSION_PAUSED
@@ -954,6 +956,7 @@ async def test_t14_torrent_partial_select_pause_and_stamp(temp_db: str) -> None:
     assert torrent_b64 == "AAAA"
     assert uris == []
     assert opts.get("pause") == "true"
+    assert "pause-metadata" not in opts
     assert opts.get("select-file") == "1,3"
     row = await _fetch_download(download["id"])
     assert row["error_code"] == ERROR_ADMISSION_PAUSED
@@ -981,6 +984,7 @@ async def test_t14b_torrent_full_select_same_pause_stamp(temp_db: str) -> None:
     assert gid == "gid-t14b"
     _, _, opts = client.add_torrent.await_args.args
     assert opts.get("pause") == "true"
+    assert "pause-metadata" not in opts
     row = await _fetch_download(download["id"])
     assert row["error_code"] == ERROR_ADMISSION_PAUSED
     assert row["status"] == "paused"
@@ -1611,3 +1615,230 @@ async def test_pause_stamp_fence_race_returns_stale(temp_db: str) -> None:
         )
     assert result == "stale"
     client.pause.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# 09-07 HTTP torrent payload pause: follow-out payload stays system-owned
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_http_known_size_submit_pauses_with_pause_metadata(
+    temp_db: str,
+) -> None:
+    """AC-1: known-size HTTP also pause + pause-metadata + admission_paused."""
+    from app.modules.backend.aria2_adapter import Aria2BackendAdapter
+
+    download = await create_global_download_v0(
+        resource_key="http:t1-known",
+        source_uri="https://example.com/known.bin",
+        resource_kind="http",
+        status="queued",
+        total_bytes=1024,
+        size_known=True,
+    )
+    client = make_aria2_client(add_uri="gid-t1-known")
+    adapter = Aria2BackendAdapter(client)
+    gid = await adapter.submit(
+        tid=download["id"],
+        uri="https://example.com/known.bin",
+        options={},
+    )
+    assert gid == "gid-t1-known"
+    _, opts = client.add_uri.await_args.args
+    assert opts.get("pause") == "true"
+    assert opts.get("pause-metadata") == "true"
+    row = await _fetch_download(download["id"])
+    assert row["error_code"] == ERROR_ADMISSION_PAUSED
+    assert row["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_http_torrent_url_handoff_keeps_system_code_without_second_pause(
+    temp_db: str,
+) -> None:
+    """AC-4: HTTP .torrent URL follow-out payload stays paused with system code.
+
+    Production 404 timeline: parent GID had admission_paused; payload was
+    written active and the credential was cleared, so the later pause event
+    branded external_paused. Payload already paused must skip growth pause.
+    """
+    from app.services.lifecycle.coordinator import reconcile_attempt_signal
+
+    user = await create_user_v0(username="http_torrent_payload", quota_bytes=10_000_000)
+    download = await create_global_download_v0(
+        resource_key="http:nyaa-2003522",
+        source_uri="https://nyaa.si/download/2003522.torrent",
+        resource_kind="http",
+        status="paused",
+        aria2_gid="gid_src_http_torrent",
+        total_bytes=4096,
+        size_known=True,
+        disk_reserved_bytes=4096,
+        error_code=ERROR_ADMISSION_PAUSED,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="paused",
+        reserved_bytes=4096,
+    )
+
+    payload = "gid_payload_http_torrent"
+    payload_status = {
+        "status": "paused",
+        "following": "gid_src_http_torrent",
+        "totalLength": "8192",
+        "completedLength": "0",
+        "files": [
+            {
+                "path": "/dl/payload.bin",
+                "length": "8192",
+                "selected": "true",
+            }
+        ],
+        "bittorrent": {"info": {"name": "payload.bin"}},
+    }
+    client = make_aria2_client(unpause=Exception("leave paused"))
+    client.tell_status.return_value = payload_status
+
+    result = await reconcile_attempt_signal(
+        backend=client,
+        observed_gid="gid_src_http_torrent",
+        event="complete",
+        observed_status={
+            "status": "complete",
+            "followedBy": [payload],
+            "totalLength": "4096",
+            "completedLength": "4096",
+        },
+        log_prefix="[09-07]",
+    )
+    assert result == ReconcileResult.CHANGED
+
+    row = await _fetch_download(download["id"])
+    assert row["aria2_gid"] == payload
+    assert row["status"] == "paused"
+    assert row["error_code"] in {
+        ERROR_METADATA_ADMISSION_PAUSED,
+        ERROR_ADMISSION_PAUSED,
+        ERROR_UNPAUSE_FAILED,
+    }
+    assert row["error_code"] != ERROR_EXTERNAL_PAUSED
+    client.pause.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handoff_active_payload_keeps_or_stamps_system_code(
+    temp_db: str,
+) -> None:
+    """AC-5: unexpected active payload must not clear create-time error_code."""
+    from app.services.lifecycle.handoff import _handoff_locked
+
+    user = await create_user_v0(username="http_active_payload", quota_bytes=10_000_000)
+    download = await create_global_download_v0(
+        resource_key="http:active-payload",
+        source_uri="https://example.com/file.torrent",
+        resource_kind="http",
+        status="paused",
+        aria2_gid="gid_src_active_payload",
+        total_bytes=4096,
+        size_known=True,
+        disk_reserved_bytes=4096,
+        error_code=ERROR_ADMISSION_PAUSED,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="paused",
+        reserved_bytes=4096,
+    )
+
+    payload = "gid_payload_active"
+    payload_status = {
+        "status": "active",
+        "following": "gid_src_active_payload",
+        "totalLength": "4096",
+        "completedLength": "0",
+        "files": [
+            {"path": "/dl/file.bin", "length": "4096", "selected": "true"}
+        ],
+        "bittorrent": {"info": {"name": "file.bin"}},
+    }
+    client = make_aria2_client()
+    result, complete_dispatch = await _handoff_locked(
+        backend=client,
+        attempt_id=int(download["id"]),
+        source_gid="gid_src_active_payload",
+        payload_gid=payload,
+        snapshot={
+            "aria2_gid": "gid_src_active_payload",
+            "status": "paused",
+            "size_known": True,
+            "error_code": ERROR_ADMISSION_PAUSED,
+            "total_bytes": 4096,
+            "completed_bytes": 0,
+        },
+        download=dict(download),
+        log_prefix="[09-07]",
+        _payload_status=payload_status,
+    )
+    assert result == ReconcileResult.CHANGED
+    assert complete_dispatch is None
+    row = await _fetch_download(download["id"])
+    assert row["aria2_gid"] == payload
+    assert row["error_code"] in {
+        ERROR_ADMISSION_PAUSED,
+        ERROR_METADATA_ADMISSION_PAUSED,
+    }
+    assert row["error_code"] != ERROR_EXTERNAL_PAUSED
+    assert row["error_code"] is not None
+
+
+@pytest.mark.asyncio
+async def test_projection_pause_event_keeps_system_code_not_external(
+    temp_db: str,
+) -> None:
+    """AC-6: late WS event=pause with a system code must not brand external."""
+    from app.services.lifecycle.coordinator import reconcile_attempt_signal
+
+    user = await create_user_v0(username="pause_event_owned", quota_bytes=10_000_000)
+    download = await create_global_download_v0(
+        resource_key="http:pause-event-owned",
+        source_uri="https://example.com/owned.bin",
+        resource_kind="http",
+        status="paused",
+        aria2_gid="gid_pause_event_owned",
+        total_bytes=1000,
+        size_known=True,
+        completed_bytes=100,
+        disk_reserved_bytes=1000,
+        error_code=ERROR_ADMISSION_PAUSED,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="paused",
+    )
+    paused_status = {
+        "gid": "gid_pause_event_owned",
+        "status": "paused",
+        "totalLength": "1000",
+        "completedLength": "100",
+        "files": [
+            {"path": "/tmp/owned.bin", "length": "1000", "selected": "true"}
+        ],
+    }
+    client = make_aria2_client(tell_status=paused_status)
+    result = await reconcile_attempt_signal(
+        backend=client,
+        observed_gid="gid_pause_event_owned",
+        event="pause",
+        observed_status=paused_status,
+        log_prefix="[09-07]",
+    )
+    assert result in (ReconcileResult.CHANGED, ReconcileResult.STALE)
+    row = await _fetch_download(download["id"])
+    assert row["status"] == "paused"
+    assert row["error_code"] == ERROR_ADMISSION_PAUSED
+    assert row["error_code"] != ERROR_EXTERNAL_PAUSED

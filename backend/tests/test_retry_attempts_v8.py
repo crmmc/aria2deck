@@ -69,7 +69,8 @@ async def test_failed_retry_creates_new_attempt_ids(temp_db: str) -> None:
     assert global_download_id_of(second) != global_download_id_of(first)
     assert second["id"] != first["id"]
     assert old_global["status"] == "failed"
-    assert new_global["status"] == "active"
+    assert new_global["status"] == "paused"
+    assert new_global["error_code"] == "admission_paused"
     assert new_global["aria2_gid"] == "gid-retry-new"
 
 
@@ -112,7 +113,8 @@ async def test_terminal_global_download_never_resurrected(temp_db: str) -> None:
     assert created is not None
     assert stored_terminal["status"] == "failed"
     assert created["id"] != terminal["id"]
-    assert created["status"] == "active"
+    assert created["status"] == "paused"
+    assert created["error_code"] == "admission_paused"
 
 
 @pytest.mark.asyncio

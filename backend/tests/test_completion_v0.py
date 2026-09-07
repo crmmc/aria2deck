@@ -325,7 +325,7 @@ async def test_complete_global_download_restores_source_when_index_registration_
     assert stored_count == 0
     assert entry_count == 0
     assert user_task is not None
-    assert user_task["status"] == "active"
+    assert user_task["status"] == "paused"
     assert user_task["reserved_bytes"] == total_bytes
     assert usage["reserved_bytes"] == total_bytes
     assert usage["used_bytes"] == 0
@@ -430,11 +430,11 @@ async def test_completion_cancel_after_move_restores_source_and_temporary_db(
             await conn.execute(select(func.count()).select_from(stored_files))
         ).scalar_one()
     assert current is not None
-    assert current["status"] == "active"
+    assert current["status"] == "paused"
     assert current["aria2_gid"] == "gid-complete-cancel"
     assert current["disk_reserved_bytes"] == 4
     assert current_task is not None
-    assert current_task["status"] == "active"
+    assert current_task["status"] == "paused"
     assert current_task["reserved_bytes"] == 4
     assert usage["reserved_bytes"] == 4
     assert stored_count == 0

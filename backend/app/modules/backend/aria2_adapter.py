@@ -69,8 +69,10 @@ def build_submission_call(
 ) -> SubmissionCall:
     """构建一条 aria2 提交描述符（Spec §6.2）。
 
-    ``planned_gid`` 仅批量路径传入：加入 ``gid``，HTTP 强制 ``pause=true``；
-    单任务路径不传，保持既有 unknown-size 条件暂停行为。
+    ``planned_gid`` 仅批量路径传入：加入 ``gid``。HTTP 一律 ``pause``
+    + ``pause-metadata``（父任务停着下种子文件，正片出生即停）。磁力只加
+    ``pause-metadata``：父 GID 必须继续跑才能解析元数据，正片出生再停。
+    直接 torrent 只有一段 GID，只加 ``pause``。
     """
     tid = int(download["id"])
     resource_kind = str(download.get("resource_kind") or "")
@@ -101,23 +103,23 @@ def build_submission_call(
             source_uris=[uri, *mirrors],
         )
         submit_options.update(gateway_options)
-        error_code: str | None = None
-        # 批量路径强制 pause=true（Spec §6.2）；单任务仅 unknown-size 暂停。
-        if planned_gid or unknown_size:
-            submit_options["pause"] = "true"
-            error_code = ERROR_ADMISSION_PAUSED
-        status = "paused" if error_code is not None else "active"
+        # HTTP 种子 URL 会 follow 出第二段正片 GID；pause-metadata 让正片
+        # 出生即停。普通直链上 pause-metadata 是空操作。
+        submit_options["pause"] = "true"
+        submit_options["pause-metadata"] = "true"
         return SubmissionCall(
             method="aria2.addUri",
             params=[list(gateway_uris), submit_options],
-            status=status,
-            error_code=error_code,
+            status="paused",
+            error_code=ERROR_ADMISSION_PAUSED,
             extra_uris=list(gateway_uris[1:]),
         )
 
     Aria2BackendAdapter._merge_user_and_server_options(submit_options, options)
     error_code = None
-    if unknown_size and resource_kind == "magnet":
+    if resource_kind == "magnet":
+        # 不要 pause=true：policy 对 metadata_admission_paused 在未知大小时
+        # 是 keep，父 GID 一停元数据就下不来，正片也不会 follow。
         submit_options["pause-metadata"] = "true"
         error_code = ERROR_METADATA_ADMISSION_PAUSED
 
