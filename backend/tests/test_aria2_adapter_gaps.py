@@ -61,21 +61,30 @@ class TestSubmit:
     async def test_http_unknown_size_starts_paused(self, monkeypatch):
         _patch_download(monkeypatch, _download(size_known=0))
         state = _patch_assign(monkeypatch)
-        adapter = Aria2BackendAdapter(make_aria2_client(add_uri="gid1"))
+        client = make_aria2_client(add_uri="gid1")
+        adapter = Aria2BackendAdapter(client)
         gid = await adapter.submit(tid=1, uri="https://x.example/f", options={})
         assert gid == "gid1"
+        _, opts = client.add_uri.await_args.args
+        assert opts["pause"] == "true"
+        assert opts["pause-metadata"] == "true"
         assert state["assigned"][2] == "paused"
         assert state["assigned"][3] == mod.ERROR_ADMISSION_PAUSED
 
     @pytest.mark.asyncio
-    async def test_http_known_size_active(self, monkeypatch):
+    async def test_http_known_size_paused(self, monkeypatch):
         _patch_download(monkeypatch, _download(size_known=1))
         state = _patch_assign(monkeypatch)
-        adapter = Aria2BackendAdapter(make_aria2_client(add_uri="gid2"))
+        client = make_aria2_client(add_uri="gid2")
+        adapter = Aria2BackendAdapter(client)
         await adapter.submit(
             tid=1, uri="https://x.example/f", options={"out": "f.zip"}
         )
-        assert state["assigned"][2] == "active"
+        _, opts = client.add_uri.await_args.args
+        assert opts["pause"] == "true"
+        assert opts["pause-metadata"] == "true"
+        assert state["assigned"][2] == "paused"
+        assert state["assigned"][3] == mod.ERROR_ADMISSION_PAUSED
 
     @pytest.mark.asyncio
     async def test_http_mirror_change_uri_failure_tolerated(self, monkeypatch):
@@ -112,9 +121,13 @@ class TestSubmit:
             _download(resource_kind="torrent", source_uri="base64:AAAA"),
         )
         state = _patch_assign(monkeypatch)
-        adapter = Aria2BackendAdapter(make_aria2_client(add_torrent="gid5"))
+        client = make_aria2_client(add_torrent="gid5")
+        adapter = Aria2BackendAdapter(client)
         gid = await adapter.submit(tid=1, uri="base64:AAAA", options={})
         assert gid == "gid5"
+        _torrent, _uris, opts = client.add_torrent.await_args.args
+        assert opts["pause"] == "true"
+        assert "pause-metadata" not in opts
         assert state["assigned"][2] == "paused"
         assert state["assigned"][3] == mod.ERROR_ADMISSION_PAUSED
 
@@ -124,13 +137,17 @@ class TestSubmit:
             monkeypatch, _download(resource_kind="magnet", size_known=0)
         )
         state = _patch_assign(monkeypatch)
-        adapter = Aria2BackendAdapter(make_aria2_client(add_uri="gid6"))
+        client = make_aria2_client(add_uri="gid6")
+        adapter = Aria2BackendAdapter(client)
         gid = await adapter.submit(
             tid=1,
             uri="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
             options={},
         )
         assert gid == "gid6"
+        _, opts = client.add_uri.await_args.args
+        assert "pause" not in opts
+        assert opts["pause-metadata"] == "true"
         assert state["assigned"][2] == "paused"
         assert state["assigned"][3] == mod.ERROR_METADATA_ADMISSION_PAUSED
 
@@ -313,6 +330,7 @@ class TestBuildSubmissionCall:
         assert uris == ["http://gw/_internal/fetch/7/0"]
         assert opts["gid"] == "0123456789abcdef"
         assert opts["pause"] == "true"
+        assert opts["pause-metadata"] == "true"
         assert opts["dir"] == "/data/7"
         assert opts["seed-time"] == "0"
         assert opts["bt-stop-timeout"] == "300"
@@ -321,16 +339,17 @@ class TestBuildSubmissionCall:
         assert call.error_code == mod.ERROR_ADMISSION_PAUSED
         assert call.extra_uris == []
 
-    def test_http_without_planned_gid_keeps_single_task_behavior(self, monkeypatch):
+    def test_http_without_planned_gid_still_pauses(self, monkeypatch):
         self._patch_env(monkeypatch)
         call = mod.build_submission_call(
             _download(id=7, size_known=1), uri="https://x.example/f", options={}
         )
         _, opts = call.params
         assert "gid" not in opts
-        assert "pause" not in opts
-        assert call.status == "active"
-        assert call.error_code is None
+        assert opts["pause"] == "true"
+        assert opts["pause-metadata"] == "true"
+        assert call.status == "paused"
+        assert call.error_code == mod.ERROR_ADMISSION_PAUSED
 
     def test_http_unknown_size_without_gid_pauses(self, monkeypatch):
         self._patch_env(monkeypatch)
@@ -339,6 +358,7 @@ class TestBuildSubmissionCall:
         )
         _, opts = call.params
         assert opts["pause"] == "true"
+        assert opts["pause-metadata"] == "true"
         assert call.status == "paused"
         assert call.error_code == mod.ERROR_ADMISSION_PAUSED
 
@@ -367,6 +387,7 @@ class TestBuildSubmissionCall:
         assert call.method == "aria2.addUri"
         uris, opts = call.params
         assert uris == ["magnet:?xt=urn:btih:x"]
+        assert "pause" not in opts
         assert opts["pause-metadata"] == "true"
         assert opts["gid"] == "aaaabbbbccccdddd"
         assert opts["bt-tracker"] == "http://tr/ann"
@@ -375,7 +396,7 @@ class TestBuildSubmissionCall:
         assert call.error_code == mod.ERROR_METADATA_ADMISSION_PAUSED
         assert call.extra_uris == []
 
-    def test_magnet_known_size_active(self, monkeypatch):
+    def test_magnet_known_size_pauses_payload(self, monkeypatch):
         self._patch_env(monkeypatch)
         call = mod.build_submission_call(
             _download(id=8, resource_kind="magnet", size_known=1),
@@ -383,9 +404,8 @@ class TestBuildSubmissionCall:
             options={},
         )
         _, opts = call.params
-        assert "pause-metadata" not in opts
-        assert call.status == "active"
-        assert call.error_code is None
+        assert "pause" not in opts
+        assert opts["pause-metadata"] == "true"
 
     def test_torrent_pauses_and_select_file(self, monkeypatch):
         self._patch_env(monkeypatch)
@@ -399,6 +419,7 @@ class TestBuildSubmissionCall:
         assert torrent == "AAAA"
         assert uris == []
         assert opts["pause"] == "true"
+        assert "pause-metadata" not in opts
         assert opts["select-file"] == "1,2"
         assert call.status == "paused"
         assert call.error_code == mod.ERROR_ADMISSION_PAUSED
@@ -453,6 +474,7 @@ class TestSubmitUsesBuilder:
         torrent, uris, opts = client.add_torrent.await_args.args
         assert torrent == "QQ=="
         assert opts["pause"] == "true"
+        assert "pause-metadata" not in opts
         assert state["assigned"][2] == "paused"
         assert state["assigned"][3] == mod.ERROR_ADMISSION_PAUSED
 
@@ -467,15 +489,19 @@ class TestBuildSubmissionCallFallbackStatus:
             ("torrent", 0, "waiting", None),
             # torrent + 已知大小 → active
             ("torrent", 1, "active", None),
-            # magnet + unknown size → pause-metadata + paused
+            # magnet 只 pause-metadata：父 GID 继续跑解析元数据，正片出生即停
             (
                 "magnet",
                 0,
                 "paused",
                 mod.ERROR_METADATA_ADMISSION_PAUSED,
             ),
-            # magnet + 已知大小 → active
-            ("magnet", 1, "active", None),
+            (
+                "magnet",
+                1,
+                "paused",
+                mod.ERROR_METADATA_ADMISSION_PAUSED,
+            ),
         ],
     )
     def test_fallback_status_table(
@@ -495,12 +521,12 @@ class TestBuildSubmissionCallFallbackStatus:
         assert call.params[0] == ["magnet:?xt=urn:btih:" + "0" * 40]
         assert call.status == expected_status
         assert call.error_code == expected_error_code
-        # magnet unknown-size 时才注入 pause-metadata
-        if kind == "magnet" and not size_known:
+        if kind == "magnet":
+            assert "pause" not in call.params[1]
             assert call.params[1]["pause-metadata"] == "true"
         else:
             assert "pause-metadata" not in call.params[1]
-        assert "pause" not in call.params[1]
+            assert "pause" not in call.params[1]
 
     def test_planned_gid_injected_into_fallback_options(self):
         download = _download(

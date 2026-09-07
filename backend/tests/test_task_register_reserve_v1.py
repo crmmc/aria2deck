@@ -183,8 +183,8 @@ async def test_adapter_http_unknown_size_adds_pause(temp_db: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_adapter_http_known_size_no_pause(temp_db: str) -> None:
-    """Known-size http submit does NOT include pause (downloads immediately)."""
+async def test_adapter_http_known_size_pauses(temp_db: str) -> None:
+    """Known-size http submit still pauses so torrent URLs cannot skip payload pause."""
     gd = await create_global_download_v0(
         resource_key="http://example.com/known",
         source_uri="http://example.com/known",
@@ -203,7 +203,8 @@ async def test_adapter_http_known_size_no_pause(temp_db: str) -> None:
 
     assert gid == "gid-http2"
     _, opts = client.add_uri.await_args.args
-    assert "pause" not in opts
+    assert opts.get("pause") == "true"
+    assert opts.get("pause-metadata") == "true"
 
     async with transaction() as conn:
         row = (
@@ -212,4 +213,5 @@ async def test_adapter_http_known_size_no_pause(temp_db: str) -> None:
             )
         ).mappings().first()
     assert row is not None
-    assert row["status"] == "active"
+    assert row["status"] == "paused"
+    assert row["error_code"] == "admission_paused"

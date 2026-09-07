@@ -548,3 +548,60 @@ async def test_admission_unpause_rpc_unavailable_keeps_pause_state(temp_db: str)
     # sync round retries the unpause via policy instead of branding.
     assert row["status"] == "paused"
     assert row["error_code"] == ERROR_ADMISSION_PAUSED
+
+
+
+@pytest.mark.asyncio
+async def test_projection_pause_event_size_just_admitted_not_external(temp_db: str):
+    """AC-6: event=pause on first trusted size must not brand external_paused.
+
+    Pre-fix: admission_initial_submit_pause required event != "pause", so a
+    late pause event during first admission overwrote the system code.
+    """
+    from app.modules.task_core.states import (
+        ERROR_ADMISSION_PAUSED,
+        ERROR_EXTERNAL_PAUSED,
+    )
+
+    user = await create_user_v0(username="t09_pause_event_admit", quota_bytes=10_000_000)
+    download = await create_global_download_v0(
+        resource_key="http:t09-pause-event-admit",
+        source_uri="https://example.com/t09-admit.bin",
+        resource_kind="http",
+        status="active",
+        aria2_gid="gid_t09_pause_admit",
+        total_bytes=0,
+        completed_bytes=0,
+        disk_reserved_bytes=0,
+        size_known=False,
+        error_code=None,
+    )
+    await create_user_task_v0(
+        user_id=user["id"],
+        global_download_id=download["id"],
+        status="active",
+        reserved_bytes=0,
+    )
+
+    paused_status = {
+        "status": "paused",
+        "totalLength": "2048",
+        "completedLength": "0",
+        "files": [
+            {"path": "/dl/t09-admit.bin", "length": "2048", "selected": "true"}
+        ],
+    }
+    client = _make_client()
+    client.tell_status.return_value = paused_status
+    result = await reconcile_attempt_signal(
+        backend=client,
+        observed_gid="gid_t09_pause_admit",
+        event="pause",
+        observed_status=paused_status,
+        log_prefix="[09-07]",
+    )
+    assert result == ReconcileResult.CHANGED
+    row = await _fetch_download_row(download["id"])
+    assert row["status"] == "paused"
+    assert row["error_code"] == ERROR_ADMISSION_PAUSED
+    assert row["error_code"] != ERROR_EXTERNAL_PAUSED

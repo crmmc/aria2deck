@@ -23,6 +23,7 @@ from app.modules.task_core.states import (
     ERROR_GROWTH_UNPAUSE_FAILED,
     ERROR_METADATA_ADMISSION_PAUSED,
     ERROR_UNPAUSE_FAILED,
+    SYSTEM_OWNED_PAUSE_CODES,
 )
 from app.repositories.task.downloads import (
     get_global_download_by_gid,
@@ -493,10 +494,15 @@ async def _handoff_locked(
         global_values["error_code"] = ERROR_METADATA_ADMISSION_PAUSED
         global_values["error_message"] = None
     elif raw_status in {"active", "waiting"}:
-        # Payload already running (non-metadata): clear create-time pending
-        # credential (Spec §3.1.1 / M9 — handoff confirms payload release).
-        global_values["error_code"] = None
-        global_values["error_message"] = None
+        # Payload running without a confirmed unpause is still unreleased.
+        # Keep an existing system code; stamp metadata admission if bare.
+        existing_code = str(snapshot.get("error_code") or "")
+        if existing_code in SYSTEM_OWNED_PAUSE_CODES:
+            global_values["error_code"] = existing_code
+            global_values["error_message"] = None
+        else:
+            global_values["error_code"] = ERROR_METADATA_ADMISSION_PAUSED
+            global_values["error_message"] = None
 
     updated = await guarded_update_download_and_active_user_tasks(
         attempt_id,
