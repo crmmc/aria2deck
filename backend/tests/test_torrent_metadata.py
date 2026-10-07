@@ -121,6 +121,54 @@ def test_extracts_all_torrent_network_endpoints() -> None:
     assert metadata.webseed_urls == ()
 
 
+def test_dedupes_tracker_endpoints_in_first_seen_order() -> None:
+    announce = b"udp://8.8.8.8:6969/announce"
+    repeated = b"https://8.8.4.4/announce"
+    torrent = bdict(
+        [
+            (b"announce", bstr(announce)),
+            (
+                b"announce-list",
+                blist(
+                    [
+                        blist([bstr(repeated), bstr(announce)]),
+                        blist([bstr(repeated)]),
+                    ]
+                ),
+            ),
+            (b"info", single_file_info()),
+        ]
+    )
+
+    metadata = parse_torrent_base64(base64.b64encode(torrent).decode("ascii"))
+
+    assert metadata.tracker_urls == (
+        announce.decode(),
+        repeated.decode(),
+    )
+
+
+def test_parse_accepts_trackers_beyond_legacy_endpoint_cap() -> None:
+    # 回归：真实 BDRip 种子常内置 80+ tracker，旧的 64 条上限会整体拒绝
+    tracker_urls = [
+        f"udp://tracker-{index}.example.com:6969/announce".encode()
+        for index in range(1, 84)
+    ]
+    torrent = bdict(
+        [
+            (
+                b"announce-list",
+                blist([blist([bstr(url)]) for url in tracker_urls]),
+            ),
+            (b"info", single_file_info()),
+        ]
+    )
+
+    metadata = parse_torrent_base64(base64.b64encode(torrent).decode("ascii"))
+
+    assert metadata.tracker_urls == tuple(url.decode() for url in tracker_urls)
+
+
 def test_parse_multi_file_torrent_metadata() -> None:
     info = multi_file_info()
     metadata = parse_torrent_base64(torrent_b64(info))
