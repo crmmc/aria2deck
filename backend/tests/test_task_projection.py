@@ -88,6 +88,62 @@ def test_rest_response_maps_effective_status_and_uses_progress() -> None:
     assert response["completed_length"] == 10
 
 
+def test_rest_response_labels_ingesting_window_when_live_complete() -> None:
+    # aria2 已 complete 而 DB 仍 active-like：入库窗口显示「入库中」
+    live = {"status": "complete", "totalLength": 10, "completedLength": 10}
+    cases = {
+        "active": "active",
+        "waiting": "waiting",
+        "queued": "queued",
+        "paused": "paused",
+    }
+    for user_status, rest_status in cases.items():
+        response = build_rest_task_response(
+            _row(
+                user_status=user_status,
+                global_status=user_status,
+                completed_bytes=10,
+                total_bytes=10,
+            ),
+            live,
+        )
+        assert response["status"] == rest_status, user_status
+        assert response["status_label"] == "入库中", user_status
+
+
+def test_rest_response_keeps_downloading_label_while_live_active() -> None:
+    response = build_rest_task_response(
+        _row(user_status="active", global_status="active"),
+        {"status": "active"},
+    )
+
+    assert response["status_label"] == "下载中"
+
+
+def test_rest_response_label_falls_back_without_live_snapshot() -> None:
+    response = build_rest_task_response(
+        _row(user_status="active", global_status="active")
+    )
+
+    assert response["status_label"] == "下载中"
+
+
+def test_rest_response_terminal_status_not_labeled_ingesting() -> None:
+    # DB 已终态：即使 live 残留 complete 也不显示「入库中」
+    response = build_rest_task_response(
+        _row(
+            user_status="active",
+            global_status="completed",
+            completed_bytes=10,
+            total_bytes=10,
+        ),
+        {"status": "complete"},
+    )
+
+    assert response["status"] == "complete"
+    assert response["status_label"] == "已完成"
+
+
 def test_filter_rows_for_status_uses_effective_state() -> None:
     rows = [
         _row(user_status="active", global_status="active", name="active.bin"),

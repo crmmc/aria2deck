@@ -24,6 +24,7 @@ __all__ = [
     "ACTIVE_LIKE_DOWNLOAD_STATUSES",
     "BT_TRACKER_PLACEHOLDER",
     "INFO_HASH_HEX_PATTERN",
+    "INGESTING_LABEL",
     "METADATA_NAME_PREFIX",
     "Any",
     "InvalidTaskStatusFilter",
@@ -59,6 +60,7 @@ __all__ = [
 
 BT_TRACKER_PLACEHOLDER = "http://aria2deck.invalid/announce"
 INFO_HASH_HEX_PATTERN = re.compile(r"^[a-fA-F0-9]{40}$")
+INGESTING_LABEL = "入库中"
 
 
 def ms_to_iso(timestamp_ms: int | None) -> str | None:
@@ -441,13 +443,19 @@ def build_rest_task_response(
     # Retry projection uses user-task status (matches POST /retry gate).
     retryable, retry_blocked_reason = history_retry_projection(row)
 
+    status_label = user_visible_label(
+        effective, row.get("global_error_code") or row.get("error_code")
+    )
+    # aria2 已 complete 而 DB 尚未终态：文件处于入库窗口
+    live_status = str(live.get("status") or "") if live else ""
+    if active_like and live_status == "complete":
+        status_label = INGESTING_LABEL
+
     return {
         "id": row["id"],
         "task_id": row["global_download_id"],
         "status": legacy_rest_status(effective),
-        "status_label": user_visible_label(
-            effective, row.get("global_error_code") or row.get("error_code")
-        ),
+        "status_label": status_label,
         "name": name,
         "uri": row.get("source_uri") or "",
         "total_length": total_length,
