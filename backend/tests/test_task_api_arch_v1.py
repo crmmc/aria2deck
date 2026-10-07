@@ -227,7 +227,7 @@ async def test_register_and_submit_created_path(temp_db: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_register_and_submit_duplicate_maps_to_conflict(temp_db: str) -> None:
+async def test_register_and_submit_duplicate_returns_existing_task(temp_db: str) -> None:
     user = await create_user_v0(username="arch-dup")
     gd = await create_global_download_v0(
         resource_key="magnet:?xt=urn:btih:arch-dup",
@@ -237,7 +237,7 @@ async def test_register_and_submit_duplicate_maps_to_conflict(temp_db: str) -> N
         total_bytes=128,
         size_known=True,
     )
-    await create_user_task_v0(
+    existing = await create_user_task_v0(
         user_id=user["id"], global_download_id=gd["id"], status="active"
     )
     spec = ResourceSpec(
@@ -250,13 +250,13 @@ async def test_register_and_submit_duplicate_maps_to_conflict(temp_db: str) -> N
 
     client = make_aria2_client()
     with patch("app.services.task_service._get_client", return_value=client):
-        with pytest.raises(ConflictError) as excinfo:
-            await task_service.register_and_submit(
-                user_id=user["id"],
-                quota_bytes=user["quota_bytes"],
-                resource=spec,
-            )
-    assert "任务已存在" in str(excinfo.value)
+        payload = await task_service.register_and_submit(
+            user_id=user["id"],
+            quota_bytes=user["quota_bytes"],
+            resource=spec,
+        )
+    assert payload["id"] == existing["id"]
+    assert payload["task_id"] == gd["id"]
     client.add_uri.assert_not_called()
 
 

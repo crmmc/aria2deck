@@ -229,8 +229,10 @@ async def test_register_attach_rejected_when_quota_insufficient(temp_db: str) ->
 
 
 @pytest.mark.asyncio
-async def test_register_rejects_duplicate_active_pid(temp_db: str) -> None:
-    """AC-2 case 6: same user re-registers same live tid → duplicate error."""
+async def test_register_duplicate_active_pid_returns_idempotent_result(
+    temp_db: str,
+) -> None:
+    """AC-2 case 6: same user re-registers same live tid → idempotent duplicate."""
     user = await create_user_v0(username="dup")
     gd = await create_global_download_v0(
         resource_key="magnet:?xt=urn:btih:dup",
@@ -240,7 +242,7 @@ async def test_register_rejects_duplicate_active_pid(temp_db: str) -> None:
         total_bytes=512,
         size_known=True,
     )
-    await create_user_task_v0(
+    task = await create_user_task_v0(
         user_id=user["id"], global_download_id=gd["id"], status="active"
     )
 
@@ -251,9 +253,13 @@ async def test_register_rejects_duplicate_active_pid(temp_db: str) -> None:
         size_bytes=512,
         size_known=True,
     )
-    with pytest.raises(RegisterError) as excinfo:
-        await register(user_id=user["id"], quota_bytes=user["quota_bytes"], resource=spec)
-    assert excinfo.value.code == "duplicate_task"
+    result = await register(
+        user_id=user["id"], quota_bytes=user["quota_bytes"], resource=spec
+    )
+    assert result.outcome == "duplicate"
+    assert result.pid == task["id"]
+    assert result.tid == gd["id"]
+    assert result.status == "active"
 
 
 # --- M17 Task 1: quota errors carry decision inputs ------------------------

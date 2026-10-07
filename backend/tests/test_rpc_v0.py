@@ -407,7 +407,7 @@ async def test_rpc_add_uri_rejects_path_like_out_option(temp_db: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_rpc_add_uri_rejects_duplicate_completed_magnet_without_renaming(
+async def test_rpc_add_uri_duplicate_completed_magnet_is_idempotent(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="rpc_duplicate_magnet", quota_bytes=1000)
@@ -440,15 +440,13 @@ async def test_rpc_add_uri_rejects_duplicate_completed_magnet_without_renaming(
     client = _make_rpc_client()
     handler = Aria2RpcHandler(user["id"])
 
-    with pytest.raises(RpcError) as exc_info:
-        await handler.handle(
-            "aria2.addUri",
-            [[f"magnet:?xt=urn:btih:{MAGNET_INFO_HASH}&dn=wrong-name"]],
-        )
+    gid = await handler.handle(
+        "aria2.addUri",
+        [[f"magnet:?xt=urn:btih:{MAGNET_INFO_HASH}&dn=wrong-name"]],
+    )
 
     task = await get_user_task(user["id"], global_download["id"])
-    assert exc_info.value.code == RpcErrorCode.TASK_EXISTS
-    assert exc_info.value.message == "任务已存在"
+    assert gid.startswith("task-")
     assert task is not None
     assert task["display_name"] == "real-magnet-name"
     client.add_uri.assert_not_awaited()
@@ -550,7 +548,7 @@ async def test_rpc_add_torrent_rejects_embedded_webseed_before_submit(
 
 
 @pytest.mark.asyncio
-async def test_rpc_add_torrent_rejects_duplicate_torrent(
+async def test_rpc_add_torrent_duplicate_is_idempotent_success(
     temp_db: str,
 ) -> None:
     user = await create_user_v0(username="rpc_duplicate_torrent")
@@ -559,10 +557,8 @@ async def test_rpc_add_torrent_rejects_duplicate_torrent(
     torrent_data = _valid_rpc_torrent()
 
     first_gid = await handler.handle("aria2.addTorrent", [torrent_data])
-    with pytest.raises(RpcError) as exc_info:
-        await handler.handle("aria2.addTorrent", [torrent_data])
+    second_gid = await handler.handle("aria2.addTorrent", [torrent_data])
 
     assert first_gid.startswith("task-")
-    assert exc_info.value.code == RpcErrorCode.TASK_EXISTS
-    assert exc_info.value.message == "任务已存在"
+    assert second_gid == first_gid
     client.add_torrent.assert_awaited_once()
