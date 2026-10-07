@@ -935,6 +935,39 @@ describe("TasksPage", () => {
     expect(screen.getByText("等待中")).toBeInTheDocument();
   });
 
+  test("renders backend status_label for active tasks (ingesting window)", async () => {
+    let wsCallbacks: {
+      onTaskUpdate: (task: Task) => void;
+    } | null = null;
+    mockUseTaskWebSocket.mockImplementation((callbacks) => {
+      wsCallbacks = callbacks;
+    });
+
+    render(<TasksPage />);
+    expect(await screen.findByText("ubuntu.iso")).toBeInTheDocument();
+    expect(screen.getByText("下载中")).toBeInTheDocument();
+
+    act(() => {
+      wsCallbacks?.onTaskUpdate({
+        ...activeTask,
+        status: "active",
+        status_label: "入库中",
+      });
+    });
+
+    expect(screen.getByText("入库中")).toBeInTheDocument();
+
+    act(() => {
+      wsCallbacks?.onTaskUpdate({
+        ...activeTask,
+        status: "active",
+        status_label: null,
+      });
+    });
+
+    expect(screen.getByText("下载中")).toBeInTheDocument();
+  });
+
   test("renders backend status_label for queued and paused tasks", async () => {
     let wsCallbacks: {
       onTaskUpdate: (task: Task) => void;

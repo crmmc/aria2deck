@@ -74,15 +74,20 @@ export const TaskCard = memo(function TaskCard({
               {displayName}
             </h3>
             <span className={`task-status task-status-${task.status}`}>
-              {task.status === "queued" || task.status === "paused"
-                ? task.status_label || (task.status === "queued" ? "排队中" : "已暂停")
-                : task.status === "active"
-                  ? "下载中"
-                  : task.status === "waiting"
-                    ? "等待中"
-                    : task.status === "error"
-                      ? "失败"
-                      : task.status}
+              {task.status === "queued" ||
+              task.status === "paused" ||
+              task.status === "active"
+                ? task.status_label ||
+                  (task.status === "queued"
+                    ? "排队中"
+                    : task.status === "paused"
+                      ? "已暂停"
+                      : "下载中")
+                : task.status === "waiting"
+                  ? "等待中"
+                  : task.status === "error"
+                    ? "失败"
+                    : task.status}
             </span>
           </div>
           <div className="task-card-meta muted tabular-nums text-sm">
