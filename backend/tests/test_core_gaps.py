@@ -68,11 +68,11 @@ class TestSecurityGaps:
         assert await sec.check_url_ssrf("http://[::bad") == "无效的下载链接"
 
     @pytest.mark.asyncio
-    async def test_torrent_too_many_endpoints(self):
+    async def test_torrent_endpoints_not_limited_by_count(self):
         result = await sec.check_torrent_network_endpoints(
-            ["http://t.example/ann"] * 100, []
+            ["udp://1.1.1.1:6969/announce"] * 100, []
         )
-        assert result == "种子文件包含过多网络地址"
+        assert result is None
 
 
 class TestRequestRateGuard:

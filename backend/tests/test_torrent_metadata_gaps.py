@@ -125,10 +125,10 @@ def test_webseed_invalid_type():
         )
 
 
-def test_too_many_endpoints():
+def test_duplicate_endpoints_deduped():
     tiers = blist([blist([bstr(b"http://t.example/a")]) for _ in range(100)])
-    with pytest.raises(TorrentMetadataError, match="too many"):
-        parse_torrent_bytes(wrap(single_file_info(), **{"announce-list": tiers}))
+    metadata = parse_torrent_bytes(wrap(single_file_info(), **{"announce-list": tiers}))
+    assert metadata.tracker_urls == ("http://t.example/a",)
 
 
 def test_files_not_list():

@@ -343,9 +343,6 @@ async def check_torrent_network_endpoints(
     tracker_urls: Sequence[str],
     webseed_urls: Sequence[str],
 ) -> str | None:
-    if len(tracker_urls) + len(webseed_urls) > MAX_EMBEDDED_NETWORK_URI_COUNT:
-        return "种子文件包含过多网络地址"
-
     for label, urls, schemes in (
         ("tracker", tracker_urls, TRACKER_URI_SCHEMES),
         ("webseed", webseed_urls, WEBSEED_URI_SCHEMES),

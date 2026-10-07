@@ -18,7 +18,6 @@ MAX_BENCODE_NUMBER_DIGITS = 20
 MAX_PATH_DEPTH = 32
 MAX_PATH_COMPONENT_LENGTH = 255
 MAX_RELATIVE_PATH_LENGTH = 4096
-MAX_TORRENT_NETWORK_ENDPOINTS = 64
 
 
 class TorrentMetadataError(ValueError):
@@ -213,9 +212,8 @@ def _extract_network_endpoints(
         else:
             raise TorrentMetadataError(f"{field} must be a string or list")
 
-    if len(trackers) + len(webseeds) > MAX_TORRENT_NETWORK_ENDPOINTS:
-        raise TorrentMetadataError("too many torrent network endpoints")
-    return tuple(trackers), tuple(webseeds)
+    # tracker 数量不设上限，连接与调度由 aria2 负责；此处仅简单去重并保留首次出现顺序
+    return tuple(dict.fromkeys(trackers)), tuple(webseeds)
 
 
 def _extract_files(root_name: str, info: dict[bytes, Any]) -> list[TorrentFile]:
