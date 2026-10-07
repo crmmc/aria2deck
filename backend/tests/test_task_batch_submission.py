@@ -283,7 +283,7 @@ class TestRegisterOutcomes:
         assert item.status == "active"
         assert client.calls == []  # joined_live + gid 不产生任何 aria2 RPC
 
-    def test_same_user_duplicate_fails_per_item(self, temp_db, test_user, no_probe):
+    def test_same_user_duplicate_is_idempotent_success(self, temp_db, test_user, no_probe):
         class Dynamic(FakeAria2Client):
             async def multicall(self, calls):
                 return [ok(c["params"][1]["gid"]) for c in calls]
@@ -306,8 +306,11 @@ class TestRegisterOutcomes:
                 client=dyn,
             )
         )
-        assert second.accepted_count == 0
-        assert second.results[0].error_code == "duplicate_task"
+        assert second.accepted_count == 1
+        assert second.results[0].accepted is True
+        assert second.results[0].task_id == first.results[0].task_id
+        assert second.results[0].global_download_id == first.results[0].global_download_id
+        assert second.results[0].error_code is None
 
     def test_attached_completed_accepted(self, temp_db, test_user, no_probe):
         async def seed():

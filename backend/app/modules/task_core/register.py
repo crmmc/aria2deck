@@ -6,7 +6,7 @@ Responsibilities:
 - Otherwise create a new tid + pid.
 - Enforce known-size > quota_bytes → quota_exceeded.
 - Enforce used+reserved+size <= quota_bytes for attach (CAS already handles this).
-- Enforce same-user same-tid active pid → duplicate_task.
+- Same-user same-tid active pid → idempotent duplicate result (terminal pid still errors).
 
 This module does NOT submit to aria2 (submit is stubbed / left for Task 3).
 """
@@ -39,7 +39,7 @@ from app.repositories.task.user_tasks import (
 )
 from app.services.usage_service import get_usage, release_reserved, reserve_bytes
 
-RegisterOutcome = Literal["created", "joined_live", "attached_completed"]
+RegisterOutcome = Literal["created", "joined_live", "attached_completed", "duplicate"]
 
 DUPLICATE_TASK_MESSAGE = "任务已存在"
 
@@ -150,10 +150,15 @@ async def _register_attach(
     size: int,
 ) -> RegisterResult:
     tid = int(completed["id"])
-    # Duplicate check: same user already has a task for this tid.
+    # Duplicate: same user already holds this resource — idempotent success.
     existing = await get_user_task(user_id, tid)
     if existing is not None:
-        raise RegisterError("duplicate_task", DUPLICATE_TASK_MESSAGE)
+        return RegisterResult(
+            pid=int(existing["id"]),
+            tid=tid,
+            outcome="duplicate",
+            status=str(existing["status"]),
+        )
 
     # AC-4: attach must be strict; attach_completed_file_to_user uses CAS
     # used+reserved+size <= quota. We pre-check to give a stable error code.
@@ -226,7 +231,14 @@ async def _register_join_live(
     tid = int(live["id"])
     existing = await get_user_task(user_id, tid)
     if existing is not None and str(existing["status"]) in ACTIVE_USER_TASK_STATUSES:
-        raise RegisterError("duplicate_task", DUPLICATE_TASK_MESSAGE)
+        # Idempotent duplicate: existing active task already holds the
+        # reservation and the aria2 gid; no new accounting or submission.
+        return RegisterResult(
+            pid=int(existing["id"]),
+            tid=tid,
+            outcome="duplicate",
+            status=str(existing["status"]),
+        )
 
     # If the live tid already knows its size, use it for headroom check.
     live_size = int(live.get("total_bytes") or 0)

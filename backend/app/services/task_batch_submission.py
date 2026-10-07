@@ -541,6 +541,11 @@ def _collect_outcome(
         item.accepted = True
         item.status = legacy_rest_status(register_result.status)
         return
+    if outcome == "duplicate":
+        # 幂等成功：既有任务已持有预留与 gid，无需进入提交阶段
+        item.accepted = True
+        item.status = legacy_rest_status(register_result.status)
+        return
     if outcome == "joined_live":
         # gid 已绑定的 live global 无需 RPC（在提交阶段读取行后分流）
         item.status = register_result.status

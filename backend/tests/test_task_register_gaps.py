@@ -40,13 +40,14 @@ class TestAttach:
             return _row(id=5, completed_file_id=9)
 
         async def fake_task(user_id, tid):
-            return {"id": 1}
+            return {"id": 1, "status": "completed"}
 
         monkeypatch.setattr(reg, "find_latest_completed_global_download_by_resource_key", fake_find)
         monkeypatch.setattr(reg, "get_user_task", fake_task)
-        with pytest.raises(RegisterError) as exc:
-            await reg.register(user_id=1, quota_bytes=1000, resource=_spec())
-        assert exc.value.code == "duplicate_task"
+        result = await reg.register(user_id=1, quota_bytes=1000, resource=_spec())
+        assert result.outcome == "duplicate"
+        assert result.pid == 1
+        assert result.tid == 5
 
     @pytest.mark.asyncio
     async def test_attach_completed_over_quota(self, monkeypatch, usage_zero):
