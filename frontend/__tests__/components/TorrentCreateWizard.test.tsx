@@ -75,3 +75,39 @@ describe("TorrentCreateWizard 提交错误提示", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
+
+describe("TorrentCreateWizard 文件名悬浮提示", () => {
+  test("文件名和目录名省略时，title 属性提供完整名称", () => {
+    const longFileName = "a".repeat(80) + ".mkv";
+    const longDirName = "b".repeat(80);
+    const treePreview = {
+      ...preview,
+      file_count: 1,
+      files: [{ index: 1, path: [longDirName, longFileName], size: 1024 }],
+      tree: [
+        {
+          type: "directory",
+          name: longDirName,
+          path: [longDirName],
+          size: 1024,
+          children: [
+            { type: "file", index: 1, path: [longDirName, longFileName], size: 1024, name: longFileName },
+          ],
+        },
+      ],
+    } as unknown as TorrentPreview;
+
+    render(
+      <TorrentCreateWizard
+        torrentBase64="dG9ycmVudA=="
+        preview={treePreview}
+        onCancel={jest.fn()}
+        onCreated={jest.fn()}
+        onError={jest.fn()}
+      />
+    );
+
+    expect(screen.getByText(longFileName)).toHaveAttribute("title", longFileName);
+    expect(screen.getByText(longDirName)).toHaveAttribute("title", longDirName);
+  });
+});

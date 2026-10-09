@@ -1127,7 +1127,8 @@ dialog.more-menu-overlay {
 .confirm-content,
 .batch-modal-content,
 .search-modal,
-.more-menu {
+.more-menu,
+.torrent-cancel-dialog {
   position: relative;
   z-index: 1;
 }

@@ -86,7 +86,7 @@ function TreeNode({
             <CheckMark state={checked ? "checked" : "empty"} />
           </button>
         )}
-        <span className="torrent-tree-name">{node.name}</span>
+        <span className="torrent-tree-name" title={node.name}>{node.name}</span>
         <span className="torrent-tree-size">{formatBytes(node.size)}</span>
       </div>
     );
@@ -117,7 +117,7 @@ function TreeNode({
             <CheckMark state={state} />
           </button>
         )}
-        <span className="torrent-tree-name">{node.name}</span>
+        <span className="torrent-tree-name" title={node.name}>{node.name}</span>
         <span className="torrent-tree-size">{formatBytes(node.size)}</span>
       </div>
       {node.children.map((child) => (
