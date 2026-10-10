@@ -119,6 +119,7 @@ docker run -d \
 | `ARIA2DECK_SHARE_JWT_SECRET` | 分享链接签名密钥，非 debug 模式必填 | - |
 | `ARIA2DECK_CREDENTIAL_PEPPER` | API Token 与用户 RPC 密钥摘要 pepper，非 debug 模式必填，至少 32 字节 | - |
 | `ARIA2DECK_INITIAL_ADMIN_PASSWORD` | 首次创建管理员时使用，至少 16 个字符 | - |
+| `ARIA2C_RPC_ALLOW_ALL_ORIGINS` | 允许任意来源跨域访问 `/aria2/jsonrpc`（AriaNg、Motrix 等第三方前端部署在其他域名时需要开启）；RPC 密钥认证仍必需，且响应不带 Cookie 凭据，其余 API 不受影响 | `false` |
 | `ARIA2C_CORS_ORIGINS` | 额外允许的 CORS 域名，逗号分隔 | - |
 | `ARIA2C_ALLOW_NULL_ORIGIN` | 是否允许 `Origin: null`，仅受控客户端需要时设为 `true` | `false` |
 | `ARIA2C_DEBUG` | 调试模式（Cookie 关闭 Secure、SQL echo 等），生产保持 `false` | `false` |
