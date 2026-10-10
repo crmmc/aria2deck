@@ -1,3 +1,5 @@
+import pytest
+
 from app.domain.status import REST_TASK_STATUS_FILTERS
 from app.services.task_projection import (
     BT_TRACKER_PLACEHOLDER,
@@ -22,6 +24,8 @@ def _row(
     user_name: str | None = None,
     completed_bytes: int = 3,
     total_bytes: int = 10,
+    error_code: str | None = None,
+    error_message: str | None = None,
 ) -> dict:
     return {
         "id": 10,
@@ -30,7 +34,7 @@ def _row(
         "status": user_status,
         "reserved_bytes": 7,
         "display_name": user_name,
-        "error_message": None,
+        "error_message": error_message,
         "created_at_ms": 1_700_000_000_000,
         "updated_at_ms": 1_700_000_001_000,
         "finished_at_ms": None,
@@ -43,7 +47,7 @@ def _row(
         "global_status": global_status,
         "total_bytes": total_bytes,
         "completed_bytes": completed_bytes,
-        "error_code": None,
+        "error_code": error_code,
         "global_error_message": None,
         "completed_at_ms": None,
     }
@@ -68,6 +72,81 @@ def test_aria2_status_keeps_global_terminal_over_live_active_status() -> None:
     assert build_aria2_status(_row(user_status="active", global_status="completed"), live)["status"] == "complete"
     assert build_aria2_status(_row(user_status="active", global_status="failed"), live)["status"] == "error"
     assert build_aria2_status(_row(user_status="active", global_status="cancelled"), live)["status"] == "error"
+
+
+def test_stored_file_deleted_projects_as_aria2_removed() -> None:
+    row = _row(
+        user_status="cancelled",
+        global_status="cancelled",
+        error_code="stored_file_deleted",
+        error_message="Stored file was deleted",
+    )
+
+    result = build_aria2_status(row)
+
+    assert result["status"] == "removed"
+    assert result["errorCode"] == "0"
+    assert result["errorMessage"] == ""
+
+
+@pytest.mark.parametrize(
+    "row_kwargs,expected_status,expected_code,expected_message",
+    [
+        (
+            {"user_status": "cancelled", "global_status": "cancelled"},
+            "error",
+            "1",
+            "",
+        ),
+        (
+            {
+                "user_status": "cancelled",
+                "global_status": "cancelled",
+                "error_code": "other_reason",
+            },
+            "error",
+            "1",
+            "",
+        ),
+        (
+            {
+                "user_status": "failed",
+                "global_status": "failed",
+                "error_message": "aria2: boom",
+            },
+            "error",
+            "1",
+            "aria2: boom",
+        ),
+        (
+            {"user_status": "completed", "global_status": "completed"},
+            "complete",
+            "0",
+            "",
+        ),
+        (
+            {
+                "user_status": "active",
+                "global_status": "cancelled",
+                "error_code": "stored_file_deleted",
+            },
+            "removed",
+            "0",
+            "",
+        ),
+    ],
+)
+def test_aria2_status_terminal_matrix(
+    row_kwargs: dict,
+    expected_status: str,
+    expected_code: str,
+    expected_message: str,
+) -> None:
+    result = build_aria2_status(_row(**row_kwargs))
+
+    assert result["status"] == expected_status
+    assert result["errorCode"] == expected_code
+    assert result["errorMessage"] == expected_message
 
 
 def test_rest_response_maps_effective_status_and_uses_progress() -> None:
