@@ -36,6 +36,8 @@ services:
       - ARIA2C_DOWNLOAD_DIR=/app/backend/downloads
       - ARIA2C_DATABASE_PATH=/app/backend/data/app.db
       - ARIA2C_DEBUG=false
+      - "ARIA2C_CORS_ORIGINS=${ARIA2C_CORS_ORIGINS:-}"
+      - "ARIA2C_RPC_ALLOW_ALL_ORIGINS=${ARIA2C_RPC_ALLOW_ALL_ORIGINS:-false}"
     volumes:
       - ./data/app:/app/backend/data
       - ./data/downloads:/app/backend/downloads
