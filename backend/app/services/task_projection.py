@@ -243,6 +243,14 @@ def build_aria2_status(
     live = live or {}
     effective = effective_status(row)
     status = aria2_status(effective)
+    # A stored-file deletion cancels a finished download. That is a removal,
+    # not a download failure: project aria2's native "removed" so clients
+    # render a neutral removed state instead of errorCode 1.
+    if (
+        effective == "cancelled"
+        and str(row.get("error_code") or "") == "stored_file_deleted"
+    ):
+        status = "removed"
 
     gid = f"task-{row['id']}"
     total_bytes = _safe_int(row.get("total_bytes"))
