@@ -86,6 +86,7 @@ from app.http.request_body_limit import (
     MAX_HTTP_REQUEST_BODY_BYTES,
     RequestBodyLimitMiddleware,
 )
+from app.http.rpc_cors import NonRpcCORSMiddleware, RpcCorsFastAPI
 from app.modules.backend.aria2_adapter import Aria2BackendAdapter
 from app.repositories.auth import (
     count_admins,
@@ -507,7 +508,8 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title=settings.app_name, debug=settings.debug, lifespan=lifespan)
+    application_class = RpcCorsFastAPI if settings.rpc_allow_all_origins else FastAPI
+    app = application_class(title=settings.app_name, debug=settings.debug, lifespan=lifespan)
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=MAX_HTTP_REQUEST_BODY_BYTES,
@@ -595,15 +597,23 @@ def create_app() -> FastAPI:
         cors_origins.append("null")
     # 从环境变量添加额外的 CORS 域名（逗号分隔）
     extra_origins = settings.cors_origins
+    has_custom_origin = False
     if extra_origins:
         for origin in extra_origins.split(","):
             origin = origin.strip()
             if origin == "null" and not (settings.debug or settings.allow_null_origin):
                 continue
+            if origin:
+                has_custom_origin = True
             if origin and origin not in cors_origins:
                 cors_origins.append(origin)
+    if not settings.rpc_allow_all_origins and not has_custom_origin:
+        logger.warning(
+            "RPC 未启用任意来源且未配置自定义 CORS 来源；"
+            "请设置 ARIA2C_CORS_ORIGINS，或显式启用 ARIA2C_RPC_ALLOW_ALL_ORIGINS。"
+        )
     app.add_middleware(
-        CORSMiddleware,
+        NonRpcCORSMiddleware if settings.rpc_allow_all_origins else CORSMiddleware,
         allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     aria2_rpc_secret: str = ""
     aria2_poll_interval: float = 2.0
     cors_origins: str = ""
+    rpc_allow_all_origins: bool = False
     allow_null_origin: bool = False
     download_dir: str = str(BASE_DIR / "downloads")
     host: str = "0.0.0.0"  # noqa: S104  # configurable service listener default
