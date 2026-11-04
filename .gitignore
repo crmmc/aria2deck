@@ -30,6 +30,10 @@ backend/downloads/*
 !backend/downloads/.gitkeep
 backend/static/*
 !backend/static/.gitkeep
+backend/v2/static/*
+!backend/v2/static/.gitkeep
+backend/v2/.coverage
+backend/v2/data/
 backend/aria2/aria2.log
 backend/aria2/aria2.session
 backend/aria2/aria2.session.lock
@@ -45,6 +49,9 @@ frontend/out/
 frontend/.env.local
 frontend/.env*.local
 frontend/coverage/
+frontend/v2/node_modules/
+frontend/v2/dist/
+frontend/v2/coverage/
 *.tsbuildinfo
 
 # IDE

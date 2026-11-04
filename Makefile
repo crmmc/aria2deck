@@ -1,16 +1,13 @@
 .PHONY: install build run dev-front dev-back dev-aria2 clean docker-build docker-up docker-down docker-logs \
         lint lint-back lint-front typecheck typecheck-back typecheck-front \
-        test test-back test-front dup security check
+        test test-back test-front dup security check verify-v2-standalone
 
 # Variables
 PYTHON = python3
 BUN = bun
-BACKEND_DIR = backend
-FRONTEND_DIR = frontend
+BACKEND_DIR = backend/v2
+FRONTEND_DIR = frontend/v2
 STATIC_DIR = $(BACKEND_DIR)/static
-DEV_ARIA2_SECRET = 1
-DEV_BACK_DEBUG = true
-DEV_BACK_RESET_ADMIN_PASSWORD = true
 
 # Default target
 all: build
@@ -18,7 +15,7 @@ all: build
 # Install dependencies
 install:
 	@echo "Installing backend dependencies with uv..."
-	uv sync
+	cd $(BACKEND_DIR) && uv sync
 	@echo "Installing frontend dependencies with bun..."
 	cd $(FRONTEND_DIR) && $(BUN) install
 
@@ -34,13 +31,13 @@ build:
 	rm -rf $(STATIC_DIR)
 	mkdir -p $(STATIC_DIR)
 	@echo "Moving frontend build to backend static directory..."
-	cp -r $(FRONTEND_DIR)/out/* $(STATIC_DIR)/
+	cp -R $(FRONTEND_DIR)/dist/* $(STATIC_DIR)/
 	@echo "Build complete."
 
 # Run backend with standard logs (compatibility target)
 run:
 	@echo "Starting backend with standard logs..."
-	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=false ARIA2C_DEV_RESET_ADMIN_PASSWORD=false ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --log-level info --no-access-log
+	cd $(BACKEND_DIR) && uv run uvicorn aria2deck.main:app --host 0.0.0.0 --port 8001 --reload --log-level info --no-access-log
 
 # Frontend development mode
 # Use this when developing UI pages/components
@@ -50,17 +47,14 @@ dev-front:
 	@$(MAKE) build
 	@echo "Starting frontend dev server on http://localhost:3000 ..."
 	@echo "API requests will be sent to http://localhost:8001"
-	cd $(FRONTEND_DIR) && NEXT_PUBLIC_API_BASE=http://localhost:8001 $(BUN) run dev
+	cd $(FRONTEND_DIR) && $(BUN) run dev
 
 # Backend development mode (verbose logs)
-# Difference from `run`: ARIA2C_DEBUG=true and uvicorn --log-level debug
+# Difference from `run`: ARIA2DECK_DEBUG=true and uvicorn --log-level debug
 
 dev-back:
-	@echo "Starting backend dev mode with verbose logs..."
-	@echo "ARIA2C_DEBUG=$(DEV_BACK_DEBUG)"
-	@echo "ARIA2C_DEV_RESET_ADMIN_PASSWORD=$(DEV_BACK_RESET_ADMIN_PASSWORD)"
-	@echo "Dev mode will reset the admin password from ARIA2DECK_INITIAL_ADMIN_PASSWORD when ARIA2C_DEV_RESET_ADMIN_PASSWORD=true."
-	PYTHONPATH=$(BACKEND_DIR) ARIA2C_DEBUG=$(DEV_BACK_DEBUG) ARIA2C_DEV_RESET_ADMIN_PASSWORD=$(DEV_BACK_RESET_ADMIN_PASSWORD) ARIA2C_ARIA2_RPC_SECRET=$(DEV_ARIA2_SECRET) uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --log-level debug --no-access-log
+	@echo "Starting V2 backend dev mode with verbose logs..."
+	cd $(BACKEND_DIR) && ARIA2DECK_DEBUG=true uv run uvicorn aria2deck.main:app --host 0.0.0.0 --port 8001 --reload --log-level debug --no-access-log
 
 # Local aria2 backend for testing (foreground)
 # Keep this running in another terminal while using dev-back/dev-front
@@ -73,7 +67,7 @@ dev-aria2:
 
 lint-back:
 	@echo "Linting backend (ruff)..."
-	uv run ruff check $(BACKEND_DIR)/app $(BACKEND_DIR)/tests
+	cd $(BACKEND_DIR) && uv run ruff check src tests
 
 lint-front:
 	@echo "Linting frontend (eslint)..."
@@ -83,7 +77,7 @@ lint: lint-back lint-front
 
 typecheck-back:
 	@echo "Type checking backend (mypy)..."
-	cd $(BACKEND_DIR) && uv run mypy app
+	cd $(BACKEND_DIR) && uv run mypy src
 
 typecheck-front:
 	@echo "Type checking frontend (tsc)..."
@@ -93,9 +87,8 @@ typecheck: typecheck-back typecheck-front
 
 test-back:
 	@echo "Testing backend (pytest + coverage 95% gate)..."
-	# 显式传 fail-under/branch：coverage 从 backend/ 运行时读不到仓库根 pyproject.toml，
-	# 隐式依赖配置会让门禁静默失效
-	cd $(BACKEND_DIR) && uv run pytest --cov=app --cov-branch --cov-fail-under=95 --cov-report=term-missing
+	# 显式传 fail-under/branch，确保 V2 覆盖率门禁始终生效
+	cd $(BACKEND_DIR) && uv run pytest --cov=aria2deck --cov-branch --cov-fail-under=95 --cov-report=term-missing
 
 test-front:
 	@echo "Testing frontend (jest + coverage 95% gate)..."
@@ -106,11 +99,15 @@ test: test-back test-front
 # 重复代码检测（信息参考，不参与门禁）
 dup:
 	@echo "Detecting duplicated code (jscpd)..."
-	bunx jscpd $(BACKEND_DIR)/app $(FRONTEND_DIR)/app $(FRONTEND_DIR)/components $(FRONTEND_DIR)/hooks $(FRONTEND_DIR)/lib --min-tokens 70
+	bunx jscpd $(BACKEND_DIR)/src $(FRONTEND_DIR)/src --min-tokens 70
 
 # 深度安全扫描（首次运行需联网拉取规则集）
 security:
-	uvx semgrep scan --config auto --error $(BACKEND_DIR)/app $(FRONTEND_DIR)/app $(FRONTEND_DIR)/components $(FRONTEND_DIR)/hooks $(FRONTEND_DIR)/lib
+	uvx semgrep scan --config auto --error $(BACKEND_DIR)/src $(FRONTEND_DIR)/src
+
+# 在不含 V1 的临时目录重新安装、测试、构建并启动 V2
+verify-v2-standalone:
+	bash scripts/verify-v2-standalone.sh
 
 # 提交前一键门禁：lint + 类型检查 + 测试（含覆盖率门禁）
 check: lint typecheck test
@@ -119,9 +116,9 @@ check: lint typecheck test
 # Clean
 clean:
 	rm -rf $(STATIC_DIR)
-	rm -rf $(FRONTEND_DIR)/out
-	rm -rf $(FRONTEND_DIR)/.next
-	find . -type d -name "__pycache__" -exec rm -rf {} +
+	rm -rf $(FRONTEND_DIR)/dist
+	rm -rf $(FRONTEND_DIR)/coverage
+	find $(BACKEND_DIR)/src $(BACKEND_DIR)/tests -type d -name "__pycache__" -exec rm -rf {} +
 
 # Docker commands
 docker-build:

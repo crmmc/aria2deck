@@ -3,14 +3,14 @@
 # ============================================================================
 FROM oven/bun:1.3.11@sha256:0733e50325078969732ebe3b15ce4c4be5082f18c4ac1a0f0ca4839c2e4e42a7 AS frontend-builder
 
-WORKDIR /app/frontend
+WORKDIR /app/frontend/v2
 
 # Install dependencies
-COPY frontend/package.json frontend/bun.lock ./
+COPY frontend/v2/package.json frontend/v2/bun.lock ./
 RUN bun install --frozen-lockfile
 
 # Build static export
-COPY frontend/ ./
+COPY frontend/v2/ ./
 RUN bun run build
 
 # ============================================================================
@@ -18,7 +18,7 @@ RUN bun run build
 # ============================================================================
 FROM python:3.12.13-slim-trixie@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
 
-WORKDIR /app
+WORKDIR /app/backend/v2
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -37,32 +37,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:0.8.12@sha256:f64ad69940b634e75d2e4d799eb5238066c5eeda49f76e782d4873c3d014ea33 /uv /usr/local/bin/uv
 
 # Copy Python dependencies and install
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+COPY backend/v2/pyproject.toml backend/v2/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy backend code
-COPY backend/ ./backend/
+COPY backend/v2/src ./src/
 
 # Copy frontend build output
-COPY --from=frontend-builder /app/frontend/out ./backend/static/
+COPY --from=frontend-builder /app/frontend/v2/dist ./static/
 
 # Create directories for data persistence
 RUN mkdir -p /app/backend/data /app/backend/downloads
 
 # Environment variables
-ENV PYTHONPATH=/app/backend \
+ENV PYTHONPATH=/app/backend/v2/src \
     PYTHONUNBUFFERED=1 \
-    ARIA2C_DATABASE_PATH=/app/backend/data/app.db \
-    ARIA2C_DOWNLOAD_DIR=/app/backend/downloads \
-    ARIA2C_HOST=0.0.0.0 \
-    ARIA2C_PORT=8001
+    ARIA2DECK_DATABASE_PATH=/app/backend/data/v2.db \
+    ARIA2DECK_DOWNLOAD_DIR=/app/backend/downloads \
+    ARIA2DECK_HOST=0.0.0.0 \
+    ARIA2DECK_PORT=8001
 
 # Expose port
 EXPOSE 8001
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${ARIA2C_PORT:-8001}/api/health/ready || exit 1
+    CMD curl -f http://localhost:${ARIA2DECK_PORT:-8001}/api/health/ready || exit 1
 
 # Run application
-CMD ["sh", "-c", "uv run uvicorn app.main:app --host ${ARIA2C_HOST:-0.0.0.0} --port ${ARIA2C_PORT:-8001} --no-access-log"]
+CMD ["sh", "-c", "uv run --no-sync uvicorn aria2deck.main:app --host ${ARIA2DECK_HOST:-0.0.0.0} --port ${ARIA2DECK_PORT:-8001} --no-access-log"]
