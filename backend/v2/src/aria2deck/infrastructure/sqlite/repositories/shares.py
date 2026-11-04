@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ....application.shares.models import ShareRecord
 from ....domain.errors import DomainError, ErrorCode
 from ....domain.shares import (
     Share,
@@ -16,33 +16,6 @@ from ....domain.shares import (
     share_status,
 )
 from ..schema import content_objects, share_links, user_files
-
-
-@dataclass(frozen=True, slots=True)
-class ShareRecord:
-    id: int
-    code: str
-    owner_id: int
-    user_file_id: int | None
-    file_name: str
-    file_size: int
-    file_kind: str
-    content_key: str
-    password_hash: str | None
-    expires_at_ms: int | None
-    revoked_at_ms: int | None
-    max_downloads: int | None
-    download_count: int
-    file_pending_delete: bool
-
-    def as_domain(self) -> Share:
-        return Share(
-            expires_at_ms=self.expires_at_ms,
-            revoked_at_ms=self.revoked_at_ms,
-            max_downloads=self.max_downloads,
-            download_count=self.download_count,
-            file_pending_delete=self.file_pending_delete,
-        )
 
 
 class ShareRepository:
@@ -67,6 +40,7 @@ class ShareRepository:
             revoked_at_ms=record["revoked_at_ms"],
             max_downloads=record["max_downloads"],
             download_count=int(record["download_count"]),
+            created_at_ms=int(record["created_at_ms"]),
             file_pending_delete=record["deletion_state"] != "active",
         )
 
@@ -119,35 +93,9 @@ class ShareRepository:
         ).first()
         if owned is None:
             raise DomainError(ErrorCode.NOT_FOUND, "用户文件不存在")
-        rows = (
-            await self.connection.execute(
-                select(
-                    share_links.c.expires_at_ms,
-                    share_links.c.revoked_at_ms,
-                    share_links.c.max_downloads,
-                    share_links.c.download_count,
-                    content_objects.c.deletion_state,
-                )
-                .select_from(
-                    share_links.join(user_files, user_files.c.id == share_links.c.user_file_id)
-                    .join(content_objects, content_objects.c.id == user_files.c.content_id)
-                )
-                .where(share_links.c.user_file_id == user_file_id)
-            )
-        ).all()
         active_count = sum(
-            share_status(
-                Share(
-                    expires_at_ms=row.expires_at_ms,
-                    revoked_at_ms=row.revoked_at_ms,
-                    max_downloads=row.max_downloads,
-                    download_count=int(row.download_count),
-                    file_pending_delete=row.deletion_state != "active",
-                ),
-                now_ms,
-            )
-            is ShareStatus.ACTIVE
-            for row in rows
+            status is ShareStatus.ACTIVE
+            for status in await self.get_share_statuses(user_file_id=user_file_id, now_ms=now_ms)
         )
         ensure_share_capacity(active_count)
         try:
@@ -170,6 +118,38 @@ class ShareRepository:
             raise DomainError(ErrorCode.DUPLICATE_RESOURCE, "分享码已存在或文件引用无效") from None
         return int(result.inserted_primary_key[0])
 
+    async def get_share_statuses(self, *, user_file_id: int, now_ms: int) -> list[ShareStatus]:
+        """Compute statuses for one file; SQL fetches raw columns, mapping stays in share_status."""
+        rows = (
+            await self.connection.execute(
+                select(
+                    share_links.c.expires_at_ms,
+                    share_links.c.revoked_at_ms,
+                    share_links.c.max_downloads,
+                    share_links.c.download_count,
+                    content_objects.c.deletion_state,
+                )
+                .select_from(
+                    share_links.join(user_files, user_files.c.id == share_links.c.user_file_id)
+                    .join(content_objects, content_objects.c.id == user_files.c.content_id)
+                )
+                .where(share_links.c.user_file_id == user_file_id)
+            )
+        ).all()
+        return [
+            share_status(
+                Share(
+                    expires_at_ms=row.expires_at_ms,
+                    revoked_at_ms=row.revoked_at_ms,
+                    max_downloads=row.max_downloads,
+                    download_count=int(row.download_count),
+                    file_pending_delete=row.deletion_state != "active",
+                ),
+                now_ms,
+            )
+            for row in rows
+        ]
+
     async def list_shares(self, owner_id: int) -> list[ShareRecord]:
         rows = (
             await self.connection.execute(
@@ -184,6 +164,79 @@ class ShareRepository:
             )
         ).all()
         return [self._record(row) for row in rows]
+
+    async def page_shares(
+        self,
+        owner_id: int,
+        *,
+        now_ms: int,
+        status: ShareStatus | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> tuple[list[ShareRecord], int]:
+        """Owner listing with status filter; mapping happens only through share_status."""
+        records = await self.list_shares(owner_id)
+        if status is not None:
+            records = [
+                record
+                for record in records
+                if share_status(record.as_domain(), now_ms) is status
+            ]
+        total = len(records)
+        window = records[offset : offset + limit] if limit is not None else records[offset:]
+        return window, total
+
+    async def find_share_by_code(self, code: str) -> ShareRecord | None:
+        row = (
+            await self.connection.execute(
+                select(share_links, content_objects.c.deletion_state)
+                .select_from(
+                    share_links.outerjoin(
+                        user_files, user_files.c.id == share_links.c.user_file_id
+                    ).outerjoin(content_objects, content_objects.c.id == user_files.c.content_id)
+                )
+                .where(share_links.c.code == code)
+            )
+        ).first()
+        return None if row is None else self._record(row)
+
+    async def revoke_share(self, share_id: int, *, owner_id: int, now_ms: int) -> bool:
+        result = await self.connection.execute(
+            update(share_links)
+            .where(share_links.c.id == share_id)
+            .where(share_links.c.owner_id == owner_id)
+            .where(share_links.c.revoked_at_ms.is_(None))
+            .values(revoked_at_ms=now_ms)
+        )
+        return result.rowcount == 1
+
+    async def revoke_all_shares(self, owner_id: int, *, now_ms: int) -> int:
+        result = await self.connection.execute(
+            update(share_links)
+            .where(share_links.c.owner_id == owner_id)
+            .where(share_links.c.revoked_at_ms.is_(None))
+            .values(revoked_at_ms=now_ms)
+        )
+        return int(result.rowcount)
+
+    async def delete_share(self, share_id: int, *, owner_id: int) -> bool:
+        result = await self.connection.execute(
+            delete(share_links)
+            .where(share_links.c.id == share_id)
+            .where(share_links.c.owner_id == owner_id)
+        )
+        return result.rowcount == 1
+
+    async def count_shares(self, owner_id: int) -> int:
+        return int(
+            (
+                await self.connection.execute(
+                    select(func.count())
+                    .select_from(share_links)
+                    .where(share_links.c.owner_id == owner_id)
+                )
+            ).scalar_one()
+        )
 
     async def increment_download_count(self, share_id: int, *, expected_count: int) -> None:
         result = await self.connection.execute(

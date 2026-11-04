@@ -52,6 +52,7 @@ ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     403: {"model": ErrorResponse, "description": "无权限"},
     404: {"model": ErrorResponse, "description": "资源不存在"},
     409: {"model": ErrorResponse, "description": "状态冲突"},
+    410: {"model": ErrorResponse, "description": "分享已失效"},
     413: {"model": ErrorResponse, "description": "内容过大"},
     416: {"model": ErrorResponse, "description": "请求的区间无法满足"},
     422: {"model": ErrorResponse, "description": "输入无效"},

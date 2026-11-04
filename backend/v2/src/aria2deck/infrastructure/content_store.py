@@ -174,6 +174,44 @@ class DownloadContentStore:
     def on_disk(self, storage_path: str) -> bool:
         return self._destination(storage_path).exists()
 
+    def machine_free_bytes(self) -> int:
+        return shutil.disk_usage(self.download_directory).free
+
+    def _verify_prepared(self, storage_path: str) -> tuple[int, str]:
+        target = self._destination(storage_path)
+        if not target.is_file():
+            raise DomainError(ErrorCode.INVALID_STATE, "prepared 输出文件不存在")
+        return target.stat().st_size, _file_digest(target)
+
+    async def verify_prepared(self, storage_path: str) -> tuple[int, str]:
+        return await asyncio.to_thread(self._verify_prepared, storage_path)
+
+    def _remove_prepared(self, storage_path: str) -> None:
+        target = self._destination(storage_path)
+        if target.exists() or target.is_symlink():
+            target.unlink()
+
+    async def remove_prepared(self, storage_path: str) -> None:
+        await asyncio.to_thread(self._remove_prepared, storage_path)
+
+    def _install_prepared(self, storage_path: str, digest: str) -> str:
+        canonical = f"objects/file-{digest}"
+        source = self._destination(storage_path)
+        destination = self._destination(canonical)
+        if destination.exists():
+            # 规范对象已在位（此前安装过）：丢弃 part 文件即可。
+            if source.exists() or source.is_symlink():
+                source.unlink()
+            return canonical
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.parent.is_symlink():
+            raise DomainError(ErrorCode.INVALID_INPUT, "内容存储目录不能是符号链接")
+        source.replace(destination)
+        return canonical
+
+    async def install_prepared(self, storage_path: str, digest: str) -> str:
+        return await asyncio.to_thread(self._install_prepared, storage_path, digest)
+
     def _scan_entries(self, storage_path: str) -> list[ContentEntryIdentity]:
         return list(self._scan(self._destination(storage_path)).entries)
 

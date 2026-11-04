@@ -440,3 +440,144 @@ class StorageDeleteResponse(BaseModel):
     accepted_count: int
     rejected_count: int
     results: list[StorageDeleteResultResponse]
+
+
+class PackPrecomputeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    items: list[int] = Field(min_length=1, max_length=1000)
+
+
+class PackPrecomputeItemResponse(BaseModel):
+    user_file_id: int
+    accepted: bool
+    display_name: str | None = None
+    size: int = 0
+    error: ErrorBody | None = None
+
+
+class PackPrecomputeResponse(BaseModel):
+    items: list[PackPrecomputeItemResponse]
+    total_size: int
+    available_bytes: int
+
+
+class PackCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    items: list[int] = Field(min_length=1, max_length=100)
+    output_name: str = Field(min_length=1, max_length=200)
+    delete_source: bool = False
+
+
+class PackOutputResponse(BaseModel):
+    user_file_id: int
+    display_name: str
+    size: int
+
+
+class PackViewResponse(BaseModel):
+    id: int
+    status: Literal["pending", "packing", "done", "failed", "cancelled"]
+    step: Literal["validating", "compressing", "verifying"] | None
+    step_progress: int
+    step_started_at_ms: int | None
+    created_at_ms: int
+    updated_at_ms: int
+    finished_at_ms: int | None
+    error_code: str | None
+    delete_source: bool
+    output: PackOutputResponse | None = None
+
+
+class ShareCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_file_id: int
+    expires_in_seconds: int | None = Field(default=None, ge=1, le=30 * 24 * 60 * 60)
+    max_downloads: int | None = Field(default=None, ge=1, le=10000)
+    password: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+class ShareItemResponse(BaseModel):
+    id: int
+    code: str
+    file_name: str
+    file_size: int
+    file_kind: str
+    status: Literal["active", "expired", "revoked", "exhausted", "unavailable"]
+    expires_at_ms: int | None
+    max_downloads: int | None
+    download_count: int
+    created_at_ms: int
+    has_password: bool
+
+
+class ShareCreatedResponse(ShareItemResponse):
+    pass
+
+
+class ShareListResponse(BaseModel):
+    items: list[ShareItemResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class ShareBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    share_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+class ShareBatchItemResponse(BaseModel):
+    share_id: int
+    ok: bool
+    already_revoked: bool = False
+    error: ErrorBody | None = None
+
+
+class ShareBatchResponse(BaseModel):
+    results: list[ShareBatchItemResponse]
+    accepted_count: int
+    rejected_count: int
+
+
+class ShareRevokeAllResponse(BaseModel):
+    revoked_count: int
+
+
+class PublicShareInfoResponse(BaseModel):
+    file_name: str
+    file_size: int
+    file_kind: str
+    has_password: bool
+    expires_at_ms: int | None
+    max_downloads: int | None
+    download_count: int
+
+
+class ShareVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    password: str = Field(min_length=1, max_length=100)
+
+
+class ShareVerifyResponse(BaseModel):
+    access_token: str
+    expires_in: int
+
+
+class PublicEntryItemResponse(BaseModel):
+    name: str
+    path: str
+    kind: Literal["file", "directory"]
+    size: int
+
+
+class PublicBreadcrumbResponse(BaseModel):
+    name: str
+    path: str
+
+
+class PublicEntryListResponse(BaseModel):
+    items: list[PublicEntryItemResponse]
+    total: int
+    page: int
+    page_size: int
+    breadcrumbs: list[PublicBreadcrumbResponse]

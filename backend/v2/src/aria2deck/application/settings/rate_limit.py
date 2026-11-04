@@ -52,6 +52,27 @@ class RateLimiter:
             _AUTHENTICATED_WINDOW_MS,
         )
 
+    def check_create_pack(self, *, user_id: int) -> None:
+        self._check(
+            ("create-pack", str(user_id)),
+            self.settings().create_pack_rate_limit,
+            _AUTHENTICATED_WINDOW_MS,
+        )
+
+    def check_create_share(self, *, user_id: int) -> None:
+        self._check(
+            ("create-share", str(user_id)),
+            self.settings().create_share_rate_limit,
+            _AUTHENTICATED_WINDOW_MS,
+        )
+
+    def check_share_access(self, ip: str) -> None:
+        self._check(
+            ("share-access", ip),
+            self.settings().share_access_rate_limit,
+            _AUTHENTICATED_WINDOW_MS,
+        )
+
     def _check(self, key: tuple[str, ...], limit: int, window_ms: int) -> None:
         now_ms = self.clock_ms()
         bucket = self._buckets.get(key)

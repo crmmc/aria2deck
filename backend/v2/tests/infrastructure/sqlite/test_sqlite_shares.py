@@ -7,7 +7,7 @@ from sqlalchemy import delete, text
 from sqlalchemy.exc import IntegrityError
 
 from aria2deck.domain.errors import DomainError, ErrorCode
-from aria2deck.domain.shares import plan_share_download
+from aria2deck.domain.shares import ShareStatus, plan_share_download
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
 from aria2deck.infrastructure.sqlite.repositories.shares import ShareRepository
@@ -215,3 +215,99 @@ async def test_user_delete_cascades_share_shells_after_file_cleanup(
             await shares.get_share(share_id)
         assert caught.value.code is ErrorCode.NOT_FOUND
         assert await shares.list_shares(owner) == []
+
+
+async def test_share_statuses_map_through_share_status_only(database: SQLiteDatabase) -> None:
+    owner = await create_user(database)
+    target = await file_id(database, owner)
+    async with SQLiteUnitOfWork(database) as uow:
+        shares = ShareRepository(uow.connection)
+        await shares.create_share(user_id=owner, user_file_id=target, code="live", password_hash=None, expires_at_ms=5000, max_downloads=None, now_ms=1)
+        await shares.create_share(user_id=owner, user_file_id=target, code="gone", password_hash=None, expires_at_ms=None, max_downloads=None, now_ms=1)
+        await shares.create_share(user_id=owner, user_file_id=target, code="spent", password_hash=None, expires_at_ms=None, max_downloads=1, now_ms=1)
+        await shares.create_share(user_id=owner, user_file_id=target, code="dead", password_hash=None, expires_at_ms=None, max_downloads=None, now_ms=1)
+        await uow.connection.execute(text("UPDATE share_links SET download_count = 1 WHERE code = 'spent'"))
+        await uow.connection.execute(text("UPDATE share_links SET revoked_at_ms = 9 WHERE code = 'dead'"))
+        statuses = await shares.get_share_statuses(user_file_id=target, now_ms=100)
+    assert sorted(status.value for status in statuses) == ["active", "active", "exhausted", "revoked"]
+    late = None
+    async with SQLiteUnitOfWork(database) as uow:
+        late = await ShareRepository(uow.connection).get_share_statuses(user_file_id=target, now_ms=6000)
+    assert sorted(status.value for status in late) == ["active", "exhausted", "expired", "revoked"]
+
+
+async def test_find_share_by_code_and_pending_delete_derivation(database: SQLiteDatabase) -> None:
+    owner = await create_user(database)
+    target = await file_id(database, owner)
+    async with SQLiteUnitOfWork(database) as uow:
+        shares = ShareRepository(uow.connection)
+        share_id = await shares.create_share(user_id=owner, user_file_id=target, code="by-code", password_hash=None, expires_at_ms=None, max_downloads=None, now_ms=1)
+        record = await shares.find_share_by_code("by-code")
+        assert record is not None and record.id == share_id
+        assert await shares.find_share_by_code("missing") is None
+        content_id = (
+            await ContentRepository(uow.connection).find_object_by_key(record.content_key)
+        ).id
+    async with SQLiteUnitOfWork(database) as uow:
+        await uow.connection.execute(
+            text("UPDATE content_objects SET deletion_state = 'pending_delete' WHERE id = :id"),
+            {"id": content_id},
+        )
+    async with SQLiteUnitOfWork(database) as uow:
+        pending = await ShareRepository(uow.connection).find_share_by_code("by-code")
+    assert pending is not None
+    assert pending.file_pending_delete is True
+
+
+async def test_revoke_delete_and_revoke_all_semantics(database: SQLiteDatabase) -> None:
+    owner = await create_user(database)
+    other = await create_user(database, "other", admin=False)
+    own = await file_id(database, owner)
+    async with SQLiteUnitOfWork(database) as uow:
+        content = ContentRepository(uow.connection)
+        foreign_content = await content.create_object(
+            kind="file", digest="cd" * 32, size=5, storage_path="objects/foreign", now_ms=1
+        )
+        foreign_file = await content.add_user_file(
+            user_id=other, content_id=foreign_content, display_name="foreign", now_ms=1
+        )
+    async with SQLiteUnitOfWork(database) as uow:
+        shares = ShareRepository(uow.connection)
+        first = await shares.create_share(user_id=owner, user_file_id=own, code="r1", password_hash=None, expires_at_ms=None, max_downloads=None, now_ms=1)
+        second = await shares.create_share(user_id=owner, user_file_id=own, code="r2", password_hash=None, expires_at_ms=None, max_downloads=None, now_ms=1)
+        foreign = await shares.create_share(user_id=other, user_file_id=foreign_file, code="r3", password_hash=None, expires_at_ms=None, max_downloads=None, now_ms=1)
+        assert await shares.revoke_share(first, owner_id=owner, now_ms=10)
+        assert not await shares.revoke_share(first, owner_id=owner, now_ms=11)  # 重复撤销。
+        assert not await shares.revoke_share(second, owner_id=other, now_ms=12)  # 他人不可撤销。
+        assert (await shares.get_share(first)).revoked_at_ms == 10
+        assert await shares.revoke_all_shares(owner, now_ms=20) == 1  # first 已撤销，仅 second。
+        assert (await shares.get_share(second)).revoked_at_ms == 20
+        assert (await shares.get_share(foreign)).revoked_at_ms is None
+
+        assert await shares.delete_share(first, owner_id=owner)
+        assert not await shares.delete_share(first, owner_id=owner)
+        assert not await shares.delete_share(foreign, owner_id=owner)
+        assert await shares.count_shares(owner) == 1
+
+
+async def test_page_shares_filters_status_and_paginates(database: SQLiteDatabase) -> None:
+    owner = await create_user(database)
+    target = await file_id(database, owner)
+    async with SQLiteUnitOfWork(database) as uow:
+        shares = ShareRepository(uow.connection)
+        await shares.create_share(user_id=owner, user_file_id=target, code="p1", password_hash=None, expires_at_ms=None, max_downloads=None, now_ms=1)
+        await shares.create_share(user_id=owner, user_file_id=target, code="p2", password_hash=None, expires_at_ms=None, max_downloads=None, now_ms=1)
+        await shares.create_share(user_id=owner, user_file_id=target, code="p3", password_hash=None, expires_at_ms=None, max_downloads=None, now_ms=1)
+        await uow.connection.execute(text("UPDATE share_links SET revoked_at_ms = 5 WHERE code IN ('p2', 'p3')"))
+        active, active_total = await shares.page_shares(owner, now_ms=10, status=ShareStatus.ACTIVE)
+        revoked, revoked_total = await shares.page_shares(owner, now_ms=10, status=ShareStatus.REVOKED, offset=1, limit=1)
+        everything, everything_total = await shares.page_shares(owner, now_ms=10)
+        beyond, beyond_total = await shares.page_shares(owner, now_ms=10, offset=9, limit=5)
+    assert [record.code for record in active] == ["p1"]
+    assert active_total == 1
+    assert [record.code for record in revoked] == ["p3"]
+    assert revoked_total == 2
+    assert everything_total == 3
+    assert [record.code for record in everything] == ["p1", "p2", "p3"]
+    assert beyond == []
+    assert beyond_total == 3

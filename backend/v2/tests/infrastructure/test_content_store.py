@@ -223,3 +223,45 @@ async def test_scan_entries_matches_the_completion_layout(tmp_path: Path) -> Non
     await store.install(2, file_preparation)
     assert file_preparation.identity.kind is ContentKind.FILE
     assert await store.scan_entries(file_preparation.storage_path) == []
+
+
+async def test_install_prepared_is_idempotent_and_guards_symlink_parent(tmp_path: Path) -> None:
+    store = DownloadContentStore(tmp_path)
+    part = tmp_path / "packs" / "prepared-1.part"
+    part.parent.mkdir(parents=True)
+    part.write_bytes(b"payload")
+    digest = "ab" * 32
+
+    canonical = await store.install_prepared("packs/prepared-1.part", digest)
+    assert canonical == f"objects/file-{digest}"
+    assert (tmp_path / "objects" / f"file-{digest}").read_bytes() == b"payload"
+
+    part.write_bytes(b"stale copy")  # 规范位已存在：再次安装只清 part。
+    canonical = await store.install_prepared("packs/prepared-1.part", digest)
+    assert canonical == f"objects/file-{digest}"
+    assert not part.exists()
+    assert (tmp_path / "objects" / f"file-{digest}").read_bytes() == b"payload"
+
+    import shutil
+
+    other = tmp_path / "objects2"
+    other.mkdir()
+    shutil.rmtree(tmp_path / "objects")
+    (tmp_path / "objects").symlink_to(other, target_is_directory=True)
+    with pytest.raises(DomainError) as caught:
+        await store.install_prepared("packs/prepared-1.part", "cd" * 32)
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+
+
+async def test_remove_prepared_is_idempotent_for_missing_and_symlinks(tmp_path: Path) -> None:
+    store = DownloadContentStore(tmp_path)
+    await store.remove_prepared("packs/prepared-9.part")  # 不存在：幂等成功。
+
+    target = tmp_path / "outside"
+    target.write_bytes(b"x")
+    part = tmp_path / "packs" / "prepared-9.part"
+    part.parent.mkdir(parents=True)
+    part.symlink_to(target)
+    await store.remove_prepared("packs/prepared-9.part")
+    assert not part.exists()
+    assert target.exists()

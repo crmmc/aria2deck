@@ -15,9 +15,14 @@ from ..application.library.commands import LibraryCommandService
 from ..application.library.deletion import ContentDeletionWorker
 from ..application.library.download import LibraryDownloadService
 from ..application.library.queries import LibraryQueryService
+from ..application.packs.admission import PackAdmissionService
+from ..application.packs.control import PackControlService
+from ..application.packs.progress import PackProgressService
 from ..application.settings.rate_limit import RateLimiter
 from ..application.settings.service import SettingsService
 from ..application.settings.trackers import TrackerService
+from ..application.shares.access import PublicShareService
+from ..application.shares.manage import ShareManageService
 from ..application.system.connectivity import BackendConnectivity
 from ..domain.accounts import Permission, authorize_admin_session
 from ..domain.errors import DomainError, ErrorCode
@@ -66,6 +71,26 @@ def library_download(request: Request) -> LibraryDownloadService:
 
 def library_deletion(request: Request) -> ContentDeletionWorker:
     return cast(ContentDeletionWorker, request.app.state.library_deletion)
+
+
+def pack_admission(request: Request) -> PackAdmissionService:
+    return cast(PackAdmissionService, request.app.state.pack_admission)
+
+
+def pack_progress(request: Request) -> PackProgressService:
+    return cast(PackProgressService, request.app.state.pack_progress)
+
+
+def pack_control(request: Request) -> PackControlService:
+    return cast(PackControlService, request.app.state.pack_control)
+
+
+def share_manage(request: Request) -> ShareManageService:
+    return cast(ShareManageService, request.app.state.share_manage)
+
+
+def public_shares(request: Request) -> PublicShareService:
+    return cast(PublicShareService, request.app.state.public_shares)
 
 
 def tracker_service(request: Request) -> TrackerService:

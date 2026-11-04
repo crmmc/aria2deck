@@ -18,7 +18,10 @@ from .api.downloads import router as downloads_router
 from .api.errors import install_error_handlers
 from .api.files import router as files_router
 from .api.health import router as health_router
+from .api.packs import router as packs_router
+from .api.public_shares import router as public_shares_router
 from .api.settings import router as settings_router
+from .api.shares import router as shares_router
 from .api.static_site import register_static_site
 from .api.system import router as system_router
 from .application.accounts.service import AccountService
@@ -36,16 +39,25 @@ from .application.library.deletion import ContentDeletionWorker
 from .application.library.download import LibraryDownloadService
 from .application.library.leases import ReadLeaseManager
 from .application.library.queries import LibraryQueryService
+from .application.packs.admission import PackAdmissionService
 from .application.packs.cleanup import PackUserCleanup
+from .application.packs.control import PackControlService
+from .application.packs.dispatcher import PackDispatcher
+from .application.packs.progress import PackProgressService
+from .application.packs.source_cleanup import SourceCleanupWorker
 from .application.ports import UnitOfWork
 from .application.settings.rate_limit import RateLimiter
 from .application.settings.service import SettingsService
 from .application.settings.trackers import TrackerService
+from .application.shares.access import PublicShareService
+from .application.shares.manage import ShareManageService
+from .application.shares.tokens import ShareAccessTokenStore
 from .application.system.connectivity import BackendConnectivity
 from .application.system.health import HealthService
 from .application.system.supervisor import WorkerSupervisor
 from .domain.errors import DomainError
 from .domain.settings import SystemSettings
+from .infrastructure.archive_writer import ArchiveWriter
 from .infrastructure.aria2 import Aria2DownloadControl
 from .infrastructure.aria2_submission import Aria2SubmissionClient
 from .infrastructure.config import Settings
@@ -67,6 +79,7 @@ from .infrastructure.sqlite.repositories.downloads import DownloadRepository
 from .infrastructure.sqlite.repositories.packs import PackRepository
 from .infrastructure.sqlite.repositories.quota import QuotaRepository
 from .infrastructure.sqlite.repositories.settings import SettingsRepository
+from .infrastructure.sqlite.repositories.shares import ShareRepository
 from .infrastructure.sqlite.repositories.trackers import TrackerRepository
 from .infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
 
@@ -134,10 +147,11 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         control=Aria2DownloadControl(settings=settings_service.current),
         clock_ms=_clock_ms,
     )
+    pack_writer_control = PackWriterControl()
     pack_cleanup = PackUserCleanup(
         uow_factory=uow_factory,
         repository_factory=pack_repository,
-        control=PackWriterControl(),
+        control=pack_writer_control,
         clock_ms=_clock_ms,
     )
     library_cleanup = LibraryUserCleanup(
@@ -253,6 +267,67 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         lease_ttl_ms=DELETE_LEASE_TTL_MS,
     )
     supervisor.register("content-deletion", library_deletion.run_worker)
+    pack_admission = PackAdmissionService(
+        uow_factory=uow_factory,
+        repository_factory=pack_repository,
+        quota_repository_factory=lambda uow: QuotaRepository(cast(AsyncConnection, uow.connection)),
+        machine_space=content_store,
+        settings=settings_service.current,
+        clock_ms=_clock_ms,
+    )
+    pack_progress = PackProgressService(
+        uow_factory=uow_factory,
+        repository_factory=pack_repository,
+        content_repository_factory=content_repository,
+    )
+    pack_control = PackControlService(
+        uow_factory=uow_factory,
+        repository_factory=pack_repository,
+        content_repository_factory=content_repository,
+        quota_repository_factory=lambda uow: QuotaRepository(cast(AsyncConnection, uow.connection)),
+        stop_writer=pack_writer_control.stop_and_wait,
+        prepared_store=content_store,
+        clock_ms=_clock_ms,
+        lease_owner=DELETE_LEASE_OWNER,
+        lease_ttl_ms=DELETE_LEASE_TTL_MS,
+    )
+    pack_dispatcher = PackDispatcher(
+        uow_factory=uow_factory,
+        repository_factory=pack_repository,
+        quota_repository_factory=lambda uow: QuotaRepository(cast(AsyncConnection, uow.connection)),
+        writer=ArchiveWriter(),
+        content_store=content_store,
+        writer_control=pack_writer_control,
+        settings=settings_service.current,
+        clock_ms=_clock_ms,
+    )
+    pack_source_cleanup = SourceCleanupWorker(
+        uow_factory=uow_factory,
+        repository_factory=pack_repository,
+        content_repository_factory=content_repository,
+        quota_repository_factory=lambda uow: QuotaRepository(cast(AsyncConnection, uow.connection)),
+        clock_ms=_clock_ms,
+        lease_owner=DELETE_LEASE_OWNER,
+        lease_ttl_ms=DELETE_LEASE_TTL_MS,
+    )
+    supervisor.register("pack-dispatcher", pack_dispatcher.run_worker)
+    supervisor.register("pack-source-cleanup", pack_source_cleanup.run_worker)
+    share_tokens = ShareAccessTokenStore(clock_ms=_clock_ms)
+    share_manage = ShareManageService(
+        uow_factory=uow_factory,
+        repository_factory=lambda uow: ShareRepository(cast(AsyncConnection, uow.connection)),
+        clock_ms=_clock_ms,
+    )
+    public_shares = PublicShareService(
+        uow_factory=uow_factory,
+        repository_factory=lambda uow: ShareRepository(cast(AsyncConnection, uow.connection)),
+        content_repository_factory=content_repository,
+        tokens=share_tokens,
+        leases=read_leases,
+        content_paths=content_store,
+        streamer=library_download,
+        clock_ms=_clock_ms,
+    )
     health_service = HealthService(
         database_check=partial(_database_is_ready, database),
         directory_check=partial(_directory_is_ready, config.download_directory),
@@ -304,6 +379,13 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     app.state.library_commands = library_commands
     app.state.library_download = library_download
     app.state.library_deletion = library_deletion
+    app.state.pack_admission = pack_admission
+    app.state.pack_progress = pack_progress
+    app.state.pack_control = pack_control
+    app.state.pack_dispatcher = pack_dispatcher
+    app.state.pack_source_cleanup = pack_source_cleanup
+    app.state.share_manage = share_manage
+    app.state.public_shares = public_shares
     app.state.tracker_service = tracker_service
     app.state.download_observations = observations
     app.state.settings_service = settings_service
@@ -317,6 +399,9 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     app.include_router(accounts_router)
     app.include_router(downloads_router)
     app.include_router(files_router)
+    app.include_router(packs_router)
+    app.include_router(shares_router)
+    app.include_router(public_shares_router)
     app.include_router(settings_router)
     app.include_router(system_router)
     app.include_router(health_router)
