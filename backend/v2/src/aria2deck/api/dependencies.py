@@ -11,10 +11,15 @@ from ..application.downloads.commands import DownloadCommandService
 from ..application.downloads.gateway import DownloadGatewayService
 from ..application.downloads.history import HistoryService
 from ..application.downloads.queries import DownloadQueryService
+from ..application.library.commands import LibraryCommandService
+from ..application.library.deletion import ContentDeletionWorker
+from ..application.library.download import LibraryDownloadService
+from ..application.library.queries import LibraryQueryService
 from ..application.settings.rate_limit import RateLimiter
 from ..application.settings.service import SettingsService
 from ..application.settings.trackers import TrackerService
 from ..application.system.connectivity import BackendConnectivity
+from ..domain.accounts import Permission, authorize_admin_session
 from ..domain.errors import DomainError, ErrorCode
 
 SESSION_COOKIE = "aria2deck_v2_session"
@@ -45,6 +50,22 @@ def download_history(request: Request) -> HistoryService:
 
 def download_gateway(request: Request) -> DownloadGatewayService:
     return cast(DownloadGatewayService, request.app.state.download_gateway)
+
+
+def library_queries(request: Request) -> LibraryQueryService:
+    return cast(LibraryQueryService, request.app.state.library_queries)
+
+
+def library_commands(request: Request) -> LibraryCommandService:
+    return cast(LibraryCommandService, request.app.state.library_commands)
+
+
+def library_download(request: Request) -> LibraryDownloadService:
+    return cast(LibraryDownloadService, request.app.state.library_download)
+
+
+def library_deletion(request: Request) -> ContentDeletionWorker:
+    return cast(ContentDeletionWorker, request.app.state.library_deletion)
 
 
 def tracker_service(request: Request) -> TrackerService:
@@ -112,3 +133,10 @@ async def required_session_principal(
     _session: Annotated[str | None, Security(SESSION_COOKIE_SCHEME)] = None,
 ) -> Principal:
     return _require_principal(principal)
+
+
+def required_admin_principal(
+    principal: Principal = Depends(required_principal),
+) -> Principal:
+    authorize_admin_session(principal.user.role, principal.kind, Permission.MANAGE_STORAGE)
+    return principal

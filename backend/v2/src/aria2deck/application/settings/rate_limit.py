@@ -45,6 +45,13 @@ class RateLimiter:
             _AUTHENTICATED_WINDOW_MS,
         )
 
+    def check_file_search(self, *, user_id: int) -> None:
+        self._check(
+            ("file-search", str(user_id)),
+            self.settings().file_search_rate_limit,
+            _AUTHENTICATED_WINDOW_MS,
+        )
+
     def _check(self, key: tuple[str, ...], limit: int, window_ms: int) -> None:
         now_ms = self.clock_ms()
         bucket = self._buckets.get(key)

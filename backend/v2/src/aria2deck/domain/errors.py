@@ -35,6 +35,7 @@ class ErrorCode(StrEnum):
     CONFIGURATION_INVALID = "configuration_invalid"
     SCHEMA_MISMATCH = "schema_mismatch"
     RATE_LIMITED = "rate_limited"
+    NOT_IMPLEMENTED = "not_implemented"
 
 
 class DomainError(Exception):

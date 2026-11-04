@@ -151,3 +151,75 @@ async def test_cleanup_unlinks_root_symlink_and_rejects_non_directory(tmp_path: 
     with pytest.raises(DomainError) as caught:
         await store.cleanup_attempt(2)
     assert caught.value.code is ErrorCode.INVALID_STATE
+
+
+async def test_physical_delete_is_idempotent_for_files_trees_and_symlinks(tmp_path: Path) -> None:
+    store = DownloadContentStore(tmp_path)
+    single = tmp_path / "objects" / "file-abc"
+    single.parent.mkdir()
+    single.write_bytes(b"abc")
+    await store.physical_delete("objects/file-abc")
+    assert not single.exists()
+    await store.physical_delete("objects/file-abc")
+
+    tree = tmp_path / "objects" / "directory-def"
+    (tree / "nested").mkdir(parents=True)
+    (tree / "nested" / "child.bin").write_bytes(b"child")
+    (tree / "empty").mkdir()
+    await store.physical_delete("objects/directory-def")
+    assert not tree.exists()
+    await store.physical_delete("objects/directory-def")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "objects" / "file-link"
+    link.symlink_to(outside)
+    await store.physical_delete("objects/file-link")
+    assert not link.exists()
+    assert outside.exists()
+
+    with pytest.raises(DomainError) as caught:
+        await store.physical_delete("/absolute")
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+
+
+async def test_open_read_handle_resolves_entry_paths_and_rejects_escape(tmp_path: Path) -> None:
+    source = tmp_path / "1"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "child.bin").write_bytes(b"child")
+    (source / "root.bin").write_bytes(b"root")
+    store = DownloadContentStore(tmp_path)
+    preparation = await store.scan(1)
+    await store.install(1, preparation)
+
+    root = await store.open_read_handle(preparation.storage_path, "root.bin")
+    assert root.read() == b"root"
+    root.close()
+    nested = await store.open_read_handle(preparation.storage_path, "nested/child.bin")
+    assert nested.read() == b"child"
+    nested.close()
+
+    for escape in ("../escape", "a\\b", "/absolute"):
+        with pytest.raises(DomainError) as caught:
+            await store.open_read_handle(preparation.storage_path, escape)
+        assert caught.value.code is ErrorCode.INVALID_INPUT
+
+
+async def test_scan_entries_matches_the_completion_layout(tmp_path: Path) -> None:
+    source = tmp_path / "1"
+    (source / "nested").mkdir(parents=True)
+    (source / "empty").mkdir()
+    (source / "root.bin").write_bytes(b"root")
+    (source / "nested" / "child.bin").write_bytes(b"child")
+    store = DownloadContentStore(tmp_path)
+    preparation = await store.scan(1)
+    await store.install(1, preparation)
+    assert await store.scan_entries(preparation.storage_path) == list(preparation.entries)
+
+    single = tmp_path / "2"
+    single.mkdir()
+    (single / "file.bin").write_bytes(b"abc")
+    file_preparation = await store.scan(2)
+    await store.install(2, file_preparation)
+    assert file_preparation.identity.kind is ContentKind.FILE
+    assert await store.scan_entries(file_preparation.storage_path) == []

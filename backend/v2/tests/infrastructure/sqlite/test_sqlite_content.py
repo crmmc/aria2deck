@@ -72,12 +72,16 @@ async def test_pending_delete_content_rejects_new_references(database: SQLiteDat
     content_id = await object_id(database)
     async with SQLiteUnitOfWork(database) as uow:
         repo = ContentRepository(uow.connection)
-        assert await repo.claim_orphan_delete(content_id, now_ms=1)
+        assert await repo.claim_orphan_delete(
+            content_id, now_ms=1, lease_owner="content-deletion", lease_ttl_ms=1000
+        )
         assert (await repo.get_object(content_id)).deletion_state.value == "pending_delete"
         with pytest.raises(DomainError) as caught:
             await repo.add_user_file(user_id=user_id, content_id=content_id, display_name="a", now_ms=1)
         assert caught.value.code is ErrorCode.CONTENT_PENDING_DELETE
-        assert not await repo.claim_orphan_delete(content_id, now_ms=2)
+        assert not await repo.claim_orphan_delete(
+            content_id, now_ms=2, lease_owner="content-deletion", lease_ttl_ms=1000
+        )
 
 
 async def test_existing_reference_and_pending_pack_source_block_physical_delete_claim(database: SQLiteDatabase) -> None:
@@ -86,14 +90,20 @@ async def test_existing_reference_and_pending_pack_source_block_physical_delete_
     async with SQLiteUnitOfWork(database) as uow:
         content = ContentRepository(uow.connection)
         file_id = await content.add_user_file(user_id=user_id, content_id=content_id, display_name="a", now_ms=1)
-        assert not await content.claim_orphan_delete(content_id, now_ms=1)
+        assert not await content.claim_orphan_delete(
+            content_id, now_ms=1, lease_owner="content-deletion", lease_ttl_ms=1000
+        )
         pack_id = await PackRepository(uow.connection).create_job(owner_id=user_id, output_name="a.zip", pack_format="zip", source_size=10, reserved_bytes=10, physical_reserved_bytes=10, delete_source=True, now_ms=1)
         from aria2deck.domain.packs import PackSourceSnapshot
         await PackRepository(uow.connection).add_source(pack_id, PackSourceSnapshot(file_id, content_id, "file:" + HASH, "a", 1, 10))
         await uow.connection.execute(text("DELETE FROM user_files WHERE id = :id"), {"id": file_id})
-        assert not await content.claim_orphan_delete(content_id, now_ms=2)
+        assert not await content.claim_orphan_delete(
+            content_id, now_ms=2, lease_owner="content-deletion", lease_ttl_ms=1000
+        )
         await uow.connection.execute(text("UPDATE pack_sources SET cleanup_status = 'kept'"))
-        assert await content.claim_orphan_delete(content_id, now_ms=3)
+        assert await content.claim_orphan_delete(
+            content_id, now_ms=3, lease_owner="content-deletion", lease_ttl_ms=1000
+        )
 
 
 async def test_pack_sources_do_not_have_current_file_or_content_foreign_keys(database: SQLiteDatabase) -> None:

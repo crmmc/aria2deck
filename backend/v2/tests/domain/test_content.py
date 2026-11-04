@@ -5,9 +5,12 @@ import pytest
 from aria2deck.domain.content import (
     ContentDeletionState,
     ContentKind,
+    RangeFallback,
+    RangeSpec,
     content_identity,
     join_relative_path,
     normalize_relative_path,
+    parse_range_header,
     plan_reference_removal,
     require_physical_deletable,
     validate_display_name,
@@ -106,3 +109,67 @@ def test_physical_delete_requires_pending_zero_references_and_drained_leases() -
         with pytest.raises(DomainError) as caught:
             require_physical_deletable(state, references, leases)
         assert caught.value.code is code
+
+
+def test_range_spec_exposes_inclusive_length() -> None:
+    assert parse_range_header("bytes=2-5", 10) == RangeSpec(2, 5)
+    assert parse_range_header("bytes=2-5", 10).length == 4
+
+
+@pytest.mark.parametrize(
+    "header,total_size,expected",
+    [
+        ("bytes=0-9", 10, RangeSpec(0, 9)),
+        ("bytes=0-", 10, RangeSpec(0, 9)),
+        ("bytes=2-5", 10, RangeSpec(2, 5)),
+        ("bytes=9-9", 10, RangeSpec(9, 9)),
+        ("bytes=7-", 10, RangeSpec(7, 9)),
+        ("bytes=-3", 10, RangeSpec(7, 9)),
+        ("bytes=-10", 10, RangeSpec(0, 9)),
+        ("bytes=-99", 10, RangeSpec(0, 9)),
+        ("bytes=1-2", 10, RangeSpec(1, 2)),
+        ("bytes=0-10", 10, RangeSpec(0, 9)),
+        ("bytes=5-999", 10, RangeSpec(5, 9)),
+        ("BYTES=1-2", 10, RangeSpec(1, 2)),
+        (" bytes=1-2 ", 10, RangeSpec(1, 2)),
+    ],
+)
+def test_parse_range_header_accepts_single_ranges(
+    header: str, total_size: int, expected: RangeSpec
+) -> None:
+    result = parse_range_header(header, total_size)
+    assert isinstance(result, RangeSpec)
+    assert result == expected
+
+
+@pytest.mark.parametrize("header", ["items=0-1", "bytes=0-1,3-4", "bytes=0-1, 5-6", "", "="])
+def test_parse_range_header_falls_back_to_full_response(header: str) -> None:
+    assert isinstance(parse_range_header(header, 10), RangeFallback)
+
+
+@pytest.mark.parametrize(
+    "header,total_size",
+    [
+        ("bytes=-0", 10),
+        ("bytes=-", 10),
+        ("bytes=5-3", 10),
+        ("bytes=10-", 10),
+        ("bytes=10-12", 10),
+        ("bytes=0-", 0),
+        ("bytes=-1", 0),
+        ("bytes=a-b", 10),
+        ("bytes=1-x", 10),
+        ("bytes=-x", 10),
+        ("bytes=abc", 10),
+    ],
+)
+def test_parse_range_header_rejects_unsatisfiable_ranges(header: str, total_size: int) -> None:
+    with pytest.raises(DomainError) as caught:
+        parse_range_header(header, total_size)
+    assert caught.value.code is ErrorCode.RANGE_NOT_SATISFIABLE
+
+
+def test_parse_range_header_rejects_negative_total_size() -> None:
+    with pytest.raises(DomainError) as caught:
+        parse_range_header("bytes=0-1", -1)
+    assert caught.value.code is ErrorCode.INVALID_INPUT

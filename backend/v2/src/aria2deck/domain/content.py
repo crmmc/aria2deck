@@ -117,3 +117,63 @@ def require_physical_deletable(
         raise DomainError(ErrorCode.INVALID_STATE, "内容尚未进入待删除状态")
     if reference_count != 0 or read_leases != 0:
         raise DomainError(ErrorCode.CONTENT_BUSY, "内容仍有引用或读取租约")
+
+
+@dataclass(frozen=True, slots=True)
+class RangeSpec:
+    """Inclusive byte range selected by a single-range header."""
+
+    start: int
+    end: int
+
+    @property
+    def length(self) -> int:
+        return self.end - self.start + 1
+
+
+@dataclass(frozen=True, slots=True)
+class RangeFallback:
+    """Marker: the range cannot be honored partially, serve the full body with 200."""
+
+
+_RANGE_NUMBER = re.compile(r"[0-9]+")
+
+
+def _unsatisfiable() -> DomainError:
+    return DomainError(ErrorCode.RANGE_NOT_SATISFIABLE, "请求的区间无法满足")
+
+
+def parse_range_header(header: str, total_size: int) -> RangeSpec | RangeFallback:
+    if total_size < 0:
+        raise DomainError(ErrorCode.INVALID_INPUT, "内容大小不能为负数")
+    unit, separator, raw_set = header.strip().partition("=")
+    if not separator or unit.strip().lower() != "bytes":
+        return RangeFallback()
+    raw_spec = raw_set.strip()
+    if "," in raw_spec:
+        return RangeFallback()
+    start_text, hyphen, tail = raw_spec.partition("-")
+    if not hyphen:
+        raise _unsatisfiable()
+    start_text = start_text.strip()
+    tail = tail.strip()
+    if start_text == "":
+        # 后缀形式 bytes=-n：-0 非法，n 超过总大小按总大小截断（RFC 9110）。
+        if _RANGE_NUMBER.fullmatch(tail) is None:
+            raise _unsatisfiable()
+        suffix = int(tail)
+        if suffix == 0 or total_size == 0:
+            raise _unsatisfiable()
+        return RangeSpec(max(total_size - suffix, 0), total_size - 1)
+    if _RANGE_NUMBER.fullmatch(start_text) is None:
+        raise _unsatisfiable()
+    start = int(start_text)
+    if tail == "":
+        end = total_size - 1
+    elif _RANGE_NUMBER.fullmatch(tail) is None:
+        raise _unsatisfiable()
+    else:
+        end = min(int(tail), total_size - 1)
+    if start > end or total_size == 0 or start >= total_size:
+        raise _unsatisfiable()
+    return RangeSpec(start, end)

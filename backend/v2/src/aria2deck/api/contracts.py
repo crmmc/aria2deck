@@ -340,3 +340,103 @@ class TrackerStatusResponse(BaseModel):
     failed_urls: list[str]
     updated_at_ms: int | None
     last_refresh_at_ms: int | None
+
+
+class FileItemResponse(BaseModel):
+    id: int
+    display_name: str
+    kind: Literal["file", "directory"]
+    size: int
+    created_at_ms: int
+
+
+class FileListResponse(BaseModel):
+    items: list[FileItemResponse]
+    total: int
+    page: int
+    page_size: int
+    space: TaskQuotaResponse
+
+
+class FileEntryItemResponse(BaseModel):
+    name: str
+    path: str
+    kind: Literal["file", "directory"]
+    size: int
+
+
+class DirectoryBreadcrumbResponse(BaseModel):
+    name: str
+    path: str
+
+
+class FileEntryListResponse(BaseModel):
+    items: list[FileEntryItemResponse]
+    total: int
+    page: int
+    page_size: int
+    breadcrumbs: list[DirectoryBreadcrumbResponse]
+
+
+class FileSearchHitResponse(BaseModel):
+    user_file_id: int
+    display_name: str
+    path: str
+    kind: Literal["file", "directory"]
+    size: int
+
+
+class FileSearchResponse(BaseModel):
+    hits: list[FileSearchHitResponse]
+    truncated: bool
+
+
+class FileRenameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+
+
+class StorageFileResponse(BaseModel):
+    content_id: int
+    content_key: str
+    kind: Literal["file", "directory"]
+    size: int
+    storage_path: str
+    on_disk: bool
+    reference_count: int
+    deletion_state: Literal["active", "pending_delete", "tombstoned"]
+
+
+class StorageFileListResponse(BaseModel):
+    items: list[StorageFileResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class StorageReferencingUserResponse(BaseModel):
+    user_id: int
+    username: str
+    display_name: str
+    referenced_at_ms: int
+
+
+class StorageReferencingUserListResponse(BaseModel):
+    items: list[StorageReferencingUserResponse]
+
+
+class StorageDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+class StorageDeleteResultResponse(BaseModel):
+    content_id: int
+    accepted: bool
+    error: ErrorBody | None = None
+
+
+class StorageDeleteResponse(BaseModel):
+    accepted_count: int
+    rejected_count: int
+    results: list[StorageDeleteResultResponse]

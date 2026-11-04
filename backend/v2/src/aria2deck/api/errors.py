@@ -43,6 +43,7 @@ _STATUS = {
     ErrorCode.CONFIGURATION_INVALID: 500,
     ErrorCode.SCHEMA_MISMATCH: 500,
     ErrorCode.RATE_LIMITED: 429,
+    ErrorCode.NOT_IMPLEMENTED: 501,
 }
 
 ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
@@ -52,9 +53,11 @@ ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     404: {"model": ErrorResponse, "description": "资源不存在"},
     409: {"model": ErrorResponse, "description": "状态冲突"},
     413: {"model": ErrorResponse, "description": "内容过大"},
+    416: {"model": ErrorResponse, "description": "请求的区间无法满足"},
     422: {"model": ErrorResponse, "description": "输入无效"},
     429: {"model": ErrorResponse, "description": "请求过于频繁"},
     500: {"model": ErrorResponse, "description": "服务器错误"},
+    501: {"model": ErrorResponse, "description": "暂未实现"},
     502: {"model": ErrorResponse, "description": "外部服务结果不可确认"},
     503: {"model": ErrorResponse, "description": "服务暂不可用"},
 }

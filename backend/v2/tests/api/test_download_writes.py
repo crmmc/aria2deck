@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from fastapi import FastAPI
@@ -273,10 +274,12 @@ def test_completed_content_attaches_to_another_user_and_same_user_is_idempotent(
             async with SQLiteUnitOfWork(database) as uow:
                 downloads = DownloadRepository(uow.connection)
                 record = await downloads.get_task(user_id=int(admin["id"]), task_id=attempt_id)
+                # 当前时间基准：1970 时间戳会被历史保留 worker 立即软过期，与断言竞态（已知坑）。
+                now_ms = time.time_ns() // 1_000_000
                 content_id = await ContentRepository(uow.connection).create_object(
-                    kind="file", digest="ab" * 32, size=10, storage_path="objects/file", now_ms=2
+                    kind="file", digest="ab" * 32, size=10, storage_path="objects/file", now_ms=now_ms
                 )
-                await downloads.complete_attempt(record.attempt_id, content_id=content_id, now_ms=2)
+                await downloads.complete_attempt(record.attempt_id, content_id=content_id, now_ms=now_ms)
         finally:
             await database.close()
 

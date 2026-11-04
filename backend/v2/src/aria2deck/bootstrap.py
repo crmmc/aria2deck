@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections.abc import AsyncIterator
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from .api.accounts import router as accounts_router
 from .api.downloads import router as downloads_router
 from .api.errors import install_error_handlers
+from .api.files import router as files_router
 from .api.health import router as health_router
 from .api.settings import router as settings_router
 from .api.static_site import register_static_site
@@ -29,6 +31,11 @@ from .application.downloads.projection import TaskProjector
 from .application.downloads.queries import DownloadQueryService
 from .application.downloads.recovery import DownloadRecoveryService
 from .application.library.cleanup import LibraryUserCleanup
+from .application.library.commands import LibraryCommandService
+from .application.library.deletion import ContentDeletionWorker
+from .application.library.download import LibraryDownloadService
+from .application.library.leases import ReadLeaseManager
+from .application.library.queries import LibraryQueryService
 from .application.packs.cleanup import PackUserCleanup
 from .application.ports import UnitOfWork
 from .application.settings.rate_limit import RateLimiter
@@ -51,13 +58,19 @@ from .infrastructure.security import CredentialManager
 from .infrastructure.sqlite.bootstrap import initialize_database, validate_database
 from .infrastructure.sqlite.engine import SQLiteDatabase
 from .infrastructure.sqlite.repositories.accounts import AccountRepository
-from .infrastructure.sqlite.repositories.content import ContentRepository
+from .infrastructure.sqlite.repositories.content import (
+    DELETE_LEASE_OWNER,
+    DELETE_LEASE_TTL_MS,
+    ContentRepository,
+)
 from .infrastructure.sqlite.repositories.downloads import DownloadRepository
 from .infrastructure.sqlite.repositories.packs import PackRepository
 from .infrastructure.sqlite.repositories.quota import QuotaRepository
 from .infrastructure.sqlite.repositories.settings import SettingsRepository
 from .infrastructure.sqlite.repositories.trackers import TrackerRepository
 from .infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
+
+logger = logging.getLogger(__name__)
 
 
 async def _database_is_ready(database: SQLiteDatabase) -> bool:
@@ -172,12 +185,13 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         retention_days=lambda: settings_service.current().history_retention_days,
     )
     connectivity = BackendConnectivity()
+    content_store = DownloadContentStore(config.download_directory)
     download_lifecycle = DownloadLifecycleService(
         uow_factory=uow_factory,
         repository_factory=download_repository,
         content_repository_factory=content_repository,
         backend=submission_backend,
-        content_store=DownloadContentStore(config.download_directory),
+        content_store=content_store,
         observations=observations,
         connectivity=connectivity,
         clock_ms=_clock_ms,
@@ -209,6 +223,36 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     supervisor.register("account-deletion", account_service.run_deletion_worker)
     supervisor.register("history-retention", download_history.run_worker)
     supervisor.register("tracker-refresh", tracker_service.run_worker)
+    library_queries = LibraryQueryService(
+        uow_factory=uow_factory,
+        repository_factory=content_repository,
+        quota_repository_factory=lambda uow: QuotaRepository(cast(AsyncConnection, uow.connection)),
+        storage_presence=content_store,
+    )
+    library_commands = LibraryCommandService(
+        uow_factory=uow_factory,
+        repository_factory=content_repository,
+        quota_repository_factory=lambda uow: QuotaRepository(cast(AsyncConnection, uow.connection)),
+        clock_ms=_clock_ms,
+        lease_owner=DELETE_LEASE_OWNER,
+        lease_ttl_ms=DELETE_LEASE_TTL_MS,
+    )
+    read_leases = ReadLeaseManager(uow_factory=uow_factory, repository_factory=content_repository)
+    library_download = LibraryDownloadService(
+        uow_factory=uow_factory,
+        repository_factory=content_repository,
+        leases=read_leases,
+        content_store=content_store,
+    )
+    library_deletion = ContentDeletionWorker(
+        uow_factory=uow_factory,
+        repository_factory=content_repository,
+        content_store=content_store,
+        clock_ms=_clock_ms,
+        owner=DELETE_LEASE_OWNER,
+        lease_ttl_ms=DELETE_LEASE_TTL_MS,
+    )
+    supervisor.register("content-deletion", library_deletion.run_worker)
     health_service = HealthService(
         database_check=partial(_database_is_ready, database),
         directory_check=partial(_directory_is_ready, config.download_directory),
@@ -234,6 +278,9 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
             )
             await settings_service.initialize()
             await download_recovery.recover()
+            async with uow_factory() as uow:
+                reset_leases = await content_repository(uow).reset_all_read_leases()
+            logger.info("启动读租约复位 count=%s", reset_leases)
             app.state.readiness_check = health_service.is_ready
             app.state.readiness_details = health_service.errors
             await supervisor.start()
@@ -253,6 +300,10 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     app.state.download_recovery = download_recovery
     app.state.download_lifecycle = download_lifecycle
     app.state.download_gateway = download_gateway
+    app.state.library_queries = library_queries
+    app.state.library_commands = library_commands
+    app.state.library_download = library_download
+    app.state.library_deletion = library_deletion
     app.state.tracker_service = tracker_service
     app.state.download_observations = observations
     app.state.settings_service = settings_service
@@ -265,6 +316,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     install_error_handlers(app)
     app.include_router(accounts_router)
     app.include_router(downloads_router)
+    app.include_router(files_router)
     app.include_router(settings_router)
     app.include_router(system_router)
     app.include_router(health_router)

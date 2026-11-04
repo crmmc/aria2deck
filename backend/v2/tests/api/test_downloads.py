@@ -49,9 +49,11 @@ def seed_task(
     completed_bytes: int = 100,
     reserved_bytes: int = 0,
     attempt_id: int | None = None,
-    created_at_ms: int = 1,
+    created_at_ms: int | None = None,
 ) -> tuple[int, int]:
     async def write() -> tuple[int, int]:
+        # 默认使用当前时间：1970 时间戳会被历史保留 worker 立即过期，与断言竞态（已知坑）。
+        timestamp = _now_ms() if created_at_ms is None else created_at_ms
         database = SQLiteDatabase(settings.database_path)
         try:
             async with SQLiteUnitOfWork(database) as uow:
@@ -68,7 +70,7 @@ def seed_task(
                         selected_file_indexes_json=None,
                         display_name=name,
                         display_uri=display_uri,
-                        now_ms=created_at_ms,
+                        now_ms=timestamp,
                     )
                     current_attempt_id = await repository.create_attempt(
                         source_id=source_id,
@@ -76,7 +78,7 @@ def seed_task(
                         gid=gid,
                         status=attempt_status,
                         total_length=total_bytes,
-                        now_ms=created_at_ms,
+                        now_ms=timestamp,
                     )
                     await uow.connection.execute(
                         update(download_attempts)
@@ -90,7 +92,7 @@ def seed_task(
                     reserved_bytes=reserved_bytes,
                     display_name=name,
                     display_uri=display_uri,
-                    now_ms=created_at_ms,
+                    now_ms=timestamp,
                 )
                 return current_attempt_id, subscription_id
         finally:
@@ -167,9 +169,8 @@ def test_task_list_is_user_scoped_paginated_searchable_and_filterable(
         display_uri="https://example.com/ARCHIVE",
         subscription_status=SubscriptionStatus.PAUSED,
         attempt_status=AttemptStatus.PAUSED,
-        created_at_ms=2,
     )
-    seed_task(settings, user_id=other_id, name="Other user secret", created_at_ms=3)
+    seed_task(settings, user_id=other_id, name="Other user secret")
 
     first = client.get("/api/v2/tasks", params={"page": 1, "page_size": 1})
     assert first.status_code == 200

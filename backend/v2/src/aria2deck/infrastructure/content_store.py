@@ -5,6 +5,7 @@ import hashlib
 import os
 import shutil
 from pathlib import Path
+from typing import IO
 
 from ..application.downloads.models import ContentPreparation
 from ..domain.content import (
@@ -143,3 +144,38 @@ class DownloadContentStore:
 
     async def cleanup_attempt(self, attempt_id: int) -> None:
         await asyncio.to_thread(self._cleanup_attempt, attempt_id)
+
+    def _physical_delete(self, storage_path: str) -> None:
+        target = self._destination(storage_path)
+        if target.is_symlink():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+        elif target.exists():
+            target.unlink()
+
+    async def physical_delete(self, storage_path: str) -> None:
+        await asyncio.to_thread(self._physical_delete, storage_path)
+
+    def _open_read_handle(self, storage_path: str, entry_relative_path: str | None) -> IO[bytes]:
+        root = self._destination(storage_path)
+        target = root if entry_relative_path is None else root / normalize_relative_path(entry_relative_path)
+        return target.open("rb")
+
+    async def open_read_handle(
+        self, storage_path: str, entry_relative_path: str | None = None
+    ) -> IO[bytes]:
+        return await asyncio.to_thread(self._open_read_handle, storage_path, entry_relative_path)
+
+    def physical_path(self, storage_path: str, entry_relative_path: str | None = None) -> Path:
+        root = self._destination(storage_path)
+        return root if entry_relative_path is None else root / normalize_relative_path(entry_relative_path)
+
+    def on_disk(self, storage_path: str) -> bool:
+        return self._destination(storage_path).exists()
+
+    def _scan_entries(self, storage_path: str) -> list[ContentEntryIdentity]:
+        return list(self._scan(self._destination(storage_path)).entries)
+
+    async def scan_entries(self, storage_path: str) -> list[ContentEntryIdentity]:
+        return await asyncio.to_thread(self._scan_entries, storage_path)

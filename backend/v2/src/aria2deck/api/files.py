@@ -1,0 +1,345 @@
+from __future__ import annotations
+
+from typing import Literal
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, Header, Path, Query
+from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
+
+from ..application.accounts.models import Principal
+from ..application.library.commands import LibraryCommandService
+from ..application.library.download import LibraryDownloadService
+from ..application.library.models import UserFileView
+from ..application.library.queries import LibraryQueryService
+from ..application.settings.rate_limit import RateLimiter
+from ..domain.accounts import require_session
+from ..domain.content import ContentKind
+from ..domain.errors import DomainError, ErrorCode
+from ..domain.quota import Quota, available_user_bytes
+from .contracts import (
+    DirectoryBreadcrumbResponse,
+    ErrorBody,
+    FileEntryItemResponse,
+    FileEntryListResponse,
+    FileItemResponse,
+    FileListResponse,
+    FileRenameRequest,
+    FileSearchHitResponse,
+    FileSearchResponse,
+    OkResponse,
+    StorageDeleteRequest,
+    StorageDeleteResponse,
+    StorageDeleteResultResponse,
+    StorageFileListResponse,
+    StorageFileResponse,
+    StorageReferencingUserListResponse,
+    StorageReferencingUserResponse,
+    TaskQuotaResponse,
+)
+from .dependencies import (
+    library_commands,
+    library_download,
+    library_queries,
+    rate_limiter,
+    required_admin_principal,
+    required_principal,
+    required_session_principal,
+)
+from .errors import error_responses
+
+router = APIRouter(prefix="/api/v2", tags=["files"])
+
+
+def _kind(kind: ContentKind) -> Literal["file", "directory"]:
+    return "directory" if kind is ContentKind.DIRECTORY else "file"
+
+
+def _file(item: UserFileView) -> FileItemResponse:
+    return FileItemResponse(
+        id=item.id,
+        display_name=item.display_name,
+        kind=_kind(item.kind),
+        size=item.size,
+        created_at_ms=item.created_at_ms,
+    )
+
+
+def _space(quota: Quota) -> TaskQuotaResponse:
+    return TaskQuotaResponse(
+        quota_bytes=quota.quota_bytes,
+        used_bytes=quota.used_bytes,
+        reserved_bytes=quota.reserved_bytes,
+        available_bytes=available_user_bytes(quota),
+    )
+
+
+def _content_disposition(name: str) -> str:
+    fallback = name if name.isascii() and '"' not in name and "\\" not in name else "download"
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
+@router.get(
+    "/files",
+    response_model=FileListResponse | FileSearchResponse,
+    responses=error_responses(400, 401, 404, 422, 429, 500),
+)
+async def list_files(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=200),
+    scope: int | None = Query(default=None, ge=1),
+    principal: Principal = Depends(required_principal),
+    service: LibraryQueryService = Depends(library_queries),
+    limiter: RateLimiter = Depends(rate_limiter),
+) -> FileListResponse | FileSearchResponse:
+    if search is not None:
+        limiter.check_file_search(user_id=principal.user.id)
+        hits, truncated = await service.search(
+            user_id=principal.user.id, term=search, scope_file_id=scope
+        )
+        return FileSearchResponse(
+            hits=[
+                FileSearchHitResponse(
+                    user_file_id=hit.user_file_id,
+                    display_name=hit.display_name,
+                    path=hit.path,
+                    kind=_kind(hit.kind),
+                    size=hit.size,
+                )
+                for hit in hits
+            ],
+            truncated=truncated,
+        )
+    items, total, quota = await service.list_root_files(
+        user_id=principal.user.id, page=page, page_size=page_size
+    )
+    return FileListResponse(
+        items=[_file(item) for item in items],
+        total=total,
+        page=page,
+        page_size=page_size,
+        space=_space(quota),
+    )
+
+
+@router.get(
+    "/files/{file_id}/entries",
+    response_model=FileEntryListResponse,
+    responses=error_responses(400, 401, 404, 422, 429, 500),
+)
+async def list_file_entries(
+    file_id: int = Path(ge=1),
+    path: str = Query(default=""),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    principal: Principal = Depends(required_principal),
+    service: LibraryQueryService = Depends(library_queries),
+) -> FileEntryListResponse:
+    entries, breadcrumbs, total = await service.browse_directory(
+        user_id=principal.user.id, file_id=file_id, path=path, page=page, page_size=page_size
+    )
+    return FileEntryListResponse(
+        items=[
+            FileEntryItemResponse(
+                name=entry.name,
+                path=entry.path,
+                kind=_kind(entry.kind),
+                size=entry.size,
+            )
+            for entry in entries
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+        breadcrumbs=[
+            DirectoryBreadcrumbResponse(name=item.name, path=item.path)
+            for item in breadcrumbs
+        ],
+    )
+
+
+@router.get(
+    "/files/{file_id}/download",
+    responses=error_responses(400, 401, 404, 409, 416, 422, 429, 500),
+)
+async def download_file(
+    file_id: int = Path(ge=1),
+    path: str | None = Query(default=None),
+    range_header: str | None = Header(default=None, alias="Range"),
+    principal: Principal = Depends(required_session_principal),
+    service: LibraryDownloadService = Depends(library_download),
+) -> StreamingResponse:
+    require_session(principal.kind)  # API Token 不能下载文件，仅浏览器会话可用。
+    target = await service.open_download(
+        user_id=principal.user.id,
+        file_id=file_id,
+        path=path,
+        range_header=range_header,
+    )
+    headers = {
+        "Content-Disposition": _content_disposition(target.display_name),
+        "Accept-Ranges": "bytes",
+    }
+    if target.range_spec is not None:
+        headers["Content-Length"] = str(target.range_spec.length)
+        headers["Content-Range"] = (
+            f"bytes {target.range_spec.start}-{target.range_spec.end}/{target.total_size}"
+        )
+        status_code = 206
+    else:
+        headers["Content-Length"] = str(target.total_size)
+        status_code = 200
+    return StreamingResponse(
+        service.iter_chunks(target),
+        status_code=status_code,
+        headers=headers,
+        background=BackgroundTask(service.release, target),
+    )
+
+
+@router.patch(
+    "/files/{file_id}",
+    response_model=FileItemResponse,
+    responses=error_responses(401, 404, 409, 422, 429, 500),
+)
+async def rename_file(
+    file_id: int,
+    payload: FileRenameRequest,
+    principal: Principal = Depends(required_principal),
+    service: LibraryCommandService = Depends(library_commands),
+) -> FileItemResponse:
+    view = await service.rename(
+        user_id=principal.user.id, file_id=file_id, new_name=payload.name
+    )
+    return _file(view)
+
+
+@router.delete(
+    "/files/{file_id}",
+    response_model=OkResponse,
+    responses=error_responses(401, 404, 409, 422, 429, 500),
+)
+async def delete_file(
+    file_id: int = Path(ge=1),
+    principal: Principal = Depends(required_principal),
+    service: LibraryCommandService = Depends(library_commands),
+) -> OkResponse:
+    await service.delete_user_file(user_id=principal.user.id, file_id=file_id)
+    return OkResponse()
+
+
+@router.get(
+    "/storage/files",
+    response_model=StorageFileListResponse,
+    responses=error_responses(401, 403, 422, 429, 500),
+)
+async def list_storage_files(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=200),
+    orphans_only: bool = Query(default=False),
+    principal: Principal = Depends(required_admin_principal),
+    service: LibraryQueryService = Depends(library_queries),
+) -> StorageFileListResponse:
+    items, total = await service.list_storage_files(
+        page=page,
+        page_size=page_size,
+        search=search,
+        orphans_only=orphans_only,
+    )
+    return StorageFileListResponse(
+        items=[
+            StorageFileResponse(
+                content_id=item.content_id,
+                content_key=item.content_key,
+                kind=_kind(item.kind),
+                size=item.size,
+                storage_path=item.storage_path,
+                on_disk=item.on_disk,
+                reference_count=item.reference_count,
+                deletion_state=item.deletion_state.value,
+            )
+            for item in items
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get(
+    "/storage/files/{content_id}/users",
+    response_model=StorageReferencingUserListResponse,
+    responses=error_responses(401, 403, 404, 422, 429, 500),
+)
+async def list_storage_referencing_users(
+    content_id: int = Path(ge=1),
+    principal: Principal = Depends(required_admin_principal),
+    service: LibraryQueryService = Depends(library_queries),
+) -> StorageReferencingUserListResponse:
+    users = await service.list_referencing_users(content_id)
+    return StorageReferencingUserListResponse(
+        items=[
+            StorageReferencingUserResponse(
+                user_id=row.user_id,
+                username=row.username,
+                display_name=row.display_name,
+                referenced_at_ms=row.referenced_at_ms,
+            )
+            for row in users
+        ]
+    )
+
+
+@router.post(
+    "/storage/files/delete",
+    response_model=StorageDeleteResponse,
+    status_code=202,
+    responses=error_responses(401, 403, 422, 429, 500),
+)
+async def delete_storage_files(
+    payload: StorageDeleteRequest,
+    principal: Principal = Depends(required_admin_principal),
+    service: LibraryCommandService = Depends(library_commands),
+) -> StorageDeleteResponse:
+    unique_ids = list(dict.fromkeys(payload.content_ids))
+    outcomes = await service.storage_delete_orphans(unique_ids)
+    results = [
+        StorageDeleteResultResponse(
+            content_id=outcome.content_id,
+            accepted=outcome.accepted,
+            error=(
+                ErrorBody(code=outcome.error_code, message=outcome.message)
+                if outcome.error_code is not None and outcome.message is not None
+                else None
+            ),
+        )
+        for outcome in outcomes
+    ]
+    accepted = sum(result.accepted for result in results)
+    return StorageDeleteResponse(
+        accepted_count=accepted,
+        rejected_count=len(results) - accepted,
+        results=results,
+    )
+
+
+@router.post(
+    "/storage/scan",
+    responses=error_responses(401, 403, 429, 500, 501),
+)
+async def scan_storage(
+    principal: Principal = Depends(required_admin_principal),
+) -> None:
+    raise DomainError(ErrorCode.NOT_IMPLEMENTED, "存储扫描暂未实现")
+
+
+@router.post(
+    "/storage/repair",
+    responses=error_responses(401, 403, 429, 500, 501),
+)
+async def repair_storage(
+    principal: Principal = Depends(required_admin_principal),
+) -> None:
+    raise DomainError(ErrorCode.NOT_IMPLEMENTED, "存储修复暂未实现")
