@@ -1,15 +1,16 @@
 import { api } from "@/shared/api/client";
-import { sha256Hex } from "@/shared/lib/crypto";
+import { passwordClientHash } from "@/shared/lib/crypto";
 import type { OkResponse, RpcAccessResponse } from "@/shared/api/types";
 
-/** 客户端先哈希再提交（ACC-12）：后端契约只接受 64 位十六进制摘要。 */
+/** 客户端先派生再提交（ACC-12）：PBKDF2 + 用户名盐的 64 位十六进制，旧/新密码按同一当前用户名派生。 */
 export async function changePassword(
+  username: string,
   oldPassword: string | null,
   newPassword: string,
 ): Promise<OkResponse> {
   return api.post<OkResponse>("/api/v2/auth/password", {
-    old_password: oldPassword === null ? null : await sha256Hex(oldPassword),
-    new_password: await sha256Hex(newPassword),
+    old_password: oldPassword === null ? null : await passwordClientHash(username, oldPassword),
+    new_password: await passwordClientHash(username, newPassword),
   });
 }
 

@@ -1,5 +1,5 @@
 import { api } from "@/shared/api/client";
-import { sha256Hex } from "@/shared/lib/crypto";
+import { passwordClientHash } from "@/shared/lib/crypto";
 import type {
   DeleteUserResponse,
   UserListResponse,
@@ -25,7 +25,8 @@ export async function createUser(input: {
 }): Promise<UserResponse> {
   return api.post<UserResponse>("/api/v2/users", {
     username: input.username,
-    password: await sha256Hex(input.password),
+    // wire 用目标用户名派生的客户端哈希（与登录侧同形态），不传明文。
+    password: await passwordClientHash(input.username, input.password),
     is_admin: input.isAdmin,
     is_initial_password: input.isInitialPassword,
     quota_bytes: input.quotaBytes,

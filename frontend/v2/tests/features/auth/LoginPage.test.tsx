@@ -146,49 +146,61 @@ describe("LoginPage", () => {
     expect(await screen.findByText("免登回文件页")).toBeInTheDocument();
   });
 
-  it("uses WebCrypto digest when subtle is available", async () => {
+  it("sends the PBKDF2 client hash on the wire (WebCrypto path)", async () => {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
-    const digest = jest.fn(async () => new Uint8Array([0xab, 0xcd]).buffer);
+    const { webcrypto } = await import("node:crypto");
     Object.defineProperty(globalThis, "crypto", {
-      value: { subtle: { digest } },
-      configurable: true,
-      writable: true,
-    });
-    // jsdom 不带 TextEncoder，用 Node 的补齐（仅本用例）。
-    const encoderDescriptor = Object.getOwnPropertyDescriptor(globalThis, "TextEncoder");
-    const { TextEncoder: NodeTextEncoder } = await import("node:util");
-    Object.defineProperty(globalThis, "TextEncoder", {
-      value: NodeTextEncoder,
+      value: webcrypto,
       configurable: true,
       writable: true,
     });
     try {
       mockFetch.mockResolvedValueOnce(json(401, err()));
       mockFetch.mockResolvedValueOnce(json(200, ME));
-      render(
-        <MemoryRouter initialEntries={["/login"]}>
-          <AppProviders>
-            <LoginPage />
-          </AppProviders>
-        </MemoryRouter>,
-      );
-      fillAndSubmit("admin", "whatever");
+      renderLogin();
+      fillAndSubmit("admin", "right-password");
       await waitFor(() => {
         const call = mockFetch.mock.calls.find(([url]) => url === "/api/v2/auth/login");
         expect(call).toBeDefined();
-        expect(JSON.parse(call![1].body as string).password).toBe("abcd");
+        // 独立基准：pbkdf2_hmac('sha256', b'right-password', sha256(b'admin').hexdigest().encode(), 10000)
+        expect(JSON.parse(call![1].body as string)).toEqual({
+          username: "admin",
+          password: "da5b623564816f0bbdf7a25143f9a91d7d302c88dd976e3d33c2f64b9a0c7a4c",
+        });
       });
-      expect(digest).toHaveBeenCalledTimes(1); // 参数为跨 realm 的 Uint8Array，仅验证调用。
     } finally {
       if (descriptor !== undefined) {
         Object.defineProperty(globalThis, "crypto", descriptor);
       } else {
         delete (globalThis as { crypto?: unknown }).crypto;
       }
-      if (encoderDescriptor !== undefined) {
-        Object.defineProperty(globalThis, "TextEncoder", encoderDescriptor);
+    }
+  });
+
+  it("sends the same wire hash via the pure JS fallback (no subtle)", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    Object.defineProperty(globalThis, "crypto", {
+      value: {}, // 非安全上下文：无 subtle，走纯 JS PBKDF2。
+      configurable: true,
+      writable: true,
+    });
+    try {
+      mockFetch.mockResolvedValueOnce(json(401, err()));
+      mockFetch.mockResolvedValueOnce(json(200, ME));
+      renderLogin();
+      fillAndSubmit("admin", "right-password");
+      await waitFor(() => {
+        const call = mockFetch.mock.calls.find(([url]) => url === "/api/v2/auth/login");
+        expect(call).toBeDefined();
+        expect(JSON.parse(call![1].body as string).password).toBe(
+          "da5b623564816f0bbdf7a25143f9a91d7d302c88dd976e3d33c2f64b9a0c7a4c",
+        );
+      });
+    } finally {
+      if (descriptor !== undefined) {
+        Object.defineProperty(globalThis, "crypto", descriptor);
       } else {
-        delete (globalThis as { TextEncoder?: unknown }).TextEncoder;
+        delete (globalThis as { crypto?: unknown }).crypto;
       }
     }
   });

@@ -84,8 +84,9 @@ describe("ProfilePage password", () => {
       const call = mockFetch.mock.calls.find(([url]) => url === "/api/v2/auth/password");
       expect(call).toBeDefined();
       const body = JSON.parse(call![1].body as string);
-      expect(body.old_password).toMatch(/^[0-9a-f]{64}$/);
-      expect(body.new_password).toMatch(/^[0-9a-f]{64}$/);
+      // 独立基准（username=alice）：pbkdf2_hmac('sha256', pw, sha256(b'alice').hexdigest().encode(), 10000).hex()
+      expect(body.old_password).toBe("d8b20a1f89e56c1cde5b162e3b10ed180b01d5711a8cbf29e2b1018ac7b35d01");
+      expect(body.new_password).toBe("253af49750a3f4cd54a44ced05695cdc4fd34e9d9461dccd4d5a5fd08815d862");
     });
     expect(await screen.findByText("密码修改成功")).toBeInTheDocument();
     await waitFor(() => expect(passwordInput("新密码").value).toBe("")); // 表单已清空。

@@ -162,7 +162,8 @@ describe("UsersPage create", () => {
       expect(call).toBeDefined();
       const body = JSON.parse(call![1].body as string);
       expect(body.username).toBe("bob");
-      expect(body.password).toMatch(/^[0-9a-f]{64}$/);
+      // 独立基准（目标用户名 bob 派生）：pbkdf2_hmac('sha256', b'secret123', sha256(b'bob').hexdigest().encode(), 10000).hex()
+      expect(body.password).toBe("ca95e432502136463589237a06357aa4c30db1f8be3e3a4a9cf6ac57df638337");
       expect(body.is_admin).toBe(false);
       expect(body.is_initial_password).toBe(true);
       expect(body.quota_bytes).toBe(50 * GIB);

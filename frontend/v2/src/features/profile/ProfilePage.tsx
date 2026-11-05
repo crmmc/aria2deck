@@ -76,6 +76,7 @@ export function ProfilePage() {
     setChanging(true);
     try {
       await changePassword(
+        user?.username ?? "",
         user?.is_initial_password === true ? null : oldPassword,
         newPassword,
       );

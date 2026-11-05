@@ -3,7 +3,7 @@ import { Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "@/app/hooks";
 import { ApiRequestError } from "@/shared/api/client";
-import { sha256Hex } from "@/shared/lib/crypto";
+import { passwordClientHash } from "@/shared/lib/crypto";
 
 export function LoginPage() {
   const { user, loading, login } = useAuth();
@@ -31,8 +31,9 @@ export function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      const hashed = await sha256Hex(password);
-      await login(username.trim(), hashed);
+      const trimmed = username.trim();
+      const hashed = await passwordClientHash(trimmed, password);
+      await login(trimmed, hashed);
       const from = (location.state as { from?: string } | null)?.from;
       navigate(from && from !== "/login" ? from : "/tasks", { replace: true });
     } catch (caught) {
