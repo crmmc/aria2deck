@@ -189,13 +189,12 @@ async def download_share_by_form(
     _require_urlencoded_form(request)
     _require_form_size(request)
     # 表单通道：手工解析 x-www-form-urlencoded（不引 python-multipart），token 只从表单或 Bearer 头进入。
+    # token 是否必需由 service 按分享是否设密码裁决（无密码分享凭分享码直接访问）。
     body = (await request.body()).decode("utf-8", errors="replace")
     _require_form_body_size(len(body.encode("utf-8")))
     form = parse_qs(body, keep_blank_values=True)
     raw_token = form.get("token", [""])[0]
     raw_path = form.get("path", [""])[0]
-    if not raw_token:
-        raise DomainError(ErrorCode.UNAUTHENTICATED, "分享访问令牌无效或已过期")
     path = raw_path or None
     result = await service.download(code, raw_token, path, range_header)
     return _streaming(result, service)

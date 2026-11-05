@@ -356,32 +356,38 @@ async def test_browse_requires_token_and_directory(tmp_path: Path) -> None:
     world, user_id = await _world(tmp_path)
     _, file_id = await _seed_file(world.database, world.root, user_id, 1, b"data")
     _, dir_file = await _seed_directory(world.database, world.root, user_id, 2)
-    single = await world.manage.create(user_id, user_file_id=file_id, expires_in_seconds=None, max_downloads=None, password=None)
-    shared = await world.manage.create(user_id, user_file_id=dir_file, expires_in_seconds=None, max_downloads=None, password=None)
-
-    token, _ = world.tokens.issue(shared.code)
-    with pytest.raises(DomainError) as caught:
-        await world.public.browse(shared.code, "bad-token", "", 1, 10)
-    assert caught.value.code is ErrorCode.UNAUTHENTICATED
-    other_token, _ = world.tokens.issue(single.code)
-    with pytest.raises(DomainError) as caught:
-        await world.public.browse(shared.code, other_token, "", 1, 10)
-    assert caught.value.code is ErrorCode.UNAUTHENTICATED
-    single_token, _ = world.tokens.issue(single.code)
-    with pytest.raises(DomainError) as caught:
-        await world.public.browse(single.code, single_token, "", 1, 10)
-    assert caught.value.code is ErrorCode.INVALID_INPUT
-
-    entries, breadcrumbs, total = await world.public.browse(shared.code, token, "", 1, 10)
+    # 无密码分享：凭分享码直接浏览（V1 语义，token 被忽略）。
+    open_shared = await world.manage.create(user_id, user_file_id=dir_file, expires_in_seconds=None, max_downloads=None, password=None)
+    entries, breadcrumbs, total = await world.public.browse(open_shared.code, "", "", 1, 10)
     assert total == 1
     assert [(entry.name, entry.kind) for entry in entries] == [("docs", ContentKind.DIRECTORY)]
     assert [crumb.name for crumb in breadcrumbs] == ["dir-2"]
-    nested, _, nested_total = await world.public.browse(shared.code, token, "docs", 1, 10)
+    nested, _, nested_total = await world.public.browse(open_shared.code, "", "docs", 1, 10)
     assert nested_total == 1
     assert nested[0].path == "docs/child.bin"
     with pytest.raises(DomainError) as caught:
-        await world.public.browse(shared.code, token, "docs/child.bin", 1, 10)
+        await world.public.browse(open_shared.code, "", "docs/child.bin", 1, 10)
     assert caught.value.code is ErrorCode.NOT_FOUND
+
+    # 有密码分享：token 门生效（错误/跨分享/缺失一律 401；单文件浏览 422）。
+    guarded = await world.manage.create(user_id=user_id, user_file_id=file_id, expires_in_seconds=None, max_downloads=None, password=SHARE_PASSWORD)
+    guarded_dir = await world.manage.create(user_id=user_id, user_file_id=dir_file, expires_in_seconds=None, max_downloads=None, password=SHARE_PASSWORD)
+    with pytest.raises(DomainError) as caught:
+        await world.public.browse(guarded_dir.code, "", "", 1, 10)
+    assert caught.value.code is ErrorCode.UNAUTHENTICATED
+    with pytest.raises(DomainError) as caught:
+        await world.public.browse(guarded_dir.code, "bad-token", "", 1, 10)
+    assert caught.value.code is ErrorCode.UNAUTHENTICATED
+    other_token, _ = world.tokens.issue(guarded.code)
+    with pytest.raises(DomainError) as caught:
+        await world.public.browse(guarded_dir.code, other_token, "", 1, 10)
+    assert caught.value.code is ErrorCode.UNAUTHENTICATED
+    token, _ = await world.public.verify(guarded.code, SHARE_PASSWORD)
+    with pytest.raises(DomainError) as caught:
+        await world.public.browse(guarded.code, token, "", 1, 10)
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+    dir_token, _ = await world.public.verify(guarded_dir.code, SHARE_PASSWORD)
+    assert await world.public.browse(guarded_dir.code, dir_token, "", 1, 10) is not None
 
 
 async def test_download_decision_matrix_and_lease(tmp_path: Path) -> None:

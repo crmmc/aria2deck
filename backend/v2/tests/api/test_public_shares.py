@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
@@ -135,32 +134,39 @@ def test_browse_and_query_token_ignored(client: TestClient, settings) -> None:
     user_id = _setup(client)
     dir_file = _seed_directory(settings, user_id, 2)
     file_id = seed_file(settings, user_id=user_id, index=1, payload=b"z")[1]
-    dir_code = _make_share(client, dir_file)
-    file_code = _make_share(client, file_id)
+    dir_code = _make_share(client, dir_file)  # 无密码：凭分享码直接访问（V1 语义）。
+    guarded_file = seed_file(settings, user_id=user_id, index=2, payload=b"y")[1]
+    guarded_code = _make_share(client, guarded_file, password=PASSWORD)
     anon = TestClient(client.app)
 
-    # 无密码分享走不了验密接口：测试用应用内 token 存储直接签发。
-    issued = asyncio.run(_issue_token(client.app, dir_code))
-    headers = {"Authorization": f"Bearer {issued}"}
-
-    entries = anon.get(f"/api/s/{dir_code}/entries", headers=headers)
-    assert entries.status_code == 200
+    # 无密码分享：无 token 200；对 Bearer 内容不敏感（token 仅对有密码分享有意义）。
+    entries = anon.get(f"/api/s/{dir_code}/entries")
+    assert entries.status_code == 200, entries.text
     body = entries.json()
     assert body["total"] == 1
     assert [(item["name"], item["kind"]) for item in body["items"]] == [("docs", "directory")]
     assert [c["name"] for c in body["breadcrumbs"]] == ["dir-2"]
-    nested = anon.get(f"/api/s/{dir_code}/entries", params={"path": "docs"}, headers=headers)
+    nested = anon.get(f"/api/s/{dir_code}/entries", params={"path": "docs"})
     assert nested.json()["items"][0]["path"] == "docs/child.bin"
+    junk = anon.get(f"/api/s/{dir_code}/entries", headers={"Authorization": "Bearer junk"})
+    assert junk.status_code == 200, "无密码分享不校验 token"
 
-    assert anon.get(f"/api/s/{dir_code}/entries").status_code == 401
-    assert anon.get(f"/api/s/{dir_code}/entries?token={issued}").status_code == 401, "query token 必须被忽略"
-    assert anon.get(f"/api/s/{file_code}/entries", headers=headers).status_code == 401, "令牌绑定单一分享码"
-    file_token = asyncio.run(_issue_token(client.app, file_code))
-    assert anon.get(f"/api/s/{file_code}/entries", headers={"Authorization": f"Bearer {file_token}"}).status_code == 422
+    # 有密码分享：无 token 401；query token 一律忽略（含真实值）；正确 Bearer 过门后按业务语义 422（单文件）。
+    assert anon.get(f"/api/s/{guarded_code}/entries").status_code == 401
+    token = anon.post(f"/api/s/{guarded_code}/verify", json={"password": PASSWORD}).json()[
+        "access_token"
+    ]
+    query = anon.get(f"/api/s/{guarded_code}/entries", params={"token": token})
+    assert query.status_code == 401, "query token 必须被忽略"
+    through = anon.get(
+        f"/api/s/{guarded_code}/entries", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert through.status_code == 422, "过门后单文件分享按业务语义拒绝浏览"
 
-
-async def _issue_token(app: FastAPI, code: str) -> str:
-    return app.state.public_shares.tokens.issue(code)[0]
+    # 令牌绑定单一分享码：用于其他有密码分享无效。
+    other_guard = _make_share(client, file_id, password=PASSWORD)
+    cross = anon.get(f"/api/s/{other_guard}/entries", headers={"Authorization": f"Bearer {token}"})
+    assert cross.status_code == 401, "令牌绑定单一分享码"
 
 
 def test_download_matrix_headers_and_form_channel(client: TestClient, settings) -> None:
@@ -171,59 +177,65 @@ def test_download_matrix_headers_and_form_channel(client: TestClient, settings) 
     code = _make_share(client, file_id, max_downloads=5)  # 非 bytes 回退也是完整实体，计入计数。
     dir_code = _make_share(client, dir_file)
     anon = TestClient(client.app)
-    token = asyncio.run(_issue_token(client.app, code))
-    headers = {"Authorization": f"Bearer {token}"}
 
-    full = anon.get(f"/api/s/{code}/download", headers=headers)
+    # 无密码分享：凭分享码直接下载（无任何 token）。
+    full = anon.get(f"/api/s/{code}/download")
     assert full.status_code == 200
     assert full.content == payload
     assert full.headers["content-length"] == "10"
     assert full.headers["accept-ranges"] == "bytes"
     assert full.headers["content-disposition"].startswith("attachment;")
 
-    partial = anon.get(f"/api/s/{code}/download", headers={**headers, "Range": "bytes=2-4"})
+    partial = anon.get(f"/api/s/{code}/download", headers={"Range": "bytes=2-4"})
     assert partial.status_code == 206
     assert partial.content == payload[2:5]
     assert partial.headers["content-range"] == "bytes 2-4/10"
 
-    suffix = anon.get(f"/api/s/{code}/download", headers={**headers, "Range": "bytes=-3"})
+    suffix = anon.get(f"/api/s/{code}/download", headers={"Range": "bytes=-3"})
     assert suffix.status_code == 206 and suffix.content == payload[-3:]
 
-    fallback = anon.get(f"/api/s/{code}/download", headers={**headers, "Range": "items=0-1"})
+    fallback = anon.get(f"/api/s/{code}/download", headers={"Range": "items=0-1"})
     assert fallback.status_code == 200 and fallback.content == payload
 
-    invalid = anon.get(f"/api/s/{code}/download", headers={**headers, "Range": "bytes=99-"})
+    invalid = anon.get(f"/api/s/{code}/download", headers={"Range": "bytes=99-"})
     assert invalid.status_code == 416
     assert invalid.json()["error"]["code"] == "range_not_satisfiable"
 
-    # query token 一律不读：无 Bearer 头即未携带。
-    assert anon.get(f"/api/s/{code}/download", params={"token": token}).status_code == 401
-
-    # 表单通道（x-www-form-urlencoded）。
-    form = anon.post(f"/api/s/{code}/download", data={"token": token})
+    # 表单通道（x-www-form-urlencoded）同样直接可用（token 可为空）。
+    form = anon.post(f"/api/s/{code}/download", data={"token": ""})
     assert form.status_code == 200 and form.content == payload
-    assert anon.post(f"/api/s/{code}/download", data={"token": "wrong"}).status_code == 401
+
+    # 有密码分享的 token 语义：无 token 401；query token 一律忽略（含真实值）；
+    # 错误表单 token 401；正确 token 表单通道 200。
+    guarded_id = seed_file(settings, user_id=user_id, index=4, payload=b"g")[1]
+    guarded = _make_share(client, guarded_id, password=PASSWORD, max_downloads=3)
+    assert anon.get(f"/api/s/{guarded}/download").status_code == 401
+    token = anon.post(f"/api/s/{guarded}/verify", json={"password": PASSWORD}).json()[
+        "access_token"
+    ]
+    assert (
+        anon.get(f"/api/s/{guarded}/download", params={"token": token}).status_code == 401
+    ), "query token 必须被忽略"
+    assert anon.post(f"/api/s/{guarded}/download", data={"token": "wrong"}).status_code == 401
+    guarded_form = anon.post(f"/api/s/{guarded}/download", data={"token": token})
+    assert guarded_form.status_code == 200 and guarded_form.content == b"g"
     assert anon.post(f"/api/s/{code}/download", data={}).status_code == 422, "缺 Content-Type 按非表单拒绝"
 
-    # 目录内条目下载 + 目录整体拒绝。
-    dir_token = asyncio.run(_issue_token(client.app, dir_code))
+    # 目录内条目下载 + 目录整体拒绝（无密码分享直接访问）。
     entry = anon.get(
         f"/api/s/{dir_code}/download",
         params={"path": "docs/child.bin"},
-        headers={"Authorization": f"Bearer {dir_token}", "Range": "bytes=1-2"},
+        headers={"Range": "bytes=1-2"},
     )
     assert entry.status_code == 206 and entry.content == b"bc"
-    assert (
-        anon.get(f"/api/s/{dir_code}/download", headers={"Authorization": f"Bearer {dir_token}"}).status_code
-        == 422
-    )
+    assert anon.get(f"/api/s/{dir_code}/download").status_code == 422
 
-    # 计数：两次完整（200 + 全文件 206）计 2，第三完整达上限，之后 410。
-    whole = anon.get(f"/api/s/{code}/download", headers={**headers, "Range": "bytes=0-"})
+    # 计数：完整（200 全量 + 全文件 206 + 表单）逐次计入，达上限后 410。
+    whole = anon.get(f"/api/s/{code}/download", headers={"Range": "bytes=0-"})
     assert whole.status_code == 206 and whole.content == payload
-    third = anon.get(f"/api/s/{code}/download", headers=headers)
+    third = anon.get(f"/api/s/{code}/download")
     assert third.status_code == 200
-    exhausted = anon.get(f"/api/s/{code}/download", headers=headers)
+    exhausted = anon.get(f"/api/s/{code}/download")
     assert exhausted.status_code == 410
     assert exhausted.json()["error"]["code"] == "share_exhausted"
 
@@ -234,16 +246,15 @@ def test_form_channel_content_type_size_and_rate_consumption(
     user_id = _setup(client)
     file_id = seed_file(settings, user_id=user_id, index=1, payload=b"form")[1]
     code = _make_share(client, file_id, max_downloads=10)
-    token = asyncio.run(_issue_token(client.app, code))
 
     wrong_type = TestClient(client.app).post(
-        f"/api/s/{code}/download", json={"token": token}
+        f"/api/s/{code}/download", json={"token": "x"}
     )
     assert wrong_type.status_code == 422
     assert wrong_type.json()["error"]["code"] == "invalid_input"
 
     oversized = TestClient(client.app).post(
-        f"/api/s/{code}/download", data={"token": token, "pad": "x" * (64 * 1024 + 1)}
+        f"/api/s/{code}/download", data={"token": "", "pad": "x" * (64 * 1024 + 1)}
     )
     assert oversized.status_code == 413
     assert oversized.json()["error"]["code"] == "task_too_large"
@@ -252,9 +263,9 @@ def test_form_channel_content_type_size_and_rate_consumption(
     client.patch("/api/v2/settings", json={"share_access_rate_limit": 1})
     login(client, "user", OTHER_PASSWORD)
     limited = TestClient(client.app, client=("198.51.100.7", 2222))
-    # 无 token 的请求也消耗限流额度：第一次 401，第二次 429。
-    assert limited.post(f"/api/s/{code}/download", data={"token": ""}).status_code == 401
-    throttled = limited.post(f"/api/s/{code}/download", data={"token": token})
+    # 限流在任何语义之前：第一次成功（无密码分享直接下载），第二次 429。
+    assert limited.post(f"/api/s/{code}/download", data={"token": ""}).status_code == 200
+    throttled = limited.post(f"/api/s/{code}/download", data={"token": ""})
     assert throttled.status_code == 429
     assert "Retry-After" in throttled.headers
 
@@ -266,13 +277,11 @@ def test_info_and_entries_are_rate_limited_by_ip(client: TestClient, settings) -
     login(client)
     client.patch("/api/v2/settings", json={"share_access_rate_limit": 1})
     login(client, "user", OTHER_PASSWORD)
-    token = asyncio.run(_issue_token(client.app, code))
     limited = TestClient(client.app, client=("198.51.100.8", 3333))
-    headers = {"Authorization": f"Bearer {token}"}
 
     assert limited.get(f"/api/s/{code}/info").status_code == 200
     assert limited.get(f"/api/s/{code}/info").status_code == 429
 
     entries_client = TestClient(client.app, client=("198.51.100.9", 3334))
-    assert entries_client.get(f"/api/s/{code}/entries", headers=headers).status_code == 200
-    assert entries_client.get(f"/api/s/{code}/entries", headers=headers).status_code == 429
+    assert entries_client.get(f"/api/s/{code}/entries").status_code == 200
+    assert entries_client.get(f"/api/s/{code}/entries").status_code == 429

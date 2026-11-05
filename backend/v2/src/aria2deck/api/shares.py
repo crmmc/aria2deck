@@ -90,13 +90,14 @@ async def create_share(
 )
 async def list_shares(
     status: ShareStatus | None = None,
+    q: str | None = Query(default=None, max_length=200),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     principal: Principal = Depends(required_principal),
     service: ShareManageService = Depends(share_manage),
 ) -> ShareListResponse:
     items, total = await service.list_shares(
-        principal.user.id, status=status, page=page, page_size=page_size
+        principal.user.id, status=status, term=q, page=page, page_size=page_size
     )
     return ShareListResponse(
         items=[_share(item) for item in items],

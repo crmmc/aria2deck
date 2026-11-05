@@ -90,10 +90,10 @@ class PublicShareService:
         return self.tokens.issue(code)
 
     async def browse(
-        self, code: str, token: str, path: str, page: int, page_size: int
+        self, code: str, token: str | None, path: str, page: int, page_size: int
     ) -> tuple[list[PublicShareEntryView], list[ShareEntryBreadcrumb], int]:
-        self._require_token(code, token)
         record = await self._active_share(code)
+        self._require_token(record, token)
         async with self.uow_factory() as uow:
             content = self.content_repository_factory(uow)
             file_record = await self._owned_file(content, record)
@@ -124,12 +124,13 @@ class PublicShareService:
     async def download(
         self,
         code: str,
-        token: str,
+        token: str | None,
         path: str | None,
         range_header: str | None,
     ) -> PublicShareDownload:
-        self._require_token(code, token)
         now_ms = self.clock_ms()
+        record = await self._active_share(code)
+        self._require_token(record, token)
         record = await self._active_share(code)
         async with self.uow_factory() as uow:
             content = self.content_repository_factory(uow)
@@ -206,8 +207,11 @@ class PublicShareService:
         require_share_available(record.as_domain(), self.clock_ms())
         return record
 
-    def _require_token(self, code: str, token: str) -> None:
-        if not token or not self.tokens.verify(code, token):
+    def _require_token(self, record: ShareRecord, token: str | None) -> None:
+        # 无密码分享凭分享码直接访问：token 是「过密码门」的证明，无门则无需证明。
+        if record.password_hash is None:
+            return
+        if not token or not self.tokens.verify(record.code, token):
             raise DomainError(ErrorCode.UNAUTHENTICATED, "分享访问令牌无效或已过期")
 
     async def _owned_file(

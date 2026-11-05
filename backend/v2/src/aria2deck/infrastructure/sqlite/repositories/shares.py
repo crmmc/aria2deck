@@ -171,11 +171,15 @@ class ShareRepository:
         *,
         now_ms: int,
         status: ShareStatus | None = None,
+        term: str | None = None,
         offset: int = 0,
         limit: int | None = None,
     ) -> tuple[list[ShareRecord], int]:
-        """Owner listing with status filter; mapping happens only through share_status."""
+        """Owner listing with status/search filter; mapping happens only through share_status."""
         records = await self.list_shares(owner_id)
+        if term:
+            needle = term.strip().casefold()
+            records = [record for record in records if needle in record.file_name.casefold()]
         if status is not None:
             records = [
                 record

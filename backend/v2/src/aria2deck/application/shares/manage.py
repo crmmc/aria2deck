@@ -33,6 +33,7 @@ class ShareRepositoryPort(Protocol):
         *,
         now_ms: int,
         status: ShareStatus | None = None,
+        term: str | None = None,
         offset: int = 0,
         limit: int | None = None,
     ) -> tuple[list[ShareRecord], int]: ...
@@ -124,6 +125,7 @@ class ShareManageService:
         user_id: int,
         *,
         status: ShareStatus | None,
+        term: str | None = None,
         page: int,
         page_size: int,
     ) -> tuple[list[ShareView], int]:
@@ -133,6 +135,7 @@ class ShareManageService:
                 user_id,
                 now_ms=now_ms,
                 status=status,
+                term=term,
                 offset=(page - 1) * page_size,
                 limit=page_size,
             )

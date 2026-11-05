@@ -89,6 +89,17 @@ def test_share_list_filter_and_isolation(client: TestClient, settings) -> None:
     assert [item["id"] for item in filtered.json()["items"]] == [short["id"]]
     assert client.get("/api/v2/shares", params={"status": "active"}).json()["total"] == 1
 
+    # 服务端搜索（q）：按文件名忽略大小写过滤，可与状态筛选组合。
+    _, other_file = seed_file(settings, user_id=user_id, index=3, payload=b"other")
+    _create(client, other_file)
+    needle = client.get("/api/v2/shares", params={"q": "FILE-3"})
+    assert needle.status_code == 200
+    assert needle.json()["total"] == 1
+    assert needle.json()["items"][0]["file_name"] == "file-3"
+    assert client.get("/api/v2/shares", params={"q": "不存在"}).json()["total"] == 0
+    combined = client.get("/api/v2/shares", params={"q": "file", "status": "revoked"})
+    assert combined.json()["total"] == 1
+
 
 def test_share_revoke_delete_and_revoke_all(client: TestClient, settings) -> None:
     _setup(client)
