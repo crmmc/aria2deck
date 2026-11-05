@@ -23,6 +23,11 @@ class Settings:
     credential_pepper: str | None = field(default=None, repr=False)
     initial_admin_password: str | None = field(default=None, repr=False)
     session_ttl_seconds: int = 43200
+    # CORS 来源：无 settings 列可用（不改 schema），取环境变量。
+    # ARIA2C_RPC_ALLOW_ALL_ORIGINS=true → 任意来源模式（*，无 credentials）；
+    # ARIA2C_RPC_ALLOWED_ORIGINS=逗号分隔精确白名单；默认空 = 仅同源（不附 CORS 头）。
+    rpc_allow_all_origins: bool = False
+    rpc_allowed_origins: frozenset[str] = frozenset()
 
     @property
     def instance_lock_path(self) -> Path:
@@ -99,6 +104,13 @@ class Settings:
             share_jwt_secret=share_secret,
             credential_pepper=pepper,
             initial_admin_password=env.get("ARIA2DECK_INITIAL_ADMIN_PASSWORD") or None,
+            rpc_allow_all_origins=env.get("ARIA2C_RPC_ALLOW_ALL_ORIGINS", "").strip().lower()
+            in {"1", "true", "yes"},
+            rpc_allowed_origins=frozenset(
+                origin.strip()
+                for origin in env.get("ARIA2C_RPC_ALLOWED_ORIGINS", "").split(",")
+                if origin.strip()
+            ),
         )
 
     def ensure_directories(self) -> None:

@@ -75,6 +75,11 @@ class DownloadQueryService:
             )
         return self.projector.project(record)
 
+    async def list_user_records(self, *, user_id: int) -> list[DownloadRecord]:
+        """RPC/WS 适配用的原始记录视图（含真实 GID，仅在服务端解析，绝不外发）。"""
+        async with self.uow_factory() as uow:
+            return await self.repository_factory(uow).list_tasks(user_id=user_id)
+
     async def stats(self, *, user_id: int) -> TaskStats:
         async with self.uow_factory() as uow:
             records = await self.repository_factory(uow).list_tasks(user_id=user_id)

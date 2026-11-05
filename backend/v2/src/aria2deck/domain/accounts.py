@@ -18,6 +18,7 @@ class Role(StrEnum):
 class CredentialKind(StrEnum):
     SESSION = "session"
     API_TOKEN = "api_token"  # noqa: S105  # 凭证类型标识，不是密钥
+    RPC_SECRET = "rpc_secret"  # noqa: S105  # 凭证类型标识，不是密钥
 
 
 class Permission(StrEnum):

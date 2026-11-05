@@ -66,6 +66,13 @@ class RateLimiter:
             _AUTHENTICATED_WINDOW_MS,
         )
 
+    def check_rpc(self, ip: str) -> None:
+        self._check(
+            ("rpc", ip),
+            self.settings().rpc_rate_limit,
+            _AUTHENTICATED_WINDOW_MS,
+        )
+
     def check_share_access(self, ip: str) -> None:
         self._check(
             ("share-access", ip),

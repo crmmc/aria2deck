@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
@@ -27,7 +28,14 @@ from ...domain.accounts import (
 )
 from ...domain.errors import DomainError, ErrorCode
 from ...domain.quota import available_user_bytes
-from ..ports import AccountRepositoryPort, CredentialPort, UnitOfWork, UserCleanupPort
+from ..ports import (
+    AccountRepositoryPort,
+    CredentialPort,
+    SessionRevocation,
+    SessionRevocationBus,
+    UnitOfWork,
+    UserCleanupPort,
+)
 from .models import CleanupReport, CreatedApiToken, LoginResult, Principal, RpcAccess, UserView
 
 logger = logging.getLogger(__name__)
@@ -55,7 +63,8 @@ class AccountService:
         credentials: CredentialPort,
         clock_ms: Callable[[], int],
         session_ttl_seconds: int,
-        cleanup_ports: tuple[UserCleanupPort, ...],
+        cleanup_ports: tuple[UserCleanupPort, ...] = (),
+        revocation_bus: SessionRevocationBus | None = None,
     ) -> None:
         self.uow_factory = uow_factory
         self.repository_factory = repository_factory
@@ -63,6 +72,7 @@ class AccountService:
         self.clock_ms = clock_ms
         self.session_ttl_seconds = session_ttl_seconds
         self.cleanup_ports = cleanup_ports
+        self.revocation_bus = revocation_bus
 
     async def _view(self, repository: AccountRepositoryPort, user: User) -> UserView:
         return UserView(user, await repository.get_quota(user.id))
@@ -114,6 +124,7 @@ class AccountService:
             ):
                 raise _authentication_failed()
             await repository.revoke_user_sessions(user_id=user.id, now_ms=now_ms)
+            self._publish_revocation(SessionRevocation(user_id=user.id))
             raw_session_id = self.credentials.new_session_id()
             await repository.create_session(
                 session_id=self.credentials.digest_session(raw_session_id),
@@ -123,6 +134,7 @@ class AccountService:
                 expires_at_ms=now_ms + self.session_ttl_seconds * 1000,
             )
             view = await self._view(repository, user)
+        self._publish_revocation(SessionRevocation(user_id=user.id))
         return LoginResult(view, raw_session_id)
 
     async def logout(self, principal: Principal) -> None:
@@ -133,6 +145,9 @@ class AccountService:
             await self.repository_factory(uow).revoke_session(
                 session_id=principal.session_id, now_ms=self.clock_ms()
             )
+        self._publish_revocation(
+            SessionRevocation(user_id=principal.user.id, session_id=principal.session_id)
+        )
 
     async def current_user(self, principal: Principal) -> UserView:
         async with self.uow_factory() as uow:
@@ -170,6 +185,7 @@ class AccountService:
             if not changed:
                 raise DomainError(ErrorCode.INVALID_STATE, "密码已被其他请求修改，请重试")
             await repository.revoke_user_sessions(user_id=user.id, now_ms=now_ms)
+            self._publish_revocation(SessionRevocation(user_id=user.id))
             raw_session_id = self.credentials.new_session_id()
             await repository.create_session(
                 session_id=self.credentials.digest_session(raw_session_id),
@@ -334,6 +350,7 @@ class AccountService:
                 admin_count=await repository.count_admins(),
             )
             await repository.mark_pending_delete(user_id=user.id, now_ms=self.clock_ms())
+        self._publish_revocation(SessionRevocation(user_id=user_id))
 
 
     async def create_api_token(
@@ -380,6 +397,23 @@ class AccountService:
             await self.repository_factory(uow).delete_api_token(
                 token_id=token_id, user_id=principal.user.id
             )
+
+    async def authenticate_rpc_secret(self, raw_secret: str) -> Principal:
+        """External RPC clients authenticate with the per-user RPC secret (ACC-10)."""
+        async with self.uow_factory() as uow:
+            candidates = await self.repository_factory(uow).list_rpc_enabled_users()
+        for user in candidates:
+            if user.pending_delete:
+                continue
+            ciphertext = user.rpc_secret_ciphertext
+            if ciphertext is None:
+                continue
+            if hmac.compare_digest(
+                self.credentials.decrypt(ciphertext).encode("utf-8"),
+                raw_secret.encode("utf-8"),
+            ):
+                return Principal(user, CredentialKind.RPC_SECRET)
+        raise _authentication_failed()
 
     async def rpc_access(self, principal: Principal) -> RpcAccess:
         require_session(principal.kind)
@@ -435,6 +469,10 @@ class AccountService:
         require_credential_invalidation(confirmation)
         async with self.uow_factory() as uow:
             return await self.repository_factory(uow).invalidate_credentials()
+
+    def _publish_revocation(self, revocation: SessionRevocation) -> None:
+        if self.revocation_bus is not None:
+            self.revocation_bus.publish(revocation)
 
     async def cleanup_pending_users(self) -> CleanupReport:
         async with self.uow_factory() as uow:

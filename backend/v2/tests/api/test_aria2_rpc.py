@@ -1,0 +1,586 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import time
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
+from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
+from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
+from tests.api.conftest import create_admin, login
+from tests.download_fakes import FakeSubmissionBackend
+
+WRONG_SECRET = "错误令牌"  # noqa: S105  # 测试夹具令牌，非凭据
+
+
+class SimpleCors:
+    def __init__(self, *, allow_all: bool, allowed_origins: frozenset[str]) -> None:
+        self.allow_all = allow_all
+        self.allowed_origins = allowed_origins
+
+
+_CURRENT_SECRET: dict[str, str] = {}
+
+
+def _enable_rpc(client: TestClient) -> None:
+    """登录后开启 RPC 访问并取回原文 Secret（仅显示一次）。"""
+    response = client.put("/api/v2/credentials/rpc", json={"enabled": True})
+    assert response.status_code == 200, response.text
+    secret = response.json()["secret"]
+    assert secret
+    _CURRENT_SECRET["value"] = secret
+
+
+def _secret() -> str:
+    return _CURRENT_SECRET["value"]
+
+
+def _rpc(
+    client: TestClient, method: str, params: list[object] | None = None, *, token: str | None = None
+) -> object:
+    effective = _secret() if token is None else token
+    payload = {"jsonrpc": "2.0", "id": "1", "method": method, "params": [f"token:{effective}", *(params or [])]}
+    return client.post("/aria2/jsonrpc", json=payload)
+
+
+def _seed_task(settings, user_id: int, *, status: str = "active", name: str = "demo.bin") -> tuple[int, str]:
+    now_ms = time.time_ns() // 1_000_000  # 当前时间基准：1970 时间戳会被历史保留 worker 过期（已知坑）。
+
+    async def write() -> tuple[int, str]:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                repository = DownloadRepository(uow.connection)
+                source_id = await repository.create_source(
+                    kind="http",
+                    resource_key=f"http:rpc-{user_id}-{name}",
+                    payload_json="{}",
+                    options_json="{}",
+                    selected_file_indexes_json=None,
+                    display_name=name,
+                    display_uri="https://example.com/展示链接",
+                    now_ms=now_ms,
+                )
+                attempt_id = await repository.create_attempt(
+                    source_id=source_id,
+                    resource_key=f"http:rpc-{user_id}-{name}",
+                    gid="feedface0123456789abcdef",
+                    now_ms=now_ms,
+                )
+                task_id = await repository.create_subscription(
+                    attempt_id=attempt_id,
+                    user_id=user_id,
+                    reserved_bytes=0,
+                    display_name=name,
+                    display_uri=None,
+                    now_ms=now_ms,
+                )
+                await uow.connection.execute(
+                    text("UPDATE task_subscriptions SET status = :status WHERE id = :id"),
+                    {"status": status, "id": task_id},
+                )
+                return task_id, "feedface0123456789abcdef"
+        finally:
+            await database.close()
+
+    return asyncio.run(write())
+
+
+@pytest.fixture
+def rpc_client(client: TestClient) -> TestClient:
+    _CURRENT_SECRET.clear()
+    create_admin(client)
+    login(client)
+    _enable_rpc(client)
+    # 真实 aria2 不在测试环境运行：换假提交后端，业务链路保持真实执行。
+    backend = FakeSubmissionBackend()
+    backend.mark_confirmed_on_submit = True
+    client.app.state.download_commands.backend = backend
+    client.app.state.download_recovery.backend = backend
+    return client
+
+
+def test_get_method_is_rejected(rpc_client: TestClient) -> None:
+    assert rpc_client.get("/aria2/jsonrpc").status_code == 405
+
+
+def test_parse_error_and_invalid_envelope(rpc_client: TestClient) -> None:
+    raw = rpc_client.post("/aria2/jsonrpc", content=b"{not json", headers={"Content-Type": "application/json"})
+    assert raw.status_code == 200
+    assert raw.json()["error"]["code"] == -32700
+
+    bad_envelope = rpc_client.post(
+        "/aria2/jsonrpc", json={"jsonrpc": "1.0", "id": 1, "method": "aria2.getVersion"}
+    )
+    assert bad_envelope.json()["error"]["code"] == -32600
+    missing_method = rpc_client.post(
+        "/aria2/jsonrpc", json={"jsonrpc": "2.0", "id": 1}
+    )
+    assert missing_method.json()["error"]["code"] == -32600
+
+
+def test_unknown_method_and_internal_error_shape(rpc_client: TestClient) -> None:
+    response = _rpc(rpc_client, "aria2.changeOption", ["g", {}])
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == -32601
+    assert "不存在" in response.json()["error"]["message"]
+
+
+def test_token_three_states(rpc_client: TestClient) -> None:
+    ok = _rpc(rpc_client, "system.listMethods")
+    assert ok.status_code == 200
+    assert len(ok.json()["result"]) == 30
+
+    wrong = _rpc(rpc_client, "system.listMethods", token=WRONG_SECRET)
+    assert wrong.status_code == 200
+    assert wrong.json()["error"]["code"] == 1
+
+    missing = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={"jsonrpc": "2.0", "id": 7, "method": "system.listMethods", "params": []},
+    )
+    assert missing.status_code == 200
+    assert missing.json()["error"]["code"] == 1
+    assert missing.json()["id"] == 7
+
+
+def test_notification_without_id_returns_204(rpc_client: TestClient) -> None:
+    notification = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={"jsonrpc": "2.0", "method": "system.listMethods", "params": [f"token:{_secret()}"]},
+    )
+    assert notification.status_code == 204
+
+    # 缺 token 的通知同样 204；带 id 的错误请求才有响应体。
+    broken_notification = rpc_client.post(
+        "/aria2/jsonrpc", json={"jsonrpc": "2.0", "method": "system.listMethods"}
+    )
+    assert broken_notification.status_code == 204
+
+
+def test_batch_semantics(rpc_client: TestClient) -> None:
+    token = f"token:{_secret()}"
+    batch = rpc_client.post(
+        "/aria2/jsonrpc",
+        json=[
+            {"jsonrpc": "2.0", "id": 1, "method": "system.listMethods", "params": [token]},
+            {"jsonrpc": "2.0", "method": "aria2.tellActive", "params": [token]},  # 通知被过滤
+            {"jsonrpc": "2.0", "id": 2, "method": "nope.method", "params": [token]},
+            {"jsonrpc": "2.0", "id": 3, "method": "aria2.getVersion"},  # 缺 token：code 1
+        ],
+    )
+    assert batch.status_code == 200
+    body = batch.json()
+    assert [item["id"] for item in body] == [1, 2, 3]
+    assert len(body[0]["result"]) == 30
+    assert body[1]["error"]["code"] == -32601
+    assert body[2]["error"]["code"] == 1
+
+    empty = rpc_client.post("/aria2/jsonrpc", json=[])
+    assert empty.json()["error"]["code"] == -32600
+
+    oversized = [
+        {"jsonrpc": "2.0", "id": index, "method": "system.listMethods", "params": [token]}
+        for index in range(21)
+    ]
+    assert rpc_client.post("/aria2/jsonrpc", json=oversized).json()["error"]["code"] == -32600
+
+    all_notifications = rpc_client.post(
+        "/aria2/jsonrpc",
+        json=[{"jsonrpc": "2.0", "method": "aria2.tellActive", "params": [token]}] * 3,
+    )
+    assert all_notifications.status_code == 204
+
+
+def test_multicall_wrapper_and_nesting_rejection(rpc_client: TestClient) -> None:
+    token = f"token:{_secret()}"
+    response = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "system.multicall",
+            "params": [
+                token,
+                [
+                    {"methodName": "aria2.getVersion", "params": []},
+                    {"methodName": "aria2.pause", "params": ["g"]},
+                ],
+            ],
+        },
+    )
+    assert response.status_code == 200
+    results = response.json()["result"]
+    assert isinstance(results[0], list) and results[0][0]["version"]
+    assert results[1]["faultCode"] == 1
+
+    nested = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "system.multicall",
+            "params": [token, [{"methodName": "system.multicall", "params": []}]],
+        },
+    )
+    body = nested.json()["result"][0]
+    assert body["faultCode"] == -32602
+
+    oversized = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "system.multicall",
+            "params": [token, [{"methodName": "aria2.getVersion"}] * 21],
+        },
+    )
+    assert oversized.json()["error"]["code"] == -32602
+
+
+def test_rate_limit_returns_200_with_error_and_retry_after(client: TestClient) -> None:
+    create_admin(client)
+    login(client)
+    response = client.patch("/api/v2/settings", json={"rpc_rate_limit": 1})
+    assert response.status_code == 200
+    first = client.post(
+        "/aria2/jsonrpc", json={"jsonrpc": "2.0", "id": 1, "method": "system.listMethods"}
+    )
+    assert first.status_code == 200
+    assert first.json()["error"]["code"] in {1, -32601} or "result" in first.json()
+    second = client.post(
+        "/aria2/jsonrpc", json={"jsonrpc": "2.0", "id": 2, "method": "system.listMethods"}
+    )
+    assert second.status_code == 200
+    assert second.json()["error"]["code"] == -32000
+    assert "Retry-After" in second.headers
+
+
+def test_cors_whitelist_and_reject(client: TestClient, app: FastAPI) -> None:
+    app.state.rpc_cors = SimpleCors(allow_all=False, allowed_origins=frozenset({"https://ariang.example"}))
+    preflight = client.options(
+        "/aria2/jsonrpc", headers={"Origin": "https://ariang.example"}
+    )
+    assert preflight.status_code == 204
+    assert preflight.headers["access-control-allow-origin"] == "https://ariang.example"
+    assert preflight.headers["access-control-allow-credentials"] == "true"
+
+    foreign = client.options("/aria2/jsonrpc", headers={"Origin": "https://evil.example"})
+    assert foreign.status_code == 403
+
+    unknown = client.options("/aria2/jsonrpc")
+    assert unknown.status_code == 403
+
+
+def test_cors_allow_all_mode_has_no_credentials(client: TestClient, app: FastAPI) -> None:
+    app.state.rpc_cors = SimpleCors(allow_all=True, allowed_origins=frozenset())
+    preflight = client.options("/aria2/jsonrpc", headers={"Origin": "https://anywhere.example"})
+    assert preflight.status_code == 204
+    assert preflight.headers["access-control-allow-origin"] == "*"
+    assert "access-control-allow-credentials" not in preflight.headers
+    post = client.post(
+        "/aria2/jsonrpc",
+        json={"jsonrpc": "2.0", "id": 1, "method": "system.listMethods"},
+        headers={"Origin": "https://anywhere.example"},
+    )
+    assert post.headers.get("access-control-allow-origin") == "*"
+
+
+def test_projection_safety_full_scan(rpc_client: TestClient, settings) -> None:
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    _seed_task(settings, user_id)
+
+    payloads: list[str] = []
+    for method, params in [
+        ("aria2.tellActive", []),
+        ("aria2.tellWaiting", [0, 10]),
+        ("aria2.tellStopped", [0, 10]),
+        ("aria2.getGlobalStat", []),
+        ("aria2.getOption", ["0000000000000000"]),
+        ("aria2.getGlobalOption", []),
+    ]:
+        response = _rpc(rpc_client, method, params)
+        payloads.append(response.text)
+    status = _rpc(rpc_client, "aria2.tellStatus", ["0000000000000000"])
+    payloads.append(status.text)
+    blob = "\n".join(payloads)
+
+    assert "feedface" not in blob, "真实 aria2 GID 不得出现"
+    assert "objects/" not in blob and "/downloads" not in blob, "内部路径不得出现"
+    assert "capability" not in blob.lower(), "签名 capability 不得出现"
+    assert "X-Mjiz" not in blob, "capability 头名不得出现"
+    # 展示 URI 是用户提交的公开形态，允许出现；内部签名 URI 绝不出现。
+
+
+def test_raw_gid_query_echoes_request_string(rpc_client: TestClient, settings) -> None:
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    _seed_task(settings, user_id)
+    response = _rpc(rpc_client, "aria2.tellStatus", ["feedface0123456789abcdef"])
+    assert response.status_code == 200
+    body = response.json()
+    assert "result" in body
+    assert body["result"]["gid"] == "feedface0123456789abcdef"
+
+
+def test_adduri_rejects_ftp_and_path_out(rpc_client: TestClient) -> None:
+    ftp = _rpc(rpc_client, "aria2.addUri", [["ftp://example.com/file.bin"]])
+    assert ftp.json()["error"]["code"] == 1
+    out = _rpc(
+        rpc_client, "aria2.addUri", [["https://example.com/file.bin"], {"out": "/etc/passwd"}]
+    )
+    assert out.json()["error"]["code"] == 1
+    tracker = _rpc(
+        rpc_client,
+        "aria2.addUri",
+        [["https://example.com/file.bin"], {"bt-tracker": "http://t/announce"}],
+    )
+    assert tracker.json()["error"]["code"] == 1
+
+
+def test_adduri_creates_and_is_idempotent(rpc_client: TestClient, settings) -> None:
+    created = _rpc(rpc_client, "aria2.addUri", [["https://example.com/rpc-create.bin"]])
+    assert "result" in created.json(), created.text
+    gid = created.json()["result"]
+    assert len(gid) == 16
+    duplicate = _rpc(rpc_client, "aria2.addUri", [["https://example.com/rpc-create.bin"]])
+    assert duplicate.json()["result"] == gid
+    status = _rpc(rpc_client, "aria2.tellStatus", [gid])
+    assert status.json()["result"]["gid"] == gid
+
+
+def test_remove_cancels_and_rejects_terminal(rpc_client: TestClient, settings) -> None:
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    _seed_task(settings, user_id, status="active", name="cancel-me.bin")
+    listed = _rpc(rpc_client, "aria2.tellActive", [])
+    gid = listed.json()["result"][0]["gid"]
+    removed = _rpc(rpc_client, "aria2.remove", [gid])
+    assert removed.json()["result"] == gid
+    after = _rpc(rpc_client, "aria2.tellStopped", [0, 10])
+    statuses = {item["status"] for item in after.json()["result"]}
+    assert statuses <= {"complete", "error", "removed"}
+
+    terminal = _rpc(rpc_client, "aria2.remove", [gid])
+    assert terminal.json()["error"]["code"] == 1
+    unknown = _rpc(rpc_client, "aria2.remove", ["aaaaaaaaaaaaaaaa"])
+    assert unknown.json()["error"]["code"] == 1
+
+
+def test_addtorrent_rejects_bad_options(rpc_client: TestClient) -> None:
+    payload = base64.b64encode(b"not-a-torrent").decode()
+    webseed = _rpc(
+        rpc_client,
+        "aria2.addTorrent",
+        [payload, {"follow-web-seed": "http://mirror/"}],
+    )
+    assert webseed.json()["error"]["code"] == 1
+    tracker = _rpc(rpc_client, "aria2.addTorrent", [payload, {"bt-tracker": "http://t/a"}])
+    assert tracker.json()["error"]["code"] == 1
+    invalid = _rpc(rpc_client, "aria2.addTorrent", [payload])
+    assert invalid.json()["error"]["code"] == 1
+
+
+def test_removed_projection_for_cancelled_tasks(rpc_client: TestClient, settings) -> None:
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    _seed_task(settings, user_id, status="cancelled", name="removed-check.bin")
+    stopped = _rpc(rpc_client, "aria2.tellStopped", [0, 50])
+    names = {item["status"] for item in stopped.json()["result"]}
+    assert "removed" in names
+
+
+def test_multicall_token_in_subcall_ariang_form(rpc_client: TestClient) -> None:
+    """P1-1：AriaNg 标准形态——外层无 token，token 在每个子调用的 params[0]。"""
+    secret = _secret()
+    response = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "mc1",
+            "method": "system.multicall",
+            "params": [
+                [
+                    {
+                        "methodName": "aria2.getVersion",
+                        "params": [f"token:{secret}"],
+                    },
+                    {
+                        "methodName": "system.listMethods",
+                        "params": [f"token:{secret}"],
+                    },
+                ]
+            ],
+        },
+    )
+    assert response.status_code == 200
+    results = response.json()["result"]
+    assert isinstance(results[0], list) and results[0][0]["version"]
+    assert len(results[1][0]) == 30
+
+    # 多子调用 token 不一致：以第一个为准（版本查询成功，同用户执行）。
+    mixed = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "mc2",
+            "method": "system.multicall",
+            "params": [
+                [
+                    {"methodName": "aria2.getVersion", "params": [f"token:{secret}"]},
+                    {"methodName": "aria2.getVersion", "params": ["token:wrong-secret"]},
+                ]
+            ],
+        },
+    )
+    assert mixed.status_code == 200
+    assert isinstance(mixed.json()["result"][0], list)
+
+
+def test_rate_limit_charges_per_execution_count(client: TestClient) -> None:
+    """P2-6：multicall 按子调用数计费。"""
+    create_admin(client)
+    login(client)
+    client.patch("/api/v2/settings", json={"rpc_rate_limit": 20})
+    secret_response = client.put("/api/v2/credentials/rpc", json={"enabled": True})
+    secret = secret_response.json()["secret"]
+
+    calls = [{"methodName": "aria2.getVersion", "params": [f"token:{secret}"]} for _ in range(20)]
+    burst = client.post(
+        "/aria2/jsonrpc",
+        json={"jsonrpc": "2.0", "id": 1, "method": "system.multicall", "params": [calls]},
+    )
+    assert burst.status_code == 200
+    assert "result" in burst.json()
+
+    throttled = client.post(
+        "/aria2/jsonrpc",
+        json={"jsonrpc": "2.0", "id": 2, "method": "aria2.getVersion", "params": [f"token:{secret}"]},
+    )
+    assert throttled.json()["error"]["code"] == -32000
+    assert "Retry-After" in throttled.headers
+
+
+def test_internal_error_returns_32603_in_single_and_batch(client: TestClient, app: FastAPI) -> None:
+    """P2-5：非 DomainError 异常 → -32603 中文且不泄露原文（单请求与 batch 内两处）。"""
+    create_admin(client)
+    login(client)
+    secret = client.put("/api/v2/credentials/rpc", json={"enabled": True}).json()["secret"]
+
+    class ExplodingService:
+        async def dispatch(self, method: str, params: list, *, user_id: int) -> object:
+            raise RuntimeError("数据库连接池耗尽 /d/internal/secret/path")
+
+    original = app.state.aria2_rpc_service
+    app.state.aria2_rpc_service = ExplodingService()
+    try:
+        single = client.post(
+            "/aria2/jsonrpc",
+            json={
+                "jsonrpc": "2.0", "id": 1, "method": "aria2.getVersion",
+                "params": [f"token:{secret}"],
+            },
+        )
+        assert single.status_code == 200
+        error = single.json()["error"]
+        assert error["code"] == -32603
+        assert error["message"] == "服务器内部错误"
+        assert "数据库" not in error["message"] and "/d/" not in single.text
+
+        batch = client.post(
+            "/aria2/jsonrpc",
+            json=[
+                {
+                    "jsonrpc": "2.0", "id": 1, "method": "aria2.getVersion",
+                    "params": [f"token:{secret}"],
+                },
+                {"jsonrpc": "2.0", "method": "aria2.getVersion", "params": [f"token:{secret}"]},
+            ],
+        )
+        assert batch.status_code == 200
+        body = batch.json()
+        assert len(body) == 1  # 通知不产生响应。
+        assert body[0]["error"]["code"] == -32603
+        assert "RuntimeError" not in batch.text
+    finally:
+        app.state.aria2_rpc_service = original
+
+
+def test_addtorrent_canonical_param_positions(rpc_client: TestClient) -> None:
+    """P2-3：规范形态 [b64, uris[], options{}]；非空 uris（webseed）拒绝。"""
+    payload = base64.b64encode(b"not-a-torrent").decode()
+    webseed = _rpc(
+        rpc_client,
+        "aria2.addTorrent",
+        [payload, ["http://mirror/file.bin"], {"select-file": "1"}],
+    )
+    assert webseed.json()["error"]["code"] == 1
+    assert "webseed" in webseed.json()["error"]["message"]
+
+    # 空 uris 列表 + options 在 params[2] 是合法形态（种子本身无效但参数解析通过）。
+    empty_uris = _rpc(rpc_client, "aria2.addTorrent", [payload, [], {"select-file": "1"}])
+    assert "不支持通过种子 URI 列表提供 webseed" not in empty_uris.text
+    assert empty_uris.json()["error"]["code"] == 1  # 种子无效，code 1。
+
+
+def test_get_405_has_allow_header(client: TestClient) -> None:
+    response = client.get("/aria2/jsonrpc")
+    assert response.status_code == 405
+    assert response.headers.get("allow") == "POST, OPTIONS"
+
+
+def test_rpc_isolation_from_other_users(rpc_client: TestClient, settings) -> None:
+    """P3 #14：他人任务在任何响应中零出现（双用户数据专项）。"""
+    from tests.api.conftest import OTHER_PASSWORD, create_user
+
+    owner_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    _seed_task(settings, owner_id, name="owner-secret-file.bin")
+
+    create_user(rpc_client, "intruder")
+    login(rpc_client, "intruder", OTHER_PASSWORD)
+    secret = rpc_client.put("/api/v2/credentials/rpc", json={"enabled": True}).json()["secret"]
+
+    blob_parts = []
+    for method, params in [
+        ("aria2.tellActive", []),
+        ("aria2.tellWaiting", [0, 50]),
+        ("aria2.tellStopped", [0, 50]),
+        ("aria2.getGlobalStat", []),
+    ]:
+        blob_parts.append(
+            rpc_client.post(
+                "/aria2/jsonrpc",
+                json={
+                    "jsonrpc": "2.0", "id": 1, "method": method,
+                    "params": [f"token:{secret}", *params],
+                },
+            ).text
+        )
+    blob_parts.append(
+        rpc_client.post(
+            "/aria2/jsonrpc",
+            json={
+                "jsonrpc": "2.0", "id": 2, "method": "aria2.tellStatus",
+                "params": [f"token:{secret}", "feedface0123456789abcdef"],
+            },
+        ).text
+    )
+    blob = "\n".join(blob_parts)
+    assert "owner-secret-file" not in blob, "他人任务名不得出现"
+    assert blob_parts[-1].find('"error"') != -1, "他人 GID 查询必须报错"
+
+
+def test_rpc_full_scan_includes_getfiles_and_geturis(rpc_client: TestClient, settings) -> None:
+    """P3 #15：getFiles/getUris 纳入 API 级全文扫描。"""
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    _seed_task(settings, user_id)
+    listed = _rpc(rpc_client, "aria2.tellActive", [])
+    gid = listed.json()["result"][0]["gid"]
+    files = _rpc(rpc_client, "aria2.getFiles", [gid])
+    uris = _rpc(rpc_client, "aria2.getUris", [gid])
+    blob = files.text + uris.text
+    assert "feedface" not in blob
+    assert "capability" not in blob.lower() and "X-Mjiz" not in blob
+    assert "objects/" not in blob

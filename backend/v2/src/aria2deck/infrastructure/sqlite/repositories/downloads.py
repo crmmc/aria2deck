@@ -338,6 +338,18 @@ class DownloadRepository:
             raise DomainError(ErrorCode.NOT_FOUND, "任务不存在")
         return self._task(row)
 
+    async def list_subscription_owners(
+        self, attempt_id: int
+    ) -> list[tuple[int, int]]:
+        rows = (
+            await self.connection.execute(
+                select(task_subscriptions.c.id, task_subscriptions.c.user_id)
+                .where(task_subscriptions.c.attempt_id == attempt_id)
+                .order_by(task_subscriptions.c.id)
+            )
+        ).all()
+        return [(int(row.id), int(row.user_id)) for row in rows]
+
     async def count_live_subscriptions(self, attempt_id: int) -> int:
         result = await self.connection.execute(
             select(func.count(task_subscriptions.c.id))

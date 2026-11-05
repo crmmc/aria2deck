@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from aria2deck.infrastructure.config import Settings
 from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, login
 from tests.api.test_files import seed_file
 
 
 def _wait_pack_status(
-    client: TestClient, pack_id: int, statuses: tuple[str, ...], timeout: float = 15.0
+    client: TestClient, pack_id: int, statuses: tuple[str, ...], timeout: float = 30.0
 ) -> dict[str, object]:
     """后台 pack-dispatcher 每 1s 推进一轮：轮询等待真实 worker 收敛。"""
     deadline = time.monotonic() + timeout
@@ -23,6 +25,15 @@ def _wait_pack_status(
                 return dict(view.json())
         time.sleep(0.02)
     raise AssertionError(f"pack {pack_id} 未在 {timeout}s 内进入 {statuses}（当前 {last}）")
+
+
+def _delay_pack_claim(settings: Settings, pack_id: int, *, delay_ms: int = 5000) -> None:
+    """推迟领取：消除「创建→改名」与调度器 1s 轮次之间在全量负载下的竞态窗口。"""
+    with sqlite3.connect(settings.database_path) as conn:
+        conn.execute(
+            "UPDATE pack_jobs SET next_attempt_at_ms = ? WHERE id = ?",
+            (int(time.time() * 1000) + delay_ms, pack_id),
+        )
 
 
 def _setup_two_users(client: TestClient) -> tuple[int, int]:
@@ -110,6 +121,7 @@ def test_pack_failure_progress_and_lifecycle(client: TestClient, app: FastAPI, s
         "/api/v2/packs",
         json={"items": [first[1]], "output_name": "renamed.zip", "delete_source": False},
     ).json()["id"]
+    _delay_pack_claim(settings, pack_id)
     client.patch(f"/api/v2/files/{first[1]}", json={"name": "moved.bin"})
     view = _wait_pack_status(client, pack_id, ("failed",))
     assert view["error_code"] == "invalid_state"

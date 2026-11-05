@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Protocol
 
 from ..domain.accounts import ApiToken, Session, User
@@ -123,6 +125,8 @@ class AccountRepositoryPort(Protocol):
 
     async def delete_api_token(self, *, token_id: int, user_id: int) -> None: ...
 
+    async def list_rpc_enabled_users(self) -> list[User]: ...
+
     async def set_rpc_secret(
         self,
         *,
@@ -143,3 +147,24 @@ class SettingsRepositoryPort(Protocol):
 
 class UserCleanupPort(Protocol):
     async def cleanup_user(self, user_id: int) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRevocation:
+    """会话撤销通知：user 级（session_id=None）或精确会话。"""
+
+    user_id: int
+    session_id: str | None = None
+
+
+class SessionRevocationBus(Protocol):
+    """共享内核端口：accounts 发布撤销，WS 等长连接方订阅后立即关闭。
+
+    shortcut: 进程内同步分发；多实例部署需替换为共享通道（与 WS 限额同一升级点）。
+    """
+
+    def publish(self, revocation: SessionRevocation) -> None: ...
+
+    def subscribe(self, callback: Callable[[SessionRevocation], None]) -> None: ...
+
+    def unsubscribe(self, callback: Callable[[SessionRevocation], None]) -> None: ...

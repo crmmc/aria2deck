@@ -5,6 +5,7 @@ import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import cast
@@ -14,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .api.accounts import router as accounts_router
+from .api.aria2_rpc import router as aria2_rpc_router
 from .api.downloads import router as downloads_router
 from .api.errors import install_error_handlers
 from .api.files import router as files_router
@@ -24,7 +26,10 @@ from .api.settings import router as settings_router
 from .api.shares import router as shares_router
 from .api.static_site import register_static_site
 from .api.system import router as system_router
+from .api.ws import router as ws_router
+from .application.accounts.revocation import InMemorySessionRevocationBus
 from .application.accounts.service import AccountService
+from .application.downloads.broadcast import TaskBroadcast
 from .application.downloads.cleanup import DownloadUserCleanup
 from .application.downloads.commands import DownloadCommandService
 from .application.downloads.gateway import DownloadGatewayService
@@ -33,6 +38,9 @@ from .application.downloads.lifecycle import DownloadLifecycleService
 from .application.downloads.projection import TaskProjector
 from .application.downloads.queries import DownloadQueryService
 from .application.downloads.recovery import DownloadRecoveryService
+from .application.downloads.rpc_projection import VirtualGidSpace
+from .application.downloads.rpc_service import Aria2RpcService
+from .application.downloads.ws_service import WebSocketTaskService
 from .application.library.cleanup import LibraryUserCleanup
 from .application.library.commands import LibraryCommandService
 from .application.library.deletion import ContentDeletionWorker
@@ -157,6 +165,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     library_cleanup = LibraryUserCleanup(
         uow_factory=uow_factory, repository_factory=content_repository, clock_ms=_clock_ms
     )
+    session_revocations = InMemorySessionRevocationBus()
     account_service = AccountService(
         uow_factory=uow_factory,
         repository_factory=account_repository,
@@ -164,6 +173,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         clock_ms=_clock_ms,
         session_ttl_seconds=config.session_ttl_seconds,
         cleanup_ports=(download_cleanup, pack_cleanup, library_cleanup),
+        revocation_bus=session_revocations,
     )
     rate_limiter = RateLimiter(settings=settings_service.current, clock_ms=_clock_ms)
     safe_http = SafeHttpClient()
@@ -200,6 +210,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     )
     connectivity = BackendConnectivity()
     content_store = DownloadContentStore(config.download_directory)
+    task_broadcast = TaskBroadcast()
     download_lifecycle = DownloadLifecycleService(
         uow_factory=uow_factory,
         repository_factory=download_repository,
@@ -209,6 +220,8 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         observations=observations,
         connectivity=connectivity,
         clock_ms=_clock_ms,
+        broadcast=task_broadcast,
+        queries=download_queries,
     )
     download_recovery = DownloadRecoveryService(
         uow_factory=uow_factory,
@@ -232,6 +245,13 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         ),
     )
     supervisor = WorkerSupervisor()
+    virtual_gids = VirtualGidSpace()
+    aria2_rpc_service = Aria2RpcService(
+        queries=download_queries,
+        commands=download_commands,
+        history=download_history,
+        gids=virtual_gids,
+    )
     supervisor.register("download-polling", download_lifecycle.run_polling)
     supervisor.register("download-listener", download_lifecycle.run_listener)
     supervisor.register("account-deletion", account_service.run_deletion_worker)
@@ -364,8 +384,14 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
             app.state.readiness_check = None
             app.state.readiness_details = None
             await supervisor.stop()
+            await ws_service.shutdown()
             await database.close()
             instance_lock.release()
+
+    @dataclass(frozen=True)
+    class RpcCorsSettings:
+        allow_all: bool
+        allowed_origins: frozenset[str]
 
     app = FastAPI(title="Aria2Deck V2", version="0.1.0", lifespan=lifespan)
     app.state.account_service = account_service
@@ -393,9 +419,24 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     app.state.supervisor = supervisor
     app.state.connectivity = connectivity
     app.state.cookie_secure = not config.debug
+    app.state.aria2_rpc_service = aria2_rpc_service
+    ws_allowed_origins = config.rpc_allowed_origins  # 与 RPC 同源配置复用
+    ws_service = WebSocketTaskService(
+        authenticator=account_service,
+        broadcast=task_broadcast,
+        allowed_origins=ws_allowed_origins,
+    )
+    session_revocations.subscribe(ws_service.on_revocation)
+    app.state.rpc_cors = RpcCorsSettings(
+        allow_all=config.rpc_allow_all_origins,
+        allowed_origins=config.rpc_allowed_origins,
+    )
+    app.state.ws_service = ws_service
+    app.state.session_revocations = session_revocations
     app.state.readiness_check = None
     app.state.readiness_details = None
     install_error_handlers(app)
+    app.include_router(aria2_rpc_router)
     app.include_router(accounts_router)
     app.include_router(downloads_router)
     app.include_router(files_router)
@@ -404,6 +445,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     app.include_router(public_shares_router)
     app.include_router(settings_router)
     app.include_router(system_router)
+    app.include_router(ws_router)
     app.include_router(health_router)
     register_static_site(app, static_dir=static_dir or config.static_directory)
     return app

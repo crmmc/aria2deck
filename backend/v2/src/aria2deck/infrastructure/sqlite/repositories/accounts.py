@@ -68,6 +68,14 @@ class AccountRepository:
             rpc_secret_prefix=cast(str | None, row["rpc_secret_prefix"]),
         )
 
+    async def list_rpc_enabled_users(self) -> list[User]:
+        rows = (
+            await self.connection.execute(
+                select(users).where(users.c.rpc_secret_ciphertext.is_not(None))
+            )
+        ).mappings().all()
+        return [self._user(row) for row in rows]
+
     async def count_users(self) -> int:
         return int((await self.connection.execute(select(func.count(users.c.id)))).scalar_one())
 

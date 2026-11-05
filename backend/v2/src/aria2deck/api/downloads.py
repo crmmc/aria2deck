@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Header, Path, Query
 from fastapi.responses import StreamingResponse
 
 from ..application.accounts.models import Principal
+from ..application.downloads.broadcast import task_message
 from ..application.downloads.commands import DownloadCommandService
 from ..application.downloads.gateway import DownloadGatewayService
 from ..application.downloads.history import HistoryService
@@ -23,7 +24,6 @@ from .contracts import (
     TaskActionRequest,
     TaskBatchCreateRequest,
     TaskBatchResponse,
-    TaskFileResponse,
     TaskListResponse,
     TaskQuotaResponse,
     TaskResponse,
@@ -49,35 +49,8 @@ router = APIRouter(prefix="/api/v2", tags=["downloads"])
 
 
 def _task(task: TaskProjection) -> TaskResponse:
-    return TaskResponse(
-        id=task.id,
-        status=task.status,
-        status_label=task.status_label,
-        name=task.name,
-        uri=task.display_uri,
-        total_bytes=task.total_bytes,
-        completed_bytes=task.completed_bytes,
-        download_speed=task.download_speed,
-        upload_speed=task.upload_speed,
-        peer_count=task.peer_count,
-        connection_count=task.connection_count,
-        files=[
-            TaskFileResponse(
-                name=file.name,
-                total_bytes=file.total_bytes,
-                completed_bytes=file.completed_bytes,
-                selected=file.selected,
-            )
-            for file in task.files
-        ],
-        observation_fresh=task.observation_fresh,
-        reserved_bytes=task.reserved_bytes,
-        error_code=task.error_code,
-        retryable=task.retryable,
-        created_at_ms=task.created_at_ms,
-        updated_at_ms=task.updated_at_ms,
-        finished_at_ms=task.finished_at_ms,
-    )
+    """REST 与 WS 共用唯一序列化点：broadcast.task_message 是 TaskResponse 的唯一来源。"""
+    return TaskResponse.model_validate(task_message(task).payload)
 
 
 def _stats(stats: TaskStats) -> TaskStatsResponse:

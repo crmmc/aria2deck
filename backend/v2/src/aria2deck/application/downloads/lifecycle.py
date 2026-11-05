@@ -11,16 +11,19 @@ from ...domain.downloads import (
     ADMISSION_PAUSED,
     EXTERNAL_PAUSED,
     METADATA_ADMISSION_PAUSED,
+    TERMINAL_SUBSCRIPTION_STATUSES,
     AttemptStatus,
 )
 from ...domain.errors import DomainError, ErrorCode
 from ..ports import UnitOfWork
+from .broadcast import BroadcastPort, task_message
 from .commands import SubmissionBackend
 from .models import (
     AttemptRecord,
     ContentPreparation,
     DownloadObservation,
     SourceRecord,
+    TaskProjection,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,6 +33,8 @@ Sleep = Callable[[float], Awaitable[None]]
 
 class LifecycleRepository(Protocol):
     async def find_attempt_by_gid(self, gid: str) -> AttemptRecord | None: ...
+
+    async def list_subscription_owners(self, attempt_id: int) -> list[tuple[int, int]]: ...
 
     async def get_attempt(self, attempt_id: int) -> AttemptRecord: ...
 
@@ -155,6 +160,10 @@ class ContentStore(Protocol):
     async def cleanup_attempt(self, attempt_id: int) -> None: ...
 
 
+class TaskQueryPort(Protocol):
+    async def get_task(self, *, user_id: int, task_id: int) -> TaskProjection: ...
+
+
 class Connectivity(Protocol):
     def record_success(self) -> None: ...
 
@@ -183,6 +192,8 @@ class DownloadLifecycleService:
         reconnect_max_seconds: float = 30.0,
         jitter: Callable[[], float] = lambda: 0.0,
         sleep: Sleep = asyncio.sleep,
+        broadcast: BroadcastPort | None = None,
+        queries: TaskQueryPort | None = None,
     ) -> None:
         self.uow_factory = uow_factory
         self.repository_factory = repository_factory
@@ -196,7 +207,11 @@ class DownloadLifecycleService:
         self.reconnect_max_seconds = reconnect_max_seconds
         self.jitter = jitter
         self.sleep = sleep
+        self.broadcast = broadcast
+        self.queries = queries
         self._locks: dict[int, asyncio.Lock] = {}
+        # 终态帧幂等：每个 attempt 的终态只推送一次（跨 _admit/_handoff/_apply 全路径）。
+        self._terminal_broadcast: set[int] = set()
 
     async def _attempt_and_source(
         self, attempt_id: int, gid: str
@@ -222,6 +237,28 @@ class DownloadLifecycleService:
                     self.observations.discard(snapshot.gid)
                     return
                 raise
+            finally:
+                # 单一广播挂接点：决策结束后推送 DB 权威状态（快照缺失也不清空）。
+                await self._broadcast_attempt(attempt.id)
+
+    async def _broadcast_attempt(self, attempt_id: int) -> None:
+        """统一广播出口：任何路径进入终态的尝试都会推送一次终态帧（幂等）。"""
+        if self.broadcast is None or self.queries is None:
+            return
+        try:
+            async with self.uow_factory() as uow:
+                subscriptions = await self.repository_factory(uow).list_subscription_owners(
+                    attempt_id
+                )
+            for task_id, user_id in subscriptions:
+                projection = await self.queries.get_task(user_id=user_id, task_id=task_id)
+                if projection.status in TERMINAL_SUBSCRIPTION_STATUSES:
+                    if attempt_id in self._terminal_broadcast:
+                        continue  # 终态帧只发一次。
+                    self._terminal_broadcast.add(attempt_id)
+                self.broadcast.publish([user_id], task_message(projection))
+        except Exception as error:  # noqa: BLE001  # 广播失败不阻断生命周期决策
+            logger.warning("任务广播失败 error_type=%s", type(error).__name__)
 
     async def _reconcile(self, snapshot: DownloadObservation, attempt_id: int) -> None:
         attempt, source = await self._attempt_and_source(attempt_id, snapshot.gid)
