@@ -251,8 +251,9 @@ def test_production_session_cookie_is_secure(tmp_path: Path) -> None:
 INITIAL_ADMIN_PASSWORD = "test-initial-admin-32-characters"  # noqa: S105  # 本地测试凭证
 
 
-def initial_admin_hash(password: str) -> str:
-    salt = hashlib.sha256(b"admin").hexdigest().encode("ascii")
+def initial_admin_hash(password: str, username: str = "admin") -> str:
+    # 脚本/UI 客户端共同形态：盐 = sha256(username.strip().lower()) 的 hex ASCII 字节。
+    salt = hashlib.sha256(username.strip().lower().encode()).hexdigest().encode("ascii")
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 10000).hex()
 
 
@@ -289,6 +290,24 @@ def test_lifespan_creates_initial_admin_once_and_allows_restart_without_password
         )
         assert response.status_code == 200
         assert client.get("/api/v2/users").json()["total"] == 1
+
+
+def test_initial_admin_login_accepts_ui_normalized_username_derivation(
+    tmp_path: Path,
+) -> None:
+    # 回归（跨端哈希形态分叉）：UI 客户端按 username.strip().lower() 派生 wire，
+    # 用户名输入含大小写/空白时也必须与 ensure_initial_admin 的存储派生同形可登录。
+    settings = production_settings(tmp_path, INITIAL_ADMIN_PASSWORD)
+    with TestClient(create_app(settings=settings)) as client:
+        response = client.post(
+            "/api/v2/auth/login",
+            json={
+                "username": " Admin ",
+                "password": initial_admin_hash(INITIAL_ADMIN_PASSWORD, " adMIN "),
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["is_initial_password"] is True
 
 
 def test_production_lifespan_rejects_missing_initial_password_for_empty_database(

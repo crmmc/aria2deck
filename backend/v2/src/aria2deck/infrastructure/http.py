@@ -128,7 +128,12 @@ class SafeHttpClient:
         resolver = PublicResolver()
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
         session = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(resolver=resolver), timeout=timeout
+            connector=aiohttp.TCPConnector(resolver=resolver),
+            timeout=timeout,
+            # 逐字转发线缆字节：自动解压会让流出字节数超过上游声明的
+            # （压缩后）Content-Length，触发网关中途杀流；Range 偏移也随解压失真。
+            # shortcut: 无视 Accept-Encoding 强推压缩的源按压缩原样转发，需要透明解压时再升级。
+            auto_decompress=False,
         )
         current = url
         current_headers = dict(headers)
@@ -139,6 +144,9 @@ class SafeHttpClient:
                 request_headers = dict(current_headers)
                 if range_header is not None:
                     request_headers["Range"] = range_header
+                if not any(name.lower() == "accept-encoding" for name in request_headers):
+                    # 请求原始字节，让声明长度与转发字节天然一致；用户自带的编码偏好优先。
+                    request_headers["Accept-Encoding"] = "identity"
                 response = await session.get(current, headers=request_headers, allow_redirects=False)
                 if response.status in _REDIRECTS:
                     location = response.headers.get("Location")

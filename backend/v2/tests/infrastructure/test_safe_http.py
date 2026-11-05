@@ -150,7 +150,10 @@ async def test_cross_origin_redirect_drops_source_headers_and_range_is_retained(
     )
     assert await collect(response) == b"ok"
     assert session.requests[0][1]["Authorization"] == "secret"
-    assert session.requests[1] == ("https://other.example/final", {"Range": "bytes=0-1"})
+    assert session.requests[1] == (
+        "https://other.example/final",
+        {"Range": "bytes=0-1", "Accept-Encoding": "identity"},
+    )
     assert redirect.released is True
     assert session.closed is True
 
