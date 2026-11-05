@@ -7,7 +7,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import Row, RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
-from sqlalchemy.sql import Select
+from sqlalchemy.sql import ColumnElement, Select
 
 from ....application.downloads.models import (
     AttemptRecord,
@@ -37,6 +37,14 @@ from ....domain.errors import DomainError, ErrorCode
 from ..schema import content_objects, download_attempts, download_sources, task_subscriptions, users
 from .content import ContentRepository
 from .quota import QuotaRepository
+
+# 排序键白名单：枚举值映射到列对象，禁止任何用户输入以字符串形式拼进 SQL。
+_TASK_SORT_COLUMNS: dict[str, ColumnElement[Any]] = {
+    "created_at": task_subscriptions.c.created_at_ms,
+    "updated_at": task_subscriptions.c.updated_at_ms,
+    "name": task_subscriptions.c.display_name,
+    "size": download_attempts.c.total_length,
+}
 
 
 class DownloadRepository:
@@ -316,12 +324,21 @@ class DownloadRepository:
             ),
         )
 
-    async def list_tasks(self, *, user_id: int) -> list[DownloadRecord]:
+    async def list_tasks(
+        self,
+        *,
+        user_id: int,
+        sort: str = "updated_at",
+        order: str = "desc",
+    ) -> list[DownloadRecord]:
+        column = _TASK_SORT_COLUMNS[sort]
+        ascending = order == "asc"
         result = await self.connection.execute(
             self._task_query()
             .where(task_subscriptions.c.user_id == user_id)
             .order_by(
-                task_subscriptions.c.updated_at_ms.desc(), task_subscriptions.c.id.desc()
+                column.asc() if ascending else column.desc(),
+                task_subscriptions.c.id.asc() if ascending else task_subscriptions.c.id.desc(),
             )
         )
         return [self._task(row) for row in result.mappings().all()]

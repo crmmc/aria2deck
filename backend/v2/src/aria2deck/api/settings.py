@@ -5,16 +5,23 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends
 
 from ..application.accounts.models import Principal
+from ..application.settings.rate_limit import RateLimiter
 from ..application.settings.service import SettingsService
 from ..application.settings.trackers import TrackerCache, TrackerService
 from ..domain.settings import SECRET_MASK, SystemSettings
 from .contracts import (
+    Aria2TestResponse,
     PublicSiteInfoResponse,
     SettingsResponse,
     SettingsUpdateRequest,
     TrackerStatusResponse,
 )
-from .dependencies import required_session_principal, settings_service, tracker_service
+from .dependencies import (
+    rate_limiter,
+    required_session_principal,
+    settings_service,
+    tracker_service,
+)
 from .errors import error_responses
 
 router = APIRouter(prefix="/api/v2", tags=["settings"])
@@ -54,13 +61,38 @@ async def update_settings(
     return _settings_response(updated)
 
 
+@router.post(
+    "/settings/aria2/test",
+    response_model=Aria2TestResponse,
+    responses=error_responses(401, 403, 429, 500),
+)
+async def test_aria2_connection(
+    principal: Principal = Depends(required_session_principal),
+    service: SettingsService = Depends(settings_service),
+    limiter: RateLimiter = Depends(rate_limiter),
+) -> Aria2TestResponse:
+    limiter.check_aria2_test(user_id=principal.user.id)
+    result = await service.test_aria2(principal)
+    return Aria2TestResponse(
+        connected=result.connected,
+        version=result.version,
+        features=list(result.features),
+    )
+
+
 @router.get(
     "/public/site-info", response_model=PublicSiteInfoResponse, responses=error_responses(500)
 )
 async def public_site_info(
     service: SettingsService = Depends(settings_service),
 ) -> PublicSiteInfoResponse:
-    return PublicSiteInfoResponse(site_title=service.public_site_title())
+    settings = service.current()
+    return PublicSiteInfoResponse(
+        site_title=settings.site_title,
+        ws_reconnect_max_delay_seconds=settings.ws_reconnect_max_delay_seconds,
+        ws_reconnect_jitter_seconds=settings.ws_reconnect_jitter_seconds,
+        ws_reconnect_factor=settings.ws_reconnect_factor,
+    )
 
 
 def _tracker_status(cache: TrackerCache) -> TrackerStatusResponse:

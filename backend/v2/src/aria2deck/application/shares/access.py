@@ -131,7 +131,6 @@ class PublicShareService:
         now_ms = self.clock_ms()
         record = await self._active_share(code)
         self._require_token(record, token)
-        record = await self._active_share(code)
         async with self.uow_factory() as uow:
             content = self.content_repository_factory(uow)
             file_record = await self._owned_file(content, record)

@@ -38,9 +38,13 @@ class FakeUoW:
 class ReadRepository:
     def __init__(self, records: list[DownloadRecord]) -> None:
         self.records = records
+        self.sort_calls: list[tuple[str, str]] = []
 
-    async def list_tasks(self, *, user_id: int) -> list[DownloadRecord]:
+    async def list_tasks(
+        self, *, user_id: int, sort: str = "updated_at", order: str = "desc"
+    ) -> list[DownloadRecord]:
         assert user_id == 7
+        self.sort_calls.append((sort, order))
         return self.records
 
     async def get_task(self, *, user_id: int, task_id: int) -> DownloadRecord:
@@ -143,6 +147,25 @@ async def test_query_service_owns_filter_search_and_page_boundaries() -> None:
         user_id=7, status=None, search="missing", page=1, page_size=20
     )
     assert missing.items == []
+
+
+async def test_query_service_passes_sort_order_and_defaults_to_repository() -> None:
+    repository = ReadRepository([])
+    queries = DownloadQueryService(
+        uow_factory=FakeUoW,
+        repository_factory=lambda _uow: repository,
+        account_repository_factory=lambda _uow: QuotaRepository(),
+        projector=TaskProjector(
+            observations=InMemoryDownloadObservations(), clock_ms=lambda: 100_000
+        ),
+    )
+
+    await queries.list_tasks(
+        user_id=7, status=None, search="", page=1, page_size=20, sort="name", order="asc"
+    )
+    await queries.list_tasks(user_id=7, status=None, search="", page=1, page_size=20)
+
+    assert repository.sort_calls == [("name", "asc"), ("created_at", "desc")]
 
 
 async def test_query_service_detail_and_stats_use_the_same_projection() -> None:

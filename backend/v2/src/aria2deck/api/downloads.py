@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Header, Path, Query
 from fastapi.responses import StreamingResponse
 
@@ -92,6 +94,8 @@ async def list_tasks(
     page_size: int = Query(default=20, ge=1, le=100),
     status: SubscriptionStatus | None = None,
     q: str = Query(default="", max_length=200),
+    sort: Literal["created_at", "name", "size"] = "created_at",
+    order: Literal["asc", "desc"] = "desc",
     principal: Principal = Depends(required_principal),
     service: DownloadQueryService = Depends(download_queries),
 ) -> TaskListResponse:
@@ -101,6 +105,8 @@ async def list_tasks(
         search=q,
         page=page,
         page_size=page_size,
+        sort=sort,
+        order=order,
     )
     return TaskListResponse(
         items=[_task(task) for task in result.items],

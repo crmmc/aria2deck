@@ -1,0 +1,164 @@
+/* 布局：应用外壳（侧栏 / 主区 / 底导航）、登录页、页面骨架。 */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: auto 1fr;
+  min-height: 100vh;
+}
+
+.app-sidebar {
+  grid-row: 1 / span 2;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-4) var(--space-3);
+  gap: var(--space-4);
+}
+
+.app-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.app-brand-title {
+  font-size: var(--font-size-lg);
+  font-weight: 700;
+}
+.app-brand-sub {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.app-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.app-nav-link {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  text-decoration: none;
+}
+.app-nav-link:hover {
+  background: var(--color-badge-muted);
+}
+.app-nav-link.active {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.app-stats {
+  margin-top: auto;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+.app-stats p {
+  margin: var(--space-1) 0;
+}
+
+.app-logout {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  cursor: pointer;
+}
+
+.app-main {
+  padding: var(--space-5);
+  overflow-y: auto;
+}
+
+.app-bottomnav {
+  display: none;
+}
+
+.backend-banner {
+  grid-column: 2;
+  background: #fbe9e7;
+  color: var(--color-danger);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-danger);
+}
+
+.login-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+}
+
+.login-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-6);
+  width: min(360px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.login-title {
+  margin: 0;
+  font-size: var(--font-size-xl);
+}
+.login-sub {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.page-header h1 {
+  margin: 0;
+  font-size: var(--font-size-xl);
+}
+.header-meta {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+.header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.page-loading {
+  padding: var(--space-6);
+  text-align: center;
+  color: var(--color-text-muted);
+}

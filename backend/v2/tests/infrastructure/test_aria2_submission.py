@@ -372,3 +372,57 @@ async def test_top_level_multicall_rejection_is_uncertain(
     with pytest.raises(DomainError) as caught:
         await client.submit_many([submission("magnet", "0000000000000001")], trackers=())
     assert caught.value.code is ErrorCode.SUBMISSION_UNCERTAIN
+
+
+async def test_version_returns_version_and_filters_features(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def reply(request: dict[str, object]) -> dict[str, object]:
+        return {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "version": "1.37.0",
+                "enabledFeatures": ["Async DNS", "HTTPS", 1, None, True, "BitTorrent"],
+            },
+        }
+
+    session = FakeSession(reply)
+    monkeypatch.setattr("aria2deck.infrastructure.aria2_submission.aiohttp.ClientSession", lambda **kwargs: session)
+    client = make_client(tmp_path)
+
+    assert await client.version() == ("1.37.0", ["Async DNS", "HTTPS", "BitTorrent"])
+    assert session.requests[0]["method"] == "aria2.getVersion"
+    assert session.requests[0]["params"] == []
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # 错误 Secret：JSON-RPC error 响应
+        {"jsonrpc": "2.0", "id": "dynamic", "error": {"code": 1, "message": "Unauthorized"}},
+        # 空 URL / 不可达：传输层失败
+        aiohttp.ClientError("connection refused"),
+        # 超时
+        TimeoutError("timed out"),
+        # 响应形态无效
+        {"jsonrpc": "2.0", "id": "dynamic", "result": "1.37.0"},
+        {"jsonrpc": "2.0", "id": "dynamic", "result": {"enabledFeatures": ["HTTPS"]}},
+        {"jsonrpc": "2.0", "id": "dynamic", "result": {"version": 1}},
+    ],
+)
+async def test_version_failures_raise_domain_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: object
+) -> None:
+    def respond(request: dict[str, object]) -> object:
+        if isinstance(reply, dict) and reply.get("id") == "dynamic":
+            return {**reply, "id": request["id"]}
+        return reply
+
+    session = FakeSession(respond)
+    monkeypatch.setattr("aria2deck.infrastructure.aria2_submission.aiohttp.ClientSession", lambda **kwargs: session)
+    client = make_client(tmp_path)
+
+    with pytest.raises(DomainError) as caught:
+        await client.version()
+    assert caught.value.code is ErrorCode.SUBMISSION_UNCERTAIN

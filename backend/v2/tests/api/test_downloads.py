@@ -195,6 +195,53 @@ def test_task_list_is_user_scoped_paginated_searchable_and_filterable(
     assert client.get("/api/v2/tasks").text.find("Other user secret") == -1
 
 
+def test_task_list_sorts_by_whitelisted_keys_in_both_directions(
+    client: TestClient, settings: Settings
+) -> None:
+    admin = authenticated_admin(client)
+    user_id = int(admin["id"])
+    base = _now_ms()
+    _, beta = seed_task(
+        settings, user_id=user_id, name="beta", created_at_ms=base, total_bytes=300
+    )
+    _, alpha = seed_task(
+        settings, user_id=user_id, name="alpha", created_at_ms=base + 1, total_bytes=100
+    )
+    _, gamma = seed_task(
+        settings, user_id=user_id, name="gamma", created_at_ms=base + 2, total_bytes=200
+    )
+
+    def names(**params: object) -> list[str]:
+        response = client.get("/api/v2/tasks", params=params)
+        assert response.status_code == 200
+        return [item["name"] for item in response.json()["items"]]
+
+    # 默认：sort=created_at、order=desc。
+    assert names() == ["gamma", "alpha", "beta"]
+    assert names(sort="created_at", order="asc") == ["beta", "alpha", "gamma"]
+    assert names(sort="created_at", order="desc") == ["gamma", "alpha", "beta"]
+    assert names(sort="name", order="asc") == ["alpha", "beta", "gamma"]
+    assert names(sort="name", order="desc") == ["gamma", "beta", "alpha"]
+    assert names(sort="size", order="asc") == ["alpha", "gamma", "beta"]
+    assert names(sort="size", order="desc") == ["beta", "gamma", "alpha"]
+    # 排序与分页叠加时投影与分页结构不变。
+    paged = client.get(
+        "/api/v2/tasks", params={"sort": "name", "order": "asc", "page": 1, "page_size": 2}
+    ).json()
+    assert paged["total"] == 3
+    assert paged["page"] == 1
+    assert paged["page_size"] == 2
+    assert [item["id"] for item in paged["items"]] == [alpha, beta]
+
+    # 非法排序值：枚举外一律 422，不落入 SQL。
+    assert client.get(
+        "/api/v2/tasks", params={"sort": "updated_at_ms; DROP TABLE x"}
+    ).status_code == 422
+    assert client.get("/api/v2/tasks", params={"order": "ascending"}).status_code == 422
+    # 注入尝试后列表仍可用，证明没有字符串拼接进 SQL。
+    assert names(sort="name", order="asc") == ["alpha", "beta", "gamma"]
+
+
 def test_projection_uses_database_state_and_only_fresh_observation_details(
     app: FastAPI, client: TestClient, settings: Settings
 ) -> None:
@@ -546,6 +593,8 @@ async def test_list_api_adapter_maps_query_arguments_and_typed_response() -> Non
         page_size=1,
         status=SubscriptionStatus.ACTIVE,
         q="alpha",
+        sort="name",
+        order="asc",
         principal=principal,
         service=service,
     )
@@ -556,6 +605,8 @@ async def test_list_api_adapter_maps_query_arguments_and_typed_response() -> Non
         search="alpha",
         page=3,
         page_size=1,
+        sort="name",
+        order="asc",
     )
     assert response.total == 20
     assert response.page == 3

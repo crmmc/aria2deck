@@ -124,6 +124,9 @@ class CredentialInvalidateResponse(BaseModel):
 
 class PublicSiteInfoResponse(BaseModel):
     site_title: str
+    ws_reconnect_max_delay_seconds: int = Field(description="客户端 WebSocket 重连最大延迟（秒）")
+    ws_reconnect_jitter_seconds: int = Field(description="客户端 WebSocket 重连抖动（秒）")
+    ws_reconnect_factor: int = Field(description="客户端 WebSocket 重连退避倍数")
 
 
 class SettingsResponse(BaseModel):
@@ -188,6 +191,12 @@ class SettingsUpdateRequest(BaseModel):
     rpc_rate_limit: int | None = Field(default=None, ge=1, le=1_000_000)
     file_search_rate_limit: int | None = Field(default=None, ge=1, le=1_000_000)
     create_share_rate_limit: int | None = Field(default=None, ge=1, le=1_000_000)
+
+
+class Aria2TestResponse(BaseModel):
+    connected: bool
+    version: str | None = Field(default=None, description="连接成功时的 aria2 版本号")
+    features: list[str] = Field(default_factory=list, description="连接成功时启用的特性列表")
 
 
 class BackendStatusResponse(BaseModel):

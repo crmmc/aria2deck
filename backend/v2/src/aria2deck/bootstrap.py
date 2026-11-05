@@ -144,10 +144,17 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         account_repository_factory=account_repository,
         projector=task_projector,
     )
+    submission_backend = Aria2SubmissionClient(
+        settings=lambda: settings_service.current(),
+        credentials=credentials,
+        internal_base_url=config.internal_base_url,
+        download_directory=config.download_directory,
+    )
     settings_service = SettingsService(
         uow_factory=uow_factory,
         repository_factory=settings_repository,
         clock_ms=_clock_ms,
+        aria2_version=submission_backend,
     )
     download_cleanup = DownloadUserCleanup(
         uow_factory=uow_factory,
@@ -183,12 +190,6 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         fetcher=safe_http,
         settings=settings_service.current,
         clock_ms=_clock_ms,
-    )
-    submission_backend = Aria2SubmissionClient(
-        settings=settings_service.current,
-        credentials=credentials,
-        internal_base_url=config.internal_base_url,
-        download_directory=config.download_directory,
     )
     download_commands = DownloadCommandService(
         uow_factory=uow_factory,

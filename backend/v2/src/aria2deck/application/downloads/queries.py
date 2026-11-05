@@ -11,7 +11,13 @@ from .projection import TaskProjector
 
 
 class DownloadReadRepository(Protocol):
-    async def list_tasks(self, *, user_id: int) -> list[DownloadRecord]: ...
+    async def list_tasks(
+        self,
+        *,
+        user_id: int,
+        sort: str = "updated_at",
+        order: str = "desc",
+    ) -> list[DownloadRecord]: ...
 
     async def get_task(self, *, user_id: int, task_id: int) -> DownloadRecord: ...
 
@@ -43,9 +49,13 @@ class DownloadQueryService:
         search: str,
         page: int,
         page_size: int,
+        sort: str = "created_at",
+        order: str = "desc",
     ) -> TaskPage:
         async with self.uow_factory() as uow:
-            records = await self.repository_factory(uow).list_tasks(user_id=user_id)
+            records = await self.repository_factory(uow).list_tasks(
+                user_id=user_id, sort=sort, order=order
+            )
         tasks = [self.projector.project(record) for record in records]
         if status is not None:
             tasks = [task for task in tasks if task.status is status]

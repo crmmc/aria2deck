@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -10,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import SQLAlchemyError
 
 from aria2deck.bootstrap import create_app
+from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.settings import SECRET_MASK
 from aria2deck.infrastructure.config import Settings
 from aria2deck.infrastructure.sqlite.repositories.settings import SettingsRepository
@@ -19,7 +21,12 @@ from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, login
 def test_public_site_info_and_settings_roles(client: TestClient) -> None:
     public = client.get("/api/v2/public/site-info")
     assert public.status_code == 200
-    assert public.json() == {"site_title": "Aria2Deck"}
+    assert public.json() == {
+        "site_title": "Aria2Deck",
+        "ws_reconnect_max_delay_seconds": 30,
+        "ws_reconnect_jitter_seconds": 1,
+        "ws_reconnect_factor": 2,
+    }
     assert client.get("/api/v2/settings").status_code == 401
 
     create_admin(client)
@@ -29,6 +36,98 @@ def test_public_site_info_and_settings_roles(client: TestClient) -> None:
     assert client.get("/api/v2/settings").status_code == 403
     assert client.patch("/api/v2/settings", json={"site_title": "forbidden"}).status_code == 403
     assert client.get("/api/v2/public/site-info").json()["site_title"] == "Aria2Deck"
+
+
+class _FakeVersionPort:
+    def __init__(self, outcome: tuple[str, list[str]] | Exception) -> None:
+        self.outcome = outcome
+
+    async def version(self) -> tuple[str, list[str]]:
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+def test_aria2_connection_test_success_returns_version_and_features(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_admin(client)
+    login(client)
+    monkeypatch.setattr(
+        app.state.settings_service,
+        "aria2_version",
+        _FakeVersionPort(("1.37.0", ["HTTPS", "BitTorrent"])),
+    )
+
+    response = client.post("/api/v2/settings/aria2/test")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "connected": True,
+        "version": "1.37.0",
+        "features": ["HTTPS", "BitTorrent"],
+    }
+
+
+def test_aria2_connection_test_failure_returns_200_without_leaking_details(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_admin(client)
+    login(client)
+    leaking_message = (
+        "连接失败 http://127.0.0.1:6800/jsonrpc token:raw-secret ValueError: boom"
+    )
+    monkeypatch.setattr(
+        app.state.settings_service,
+        "aria2_version",
+        _FakeVersionPort(DomainError(ErrorCode.SUBMISSION_UNCERTAIN, leaking_message)),
+    )
+
+    response = client.post("/api/v2/settings/aria2/test")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "connected": False,
+        "version": None,
+        "features": [],
+    }
+    assert "6800" not in response.text
+    assert "raw-secret" not in response.text
+    assert "boom" not in response.text
+
+
+def test_aria2_connection_test_roles(client: TestClient) -> None:
+    assert client.post("/api/v2/settings/aria2/test").status_code == 401
+
+    create_admin(client)
+    login(client)
+    create_user(client)
+    login(client, "user", OTHER_PASSWORD)
+    assert client.post("/api/v2/settings/aria2/test").status_code == 403
+
+
+def test_aria2_connection_test_is_rate_limited_per_user(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_admin(client)
+    login(client)
+    monkeypatch.setattr(
+        app.state.settings_service,
+        "aria2_version",
+        _FakeVersionPort(("1.37.0", [])),
+    )
+    assert (
+        client.patch("/api/v2/settings", json={"aria2_test_rate_limit": 1}).status_code
+        == 200
+    )
+
+    first = client.post("/api/v2/settings/aria2/test")
+    second = client.post("/api/v2/settings/aria2/test")
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.json()["error"]["code"] == "rate_limited"
+    assert int(second.headers["Retry-After"]) >= 59
 
 
 def test_full_settings_round_trip_survives_restart(settings: Settings) -> None:
@@ -73,7 +172,12 @@ def test_full_settings_round_trip_survives_restart(settings: Settings) -> None:
         assert saved["hidden_file_extensions"] == [".tmp", ".part"]
         assert saved["tracker_fixed_list"] == ["udp://tracker.example:80"]
         assert saved["updated_at_ms"] > 0
-        assert first.get("/api/v2/public/site-info").json() == {"site_title": "新站点"}
+        assert first.get("/api/v2/public/site-info").json() == {
+            "site_title": "新站点",
+            "ws_reconnect_max_delay_seconds": 60,
+            "ws_reconnect_jitter_seconds": 2,
+            "ws_reconnect_factor": 3,
+        }
 
     with TestClient(create_app(settings=settings)) as second:
         login(second)
@@ -219,3 +323,21 @@ def test_backend_status_requires_two_failures_and_recovers_immediately(
         }
         connectivity.record_success()
         assert client.get("/api/v2/system/status").json()["download_backend"]["status"] == "ok"
+
+
+def test_create_app_wires_aria2_version_port_without_monkeypatch(tmp_path: Path) -> None:
+    """CFG-04 装配守卫：真实装配下设置服务必须带上 aria2 版本端口。
+
+    该接线一旦在 bootstrap 中丢失，/settings/aria2/test 会在生产返回 500，
+    而普通单测全部用 monkeypatch 替身，无法暴露漏装配。
+    """
+    settings = Settings(
+        database_path=tmp_path / "data" / "v2.db",
+        download_directory=tmp_path / "downloads",
+        static_directory=tmp_path / "static",
+        debug=True,
+    )
+
+    app = create_app(settings=settings)
+
+    assert app.state.settings_service.aria2_version is not None

@@ -66,6 +66,13 @@ class RateLimiter:
             _AUTHENTICATED_WINDOW_MS,
         )
 
+    def check_aria2_test(self, *, user_id: int) -> None:
+        self._check(
+            ("aria2-test", str(user_id)),
+            self.settings().aria2_test_rate_limit,
+            _AUTHENTICATED_WINDOW_MS,
+        )
+
     def check_rpc(self, ip: str) -> None:
         self._check(
             ("rpc", ip),

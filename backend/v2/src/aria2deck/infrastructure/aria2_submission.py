@@ -189,6 +189,25 @@ class Aria2SubmissionClient:
             return False
         return isinstance(result, dict) and result.get("gid") == gid
 
+    async def version(self) -> tuple[str, list[str]]:
+        """aria2.getVersion：连接测试用，失败统一抛 DomainError（不可达/认证失败/超时）。"""
+        try:
+            result = await self._call(self.settings(), "aria2.getVersion", [])
+        except _RpcRejected:
+            raise _uncertain("aria2 连接测试请求被拒绝") from None
+        if not isinstance(result, dict):
+            raise _uncertain("aria2 版本响应无效")
+        version = result.get("version")
+        if not isinstance(version, str):
+            raise _uncertain("aria2 版本响应无效")
+        features_value = result.get("enabledFeatures")
+        features = (
+            [item for item in features_value if isinstance(item, str)]
+            if isinstance(features_value, list)
+            else []
+        )
+        return version, features
+
     async def stop(self, *, gid: str) -> None:
         settings = self.settings()
         try:
