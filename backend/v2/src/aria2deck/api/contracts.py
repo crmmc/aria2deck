@@ -414,6 +414,8 @@ class StorageFileResponse(BaseModel):
     on_disk: bool
     reference_count: int
     deletion_state: Literal["active", "pending_delete", "tombstoned"]
+    created_at_ms: int = 0
+    file_names: list[str] = Field(default_factory=list)
 
 
 class StorageFileListResponse(BaseModel):
@@ -494,7 +496,24 @@ class PackViewResponse(BaseModel):
     finished_at_ms: int | None
     error_code: str | None
     delete_source: bool
+    output_name: str = ""
     output: PackOutputResponse | None = None
+
+
+class PackListResponse(BaseModel):
+    """Recent pack jobs of the current user, newest first (F1 打包任务卡)."""
+
+    items: list[PackViewResponse]
+
+
+class MachineStatsResponse(BaseModel):
+    """E1 管理员机器磁盘统计（只读）。"""
+
+    total_bytes: int
+    used_bytes: int
+    free_bytes: int
+    download_used_bytes: int
+    system_used_bytes: int
 
 
 class ShareCreateRequest(BaseModel):

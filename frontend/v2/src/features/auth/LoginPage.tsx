@@ -4,6 +4,7 @@ import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/app/hooks";
 import { ApiRequestError } from "@/shared/api/client";
 import { passwordClientHash } from "@/shared/lib/crypto";
+import { useSiteTitle } from "@/shared/lib/siteTitle";
 
 export function LoginPage() {
   const { user, loading, login } = useAuth();
@@ -15,12 +16,19 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const siteTitle = useSiteTitle();
 
   useEffect(() => {
     usernameRef.current?.focus();
   }, []);
 
+  useEffect(() => {
+    document.title = siteTitle;
+  }, [siteTitle]);
+
   if (!loading && user !== null) {
+    // 初始密码用户始终引导到个人资料页改密（G6），其余回来源页。
+    if (user.is_initial_password) return <Navigate to="/profile" replace />;
     const from = (location.state as { from?: string } | null)?.from;
     return <Navigate to={from && from !== "/login" ? from : "/tasks"} replace />;
   }
@@ -33,7 +41,12 @@ export function LoginPage() {
     try {
       const trimmed = username.trim();
       const hashed = await passwordClientHash(trimmed, password);
-      await login(trimmed, hashed);
+      const me = await login(trimmed, hashed);
+      // 初始密码登录后跳个人资料页引导改密（G6）。
+      if (me.is_initial_password) {
+        navigate("/profile", { replace: true });
+        return;
+      }
       const from = (location.state as { from?: string } | null)?.from;
       navigate(from && from !== "/login" ? from : "/tasks", { replace: true });
     } catch (caught) {
@@ -50,7 +63,7 @@ export function LoginPage() {
   return (
     <div className="login-page">
       <form className="login-card" onSubmit={handleSubmit} aria-label="登录表单">
-        <h1 className="login-title">Aria2Deck</h1>
+        <h1 className="login-title">{siteTitle}</h1>
         <p className="login-sub">多用户下载管理平台</p>
         {error !== null && (
           <div className="form-error" role="alert">

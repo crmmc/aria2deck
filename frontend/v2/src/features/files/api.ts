@@ -5,6 +5,7 @@ import type {
   FileItemResponse,
   FileListResponse,
   FileSearchResponse,
+  PackListResponse,
   PackPrecomputeResponse,
   PackViewResponse,
   ShareCreateOptions,
@@ -85,6 +86,19 @@ export async function createPack(
 
 export async function fetchPack(packId: number): Promise<PackViewResponse> {
   return api.get<PackViewResponse>(`/api/v2/packs/${packId}`);
+}
+
+/** F1 打包任务卡：本人最近任务（新任务在前）。 */
+export async function fetchPacks(limit: number): Promise<PackListResponse> {
+  return api.get<PackListResponse>(`/api/v2/packs?limit=${limit}`);
+}
+
+export async function cancelPack(packId: number): Promise<void> {
+  await api.post(`/api/v2/packs/${packId}/cancel`);
+}
+
+export async function deletePackRecord(packId: number): Promise<void> {
+  await api.del(`/api/v2/packs/${packId}/record`);
 }
 
 export { fileDownloadUrl };

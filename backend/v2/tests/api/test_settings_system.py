@@ -341,3 +341,23 @@ def test_create_app_wires_aria2_version_port_without_monkeypatch(tmp_path: Path)
     app = create_app(settings=settings)
 
     assert app.state.settings_service.aria2_version is not None
+
+
+def test_machine_stats_admin_only_and_fields(client: TestClient, settings) -> None:
+    # 未登录 401。
+    assert client.get("/api/v2/stats/machine").status_code == 401
+
+    create_admin(client)
+    login(client)
+    create_user(client)
+    login(client, "user", OTHER_PASSWORD)
+    # 普通用户 403。
+    assert client.get("/api/v2/stats/machine").status_code == 403
+
+    login(client)
+    body = client.get("/api/v2/stats/machine").json()
+    assert body["total_bytes"] > 0
+    assert body["free_bytes"] >= 0
+    assert body["download_used_bytes"] >= 0
+    assert body["system_used_bytes"] >= 0
+    assert body["used_bytes"] == body["download_used_bytes"] + body["system_used_bytes"]

@@ -223,7 +223,20 @@ export interface PackViewResponse {
   finished_at_ms: number | null;
   error_code: string | null;
   delete_source: boolean;
+  output_name: string;
   output: { user_file_id: number; display_name: string; size: number } | null;
+}
+
+export interface PackListResponse {
+  items: PackViewResponse[];
+}
+
+export interface MachineStatsResponse {
+  total_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  download_used_bytes: number;
+  system_used_bytes: number;
 }
 
 /* ============ 分享管理（SHARE-01~03） ============ */
@@ -395,6 +408,8 @@ export interface StorageFileResponse {
   on_disk: boolean;
   reference_count: number;
   deletion_state: "active" | "pending_delete" | "tombstoned";
+  created_at_ms: number;
+  file_names: string[];
 }
 
 export interface StorageFileListResponse {

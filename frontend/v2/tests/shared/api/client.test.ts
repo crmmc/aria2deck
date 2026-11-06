@@ -1,4 +1,10 @@
-import { api, ApiRequestError, errorMessage, setUnauthorizedHandler } from "@/shared/api/client";
+import {
+  api,
+  ApiRequestError,
+  errorMessage,
+  getNetworkOffline,
+  setUnauthorizedHandler,
+} from "@/shared/api/client";
 
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
@@ -43,6 +49,24 @@ describe("api client", () => {
       code: "network_error",
       message: "网络异常，请检查连接后重试",
     });
+  });
+
+  it("network failure marks offline but never triggers the 401 logout handler (G9)", async () => {
+    const handler = jest.fn();
+    setUnauthorizedHandler(handler);
+    // 复位上一用例可能残留的离线标记。
+    mockFetch.mockResolvedValueOnce(jsonResponse(200, {}));
+    await api.get("/api/v2/__probe__");
+    expect(getNetworkOffline()).toBe(false);
+    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed"));
+    await expect(api.get("/api/v2/a")).rejects.toBeInstanceOf(ApiRequestError);
+    expect(handler).not.toHaveBeenCalled();
+    expect(getNetworkOffline()).toBe(true);
+
+    // 任何响应到达（即使 4xx/5xx）都证明网络恢复。
+    mockFetch.mockResolvedValueOnce(jsonResponse(500, {}));
+    await expect(api.get("/api/v2/b")).rejects.toBeInstanceOf(ApiRequestError);
+    expect(getNetworkOffline()).toBe(false);
   });
 
   it.each([

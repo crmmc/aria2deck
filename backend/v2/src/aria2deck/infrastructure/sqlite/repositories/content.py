@@ -700,6 +700,24 @@ class ContentRepository:
             for row in rows
         ], total
 
+    async def list_storage_file_names(
+        self, content_ids: list[int]
+    ) -> dict[int, list[str]]:
+        """每个内容对象关联的用户文件名（按最早引用顺序，供存储页辨认文件）。"""
+        if not content_ids:
+            return {}
+        rows = (
+            await self.connection.execute(
+                select(user_files.c.content_id, user_files.c.display_name)
+                .where(user_files.c.content_id.in_(content_ids))
+                .order_by(user_files.c.id)
+            )
+        ).all()
+        names: dict[int, list[str]] = {}
+        for row in rows:
+            names.setdefault(int(row.content_id), []).append(str(row.display_name))
+        return names
+
     async def list_referencing_users(self, content_id: int) -> list[StorageReferencingUser]:
         rows = (
             await self.connection.execute(

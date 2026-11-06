@@ -393,6 +393,18 @@
       }
     },
     "/api/v2/packs": {
+      "get": {
+        "parameters": [
+          "limit"
+        ],
+        "responses": {
+          "200": "PackListResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
       "post": {
         "parameters": [],
         "responses": {
@@ -582,6 +594,18 @@
           "200": "ShareBatchResponse",
           "401": "ErrorResponse",
           "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/stats/machine": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "MachineStatsResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
           "429": "ErrorResponse",
           "500": "ErrorResponse"
         }
@@ -1147,6 +1171,22 @@
         "username"
       ]
     },
+    "MachineStatsResponse": {
+      "fields": [
+        "download_used_bytes",
+        "free_bytes",
+        "system_used_bytes",
+        "total_bytes",
+        "used_bytes"
+      ],
+      "required": [
+        "download_used_bytes",
+        "free_bytes",
+        "system_used_bytes",
+        "total_bytes",
+        "used_bytes"
+      ]
+    },
     "OkResponse": {
       "fields": [
         "ok"
@@ -1162,6 +1202,14 @@
       "required": [
         "items",
         "output_name"
+      ]
+    },
+    "PackListResponse": {
+      "fields": [
+        "items"
+      ],
+      "required": [
+        "items"
       ]
     },
     "PackOutputResponse": {
@@ -1217,6 +1265,7 @@
         "finished_at_ms",
         "id",
         "output",
+        "output_name",
         "status",
         "step",
         "step_progress",
@@ -1643,7 +1692,9 @@
       "fields": [
         "content_id",
         "content_key",
+        "created_at_ms",
         "deletion_state",
+        "file_names",
         "kind",
         "on_disk",
         "reference_count",

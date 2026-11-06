@@ -2,14 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAuth, useToast } from "@/app/hooks";
 import type { TaskResponse, TorrentPreviewResponse } from "@/shared/api/types";
-import {
-  EmptyState,
-  ErrorState,
-  LoadingState,
-  Pagination,
-} from "@/shared/components/ui";
+import { ConfirmDialog, EmptyState, ErrorState, LoadingState, Pagination } from "@/shared/components/ui";
+import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 import { useTaskWebSocket } from "@/shared/hooks/useTaskWebSocket";
 import { ApiRequestError, errorMessage } from "@/shared/api/client";
+import { copyText } from "@/shared/lib/clipboard";
+import { emitTaskActivity } from "@/shared/lib/taskEvents";
+import { sendTaskNotification } from "@/shared/notifications";
 import {
   cancelTasks,
   createTasks,
@@ -22,16 +21,26 @@ import {
   type TaskSortKey,
   type TaskSort,
 } from "./api";
-import { FailureDialog, TorrentDialog, UriCreateDialog } from "./CreateDialogs";
+import { FailureDialog, TorrentCreateWizard, UriCreateDialog } from "./CreateDialogs";
 import { TaskTable } from "./TaskTable";
 
 const PAGE_SIZE = 20;
+const MAX_TORRENT_FILE_SIZE = 10 * 1024 * 1024;
 const FILTERS: { key: TaskFilter; label: string }[] = [
   { key: "current", label: "进行中" },
   { key: "active", label: "下载中" },
   { key: "complete", label: "已完成" },
   { key: "error", label: "异常" },
 ];
+
+const IN_FLIGHT_STATUSES = ["queued", "active", "waiting", "paused"];
+const REMOVABLE_STATUSES = ["failed", "cancelled", "expired"];
+
+type ConfirmState =
+  | { kind: "cancel"; task: TaskResponse }
+  | { kind: "delete"; task: TaskResponse }
+  | { kind: "batch-cancel"; ids: number[] }
+  | null;
 
 export function TasksPage() {
   const { user, logout } = useAuth();
@@ -41,6 +50,8 @@ export function TasksPage() {
   const [page, setPage] = useState(1);
   const [filter, setFilter] = useState<TaskFilter>("current");
   const [sort, setSort] = useState<TaskSort | null>(null);
+  const [searchInput, setSearchInput] = useState("");
+  const search = useDebouncedValue(searchInput, 300);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -50,14 +61,17 @@ export function TasksPage() {
     | { kind: "failures"; items: { uri: string; message: string }[] }
     | null
   >(null);
+  const [confirm, setConfirm] = useState<ConfirmState>(null);
   const requestSeq = useRef(0);
+  const tasksRef = useRef<TaskResponse[]>([]);
+  tasksRef.current = tasks;
 
   const load = useCallback(async () => {
     const seq = ++requestSeq.current;
     setLoading(true);
     setError(null);
     try {
-      const response = await fetchTasks(filter, page, PAGE_SIZE, sort);
+      const response = await fetchTasks(filter, page, PAGE_SIZE, sort, search);
       if (seq !== requestSeq.current) return; // 丢弃过期响应。
       setTasks(response.items);
       setTotal(response.total);
@@ -67,15 +81,27 @@ export function TasksPage() {
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [filter, page, sort]);
+  }, [filter, page, sort, search]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  // WS 实时更新：只写服务端副本（带过期丢弃），不改筛选/页码。
+  // WS 实时更新：只写服务端副本（带过期丢弃），不改筛选/页码；完成/失败迁移触发 Toast+桌面通知（T15）。
   const handleFrame = useCallback(
     (frame: { task: TaskResponse }) => {
+      const previous = tasksRef.current.find((item) => item.id === frame.task.id);
+      if (previous !== undefined && previous.status !== frame.task.status) {
+        emitTaskActivity(); // 布局统计立即刷新（G11）。
+        const name = frame.task.name || "下载任务";
+        if (frame.task.status === "completed") {
+          push("success", `${name} 下载完成`);
+          sendTaskNotification("completed", name, frame.task.id, push);
+        } else if (frame.task.status === "failed") {
+          push("error", `${name} 下载失败`);
+          sendTaskNotification("failed", name, frame.task.id, push);
+        }
+      }
       setTasks((current) => {
         const next = [...current];
         const index = next.findIndex((item) => item.id === frame.task.id);
@@ -88,7 +114,7 @@ export function TasksPage() {
         return next;
       });
     },
-    [load],
+    [load, push],
   );
 
   const { connected } = useTaskWebSocket(handleFrame, {
@@ -173,6 +199,15 @@ export function TasksPage() {
     input.onchange = async () => {
       const file = input.files?.[0];
       if (file === undefined) return;
+      // 种子上传前端校验（T7）：后缀 + 大小，错误信息与旧版一致。
+      if (!file.name.endsWith(".torrent")) {
+        push("error", "请选择 .torrent 文件");
+        return;
+      }
+      if (file.size > MAX_TORRENT_FILE_SIZE) {
+        push("error", "种子文件过大，最大支持 10 MB");
+        return;
+      }
       const base64 = await readFileBase64(file);
       try {
         const preview = await previewTorrent(base64);
@@ -199,20 +234,63 @@ export function TasksPage() {
     await load();
   };
 
-  const handleCancel = async (ids: number[]) => {
-    try {
-      const response = await cancelTasks(ids);
-      const failed = response.items.filter((item) => !item.accepted);
-      if (failed.length > 0) {
-        push("error", `${failed.length} 个任务取消失败`);
+  const handleTorrentClose = () => {
+    delete (window as unknown as { __torrentBase64?: string }).__torrentBase64;
+    setDialog(null);
+  };
+
+  const reportCancelOutcome = useCallback(
+    (accepted: number, rejected: number, action: string) => {
+      if (rejected > 0) {
+        push("error", `已${action} ${accepted} 个任务，${rejected} 个${action}失败`);
       } else {
-        push("success", "已取消");
+        push("success", `已${action} ${accepted} 个任务`);
       }
-      setSelected(new Set());
-      await load();
-    } catch (caught) {
-      push("error", errorMessage(caught, "取消失败"));
+    },
+    [push],
+  );
+
+  // 取消进行中任务（T10：danger 确认）。
+  const performCancel = useCallback(
+    async (ids: number[], action: string) => {
+      try {
+        const response = await cancelTasks(ids);
+        reportCancelOutcome(
+          response.accepted_count,
+          response.rejected_count,
+          action,
+        );
+        setSelected(new Set());
+        await load();
+      } catch (caught) {
+        push("error", errorMessage(caught, `${action}失败`));
+      }
+    },
+    [load, push, reportCancelOutcome],
+  );
+
+  const handleConfirm = () => {
+    if (confirm === null) return;
+    if (confirm.kind === "cancel") {
+      void performCancel([confirm.task.id], "取消");
+    } else if (confirm.kind === "delete") {
+      void performCancel([confirm.task.id], "删除");
+    } else {
+      void performCancel(confirm.ids, "取消");
     }
+    setConfirm(null);
+  };
+
+  // 批量取消（T11）：仅取消选中的进行中任务，先经确认弹窗。
+  const requestBatchCancel = () => {
+    const ids = tasks
+      .filter((task) => selected.has(task.id) && IN_FLIGHT_STATUSES.includes(task.status))
+      .map((task) => task.id);
+    if (ids.length === 0) {
+      push("info", "没有可取消的任务");
+      return;
+    }
+    setConfirm({ kind: "batch-cancel", ids });
   };
 
   const handleRetry = async (id: number) => {
@@ -225,10 +303,56 @@ export function TasksPage() {
     }
   };
 
+  // 复制链接（T12）：clipboard API + 旧环境降级，结果以 Toast 反馈。
+  const handleCopyUri = useCallback(
+    async (uri: string) => {
+      const copied = await copyText(uri);
+      if (copied) push("success", "链接已复制");
+      else push("error", "复制失败，请手动复制");
+    },
+    [push],
+  );
+
   const liveIds = useMemo(
     () => tasks.filter((task) => task.status === "active").length,
     [tasks],
   );
+
+  const allSelected = tasks.length > 0 && tasks.every((task) => selected.has(task.id));
+  const removableIds = useMemo(
+    () => new Set(tasks.filter((task) => REMOVABLE_STATUSES.includes(task.status)).map((t) => t.id)),
+    [tasks],
+  );
+
+  const confirmDialog =
+    confirm === null ? null : confirm.kind === "cancel" ? (
+      <ConfirmDialog
+        title="取消下载"
+        message={`确定要取消下载「${confirm.task.name}」吗？`}
+        confirmLabel="取消下载"
+        danger
+        onConfirm={handleConfirm}
+        onCancel={() => setConfirm(null)}
+      />
+    ) : confirm.kind === "delete" ? (
+      <ConfirmDialog
+        title="删除任务"
+        message={`确定要删除任务「${confirm.task.name}」吗？`}
+        confirmLabel="删除"
+        danger
+        onConfirm={handleConfirm}
+        onCancel={() => setConfirm(null)}
+      />
+    ) : (
+      <ConfirmDialog
+        title="批量取消"
+        message={`确定要取消选中的 ${confirm.ids.length} 个任务吗？`}
+        confirmLabel="确认取消"
+        danger
+        onConfirm={handleConfirm}
+        onCancel={() => setConfirm(null)}
+      />
+    );
 
   return (
     <section className="page" aria-label="任务列表">
@@ -238,6 +362,17 @@ export function TasksPage() {
           {connected ? "实时连接中" : "离线轮询"} · 下载中 {liveIds}
         </span>
         <div className="header-actions">
+          <input
+            type="search"
+            className="task-search"
+            placeholder="搜索任务名称"
+            aria-label="搜索任务"
+            value={searchInput}
+            onChange={(event) => {
+              setSearchInput(event.target.value);
+              setPage(1); // 搜索条件变化同步回第 1 页。
+            }}
+          />
           <button
             type="button"
             className="secondary-button"
@@ -276,11 +411,7 @@ export function TasksPage() {
       {selected.size > 0 && (
         <div className="bulk-bar">
           <span>已选 {selected.size} 项</span>
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={() => void handleCancel([...selected])}
-          >
+          <button type="button" className="secondary-button" onClick={requestBatchCancel}>
             批量取消
           </button>
           <button
@@ -307,10 +438,14 @@ export function TasksPage() {
           <TaskTable
             tasks={tasks}
             selected={selected}
+            allSelected={allSelected}
+            removableIds={removableIds}
             sort={sort}
             onToggle={toggle}
             onToggleAll={toggleAll}
-            onCancel={(id) => void handleCancel([id])}
+            onRequestCancel={(task) => setConfirm({ kind: "cancel", task })}
+            onRequestDelete={(task) => setConfirm({ kind: "delete", task })}
+            onCopy={(uri) => void handleCopyUri(uri)}
             onRetry={(id) => void handleRetry(id)}
             onSort={handleSort}
           />
@@ -322,9 +457,9 @@ export function TasksPage() {
         <UriCreateDialog onClose={() => setDialog(null)} onCreate={handleCreate} />
       )}
       {dialog?.kind === "torrent" && (
-        <TorrentDialog
+        <TorrentCreateWizard
           preview={dialog.preview}
-          onClose={() => setDialog(null)}
+          onClose={handleTorrentClose}
           onCreate={handleTorrentCreate}
         />
       )}
@@ -335,6 +470,7 @@ export function TasksPage() {
           onClose={() => setDialog(null)}
         />
       )}
+      {confirmDialog}
     </section>
   );
 }

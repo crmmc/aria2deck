@@ -1,6 +1,7 @@
 import { api } from "@/shared/api/client";
 import type {
   CredentialInvalidateResponse,
+  MachineStatsResponse,
   SettingsResponse,
   SettingsUpdateRequest,
   TrackerStatusResponse,
@@ -11,6 +12,11 @@ export const CREDENTIAL_INVALIDATION_CONFIRMATION = "INVALIDATE_ALL_CREDENTIALS"
 
 export function fetchSettings(): Promise<SettingsResponse> {
   return api.get<SettingsResponse>("/api/v2/settings");
+}
+
+/** E1 机器磁盘统计（仅管理员）。 */
+export function fetchMachineStats(): Promise<MachineStatsResponse> {
+  return api.get<MachineStatsResponse>("/api/v2/stats/machine");
 }
 
 export function updateSettings(

@@ -143,6 +143,8 @@ class StorageFileView:
     on_disk: bool
     reference_count: int
     deletion_state: ContentDeletionState
+    created_at_ms: int = 0
+    file_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

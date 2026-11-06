@@ -16,8 +16,9 @@ import {
   type ToastState,
 } from "@/app/contexts";
 import { ToastHost } from "@/app/ToastHost";
-import { api, setUnauthorizedHandler } from "@/shared/api/client";
-import type { UserResponse } from "@/shared/api/types";
+import { api, ApiRequestError, setUnauthorizedHandler } from "@/shared/api/client";
+import { setSiteTitle } from "@/shared/lib/siteTitle";
+import type { PublicSiteInfoResponse, UserResponse } from "@/shared/api/types";
 
 let nextToastId = 1;
 
@@ -32,7 +33,9 @@ export function AppProviders({ children }: { children: ReactNode }) {
     try {
       const me = await api.get<UserResponse>("/api/v2/auth/me");
       setUser(me);
-    } catch {
+    } catch (caught) {
+      // 网络瞬断不误登出（G9）：保留当前会话，横幅由 client 的网络健康信号驱动。
+      if (caught instanceof ApiRequestError && caught.status === 0) return;
       setUser(null);
     } finally {
       setLoading(false);
@@ -42,6 +45,24 @@ export function AppProviders({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // 站点标题（G1）：公开站点信息拉取一次，失败回退默认标题。
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<PublicSiteInfoResponse>("/api/v2/public/site-info")
+      .then((info) => {
+        if (cancelled) return;
+        setSiteTitle(info.site_title);
+        document.title = info.site_title.trim() === "" ? "Aria2Deck" : info.site_title;
+      })
+      .catch(() => {
+        /* 失败保持默认标题 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const logout = useCallback(async () => {
     setUser(null);

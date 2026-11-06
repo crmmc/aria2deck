@@ -33,16 +33,21 @@ export async function createUser(input: {
   });
 }
 
-export function updateUser(
+export async function updateUser(
   userId: number,
   changes: {
     username?: string;
     is_admin?: boolean;
     is_initial_password?: boolean;
     quota_bytes?: number;
+    /** 重置密码：以目标用户名派生的客户端哈希提交（U3），留空则不修改。 */
+    passwordHash?: string;
   },
 ): Promise<UserResponse> {
-  return api.patch<UserResponse>(`/api/v2/users/${userId}`, changes);
+  const payload: Record<string, unknown> = { ...changes };
+  if (changes.passwordHash !== undefined) payload.password = changes.passwordHash;
+  delete payload.passwordHash;
+  return api.patch<UserResponse>(`/api/v2/users/${userId}`, payload);
 }
 
 export function deleteUser(userId: number): Promise<DeleteUserResponse> {

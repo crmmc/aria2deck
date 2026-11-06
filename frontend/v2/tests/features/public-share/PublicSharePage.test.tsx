@@ -352,3 +352,100 @@ describe("PublicSharePage", () => {
     expect(screen.getByText("后端错误")).toBeInTheDocument();
   });
 });
+
+describe("PublicSharePage 分享双轨（S1+K1）与标题（K3）", () => {
+  function setupWithSearch(
+    path: string,
+    handler: (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => unknown,
+  ) {
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
+      if (url === "/api/v2/auth/me") {
+        return json(401, { error: { code: "unauthenticated", message: "请先登录" } });
+      }
+      const result = handler(url, init);
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        typeof (result as { json?: unknown }).json === "function"
+      ) {
+        return result;
+      }
+      return json(200, result);
+    });
+    return render(
+      <MemoryRouter initialEntries={[path]}>
+        <AppProviders>
+          <AppRouter />
+        </AppProviders>
+      </MemoryRouter>,
+    );
+  }
+
+  it("legacy ?password= auto-verifies once, strips the param and keeps token in memory", async () => {
+    const replaceState = jest.spyOn(window.history, "replaceState").mockImplementation(() => {});
+    try {
+      setupWithSearch("/s/legacy?password=s3cret", (url, init) => {
+        if (url.includes("/info")) return info({ has_password: true });
+        if (url.includes("/verify")) {
+          expect(init?.body).toBe(JSON.stringify({ password: "s3cret" }));
+          return { access_token: "tok-1", expires_in: 600 };
+        }
+        return {};
+      });
+      // 自动验密成功：直接进入内容视图（不再显示验密表单）。
+      expect(await screen.findByRole("button", { name: "下载文件" })).toBeInTheDocument();
+      await waitFor(() => {
+        expect(replaceState).toHaveBeenCalled();
+        const target = String(replaceState.mock.calls[0][2]);
+        expect(target).not.toContain("password");
+      });
+      // 验密仅一次。
+      expect(mockFetch.mock.calls.filter(([url]) => String(url).includes("/verify"))).toHaveLength(1);
+      // token 不进 URL：后续请求以内存 Bearer 携带。
+      expect(document.baseURI).not.toContain("tok-1");
+    } finally {
+      replaceState.mockRestore();
+    }
+  });
+
+  it("legacy ?password= failure falls back to the manual form with an inline hint", async () => {
+    setupWithSearch("/s/legacy?password=bad", (url) => {
+      if (url.includes("/info")) return info({ has_password: true });
+      if (url.includes("/verify")) {
+        return json(403, { error: { code: "password_invalid", message: "密码错误" } });
+      }
+      return {};
+    });
+    expect(await screen.findByText("链接携带的密码无效，请手动输入")).toBeInTheDocument();
+    expect(screen.getByLabelText("提取密码")).toBeInTheDocument();
+    // 自动验密失败后不重复尝试。
+    expect(mockFetch.mock.calls.filter(([url]) => String(url).includes("/verify"))).toHaveLength(1);
+  });
+
+  it("no-password share ignores ?password= without calling verify", async () => {
+    setupWithSearch("/s/open?password=whatever", (url) => {
+      if (url.includes("/info")) return info({ has_password: false });
+      return {};
+    });
+    expect(await screen.findByRole("button", { name: "下载文件" })).toBeInTheDocument();
+    expect(mockFetch.mock.calls.filter(([url]) => String(url).includes("/verify"))).toHaveLength(0);
+  });
+
+  it("sets document.title to 文件名 - 站点标题 (K3)", async () => {
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes("/info")) return json(200, info({ file_name: "报告.pdf" }));
+      return json(200, {});
+    });
+    render(
+      <MemoryRouter initialEntries={["/s/t1"]}>
+        <AppProviders>
+          <AppRouter />
+        </AppProviders>
+      </MemoryRouter>,
+    );
+    await screen.findByText("报告.pdf");
+    await waitFor(() => expect(document.title).toBe("报告.pdf - Aria2Deck"));
+  });
+});

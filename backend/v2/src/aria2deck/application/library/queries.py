@@ -47,6 +47,10 @@ class LibraryQueryRepository(Protocol):
         self, *, offset: int, limit: int, search: str | None = None, orphans_only: bool = False
     ) -> tuple[list[StorageObjectRecord], int]: ...
 
+    async def list_storage_file_names(
+        self, content_ids: list[int]
+    ) -> dict[int, list[str]]: ...
+
     async def list_referencing_users(self, content_id: int) -> list[StorageReferencingUser]: ...
 
 
@@ -157,8 +161,12 @@ class LibraryQueryService:
     ) -> tuple[list[StorageFileView], int]:
         offset = (page - 1) * page_size
         async with self.uow_factory() as uow:
-            records, total = await self.repository_factory(uow).list_storage_objects(
+            repository = self.repository_factory(uow)
+            records, total = await repository.list_storage_objects(
                 offset=offset, limit=page_size, search=search, orphans_only=orphans_only
+            )
+            names = await repository.list_storage_file_names(
+                [record.content_id for record in records]
             )
         return [
             StorageFileView(
@@ -170,6 +178,8 @@ class LibraryQueryService:
                 on_disk=self.storage_presence.on_disk(record.storage_path),
                 reference_count=record.reference_count,
                 deletion_state=record.deletion_state,
+                created_at_ms=record.created_at_ms,
+                file_names=tuple(names.get(record.content_id, [])[:3]),
             )
             for record in records
         ], total

@@ -23,6 +23,7 @@ export async function fetchTasks(
   page: number,
   pageSize: number,
   sort: TaskSort | null,
+  search: string,
 ): Promise<TaskListResponse> {
   const params = new URLSearchParams({
     page: String(page),
@@ -31,6 +32,8 @@ export async function fetchTasks(
   if (filter !== null) {
     for (const status of FILTER_PARAMS[filter]) params.append("status", status);
   }
+  const term = search.trim();
+  if (term !== "") params.set("q", term);
   if (sort !== null) {
     params.set("sort", sort.key);
     params.set("order", sort.order);

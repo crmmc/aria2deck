@@ -550,3 +550,20 @@ def test_openapi_contains_library_paths_and_no_legacy_alias(app: FastAPI) -> Non
     assert "501" in scan_responses
     assert scan_responses["501"]["description"] == "暂未实现"
     assert not any(path.startswith("/api/files") for path in paths)
+
+
+def test_storage_listing_exposes_created_at_and_file_names(client: TestClient, settings) -> None:
+    admin = create_admin(client)
+    login(client)
+    user = create_user(client)
+    login(client, "user", OTHER_PASSWORD)
+    shared_content, _ = seed_file(settings, user_id=int(user["id"]), index=10, name="shared.bin")
+    own_content, _ = seed_file(settings, user_id=int(admin["id"]), index=11, name="admin.bin")
+
+    login(client)
+    listing = client.get("/api/v2/storage/files", params={"page": 1, "page_size": 10})
+    assert listing.status_code == 200
+    by_id = {item["content_id"]: item for item in listing.json()["items"]}
+    assert by_id[shared_content]["file_names"] == ["shared.bin"]
+    assert by_id[own_content]["file_names"] == ["admin.bin"]
+    assert by_id[shared_content]["created_at_ms"] > 0

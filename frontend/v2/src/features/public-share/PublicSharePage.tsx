@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useLocation, useParams } from "react-router-dom";
 
 import { api, ApiRequestError, errorMessage } from "@/shared/api/client";
 import { publicShareDownloadUrl } from "@/shared/api/urls";
@@ -10,6 +10,7 @@ import {
 } from "@/shared/components/ui";
 import { formatBytes, formatDateTime } from "@/shared/lib/format";
 import { triggerFormDownload } from "@/shared/lib/download";
+import { useSiteTitle } from "@/shared/lib/siteTitle";
 import type {
   DirectoryBreadcrumbResponse,
   FileEntryItemResponse,
@@ -40,6 +41,8 @@ function invalidState(error: ApiRequestError): InvalidState {
 
 export function PublicSharePage() {
   const { code = "" } = useParams<{ code: string }>();
+  const location = useLocation();
+  const siteTitle = useSiteTitle();
   const [info, setInfo] = useState<PublicShareInfoResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [invalid, setInvalid] = useState<InvalidState | null>(null);
@@ -85,6 +88,47 @@ export function PublicSharePage() {
       cancelled = true;
     };
   }, [code]);
+
+  // K3 标签页标题：文件名 - 站点标题。
+  useEffect(() => {
+    document.title = info === null ? siteTitle : `${info.file_name} - ${siteTitle}`;
+  }, [info, siteTitle]);
+
+  // S1+K1 双轨：旧版链接 ?password= 挂载时自动验密一次（仅内存，不回显表单）。
+  // 成功后 history.replaceState 清掉地址栏参数；失败展示验密表单并内联提示。
+  const legacyPasswordRef = useRef<string | null>(null);
+  if (legacyPasswordRef.current === null) {
+    const fromUrl = new URLSearchParams(location.search).get("password");
+    legacyPasswordRef.current = fromUrl === null || fromUrl === "" ? null : fromUrl;
+  }
+  const autoVerifiedRef = useRef(false);
+  useEffect(() => {
+    const legacy = legacyPasswordRef.current;
+    if (
+      info === null ||
+      autoVerifiedRef.current ||
+      legacy === null ||
+      !info.has_password ||
+      token !== null
+    ) {
+      return;
+    }
+    autoVerifiedRef.current = true;
+    api
+      .post<{ access_token: string; expires_in: number }>(
+        `/api/s/${encodeURIComponent(code)}/verify`,
+        { password: legacy },
+      )
+      .then((response) => {
+        setToken(response.access_token);
+        const url = new URL(window.location.href);
+        url.searchParams.delete("password");
+        window.history.replaceState(null, "", url);
+      })
+      .catch(() => {
+        setPasswordError("链接携带的密码无效，请手动输入");
+      });
+  }, [info, code, token]);
 
   const bearer = () =>
     tokenRef.current === null ? undefined : { Authorization: `Bearer ${tokenRef.current}` };

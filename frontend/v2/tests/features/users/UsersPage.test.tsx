@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
@@ -502,5 +502,71 @@ describe("UsersPage additional branches", () => {
         mockFetch.mock.calls.filter(([, init2]) => init2?.method === "POST").length,
       ).toBe(1); // 仍然只有一笔创建请求。
     });
+  });
+});
+
+describe("UsersPage 编辑用户重置密码（U3）", () => {
+  it("sends the target-username derived hash when resetting a password", async () => {
+    setup((url, init) => {
+      if (init?.method === "PATCH") return user(2);
+      return list([user(2, { username: "bob" })]);
+    });
+    const row = await screen.findByTestId("user-row-2");
+    fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
+    const dialog = await screen.findByRole("dialog", { name: /编辑用户：bob/ });
+    // 留空时保存不可用（未修改任何内容）。
+    expect(within(dialog).getByRole("button", { name: "保存" })).toBeDisabled();
+    const input = within(dialog).getByLabelText("重置密码") as HTMLInputElement;
+    expect(input.type).toBe("password");
+    // 显示切换。
+    fireEvent.click(within(dialog).getByRole("button", { name: "显示重置密码" }));
+    expect(input.type).toBe("text");
+    fireEvent.change(input, { target: { value: "new-secret" } });
+    expect(within(dialog).getByRole("button", { name: "保存" })).toBeEnabled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => {
+      const patch = mockFetch.mock.calls.find(([, init2]) => init2?.method === "PATCH");
+      expect(patch).toBeDefined();
+      const body = JSON.parse(patch![1].body as string);
+      // pbkdf2(sha256("bob"), "new-secret") 与登录侧同形态：64 位十六进制。
+      expect(body.password).toMatch(/^[0-9a-f]{64}$/);
+      expect(body.username).toBe("bob");
+    });
+    expect(await screen.findByText("用户 bob 已更新")).toBeInTheDocument();
+  });
+
+  it("omits password when the reset field is left blank and enforces minimum length", async () => {
+    setup((url, init) => {
+      if (init?.method === "PATCH") return user(2, { username: "bob" });
+      return list([user(2, { username: "bob", quota_bytes: 2 * GIB })]);
+    });
+    const row = await screen.findByTestId("user-row-2");
+    fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
+    const dialog = await screen.findByRole("dialog", { name: /编辑用户：bob/ });
+    // 只改配额：不带 password 字段。
+    const quota = within(dialog).getByLabelText("配额（GiB，当前 2.00 GiB）") as HTMLInputElement;
+    fireEvent.change(quota, { target: { value: "3" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => {
+      const patch = mockFetch.mock.calls.find(([, init2]) => init2?.method === "PATCH");
+      expect(patch).toBeDefined();
+      expect(JSON.parse(patch![1].body as string)).toEqual({
+        username: "bob",
+        is_admin: false,
+        is_initial_password: false,
+        quota_bytes: 3 * GIB,
+      });
+    });
+
+    // 过短密码内联报错且不发请求。
+    const patchesBefore = mockFetch.mock.calls.filter(([, init2]) => init2?.method === "PATCH").length;
+    fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
+    const reopened = await screen.findByRole("dialog", { name: /编辑用户：bob/ });
+    fireEvent.change(within(reopened).getByLabelText("重置密码"), { target: { value: "123" } });
+    fireEvent.click(within(reopened).getByRole("button", { name: "保存" }));
+    expect(await screen.findByText("重置密码至少 6 位")).toBeInTheDocument();
+    expect(
+      mockFetch.mock.calls.filter(([, init2]) => init2?.method === "PATCH").length,
+    ).toBe(patchesBefore);
   });
 });

@@ -23,13 +23,15 @@ const ME: UserResponse = {
 function content(contentId: number, overrides: Partial<StorageFileResponse> = {}): StorageFileResponse {
   return {
     content_id: contentId,
-    content_key: `key-${contentId}`,
+    content_key: `file:abcd1234efgh5678-${contentId}`,
     kind: "file",
     size: 1024,
     storage_path: `/data/objects/key-${contentId}`,
     on_disk: true,
     reference_count: 0,
     deletion_state: "active",
+    created_at_ms: 1700000000000 + contentId,
+    file_names: [`user-file-${contentId}.bin`],
     ...overrides,
   };
 }
@@ -155,8 +157,8 @@ describe("StoragePage list", () => {
       return list([content(1, { reference_count: 2 }), content(2)]);
     });
     await screen.findByTestId("storage-row-1");
-    fireEvent.click(screen.getByLabelText("选择 key-2"));
-    expect(screen.getByLabelText("选择 key-2")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("选择 file:abcd1234efgh5678-2"));
+    expect(screen.getByLabelText("选择 file:abcd1234efgh5678-2")).toBeChecked();
     fireEvent.click(screen.getByLabelText("仅显示孤儿文件"));
     await waitFor(() => {
       expect(lastUrl()).toContain("orphans_only=true");
@@ -190,32 +192,32 @@ describe("StoragePage list", () => {
       return list([content(1)], 21);
     });
     await screen.findByTestId("storage-row-1");
-    fireEvent.click(screen.getByLabelText("选择 key-1"));
-    expect(screen.getByLabelText("选择 key-1")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("选择 file:abcd1234efgh5678-1"));
+    expect(screen.getByLabelText("选择 file:abcd1234efgh5678-1")).toBeChecked();
     fireEvent.click(screen.getByLabelText("下一页"));
     await screen.findByTestId("storage-row-2");
-    expect(screen.queryByLabelText("选择 key-1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("选择 file:abcd1234efgh5678-1")).not.toBeInTheDocument();
   });
 
   it("select-all toggles every row and clears again", async () => {
     setup(() => list([content(1), content(2)]));
     await screen.findByTestId("storage-row-1");
     fireEvent.click(screen.getByLabelText("全选存储文件"));
-    expect(screen.getByLabelText("选择 key-1")).toBeChecked();
-    expect(screen.getByLabelText("选择 key-2")).toBeChecked();
+    expect(screen.getByLabelText("选择 file:abcd1234efgh5678-1")).toBeChecked();
+    expect(screen.getByLabelText("选择 file:abcd1234efgh5678-2")).toBeChecked();
     expect(screen.getByRole("button", { name: /删除选中（2）/ })).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("全选存储文件"));
-    expect(screen.getByLabelText("选择 key-1")).not.toBeChecked();
+    expect(screen.getByLabelText("选择 file:abcd1234efgh5678-1")).not.toBeChecked();
     expect(screen.queryByRole("button", { name: /删除选中/ })).not.toBeInTheDocument();
   });
 
   it("deselects an individually selected row", async () => {
     setup(() => list([content(1)]));
     await screen.findByTestId("storage-row-1");
-    fireEvent.click(screen.getByLabelText("选择 key-1"));
-    expect(screen.getByLabelText("选择 key-1")).toBeChecked();
-    fireEvent.click(screen.getByLabelText("选择 key-1")); // 再次点击取消选择。
-    expect(screen.getByLabelText("选择 key-1")).not.toBeChecked();
+    fireEvent.click(screen.getByLabelText("选择 file:abcd1234efgh5678-1"));
+    expect(screen.getByLabelText("选择 file:abcd1234efgh5678-1")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("选择 file:abcd1234efgh5678-1")); // 再次点击取消选择。
+    expect(screen.getByLabelText("选择 file:abcd1234efgh5678-1")).not.toBeChecked();
   });
 
   it("shows the orphan-filter empty hint when the filter yields nothing", async () => {
@@ -272,9 +274,9 @@ describe("StoragePage referencing users", () => {
     });
     await screen.findByTestId("storage-row-1");
     fireEvent.click(screen.getByRole("button", { name: "1 个引用" }));
-    await screen.findByRole("dialog", { name: "引用用户：key-1" });
+    await screen.findByRole("dialog", { name: "引用用户：file:abcd1234efgh5678-1" });
     await waitFor(() => {
-      const dialog = screen.getByRole("dialog", { name: "引用用户：key-1" });
+      const dialog = screen.getByRole("dialog", { name: "引用用户：file:abcd1234efgh5678-1" });
       expect(dialog.textContent).toContain("alice");
       expect(dialog.textContent).toContain("alice.bin");
       expect(dialog.textContent).toContain("2023-11-15");
@@ -336,8 +338,8 @@ describe("StoragePage delete", () => {
       return list([content(1), content(2, { reference_count: 2 })]);
     });
     await screen.findByTestId("storage-row-1");
-    fireEvent.click(screen.getByLabelText("选择 key-1"));
-    fireEvent.click(screen.getByLabelText("选择 key-2"));
+    fireEvent.click(screen.getByLabelText("选择 file:abcd1234efgh5678-1"));
+    fireEvent.click(screen.getByLabelText("选择 file:abcd1234efgh5678-2"));
     fireEvent.click(screen.getByRole("button", { name: /删除选中（2）/ }));
     const dialog = await screen.findByRole("dialog", { name: "删除存储文件" });
     expect(dialog.textContent).toContain("仅无引用的孤儿内容会被受理");
@@ -416,5 +418,39 @@ describe("StoragePage delete", () => {
     await screen.findByRole("dialog", { name: "删除存储文件" });
     fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
     expect(await screen.findByText("请求无效")).toBeInTheDocument();
+  });
+});
+
+describe("StoragePage 存储列与刷新（R1-R4）", () => {
+  it("renders file names, truncated hash with full title, and created time columns", async () => {
+    const longDigest = "a".repeat(64);
+    setup(() =>
+      list([
+        content(1, { content_key: `file:${longDigest}`, file_names: ["a.bin", "b.bin"] }),
+        content(2, { file_names: [] }),
+      ]),
+    );
+    const row1 = await screen.findByTestId("storage-row-1");
+    expect(row1.textContent).toContain("a.bin、b.bin");
+    const hashCell = row1.querySelector(`td[title='${longDigest}']`);
+    expect(hashCell).not.toBeNull();
+    expect(hashCell!.textContent).toBe("aaaaaaaa…");
+    expect(row1.textContent).toContain("2023-11-15"); // created_at_ms 本地时区格式化。
+    // 孤儿（无关联文件名）显示占位符。
+    const row2 = await screen.findByTestId("storage-row-2");
+    expect(row2.textContent).toMatch(/—/);
+  });
+
+  it("refresh button reloads the list (R1)", async () => {
+    let loads = 0;
+    setup(() => {
+      loads += 1;
+      return list([content(1)]);
+    });
+    await screen.findByTestId("storage-row-1");
+    const before = loads;
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    await waitFor(() => expect(loads).toBeGreaterThan(before));
+    expect(await screen.findByTestId("storage-row-1")).toBeInTheDocument();
   });
 });

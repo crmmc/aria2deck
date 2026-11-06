@@ -4,21 +4,13 @@ import { useAuth, useToast } from "@/app/hooks";
 import { errorMessage } from "@/shared/api/client";
 import { ConfirmDialog } from "@/shared/components/ui";
 import { useLocalState } from "@/shared/hooks/useLocalState";
+import {
+  notificationPermission,
+  requestNotificationPermission,
+  type PermissionState,
+} from "@/shared/notifications";
 import type { RpcAccessResponse } from "@/shared/api/types";
 import { changePassword, fetchRpcAccess, refreshRpcSecret, rpcEndpointUrl, setRpcAccess } from "./api";
-
-type PermissionState = "granted" | "denied" | "default";
-
-interface NotificationLike {
-  permission: PermissionState;
-  requestPermission: () => Promise<PermissionState>;
-}
-
-/** jsdom 无 Notification：以可注入形态读取，测试时替换。 */
-function notificationApi(): NotificationLike | null {
-  const candidate = (globalThis as { Notification?: NotificationLike }).Notification;
-  return candidate ?? null;
-}
 
 const MIN_PASSWORD_LENGTH = 6;
 
@@ -35,8 +27,12 @@ export function ProfilePage() {
 
   // —— 通知 ——
   const notifications = useLocalState("notifications.enabled", false);
-  const [permission, setPermission] = useState<PermissionState | null>(null);
-  const notificationSupported = notificationApi() !== null;
+  const onCompleted = useLocalState("notifications.on_completed", true);
+  const onFailed = useLocalState("notifications.on_failed", true);
+  const [permission, setPermission] = useState<PermissionState | "unsupported">(() =>
+    notificationPermission(),
+  );
+  const notificationSupported = permission !== "unsupported";
 
   // —— RPC ——
   const [rpc, setRpc] = useState<RpcAccessResponse | null>(null);
@@ -46,7 +42,7 @@ export function ProfilePage() {
   const [confirmRefresh, setConfirmRefresh] = useState(false);
 
   useEffect(() => {
-    setPermission(notificationApi()?.permission ?? null);
+    setPermission(notificationPermission());
     let cancelled = false;
     // RPC 首读失败不阻塞改密区域，仅在 RPC 分区显示错误。
     fetchRpcAccess()
@@ -97,16 +93,10 @@ export function ProfilePage() {
       notifications.setValue(false);
       return;
     }
-    const impl = notificationApi();
-    if (impl === null) return;
-    let granted: PermissionState;
-    try {
-      granted = await impl.requestPermission();
-    } catch {
-      granted = "denied";
-    }
-    setPermission(granted);
-    if (granted !== "granted") {
+    if (!notificationSupported) return;
+    const result = await requestNotificationPermission();
+    setPermission(result);
+    if (result !== "granted") {
       push("error", "浏览器通知权限被拒绝，请在浏览器设置中允许通知");
       return;
     }
@@ -224,6 +214,26 @@ export function ProfilePage() {
             disabled={!notificationSupported}
           />
           <span>启用桌面通知（任务完成等事件提醒）</span>
+        </label>
+        <label className="switch-row">
+          <input
+            type="checkbox"
+            checked={onCompleted.value}
+            onChange={(event) => onCompleted.setValue(event.target.checked)}
+            aria-label="下载完成时通知"
+            disabled={!notifications.value}
+          />
+          <span>下载完成时通知</span>
+        </label>
+        <label className="switch-row">
+          <input
+            type="checkbox"
+            checked={onFailed.value}
+            onChange={(event) => onFailed.setValue(event.target.checked)}
+            aria-label="下载失败时通知"
+            disabled={!notifications.value}
+          />
+          <span>下载失败时通知</span>
         </label>
         <p className="hint-text">
           {!notificationSupported

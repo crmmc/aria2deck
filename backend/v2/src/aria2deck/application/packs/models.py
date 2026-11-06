@@ -67,6 +67,7 @@ class PackView:
     finished_at_ms: int | None
     error_code: str | None
     delete_source: bool
+    output_name: str = ""
     output: PackOutputFileView | None = None
 
 

@@ -206,6 +206,35 @@ describe("ProfilePage notifications", () => {
     });
     expect(window.localStorage.getItem("notifications.enabled")).toBeNull();
   });
+
+  // ============ G3 通知子开关 ============
+
+  it("sub-switches default on and persist when toggled", async () => {
+    (globalThis as { Notification?: unknown }).Notification = {
+      permission: "granted",
+      requestPermission: jest.fn(),
+    };
+    window.localStorage.setItem("notifications.enabled", "true");
+    setup(() => RPC_ON);
+    await screen.findByText("RPC 访问");
+    // 默认开启。
+    expect(screen.getByLabelText("下载完成时通知")).toBeChecked();
+    expect(screen.getByLabelText("下载失败时通知")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("下载完成时通知"));
+    await waitFor(() => {
+      expect(window.localStorage.getItem("notifications.on_completed")).toBe("false");
+      // 未触碰的子开关保持默认开启（且仅在变更时才落盘）。
+      expect(window.localStorage.getItem("notifications.on_failed")).toBeNull();
+      expect(screen.getByLabelText("下载失败时通知")).toBeChecked();
+    });
+  });
+
+  it("sub-switches are disabled while the master switch is off", async () => {
+    setup(() => RPC_ON);
+    await screen.findByText("RPC 访问");
+    expect(screen.getByLabelText("下载完成时通知")).toBeDisabled();
+    expect(screen.getByLabelText("下载失败时通知")).toBeDisabled();
+  });
 });
 
 describe("ProfilePage RPC access", () => {

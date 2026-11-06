@@ -13,6 +13,7 @@ import {
 } from "@/shared/components/ui";
 import type { UserResponse } from "@/shared/api/types";
 import { formatBytes } from "@/shared/lib/format";
+import { passwordClientHash } from "@/shared/lib/crypto";
 import { bytesToGib, createUser, deleteUser, fetchUsers, updateUser } from "./api";
 
 const PAGE_SIZE = 20;
@@ -25,6 +26,8 @@ interface UserDraft {
   isAdmin: boolean;
   isInitialPassword: boolean;
   quotaGib: string;
+  /** 编辑弹窗的重置密码（U3）：留空不改；一次性明文输入 + 显示切换。 */
+  resetPassword: string;
 }
 
 function draftFrom(user: UserResponse): UserDraft {
@@ -34,6 +37,7 @@ function draftFrom(user: UserResponse): UserDraft {
     isAdmin: user.is_admin,
     isInitialPassword: user.is_initial_password,
     quotaGib: String(bytesToGib(user.quota_bytes)),
+    resetPassword: "",
   };
 }
 
@@ -60,6 +64,7 @@ export function UsersPage() {
   const [draft, setDraft] = useState<UserDraft | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [showResetPassword, setShowResetPassword] = useState(false);
   const requestSeq = useRef(0);
 
   const load = useCallback(async () => {
@@ -96,12 +101,14 @@ export function UsersPage() {
       isAdmin: false,
       isInitialPassword: true,
       quotaGib: String(DEFAULT_QUOTA_GIB),
+      resetPassword: "",
     });
     setCreating(true);
   };
 
   const openEdit = (target: UserResponse) => {
     setFormError(null);
+    setShowResetPassword(false);
     setDraft(draftFrom(target));
     setEditing(target);
   };
@@ -111,6 +118,7 @@ export function UsersPage() {
     setEditing(null);
     setDraft(null);
     setFormError(null);
+    setShowResetPassword(false);
   };
 
   const handleCreate = async () => {
@@ -159,6 +167,7 @@ export function UsersPage() {
     (draft.username !== editing.username ||
       draft.isAdmin !== editing.is_admin ||
       draft.isInitialPassword !== editing.is_initial_password ||
+      draft.resetPassword !== "" ||
       parseQuotaGib(draft.quotaGib).bytes !== editing.quota_bytes);
 
   const handleEdit = async () => {
@@ -173,14 +182,24 @@ export function UsersPage() {
       setFormError(quota.error);
       return;
     }
+    if (draft.resetPassword !== "" && draft.resetPassword.length < MIN_PASSWORD_LENGTH) {
+      setFormError(`重置密码至少 ${MIN_PASSWORD_LENGTH} 位`);
+      return;
+    }
     setFormError(null);
     setSubmitting(true);
     try {
+      // 重置密码以「目标用户名」派生客户端哈希（管理员改他人同样按目标用户名）。
+      const passwordHash =
+        draft.resetPassword === ""
+          ? undefined
+          : await passwordClientHash(username, draft.resetPassword);
       await updateUser(editing.id, {
         username,
         is_admin: draft.isAdmin,
         is_initial_password: draft.isInitialPassword,
         quota_bytes: quota.bytes,
+        passwordHash,
       });
       push("success", `用户 ${username} 已更新`);
       closeDialog();
@@ -391,6 +410,27 @@ export function UsersPage() {
               onChange={(event) => updateDraft({ quotaGib: event.target.value })}
               inputMode="decimal"
             />
+          </label>
+          <label className="form-field">
+            <span>重置密码（可选，留空不修改，至少 {MIN_PASSWORD_LENGTH} 位）</span>
+            <span className="password-row">
+              <input
+                type={showResetPassword ? "text" : "password"}
+                value={draft.resetPassword}
+                autoComplete="new-password"
+                onChange={(event) => updateDraft({ resetPassword: event.target.value })}
+                aria-label="重置密码"
+              />
+              <button
+                type="button"
+                className="password-toggle"
+                aria-label={showResetPassword ? "隐藏重置密码" : "显示重置密码"}
+                aria-pressed={showResetPassword}
+                onClick={() => setShowResetPassword((current) => !current)}
+              >
+                {showResetPassword ? "隐藏" : "显示"}
+              </button>
+            </span>
           </label>
           <label className="switch-row">
             <input

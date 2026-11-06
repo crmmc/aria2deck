@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Query
 
 from ..application.accounts.models import Principal
 from ..application.packs.admission import PackAdmissionService
@@ -12,6 +12,7 @@ from .contracts import (
     ErrorBody,
     OkResponse,
     PackCreateRequest,
+    PackListResponse,
     PackOutputResponse,
     PackPrecomputeItemResponse,
     PackPrecomputeRequest,
@@ -42,6 +43,7 @@ def _pack(view: PackView) -> PackViewResponse:
         finished_at_ms=view.finished_at_ms,
         error_code=view.error_code,
         delete_source=view.delete_source,
+        output_name=view.output_name,
         output=(
             None
             if view.output is None
@@ -111,6 +113,20 @@ async def create_pack(
         delete_source=payload.delete_source,
     )
     return _pack(await progress.get_pack(principal.user.id, pack_id))
+
+
+@router.get(
+    "/packs",
+    response_model=PackListResponse,
+    responses=error_responses(401, 422, 429, 500),
+)
+async def list_packs(
+    limit: int = Query(default=10, ge=1, le=50),
+    principal: Principal = Depends(required_principal),
+    service: PackProgressService = Depends(pack_progress),
+) -> PackListResponse:
+    views = await service.list_packs(principal.user.id, limit)
+    return PackListResponse(items=[_pack(view) for view in views])
 
 
 @router.get(

@@ -62,6 +62,7 @@ from .application.shares.manage import ShareManageService
 from .application.shares.tokens import ShareAccessTokenStore
 from .application.system.connectivity import BackendConnectivity
 from .application.system.health import HealthService
+from .application.system.machine import MachineStatsService
 from .application.system.supervisor import WorkerSupervisor
 from .domain.errors import DomainError
 from .domain.settings import SystemSettings
@@ -211,6 +212,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     )
     connectivity = BackendConnectivity()
     content_store = DownloadContentStore(config.download_directory)
+    machine_stats = MachineStatsService(content_store)
     task_broadcast = TaskBroadcast()
     download_lifecycle = DownloadLifecycleService(
         uow_factory=uow_factory,
@@ -419,6 +421,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     app.state.rate_limiter = rate_limiter
     app.state.supervisor = supervisor
     app.state.connectivity = connectivity
+    app.state.machine_stats = machine_stats
     app.state.cookie_secure = not config.debug
     app.state.aria2_rpc_service = aria2_rpc_service
     ws_allowed_origins = config.rpc_allowed_origins  # 与 RPC 同源配置复用

@@ -189,3 +189,42 @@ def test_openapi_contains_pack_and_share_paths(app: FastAPI) -> None:
     assert not any(path.startswith("/api/packs") or path.startswith("/api/shares") for path in paths)
     verify_responses = paths["/api/s/{code}/verify"]["post"]["responses"]
     assert "410" in verify_responses and "403" in verify_responses
+
+
+def test_list_recent_packs_scopes_to_owner_and_orders_newest_first(
+    client: TestClient, settings
+) -> None:
+    _, user_id = _setup_two_users(client)
+    first = seed_file(settings, user_id=user_id, index=1, payload=b"a" * 10)
+    second = seed_file(settings, user_id=user_id, index=2, payload=b"b" * 5)
+
+    created_a = client.post(
+        "/api/v2/packs",
+        json={"items": [first[1]], "output_name": "a.zip", "delete_source": False},
+    ).json()["id"]
+    created_b = client.post(
+        "/api/v2/packs",
+        json={"items": [second[1]], "output_name": "b.zip", "delete_source": False},
+    ).json()["id"]
+
+    listing = client.get("/api/v2/packs")
+    assert listing.status_code == 200
+    body = listing.json()
+    ids = [item["id"] for item in body["items"]]
+    assert ids == [created_b, created_a]  # 新任务在前。
+    assert body["items"][0]["output_name"] == "b.zip"
+    assert {item["id"] for item in body["items"]} <= {created_a, created_b}
+
+    # limit 生效。
+    assert [item["id"] for item in client.get("/api/v2/packs", params={"limit": 1}).json()["items"]] == [
+        created_b
+    ]
+    assert client.get("/api/v2/packs", params={"limit": 0}).status_code == 422
+    assert client.get("/api/v2/packs", params={"limit": 51}).status_code == 422
+
+    # 管理员视角看不到他人任务。
+    login(client)
+    assert client.get("/api/v2/packs").json()["items"] == []
+    # 未登录不可见。
+    client.cookies.clear()
+    assert client.get("/api/v2/packs").status_code == 401

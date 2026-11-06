@@ -259,6 +259,8 @@ async def list_storage_files(
                 on_disk=item.on_disk,
                 reference_count=item.reference_count,
                 deletion_state=item.deletion_state.value,
+                created_at_ms=item.created_at_ms,
+                file_names=list(item.file_names),
             )
             for item in items
         ],

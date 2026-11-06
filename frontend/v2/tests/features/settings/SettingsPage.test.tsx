@@ -475,3 +475,38 @@ describe("SettingsPage credential invalidation", () => {
     });
   });
 });
+
+describe("SettingsPage 机器磁盘卡（E1）", () => {
+  it("renders the machine disk card with download/system split", async () => {
+    setup((url) => {
+      if (url === "/api/v2/stats/machine") {
+        return {
+          total_bytes: 1000,
+          used_bytes: 500,
+          free_bytes: 500,
+          download_used_bytes: 200,
+          system_used_bytes: 300,
+        };
+      }
+      return null;
+    });
+    const card = await screen.findByRole("region", { name: undefined });
+    void card;
+    expect(await screen.findByText("机器磁盘空间")).toBeInTheDocument();
+    expect(screen.getByLabelText("机器磁盘占用")).toHaveAttribute("aria-valuenow", "50");
+    expect(screen.getByText(/下载占用：200 B/)).toBeInTheDocument();
+    expect(screen.getByText(/系统占用：300 B/)).toBeInTheDocument();
+    expect(screen.getByText(/总占用：500 B/)).toBeInTheDocument();
+  });
+
+  it("hides the card when machine stats fail to load", async () => {
+    setup((url) => {
+      if (url === "/api/v2/stats/machine") {
+        return json(500, { error: { code: "internal", message: "服务器错误" } });
+      }
+      return null;
+    });
+    await screen.findByText("基本");
+    expect(screen.queryByText("机器磁盘空间")).not.toBeInTheDocument();
+  });
+});

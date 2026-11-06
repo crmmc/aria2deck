@@ -27,6 +27,17 @@ const DELETION_STATE_LABEL: Record<StorageFileResponse["deletion_state"], string
   tombstoned: "已墓碑",
 };
 
+/** R3 哈希列：内容键形如 "file:<sha256>"，取摘要段截断展示、悬停全文。 */
+function digestOf(contentKey: string): string {
+  const separator = contentKey.indexOf(":");
+  return separator >= 0 ? contentKey.slice(separator + 1) : contentKey;
+}
+
+function shortDigest(contentKey: string): string {
+  const digest = digestOf(contentKey);
+  return digest.length > 8 ? `${digest.slice(0, 8)}…` : digest;
+}
+
 export function StoragePage() {
   const { user: me } = useAuth();
   const { push } = useToast();
@@ -127,6 +138,14 @@ export function StoragePage() {
       <header className="page-header">
         <h1>存储</h1>
         <div className="header-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={loading}
+            onClick={() => void load()}
+          >
+            刷新
+          </button>
           <label className="search-field">
             <span className="visually-hidden">搜索存储文件</span>
             <input
@@ -196,8 +215,11 @@ export function StoragePage() {
                   />
                 </th>
                 <th scope="col">内容键</th>
+                <th scope="col">文件名</th>
+                <th scope="col">哈希</th>
                 <th scope="col">类型</th>
                 <th scope="col">大小</th>
+                <th scope="col">创建时间</th>
                 <th scope="col">磁盘</th>
                 <th scope="col">引用数</th>
                 <th scope="col">删除状态</th>
@@ -218,8 +240,13 @@ export function StoragePage() {
                   <td className="name-cell" title={item.storage_path}>
                     {item.content_key}
                   </td>
+                  <td className="name-cell" title={item.file_names.join("、")}>
+                    {item.file_names.length > 0 ? item.file_names.join("、") : "—"}
+                  </td>
+                  <td title={digestOf(item.content_key)}>{shortDigest(item.content_key)}</td>
                   <td>{item.kind === "directory" ? "目录" : "文件"}</td>
                   <td>{formatBytes(item.size)}</td>
+                  <td>{formatDateTime(item.created_at_ms)}</td>
                   <td>
                     <span className={`badge tone-${item.on_disk ? "ok" : "error"}`}>
                       {item.on_disk ? "在磁盘" : "缺失"}

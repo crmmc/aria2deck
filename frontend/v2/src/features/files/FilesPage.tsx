@@ -2,9 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useToast } from "@/app/hooks";
 import { errorMessage } from "@/shared/api/client";
-import { ConfirmDialog, EmptyState, ErrorState, LoadingState, Pagination } from "@/shared/components/ui";
+import {
+  ConfirmDialog,
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  Pagination,
+} from "@/shared/components/ui";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
-import { formatBytes } from "@/shared/lib/format";
 import { triggerBatchDownloads, triggerFileDownload } from "@/shared/lib/download";
 import type {
   DirectoryBreadcrumbResponse,
@@ -25,8 +30,17 @@ import {
   renameFile,
   searchFiles,
 } from "./api";
-import { Breadcrumbs, EntryTable, RootFileTable, SearchResults } from "./FileViews";
+import {
+  Breadcrumbs,
+  EntryTable,
+  RootFileTable,
+  SearchResults,
+  SpaceUsageCard,
+  type FileSort,
+  type FileSortKey,
+} from "./FileViews";
 import { PackDialog, RenameDialog, ShareCreateDialog } from "./FilesDialogs";
+import { PackTasksCard } from "./PackTasksCard";
 
 interface BrowseContext {
   fileId: number;
@@ -35,6 +49,7 @@ interface BrowseContext {
 }
 
 const HIGHLIGHT_MS = 2500;
+const SEARCH_DEBOUNCE_MS = 500;
 
 export function FilesPage() {
   const { push } = useToast();
@@ -45,6 +60,9 @@ export function FilesPage() {
   const [rootLoading, setRootLoading] = useState(true);
   const [rootError, setRootError] = useState<string | null>(null);
   const [rootPage, setRootPage] = useState(1);
+  // 排序（F3：当前页客户端排序）
+  const [rootSort, setRootSort] = useState<FileSort>(null);
+  const [entrySort, setEntrySort] = useState<FileSort>(null);
   // 目录浏览（服务端副本 + 浏览上下文）
   const [browse, setBrowse] = useState<BrowseContext | null>(null);
   const [entries, setEntries] = useState<FileEntryItemResponse[]>([]);
@@ -53,26 +71,31 @@ export function FilesPage() {
   const [entryPage, setEntryPage] = useState(1);
   const [entryLoading, setEntryLoading] = useState(false);
   const [entryError, setEntryError] = useState<string | null>(null);
-  // 搜索（防抖 + 结果面板）
+  // 搜索（F4：查询按钮/回车立即触发；输入 500ms 防抖自动触发；全局/当前目录范围开关）
   const [keyword, setKeyword] = useState("");
-  const debouncedKeyword = useDebouncedValue(keyword, 300);
+  const debouncedKeyword = useDebouncedValue(keyword, SEARCH_DEBOUNCE_MS);
+  const [searchScope, setSearchScope] = useState<"global" | "current">("global");
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [hits, setHits] = useState<FileSearchHitResponse[]>([]);
   const [truncated, setTruncated] = useState(false);
   // 选择与高亮
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [entrySelected, setEntrySelected] = useState<Set<string>>(new Set());
   const [highlightId, setHighlightId] = useState<number | null>(null);
   const [highlightName, setHighlightName] = useState<string | null>(null);
-  // 弹窗
+  // 弹窗与批量删除
   const [renameTarget, setRenameTarget] = useState<FileItemResponse | null>(null);
   const [shareTarget, setShareTarget] = useState<FileItemResponse | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<FileItemResponse | null>(null);
+  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
   const [packOpen, setPackOpen] = useState(false);
+  const [packRefreshKey, setPackRefreshKey] = useState(0);
   const rootSeq = useRef(0);
   const entrySeq = useRef(0);
   const browseRef = useRef<BrowseContext | null>(null);
   browseRef.current = browse;
+  const searchSeq = useRef(0);
 
   const loadRoot = useCallback(async () => {
     const seq = ++rootSeq.current;
@@ -122,38 +145,58 @@ export function FilesPage() {
     if (browse !== null) void loadEntries(browse, entryPage);
   }, [browse, entryPage, loadEntries]);
 
-  // 防抖搜索：关键词或范围变化时重查；空白则收起面板。
-  useEffect(() => {
-    const term = debouncedKeyword.trim();
-    if (term === "") {
-      setHits([]);
-      setTruncated(false);
+  // F4 搜索执行器：范围=当前目录时限定在该目录内容（含子目录路径过滤）。
+  // 连续相同的（关键词, 范围）直接跳过：查询按钮/回车/防抖三路触发不重复消耗限流额度。
+  const lastSearchRef = useRef<{ term: string; scope: string }>({ term: "", scope: "global" });
+  const runSearch = useCallback(
+    async (term: string, scope: "global" | "current") => {
+      const normalized = term.trim();
+      const context = browseRef.current;
+      const scopeKey = scope === "current" && context !== null ? "current" : "global";
+      if (normalized === "") {
+        searchSeq.current += 1;
+        lastSearchRef.current = { term: "", scope: scopeKey };
+        setHits([]);
+        setTruncated(false);
+        setSearchError(null);
+        setSearchLoading(false);
+        return;
+      }
+      if (
+        lastSearchRef.current.term === normalized &&
+        lastSearchRef.current.scope === scopeKey
+      ) {
+        return;
+      }
+      lastSearchRef.current = { term: normalized, scope: scopeKey };
+      const scoped = scopeKey === "current" && context !== null;
+      const seq = ++searchSeq.current;
+      setSearchLoading(true);
       setSearchError(null);
-      setSearchLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setSearchLoading(true);
-    setSearchError(null);
-    searchFiles(term, browseRef.current?.fileId ?? null)
-      .then((response) => {
-        if (cancelled) return;
-        setHits(response.hits);
+      try {
+        const response = await searchFiles(normalized, scoped ? context.fileId : null);
+        if (seq !== searchSeq.current) return;
+        const prefix = scoped && context.path !== "" ? `${context.path}/` : null;
+        const scopedHits =
+          prefix === null ? response.hits : response.hits.filter((hit) => hit.path.startsWith(prefix));
+        setHits(scopedHits);
         setTruncated(response.truncated);
-      })
-      .catch((caught: unknown) => {
-        if (cancelled) return;
+      } catch (caught) {
+        if (seq !== searchSeq.current) return;
         setHits([]);
         setTruncated(false);
         setSearchError(errorMessage(caught, "搜索失败"));
-      })
-      .finally(() => {
-        if (!cancelled) setSearchLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [debouncedKeyword, browse]);
+      } finally {
+        if (seq === searchSeq.current) setSearchLoading(false);
+      }
+    },
+    [],
+  );
+
+  // 输入防抖自动搜索；按钮/回车立即触发同一执行器。
+  useEffect(() => {
+    void runSearch(debouncedKeyword, searchScope);
+  }, [debouncedKeyword, searchScope, runSearch]);
 
   const flashHighlight = (apply: () => void, clear: () => void) => {
     apply();
@@ -164,10 +207,45 @@ export function FilesPage() {
     setBrowse({ fileId, fileName, path });
     setEntryPage(1);
     setSelected(new Set());
+    setEntrySelected(new Set());
     if (highlight !== null) {
       flashHighlight(() => setHighlightName(highlight), () => setHighlightName(null));
     }
   };
+
+  // F5 定位：根文件不在当前页时逐页找到目标页再跳转（服务端命中不含页索引）。
+  const locateRootFile = useCallback(
+    async (hit: FileSearchHitResponse) => {
+      const seq = ++rootSeq.current;
+      const maxPage = Math.max(1, Math.ceil(total / ROOT_PAGE_SIZE));
+      for (let page = 1; page <= maxPage; page += 1) {
+        let response;
+        try {
+          response = await fetchFiles(page, ROOT_PAGE_SIZE);
+        } catch (caught) {
+          push("error", errorMessage(caught, "定位失败"));
+          return;
+        }
+        if (seq !== rootSeq.current) return; // 用户已另行操作，放弃定位。
+        if (response.items.some((file) => file.id === hit.user_file_id)) {
+          if (page === rootPage) {
+            flashHighlight(
+              () => setHighlightId(hit.user_file_id),
+              () => setHighlightId(null),
+            );
+          } else {
+            setHighlightId(hit.user_file_id);
+            window.setTimeout(() => setHighlightId(null), HIGHLIGHT_MS);
+            setRootPage(page);
+          }
+          setBrowse(null);
+          return;
+        }
+      }
+      push("error", "定位失败：未在当前列表找到该文件");
+    },
+    [push, rootPage, total],
+  );
 
   const handleLocate = (hit: FileSearchHitResponse) => {
     if (hit.path === "") {
@@ -175,17 +253,7 @@ export function FilesPage() {
         openBrowse(hit.user_file_id, hit.display_name, "", null);
         return;
       }
-      // 根文件：回根列表第 1 页并高亮（当前页未包含时提示）。
-      setBrowse(null);
-      setRootPage(1);
-      if (files.some((file) => file.id === hit.user_file_id)) {
-        flashHighlight(
-          () => setHighlightId(hit.user_file_id),
-          () => setHighlightId(null),
-        );
-      } else {
-        push("info", "已定位到根列表，该文件不在第 1 页");
-      }
+      void locateRootFile(hit);
       return;
     }
     const segments = hit.path.split("/").filter(Boolean);
@@ -214,6 +282,38 @@ export function FilesPage() {
     await triggerBatchDownloads(
       selectedFiles.map((file) => fileDownloadUrl(file.id)),
     );
+  };
+
+  // F7 目录内批量下载：仅文件条目可选中，iframe 间隔逐个触发。
+  const handleEntryBatchDownload = async () => {
+    if (browse === null || entrySelected.size === 0) return;
+    push("info", `已触发 ${entrySelected.size} 个下载`);
+    await triggerBatchDownloads(
+      [...entrySelected].map((path) => fileDownloadUrl(browse.fileId, path)),
+    );
+  };
+
+  // F6 批量删除：逐项删除 + 部分失败反馈 + 删空回页。
+  const handleBatchDelete = async () => {
+    setConfirmBatchDelete(false);
+    const ids = [...selected];
+    let deleted = 0;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await deleteFile(id);
+        deleted += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    if (failed > 0) push("error", `已删除 ${deleted} 个文件，${failed} 个删除失败`);
+    else push("success", `已删除 ${deleted} 个文件`);
+    setSelected(new Set());
+    const remaining = Math.max(0, total - deleted);
+    const maxPage = Math.max(1, Math.ceil(remaining / ROOT_PAGE_SIZE));
+    if (rootPage > maxPage) setRootPage(maxPage);
+    else await loadRoot();
   };
 
   const handleRename = async (name: string) => {
@@ -249,22 +349,39 @@ export function FilesPage() {
     });
   };
 
+  const toggleEntry = (path: string) => {
+    setEntrySelected((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const toggleAllEntries = (checked: boolean) => {
+    setEntrySelected(
+      checked
+        ? new Set(entries.filter((entry) => entry.kind === "file").map((entry) => entry.path))
+        : new Set(),
+    );
+  };
+
   const breadcrumbNavigate = (path: string) => {
     if (browse === null) return;
     openBrowse(browse.fileId, browse.fileName, path, null);
   };
 
-  const spaceText =
-    space === null
-      ? ""
-      : `已用 ${formatBytes(space.used_bytes)} · 可用 ${formatBytes(space.available_bytes)}`;
+  const closePackDialog = () => {
+    setPackOpen(false);
+    setPackRefreshKey((current) => current + 1); // 弹窗关闭后由常驻卡接管进度。
+  };
 
   return (
     <section className="page" aria-label="文件管理">
       <header className="page-header">
         <h1>文件</h1>
         {browse === null ? (
-          <span className="header-meta">{spaceText}</span>
+          <span className="header-meta">管理您下载的文件</span>
         ) : (
           <span className="header-meta">{browse.fileName}</span>
         )}
@@ -292,6 +409,13 @@ export function FilesPage() {
               </button>
               <button
                 type="button"
+                className="danger-button"
+                onClick={() => setConfirmBatchDelete(true)}
+              >
+                批量删除（{selected.size}）
+              </button>
+              <button
+                type="button"
                 className="link-button"
                 onClick={() => setSelected(new Set())}
               >
@@ -299,20 +423,61 @@ export function FilesPage() {
               </button>
             </>
           )}
-          <label className="search-field">
-            <span className="visually-hidden">搜索文件</span>
+          {browse !== null && entrySelected.size > 0 && (
+            <>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void handleEntryBatchDownload()}
+              >
+                批量下载（{entrySelected.size}）
+              </button>
+              <button
+                type="button"
+                className="link-button"
+                onClick={() => setEntrySelected(new Set())}
+              >
+                清除选择
+              </button>
+            </>
+          )}
+          <label className="search-scope" title="范围开关：全局搜根列表与所有目录；当前目录仅搜正在浏览的目录">
             <input
-              type="search"
-              value={keyword}
-              onChange={(event) => setKeyword(event.target.value)}
-              placeholder="搜索文件名…"
-              aria-label="搜索文件"
+              type="checkbox"
+              checked={searchScope === "current"}
+              disabled={browse === null}
+              onChange={(event) =>
+                setSearchScope(event.target.checked ? "current" : "global")
+              }
+              aria-label="仅搜索当前目录"
             />
+            <span>当前目录</span>
           </label>
+          <input
+            type="search"
+            className="files-search"
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void runSearch(keyword, searchScope);
+            }}
+            placeholder="搜索文件名…"
+            aria-label="搜索文件"
+          />
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => void runSearch(keyword, searchScope)}
+          >
+            查询
+          </button>
         </div>
       </header>
 
-      {debouncedKeyword.trim() !== "" && (
+      {browse === null && <PackTasksCard refreshKey={packRefreshKey} onTaskComplete={() => void loadRoot()} />}
+      {browse === null && space !== null && <SpaceUsageCard space={space} />}
+
+      {keyword.trim() !== "" && (
         <div className="search-panel" aria-label="搜索结果">
           {searchLoading ? (
             <LoadingState label="搜索中…" />
@@ -338,6 +503,7 @@ export function FilesPage() {
                 files={files}
                 selected={selected}
                 highlightId={highlightId}
+                sort={rootSort}
                 onToggle={toggle}
                 onToggleAll={(checked) =>
                   setSelected(checked ? new Set(files.map((file) => file.id)) : new Set())
@@ -347,6 +513,13 @@ export function FilesPage() {
                 onRename={setRenameTarget}
                 onShare={setShareTarget}
                 onDelete={setDeleteTarget}
+                onSort={(key: FileSortKey) =>
+                  setRootSort((current) => {
+                    if (current?.key !== key) return { key, order: "asc" };
+                    if (current.order === "asc") return { key, order: "desc" };
+                    return null;
+                  })
+                }
               />
               <Pagination
                 page={rootPage}
@@ -370,11 +543,22 @@ export function FilesPage() {
             <>
               <EntryTable
                 entries={entries}
+                selected={entrySelected}
                 highlightName={highlightName}
+                sort={entrySort}
+                onToggle={toggleEntry}
+                onToggleAll={toggleAllEntries}
                 onNavigate={(entry) =>
                   openBrowse(browse.fileId, browse.fileName, entry.path, null)
                 }
                 onDownload={handleEntryDownload}
+                onSort={(key: FileSortKey) =>
+                  setEntrySort((current) => {
+                    if (current?.key !== key) return { key, order: "asc" };
+                    if (current.order === "asc") return { key, order: "desc" };
+                    return null;
+                  })
+                }
               />
               <Pagination
                 page={entryPage}
@@ -411,10 +595,20 @@ export function FilesPage() {
           onCancel={() => setDeleteTarget(null)}
         />
       )}
+      {confirmBatchDelete && (
+        <ConfirmDialog
+          title="批量删除"
+          message={`确定要删除选中的 ${selected.size} 个文件吗？删除后不可恢复，相关分享会一并撤销。`}
+          confirmLabel="删除"
+          danger
+          onConfirm={() => void handleBatchDelete()}
+          onCancel={() => setConfirmBatchDelete(false)}
+        />
+      )}
       {packOpen && (
         <PackDialog
           selectedIds={[...selected]}
-          onClose={() => setPackOpen(false)}
+          onClose={closePackDialog}
           onPrecompute={precomputePack}
           onCreated={() => void loadRoot()}
         />

@@ -76,6 +76,12 @@ body {
 .app-stats p {
   margin: var(--space-1) 0;
 }
+.stats-progress {
+  margin-top: var(--space-1);
+}
+.stats-frozen {
+  color: var(--color-text-muted);
+}
 
 .app-logout {
   padding: var(--space-2) var(--space-3);
@@ -95,11 +101,55 @@ body {
 }
 
 .backend-banner {
-  grid-column: 2;
   background: #fbe9e7;
   color: var(--color-danger);
   padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--color-danger);
+}
+
+/* 横幅栈（G4/G9/G5）：初始密码 / 连接失败 / 后端降级，多条并存时纵向堆叠。 */
+.app-banners {
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+}
+.initial-password-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  background: #fff7e6;
+  color: var(--color-warn);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-warn);
+}
+.initial-password-banner button {
+  border: 1px solid currentColor;
+  background: none;
+  color: inherit;
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+.connection-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  background: #fef7e0;
+  color: var(--color-warn);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-warn);
+}
+.connection-banner button {
+  border: 1px solid currentColor;
+  background: none;
+  color: inherit;
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
 }
 
 .login-page {

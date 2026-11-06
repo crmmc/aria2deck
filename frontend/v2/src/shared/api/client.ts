@@ -24,6 +24,27 @@ export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): voi
 
 const NETWORK_MESSAGE = "网络异常，请检查连接后重试";
 
+/** 网络健康信号（G9）：任何请求网络异常置位、任何响应到达清除；布局横幅订阅。 */
+type NetworkHealthListener = () => void;
+
+const healthListeners = new Set<NetworkHealthListener>();
+let networkOffline = false;
+
+export function subscribeNetworkHealth(listener: NetworkHealthListener): () => void {
+  healthListeners.add(listener);
+  return () => healthListeners.delete(listener);
+}
+
+export function getNetworkOffline(): boolean {
+  return networkOffline;
+}
+
+function markNetworkHealth(offline: boolean): void {
+  if (networkOffline === offline) return;
+  networkOffline = offline;
+  for (const listener of healthListeners) listener();
+}
+
 export interface RequestOptions {
   /** 附加请求头（公开分享页的 Bearer 访问令牌）。 */
   headers?: Record<string, string>;
@@ -47,8 +68,11 @@ async function request<T>(
       credentials: "same-origin",
     });
   } catch {
+    markNetworkHealth(true);
     throw new ApiRequestError(0, "network_error", NETWORK_MESSAGE);
   }
+  // 能拿到响应（无论状态码）即证明网络连通。
+  markNetworkHealth(false);
 
   if (response.status === 401) {
     // 带 Bearer 令牌的是公开分享访问，401 属于页面内业务结果，不触发会话登出。

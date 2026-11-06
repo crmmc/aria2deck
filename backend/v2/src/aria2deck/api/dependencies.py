@@ -24,6 +24,7 @@ from ..application.settings.trackers import TrackerService
 from ..application.shares.access import PublicShareService
 from ..application.shares.manage import ShareManageService
 from ..application.system.connectivity import BackendConnectivity
+from ..application.system.machine import MachineStatsService
 from ..domain.accounts import Permission, authorize_admin_session
 from ..domain.errors import DomainError, ErrorCode
 
@@ -116,6 +117,10 @@ def _limit_authenticated(principal: Principal, limiter: RateLimiter) -> Principa
 
 def connectivity(request: Request) -> BackendConnectivity:
     return cast(BackendConnectivity, request.app.state.connectivity)
+
+
+def machine_stats(request: Request) -> MachineStatsService:
+    return cast(MachineStatsService, request.app.state.machine_stats)
 
 
 async def optional_principal(

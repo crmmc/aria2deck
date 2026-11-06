@@ -334,7 +334,6 @@ textarea {
   color: var(--color-text-muted);
 }
 
-.torrent-file-list,
 .failure-list {
   list-style: none;
   margin: 0;
@@ -345,20 +344,144 @@ textarea {
   max-height: 300px;
   overflow-y: auto;
 }
-.torrent-file-list label {
+/* ==================== 任务页（T1/T12/T16/T19） ==================== */
+
+.task-search {
+  width: 200px;
+}
+
+.link-button.danger-link {
+  color: var(--color-danger);
+}
+.link-button:disabled {
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+.task-progress {
+  position: relative;
+  min-width: 140px;
+}
+.task-progress .task-progress-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+.progress-fill.progress-active {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.35) 0 8px,
+    transparent 8px 16px
+  ),
+    linear-gradient(var(--color-primary), var(--color-primary));
+  animation: progress-stripes 0.9s linear infinite;
+}
+.progress-fill.progress-error {
+  background: var(--color-danger);
+}
+.progress-fill.progress-full {
+  background: var(--color-ok);
+}
+@keyframes progress-stripes {
+  from {
+    background-position: 0 0, 0 0;
+  }
+  to {
+    background-position: 32px 0, 0 0;
+  }
+}
+
+/* ==================== 种子三阶段向导（T8） ==================== */
+
+.torrent-stages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+.torrent-stages li {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+}
+.torrent-stages li.active {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  font-weight: 600;
+}
+.torrent-stages li.done {
+  color: var(--color-ok);
+}
+
+.torrent-toolbar {
   display: flex;
   gap: var(--space-2);
   align-items: center;
+  flex-wrap: wrap;
 }
-.torrent-file-path {
+.torrent-toolbar input[type="search"] {
+  flex: 1;
+  min-width: 160px;
+}
+.torrent-toolbar-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.torrent-tree {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--space-1) 0;
+}
+.torrent-tree-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 2px var(--space-2);
+  font-size: var(--font-size-sm);
+}
+.torrent-tree-row-folder .torrent-tree-name {
+  font-weight: 600;
+}
+.torrent-tree-name {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.torrent-tree-size {
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+.torrent-tree-mark {
+  width: 13px;
+  text-align: center;
+  color: var(--color-ok);
+}
+.torrent-tree-empty {
+  padding: var(--space-3);
+  text-align: center;
+  color: var(--color-text-muted);
   font-size: var(--font-size-sm);
 }
-.torrent-file-size {
+.torrent-summary {
+  margin-right: auto;
   color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+.torrent-cancel-text {
+  margin-right: auto;
+  color: var(--color-danger);
   font-size: var(--font-size-sm);
 }
 
@@ -379,6 +502,130 @@ textarea {
 .failure-message {
   color: var(--color-danger);
   font-size: var(--font-size-sm);
+}
+
+/* ==================== 文件页（F1/F2/F4） ==================== */
+
+.pack-card {
+  gap: var(--space-2);
+}
+.pack-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.pack-card-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.pack-card-item {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.pack-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.pack-card-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.space-card {
+  gap: var(--space-2);
+}
+.space-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.space-card-values {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+.space-progress {
+  position: relative;
+}
+.progress-frozen {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.55) 0 2px,
+    transparent 2px 4px
+  );
+  pointer-events: none;
+}
+
+.files-search {
+  width: 200px;
+}
+.search-scope {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.search-scope input {
+  accent-color: var(--color-primary);
+}
+
+/* ==================== 设置页机器磁盘（E1） ==================== */
+
+.machine-disk {
+  display: flex;
+}
+.machine-disk .progress-fill {
+  transition: none;
+}
+.progress-download {
+  background: #3b82f6;
+}
+.progress-system {
+  background: #f59e0b;
+}
+.machine-disk-legend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+.machine-disk-legend .dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  margin-right: var(--space-1);
+}
+.dot-download {
+  background: #3b82f6;
+}
+.dot-system {
+  background: #f59e0b;
 }
 
 .search-field input {

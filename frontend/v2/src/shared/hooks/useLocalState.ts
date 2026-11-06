@@ -2,7 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 
 /** WEB-13 本地状态白名单：仅批准的键可写 localStorage；不可用时回退内存并提示一次。 */
 
-export type LocalStateKey = "tasks.filter" | "history.filter" | "notifications.enabled";
+export type LocalStateKey =
+  | "tasks.filter"
+  | "history.filter"
+  | "notifications.enabled"
+  | "notifications.on_completed"
+  | "notifications.on_failed";
 
 const STORAGE_ERROR_MESSAGE = "浏览器本地存储不可用，设置将不会保留";
 

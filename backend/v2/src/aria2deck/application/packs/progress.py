@@ -13,6 +13,8 @@ from .models import PackJobRecord, PackOutputFileView, PackView
 class PackRepositoryPort(Protocol):
     async def get_job(self, pack_id: int) -> PackJobRecord: ...
 
+    async def list_recent_jobs(self, *, user_id: int, limit: int) -> list[PackJobRecord]: ...
+
 
 class ContentRepositoryPort(Protocol):
     async def get_object(self, content_id: int) -> ContentRecord: ...
@@ -47,6 +49,17 @@ class PackProgressService:
             if job.owner_id != user_id:
                 raise DomainError(ErrorCode.NOT_FOUND, "打包任务不存在")
             output = await self._output(uow, job)
+        return self._view(job, output)
+
+    async def list_packs(self, user_id: int, limit: int) -> list[PackView]:
+        """Recent jobs of the user (newest first) — the pack task card source (F1)."""
+        async with self.uow_factory() as uow:
+            repository = self.repository_factory(uow)
+            jobs = await repository.list_recent_jobs(user_id=user_id, limit=limit)
+            outputs = [await self._output(uow, job) for job in jobs]
+        return [self._view(job, output) for job, output in zip(jobs, outputs, strict=True)]
+
+    def _view(self, job: PackJobRecord, output: PackOutputFileView | None) -> PackView:
         return PackView(
             id=job.id,
             status=job.status,
@@ -58,6 +71,7 @@ class PackProgressService:
             finished_at_ms=job.finished_at_ms,
             error_code=job.error_code,
             delete_source=job.delete_source,
+            output_name=job.output_name,
             output=output,
         )
 

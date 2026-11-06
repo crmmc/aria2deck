@@ -12,7 +12,7 @@ import {
   StatusBadge,
 } from "@/shared/components/ui";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
-import { formatDateTime } from "@/shared/lib/format";
+import { formatBytes, formatDateTime } from "@/shared/lib/format";
 import { deleteHistory, fetchHistory, retryFromHistory } from "./api";
 
 function CopyUriButton({ uri, onCopy }: { uri: string; onCopy: (uri: string) => Promise<void> }) {
@@ -21,6 +21,30 @@ function CopyUriButton({ uri, onCopy }: { uri: string; onCopy: (uri: string) => 
       复制链接
     </button>
   );
+}
+
+/** H4 失败原因：下载侧已知 error_code 的中文口径，未知码原样展示。 */
+const ERROR_CODE_LABEL: Record<string, string> = {
+  upstream_failure: "上游下载失败",
+  download_unavailable: "下载不可用",
+  rpc_unavailable: "aria2 连接不可用",
+  aria2_rejected: "aria2 拒绝了操作",
+  task_too_large: "任务超出大小限制",
+  quota_exceeded: "存储配额不足",
+  physical_space_exceeded: "机器空间不足",
+  submission_uncertain: "提交结果不可确认",
+  recovery_unsafe: "恢复不安全",
+  invalid_input: "输入无效",
+  invalid_state: "状态无效",
+  content_busy: "内容被占用",
+};
+
+function failureReason(item: TaskResponse): string | null {
+  if (item.status !== "failed" && item.status !== "cancelled" && item.status !== "expired") {
+    return null;
+  }
+  if (item.error_code === null) return null;
+  return ERROR_CODE_LABEL[item.error_code] ?? item.error_code;
 }
 
 const PAGE_SIZE = 20;
@@ -197,6 +221,8 @@ export function HistoryPage() {
                 </th>
                 <th scope="col">名称</th>
                 <th scope="col">状态</th>
+                <th scope="col">大小</th>
+                <th scope="col">失败原因</th>
                 <th scope="col">完成时间</th>
                 <th scope="col">操作</th>
               </tr>
@@ -217,6 +243,13 @@ export function HistoryPage() {
                   </td>
                   <td>
                     <StatusBadge status={item.status} label={item.status_label} />
+                  </td>
+                  <td>{item.total_bytes === null ? "—" : formatBytes(item.total_bytes)}</td>
+                  <td className="name-cell">
+                    {(() => {
+                      const reason = failureReason(item);
+                      return reason === null ? "—" : <span title={reason}>{reason}</span>;
+                    })()}
                   </td>
                   <td>{formatDateTime(item.finished_at_ms ?? item.updated_at_ms)}</td>
                   <td className="actions-cell">

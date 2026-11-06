@@ -140,6 +140,22 @@ class PackRepository:
         ).all()
         return [self._job(row) for row in rows]
 
+    async def list_recent_jobs(self, *, user_id: int, limit: int) -> list[PackJobRecord]:
+        rows = (
+            await self.connection.execute(
+                select(pack_jobs, content_objects.c.content_key)
+                .select_from(
+                    pack_jobs.outerjoin(
+                        content_objects, content_objects.c.id == pack_jobs.c.output_content_id
+                    )
+                )
+                .where(pack_jobs.c.owner_id == user_id)
+                .order_by(pack_jobs.c.id.desc())
+                .limit(limit)
+            )
+        ).all()
+        return [self._job(row) for row in rows]
+
     async def list_admission_sources(
         self, *, user_id: int, user_file_ids: list[int]
     ) -> list[PackAdmissionSource]:

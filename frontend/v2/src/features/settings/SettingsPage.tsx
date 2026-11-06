@@ -4,10 +4,15 @@ import { Navigate } from "react-router-dom";
 import { useAuth, useToast } from "@/app/hooks";
 import { errorMessage } from "@/shared/api/client";
 import { ErrorState, LoadingState, Modal } from "@/shared/components/ui";
-import type { SettingsResponse, TrackerStatusResponse } from "@/shared/api/types";
-import { formatDateTime } from "@/shared/lib/format";
+import type {
+  MachineStatsResponse,
+  SettingsResponse,
+  TrackerStatusResponse,
+} from "@/shared/api/types";
+import { formatBytes, formatDateTime } from "@/shared/lib/format";
 import {
   CREDENTIAL_INVALIDATION_CONFIRMATION,
+  fetchMachineStats,
   fetchSettings,
   fetchTrackerStatus,
   invalidateCredentials,
@@ -39,6 +44,49 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
   );
 }
 
+function toPercent(value: number, total: number): number {
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  return Math.min(100, (value / total) * 100);
+}
+
+/** E1 机器磁盘卡：下载占用/系统占用分段 + 总量（对齐旧版展示）。 */
+function MachineDiskCard({ stats }: { stats: MachineStatsResponse }) {
+  const downloadPercent = toPercent(stats.download_used_bytes, stats.total_bytes);
+  const systemPercent = toPercent(stats.system_used_bytes, stats.total_bytes);
+  return (
+    <Section title="机器磁盘空间">
+      <p className="space-card-values">
+        {formatBytes(stats.free_bytes)}{" "}
+        <span className="hint-text">/ {formatBytes(stats.total_bytes)} 可用</span>
+      </p>
+      <div
+        className="progress-track machine-disk"
+        role="progressbar"
+        aria-label="机器磁盘占用"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(downloadPercent + systemPercent)}
+      >
+        <div className="progress-fill progress-download" style={{ width: `${downloadPercent}%` }} />
+        <div className="progress-fill progress-system" style={{ width: `${systemPercent}%` }} />
+      </div>
+      <div className="machine-disk-legend">
+        <span>
+          <i className="dot dot-download" aria-hidden="true" />
+          下载占用：{formatBytes(stats.download_used_bytes)}（{downloadPercent.toFixed(1)}%）
+        </span>
+        <span>
+          <i className="dot dot-system" aria-hidden="true" />
+          系统占用：{formatBytes(stats.system_used_bytes)}（{systemPercent.toFixed(1)}%）
+        </span>
+        <span className="hint-text">
+          总占用：{formatBytes(stats.used_bytes)}（{toPercent(stats.used_bytes, stats.total_bytes).toFixed(1)}%）
+        </span>
+      </div>
+    </Section>
+  );
+}
+
 export function SettingsPage() {
   const { user: me } = useAuth();
   const { push } = useToast();
@@ -56,6 +104,8 @@ export function SettingsPage() {
   const [invalidating, setInvalidating] = useState(false);
   const [aria2Test, setAria2Test] = useState<Aria2TestResult | null>(null);
   const [aria2Testing, setAria2Testing] = useState(false);
+  // E1 机器磁盘：独立加载，失败不阻塞设置编辑。
+  const [machine, setMachine] = useState<MachineStatsResponse | null>(null);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -75,6 +125,11 @@ export function SettingsPage() {
       setTracker(await fetchTrackerStatus());
     } catch {
       setTracker(null);
+    }
+    try {
+      setMachine(await fetchMachineStats());
+    } catch {
+      setMachine(null);
     }
   }, []);
 
@@ -220,6 +275,8 @@ export function SettingsPage() {
           {formError}
         </div>
       )}
+
+      {machine !== null && <MachineDiskCard stats={machine} />}
 
       <Section title="基本" hint="站点标题与容量准入。">
         <div className="form-grid">

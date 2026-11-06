@@ -3,6 +3,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
 import { LoginPage } from "@/features/auth/LoginPage";
+import { DEFAULT_SITE_TITLE, setSiteTitle } from "@/shared/lib/siteTitle";
 import type { UserResponse } from "@/shared/api/types";
 
 const mockFetch = jest.fn();
@@ -19,6 +20,25 @@ const ME: UserResponse = {
   reserved_bytes: 0,
   available_bytes: 1,
 };
+
+function siteInfo(): unknown {
+  return {
+    site_title: "Aria2Deck",
+    ws_reconnect_max_delay_seconds: 30,
+    ws_reconnect_jitter_seconds: 1,
+    ws_reconnect_factor: 2,
+  };
+}
+
+/** URL 路由 mock：站点信息固定成功，me/login 由用例覆盖。 */
+function routeMocks(overrides: Record<string, unknown>): void {
+  mockFetch.mockImplementation(async (url: string) => {
+    if (url === "/api/v2/public/site-info") return json(200, siteInfo());
+    const override = overrides[url];
+    if (override !== undefined) return override;
+    return json(401, err());
+  });
+}
 
 function renderLogin() {
   return render(
@@ -43,6 +63,8 @@ function fillAndSubmit(username: string, password: string) {
 describe("LoginPage", () => {
   beforeEach(() => {
     mockFetch.mockReset();
+    setSiteTitle(DEFAULT_SITE_TITLE);
+    document.title = "";
   });
 
   it("auto-focuses the username input", () => {
@@ -62,8 +84,9 @@ describe("LoginPage", () => {
   });
 
   it("shows inline error on 401", async () => {
-    mockFetch.mockResolvedValueOnce(json(401, err()));
-    mockFetch.mockResolvedValueOnce(json(401, err("用户名或密码错误")));
+    routeMocks({
+      "/api/v2/auth/login": json(401, err("用户名或密码错误")),
+    });
     renderLogin();
     fillAndSubmit("admin", "wrong");
     await waitFor(() => {
@@ -72,13 +95,36 @@ describe("LoginPage", () => {
   });
 
   it("shows network error inline", async () => {
-    mockFetch.mockResolvedValueOnce(json(401, err())); // me 探测失败
-    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed")); // 登录网络失败
+    routeMocks({
+      "/api/v2/auth/login": Promise.reject(new TypeError("fetch failed")),
+    });
     renderLogin();
     fillAndSubmit("admin", "x");
     await waitFor(() => {
       expect(screen.getByRole("alert")).toHaveTextContent("网络异常");
     });
+  });
+
+  it("ignores a second submit while the first login is pending", async () => {
+    let releaseLogin: (value: unknown) => void = () => undefined;
+    const pendingLogin = new Promise((resolve) => {
+      releaseLogin = resolve;
+    });
+    routeMocks({
+      "/api/v2/auth/login": pendingLogin as never,
+    });
+    renderLogin();
+    const submitButton = screen.getByRole("button", { name: "登录" });
+    fireEvent.change(screen.getByLabelText("用户名"), { target: { value: "admin" } });
+    fireEvent.change(passwordInput(), { target: { value: "pw" } });
+    fireEvent.click(submitButton);
+    // 提交中按钮已禁用；绕过按钮直接再次提交表单，验证 submitted 守卫。
+    fireEvent.submit(screen.getByLabelText("登录表单"));
+    await waitFor(() => {
+      const calls = mockFetch.mock.calls.filter(([url]) => url === "/api/v2/auth/login");
+      expect(calls).toHaveLength(1);
+    });
+    releaseLogin(json(401, err()));
   });
 
   it("redirects when already logged in", async () => {
@@ -97,14 +143,16 @@ describe("LoginPage", () => {
   });
 
   it("successful login navigates to tasks", async () => {
-    mockFetch.mockResolvedValueOnce(json(401, err())); // me 未登录
-    mockFetch.mockResolvedValueOnce(json(200, ME)); // 登录成功
+    routeMocks({
+      "/api/v2/auth/login": json(200, ME),
+    });
     render(
       <MemoryRouter initialEntries={["/login"]}>
         <AppProviders>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
             <Route path="/tasks" element={<div>登录后任务页</div>} />
+            <Route path="/profile" element={<div>个人资料页</div>} />
           </Routes>
         </AppProviders>
       </MemoryRouter>,
@@ -114,8 +162,9 @@ describe("LoginPage", () => {
   });
 
   it("redirects back to the origin page after login", async () => {
-    mockFetch.mockResolvedValueOnce(json(401, err()));
-    mockFetch.mockResolvedValueOnce(json(200, ME));
+    routeMocks({
+      "/api/v2/auth/login": json(200, ME),
+    });
     render(
       <MemoryRouter initialEntries={[{ pathname: "/login", state: { from: "/files" } }]}>
         <AppProviders>
@@ -144,6 +193,77 @@ describe("LoginPage", () => {
       </MemoryRouter>,
     );
     expect(await screen.findByText("免登回文件页")).toBeInTheDocument();
+  });
+
+  // ============ G6 初始密码登录引导 ============
+
+  it("login with an initial password redirects to /profile", async () => {
+    const initialUser = { ...ME, is_initial_password: true };
+    routeMocks({
+      "/api/v2/auth/login": json(200, initialUser),
+    });
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <AppProviders>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/profile" element={<div>改密引导页</div>} />
+            <Route path="/tasks" element={<div>任务页占位</div>} />
+          </Routes>
+        </AppProviders>
+      </MemoryRouter>,
+    );
+    fillAndSubmit("admin", "initial-password");
+    expect(await screen.findByText("改密引导页")).toBeInTheDocument();
+  });
+
+  it("already-authenticated initial-password user is also guided to /profile", async () => {
+    const initialUser = { ...ME, is_initial_password: true };
+    routeMocks({
+      "/api/v2/auth/me": json(200, initialUser),
+    });
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <AppProviders>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/profile" element={<div>免登改密页</div>} />
+          </Routes>
+        </AppProviders>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("免登改密页")).toBeInTheDocument();
+  });
+
+  // ============ G1 站点标题 ============
+
+  it("renders the dynamic site title as the heading and document title", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/v2/public/site-info") {
+        return json(200, {
+          site_title: "公司下载站",
+          ws_reconnect_max_delay_seconds: 30,
+          ws_reconnect_jitter_seconds: 1,
+          ws_reconnect_factor: 2,
+        });
+      }
+      return json(401, err());
+    });
+    renderLogin();
+    expect(await screen.findByRole("heading", { name: "公司下载站" })).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe("公司下载站"));
+  });
+
+  it("falls back to the default title when site info fails", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/v2/public/site-info") {
+        return json(500, { error: { code: "internal", message: "服务器错误" } });
+      }
+      return json(401, err());
+    });
+    renderLogin();
+    expect(await screen.findByRole("heading", { name: "Aria2Deck" })).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe("Aria2Deck"));
   });
 
   it("sends the PBKDF2 client hash on the wire (WebCrypto path)", async () => {

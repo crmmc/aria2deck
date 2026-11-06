@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
 import { TasksPage } from "@/features/tasks/TasksPage";
+import { resetNotificationDegradeFlag } from "@/shared/notifications";
 import type { TaskResponse, UserResponse } from "@/shared/api/types";
 
 const mockFetch = jest.fn();
@@ -20,13 +21,18 @@ const ME: UserResponse = {
   available_bytes: 1,
 };
 
-function task(id: number, status: TaskResponse["status"] = "active"): TaskResponse {
+function task(
+  id: number,
+  status: TaskResponse["status"] = "active",
+  overrides: Partial<TaskResponse> = {},
+): TaskResponse {
   return {
     id, status, status_label: "下载中", name: `task-${id}.bin`, uri: null,
     total_bytes: 100, completed_bytes: 40, download_speed: 10, upload_speed: 0,
     peer_count: 0, connection_count: 1, files: [], observation_fresh: true,
     reserved_bytes: 0, error_code: null, retryable: false,
     created_at_ms: 1, updated_at_ms: 2, finished_at_ms: null,
+    ...overrides,
   };
 }
 
@@ -38,11 +44,29 @@ function list(items: TaskResponse[]): unknown {
   return { items, total: items.length, page: 1, page_size: 20 };
 }
 
+function stats(): unknown {
+  return {
+    counts: { queued: 0, active: 0, waiting: 0, paused: 0, completed: 0, failed: 0, cancelled: 0, expired: 0 },
+    total: 0, download_speed: 0, upload_speed: 0,
+    quota: { quota_bytes: 1, used_bytes: 0, reserved_bytes: 0, available_bytes: 1 },
+  };
+}
+
+function siteInfo(): unknown {
+  return {
+    site_title: "Aria2Deck",
+    ws_reconnect_max_delay_seconds: 30,
+    ws_reconnect_jitter_seconds: 1,
+    ws_reconnect_factor: 2,
+  };
+}
+
 function setup(tasks: TaskResponse[]) {
   mockFetch.mockReset();
   mockFetch.mockImplementation(async (url: string) => {
     if (url === "/api/v2/auth/me") return json(200, ME);
     if (url === "/api/v2/tasks/stats") return json(200, stats());
+    if (url === "/api/v2/public/site-info") return json(200, siteInfo());
     return json(200, list(tasks));
   });
   return render(
@@ -54,20 +78,46 @@ function setup(tasks: TaskResponse[]) {
   );
 }
 
-function stats(): unknown {
-  return {
-    counts: { queued: 0, active: 0, waiting: 0, paused: 0, completed: 0, failed: 0, cancelled: 0, expired: 0 },
-    total: 0, download_speed: 0, upload_speed: 0,
-    quota: { quota_bytes: 1, used_bytes: 0, reserved_bytes: 0, available_bytes: 1 },
-  };
-}
-
 async function openCreateDialog() {
   fireEvent.click(screen.getByRole("button", { name: "新建任务" }));
   await screen.findByRole("dialog", { name: "新建下载任务" });
 }
 
+function pickTorrentFile(overrides: { name?: string; size?: number } = {}) {
+  const file = {
+    name: "sample.torrent",
+    size: 128,
+    arrayBuffer: () => Promise.resolve(new Uint8Array([1, 2, 3]).buffer),
+    ...overrides,
+  } as unknown as File;
+  const clickSpy = jest
+    .spyOn(HTMLInputElement.prototype, "click")
+    .mockImplementation(function (this: HTMLInputElement) {
+      Object.defineProperty(this, "files", { value: [file], configurable: true });
+      this.onchange?.(new Event("change"));
+    });
+  return clickSpy;
+}
+
+function stubClipboard(writeText: jest.Mock) {
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText },
+    configurable: true,
+  });
+  return () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: undefined,
+      configurable: true,
+    });
+  };
+}
+
 describe("TasksPage", () => {
+  beforeEach(() => {
+    resetNotificationDegradeFlag();
+    window.localStorage.clear();
+  });
+
   it("shows empty state when no tasks", async () => {
     setup([]);
     expect(await screen.findByText("暂无任务")).toBeInTheDocument();
@@ -179,6 +229,13 @@ describe("TasksPage", () => {
     expect(JSON.parse(posts[posts.length - 1][1].body as string)).toEqual({
       tasks: [{ uri: "https://b" }, { uri: "https://c" }],
     });
+
+    // 页脚「关闭」收起失败弹窗（与右上角 × 同一 onClose）。
+    const failureDialog = screen.getByRole("dialog", { name: /1 条任务失败/ });
+    fireEvent.click(within(failureDialog).getByText("关闭"));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: /1 条任务失败/ })).not.toBeInTheDocument(),
+    );
   });
 
   it("shows 502 as result-uncertain message", async () => {
@@ -195,6 +252,37 @@ describe("TasksPage", () => {
     expect(await screen.findByText(/结果暂无法确认/)).toBeInTheDocument();
   });
 
+  it.each([
+    [502, "下载结果暂无法确认，请稍后在任务列表核对"],
+    [500, "服务器错误"],
+  ] as const)(
+    "retry-failed surfaces 502 as uncertain and other errors as API message (status %i)",
+    async (status, expected) => {
+      setup([]);
+      await screen.findByText("暂无任务");
+      await openCreateDialog();
+      fireEvent.change(screen.getByLabelText("下载链接列表"), {
+        target: { value: "https://a" },
+      });
+      mockFetch.mockResolvedValueOnce(
+        json(200, {
+          items: [
+            { accepted: false, error: { code: "invalid_input", message: "不支持" } },
+          ],
+          accepted_count: 0,
+          rejected_count: 1,
+        }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /添加/ }));
+      expect(await screen.findByRole("dialog", { name: /1 条任务失败/ })).toBeInTheDocument();
+      mockFetch.mockResolvedValueOnce(
+        json(status, { error: { code: "upstream", message: expected === "服务器错误" ? "服务器错误" : "结果不可确认" } }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "仅重试失败项" }));
+      expect(await screen.findByText(expected)).toBeInTheDocument();
+    },
+  );
+
   it("filters trigger reload with status params", async () => {
     setup([task(1)]);
     await screen.findByTestId("task-row-1");
@@ -210,6 +298,7 @@ describe("TasksPage", () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
       if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
       return json(200, { items: [task(1)], total: 45, page: 1, page_size: 20 });
     });
     render(
@@ -255,42 +344,149 @@ describe("TasksPage", () => {
     expect(screen.getByRole("button", { name: "名称排序" })).toBeInTheDocument();
   });
 
-  it("cancels selected tasks in bulk and clears selection", async () => {
-    setup([task(1), task(2)]);
+  // ============ T1 搜索（防抖 + q 参数 + 页码重置） ============
+
+  it("search debounces input and sends the q parameter", async () => {
+    jest.useFakeTimers();
+    try {
+      setup([task(1)]);
+      await screen.findByTestId("task-row-1");
+      const callsBefore = mockFetch.mock.calls.filter(([url]) =>
+        String(url).startsWith("/api/v2/tasks?"),
+      ).length;
+      fireEvent.change(screen.getByLabelText("搜索任务"), { target: { value: "ubuntu" } });
+      fireEvent.change(screen.getByLabelText("搜索任务"), { target: { value: "ubuntu.iso" } });
+      // 防抖窗口内不发请求。
+      expect(
+        mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v2/tasks?")),
+      ).toHaveLength(callsBefore);
+      act(() => jest.advanceTimersByTime(300));
+      await waitFor(() => {
+        const url = mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0] as string;
+        expect(url).toContain("q=ubuntu.iso");
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("search change resets to page 1", async () => {
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/v2/auth/me") return json(200, ME);
+      if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
+      return json(200, { items: [task(1)], total: 45, page: 1, page_size: 20 });
+    });
+    render(
+      <MemoryRouter initialEntries={["/tasks"]}>
+        <AppProviders>
+          <TasksPage />
+        </AppProviders>
+      </MemoryRouter>,
+    );
     await screen.findByTestId("task-row-1");
-    fireEvent.click(screen.getByLabelText("选择 task-1.bin"));
-    fireEvent.click(screen.getByLabelText("选择 task-2.bin"));
+    const listUrls = () =>
+      mockFetch.mock.calls
+        .map(([url]) => String(url))
+        .filter((url) => url.startsWith("/api/v2/tasks?"));
+    fireEvent.click(screen.getByLabelText("下一页"));
+    await waitFor(() => expect(listUrls().at(-1)).toContain("page=2"));
+    fireEvent.change(screen.getByLabelText("搜索任务"), { target: { value: "x" } });
+    // 防抖 300ms 后发请求：回第 1 页并带 q 参数。
+    await waitFor(
+      () => {
+        expect(listUrls().at(-1)).toContain("page=1");
+        expect(listUrls().at(-1)).toContain("q=x");
+      },
+      { timeout: 2000 },
+    );
+  });
+
+  // ============ T10/T11 取消确认 ============
+
+  it("batch cancel asks for confirmation, cancels only in-flight tasks and clears selection", async () => {
+    setup([task(1), task(2), task(3, "failed")]);
+    await screen.findByTestId("task-row-1");
+    fireEvent.click(screen.getAllByLabelText("选择 task-1.bin")[0]);
+    fireEvent.click(screen.getAllByLabelText("选择 task-2.bin")[0]);
+    fireEvent.click(screen.getAllByLabelText("选择 task-3.bin")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /批量取消/ }));
+    // 确认弹窗：仅 2 个进行中任务计入文案。
+    const batchDialog = await screen.findByRole("dialog", { name: "批量取消" });
+    expect(batchDialog).toHaveTextContent("确定要取消选中的 2 个任务吗？");
+    // 页脚取消先收起弹窗（不改选择）。
+    fireEvent.click(within(batchDialog).getByRole("button", { name: "取消" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "批量取消" })).not.toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /批量取消/ }));
+    await screen.findByRole("dialog", { name: "批量取消" });
     mockFetch.mockResolvedValueOnce(
       json(200, { items: [{ accepted: true }, { accepted: true }], accepted_count: 2, rejected_count: 0 }),
     );
-    fireEvent.click(screen.getByRole("button", { name: /批量取消/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认取消" }));
     await waitFor(() => {
       const call = mockFetch.mock.calls.find(([url]) => url === "/api/v2/tasks/cancel");
+      // 失败任务不在取消载荷中。
       expect(JSON.parse(call![1].body)).toEqual({ task_ids: [1, 2] });
     });
+    expect(await screen.findByText("已取消 2 个任务")).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByText(/已选/)).not.toBeInTheDocument();
     });
   });
 
-  it("cancels a single task from its row", async () => {
+  it("batch cancel with no in-flight selection only toasts", async () => {
+    setup([task(1, "failed")]);
+    await screen.findByTestId("task-row-1");
+    fireEvent.click(screen.getAllByLabelText("选择 task-1.bin")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /批量取消/ }));
+    expect(await screen.findByText("没有可取消的任务")).toBeInTheDocument();
+    expect(
+      mockFetch.mock.calls.filter(([url]) => url === "/api/v2/tasks/cancel"),
+    ).toHaveLength(0);
+  });
+
+  it("single cancel requires a danger confirmation before the request", async () => {
     setup([task(1)]);
     await screen.findByTestId("task-row-1");
+    fireEvent.click(screen.getAllByRole("button", { name: "取消" })[0]);
+    const dialog = await screen.findByRole("dialog", { name: "取消下载" });
+    expect(dialog).toHaveTextContent("task-1.bin");
+    // 先放弃（页脚取消与右上角关闭都收起弹窗）：不发请求。
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "取消下载" })).not.toBeInTheDocument(),
+    );
+    expect(
+      mockFetch.mock.calls.filter(([url]) => url === "/api/v2/tasks/cancel"),
+    ).toHaveLength(0);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "取消" })[0]);
+    const reopened = await screen.findByRole("dialog", { name: "取消下载" });
+    fireEvent.click(within(reopened).getByRole("button", { name: "关闭" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "取消下载" })).not.toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "取消" })[0]);
     mockFetch.mockResolvedValueOnce(
       json(200, { items: [{ accepted: true }], accepted_count: 1, rejected_count: 0 }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(await screen.findByRole("button", { name: "取消下载" }));
     await waitFor(() => {
       const call = mockFetch.mock.calls.find(([url]) => url === "/api/v2/tasks/cancel");
       expect(JSON.parse(call![1].body)).toEqual({ task_ids: [1] });
     });
-    expect(await screen.findByText("已取消")).toBeInTheDocument();
+    expect(await screen.findByText("已取消 1 个任务")).toBeInTheDocument();
   });
 
   it("reports partial cancel failure and cancel API error", async () => {
     setup([task(1), task(2)]);
     await screen.findByTestId("task-row-1");
-    fireEvent.click(screen.getByLabelText("选择 task-1.bin"));
+    fireEvent.click(screen.getAllByLabelText("选择 task-1.bin")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /批量取消/ }));
     mockFetch.mockResolvedValueOnce(
       json(200, {
         items: [{ accepted: false, error: { code: "invalid_state", message: "已终态" } }],
@@ -298,30 +494,124 @@ describe("TasksPage", () => {
         rejected_count: 1,
       }),
     );
-    fireEvent.click(screen.getByRole("button", { name: /批量取消/ }));
-    expect(await screen.findByText("1 个任务取消失败")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "确认取消" }));
+    expect(await screen.findByText("已取消 0 个任务，1 个取消失败")).toBeInTheDocument();
 
     mockFetch.mockReset();
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
       if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
       if (url === "/api/v2/tasks/cancel") {
         return json(500, { error: { code: "internal", message: "后端错误" } });
       }
       return json(200, list([task(1)]));
     });
+    await screen.findByTestId("task-row-1");
     fireEvent.click(screen.getAllByRole("button", { name: "取消" })[0]);
+    fireEvent.click(await screen.findByRole("button", { name: "取消下载" }));
     expect(await screen.findByText("后端错误")).toBeInTheDocument();
   });
 
+  // ============ T13 失败任务删除 ============
+
+  it("failed task exposes delete with confirmation", async () => {
+    setup([task(1, "failed")]);
+    await screen.findByTestId("task-row-1");
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+    const dialog = await screen.findByRole("dialog", { name: "删除任务" });
+    expect(dialog).toHaveTextContent("task-1.bin");
+    // 页脚取消先收起弹窗。
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "删除任务" })).not.toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+    mockFetch.mockResolvedValueOnce(
+      json(200, { items: [{ accepted: true }], accepted_count: 1, rejected_count: 0 }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("dialog", { name: "删除任务" })).getByRole("button", {
+        name: "删除",
+      }),
+    );
+    await waitFor(() => {
+      const call = mockFetch.mock.calls.find(([url]) => url === "/api/v2/tasks/cancel");
+      expect(JSON.parse(call![1].body)).toEqual({ task_ids: [1] });
+    });
+    expect(await screen.findByText("已删除 1 个任务")).toBeInTheDocument();
+  });
+
+  // ============ T12 复制链接 ============
+
+  it("copies the display uri from the row button with clipboard", async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    const restore = stubClipboard(writeText);
+    try {
+      setup([task(1, "active", { uri: "magnet:?xt=urn:btih:abc" })]);
+      await screen.findByTestId("task-row-1");
+      fireEvent.click(screen.getAllByRole("button", { name: "复制" })[0]);
+      expect(writeText).toHaveBeenCalledWith("magnet:?xt=urn:btih:abc");
+      expect(await screen.findByText("链接已复制")).toBeInTheDocument();
+    } finally {
+      restore();
+    }
+  });
+
+  it("copy failure falls back to an error toast", async () => {
+    const writeText = jest.fn().mockRejectedValue(new Error("denied"));
+    const restore = stubClipboard(writeText);
+    try {
+      setup([task(1, "active", { uri: "https://example.com/f.bin" })]);
+      await screen.findByTestId("task-row-1");
+      fireEvent.click(screen.getAllByRole("button", { name: "复制" })[0]);
+      expect(await screen.findByText("复制失败，请手动复制")).toBeInTheDocument();
+    } finally {
+      restore();
+    }
+  });
+
+  it("mobile card copy target copies the uri on click", async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    const restore = stubClipboard(writeText);
+    try {
+      setup([task(1, "active", { uri: "https://example.com/m.bin" })]);
+      const card = await screen.findByTestId("task-card-1");
+      fireEvent.click(card.querySelector(".task-card-copy-target")!);
+      expect(writeText).toHaveBeenCalledWith("https://example.com/m.bin");
+      expect(await screen.findByText("链接已复制")).toBeInTheDocument();
+    } finally {
+      restore();
+    }
+  });
+
+  // ============ T14 重试禁用原因 ============
+
+  it("shows a disabled retry button with reason for completed tasks", async () => {
+    setup([task(1, "completed")]);
+    await screen.findByTestId("task-row-1");
+    const retry = screen.getAllByRole("button", { name: "重试" })[0];
+    expect(retry).toBeDisabled();
+    expect(retry).toHaveAttribute("title", "已完成的任务不可重试");
+  });
+
+  it("shows a disabled retry button with reason for expired tasks", async () => {
+    setup([task(1, "expired")]);
+    await screen.findByTestId("task-row-1");
+    const retry = screen.getAllByRole("button", { name: "重试" })[0];
+    expect(retry).toBeDisabled();
+    expect(retry).toHaveAttribute("title", "已过期的任务不可重试");
+  });
+
   it("retries a retryable task and reports failure toast", async () => {
-    const failed = { ...task(1, "failed"), retryable: true };
+    const failed = task(1, "failed", { retryable: true });
     setup([failed]);
     await screen.findByTestId("task-row-1");
     mockFetch.mockResolvedValueOnce(
       json(200, { accepted: true, task: task(1, "queued") }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "重试" })[0]);
     await waitFor(() => {
       const call = mockFetch.mock.calls.find(([url]) => url === "/api/v2/tasks/1/retry");
       expect(call).toBeDefined();
@@ -332,13 +622,77 @@ describe("TasksPage", () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
       if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
       if (url === "/api/v2/tasks/1/retry") {
         return json(404, { error: { code: "not_found", message: "任务不存在" } });
       }
       return json(200, list([failed]));
     });
-    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await screen.findByTestId("task-row-1");
+    fireEvent.click(screen.getAllByRole("button", { name: "重试" })[0]);
     expect(await screen.findByText("任务不存在")).toBeInTheDocument();
+  });
+
+  // ============ T16 进度条状态 ============
+
+  it("progress bar tone follows task status", async () => {
+    setup([
+      task(1, "active"),
+      task(2, "failed"),
+      task(3, "completed", { completed_bytes: 100 }),
+      task(4, "waiting", { total_bytes: null }),
+    ]);
+    await screen.findByTestId("task-row-1");
+    const rowFill = (id: number) =>
+      document.querySelector(
+        `[data-testid="task-row-${id}"] .progress-fill`,
+      ) as HTMLElement;
+    expect(rowFill(1).className).toContain("progress-active");
+    expect(rowFill(2).className).toContain("progress-error");
+    expect(rowFill(3).style.width).toBe("100%");
+    // 未知大小时进度为 0%，大小列与卡片显示占位符。
+    expect(rowFill(4).style.width).toBe("0%");
+    expect(
+      document.querySelector('[data-testid="task-row-4"] .progress-detail')?.textContent,
+    ).toContain("—");
+    expect(screen.getByTestId("task-card-4").textContent).toContain("—");
+    expect(
+      document.querySelector('[aria-label="task-1.bin 下载进度"]')?.getAttribute("role"),
+    ).toBe("progressbar");
+  });
+
+  // ============ T19 移动端卡片 ============
+
+  it("mobile card variant renders alongside the desktop table", async () => {
+    setup([task(1), task(2, "failed")]);
+    expect(await screen.findByTestId("task-card-1")).toBeInTheDocument();
+    expect(screen.getByTestId("task-card-2")).toBeInTheDocument();
+    expect(document.querySelector("table.task-table.desktop-only")).not.toBeNull();
+    expect(document.querySelector("ul.task-card-list.mobile-only")).not.toBeNull();
+    // 卡片含名称/状态/进度/速度与操作。
+    const card = screen.getByTestId("task-card-1");
+    expect(card.textContent).toContain("task-1.bin");
+    expect(card.textContent).toContain("下载中");
+    expect(card.querySelector(".progress-fill")).not.toBeNull();
+    expect(card.textContent).toContain("10 B/s");
+  });
+
+  it("row and header checkbox toggles plus clear-selection", async () => {
+    setup([task(1), task(2)]);
+    await screen.findByTestId("task-row-1");
+    fireEvent.click(screen.getByLabelText("全选任务"));
+    expect(screen.getAllByLabelText("选择 task-1.bin")[0]).toBeChecked();
+    fireEvent.click(screen.getByLabelText("全选任务")); // 头部反选
+    expect(screen.getAllByLabelText("选择 task-1.bin")[0]).not.toBeChecked();
+    fireEvent.click(screen.getAllByLabelText("选择 task-1.bin")[0]);
+    fireEvent.click(screen.getAllByLabelText("选择 task-1.bin")[0]); // 行内反选
+    expect(screen.getAllByLabelText("选择 task-1.bin")[0]).not.toBeChecked();
+    fireEvent.click(screen.getAllByLabelText("选择 task-1.bin")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "清除选择" }));
+    expect(screen.getAllByLabelText("选择 task-1.bin")[0]).not.toBeChecked();
+    // 移动卡片的勾选复用同一处理器。
+    fireEvent.click(screen.getAllByLabelText("选择 task-1.bin")[1]);
+    expect(screen.getAllByLabelText("选择 task-1.bin")[0]).toBeChecked();
   });
 
   it("shows error state when loading fails and retries", async () => {
@@ -346,6 +700,7 @@ describe("TasksPage", () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
       if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
       return json(502, { error: { code: "upstream", message: "上游不可用" } });
     });
     render(
@@ -359,20 +714,48 @@ describe("TasksPage", () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
       if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
       return json(200, list([task(1)]));
     });
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     expect(await screen.findByTestId("task-row-1")).toBeInTheDocument();
   });
 
-  it("torrent flow: select file, preview, choose files and create", async () => {
+  // ============ T7 种子上传前端校验 ============
+
+  it("torrent upload rejects non-.torrent files without a request", async () => {
     setup([]);
     await screen.findByText("暂无任务");
+    const clickSpy = pickTorrentFile({ name: "movie.mp4" });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "种子下载" }));
+    } finally {
+      clickSpy.mockRestore();
+    }
+    expect(await screen.findByText("请选择 .torrent 文件")).toBeInTheDocument();
+    expect(
+      mockFetch.mock.calls.filter(([url]) => String(url).includes("torrent")),
+    ).toHaveLength(0);
+  });
 
-    // jsdom 的 File 未实现 arrayBuffer，用带该方法的替身驱动 readFileBase64。
-    const file = {
-      arrayBuffer: () => Promise.resolve(new Uint8Array([1, 2, 3]).buffer),
-    } as unknown as File;
+  it("torrent upload rejects files over 10 MB", async () => {
+    setup([]);
+    await screen.findByText("暂无任务");
+    const clickSpy = pickTorrentFile({ name: "big.torrent", size: 10 * 1024 * 1024 + 1 });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "种子下载" }));
+    } finally {
+      clickSpy.mockRestore();
+    }
+    expect(await screen.findByText("种子文件过大，最大支持 10 MB")).toBeInTheDocument();
+    expect(
+      mockFetch.mock.calls.filter(([url]) => String(url).includes("torrent")),
+    ).toHaveLength(0);
+  });
+
+  it("torrent flow: wizard selection then confirm create", async () => {
+    setup([]);
+    await screen.findByText("暂无任务");
     const preview = {
       info_hash: "abc",
       name: "ubuntu.iso",
@@ -383,12 +766,7 @@ describe("TasksPage", () => {
       total_size: 1032,
       default_selection: [0, 1],
     };
-    const clickSpy = jest
-      .spyOn(HTMLInputElement.prototype, "click")
-      .mockImplementation(function (this: HTMLInputElement) {
-        Object.defineProperty(this, "files", { value: [file], configurable: true });
-        this.onchange?.(new Event("change"));
-      });
+    const clickSpy = pickTorrentFile();
     mockFetch.mockResolvedValueOnce(json(200, preview));
     try {
       fireEvent.click(screen.getByRole("button", { name: "种子下载" }));
@@ -397,15 +775,16 @@ describe("TasksPage", () => {
     }
     const dialog = await screen.findByRole("dialog", { name: /ubuntu\.iso/ });
     expect(dialog).toBeInTheDocument();
-    expect(await screen.findByText(/已选 2 \/ 2 个文件/)).toBeInTheDocument();
+    expect(await screen.findByText(/已选 2 项 · 1\.01 KiB/)).toBeInTheDocument();
 
-    // 取消第二项后创建。
-    const checkboxes = screen.getAllByRole("checkbox") as HTMLInputElement[];
-    fireEvent.click(checkboxes[1]);
+    // 取消第二项后进入确认阶段并创建。
+    fireEvent.click(screen.getByLabelText("选择文件 skip.txt"));
+    fireEvent.click(screen.getByRole("button", { name: "下一阶段" }));
+    expect(screen.getByText(/确认下载内容：1 个文件 · 1\.00 KiB/)).toBeInTheDocument();
     mockFetch.mockResolvedValueOnce(
       json(200, { items: [], accepted_count: 1, rejected_count: 0 }),
     );
-    fireEvent.click(screen.getByRole("button", { name: /创建（1 个文件）/ }));
+    fireEvent.click(screen.getByRole("button", { name: /确认创建（1 项）/ }));
     await waitFor(() => {
       const call = mockFetch.mock.calls.find(([url]) => url === "/api/v2/tasks/torrent");
       const body = JSON.parse(call![1].body as string);
@@ -418,15 +797,7 @@ describe("TasksPage", () => {
   it("torrent preview failure shows toast", async () => {
     setup([]);
     await screen.findByText("暂无任务");
-    const file = {
-      arrayBuffer: () => Promise.resolve(new Uint8Array([9]).buffer),
-    } as unknown as File;
-    const clickSpy = jest
-      .spyOn(HTMLInputElement.prototype, "click")
-      .mockImplementation(function (this: HTMLInputElement) {
-        Object.defineProperty(this, "files", { value: [file], configurable: true });
-        this.onchange?.(new Event("change"));
-      });
+    const clickSpy = pickTorrentFile();
     mockFetch.mockResolvedValueOnce(
       json(422, { error: { code: "invalid_input", message: "种子文件无效" } }),
     );
@@ -438,19 +809,23 @@ describe("TasksPage", () => {
     expect(await screen.findByText("种子文件无效")).toBeInTheDocument();
   });
 
-  it("row and header checkbox toggles plus clear-selection", async () => {
-    setup([task(1), task(2)]);
-    await screen.findByTestId("task-row-1");
-    fireEvent.click(screen.getByLabelText("全选任务"));
-    expect(screen.getByLabelText("选择 task-1.bin")).toBeChecked();
-    fireEvent.click(screen.getByLabelText("全选任务")); // 头部反选
-    expect(screen.getByLabelText("选择 task-1.bin")).not.toBeChecked();
-    fireEvent.click(screen.getByLabelText("选择 task-1.bin"));
-    fireEvent.click(screen.getByLabelText("选择 task-1.bin")); // 行内反选
-    expect(screen.getByLabelText("选择 task-1.bin")).not.toBeChecked();
-    fireEvent.click(screen.getByLabelText("选择 task-1.bin"));
-    fireEvent.click(screen.getByRole("button", { name: "清除选择" }));
-    expect(screen.getByLabelText("选择 task-1.bin")).not.toBeChecked();
+  it("torrent picker cancel (no file) makes no request", async () => {
+    setup([]);
+    await screen.findByText("暂无任务");
+    const clickSpy = jest
+      .spyOn(HTMLInputElement.prototype, "click")
+      .mockImplementation(function (this: HTMLInputElement) {
+        Object.defineProperty(this, "files", { value: [], configurable: true });
+        this.onchange?.(new Event("change"));
+      });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "种子下载" }));
+    } finally {
+      clickSpy.mockRestore();
+    }
+    expect(
+      mockFetch.mock.calls.filter(([url]) => String(url).includes("torrent")),
+    ).toHaveLength(0);
   });
 
   it("create dialog cancel closes without a request", async () => {
@@ -476,27 +851,18 @@ describe("TasksPage", () => {
     expect(screen.getByRole("dialog", { name: "新建下载任务" })).toBeInTheDocument();
   });
 
-  it("torrent dialog cancel closes without creating", async () => {
+  it("torrent wizard cancel closes after confirmation", async () => {
     setup([]);
     await screen.findByText("暂无任务");
-    const file = {
-      arrayBuffer: () => Promise.resolve(new Uint8Array([5]).buffer),
-    } as unknown as File;
-    const clickSpy = jest
-      .spyOn(HTMLInputElement.prototype, "click")
-      .mockImplementation(function (this: HTMLInputElement) {
-        Object.defineProperty(this, "files", { value: [file], configurable: true });
-        this.onchange?.(new Event("change"));
-      });
-    mockFetch.mockResolvedValueOnce(
-      json(200, {
-        info_hash: "h",
-        name: "t.iso",
-        files: [{ index: 0, path: "t.iso", size: 10 }],
-        total_size: 10,
-        default_selection: [0],
-      }),
-    );
+    const preview = {
+      info_hash: "h",
+      name: "t.iso",
+      files: [{ index: 0, path: "t.iso", size: 10 }],
+      total_size: 10,
+      default_selection: [0],
+    };
+    const clickSpy = pickTorrentFile();
+    mockFetch.mockResolvedValueOnce(json(200, preview));
     try {
       fireEvent.click(screen.getByRole("button", { name: "种子下载" }));
     } finally {
@@ -504,36 +870,31 @@ describe("TasksPage", () => {
     }
     await screen.findByRole("dialog", { name: /t\.iso/ });
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    // 已有选择 → 二次确认。
+    expect(await screen.findByText(/取消添加任务？/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认取消" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("torrent create partial failure opens the failures dialog", async () => {
     setup([]);
     await screen.findByText("暂无任务");
-    const file = {
-      arrayBuffer: () => Promise.resolve(new Uint8Array([7]).buffer),
-    } as unknown as File;
-    const clickSpy = jest
-      .spyOn(HTMLInputElement.prototype, "click")
-      .mockImplementation(function (this: HTMLInputElement) {
-        Object.defineProperty(this, "files", { value: [file], configurable: true });
-        this.onchange?.(new Event("change"));
-      });
-    mockFetch.mockResolvedValueOnce(
-      json(200, {
-        info_hash: "h",
-        name: "p.iso",
-        files: [{ index: 0, path: "p.iso", size: 10 }],
-        total_size: 10,
-        default_selection: [0],
-      }),
-    );
+    const preview = {
+      info_hash: "h",
+      name: "p.iso",
+      files: [{ index: 0, path: "p.iso", size: 10 }],
+      total_size: 10,
+      default_selection: [0],
+    };
+    const clickSpy = pickTorrentFile();
+    mockFetch.mockResolvedValueOnce(json(200, preview));
     try {
       fireEvent.click(screen.getByRole("button", { name: "种子下载" }));
     } finally {
       clickSpy.mockRestore();
     }
     await screen.findByRole("dialog", { name: /p\.iso/ });
+    fireEvent.click(screen.getByRole("button", { name: "下一阶段" }));
     mockFetch.mockResolvedValueOnce(
       json(200, {
         items: [{ accepted: false, error: { code: "invalid_input", message: "选择无效" } }],
@@ -541,38 +902,23 @@ describe("TasksPage", () => {
         rejected_count: 1,
       }),
     );
-    fireEvent.click(screen.getByRole("button", { name: /创建（1 个文件）/ }));
+    fireEvent.click(screen.getByRole("button", { name: /确认创建（1 项）/ }));
     expect(await screen.findByRole("dialog", { name: "1 条任务失败" })).toBeInTheDocument();
     expect(screen.getByText("选择无效")).toBeInTheDocument();
   });
 
   it("discards stale load responses after filter changes", async () => {
-    let deferredResolve: ((body: unknown) => void) | null = null;
-    mockFetch.mockReset();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      if (url === "/api/v2/tasks/stats") return json(200, stats());
-      if (deferredResolve !== null) {
-        const resolve = deferredResolve;
-        deferredResolve = null;
-        return new Promise((resolveOuter) => {
-          void resolve; // 初始挂起请求，稍后手动放行。
-          (resolveOuter as unknown as (v: unknown) => void)({ pending: true, resolve });
-        }).then(
-          (value) => (value as { resolve: (b: unknown) => unknown }).resolve as never,
-        ) as never;
-      }
-      return json(200, list([task(1, "active")]));
-    });
     // 简化：直接用受控 promise 拦截第一笔列表请求。
     let releaseFirst: (value: unknown) => void = () => undefined;
     const firstCall = new Promise((resolve) => {
       releaseFirst = resolve;
     });
     let calls = 0;
+    mockFetch.mockReset();
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
       if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
       calls += 1;
       if (calls === 1) {
         return firstCall as never;
@@ -593,6 +939,189 @@ describe("TasksPage", () => {
     releaseFirst(json(200, list([task(99, "completed")])));
     await screen.findByTestId("task-row-1");
     expect(screen.queryByTestId("task-row-99")).not.toBeInTheDocument();
+  });
+
+  // ============ T15 完成/失败 Toast + 桌面通知 ============
+
+  it("WS completion transition toasts and sends a desktop notification", async () => {
+    const constructed: Array<{ title: string; body: string; tag: string }> = [];
+    class FakeNotification {
+      static permission = "granted";
+      static requestPermission = jest.fn().mockResolvedValue("granted");
+      onclick: (() => void) | null = null;
+      constructor(title: string, options: { body?: string; tag?: string }) {
+        constructed.push({ title, body: options.body ?? "", tag: options.tag ?? "" });
+      }
+      close = jest.fn();
+    }
+    (globalThis as { Notification?: unknown }).Notification = FakeNotification;
+    window.localStorage.setItem("notifications.enabled", "true");
+
+    const sockets: Array<{
+      onopen: (() => void) | null;
+      onmessage: ((event: { data: string }) => void) | null;
+      onclose: ((event: { code: number }) => void) | null;
+      close: jest.Mock;
+    }> = [];
+    class FakeWebSocket {
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: ((event: { code: number }) => void) | null = null;
+      close = jest.fn();
+      constructor() {
+        sockets.push(this);
+      }
+    }
+    (global as Record<string, unknown>).WebSocket = FakeWebSocket;
+
+    try {
+      mockFetch.mockReset();
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url === "/api/v2/auth/me") return json(200, ME);
+        if (url === "/api/v2/tasks/stats") return json(200, stats());
+        if (url === "/api/v2/public/site-info") return json(200, siteInfo());
+        return json(200, list([task(1, "active")]));
+      });
+      render(
+        <MemoryRouter initialEntries={["/tasks"]}>
+          <AppProviders>
+            <TasksPage />
+          </AppProviders>
+        </MemoryRouter>,
+      );
+      await screen.findByTestId("task-row-1");
+      const socket = sockets[sockets.length - 1];
+      act(() => socket.onopen?.());
+      act(() =>
+        socket.onmessage?.({
+          data: JSON.stringify({
+            type: "task_update",
+            task: { ...task(1, "completed"), updated_at_ms: 5 },
+          }),
+        }),
+      );
+      expect(await screen.findByText("task-1.bin 下载完成")).toBeInTheDocument();
+      await waitFor(() =>
+        expect(constructed).toEqual([
+          { title: "下载完成", body: "task-1.bin", tag: "aria2-completed-1" },
+        ]),
+      );
+    } finally {
+      delete (globalThis as { Notification?: unknown }).Notification;
+      delete (global as Record<string, unknown>).WebSocket;
+    }
+  });
+
+  it("WS failure transition toasts and a disabled sub-switch suppresses the notification", async () => {
+    const constructed: unknown[] = [];
+    class FakeNotification {
+      static permission = "granted";
+      static requestPermission = jest.fn().mockResolvedValue("granted");
+      constructor() {
+        constructed.push(this);
+      }
+      close = jest.fn();
+    }
+    (globalThis as { Notification?: unknown }).Notification = FakeNotification;
+    window.localStorage.setItem("notifications.enabled", "true");
+    window.localStorage.setItem("notifications.on_failed", "false");
+
+    const sockets: Array<{
+      onopen: (() => void) | null;
+      onmessage: ((event: { data: string }) => void) | null;
+      onclose: ((event: { code: number }) => void) | null;
+      close: jest.Mock;
+    }> = [];
+    class FakeWebSocket {
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: ((event: { code: number }) => void) | null = null;
+      close = jest.fn();
+      constructor() {
+        sockets.push(this);
+      }
+    }
+    (global as Record<string, unknown>).WebSocket = FakeWebSocket;
+
+    try {
+      mockFetch.mockReset();
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url === "/api/v2/auth/me") return json(200, ME);
+        if (url === "/api/v2/tasks/stats") return json(200, stats());
+        if (url === "/api/v2/public/site-info") return json(200, siteInfo());
+        return json(200, list([task(1, "active")]));
+      });
+      render(
+        <MemoryRouter initialEntries={["/tasks"]}>
+          <AppProviders>
+            <TasksPage />
+          </AppProviders>
+        </MemoryRouter>,
+      );
+      await screen.findByTestId("task-row-1");
+      const socket = sockets[sockets.length - 1];
+      act(() => socket.onopen?.());
+      act(() =>
+        socket.onmessage?.({
+          data: JSON.stringify({
+            type: "task_update",
+            task: { ...task(1, "failed"), updated_at_ms: 6 },
+          }),
+        }),
+      );
+      expect(await screen.findByText("task-1.bin 下载失败")).toBeInTheDocument();
+      expect(constructed).toHaveLength(0); // 失败子开关关闭：仅 Toast，不弹系统通知。
+    } finally {
+      delete (globalThis as { Notification?: unknown }).Notification;
+      delete (global as Record<string, unknown>).WebSocket;
+    }
+  });
+
+  it("WS completion with an empty name falls back to the generic label", async () => {
+    const sockets: Array<{
+      onopen: (() => void) | null;
+      onmessage: ((event: { data: string }) => void) | null;
+    }> = [];
+    class FakeWebSocket {
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: ((event: { code: number }) => void) | null = null;
+      close = jest.fn();
+      constructor() {
+        sockets.push(this);
+      }
+    }
+    (global as Record<string, unknown>).WebSocket = FakeWebSocket;
+    try {
+      mockFetch.mockReset();
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url === "/api/v2/auth/me") return json(200, ME);
+        if (url === "/api/v2/tasks/stats") return json(200, stats());
+        if (url === "/api/v2/public/site-info") return json(200, siteInfo());
+        return json(200, list([task(1, "active")]));
+      });
+      render(
+        <MemoryRouter initialEntries={["/tasks"]}>
+          <AppProviders>
+            <TasksPage />
+          </AppProviders>
+        </MemoryRouter>,
+      );
+      await screen.findByTestId("task-row-1");
+      const socket = sockets[sockets.length - 1];
+      act(() => socket.onopen?.());
+      act(() =>
+        socket.onmessage?.({
+          data: JSON.stringify({
+            type: "task_update",
+            task: { ...task(1, "completed"), name: "", updated_at_ms: 9 },
+          }),
+        }),
+      );
+      expect(await screen.findByText("下载任务 下载完成")).toBeInTheDocument();
+    } finally {
+      delete (global as Record<string, unknown>).WebSocket;
+    }
   });
 
   it("WS task_update refreshes list on status change and logs out on 4401", async () => {
@@ -620,6 +1149,7 @@ describe("TasksPage", () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
       if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
       calls += 1;
       // 第二次加载（WS 触发）返回 waiting 状态。
       return json(200, list(calls <= 1 ? [task(1, "active")] : [task(1, "waiting")]));
@@ -639,6 +1169,7 @@ describe("TasksPage", () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
       if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
       return json(200, list([task(1, "waiting")]));
     });
     act(() =>
@@ -652,6 +1183,9 @@ describe("TasksPage", () => {
     await waitFor(() => {
       expect(mockFetch.mock.calls.filter(([url]) => String(url).includes("status=")).length).toBeGreaterThan(1);
     });
+    // 等待刷新响应落盘后再送下一帧，避免读到旧的 active 副本。
+    await act(async () => {});
+    await screen.findByTestId("task-row-1");
 
     // 同状态更新 → 原地替换（无整页刷新）。
     const listCallsBefore = mockFetch.mock.calls.filter(([url]) => String(url).includes("status=")).length;
@@ -663,13 +1197,14 @@ describe("TasksPage", () => {
         }),
       }),
     );
-    expect(await screen.findByText("renamed.bin")).toBeInTheDocument();
+    expect(await screen.findAllByText("renamed.bin")).not.toHaveLength(0);
     expect(mockFetch.mock.calls.filter(([url]) => String(url).includes("status=")).length).toBe(listCallsBefore);
 
     // 4401 → 登出。
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
       if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
       return json(200, list([task(1, "waiting")]));
     });
     mockFetch.mockResolvedValueOnce(json(401, { error: { code: "unauthenticated", message: "请先登录" } })); // 登出探测失败占位

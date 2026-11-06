@@ -318,3 +318,33 @@ describe("HistoryPage", () => {
     expect(await screen.findByTestId("history-row-9")).toBeInTheDocument();
   });
 });
+
+describe("HistoryPage 大小与失败原因列（H4）", () => {
+  it("shows size column and mapped failure reason for failed tasks", async () => {
+    const items = [
+      historyItem(1),
+      historyItem(2, {
+        status: "failed",
+        status_label: "失败",
+        error_code: "upstream_failure",
+        total_bytes: 5 * 1024 * 1024,
+      }),
+      historyItem(3, {
+        status: "failed",
+        status_label: "失败",
+        error_code: "weird_code",
+        total_bytes: null,
+      }),
+    ];
+    setup(() => ({ items, total: items.length, page: 1, page_size: 20 }));
+    await screen.findByTestId("history-row-1");
+    expect(screen.getByTestId("history-row-1").textContent).toContain("2.00 KiB");
+    const failed = screen.getByTestId("history-row-2");
+    expect(failed.textContent).toContain("5.00 MiB");
+    expect(failed.textContent).toContain("上游下载失败");
+    // 未知错误码原样展示。
+    expect(screen.getByTestId("history-row-3").textContent).toContain("weird_code");
+    // 已完成任务无失败原因占位。
+    expect(screen.getByTestId("history-row-1").textContent).toContain("—");
+  });
+});

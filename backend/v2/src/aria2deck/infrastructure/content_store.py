@@ -177,6 +177,22 @@ class DownloadContentStore:
     def machine_free_bytes(self) -> int:
         return shutil.disk_usage(self.download_directory).free
 
+    def machine_disk_usage(self) -> tuple[int, int, int]:
+        usage = shutil.disk_usage(self.download_directory)
+        return usage.total, usage.used, usage.free
+
+    def download_used_bytes(self) -> int:
+        if not self.download_directory.is_dir():
+            return 0
+        total = 0
+        for parent, _directories, names in os.walk(self.download_directory, followlinks=False):
+            for name in names:
+                try:
+                    total += (Path(parent) / name).stat().st_size
+                except OSError:  # pragma: no cover -- 竞态删除的文件按 0 计
+                    continue
+        return total
+
     def _verify_prepared(self, storage_path: str) -> tuple[int, str]:
         target = self._destination(storage_path)
         if not target.is_file():

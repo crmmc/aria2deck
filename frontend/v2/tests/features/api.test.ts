@@ -23,15 +23,24 @@ describe("tasks api input normalization", () => {
   });
 
   it("fetchTasks appends sort params only when a sort is active", async () => {
-    await fetchTasks(null, 2, 20, null);
+    await fetchTasks(null, 2, 20, null, "");
     expect(mockFetch.mock.calls[0][0]).toBe("/api/v2/tasks?page=2&page_size=20");
-    await fetchTasks("current", 1, 20, { key: "size", order: "asc" });
+    await fetchTasks("current", 1, 20, { key: "size", order: "asc" }, "");
     const url = new URL(String(mockFetch.mock.calls[1][0]), "http://localhost");
     expect(url.pathname).toBe("/api/v2/tasks");
     expect(url.searchParams.getAll("status")).toEqual(["queued", "active", "waiting", "paused"]);
     expect(url.searchParams.get("sort")).toBe("size");
     expect(url.searchParams.get("order")).toBe("asc");
     expect(url.searchParams.get("page")).toBe("1");
+  });
+
+  it("fetchTasks sends trimmed search term as q and skips blank terms", async () => {
+    await fetchTasks(null, 1, 20, null, "  ubuntu  ");
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      "/api/v2/tasks?page=1&page_size=20&q=ubuntu",
+    );
+    await fetchTasks(null, 1, 20, null, "   ");
+    expect(mockFetch.mock.calls[1][0]).toBe("/api/v2/tasks?page=1&page_size=20");
   });
 
   it("createTorrent sends null selection when no files selected", async () => {
