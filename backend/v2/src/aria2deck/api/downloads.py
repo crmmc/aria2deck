@@ -20,7 +20,9 @@ from ..application.downloads.queries import DownloadQueryService
 from ..domain.downloads import SubscriptionStatus
 from ..domain.quota import available_user_bytes
 from .contracts import (
+    DiskSpaceResponse,
     ErrorBody,
+    HistoryClearAllResponse,
     HistoryPurgeRequest,
     HistoryPurgeResponse,
     TaskActionRequest,
@@ -68,6 +70,13 @@ def _stats(stats: TaskStats) -> TaskStatsResponse:
             used_bytes=stats.quota.used_bytes,
             reserved_bytes=stats.quota.reserved_bytes,
             available_bytes=available_user_bytes(stats.quota),
+        ),
+        disk=DiskSpaceResponse(
+            total_bytes=stats.disk.total_bytes,
+            used_bytes=stats.disk.used_bytes,
+            reserved_bytes=stats.disk.reserved_bytes,
+            available_bytes=stats.disk.available_bytes,
+            limited=stats.disk.limited,
         ),
     )
 
@@ -185,7 +194,13 @@ async def create_tasks(
     results = await service.create_uris(
         user_id=principal.user.id,
         items=[
-            UriDownloadInput(uri=item.uri, options=item.options.model_dump())
+            # by_alias：http-user / http-passwd / max-connection-per-server 以
+            # aria2 键名（连字符）进入领域白名单，与 RPC options 同一形态；
+            # exclude_none：未设置的选项不进入 options（与 RPC 原始 dict 一致）。
+            UriDownloadInput(
+                uri=item.uri,
+                options=item.options.model_dump(by_alias=True, exclude_none=True),
+            )
             for item in payload.tasks
         ],
     )
@@ -307,6 +322,20 @@ async def delete_history(
 ) -> TaskBatchResponse:
     results = await service.delete(user_id=principal.user.id, task_ids=payload.task_ids)
     return await _batch_response(results, queries, user_id=principal.user.id, include_task=False)
+
+
+@router.delete(
+    "/history/all",
+    response_model=HistoryClearAllResponse,
+    responses=error_responses(401, 422, 429, 500),
+)
+async def clear_history(
+    principal: Principal = Depends(required_principal),
+    service: HistoryService = Depends(download_history),
+) -> HistoryClearAllResponse:
+    """一键清空本人全部终态任务（A2）。"""
+    cleared = await service.clear(user_id=principal.user.id)
+    return HistoryClearAllResponse(cleared_count=cleared)
 
 
 @router.post(

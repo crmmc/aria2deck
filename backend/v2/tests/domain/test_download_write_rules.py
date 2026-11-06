@@ -81,3 +81,70 @@ def test_display_name_fallback_and_validation_cover_non_uri_sources() -> None:
 
 def test_tracker_merge_skips_blank_entries() -> None:
     assert merge_trackers((" ", "udp://a.example:80")) == ("udp://a.example:80",)
+
+
+def test_write_options_accept_v1_parity_whitelist_and_key_identity_rules() -> None:
+    """A9：out / http-user / http-passwd / max-connection-per-server 进入白名单。
+
+    身份口径与旧版一致：凭据参与资源身份（同 URI 不同凭据是不同下载），
+    out 与连接数不参与（换名/换连接数仍是同一资源）。
+    """
+    resource = normalize_resource("https://example.com/file.iso")
+    base, base_key = normalize_download_options(resource, {})
+    with_out, out_key = normalize_download_options(resource, {"out": "renamed.bin"})
+    with_credentials, credential_key = normalize_download_options(
+        resource, {"http-user": "alice", "http-passwd": "secret"}
+    )
+    with_connections, connections_key = normalize_download_options(
+        resource, {"max-connection-per-server": 4}
+    )
+
+    assert with_out["out"] == "renamed.bin"
+    assert with_credentials["http-user"] == "alice"
+    assert with_credentials["http-passwd"] == "secret"
+    assert with_connections["max-connection-per-server"] == 4
+    assert out_key == base_key == connections_key
+    assert credential_key != base_key
+    # 凭据任意变化（含仅用户名）都会改变身份；缺失与空串也不同。
+    _, half_key = normalize_download_options(resource, {"http-user": "alice"})
+    _, empty_password_key = normalize_download_options(
+        resource, {"http-user": "alice", "http-passwd": ""}
+    )
+    assert half_key != credential_key != empty_password_key
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"out": "a/b.bin"},  # 路径形 out：防逃逸
+        {"out": "a\\b.bin"},
+        {"out": ".."},
+        {"out": "."},
+        {"out": ""},
+        {"out": 123},
+        {"http-user": "line\nbreak"},
+        {"http-passwd": "null\x00byte"},
+        {"http-user": "x" * 4097},
+        {"max-connection-per-server": 0},
+        {"max-connection-per-server": 17},
+        {"max-connection-per-server": "4"},
+        {"max-connection-per-server": True},
+    ],
+)
+def test_new_write_options_reject_unsafe_or_invalid_values(options: object) -> None:
+    with pytest.raises(DomainError):
+        normalize_download_options(normalize_resource("https://example.com/f"), options)
+
+
+def test_magnet_accepts_out_and_connections_but_rejects_credentials() -> None:
+    magnet = normalize_resource("magnet:?xt=urn:btih:" + "ab" * 20)
+    normalized, key = normalize_download_options(
+        magnet, {"out": "bt-name.bin", "max-connection-per-server": 8}
+    )
+    assert normalized["out"] == "bt-name.bin"
+    assert normalized["max-connection-per-server"] == 8
+    assert key == magnet.resource_key
+    with pytest.raises(DomainError):
+        normalize_download_options(magnet, {"http-user": "alice"})
+    with pytest.raises(DomainError):
+        normalize_download_options(magnet, {"http-passwd": "secret"})

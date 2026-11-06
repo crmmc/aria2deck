@@ -7,6 +7,7 @@ from aria2deck.application.downloads.rpc_projection import (
     VirtualGidSpace,
     aria2_status,
     basename_of,
+    failure_message,
     global_stat_payload,
     option_payload,
     slice_window,
@@ -127,3 +128,82 @@ def test_slice_window_supports_negative_offset() -> None:
     assert slice_window(items, 99, 5) == []
     assert slice_window(items, 0, 0) == []  # num=0 → 空（aria2 语义）
     assert slice_window(items, 0, 99) == items
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        ("upstream_failure", "上游下载失败"),
+        ("download_unavailable", "下载不可用"),
+        ("rpc_unavailable", "aria2 连接不可用"),
+        ("aria2_rejected", "aria2 拒绝了操作"),
+        ("task_too_large", "任务超出大小限制"),
+        ("quota_exceeded", "存储配额不足"),
+        ("physical_space_exceeded", "机器空间不足"),
+        ("submission_uncertain", "提交结果不可确认"),
+        ("recovery_unsafe", "恢复不安全"),
+        ("invalid_input", "输入无效"),
+        ("invalid_state", "状态无效"),
+        ("content_busy", "内容被占用"),
+        ("admission_paused", "系统暂停期间任务未提交"),
+        ("metadata_admission_paused", "系统暂停期间元数据未提交"),
+        # aria2 数字 fault 码并入统一拒绝文案。
+        ("aria2_1", "aria2 拒绝了操作"),
+        ("aria2_17", "aria2 拒绝了操作"),
+        # 未知但形态安全的码原样回显（受控 snake_case 域，可排障）。
+        ("custom_extension_code", "custom_extension_code"),
+    ],
+)
+def test_failure_message_maps_controlled_codes_to_chinese(code: str, expected: str) -> None:
+    assert failure_message(code) == expected
+    assert failure_message(None) == ""
+
+
+def test_failed_task_projects_localized_error_message() -> None:
+    """B2：tellStatus 失败任务输出中文失败原因，errorCode 保留原始码。"""
+    import dataclasses
+
+    failed = dataclasses.replace(TASK, status=SubscriptionStatus.FAILED, error_code="upstream_failure")
+    payload = tell_status_payload(failed, "g")
+    assert payload["status"] == "error"
+    assert payload["errorCode"] == "upstream_failure"
+    assert payload["errorMessage"] == "上游下载失败"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        SubscriptionStatus.ACTIVE,
+        SubscriptionStatus.COMPLETED,
+        SubscriptionStatus.CANCELLED,
+        SubscriptionStatus.EXPIRED,
+    ],
+)
+def test_non_failed_statuses_keep_error_message_empty(status: SubscriptionStatus) -> None:
+    """旧版同语义：errorMessage 仅 error 状态输出，其余状态（含残留 error_code）恒空串。"""
+    import dataclasses
+
+    payload = tell_status_payload(
+        dataclasses.replace(TASK, status=status, error_code="upstream_failure"), "g"
+    )
+    assert payload["errorMessage"] == ""
+
+
+def test_unsafe_error_code_text_never_leaks() -> None:
+    """负断言：路径、URI、异常原文等非受控形态一律脱敏为通用文案，原文零出现。"""
+    import dataclasses
+
+    unsafe_values = (
+        "/data/downloads/secret.iso",
+        "https://internal.example/fetch/abc",
+        "ValueError: boom at app/service.py:42",
+        "a" * 200,
+        "UPPER-CASE Leak",
+    )
+    for unsafe in unsafe_values:
+        projection = dataclasses.replace(
+            TASK, status=SubscriptionStatus.FAILED, error_code=unsafe
+        )
+        message = tell_status_payload(projection, "g")["errorMessage"]
+        assert message == "下载失败"
+        assert unsafe not in message

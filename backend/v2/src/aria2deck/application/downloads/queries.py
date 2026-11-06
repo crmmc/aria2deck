@@ -5,8 +5,10 @@ from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 
 from ...domain.downloads import SubscriptionStatus
+from ...domain.quota import PhysicalDownload, available_machine_bytes, visible_space
+from ...domain.settings import SystemSettings
 from ..ports import AccountRepositoryPort, UnitOfWork
-from .models import DownloadRecord, TaskPage, TaskProjection, TaskStats
+from .models import AttemptRecord, DownloadRecord, TaskPage, TaskProjection, TaskStats
 from .projection import TaskProjector
 
 
@@ -20,6 +22,12 @@ class DownloadReadRepository(Protocol):
     ) -> list[DownloadRecord]: ...
 
     async def get_task(self, *, user_id: int, task_id: int) -> DownloadRecord: ...
+
+    async def list_live_attempts(self, *, submitted_only: bool = False) -> list[AttemptRecord]: ...
+
+
+class MachineSpacePort(Protocol):
+    def machine_free_bytes(self) -> int: ...
 
 
 RepositoryFactory = Callable[[UnitOfWork], DownloadReadRepository]
@@ -35,11 +43,15 @@ class DownloadQueryService:
         repository_factory: RepositoryFactory,
         account_repository_factory: AccountRepositoryFactory,
         projector: TaskProjector,
+        machine_space: MachineSpacePort,
+        settings: Callable[[], SystemSettings],
     ) -> None:
         self.uow_factory = uow_factory
         self.repository_factory = repository_factory
         self.account_repository_factory = account_repository_factory
         self.projector = projector
+        self.machine_space = machine_space
+        self.settings = settings
 
     async def list_tasks(
         self,
@@ -94,14 +106,30 @@ class DownloadQueryService:
         async with self.uow_factory() as uow:
             records = await self.repository_factory(uow).list_tasks(user_id=user_id)
             quota = await self.account_repository_factory(uow).get_quota(user_id)
+            attempts = await self.repository_factory(uow).list_live_attempts()
         tasks = [self.projector.project(record) for record in records]
         counts = {status: 0 for status in SubscriptionStatus}
         for task in tasks:
             counts[task.status] += 1
+        # shortcut: 打包预留的物理承诺未计入机器余量（与 packs 侧近似对称；STAT-02 统一时并入）
+        headroom = available_machine_bytes(
+            self.machine_space.machine_free_bytes(),
+            self.settings().min_free_disk,
+            (
+                PhysicalDownload(
+                    status=attempt.status,
+                    total_length=attempt.total_length,
+                    completed_length=attempt.completed_length,
+                )
+                for attempt in attempts
+            ),
+            (),
+        )
         return TaskStats(
             counts=counts,
             total=len(tasks),
             download_speed=sum(task.download_speed for task in tasks),
             upload_speed=sum(task.upload_speed for task in tasks),
             quota=quota,
+            disk=visible_space(quota, machine_available_bytes=headroom),
         )

@@ -88,7 +88,9 @@ class FakeQueries:
         counts = {status: 0 for status in SubscriptionStatus}
         for record in self.records:
             counts[record.subscription_status] += 1
-        return TaskStats(counts=counts, total=len(self.records), download_speed=5, upload_speed=1, quota=Quota(100, 0, 0))
+        from aria2deck.domain.quota import VisibleSpace
+
+        return TaskStats(counts=counts, total=len(self.records), download_speed=5, upload_speed=1, quota=Quota(100, 0, 0), disk=VisibleSpace(100, 0, 0, 100, False))
 
 
 class FakeCommands:

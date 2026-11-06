@@ -7,6 +7,7 @@ import pytest
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.settings import (
     DEFAULT_SITE_TITLE,
+    DOWNLOAD_CONNECTION_LIMIT_KEYS,
     SECRET_MASK,
     SystemSettings,
     apply_settings_patch,
@@ -83,15 +84,22 @@ def test_rpc_url_rejects_ambiguous_or_unsafe_forms(url: str) -> None:
         ("tracker_fixed_list", ["udp:///missing-host"]),
         ("tracker_fixed_list", ["udp://[::1"]),
         ("tracker_remote_urls", ["ftp://example.com/list"]),
-        ("download_connection_limits", {"HTTP": 1}),
-        ("download_connection_limits", {"http": 0}),
-        ("download_connection_limits", {"http": 65}),
+        ("download_connection_limits", {"total_connections": -1}),
+        ("download_connection_limits", {"total_connections": 1001}),
+        ("download_connection_limits", {"unknown_key": 1}),
     ],
 )
 def test_settings_reject_invalid_collections(field: str, value: object) -> None:
     with pytest.raises(DomainError) as caught:
         replace(SystemSettings(), **{field: value})
     assert caught.value.code is ErrorCode.INVALID_INPUT
+
+
+def test_download_connection_limits_accept_zero_as_disabled() -> None:
+    """0 值语义对齐旧版：所有档位允许 0（总量/分档=不限，匿名池=全面拒绝）。"""
+    limits = {key: 0 for key in DOWNLOAD_CONNECTION_LIMIT_KEYS}
+    settings = SystemSettings(download_connection_limits=limits)
+    assert settings.download_connection_limits == limits
 
 
 @pytest.mark.parametrize(
@@ -128,7 +136,7 @@ def test_valid_boundaries_and_urls_are_accepted() -> None:
         tracker_fixed_list=("http://tracker.example:80", "https://tracker.example/announce"),
         tracker_remote_urls=("https://example.com/list",),
         tracker_refresh_interval_minutes=10080,
-        download_connection_limits={"http": 64},
+        download_connection_limits={"total_connections": 100},
         updated_at_ms=1,
     )
     assert settings.tracker_refresh_interval_minutes == 10080

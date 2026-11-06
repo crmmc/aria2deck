@@ -121,6 +121,16 @@ class PublicShareService:
             for entry in entries
         ], breadcrumbs, total
 
+    async def check_access(self, code: str, token: str | None) -> ShareRecord:
+        """校验分享可用性与访问令牌（不解析目标、不计数）。
+
+        供匿名连接限流在占用连接档之前做准入判断：无效分享码/令牌的请求
+        不应消耗匿名连接额度（旧版 check_share_access 同位职责）。
+        """
+        record = await self._active_share(code)
+        self._require_token(record, token)
+        return record
+
     async def download(
         self,
         code: str,

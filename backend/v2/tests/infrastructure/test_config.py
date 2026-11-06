@@ -188,3 +188,43 @@ def test_internal_gateway_url_is_configurable() -> None:
         {"ARIA2DECK_DEBUG": "true", "ARIA2DECK_INTERNAL_BASE_URL": "http://app:8001/"}
     )
     assert settings.internal_base_url == "http://app:8001"
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", " yes "])
+def test_rpc_allow_all_origins_accepts_truthy_values(tmp_path: Path, value: str) -> None:
+    """A7 契约：ARIA2C_RPC_ALLOW_ALL_ORIGINS 布尔读取（1/true/yes，忽略大小写与空白）。"""
+    settings = Settings.from_env(
+        environment(tmp_path) | {"ARIA2C_RPC_ALLOW_ALL_ORIGINS": value}
+    )
+    assert settings.rpc_allow_all_origins is True
+
+
+@pytest.mark.parametrize("value", ["", "false", "0", "no", "off", "enabled"])
+def test_rpc_allow_all_origins_fails_closed_on_other_values(
+    tmp_path: Path, value: str
+) -> None:
+    """A7 契约：非法/未识别取值一律不开启任意来源（fail closed）。"""
+    settings = Settings.from_env(
+        environment(tmp_path) | {"ARIA2C_RPC_ALLOW_ALL_ORIGINS": value}
+    )
+    assert settings.rpc_allow_all_origins is False
+
+
+def test_rpc_allowed_origins_parses_comma_separated_values(tmp_path: Path) -> None:
+    """A7 契约：ARIA2C_RPC_ALLOWED_ORIGINS 逗号分隔→frozenset，空白与空段剔除。
+
+    非法条目不做 URL 校验：白名单是精确匹配，垃圾条目永不命中任何 Origin，
+    等效于不存在（fail safe）。
+    """
+    settings = Settings.from_env(
+        environment(tmp_path)
+        | {"ARIA2C_RPC_ALLOWED_ORIGINS": " https://a.example , junk ,, http://b.example "}
+    )
+    assert settings.rpc_allowed_origins == frozenset(
+        {"https://a.example", "junk", "http://b.example"}
+    )
+
+
+def test_rpc_allowed_origins_default_to_empty_set(tmp_path: Path) -> None:
+    settings = Settings.from_env(environment(tmp_path))
+    assert settings.rpc_allowed_origins == frozenset()

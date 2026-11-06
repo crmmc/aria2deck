@@ -265,6 +265,18 @@
       }
     },
     "/api/v2/files": {
+      "delete": {
+        "parameters": [],
+        "responses": {
+          "200": "FileBatchDeleteResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
       "get": {
         "parameters": [
           "page",
@@ -379,6 +391,18 @@
         }
       }
     },
+    "/api/v2/history/all": {
+      "delete": {
+        "parameters": [],
+        "responses": {
+          "200": "HistoryClearAllResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
     "/api/v2/history/purge": {
       "post": {
         "parameters": [],
@@ -423,6 +447,18 @@
         "parameters": [],
         "responses": {
           "200": "PackPrecomputeResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/packs/records": {
+      "delete": {
+        "parameters": [],
+        "responses": {
+          "200": "PackClearRecordsResponse",
           "401": "ErrorResponse",
           "422": "ErrorResponse",
           "429": "ErrorResponse",
@@ -526,6 +562,19 @@
     },
     "/api/v2/settings/aria2/test": {
       "post": {
+        "parameters": [],
+        "responses": {
+          "200": "Aria2TestResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/settings/aria2/version": {
+      "get": {
         "parameters": [],
         "responses": {
           "200": "Aria2TestResponse",
@@ -942,6 +991,13 @@
         "prefix"
       ]
     },
+    "Aria2TestRequest": {
+      "fields": [
+        "aria2_rpc_secret",
+        "aria2_rpc_url"
+      ],
+      "required": []
+    },
     "Aria2TestResponse": {
       "fields": [
         "connected",
@@ -1017,10 +1073,30 @@
         "path"
       ]
     },
+    "DiskSpaceResponse": {
+      "fields": [
+        "available_bytes",
+        "limited",
+        "reserved_bytes",
+        "total_bytes",
+        "used_bytes"
+      ],
+      "required": [
+        "available_bytes",
+        "limited",
+        "reserved_bytes",
+        "total_bytes",
+        "used_bytes"
+      ]
+    },
     "DownloadOptionsRequest": {
       "fields": [
         "headers",
-        "mirrors"
+        "http-passwd",
+        "http-user",
+        "max-connection-per-server",
+        "mirrors",
+        "out"
       ],
       "required": []
     },
@@ -1040,6 +1116,37 @@
       ],
       "required": [
         "error"
+      ]
+    },
+    "FileBatchDeleteRequest": {
+      "fields": [
+        "file_ids"
+      ],
+      "required": [
+        "file_ids"
+      ]
+    },
+    "FileBatchDeleteResponse": {
+      "fields": [
+        "accepted_count",
+        "rejected_count",
+        "results"
+      ],
+      "required": [
+        "accepted_count",
+        "rejected_count",
+        "results"
+      ]
+    },
+    "FileBatchDeleteResultResponse": {
+      "fields": [
+        "accepted",
+        "error",
+        "file_id"
+      ],
+      "required": [
+        "accepted",
+        "file_id"
       ]
     },
     "FileEntryItemResponse": {
@@ -1138,6 +1245,14 @@
         "truncated"
       ]
     },
+    "HistoryClearAllResponse": {
+      "fields": [
+        "cleared_count"
+      ],
+      "required": [
+        "cleared_count"
+      ]
+    },
     "HistoryPurgeRequest": {
       "fields": [
         "before_ms",
@@ -1192,6 +1307,14 @@
         "ok"
       ],
       "required": []
+    },
+    "PackClearRecordsResponse": {
+      "fields": [
+        "cleared_count"
+      ],
+      "required": [
+        "cleared_count"
+      ]
     },
     "PackCreateRequest": {
       "fields": [
@@ -1872,6 +1995,7 @@
     "TaskStatsResponse": {
       "fields": [
         "counts",
+        "disk",
         "download_speed",
         "quota",
         "total",
@@ -1879,6 +2003,7 @@
       ],
       "required": [
         "counts",
+        "disk",
         "download_speed",
         "quota",
         "total",

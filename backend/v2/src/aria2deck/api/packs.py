@@ -11,6 +11,7 @@ from ..application.settings.rate_limit import RateLimiter
 from .contracts import (
     ErrorBody,
     OkResponse,
+    PackClearRecordsResponse,
     PackCreateRequest,
     PackListResponse,
     PackOutputResponse,
@@ -127,6 +128,20 @@ async def list_packs(
 ) -> PackListResponse:
     views = await service.list_packs(principal.user.id, limit)
     return PackListResponse(items=[_pack(view) for view in views])
+
+
+@router.delete(
+    "/packs/records",
+    response_model=PackClearRecordsResponse,
+    responses=error_responses(401, 422, 429, 500),
+)
+async def clear_pack_records(
+    principal: Principal = Depends(required_principal),
+    service: PackControlService = Depends(pack_control),
+) -> PackClearRecordsResponse:
+    """清空本人全部终态打包记录（保留输出文件）（A3）。"""
+    cleared = await service.clear_records(principal.user.id)
+    return PackClearRecordsResponse(cleared_count=cleared)
 
 
 @router.get(

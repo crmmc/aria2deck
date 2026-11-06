@@ -18,6 +18,7 @@ from ..application.library.queries import LibraryQueryService
 from ..application.packs.admission import PackAdmissionService
 from ..application.packs.control import PackControlService
 from ..application.packs.progress import PackProgressService
+from ..application.settings.download_limit import DownloadConnectionLimiter
 from ..application.settings.rate_limit import RateLimiter
 from ..application.settings.service import SettingsService
 from ..application.settings.trackers import TrackerService
@@ -104,6 +105,10 @@ def settings_service(request: Request) -> SettingsService:
 
 def rate_limiter(request: Request) -> RateLimiter:
     return cast(RateLimiter, request.app.state.rate_limiter)
+
+
+def download_connections(request: Request) -> DownloadConnectionLimiter:
+    return cast(DownloadConnectionLimiter, request.app.state.download_connections)
 
 
 def client_ip(request: Request) -> str:

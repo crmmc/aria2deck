@@ -4,9 +4,9 @@ from typing import Annotated
 from urllib.parse import parse_qs, quote
 
 from fastapi import APIRouter, Depends, Header, Path, Query, Request
-from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
+from ..application.settings.download_limit import DownloadConnectionLease, DownloadConnectionLimiter
 from ..application.settings.rate_limit import RateLimiter
 from ..application.shares.access import PublicShareService
 from ..application.shares.models import PublicShareDownload
@@ -19,8 +19,9 @@ from .contracts import (
     ShareVerifyRequest,
     ShareVerifyResponse,
 )
-from .dependencies import client_ip, public_shares, rate_limiter
+from .dependencies import client_ip, download_connections, public_shares, rate_limiter
 from .errors import error_responses
+from .streaming import LeaseStreamingResponse
 
 router = APIRouter(prefix="/api/s", tags=["public-shares"])
 
@@ -61,7 +62,11 @@ def _bearer_token(authorization: str | None) -> str:
     return value.strip()
 
 
-def _streaming(result: PublicShareDownload, service: PublicShareService) -> StreamingResponse:
+def _streaming(
+    result: PublicShareDownload,
+    service: PublicShareService,
+    connection: DownloadConnectionLease | None = None,
+) -> LeaseStreamingResponse:
     headers = {
         "Content-Disposition": _content_disposition(result.display_name),
         "Accept-Ranges": "bytes",
@@ -73,12 +78,26 @@ def _streaming(result: PublicShareDownload, service: PublicShareService) -> Stre
         )
     else:
         headers["Content-Length"] = str(result.total_size)
-    return StreamingResponse(
+    background: BackgroundTask
+    if connection is None:
+        background = BackgroundTask(service.release, result)
+    else:
+        background = BackgroundTask(_release_share_download, connection, service, result)
+    # 后台任务覆盖流正常结束；流中途异常时由 ASGI finally 兜底释放（幂等）。
+    return LeaseStreamingResponse(
         service.iter_chunks(result),
+        releases=() if connection is None else (connection.release,),
         status_code=result.decision.status_code,
         headers=headers,
-        background=BackgroundTask(service.release, result),
+        background=background,
     )
+
+
+async def _release_share_download(
+    connection: DownloadConnectionLease, service: PublicShareService, result: PublicShareDownload
+) -> None:
+    await connection.release()
+    await service.release(result)
 
 
 @router.get(
@@ -167,10 +186,21 @@ async def download_share(
     authorization: Annotated[str | None, Header()] = None,
     limiter: RateLimiter = Depends(rate_limiter),
     service: PublicShareService = Depends(public_shares),
-) -> StreamingResponse:
+    connections: DownloadConnectionLimiter = Depends(download_connections),
+) -> LeaseStreamingResponse:
     limiter.check_share_access(client_ip(request))
-    result = await service.download(code, _bearer_token(authorization), path, range_header)
-    return _streaming(result, service)
+    # 校验先行（与旧版同序）：无效分享码/令牌不消耗匿名连接档；
+    # per-file 档按内容身份计（旧版用 content_hash 口径，此处对应 content_key）。
+    record = await service.check_access(code, _bearer_token(authorization))
+    connection = await connections.acquire_anonymous(
+        client_ip=client_ip(request), file_key=record.content_key
+    )
+    try:
+        result = await service.download(code, _bearer_token(authorization), path, range_header)
+    except BaseException:
+        await connection.release()
+        raise
+    return _streaming(result, service, connection)
 
 
 @router.post(
@@ -183,7 +213,8 @@ async def download_share_by_form(
     range_header: str | None = Header(default=None, alias="Range"),
     limiter: RateLimiter = Depends(rate_limiter),
     service: PublicShareService = Depends(public_shares),
-) -> StreamingResponse:
+    connections: DownloadConnectionLimiter = Depends(download_connections),
+) -> LeaseStreamingResponse:
     # 限流先行：无 token 的请求同样消耗额度。
     limiter.check_share_access(client_ip(request))
     _require_urlencoded_form(request)
@@ -196,5 +227,14 @@ async def download_share_by_form(
     raw_token = form.get("token", [""])[0]
     raw_path = form.get("path", [""])[0]
     path = raw_path or None
-    result = await service.download(code, raw_token, path, range_header)
-    return _streaming(result, service)
+    # 校验先行（与旧版同序）：无效分享码/令牌不消耗匿名连接档；per-file 档按内容身份计。
+    record = await service.check_access(code, raw_token)
+    connection = await connections.acquire_anonymous(
+        client_ip=client_ip(request), file_key=record.content_key
+    )
+    try:
+        result = await service.download(code, raw_token, path, range_header)
+    except BaseException:
+        await connection.release()
+        raise
+    return _streaming(result, service, connection)

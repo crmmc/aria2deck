@@ -25,6 +25,8 @@ class HistoryRepository(Protocol):
 
     async def delete_history(self, *, user_id: int, task_id: int, now_ms: int) -> bool: ...
 
+    async def clear_history(self, *, user_id: int, now_ms: int) -> int: ...
+
     async def expire_history(self, *, cutoff_ms: int, now_ms: int) -> HistoryExpiration: ...
 
 
@@ -102,6 +104,13 @@ class HistoryService:
                     )
                 )
         return results
+
+    async def clear(self, *, user_id: int) -> int:
+        """一键清空本人全部终态历史（A2，旧版 DELETE /api/tasks 语义）。"""
+        async with self.uow_factory() as uow:
+            return await self.repository_factory(uow).clear_history(
+                user_id=user_id, now_ms=self.clock_ms()
+            )
 
     async def expire(self, *, cutoff_ms: int) -> HistoryExpiration:
         async with self.uow_factory() as uow:

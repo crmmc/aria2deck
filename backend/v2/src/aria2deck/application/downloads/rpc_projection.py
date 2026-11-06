@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -21,6 +22,41 @@ _ARIA2_STATUS: dict[SubscriptionStatus, str] = {
     SubscriptionStatus.CANCELLED: "removed",  # 文件删除取消 → removed（历史版本 326aeff 语义重放）
     SubscriptionStatus.EXPIRED: "removed",
 }
+
+# error_code → 脱敏中文失败原因（B2）：与前端 HistoryPage 的 ERROR_CODE_LABEL
+# 同口径；输入是受控 snake_case 码（DomainError 值 / aria2_{数字} / 暂停码），
+# 绝不落入路径、URI 或异常原文。
+_ERROR_MESSAGES: dict[str, str] = {
+    "upstream_failure": "上游下载失败",
+    "download_unavailable": "下载不可用",
+    "rpc_unavailable": "aria2 连接不可用",
+    "aria2_rejected": "aria2 拒绝了操作",
+    "task_too_large": "任务超出大小限制",
+    "quota_exceeded": "存储配额不足",
+    "physical_space_exceeded": "机器空间不足",
+    "submission_uncertain": "提交结果不可确认",
+    "recovery_unsafe": "恢复不安全",
+    "invalid_input": "输入无效",
+    "invalid_state": "状态无效",
+    "content_busy": "内容被占用",
+    "admission_paused": "系统暂停期间任务未提交",
+    "metadata_admission_paused": "系统暂停期间元数据未提交",
+}
+
+_SAFE_ERROR_CODE = re.compile(r"[a-z0-9_]{1,64}")
+
+
+def failure_message(error_code: str | None) -> str:
+    """errorCode → 中文文案；aria2 数字 fault 并入拒绝语义；非安全形态一律脱敏。"""
+    if error_code is None:
+        return ""
+    if error_code in _ERROR_MESSAGES:
+        return _ERROR_MESSAGES[error_code]
+    if error_code.startswith("aria2_"):
+        return _ERROR_MESSAGES["aria2_rejected"]
+    if _SAFE_ERROR_CODE.fullmatch(error_code):
+        return error_code
+    return "下载失败"
 
 RPC_VERSION = "1.37.0"
 RPC_FEATURES = ["aria2.rpc.multiCall", "aria2.rpc.listMethods", "aria2.rpc.secretToken"]
@@ -94,7 +130,12 @@ def tell_status_payload(
         "pieceLength": str(projection.total_bytes or 0),
         "connections": str(projection.connection_count),
         "errorCode": projection.error_code or "0",
-        "errorMessage": "",
+        # 仅 error 状态输出中文失败原因（旧版同语义：非失败态恒空串）。
+        "errorMessage": (
+            failure_message(projection.error_code)
+            if projection.status == SubscriptionStatus.FAILED
+            else ""
+        ),
         "dir": ".",
         "files": _files_payload(projection),
         "bittorrent": {

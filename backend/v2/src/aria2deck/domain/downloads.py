@@ -411,15 +411,30 @@ def submission_pause_options(kind: str) -> dict[str, str]:
 def normalize_download_options(
     resource: NormalizedResource, options: Mapping[str, object]
 ) -> tuple[dict[str, object], str]:
-    """Validate the small write-option contract and include it in HTTP identity."""
-    if any(key not in {"headers", "mirrors"} for key in options):
+    """Validate the small write-option contract and include it in HTTP identity.
+
+    白名单与旧版对齐：headers / mirrors / out / http-user / http-passwd /
+    max-connection-per-server（A9）。http-user/http-passwd 参与资源身份；
+    out 与 max-connection-per-server 不参与（同一资源换名仍是同一下载）。
+    """
+    allowed = {
+        "headers",
+        "mirrors",
+        "out",
+        "http-user",
+        "http-passwd",
+        "max-connection-per-server",
+    }
+    if any(key not in allowed for key in options):
         raise DomainError(ErrorCode.INVALID_INPUT, "下载选项包含未知字段")
     raw_headers = options.get("headers", {})
     raw_mirrors = options.get("mirrors", [])
     if not isinstance(raw_headers, Mapping) or not isinstance(raw_mirrors, list | tuple):
         raise DomainError(ErrorCode.INVALID_INPUT, "下载请求头或镜像格式无效")
-    if resource.kind != "http" and (raw_headers or raw_mirrors):
-        raise DomainError(ErrorCode.INVALID_INPUT, "仅 HTTP(S) 下载支持请求头和镜像")
+    if resource.kind != "http" and (
+        raw_headers or raw_mirrors or "http-user" in options or "http-passwd" in options
+    ):
+        raise DomainError(ErrorCode.INVALID_INPUT, "仅 HTTP(S) 下载支持请求头、镜像和认证选项")
     if len(raw_headers) > 50 or len(raw_mirrors) > 10:
         raise DomainError(ErrorCode.INVALID_INPUT, "下载请求头或镜像数量过多")
     headers: dict[str, str] = {}
@@ -432,7 +447,7 @@ def normalize_download_options(
             not re.fullmatch(r"[a-z0-9!#$%&'*+.^_`|~-]+", name)
             or name in forbidden
             or len(raw_value) > 8192
-            or any(ord(character) < 32 or ord(character) == 127 for character in raw_value)
+            or any(ord(character) < 32 or character == chr(127) for character in raw_value)
         ):
             raise DomainError(ErrorCode.INVALID_INPUT, "下载请求头无效")
         headers[name] = raw_value
@@ -445,16 +460,68 @@ def normalize_download_options(
             raise DomainError(ErrorCode.INVALID_INPUT, "镜像仅支持 HTTP(S) 地址")
         if mirror.canonical_uri not in mirrors:
             mirrors.append(mirror.canonical_uri)
+    out = _normalize_out_option(options.get("out"))
+    username, password = _normalize_http_credentials(
+        options.get("http-user"), options.get("http-passwd")
+    )
+    connections = _normalize_max_connections(options.get("max-connection-per-server"))
     normalized: dict[str, object] = {"headers": headers, "mirrors": mirrors}
+    if out is not None:
+        normalized["out"] = out
+    if username is not None:
+        normalized["http-user"] = username
+    if password is not None:
+        normalized["http-passwd"] = password
+    if connections is not None:
+        normalized["max-connection-per-server"] = connections
     if resource.kind != "http":
         return normalized, resource.resource_key
     identity = json.dumps(
-        {"uri": resource.canonical_uri, **normalized},
+        {
+            "uri": resource.canonical_uri,
+            "headers": headers,
+            "mirrors": mirrors,
+            "http-user": username,
+            "http-passwd": password,
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
     return normalized, f"http:{hashlib.sha256(identity.encode()).hexdigest()}"
+
+
+def _normalize_out_option(value: object) -> str | None:
+    """out 必须是不含路径分隔符的文件名（防逃逸，与旧版同口径）。"""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or value in {".", ".."} or "/" in value or "\\" in value:
+        raise DomainError(ErrorCode.INVALID_INPUT, "无效的 out 选项：必须是不含路径分隔符的文件名")
+    if len(value) > 200 or any(ord(character) < 32 for character in value):
+        raise DomainError(ErrorCode.INVALID_INPUT, "无效的 out 选项：文件名过长或包含非法字符")
+    return value
+
+
+def _normalize_http_credentials(user: object, password: object) -> tuple[str | None, str | None]:
+    def check(value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise DomainError(ErrorCode.INVALID_INPUT, "HTTP 认证选项无效")
+        raw = value.encode()
+        if len(raw) > 4096 or b"\r" in raw or b"\n" in raw or b"\x00" in raw:
+            raise DomainError(ErrorCode.INVALID_INPUT, "HTTP 认证选项无效")
+        return value
+
+    return check(user), check(password)
+
+
+def _normalize_max_connections(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 16:
+        raise DomainError(ErrorCode.INVALID_INPUT, "max-connection-per-server 取值无效")
+    return value
 
 
 def resource_display_name(resource: NormalizedResource, original_uri: str) -> str:

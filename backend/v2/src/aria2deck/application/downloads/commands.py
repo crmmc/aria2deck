@@ -192,12 +192,16 @@ def prepare_uri_download(
     else:
         # Magnet identity and submission deliberately discard user-supplied trackers.
         payload = {"uri": resource.canonical_uri}
+    display_name = resource_display_name(resource, uri.strip())
+    if isinstance(normalized_options.get("out"), str):
+        # 用户显式指定的输出名优先（A9）；display_name 是 V2 文件命名的唯一来源。
+        display_name = str(normalized_options["out"])
     return PreparedDownload(
         kind=resource.kind,
         resource_key=resource_key,
         payload=payload,
         options=normalized_options,
-        display_name=resource_display_name(resource, uri.strip()),
+        display_name=display_name,
         display_uri=resource.display_uri,
     )
 

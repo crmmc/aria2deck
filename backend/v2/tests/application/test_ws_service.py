@@ -10,6 +10,7 @@ from aria2deck.application.downloads.ws_service import (
 )
 from aria2deck.domain.accounts import CredentialKind, User
 from aria2deck.domain.errors import DomainError, ErrorCode
+from aria2deck.domain.settings import SystemSettings
 
 SESSION = "session-raw-id"
 PRINCIPAL_USER_ID = 11
@@ -321,6 +322,8 @@ async def test_lifecycle_broadcast_to_ws_end_to_end(tmp_path):
             repository_factory=lambda uow: DownloadRepository(uow.connection),
             account_repository_factory=lambda uow: AccountRepository(uow.connection),
             projector=projector,
+            machine_space=rt.store,
+            settings=lambda: SystemSettings(min_free_disk=0),
         )
         lifecycle = DownloadLifecycleService(
             uow_factory=uow_factory,

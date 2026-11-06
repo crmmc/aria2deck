@@ -228,3 +228,42 @@ def test_list_recent_packs_scopes_to_owner_and_orders_newest_first(
     # 未登录不可见。
     client.cookies.clear()
     assert client.get("/api/v2/packs").status_code == 401
+
+
+def test_clear_pack_records_endpoint_removes_terminal_and_keeps_outputs(
+    client: TestClient, settings
+) -> None:
+    """A3：DELETE /api/v2/packs/records 清全部终态记录，保留输出文件。"""
+    _, user_id = _setup_two_users(client)
+    first = seed_file(settings, user_id=user_id, index=31, payload=b"a" * 16)
+    second = seed_file(settings, user_id=user_id, index=32, payload=b"b" * 8)
+
+    done = client.post(
+        "/api/v2/packs",
+        json={"items": [first[1]], "output_name": "clear-done.zip", "delete_source": False},
+    ).json()["id"]
+    _wait_pack_status(client, done, ("done",))
+    client.post(  # 活动任务不参与清理（副作用调用，返回值由下方 remaining 断言覆盖）。
+        "/api/v2/packs",
+        json={"items": [second[1]], "output_name": "clear-live.zip", "delete_source": False},
+    )
+    cancelled_view = client.post(
+        "/api/v2/packs",
+        json={"items": [second[1]], "output_name": "clear-cancel.zip", "delete_source": False},
+    ).json()["id"]
+    client.post(f"/api/v2/packs/{cancelled_view}/cancel")
+
+    response = client.delete("/api/v2/packs/records")
+
+    assert response.status_code == 200
+    cleared = response.json()["cleared_count"]
+    # done 与 cancelled 都属终态（cancelled 可能仍被 dispatcher 推进中，容忍 1 或 2）。
+    assert cleared in {1, 2}
+    assert client.get(f"/api/v2/packs/{done}").status_code == 404
+    remaining = {item["id"] for item in client.get("/api/v2/packs", params={"limit": 50}).json()["items"]}
+    assert done not in remaining
+    # 输出文件保留：文件列表里仍有 clear-done.zip。
+    names = {item["display_name"] for item in client.get("/api/v2/files").json()["items"]}
+    assert "clear-done.zip" in names
+    # 重复清理为 0。
+    assert client.delete("/api/v2/packs/records").json()["cleared_count"] == 0

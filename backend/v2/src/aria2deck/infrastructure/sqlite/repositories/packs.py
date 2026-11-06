@@ -567,6 +567,25 @@ class PackRepository:
         )
         return result.rowcount == 1
 
+    async def clear_terminal_records(self, *, user_id: int) -> int:
+        """清空本人全部终态打包记录（A3）；来源清理未完成的记录保留。"""
+        pending_sources = (
+            select(pack_sources.c.id)
+            .where(pack_sources.c.pack_id == pack_jobs.c.id)
+            .where(pack_sources.c.cleanup_status == "pending")
+        )
+        result = await self.connection.execute(
+            delete(pack_jobs)
+            .where(pack_jobs.c.owner_id == user_id)
+            .where(
+                pack_jobs.c.status.in_(
+                    (PackStatus.DONE, PackStatus.FAILED, PackStatus.CANCELLED)
+                )
+            )
+            .where(~pending_sources.exists())
+        )
+        return int(result.rowcount)
+
     async def list_active_jobs(self, user_id: int) -> list[int]:
         rows = (
             await self.connection.execute(

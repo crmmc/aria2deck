@@ -4,14 +4,14 @@ from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, Path, Query
-from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
 from ..application.accounts.models import Principal
 from ..application.library.commands import LibraryCommandService
 from ..application.library.download import LibraryDownloadService
-from ..application.library.models import UserFileView
+from ..application.library.models import DownloadTarget, UserFileView
 from ..application.library.queries import LibraryQueryService
+from ..application.settings.download_limit import DownloadConnectionLease, DownloadConnectionLimiter
 from ..application.settings.rate_limit import RateLimiter
 from ..domain.accounts import require_session
 from ..domain.content import ContentKind
@@ -20,6 +20,9 @@ from ..domain.quota import Quota, available_user_bytes
 from .contracts import (
     DirectoryBreadcrumbResponse,
     ErrorBody,
+    FileBatchDeleteRequest,
+    FileBatchDeleteResponse,
+    FileBatchDeleteResultResponse,
     FileEntryItemResponse,
     FileEntryListResponse,
     FileItemResponse,
@@ -38,6 +41,7 @@ from .contracts import (
     TaskQuotaResponse,
 )
 from .dependencies import (
+    download_connections,
     library_commands,
     library_download,
     library_queries,
@@ -47,6 +51,7 @@ from .dependencies import (
     required_session_principal,
 )
 from .errors import error_responses
+from .streaming import LeaseStreamingResponse
 
 router = APIRouter(prefix="/api/v2", tags=["files"])
 
@@ -169,14 +174,22 @@ async def download_file(
     range_header: str | None = Header(default=None, alias="Range"),
     principal: Principal = Depends(required_session_principal),
     service: LibraryDownloadService = Depends(library_download),
-) -> StreamingResponse:
+    connections: DownloadConnectionLimiter = Depends(download_connections),
+) -> LeaseStreamingResponse:
     require_session(principal.kind)  # API Token 不能下载文件，仅浏览器会话可用。
-    target = await service.open_download(
-        user_id=principal.user.id,
-        file_id=file_id,
-        path=path,
-        range_header=range_header,
+    lease = await connections.acquire_authenticated(
+        user_id=principal.user.id, file_key=str(file_id)
     )
+    try:
+        target = await service.open_download(
+            user_id=principal.user.id,
+            file_id=file_id,
+            path=path,
+            range_header=range_header,
+        )
+    except BaseException:
+        await lease.release()
+        raise
     headers = {
         "Content-Disposition": _content_disposition(target.display_name),
         "Accept-Ranges": "bytes",
@@ -190,12 +203,21 @@ async def download_file(
     else:
         headers["Content-Length"] = str(target.total_size)
         status_code = 200
-    return StreamingResponse(
+    # 后台任务覆盖流正常结束；流中途异常时由 ASGI finally 兜底释放（幂等）。
+    return LeaseStreamingResponse(
         service.iter_chunks(target),
+        releases=(lease.release,),
         status_code=status_code,
         headers=headers,
-        background=BackgroundTask(service.release, target),
+        background=BackgroundTask(_release_download, lease, service, target),
     )
+
+
+async def _release_download(
+    lease: DownloadConnectionLease, service: LibraryDownloadService, target: DownloadTarget
+) -> None:
+    await lease.release()
+    await service.release(target)
 
 
 @router.patch(
@@ -227,6 +249,40 @@ async def delete_file(
 ) -> OkResponse:
     await service.delete_user_file(user_id=principal.user.id, file_id=file_id)
     return OkResponse()
+
+
+@router.delete(
+    "/files",
+    response_model=FileBatchDeleteResponse,
+    responses=error_responses(401, 404, 409, 422, 429, 500),
+)
+async def delete_files(
+    payload: FileBatchDeleteRequest,
+    principal: Principal = Depends(required_principal),
+    service: LibraryCommandService = Depends(library_commands),
+) -> FileBatchDeleteResponse:
+    """批量删除本人文件引用（A1）：逐项受理，单项失败不阻断其余。"""
+    outcomes = await service.delete_user_files(
+        user_id=principal.user.id, file_ids=payload.file_ids
+    )
+    results = [
+        FileBatchDeleteResultResponse(
+            file_id=outcome.content_id,
+            accepted=outcome.accepted,
+            error=(
+                ErrorBody(code=outcome.error_code, message=outcome.message)
+                if outcome.error_code is not None and outcome.message is not None
+                else None
+            ),
+        )
+        for outcome in outcomes
+    ]
+    accepted = sum(result.accepted for result in results)
+    return FileBatchDeleteResponse(
+        accepted_count=accepted,
+        rejected_count=len(results) - accepted,
+        results=results,
+    )
 
 
 @router.get(

@@ -159,3 +159,87 @@ def test_gateway_closes_an_over_limit_response_before_streaming() -> None:
         assert closed == [True]
 
     asyncio.run(exercise())
+
+
+async def test_gateway_maps_http_credentials_to_basic_authorization(
+    tmp_path: Path,
+) -> None:
+    """A9：http-user/http-passwd → 上游 Basic 认证；显式 Authorization 头优先。"""
+    import base64
+
+    settings = Settings(tmp_path / "v2.db", tmp_path / "downloads", tmp_path / "static", True)
+    app = create_app(settings=settings)
+    async with app.router.lifespan_context(app):
+        view = await app.state.account_service.create_user(
+            None, username="admin", password_hash="ab" * 32, is_admin=True,
+            is_initial_password=False, quota_bytes=None,
+        )
+        app.state.download_commands.backend = FakeSubmissionBackend()
+        gateway = app.state.download_gateway
+        fake = FakeUpstream(response([b"x"], total=1, body_bytes=1)[0])
+        gateway.upstream = fake
+
+        credentials = (
+            await app.state.download_commands.create_uris(
+                user_id=view.user.id,
+                items=[
+                    UriDownloadInput(
+                        "https://example.com/authed",
+                        {"http-user": "alice", "http-passwd": "secret"},
+                    )
+                ],
+            )
+        )[0]
+        assert credentials.accepted
+        await gateway.open(
+            attempt_id=credentials.attempt_id,
+            source_index=0,
+            capability=capability(credentials.attempt_id),
+            range_header=None,
+        )
+        url, headers, _ = fake.calls[-1]
+        expected = base64.b64encode(b"alice:secret").decode()
+        assert headers["Authorization"] == f"Basic {expected}"
+
+        explicit = (
+            await app.state.download_commands.create_uris(
+                user_id=view.user.id,
+                items=[
+                    UriDownloadInput(
+                        "https://example.com/explicit",
+                        {
+                            "http-user": "alice",
+                            "http-passwd": "secret",
+                            "headers": {"Authorization": "Bearer token"},
+                        },
+                    )
+                ],
+            )
+        )[0]
+        assert explicit.accepted
+        await gateway.open(
+            attempt_id=explicit.attempt_id,
+            source_index=0,
+            capability=capability(explicit.attempt_id),
+            range_header=None,
+        )
+        _, explicit_headers, _ = fake.calls[-1]
+        assert explicit_headers["authorization"] == "Bearer token"
+
+        username_only = (
+            await app.state.download_commands.create_uris(
+                user_id=view.user.id,
+                items=[
+                    UriDownloadInput("https://example.com/useronly", {"http-user": "bob"})
+                ],
+            )
+        )[0]
+        assert username_only.accepted
+        await gateway.open(
+            attempt_id=username_only.attempt_id,
+            source_index=0,
+            capability=capability(username_only.attempt_id),
+            range_header=None,
+        )
+        _, no_password_headers, _ = fake.calls[-1]
+        assert no_password_headers["Authorization"] == f"Basic {base64.b64encode(b'bob:').decode()}"

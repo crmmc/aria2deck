@@ -64,5 +64,5 @@ EXPOSE 8001
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:${ARIA2DECK_PORT:-8001}/api/health/ready || exit 1
 
-# Run application
-CMD ["sh", "-c", "uv run --no-sync uvicorn aria2deck.main:app --host ${ARIA2DECK_HOST:-0.0.0.0} --port ${ARIA2DECK_PORT:-8001} --no-access-log"]
+# Run application（访问日志交给 uvicorn 默认输出，由 docker json-file 轮转）
+CMD ["sh", "-c", "uv run --no-sync uvicorn aria2deck.main:app --host ${ARIA2DECK_HOST:-0.0.0.0} --port ${ARIA2DECK_PORT:-8001}"]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.engine import Row, RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -748,6 +748,30 @@ class DownloadRepository:
             raise DomainError(ErrorCode.INVALID_STATE, "历史任务已变化，请重试")
         await self.detach_unused_sources(now_ms=now_ms)
         return True
+
+    async def clear_history(self, *, user_id: int, now_ms: int) -> int:
+        """一键清空本人全部终态任务（A2，旧版 clear_terminal_user_tasks 语义）。"""
+        terminal_attempts = select(download_attempts.c.id).where(
+            download_attempts.c.status.in_(
+                (
+                    AttemptStatus.COMPLETED,
+                    AttemptStatus.FAILED,
+                    AttemptStatus.CANCELLED,
+                )
+            )
+        )
+        result = await self.connection.execute(
+            delete(task_subscriptions)
+            .where(task_subscriptions.c.user_id == user_id)
+            .where(
+                or_(
+                    task_subscriptions.c.status.in_(TERMINAL_SUBSCRIPTION_STATUSES),
+                    task_subscriptions.c.attempt_id.in_(terminal_attempts),
+                )
+            )
+        )
+        await self.detach_unused_sources(now_ms=now_ms)
+        return int(result.rowcount)
 
     async def detach_unused_sources(self, *, now_ms: int) -> int:
         attempts_for_source = (

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
@@ -10,6 +9,25 @@ from .errors import DomainError, ErrorCode
 
 SECRET_MASK = "********"  # noqa: S105  # 掩码不是密钥
 DEFAULT_SITE_TITLE = "Aria2Deck"
+# 下载并发连接上限的合法键与默认值（旧版 DownloadConfig 默认同源；
+# 匿名池 = 旧版 anonymous_base+borrow 之和 40）。
+# 0 值语义对齐旧版：总量与各分档 0=不限，匿名池 0=全面拒绝匿名下载。
+DOWNLOAD_CONNECTION_LIMIT_KEYS = (
+    "total_connections",
+    "authenticated_per_user_connections",
+    "authenticated_per_file_connections",
+    "anonymous_total_connections",
+    "anonymous_per_ip_connections",
+    "anonymous_per_file_connections",
+)
+DEFAULT_DOWNLOAD_CONNECTION_LIMITS: tuple[tuple[str, int], ...] = (
+    ("total_connections", 100),
+    ("authenticated_per_user_connections", 16),
+    ("authenticated_per_file_connections", 8),
+    ("anonymous_total_connections", 40),
+    ("anonymous_per_ip_connections", 4),
+    ("anonymous_per_file_connections", 2),
+)
 _RATE_LIMIT_FIELDS = (
     "account_security_rate_limit",
     "authenticated_api_rate_limit",
@@ -90,7 +108,7 @@ class SystemSettings:
         for url in self.tracker_remote_urls:
             _validate_http_url(url, "Tracker 远程地址无效")
         for key, value in self.download_connection_limits.items():
-            if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) or not 1 <= value <= 64:
+            if key not in DOWNLOAD_CONNECTION_LIMIT_KEYS or not 0 <= value <= 1000:
                 raise DomainError(ErrorCode.INVALID_INPUT, "下载连接数配置无效")
         for name in _RATE_LIMIT_FIELDS:
             if not 1 <= getattr(self, name) <= 1_000_000:
@@ -194,6 +212,11 @@ def merge_trackers(*groups: tuple[str, ...]) -> tuple[str, ...]:
                 seen.add(tracker)
                 merged.append(tracker)
     return tuple(merged)
+
+
+def effective_download_limits(config: Mapping[str, int]) -> dict[str, int]:
+    """补全下载并发上限：未配置的键回落到默认值。"""
+    return {key: int(config.get(key, default)) for key, default in DEFAULT_DOWNLOAD_CONNECTION_LIMITS}
 
 
 def parse_tracker_text(text: str) -> tuple[str, ...]:

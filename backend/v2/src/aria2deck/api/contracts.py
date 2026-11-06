@@ -199,6 +199,14 @@ class Aria2TestResponse(BaseModel):
     features: list[str] = Field(default_factory=list, description="连接成功时启用的特性列表")
 
 
+class Aria2TestRequest(BaseModel):
+    """可选表单值：提供时优先用请求值测试，不落库；掩码密钥复用已存值。"""
+
+    model_config = ConfigDict(extra="forbid")
+    aria2_rpc_url: str | None = Field(default=None, max_length=2048)
+    aria2_rpc_secret: str | None = Field(default=None, max_length=4096)
+
+
 class BackendStatusResponse(BaseModel):
     status: Literal["ok", "degraded"]
     message: str
@@ -268,12 +276,31 @@ class TaskStatsResponse(BaseModel):
     download_speed: int
     upload_speed: int
     quota: TaskQuotaResponse
+    disk: DiskSpaceResponse
+
+
+class DiskSpaceResponse(BaseModel):
+    """用户可见磁盘口径（旧版 STAT-01）：机器余量不足时收紧总量并置 limited。"""
+
+    total_bytes: int
+    used_bytes: int
+    reserved_bytes: int
+    available_bytes: int
+    limited: bool
 
 
 class DownloadOptionsRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """任务创建选项白名单（键名沿用 aria2 形式，RPC 与 REST 一致）。"""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
     headers: dict[str, str] = Field(default_factory=dict)
     mirrors: list[str] = Field(default_factory=list, max_length=10)
+    out: str | None = Field(default=None, min_length=1, max_length=200)
+    http_user: str | None = Field(default=None, alias="http-user", max_length=4096)
+    http_passwd: str | None = Field(default=None, alias="http-passwd", max_length=4096)
+    max_connection_per_server: int | None = Field(
+        default=None, alias="max-connection-per-server", ge=1, le=16
+    )
 
 
 class TaskCreateRequest(BaseModel):
@@ -339,6 +366,35 @@ class HistoryPurgeRequest(BaseModel):
 class HistoryPurgeResponse(BaseModel):
     expired_tasks: int
     detached_sources: int
+
+
+class HistoryClearAllResponse(BaseModel):
+    """一键清空本人全部终态任务（A2）。"""
+
+    cleared_count: int
+
+
+class FileBatchDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    file_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+class FileBatchDeleteResultResponse(BaseModel):
+    file_id: int
+    accepted: bool
+    error: ErrorBody | None = None
+
+
+class FileBatchDeleteResponse(BaseModel):
+    accepted_count: int
+    rejected_count: int
+    results: list[FileBatchDeleteResultResponse]
+
+
+class PackClearRecordsResponse(BaseModel):
+    """清空全部终态打包记录（保留输出文件）（A3）。"""
+
+    cleared_count: int
 
 
 class TrackerStatusResponse(BaseModel):

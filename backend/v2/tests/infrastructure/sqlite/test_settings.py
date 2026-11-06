@@ -31,7 +31,7 @@ async def test_settings_repository_encrypts_and_restores_all_values(
         aria2_rpc_secret=RPC_VALUE,
         hidden_file_extensions=(".tmp",),
         tracker_fixed_list=("udp://tracker.example",),
-        download_connection_limits={"http": 4},
+        download_connection_limits={"total_connections": 4},
         updated_at_ms=123,
     )
     async with SQLiteUnitOfWork(database) as uow:

@@ -567,3 +567,40 @@ def test_storage_listing_exposes_created_at_and_file_names(client: TestClient, s
     assert by_id[shared_content]["file_names"] == ["shared.bin"]
     assert by_id[own_content]["file_names"] == ["admin.bin"]
     assert by_id[shared_content]["created_at_ms"] > 0
+
+
+def test_batch_delete_files_accepts_per_item_results(
+    client: TestClient, settings: Settings
+) -> None:
+    """A1：批量删除与单条删除同一引用语义，逐项受理，失败不阻断其余。"""
+    _, user_id = setup_users(client)
+    _, first = seed_file(settings, user_id=user_id, index=21, payload=b"a")
+    _, second = seed_file(settings, user_id=user_id, index=22, payload=b"b")
+
+    response = client.request(
+        "DELETE", "/api/v2/files", json={"file_ids": [first, 999999, second, first]}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted_count"] == 2
+    assert body["rejected_count"] == 1
+    by_id = {item["file_id"]: item for item in body["results"]}
+    assert by_id[first]["accepted"] is True
+    assert by_id[second]["accepted"] is True
+    assert by_id[999999]["accepted"] is False
+    assert by_id[999999]["error"]["code"] == "not_found"
+    # 删除后列表不再包含已删条目。
+    listing = client.get("/api/v2/files")
+    remaining = {item["id"] for item in listing.json()["items"]}
+    assert first not in remaining and second not in remaining
+
+
+def test_batch_delete_files_validates_size_boundaries(client: TestClient) -> None:
+    setup_users(client)
+
+    def _delete(payload: dict) -> object:
+        return client.request("DELETE", "/api/v2/files", json=payload)
+
+    assert _delete({"file_ids": []}).status_code == 422
+    assert _delete({"file_ids": list(range(1, 1002))}).status_code == 422

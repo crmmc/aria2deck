@@ -4,6 +4,7 @@ import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace as dataclasses_replace
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -130,6 +131,13 @@ class Aria2SubmissionClient:
             uri = source.payload.get("uri")
             if not isinstance(uri, str):
                 raise DomainError(ErrorCode.INVALID_STATE, "Magnet 下载来源数据无效")
+            # 用户级 out / max-connection-per-server 透传给 aria2（A9，旧版 magnet 路径同位）。
+            if isinstance(source.options.get("out"), str):
+                options["out"] = source.options["out"]
+            if isinstance(source.options.get("max-connection-per-server"), int):
+                options["max-connection-per-server"] = str(
+                    source.options["max-connection-per-server"]
+                )
             params = [[uri], options]
             method = "aria2.addUri"
         elif source.kind == "torrent":
@@ -189,10 +197,22 @@ class Aria2SubmissionClient:
             return False
         return isinstance(result, dict) and result.get("gid") == gid
 
-    async def version(self) -> tuple[str, list[str]]:
-        """aria2.getVersion：连接测试用，失败统一抛 DomainError（不可达/认证失败/超时）。"""
+    async def version(
+        self, *, url: str | None = None, secret: str | None = None
+    ) -> tuple[str, list[str]]:
+        """aria2.getVersion：连接测试用，失败统一抛 DomainError（不可达/认证失败/超时）。
+
+        传入表单值时用请求值探测（不落库）；None 表示沿用当前配置。
+        """
+        settings = self.settings()
+        if url is not None or secret is not None:
+            settings = dataclasses_replace(
+                settings,
+                aria2_rpc_url=url if url is not None else settings.aria2_rpc_url,
+                aria2_rpc_secret=secret if secret is not None else settings.aria2_rpc_secret,
+            )
         try:
-            result = await self._call(self.settings(), "aria2.getVersion", [])
+            result = await self._call(settings, "aria2.getVersion", [])
         except _RpcRejected:
             raise _uncertain("aria2 连接测试请求被拒绝") from None
         if not isinstance(result, dict):

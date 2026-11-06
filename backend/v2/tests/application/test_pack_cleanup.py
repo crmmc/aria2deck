@@ -301,3 +301,56 @@ async def test_control_delete_and_clear_record_semantics(tmp_path: Path) -> None
         await control.delete_pack(user_id, pack_three)
     assert caught.value.code is ErrorCode.INVALID_STATE
     assert ShareStatus.ACTIVE.value == "active"
+
+
+async def test_clear_records_removes_only_terminal_with_finished_cleanup(
+    tmp_path: Path,
+) -> None:
+    """A3：清空全部终态打包记录（保留输出）；清理未完成/进行中的记录保留。"""
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    other = await create_pack_user(database, "other")
+    _, first = await seed_pack_file(database, root, user_id, 1, payload=b"a" * 10)
+    _, second = await seed_pack_file(database, root, user_id, 2, payload=b"b" * 6)
+    _, third = await seed_pack_file(database, root, user_id, 3, payload=b"c" * 7)
+    _, other_source = await seed_pack_file(database, root, other, 4, payload=b"d" * 5)
+    store = DownloadContentStore(root)
+
+    # 1) done + delete_source=True：清理未完成 → 记录保留。
+    pending_cleanup = await create_pack(
+        database, clock, store, user_id, [first], output_name="wait.zip", delete_source=True
+    )
+    await _run_to_done(database, clock, store, pending_cleanup)
+    # 2) done + delete_source=False：来源标记保留 → 立即可清。
+    done = await create_pack(
+        database, clock, store, user_id, [second], output_name="done.zip", delete_source=False
+    )
+    await _run_to_done(database, clock, store, done)
+    # 3) 他人终态记录：不受本人清理影响。
+    other_done = await create_pack(
+        database, clock, store, other, [other_source], output_name="other.zip", delete_source=False
+    )
+    await _run_to_done(database, clock, store, other_done)
+    # 4) 进行中（pending）记录：保留。
+    pending = await create_pack(
+        database, clock, store, user_id, [third], output_name="live.zip", delete_source=False
+    )
+
+    control = make_control(database, clock, store)
+    cleared = await control.clear_records(user_id)
+
+    assert cleared == 1
+    with pytest.raises(DomainError):
+        await get_job(database, done)
+    for kept in (pending_cleanup, pending, other_done):
+        assert (await get_job(database, kept)).status in {PackStatus.DONE, PackStatus.PENDING}
+    # 输出引用保留：done.zip 归档仍在本人文件里（记录删除但输出未动）。
+    async with SQLiteUnitOfWork(database) as uow:
+        rows = (
+            await uow.connection.execute(
+                text("SELECT display_name FROM user_files WHERE user_id = :u"),
+                {"u": user_id},
+            )
+        ).fetchall()
+    names = {row[0] for row in rows}
+    assert "done.zip" in names

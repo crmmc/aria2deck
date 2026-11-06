@@ -370,3 +370,56 @@ def test_write_openapi_includes_partial_and_whole_failure_contracts(app: FastAPI
     assert paths["/api/v2/tasks/torrent/preview"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith("TorrentPreviewResponse")
     assert paths["/api/v2/tasks/cancel"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith("TaskBatchResponse")
     assert "/api/v2/internal/fetch/{attempt_id}/{source_index}" not in paths
+
+
+def test_create_task_accepts_new_option_whitelist_without_echoing_credentials(
+    client: TestClient, settings: Settings
+) -> None:
+    """A9：REST 侧接受 aria2 键名选项；凭据不回显到任何响应。"""
+    create_admin(client)
+    login(client)
+    backend = install_backend(client)
+
+    response = client.post(
+        "/api/v2/tasks",
+        json={
+            "tasks": [
+                {
+                    "uri": "https://example.com/authed.iso",
+                    "options": {
+                        "out": "renamed.iso",
+                        "http-user": "alice",
+                        "http-passwd": "s3cret-passwd",
+                        "max-connection-per-server": 4,
+                    },
+                },
+                # 路径形 out 拒绝（防逃逸），逐项失败不阻断其余。
+                {
+                    "uri": "https://example.com/escape.iso",
+                    "options": {"out": "../escape.iso"},
+                },
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["accepted_count"], body["rejected_count"]) == (1, 1)
+    rejected = body["items"][1]
+    assert rejected["accepted"] is False
+    assert rejected["error"]["code"] == "invalid_input"
+    assert "out" in rejected["error"]["message"]
+    accepted_task = body["items"][0]["task"]
+    assert accepted_task["name"] == "renamed.iso"
+    # 凭据零回显：全文不得出现用户名/密码字面量。
+    assert "alice" not in response.text
+    assert "s3cret-passwd" not in response.text
+
+    detail = client.get(f"/api/v2/tasks/{accepted_task['id']}")
+    assert "alice" not in detail.text and "s3cret-passwd" not in detail.text
+
+    # aria2 提交载荷不含凭据（HTTP 走内部网关，凭据只留在来源数据里）。
+    assert backend.submit_calls
+    submission = backend.submit_calls[-1][-1]
+    call = submission  # Submission 数据类
+    assert call.source.options["http-user"] == "alice"  # 来源侧保留用于网关

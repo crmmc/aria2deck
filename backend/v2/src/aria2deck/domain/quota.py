@@ -31,6 +31,38 @@ def visible_available_bytes(account: Quota, *, machine_available_bytes: int) -> 
     return min(available_user_bytes(account), machine_available_bytes)
 
 
+@dataclass(frozen=True, slots=True)
+class VisibleSpace:
+    """用户可见磁盘口径（旧版 STAT-01 同口径）：机器余量不足时收紧总量并置 limited。"""
+
+    total_bytes: int
+    used_bytes: int
+    reserved_bytes: int
+    available_bytes: int
+    limited: bool
+
+
+def visible_space(account: Quota, *, machine_available_bytes: int) -> VisibleSpace:
+    if machine_available_bytes < 0:
+        raise DomainError(ErrorCode.INVALID_INPUT, "机器可用空间不能为负数")
+    headroom = machine_available_bytes
+    quota_available = available_user_bytes(account)
+    limited = headroom < quota_available
+    available = min(quota_available, headroom)
+    total = (
+        account.used_bytes + account.reserved_bytes + available
+        if limited
+        else account.quota_bytes
+    )
+    return VisibleSpace(
+        total_bytes=total,
+        used_bytes=account.used_bytes,
+        reserved_bytes=account.reserved_bytes,
+        available_bytes=available,
+        limited=limited,
+    )
+
+
 def reserve(account: Quota, amount: int, *, machine_available_bytes: int) -> Quota:
     if amount < 0 or machine_available_bytes < 0:
         raise DomainError(ErrorCode.INVALID_INPUT, "预留空间和机器余量不能为负数")

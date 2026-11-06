@@ -22,6 +22,7 @@ from .api.files import router as files_router
 from .api.health import router as health_router
 from .api.packs import router as packs_router
 from .api.public_shares import router as public_shares_router
+from .api.request_body_limit import RequestBodyLimitMiddleware
 from .api.settings import router as settings_router
 from .api.shares import router as shares_router
 from .api.static_site import register_static_site
@@ -54,6 +55,7 @@ from .application.packs.dispatcher import PackDispatcher
 from .application.packs.progress import PackProgressService
 from .application.packs.source_cleanup import SourceCleanupWorker
 from .application.ports import UnitOfWork
+from .application.settings.download_limit import DownloadConnectionLimiter
 from .application.settings.rate_limit import RateLimiter
 from .application.settings.service import SettingsService
 from .application.settings.trackers import TrackerService
@@ -139,11 +141,14 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
 
     observations = InMemoryDownloadObservations()
     task_projector = TaskProjector(observations=observations, clock_ms=_clock_ms)
+    content_store = DownloadContentStore(config.download_directory)
     download_queries = DownloadQueryService(
         uow_factory=uow_factory,
         repository_factory=download_repository,
         account_repository_factory=account_repository,
         projector=task_projector,
+        machine_space=content_store,
+        settings=lambda: settings_service.current(),
     )
     submission_backend = Aria2SubmissionClient(
         settings=lambda: settings_service.current(),
@@ -184,6 +189,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         revocation_bus=session_revocations,
     )
     rate_limiter = RateLimiter(settings=settings_service.current, clock_ms=_clock_ms)
+    download_connections = DownloadConnectionLimiter(settings=settings_service.current)
     safe_http = SafeHttpClient()
     tracker_service = TrackerService(
         uow_factory=uow_factory,
@@ -211,7 +217,6 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         retention_days=lambda: settings_service.current().history_retention_days,
     )
     connectivity = BackendConnectivity()
-    content_store = DownloadContentStore(config.download_directory)
     machine_stats = MachineStatsService(content_store)
     task_broadcast = TaskBroadcast()
     download_lifecycle = DownloadLifecycleService(
@@ -397,6 +402,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         allowed_origins: frozenset[str]
 
     app = FastAPI(title="Aria2Deck V2", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(RequestBodyLimitMiddleware)
     app.state.account_service = account_service
     app.state.download_queries = download_queries
     app.state.download_commands = download_commands
@@ -419,6 +425,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     app.state.download_observations = observations
     app.state.settings_service = settings_service
     app.state.rate_limiter = rate_limiter
+    app.state.download_connections = download_connections
     app.state.supervisor = supervisor
     app.state.connectivity = connectivity
     app.state.machine_stats = machine_stats

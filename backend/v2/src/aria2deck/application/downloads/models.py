@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from ...domain.content import ContentEntryIdentity, ContentIdentity
 from ...domain.downloads import AttemptStatus, RegistrationOutcome, SubscriptionStatus
-from ...domain.quota import Quota
+from ...domain.quota import Quota, VisibleSpace
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +89,7 @@ class TaskStats:
     download_speed: int
     upload_speed: int
     quota: Quota
+    disk: VisibleSpace
 
 
 @dataclass(frozen=True, slots=True)

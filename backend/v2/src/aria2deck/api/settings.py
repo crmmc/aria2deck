@@ -10,6 +10,7 @@ from ..application.settings.service import SettingsService
 from ..application.settings.trackers import TrackerCache, TrackerService
 from ..domain.settings import SECRET_MASK, SystemSettings
 from .contracts import (
+    Aria2TestRequest,
     Aria2TestResponse,
     PublicSiteInfoResponse,
     SettingsResponse,
@@ -64,13 +65,38 @@ async def update_settings(
 @router.post(
     "/settings/aria2/test",
     response_model=Aria2TestResponse,
-    responses=error_responses(401, 403, 429, 500),
+    responses=error_responses(401, 403, 422, 429, 500),
 )
 async def test_aria2_connection(
+    payload: Aria2TestRequest | None = None,
     principal: Principal = Depends(required_session_principal),
     service: SettingsService = Depends(settings_service),
     limiter: RateLimiter = Depends(rate_limiter),
 ) -> Aria2TestResponse:
+    limiter.check_aria2_test(user_id=principal.user.id)
+    result = await service.test_aria2(
+        principal,
+        url=None if payload is None else payload.aria2_rpc_url,
+        secret=None if payload is None else payload.aria2_rpc_secret,
+    )
+    return Aria2TestResponse(
+        connected=result.connected,
+        version=result.version,
+        features=list(result.features),
+    )
+
+
+@router.get(
+    "/settings/aria2/version",
+    response_model=Aria2TestResponse,
+    responses=error_responses(401, 403, 429, 500),
+)
+async def aria2_version(
+    principal: Principal = Depends(required_session_principal),
+    service: SettingsService = Depends(settings_service),
+    limiter: RateLimiter = Depends(rate_limiter),
+) -> Aria2TestResponse:
+    """查询当前配置连接的 aria2 版本（A4，只读探测）。"""
     limiter.check_aria2_test(user_id=principal.user.id)
     result = await service.test_aria2(principal)
     return Aria2TestResponse(

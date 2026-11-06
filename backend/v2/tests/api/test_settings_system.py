@@ -148,7 +148,7 @@ def test_full_settings_round_trip_survives_restart(settings: Settings) -> None:
         "tracker_fixed_list": ["udp://tracker.example:80", "", "udp://tracker.example:80"],
         "tracker_remote_urls": ["https://example.com/trackers.txt"],
         "tracker_refresh_interval_minutes": 5,
-        "download_connection_limits": {"http": 16, "bt": 8},
+        "download_connection_limits": {"authenticated_per_user_connections": 16, "anonymous_per_ip_connections": 8},
         "account_security_rate_limit": 11,
         "authenticated_api_rate_limit": 601,
         "public_api_rate_limit": 301,
@@ -361,3 +361,110 @@ def test_machine_stats_admin_only_and_fields(client: TestClient, settings) -> No
     assert body["download_used_bytes"] >= 0
     assert body["system_used_bytes"] >= 0
     assert body["used_bytes"] == body["download_used_bytes"] + body["system_used_bytes"]
+
+
+class _RecordingVersionPort:
+    """记录探测参数的连接测试替身（A4/A8）。"""
+
+    def __init__(self, outcome: tuple[str, list[str]] | Exception) -> None:
+        self.outcome = outcome
+        self.calls: list[dict[str, str | None]] = []
+
+    async def version(
+        self, *, url: str | None = None, secret: str | None = None
+    ) -> tuple[str, list[str]]:
+        self.calls.append({"url": url, "secret": secret})
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+def test_aria2_version_endpoint_is_read_only_probe(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A4：GET /settings/aria2/version 只读探测当前配置，管理员会话专用。"""
+    port = _RecordingVersionPort(("1.37.0", ["HTTPS"]))
+    monkeypatch.setattr(app.state.settings_service, "aria2_version", port)
+
+    assert client.get("/api/v2/settings/aria2/version").status_code == 401
+    create_admin(client)
+    login(client)
+    create_user(client)
+    login(client, "user", OTHER_PASSWORD)
+    assert client.get("/api/v2/settings/aria2/version").status_code == 403
+
+    login(client)
+    response = client.get("/api/v2/settings/aria2/version")
+    assert response.status_code == 200
+    assert response.json() == {"connected": True, "version": "1.37.0", "features": ["HTTPS"]}
+    assert port.calls == [{"url": None, "secret": None}]
+
+    failure = client.get("/api/v2/settings/aria2/version")  # 限流前的成功探测已消耗 1 次
+    assert failure.status_code in {200, 429}
+
+
+def test_aria2_test_with_form_values_probes_without_saving(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A8：表单值优先测试且不落库；掩码密钥复用已存密钥。"""
+    create_admin(client)
+    login(client)
+    saved_secret = "saved-rpc-secret-for-mask-reuse"  # noqa: S105  # 测试夹具密钥
+    assert client.patch("/api/v2/settings", json={"aria2_rpc_secret": saved_secret}).status_code == 200
+    port = _RecordingVersionPort(("1.37.0", []))
+    monkeypatch.setattr(app.state.settings_service, "aria2_version", port)
+    before = client.get("/api/v2/settings").json()
+    assert before["aria2_rpc_secret"] == SECRET_MASK  # 读取面只回掩码，不回原文
+
+    probed = client.post(
+        "/api/v2/settings/aria2/test",
+        json={"aria2_rpc_url": "http://candidate:6800/jsonrpc", "aria2_rpc_secret": "form-secret"},
+    )
+    assert probed.status_code == 200
+    assert probed.json()["connected"] is True
+    assert port.calls == [
+        {"url": "http://candidate:6800/jsonrpc", "secret": "form-secret"}
+    ]
+
+    masked = client.post(
+        "/api/v2/settings/aria2/test",
+        json={"aria2_rpc_url": "http://masked:6800/jsonrpc", "aria2_rpc_secret": SECRET_MASK},
+    )
+    assert masked.status_code == 200
+    assert port.calls[-1]["url"] == "http://masked:6800/jsonrpc"
+    assert port.calls[-1]["secret"] == saved_secret  # 掩码 = 复用已存密钥探测
+
+    # 未保存：设置读取仍是旧值，密钥仍只以掩码出现。
+    after = client.get("/api/v2/settings").json()
+    assert after["aria2_rpc_url"] == before["aria2_rpc_url"]
+    assert after["aria2_rpc_secret"] == SECRET_MASK
+
+
+def test_aria2_test_rejects_invalid_form_url_with_422(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_admin(client)
+    login(client)
+    monkeypatch.setattr(
+        client.app.state.settings_service,
+        "aria2_version",
+        _RecordingVersionPort(("1.37.0", [])),
+    )
+    response = client.post(
+        "/api/v2/settings/aria2/test",
+        json={"aria2_rpc_url": "ftp://bad-scheme/jsonrpc"},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_input"
+
+
+def test_aria2_test_without_body_still_probes_saved_config(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_admin(client)
+    login(client)
+    port = _RecordingVersionPort(("1.37.0", []))
+    monkeypatch.setattr(app.state.settings_service, "aria2_version", port)
+    response = client.post("/api/v2/settings/aria2/test")
+    assert response.status_code == 200
+    assert port.calls == [{"url": None, "secret": None}]

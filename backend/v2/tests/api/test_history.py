@@ -171,3 +171,45 @@ def test_recreating_empty_source_rebuilds_payload_and_supports_new_retry(
             await database.close()
 
     asyncio.run(check())
+
+
+def test_clear_all_history_removes_only_terminal_tasks(
+    client: TestClient, settings: Settings
+) -> None:
+    """A2：一键清空本人全部终态任务（含有效终态），进行中任务保留。"""
+    admin = create_admin(client)
+    login(client)
+    install_backend(client)
+    user_id = int(admin["id"])
+    base = _now_ms()
+    _, completed = seed_task(settings, user_id=user_id, name="Alpha complete", subscription_status=SubscriptionStatus.COMPLETED, attempt_status=AttemptStatus.COMPLETED, created_at_ms=base)
+    _, failed = seed_task(settings, user_id=user_id, name="Beta failed", subscription_status=SubscriptionStatus.FAILED, attempt_status=AttemptStatus.FAILED, created_at_ms=base + 1)
+    _, live = seed_task(settings, user_id=user_id, name="Live", created_at_ms=base + 2)
+    # 订阅仍 live、尝试已终态：有效状态同样属于终态，应被清空。
+    _, lagging = seed_task(settings, user_id=user_id, name="Lagging", subscription_status=SubscriptionStatus.ACTIVE, attempt_status=AttemptStatus.COMPLETED, created_at_ms=base + 3)
+    # 他人任务不受影响。
+    other_row = create_user(client, "other", password=OTHER_PASSWORD)
+    other_id = int(other_row["id"])
+    login(client, "other", OTHER_PASSWORD)
+    _, other_terminal = seed_task(settings, user_id=other_id, name="Other done", subscription_status=SubscriptionStatus.COMPLETED, attempt_status=AttemptStatus.COMPLETED, created_at_ms=base)
+    login(client)
+
+    response = client.delete("/api/v2/history/all")
+
+    assert response.status_code == 200
+    assert response.json() == {"cleared_count": 3}
+    # 进行中任务保留，历史清空。
+    tasks = client.get("/api/v2/tasks").json()
+    remaining_ids = {item["id"] for item in tasks["items"]}
+    assert live in remaining_ids
+    assert completed not in remaining_ids and failed not in remaining_ids
+    assert lagging not in remaining_ids
+    assert client.get("/api/v2/history").json()["total"] == 0
+    # 重复清空返回 0。
+    assert client.delete("/api/v2/history/all").json() == {"cleared_count": 0}
+
+    # 他人历史仍在。
+    login(client, "other", OTHER_PASSWORD)
+    other_history = client.get("/api/v2/history").json()
+    assert other_history["total"] == 1
+    assert other_history["items"][0]["id"] == other_terminal

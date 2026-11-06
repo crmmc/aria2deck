@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Protocol
@@ -102,9 +103,20 @@ class DownloadGatewayService:
             for name, value in raw_headers.items()
         ):
             raise DomainError(ErrorCode.INVALID_STATE, "HTTP 请求头数据无效")
+        upstream_headers = dict(raw_headers)
+        # http-user/http-passwd → Basic 认证；用户已给 Authorization 头时不覆盖（与旧版同口径）。
+        username = source.options.get("http-user")
+        password = source.options.get("http-passwd")
+        if isinstance(username, str) and not any(
+            name.lower() == "authorization" for name in upstream_headers
+        ):
+            raw_credentials = f"{username}:{password if isinstance(password, str) else ''}".encode()
+            upstream_headers["Authorization"] = (
+                f"Basic {base64.b64encode(raw_credentials).decode()}"
+            )
         upstream = await self.upstream.open(
             url=raw_uris[source_index],
-            headers=raw_headers,
+            headers=upstream_headers,
             range_header=range_header,
         )
         maximum = self.settings().max_task_size

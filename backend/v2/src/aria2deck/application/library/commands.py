@@ -99,6 +99,21 @@ class LibraryCommandService:
                         "最后引用删除后未认领物理删除 content_id=%s", record.content_id
                     )
 
+    async def delete_user_files(
+        self, *, user_id: int, file_ids: list[int]
+    ) -> list[StorageDeleteOutcome]:
+        """批量删除本人文件引用（A1）：逐项受理，单项失败不阻断其余。"""
+        outcomes: list[StorageDeleteOutcome] = []
+        for file_id in dict.fromkeys(file_ids):
+            try:
+                await self.delete_user_file(user_id=user_id, file_id=file_id)
+                outcomes.append(StorageDeleteOutcome(file_id, True))
+            except DomainError as error:
+                outcomes.append(
+                    StorageDeleteOutcome(file_id, False, error.code.value, str(error))
+                )
+        return outcomes
+
     async def storage_delete_orphans(self, content_ids: list[int]) -> list[StorageDeleteOutcome]:
         outcomes: list[StorageDeleteOutcome] = []
         for content_id in content_ids:

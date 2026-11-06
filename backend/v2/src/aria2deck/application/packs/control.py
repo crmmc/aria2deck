@@ -22,6 +22,8 @@ class PackRepositoryPort(Protocol):
 
     async def delete_job(self, pack_id: int) -> bool: ...
 
+    async def clear_terminal_records(self, *, user_id: int) -> int: ...
+
 
 class ContentRepositoryPort(Protocol):
     async def get_user_file(self, *, user_id: int, file_id: int) -> UserFileRecord: ...
@@ -117,6 +119,11 @@ class PackControlService:
         await self._ensure_deletable(job)
         async with self.uow_factory() as uow:
             await self.repository_factory(uow).delete_job(pack_id)
+
+    async def clear_records(self, user_id: int) -> int:
+        """清空本人全部终态打包记录，保留输出文件引用（A3，旧版 DELETE /api/files/pack 语义）。"""
+        async with self.uow_factory() as uow:
+            return await self.repository_factory(uow).clear_terminal_records(user_id=user_id)
 
     async def _owned_job(self, user_id: int, pack_id: int) -> PackJobRecord:
         async with self.uow_factory() as uow:

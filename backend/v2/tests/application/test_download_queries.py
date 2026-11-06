@@ -5,6 +5,7 @@ from types import TracebackType
 import pytest
 
 from aria2deck.application.downloads.models import (
+    AttemptRecord,
     DownloadObservation,
     DownloadRecord,
     TaskPage,
@@ -15,6 +16,7 @@ from aria2deck.application.downloads.queries import DownloadQueryService
 from aria2deck.domain.downloads import AttemptStatus, SubscriptionStatus
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.quota import Quota, available_user_bytes
+from aria2deck.domain.settings import SystemSettings
 from aria2deck.infrastructure.observations import InMemoryDownloadObservations
 
 
@@ -53,6 +55,14 @@ class ReadRepository:
             if record.id == task_id:
                 return record
         raise DomainError(ErrorCode.NOT_FOUND, "任务不存在")
+
+    async def list_live_attempts(self, *, submitted_only: bool = False) -> list[AttemptRecord]:
+        return []
+
+
+class MachineSpace:
+    def machine_free_bytes(self) -> int:
+        return 500
 
 
 class QuotaRepository:
@@ -104,6 +114,8 @@ def service(records: list[DownloadRecord]) -> DownloadQueryService:
         repository_factory=lambda _uow: ReadRepository(records),
         account_repository_factory=lambda _uow: QuotaRepository(),
         projector=TaskProjector(observations=observations, clock_ms=lambda: 100_000),
+        machine_space=MachineSpace(),
+        settings=lambda: SystemSettings(min_free_disk=0),
     )
 
 
@@ -158,6 +170,8 @@ async def test_query_service_passes_sort_order_and_defaults_to_repository() -> N
         projector=TaskProjector(
             observations=InMemoryDownloadObservations(), clock_ms=lambda: 100_000
         ),
+        machine_space=MachineSpace(),
+        settings=lambda: SystemSettings(min_free_disk=0),
     )
 
     await queries.list_tasks(
