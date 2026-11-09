@@ -10,6 +10,7 @@ from aria2deck.application.library.download import LibraryDownloadService
 from aria2deck.application.library.leases import ReadLeaseManager
 from aria2deck.application.shares.access import PublicShareService
 from aria2deck.application.shares.manage import ShareManageService
+from aria2deck.application.shares.models import ShareRecord
 from aria2deck.application.shares.tokens import ShareAccessTokenStore
 from aria2deck.domain.content import ContentKind
 from aria2deck.domain.errors import DomainError, ErrorCode
@@ -433,6 +434,162 @@ async def test_download_decision_matrix_and_lease(tmp_path: Path) -> None:
     assert world.leases.in_flight(content_id) == 0, "计数失败不得泄漏读租约"
 
 
+@pytest.mark.parametrize("range_header", [None, "bytes=0-0"])
+@pytest.mark.parametrize(
+    "state,expected_code",
+    [
+        ("revoked", ErrorCode.SHARE_REVOKED),
+        ("expired", ErrorCode.SHARE_EXPIRED),
+        ("exhausted", ErrorCode.SHARE_EXHAUSTED),
+        ("file_deleted", ErrorCode.SHARE_UNAVAILABLE),
+    ],
+)
+async def test_download_rechecks_share_after_lease_acquisition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    expected_code: ErrorCode,
+    range_header: str | None,
+) -> None:
+    world, user_id = await _world(tmp_path)
+    content_id, file_id = await _seed_file(world.database, world.root, user_id, 1, b"payload")
+    shared = await world.manage.create(
+        user_id,
+        user_file_id=file_id,
+        expires_in_seconds=1 if state == "expired" else None,
+        max_downloads=1,
+        password=None,
+    )
+    token, _ = world.tokens.issue(shared.code)
+    original_acquire = world.leases.acquire
+
+    async def acquire_then_invalidate(leased_content_id: int) -> None:
+        await original_acquire(leased_content_id)
+        if state == "expired":
+            world.clock.advance(1_000)
+        elif state == "revoked":
+            await world.manage.revoke(user_id, [shared.view.id])
+        else:
+            async with SQLiteUnitOfWork(world.database) as uow:
+                if state == "exhausted":
+                    await uow.connection.execute(
+                        text("UPDATE share_links SET download_count = 1 WHERE id = :id"),
+                        {"id": shared.view.id},
+                    )
+                else:
+                    await uow.connection.execute(
+                        text("DELETE FROM user_files WHERE id = :id"), {"id": file_id}
+                    )
+
+    monkeypatch.setattr(world.leases, "acquire", acquire_then_invalidate)
+    with pytest.raises(DomainError) as caught:
+        await world.public.download(shared.code, token, None, range_header)
+    assert caught.value.code is expected_code
+    assert world.leases.in_flight(content_id) == 0
+    async with SQLiteUnitOfWork(world.database) as uow:
+        current = await ShareRepository(uow.connection).get_share(shared.view.id)
+    assert current.download_count == (1 if state == "exhausted" else 0)
+
+
+async def test_count_retry_rechecks_revoked_share_and_releases_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world, user_id = await _world(tmp_path)
+    content_id, file_id = await _seed_file(world.database, world.root, user_id, 1, b"payload")
+    shared = await world.manage.create(
+        user_id, user_file_id=file_id, expires_in_seconds=None, max_downloads=3, password=None
+    )
+    token, _ = world.tokens.issue(shared.code)
+    original_acquire = world.leases.acquire
+    original_find = world.public._find_share
+
+    async def acquire_then_create_count_conflict(leased_content_id: int) -> None:
+        await original_acquire(leased_content_id)
+        async with SQLiteUnitOfWork(world.database) as uow:
+            await uow.connection.execute(
+                text("UPDATE share_links SET download_count = 1 WHERE id = :id"),
+                {"id": shared.view.id},
+            )
+
+    async def find_after_revoke(code: str) -> ShareRecord:
+        await world.manage.revoke(user_id, [shared.view.id])
+        return await original_find(code)
+
+    monkeypatch.setattr(world.leases, "acquire", acquire_then_create_count_conflict)
+    monkeypatch.setattr(world.public, "_find_share", find_after_revoke)
+    with pytest.raises(DomainError) as caught:
+        await world.public.download(shared.code, token, None, None)
+    assert caught.value.code is ErrorCode.SHARE_REVOKED
+    assert world.leases.in_flight(content_id) == 0
+    async with SQLiteUnitOfWork(world.database) as uow:
+        current = await ShareRepository(uow.connection).get_share(shared.view.id)
+    assert current.download_count == 1
+
+
+async def test_count_retry_uses_fresh_active_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world, user_id = await _world(tmp_path)
+    content_id, file_id = await _seed_file(world.database, world.root, user_id, 1, b"payload")
+    shared = await world.manage.create(
+        user_id, user_file_id=file_id, expires_in_seconds=None, max_downloads=3, password=None
+    )
+    token, _ = world.tokens.issue(shared.code)
+    original_acquire = world.leases.acquire
+
+    async def acquire_then_create_count_conflict(leased_content_id: int) -> None:
+        await original_acquire(leased_content_id)
+        async with SQLiteUnitOfWork(world.database) as uow:
+            await uow.connection.execute(
+                text("UPDATE share_links SET download_count = 1 WHERE id = :id"),
+                {"id": shared.view.id},
+            )
+
+    monkeypatch.setattr(world.leases, "acquire", acquire_then_create_count_conflict)
+    result = await world.public.download(shared.code, token, None, None)
+    await world.public.release(result)
+    assert world.leases.in_flight(content_id) == 0
+    async with SQLiteUnitOfWork(world.database) as uow:
+        current = await ShareRepository(uow.connection).get_share(shared.view.id)
+    assert current.download_count == 2
+
+
+async def test_count_retry_stops_after_five_active_conflicts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world, user_id = await _world(tmp_path)
+    _, file_id = await _seed_file(world.database, world.root, user_id, 1, b"payload")
+    shared = await world.manage.create(
+        user_id, user_file_id=file_id, expires_in_seconds=None, max_downloads=5, password=None
+    )
+    record = await world.public._active_share(shared.code)
+    original_factory = world.public.repository_factory
+    attempts = 0
+
+    class _ConflictingRepository:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+        async def increment_download_count(
+            self, share_id: int, *, expected_count: int, now_ms: int
+        ) -> None:
+            nonlocal attempts
+            attempts += 1
+            raise DomainError(ErrorCode.INVALID_STATE, "分享计数已变化，请重试")
+
+    def conflicting_factory(uow: object) -> object:
+        return _ConflictingRepository(original_factory(uow))
+
+    monkeypatch.setattr(world.public, "repository_factory", conflicting_factory)
+    with pytest.raises(DomainError) as caught:
+        await world.public._count_download(record)
+    assert caught.value.code is ErrorCode.INVALID_STATE
+    assert attempts == 5
+
+
 async def test_concurrent_full_downloads_hit_max_exactly(tmp_path: Path) -> None:
     world, user_id = await _world(tmp_path)
     payload = b"abcdef"
@@ -498,7 +655,9 @@ async def test_count_failure_releases_lease_on_any_exception(tmp_path: Path) -> 
         def __getattr__(self, name: str) -> object:
             return getattr(self._inner, name)
 
-        async def increment_download_count(self, share_id: int, *, expected_count: int) -> None:
+        async def increment_download_count(
+            self, share_id: int, *, expected_count: int, now_ms: int
+        ) -> None:
             raise RuntimeError("计数存储故障")
 
     def exploding_factory(uow: object) -> object:
@@ -511,3 +670,42 @@ async def test_count_failure_releases_lease_on_any_exception(tmp_path: Path) -> 
     finally:
         world.public.repository_factory = original_factory  # type: ignore[assignment]
     assert world.leases.in_flight(1) == 0, "非 DomainError 异常也必须释放读租约"
+
+
+@pytest.mark.parametrize("range_header", [None, "bytes=0-0"])
+async def test_download_cancellation_after_acquire_releases_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, range_header: str | None
+) -> None:
+    world, user_id = await _world(tmp_path)
+    content_id, file_id = await _seed_file(world.database, world.root, user_id, 1, b"payload")
+    shared = await world.manage.create(
+        user_id, user_file_id=file_id, expires_in_seconds=None, max_downloads=5, password=None
+    )
+    token, _ = world.tokens.issue(shared.code)
+    cancelled = asyncio.CancelledError("下载准入取消")
+
+    if range_header is None:
+
+        async def cancel_count(record: ShareRecord) -> None:
+            assert world.leases.in_flight(content_id) == 1
+            raise cancelled
+
+        monkeypatch.setattr(world.public, "_count_download", cancel_count)
+    else:
+        original_active_share = world.public._active_share
+        active_share_calls = 0
+
+        async def cancel_recheck(code: str) -> ShareRecord:
+            nonlocal active_share_calls
+            active_share_calls += 1
+            if active_share_calls == 1:
+                return await original_active_share(code)
+            assert world.leases.in_flight(content_id) == 1
+            raise cancelled
+
+        monkeypatch.setattr(world.public, "_active_share", cancel_recheck)
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await world.public.download(shared.code, token, None, range_header)
+    assert caught.value is cancelled
+    assert world.leases.in_flight(content_id) == 0

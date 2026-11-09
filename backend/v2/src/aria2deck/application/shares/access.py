@@ -25,7 +25,9 @@ from .tokens import ShareAccessTokenStore
 class ShareRepositoryPort(Protocol):
     async def find_share_by_code(self, code: str) -> ShareRecord | None: ...
 
-    async def increment_download_count(self, share_id: int, *, expected_count: int) -> None: ...
+    async def increment_download_count(
+        self, share_id: int, *, expected_count: int, now_ms: int
+    ) -> None: ...
 
 
 class ContentRepositoryPort(Protocol):
@@ -170,8 +172,10 @@ class PublicShareService:
         try:
             if decision.count_download:
                 await self._count_download(record)
-        except Exception:
-            # 计数路径的任何异常（含非 DomainError）都必须释放读租约，不得泄漏。
+            else:
+                await self._active_share(record.code)
+        except BaseException:
+            # 租约后的任何准入异常（含协程取消）都必须释放读租约；原样抛出，不得吞掉取消。
             await self.leases.release(content_id)
             raise
         return PublicShareDownload(
@@ -236,16 +240,14 @@ class PublicShareService:
             try:
                 async with self.uow_factory() as uow:
                     await self.repository_factory(uow).increment_download_count(
-                        record.id, expected_count=record.download_count
+                        record.id,
+                        expected_count=record.download_count,
+                        now_ms=self.clock_ms(),
                     )
                 return
             except DomainError:
                 fresh = await self._find_share(record.code)
-                if (
-                    fresh.max_downloads is not None
-                    and fresh.download_count >= fresh.max_downloads
-                ):
-                    raise DomainError(ErrorCode.SHARE_EXHAUSTED, "分享下载次数已用尽") from None
+                require_share_available(fresh.as_domain(), self.clock_ms())
                 record = fresh
         raise DomainError(ErrorCode.INVALID_STATE, "分享计数冲突，请重试")
 

@@ -13,6 +13,7 @@ from ....domain.shares import (
     Share,
     ShareStatus,
     ensure_share_capacity,
+    require_share_available,
     share_status,
 )
 from ..schema import content_objects, share_links, user_files
@@ -242,7 +243,18 @@ class ShareRepository:
             ).scalar_one()
         )
 
-    async def increment_download_count(self, share_id: int, *, expected_count: int) -> None:
+    async def increment_download_count(
+        self, share_id: int, *, expected_count: int, now_ms: int
+    ) -> None:
+        active_file = (
+            select(user_files.c.id)
+            .select_from(
+                user_files.join(content_objects, content_objects.c.id == user_files.c.content_id)
+            )
+            .where(user_files.c.id == share_links.c.user_file_id)
+            .where(content_objects.c.deletion_state == "active")
+            .exists()
+        )
         result = await self.connection.execute(
             update(share_links)
             .where(share_links.c.id == share_id)
@@ -251,11 +263,16 @@ class ShareRepository:
                 (share_links.c.max_downloads.is_(None))
                 | (share_links.c.download_count < share_links.c.max_downloads)
             )
+            .where(share_links.c.revoked_at_ms.is_(None))
+            .where(
+                (share_links.c.expires_at_ms.is_(None))
+                | (share_links.c.expires_at_ms > now_ms)
+            )
+            .where(active_file)
             .values(download_count=share_links.c.download_count + 1)
         )
         if result.rowcount == 1:
             return
         current = await self.get_share(share_id)
-        if current.max_downloads is not None and current.download_count >= current.max_downloads:
-            raise DomainError(ErrorCode.SHARE_EXHAUSTED, "分享下载次数已用尽")
+        require_share_available(current.as_domain(), now_ms)
         raise DomainError(ErrorCode.INVALID_STATE, "分享计数已变化，请重试")

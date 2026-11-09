@@ -77,14 +77,70 @@ async def test_full_and_partial_downloads_use_atomic_counting(database: SQLiteDa
         assert not partial.count_download
         full = plan_share_download(first.as_domain(), now_ms=1, size=100, range_header="bytes=0-99")
         assert full.count_download
-        await shares.increment_download_count(share_id, expected_count=0)
-        await shares.increment_download_count(share_id, expected_count=1)
+        await shares.increment_download_count(share_id, expected_count=0, now_ms=1)
+        await shares.increment_download_count(share_id, expected_count=1, now_ms=1)
         exhausted = await shares.get_share(share_id)
         with pytest.raises(DomainError) as caught:
             plan_share_download(exhausted.as_domain(), now_ms=1, size=100, range_header=None)
         assert caught.value.code is ErrorCode.SHARE_EXHAUSTED
         with pytest.raises(DomainError):
-            await shares.increment_download_count(share_id, expected_count=1)
+            await shares.increment_download_count(share_id, expected_count=1, now_ms=1)
+
+
+@pytest.mark.parametrize(
+    "state,expected_code",
+    [
+        ("revoked", ErrorCode.SHARE_REVOKED),
+        ("expired", ErrorCode.SHARE_EXPIRED),
+        ("exhausted", ErrorCode.SHARE_EXHAUSTED),
+        ("file_deleted", ErrorCode.SHARE_UNAVAILABLE),
+        ("content_pending_delete", ErrorCode.SHARE_UNAVAILABLE),
+    ],
+)
+async def test_increment_download_count_rejects_invalid_share_atomically(
+    database: SQLiteDatabase, state: str, expected_code: ErrorCode
+) -> None:
+    owner = await create_user(database)
+    owned_file = await file_id(database, owner)
+    async with SQLiteUnitOfWork(database) as uow:
+        shares = ShareRepository(uow.connection)
+        share_id = await shares.create_share(
+            user_id=owner,
+            user_file_id=owned_file,
+            code="code",
+            password_hash=None,
+            expires_at_ms=2 if state == "expired" else None,
+            max_downloads=1,
+            now_ms=1,
+        )
+        if state == "revoked":
+            await uow.connection.execute(
+                text("UPDATE share_links SET revoked_at_ms = 2 WHERE id = :id"),
+                {"id": share_id},
+            )
+        elif state == "exhausted":
+            await uow.connection.execute(
+                text("UPDATE share_links SET download_count = 1 WHERE id = :id"),
+                {"id": share_id},
+            )
+        elif state == "file_deleted":
+            await uow.connection.execute(
+                text("DELETE FROM user_files WHERE id = :id"), {"id": owned_file}
+            )
+        elif state == "content_pending_delete":
+            await uow.connection.execute(
+                text(
+                    "UPDATE content_objects SET deletion_state = 'pending_delete' "
+                    "WHERE id = (SELECT content_id FROM user_files WHERE id = :id)"
+                ),
+                {"id": owned_file},
+            )
+
+        with pytest.raises(DomainError) as caught:
+            await shares.increment_download_count(share_id, expected_count=0, now_ms=2)
+        assert caught.value.code is expected_code
+        current = await shares.get_share(share_id)
+    assert current.download_count == (1 if state == "exhausted" else 0)
 
 
 async def test_concurrent_full_downloads_never_cross_the_limit(database: SQLiteDatabase) -> None:
@@ -100,7 +156,9 @@ async def test_concurrent_full_downloads_never_cross_the_limit(database: SQLiteD
                 share = await shares.get_share(share_id)
                 decision = plan_share_download(share.as_domain(), now_ms=1, size=100, range_header=None)
                 if decision.count_download:
-                    await shares.increment_download_count(share_id, expected_count=share.download_count)
+                    await shares.increment_download_count(
+                        share_id, expected_count=share.download_count, now_ms=1
+                    )
             return True
         except DomainError:
             return False
@@ -138,7 +196,7 @@ async def test_duplicate_share_code_and_stale_count_are_stable(database: SQLiteD
             await shares.create_share(user_id=owner, user_file_id=owned_file, code="code", password_hash=None, expires_at_ms=None, max_downloads=2, now_ms=1)
         assert caught.value.code is ErrorCode.DUPLICATE_RESOURCE
         with pytest.raises(DomainError) as caught:
-            await shares.increment_download_count(share_id, expected_count=1)
+            await shares.increment_download_count(share_id, expected_count=1, now_ms=1)
         assert caught.value.code is ErrorCode.INVALID_STATE
 
 
