@@ -270,6 +270,36 @@ def test_form_channel_content_type_size_and_rate_consumption(
     assert "Retry-After" in throttled.headers
 
 
+def test_public_rate_limit_covers_every_share_route(client: TestClient, settings) -> None:
+    user_id = _setup(client)
+    file_id = seed_file(settings, user_id=user_id, index=1, payload=b"payload")[1]
+    directory_id = _seed_directory(settings, user_id, 20)
+    file_code = _make_share(client, file_id)
+    guarded_code = _make_share(client, file_id, password=PASSWORD)
+    directory_code = _make_share(client, directory_id)
+    login(client)
+    assert (
+        client.patch("/api/v2/settings", json={"public_api_rate_limit": 1}).status_code
+        == 200
+    )
+
+    requests = (
+        lambda anon: anon.get(f"/api/s/{file_code}/info"),
+        lambda anon: anon.post(f"/api/s/{guarded_code}/verify", json={"password": PASSWORD}),
+        lambda anon: anon.get(f"/api/s/{directory_code}/entries"),
+        lambda anon: anon.get(f"/api/s/{file_code}/download"),
+        lambda anon: anon.post(f"/api/s/{file_code}/download", data={"token": ""}),
+    )
+    for index, request in enumerate(requests):
+        anon = TestClient(client.app, client=(f"198.51.100.{30 + index}", 4321))
+        first = request(anon)
+        assert first.status_code == 200, first.text
+        limited = request(anon)
+        assert limited.status_code == 429, limited.text
+        assert limited.json()["error"]["code"] == "rate_limited"
+        assert "Retry-After" in limited.headers
+
+
 def test_info_and_entries_are_rate_limited_by_ip(client: TestClient, settings) -> None:
     user_id = _setup(client)
     dir_file = _seed_directory(settings, user_id, 9)

@@ -176,6 +176,23 @@ async def test_create_reserves_and_snapshots_atomically(tmp_path: Path) -> None:
     assert count == 1, "失败的创建不得留下半任务"
 
 
+async def test_create_snapshots_non_default_pack_format(tmp_path: Path) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, file_id = await seed_pack_file(database, root, user_id, 1)
+    service = make_admission(
+        database, clock, DownloadContentStore(root), pack_format="tar.zst"
+    )
+
+    pack_id = await service.create(
+        user_id, user_file_ids=[file_id], output_name="bundle.tar.zst", delete_source=False
+    )
+
+    async with SQLiteUnitOfWork(database) as uow:
+        job = await PackRepository(uow.connection).get_job(pack_id)
+    assert job.pack_format == "tar.zst"
+
+
 async def test_create_rejects_when_quota_or_disk_insufficient(tmp_path: Path) -> None:
     database, clock, root = await setup_pack_world(tmp_path)
     tight_user = await create_pack_user(database, "tight", quota_bytes=150)

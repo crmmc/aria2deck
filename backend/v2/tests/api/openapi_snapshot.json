@@ -532,6 +532,7 @@
         "parameters": [],
         "responses": {
           "200": "PublicSiteInfoResponse",
+          "429": "ErrorResponse",
           "500": "ErrorResponse"
         }
       }
@@ -1540,7 +1541,6 @@
         "create_torrent_rate_limit",
         "download_connection_limits",
         "file_search_rate_limit",
-        "hidden_file_extensions",
         "history_retention_days",
         "max_task_size",
         "min_free_disk",
@@ -1571,7 +1571,6 @@
         "create_torrent_rate_limit",
         "download_connection_limits",
         "file_search_rate_limit",
-        "hidden_file_extensions",
         "history_retention_days",
         "max_task_size",
         "min_free_disk",
@@ -1604,7 +1603,6 @@
         "create_torrent_rate_limit",
         "download_connection_limits",
         "file_search_rate_limit",
-        "hidden_file_extensions",
         "history_retention_days",
         "max_task_size",
         "min_free_disk",

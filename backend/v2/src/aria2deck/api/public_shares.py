@@ -111,7 +111,9 @@ async def share_info(
     limiter: RateLimiter = Depends(rate_limiter),
     service: PublicShareService = Depends(public_shares),
 ) -> PublicShareInfoResponse:
-    limiter.check_share_access(client_ip(request))
+    ip = client_ip(request)
+    limiter.check_public(ip)
+    limiter.check_share_access(ip)
     info = await service.info(code)
     return PublicShareInfoResponse(
         file_name=info.file_name,
@@ -136,7 +138,9 @@ async def verify_share(
     limiter: RateLimiter = Depends(rate_limiter),
     service: PublicShareService = Depends(public_shares),
 ) -> ShareVerifyResponse:
-    limiter.check_share_access(client_ip(request))
+    ip = client_ip(request)
+    limiter.check_public(ip)
+    limiter.check_share_access(ip)
     token, expires_in = await service.verify(code, payload.password)
     return ShareVerifyResponse(access_token=token, expires_in=expires_in)
 
@@ -156,7 +160,9 @@ async def browse_share(
     limiter: RateLimiter = Depends(rate_limiter),
     service: PublicShareService = Depends(public_shares),
 ) -> PublicEntryListResponse:
-    limiter.check_share_access(client_ip(request))
+    ip = client_ip(request)
+    limiter.check_public(ip)
+    limiter.check_share_access(ip)
     entries, breadcrumbs, total = await service.browse(
         code, _bearer_token(authorization), path, page, page_size
     )
@@ -188,7 +194,9 @@ async def download_share(
     service: PublicShareService = Depends(public_shares),
     connections: DownloadConnectionLimiter = Depends(download_connections),
 ) -> LeaseStreamingResponse:
-    limiter.check_share_access(client_ip(request))
+    ip = client_ip(request)
+    limiter.check_public(ip)
+    limiter.check_share_access(ip)
     # 校验先行（与旧版同序）：无效分享码/令牌不消耗匿名连接档；
     # per-file 档按内容身份计（旧版用 content_hash 口径，此处对应 content_key）。
     record = await service.check_access(code, _bearer_token(authorization))
@@ -216,7 +224,9 @@ async def download_share_by_form(
     connections: DownloadConnectionLimiter = Depends(download_connections),
 ) -> LeaseStreamingResponse:
     # 限流先行：无 token 的请求同样消耗额度。
-    limiter.check_share_access(client_ip(request))
+    ip = client_ip(request)
+    limiter.check_public(ip)
+    limiter.check_share_access(ip)
     _require_urlencoded_form(request)
     _require_form_size(request)
     # 表单通道：手工解析 x-www-form-urlencoded（不引 python-multipart），token 只从表单或 Bearer 头进入。

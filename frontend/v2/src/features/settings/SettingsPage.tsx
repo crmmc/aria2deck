@@ -307,22 +307,22 @@ export function SettingsPage() {
         </div>
       </Section>
 
-      <Section title="下载" hint="隐藏后缀与每主机连接数限制。">
+      <Section title="下载" hint="下载连接数限制。">
         <div className="form-grid">
           <label className="form-field form-field-wide">
-            <span>隐藏文件后缀（每行一个，如 .ini）</span>
-            <textarea
-              rows={3}
-              value={form.hiddenExtensionsText}
-              onChange={(event) => setField("hiddenExtensionsText", event.target.value)}
-            />
-          </label>
-          <label className="form-field form-field-wide">
-            <span>下载连接数限制（每行一条：主机=连接数，1-64）</span>
+            <span>下载连接数限制（每行一条：配置键=连接数，0-1000）</span>
             <textarea
               rows={3}
               value={form.downloadConnectionLimitsText}
               onChange={(event) => setField("downloadConnectionLimitsText", event.target.value)}
+              placeholder={[
+                "total_connections=100",
+                "authenticated_per_user_connections=16",
+                "authenticated_per_file_connections=8",
+                "anonymous_total_connections=40",
+                "anonymous_per_ip_connections=4",
+                "anonymous_per_file_connections=2",
+              ].join("\n")}
             />
           </label>
         </div>

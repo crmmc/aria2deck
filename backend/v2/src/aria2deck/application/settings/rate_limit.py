@@ -31,6 +31,13 @@ class RateLimiter:
             _AUTHENTICATED_WINDOW_MS,
         )
 
+    def check_public(self, ip: str) -> None:
+        self._check(
+            ("public-api", ip),
+            self.settings().public_api_rate_limit,
+            _AUTHENTICATED_WINDOW_MS,
+        )
+
     def check_create_task(self, *, user_id: int) -> None:
         self._check(
             ("create-task", str(user_id)),

@@ -113,6 +113,14 @@ async def test_history_purge_conditions_and_worker() -> None:
         await empty_retention.purge(principal(), before_ms=None, older_than_days=None)
 
 
+async def test_history_purge_uses_non_default_retention() -> None:
+    service, repository = make_service([], retention=7)
+
+    await service.purge(principal(), before_ms=None, older_than_days=None)
+
+    assert repository.cutoffs == [10**12 - 7 * 86400 * 1000]
+
+
 async def test_history_worker_expires_before_sleeping(monkeypatch: pytest.MonkeyPatch) -> None:
     service, repository = make_service([])
 

@@ -39,8 +39,10 @@ class FlakyWriter:
     def __init__(self, failures: int, *, chunk_size: int | None = None) -> None:
         self.failures = failures
         self.inner = ArchiveWriter(chunk_size=chunk_size) if chunk_size else ArchiveWriter()
+        self.observed_options: list[tuple[str, int]] = []
 
     async def write_archive(self, destination, *, sources, pack_format, compression_level, on_progress=None):
+        self.observed_options.append((pack_format, compression_level))
         if self.failures > 0:
             self.failures -= 1
             raise OSError("simulated storage hiccup")
@@ -160,6 +162,21 @@ async def test_full_chain_completes_installs_output_and_converts_quota(
     clock.advance(RETRY_DELAYS[0])  # 第二个任务在下一轮被领取。
     await dispatcher.step_once()
     assert (await get_job(database, second_pack)).status is PackStatus.DONE
+
+
+async def test_dispatcher_uses_non_default_compression_level(tmp_path: Path) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, file_id = await seed_pack_file(database, root, user_id, 1)
+    store = DownloadContentStore(root)
+    pack_id = await create_pack(database, clock, store, user_id, [file_id])
+    writer = FlakyWriter(0)
+    dispatcher = make_dispatcher(database, clock, store, writer=writer)
+
+    await dispatcher.step_once()
+
+    assert (await get_job(database, pack_id)).status is PackStatus.DONE
+    assert writer.observed_options == [("zip", 3)]
 
 
 async def test_compression_progress_persists_monotonically(tmp_path: Path) -> None:

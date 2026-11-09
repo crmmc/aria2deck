@@ -107,6 +107,8 @@ class Aria2SubmissionClient:
         options: dict[str, object] = dict(submission_pause_options(source.kind))
         options["gid"] = submission.gid
         options["dir"] = str(self.download_directory / str(submission.attempt_id))
+        if source.kind in {"magnet", "torrent"}:
+            options["bt-stop-timeout"] = str(self.settings().aria2_bt_stop_timeout_seconds)
         if trackers and source.kind in {"magnet", "torrent"}:
             options["bt-tracker"] = ",".join(trackers)
         params: list[object]

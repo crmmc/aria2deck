@@ -30,7 +30,6 @@ function settings(overrides: Partial<SettingsResponse> = {}): SettingsResponse {
     aria2_rpc_url: "http://127.0.0.1:6800/rpc",
     aria2_rpc_secret: "********",
     aria2_bt_stop_timeout_seconds: 60,
-    hidden_file_extensions: [".ini"],
     pack_format: "zip",
     pack_compression_level: 5,
     ws_reconnect_max_delay_seconds: 30,
@@ -114,6 +113,22 @@ describe("SettingsPage load and layout", () => {
     setup(() => null);
     expect(await screen.findByLabelText("网站标题")).toHaveValue("Aria2Deck");
     expect(screen.getByLabelText("RPC 地址")).toHaveValue("http://127.0.0.1:6800/rpc");
+    expect(screen.queryByLabelText(/隐藏文件后缀/)).not.toBeInTheDocument();
+    const connectionLimits = screen.getByLabelText(
+      "下载连接数限制（每行一条：配置键=连接数，0-1000）",
+    );
+    expect(connectionLimits).toBeInTheDocument();
+    expect(connectionLimits).toHaveAttribute(
+      "placeholder",
+      [
+        "total_connections=100",
+        "authenticated_per_user_connections=16",
+        "authenticated_per_file_connections=8",
+        "anonymous_total_connections=40",
+        "anonymous_per_ip_connections=4",
+        "anonymous_per_file_connections=2",
+      ].join("\n"),
+    );
     expect(screen.getByText("RPC 连接参数；Secret 掩码显示，留空保持不变。")).toBeInTheDocument();
     expect(screen.getByLabelText("账户安全限流")).toHaveValue("10");
     expect(screen.getByLabelText("打包格式")).toHaveValue("zip");
@@ -234,6 +249,7 @@ describe("SettingsPage save", () => {
     expect(body.aria2_rpc_secret).toBeUndefined(); // 掩码不覆盖真值。
     expect(body.max_task_size).toBe(10 * GIB);
     expect(body.account_security_rate_limit).toBe(10);
+    expect(body.hidden_file_extensions).toBeUndefined();
     // 保存成功后重读一次。
     await waitFor(() => {
       const reads = mockFetch.mock.calls.filter(

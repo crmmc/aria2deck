@@ -38,6 +38,40 @@ def test_public_site_info_and_settings_roles(client: TestClient) -> None:
     assert client.get("/api/v2/public/site-info").json()["site_title"] == "Aria2Deck"
 
 
+def test_public_site_info_uses_the_non_default_public_ip_limit(
+    client: TestClient,
+) -> None:
+    create_admin(client)
+    login(client)
+    assert (
+        client.patch("/api/v2/settings", json={"public_api_rate_limit": 1}).status_code
+        == 200
+    )
+    public = TestClient(client.app, client=("198.51.100.20", 4321))
+
+    assert public.get("/api/v2/public/site-info").status_code == 200
+    limited = public.get("/api/v2/public/site-info")
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "rate_limited"
+    assert "Retry-After" in limited.headers
+
+
+def test_settings_contract_does_not_expose_hidden_file_extensions(
+    client: TestClient,
+) -> None:
+    create_admin(client)
+    login(client)
+
+    current = client.get("/api/v2/settings")
+    assert current.status_code == 200
+    assert "hidden_file_extensions" not in current.json()
+    rejected = client.patch(
+        "/api/v2/settings", json={"hidden_file_extensions": [".tmp"]}
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["error"]["code"] == "invalid_input"
+
+
 class _FakeVersionPort:
     def __init__(self, outcome: tuple[str, list[str]] | Exception) -> None:
         self.outcome = outcome
@@ -138,7 +172,6 @@ def test_full_settings_round_trip_survives_restart(settings: Settings) -> None:
         "aria2_rpc_url": "https://127.0.0.1:6800/jsonrpc",
         "aria2_rpc_secret": "test-only-rpc-secret",
         "aria2_bt_stop_timeout_seconds": 1,
-        "hidden_file_extensions": [" TMP ", ".part", ".tmp"],
         "pack_format": "tar.zst",
         "pack_compression_level": 22,
         "ws_reconnect_max_delay_seconds": 60,
@@ -169,7 +202,7 @@ def test_full_settings_round_trip_survives_restart(settings: Settings) -> None:
         saved = response.json()
         assert saved["site_title"] == "新站点"
         assert saved["aria2_rpc_secret"] == SECRET_MASK
-        assert saved["hidden_file_extensions"] == [".tmp", ".part"]
+        assert "hidden_file_extensions" not in saved
         assert saved["tracker_fixed_list"] == ["udp://tracker.example:80"]
         assert saved["updated_at_ms"] > 0
         assert first.get("/api/v2/public/site-info").json() == {

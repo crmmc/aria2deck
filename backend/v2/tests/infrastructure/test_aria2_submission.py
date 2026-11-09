@@ -88,6 +88,48 @@ async def test_submission_multicall_uses_internal_uris_pause_and_selection(
     assert nested[2]["methodName"] == "aria2.addTorrent"
 
 
+async def test_bt_stop_timeout_is_a_string_for_bt_submissions_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = Aria2SubmissionClient(
+        settings=lambda: SystemSettings(aria2_bt_stop_timeout_seconds=17),
+        credentials=CredentialManager(pepper=None, debug=True),
+        internal_base_url="http://app:8001",
+        download_directory=tmp_path,
+    )
+    captured: list[object] = []
+    submissions = [
+        submission("http", "0000000000000001"),
+        submission("magnet", "0000000000000002"),
+        submission("torrent", "0000000000000003"),
+    ]
+
+    async def fake_call(
+        settings: object,
+        method: str,
+        params: list[object],
+        *,
+        authenticate: bool = True,
+    ) -> object:
+        captured.extend(params)
+        return [[item.gid] for item in submissions]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    assert all(
+        reply.accepted
+        for reply in await client.submit_many(submissions, trackers=())
+    )
+
+    calls = captured[0]
+    assert isinstance(calls, list)
+    http_options = calls[0]["params"][1]
+    magnet_options = calls[1]["params"][1]
+    torrent_options = calls[2]["params"][2]
+    assert "bt-stop-timeout" not in http_options
+    assert magnet_options["bt-stop-timeout"] == "17"
+    assert torrent_options["bt-stop-timeout"] == "17"
+
+
 async def test_empty_submission_does_not_call_network(tmp_path: Path) -> None:
     assert await make_client(tmp_path).submit_many([], trackers=()) == []
 

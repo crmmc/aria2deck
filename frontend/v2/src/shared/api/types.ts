@@ -350,7 +350,6 @@ export interface SettingsResponse {
   aria2_rpc_url: string;
   aria2_rpc_secret: string | null;
   aria2_bt_stop_timeout_seconds: number;
-  hidden_file_extensions: string[];
   pack_format: PackFormat;
   pack_compression_level: number;
   ws_reconnect_max_delay_seconds: number;

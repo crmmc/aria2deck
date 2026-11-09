@@ -35,6 +35,14 @@ export const RATE_LIMIT_FIELDS: RateLimitField[] = [
 ];
 
 const GIB = 1024 ** 3;
+const DOWNLOAD_CONNECTION_LIMIT_KEYS = new Set([
+  "total_connections",
+  "authenticated_per_user_connections",
+  "authenticated_per_file_connections",
+  "anonymous_total_connections",
+  "anonymous_per_ip_connections",
+  "anonymous_per_file_connections",
+]);
 
 export interface SettingsForm {
   siteTitle: string;
@@ -43,7 +51,6 @@ export interface SettingsForm {
   aria2RpcUrl: string;
   aria2RpcSecret: string; // 留空 = 保持不变（不随保存提交）。
   aria2BtStopTimeoutSeconds: string;
-  hiddenExtensionsText: string;
   packFormat: PackFormat;
   packCompressionLevel: string;
   wsReconnectMaxDelaySeconds: string;
@@ -96,12 +103,19 @@ function parseConnectionLimits(raw: string): {
   for (const line of parseLines(raw)) {
     const separator = line.indexOf("=");
     if (separator <= 0) {
-      return { value: {}, error: `下载连接数格式无效：${line}（应为主机=连接数）` };
+      return { value: {}, error: `下载连接数格式无效：${line}（应为配置键=连接数）` };
     }
     const key = line.slice(0, separator);
-    const value = Number(line.slice(separator + 1));
-    if (!/^[a-z][a-z0-9_]{0,63}$/.test(key) || !Number.isInteger(value) || value < 1 || value > 64) {
-      return { value: {}, error: `下载连接数配置无效：${line}（键为小写标识符，连接数 1-64）` };
+    const rawValue = line.slice(separator + 1);
+    const value = Number(rawValue);
+    if (
+      rawValue.trim() === "" ||
+      !DOWNLOAD_CONNECTION_LIMIT_KEYS.has(key) ||
+      !Number.isInteger(value) ||
+      value < 0 ||
+      value > 1000
+    ) {
+      return { value: {}, error: `下载连接数配置无效：${line}（仅支持六个配置键，连接数 0-1000）` };
     }
     result[key] = value;
   }
@@ -116,7 +130,6 @@ export function formFromSettings(settings: SettingsResponse): SettingsForm {
     aria2RpcUrl: settings.aria2_rpc_url,
     aria2RpcSecret: "",
     aria2BtStopTimeoutSeconds: String(settings.aria2_bt_stop_timeout_seconds),
-    hiddenExtensionsText: settings.hidden_file_extensions.join("\n"),
     packFormat: settings.pack_format,
     packCompressionLevel: String(settings.pack_compression_level),
     wsReconnectMaxDelaySeconds: String(settings.ws_reconnect_max_delay_seconds),
@@ -167,7 +180,6 @@ export function buildUpdatePayload(form: SettingsForm): PayloadResult {
   if (btStop.error !== null) return { ok: false, error: btStop.error };
   payload.aria2_bt_stop_timeout_seconds = btStop.value;
 
-  payload.hidden_file_extensions = parseLines(form.hiddenExtensionsText);
   payload.pack_format = form.packFormat;
 
   const packLevel = parseIntInRange(form.packCompressionLevel, "压缩级别", 0, 22);

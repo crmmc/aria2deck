@@ -61,7 +61,7 @@ def test_openapi_success_and_error_models_match_actual_payloads(app: FastAPI) ->
     assert schema_ref(login, "422") == "#/components/schemas/ErrorResponse"
 
     public = paths["/api/v2/public/site-info"]["get"]
-    assert set(public["responses"]) == {"200", "500"}
+    assert set(public["responses"]) == {"200", "429", "500"}
     assert schema_ref(public, "200") == "#/components/schemas/PublicSiteInfoResponse"
     assert schema_ref(
         paths["/api/v2/users"]["get"], "200"

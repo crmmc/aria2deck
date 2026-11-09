@@ -45,7 +45,6 @@ function settingsBody(): Record<string, unknown> {
     aria2_rpc_url: "http://127.0.0.1:6800/rpc",
     aria2_rpc_secret: null,
     aria2_bt_stop_timeout_seconds: 60,
-    hidden_file_extensions: [],
     pack_format: "zip",
     pack_compression_level: 5,
     ws_reconnect_max_delay_seconds: 30,

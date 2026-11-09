@@ -5,6 +5,7 @@ from pathlib import Path
 from types import TracebackType
 
 import pytest
+from fastapi import Request
 from sqlalchemy import text
 
 from aria2deck.api.contracts import SettingsUpdateRequest
@@ -252,7 +253,11 @@ async def test_settings_service_requires_initialization_then_updates_atomically(
         SettingsUpdateRequest(site_title="Adapter"), principal=admin, service=service
     )
     assert response.site_title == "Adapter"
-    public = await public_site_info(service=service)
+    public = await public_site_info(
+        request=Request({"type": "http", "client": ("192.0.2.1", 1234)}),
+        service=service,
+        limiter=app.state.rate_limiter,
+    )
     assert public.site_title == "Adapter"
 
 

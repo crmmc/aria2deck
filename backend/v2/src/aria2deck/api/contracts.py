@@ -136,7 +136,6 @@ class SettingsResponse(BaseModel):
     aria2_rpc_url: str
     aria2_rpc_secret: str | None = Field(description="仅返回掩码，不返回密钥原文")
     aria2_bt_stop_timeout_seconds: int
-    hidden_file_extensions: list[str]
     pack_format: Literal["zip", "tar.zst"]
     pack_compression_level: int
     ws_reconnect_max_delay_seconds: int
@@ -169,7 +168,6 @@ class SettingsUpdateRequest(BaseModel):
     aria2_rpc_url: str | None = Field(default=None, max_length=2048)
     aria2_rpc_secret: str | None = Field(default=None, max_length=4096)
     aria2_bt_stop_timeout_seconds: int | None = Field(default=None, ge=1, le=86400)
-    hidden_file_extensions: list[str] | None = None
     pack_format: Literal["zip", "tar.zst"] | None = None
     pack_compression_level: int | None = Field(default=None, ge=0, le=22)
     ws_reconnect_max_delay_seconds: int | None = Field(default=None, ge=1, le=300)

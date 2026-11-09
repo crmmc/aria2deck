@@ -17,7 +17,6 @@ function settings(overrides: Partial<SettingsResponse> = {}): SettingsResponse {
     aria2_rpc_url: "http://127.0.0.1:6800/rpc",
     aria2_rpc_secret: "********",
     aria2_bt_stop_timeout_seconds: 60,
-    hidden_file_extensions: [".ini", ".tmp"],
     pack_format: "zip",
     pack_compression_level: 5,
     ws_reconnect_max_delay_seconds: 30,
@@ -27,7 +26,7 @@ function settings(overrides: Partial<SettingsResponse> = {}): SettingsResponse {
     tracker_fixed_list: ["udp://a/announce"],
     tracker_remote_urls: ["https://t.example/list.txt"],
     tracker_refresh_interval_minutes: 60,
-    download_connection_limits: { per_host: 8 },
+    download_connection_limits: { authenticated_per_user_connections: 8 },
     account_security_rate_limit: 10,
     authenticated_api_rate_limit: 600,
     public_api_rate_limit: 300,
@@ -53,9 +52,9 @@ describe("formFromSettings", () => {
     const result = formFromSettings(settings());
     expect(result.maxTaskSizeGib).toBe("10");
     expect(result.minFreeDiskGib).toBe("5");
-    expect(result.hiddenExtensionsText).toBe(".ini\n.tmp");
+    expect(result).not.toHaveProperty("hiddenExtensionsText");
     expect(result.trackerRemoteUrlsText).toBe("https://t.example/list.txt");
-    expect(result.downloadConnectionLimitsText).toBe("per_host=8");
+    expect(result.downloadConnectionLimitsText).toBe("authenticated_per_user_connections=8");
     expect(result.rateLimits.rpc_rate_limit).toBe("600");
     expect(result.aria2RpcSecret).toBe(""); // 掩码不进入可提交字段。
   });
@@ -79,9 +78,9 @@ describe("buildUpdatePayload", () => {
     expect(result.payload.site_title).toBe("Aria2Deck");
     expect(result.payload.max_task_size).toBe(10 * GIB);
     expect(result.payload.min_free_disk).toBe(5 * GIB);
-    expect(result.payload.hidden_file_extensions).toEqual([".ini", ".tmp"]);
+    expect(result.payload).not.toHaveProperty("hidden_file_extensions");
     expect(result.payload.tracker_fixed_list).toEqual(["udp://a/announce"]);
-    expect(result.payload.download_connection_limits).toEqual({ per_host: 8 });
+    expect(result.payload.download_connection_limits).toEqual({ authenticated_per_user_connections: 8 });
     expect(result.payload.account_security_rate_limit).toBe(10);
     expect(result.payload.aria2_rpc_secret).toBeUndefined();
     expect(Object.keys(result.payload)).not.toContain("updated_at_ms");
@@ -125,20 +124,49 @@ describe("buildUpdatePayload", () => {
     if (!result.ok) expect(result.error).toContain("下载连接数格式无效");
   });
 
-  it("rejects connection limit with invalid key or value", () => {
-    const badKey = buildUpdatePayload(form({ downloadConnectionLimitsText: "Bad-Key=8" }));
-    expect(badKey.ok).toBe(false);
-    const badValue = buildUpdatePayload(form({ downloadConnectionLimitsText: "per_host=99" }));
-    expect(badValue.ok).toBe(false);
+  it("rejects a legacy connection limit key", () => {
+    const result = buildUpdatePayload(form({ downloadConnectionLimitsText: "per_host=8" }));
+    expect(result.ok).toBe(false);
   });
 
-  it("accepts multiple valid connection limit lines and strips blanks", () => {
+  it.each(["-1", "1.5", "1001"])("rejects out-of-range connection limit %s", (value) => {
     const result = buildUpdatePayload(
-      form({ downloadConnectionLimitsText: "per_host=8\n\nglobal=64\n " }),
+      form({ downloadConnectionLimitsText: `authenticated_per_user_connections=${value}` }),
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a missing connection limit value instead of treating it as zero", () => {
+    const result = buildUpdatePayload(
+      form({ downloadConnectionLimitsText: "total_connections=" }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("下载连接数配置无效");
+  });
+
+  it("accepts all six real connection limit keys, zero, and the 1000 boundary", () => {
+    const result = buildUpdatePayload(
+      form({
+        downloadConnectionLimitsText: [
+          "total_connections=0",
+          "authenticated_per_user_connections=1000",
+          "authenticated_per_file_connections=7",
+          "anonymous_total_connections=9",
+          "anonymous_per_ip_connections=4",
+          "anonymous_per_file_connections=2",
+        ].join("\n"),
+      }),
     );
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.payload.download_connection_limits).toEqual({ per_host: 8, global: 64 });
+      expect(result.payload.download_connection_limits).toEqual({
+        total_connections: 0,
+        authenticated_per_user_connections: 1000,
+        authenticated_per_file_connections: 7,
+        anonymous_total_connections: 9,
+        anonymous_per_ip_connections: 4,
+        anonymous_per_file_connections: 2,
+      });
     }
   });
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from ..application.accounts.models import Principal
 from ..application.settings.rate_limit import RateLimiter
@@ -18,6 +18,7 @@ from .contracts import (
     TrackerStatusResponse,
 )
 from .dependencies import (
+    client_ip,
     rate_limiter,
     required_session_principal,
     settings_service,
@@ -107,11 +108,14 @@ async def aria2_version(
 
 
 @router.get(
-    "/public/site-info", response_model=PublicSiteInfoResponse, responses=error_responses(500)
+    "/public/site-info", response_model=PublicSiteInfoResponse, responses=error_responses(429, 500)
 )
 async def public_site_info(
+    request: Request,
     service: SettingsService = Depends(settings_service),
+    limiter: RateLimiter = Depends(rate_limiter),
 ) -> PublicSiteInfoResponse:
+    limiter.check_public(client_ip(request))
     settings = service.current()
     return PublicSiteInfoResponse(
         site_title=settings.site_title,

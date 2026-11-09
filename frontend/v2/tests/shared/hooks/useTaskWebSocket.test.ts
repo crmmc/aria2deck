@@ -213,6 +213,13 @@ describe("useTaskWebSocket", () => {
       act(() => jest.advanceTimersByTime(1));
       expect(sockets).toHaveLength(3);
       expect(siteInfoFetch).toHaveBeenCalledTimes(1); // 重连不再请求站点信息。
+
+      // 第三次失败本应退避 50000ms，非默认最大延迟 10 秒将其封顶。
+      act(() => sockets[2].onclose?.({ code: 1006 }));
+      act(() => jest.advanceTimersByTime(9999));
+      expect(sockets).toHaveLength(3);
+      act(() => jest.advanceTimersByTime(1));
+      expect(sockets).toHaveLength(4);
     } finally {
       delete (global as Record<string, unknown>).fetch;
     }
