@@ -177,5 +177,7 @@ class DownloadGatewayService:
                 if upstream.total_bytes is None:
                     await self._admit(attempt_id, absolute, known_total=False)
                 yield chunk
+            if upstream.body_bytes is not None and received < upstream.body_bytes:
+                raise DomainError(ErrorCode.UPSTREAM_FAILURE, "上游响应少于声明大小")
         finally:
             await upstream.close()

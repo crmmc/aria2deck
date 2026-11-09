@@ -14,6 +14,7 @@ from ..application.downloads.models import UpstreamResponse
 from ..domain.errors import DomainError, ErrorCode
 
 _REDIRECTS = {301, 302, 303, 307, 308}
+_RangeRequest = tuple[int, int | None] | int
 
 
 def _upstream_error(message: str = "上游下载服务请求失败") -> DomainError:
@@ -118,6 +119,22 @@ def _content_range(value: str) -> tuple[int, int, int | None]:
     return start, end, total
 
 
+def _request_range(value: str) -> _RangeRequest:
+    match = re.fullmatch(r"bytes=(?:(\d+)-(\d*)|-(\d+))", value)
+    if match is None:
+        raise DomainError(ErrorCode.RANGE_NOT_SATISFIABLE, "下载范围无效")
+    if match.group(3) is not None:
+        suffix = int(match.group(3))
+        if suffix == 0:
+            raise DomainError(ErrorCode.RANGE_NOT_SATISFIABLE, "下载范围无效")
+        return suffix
+    start = int(match.group(1))
+    end = int(match.group(2)) if match.group(2) else None
+    if end is not None and end < start:
+        raise DomainError(ErrorCode.RANGE_NOT_SATISFIABLE, "下载范围无效")
+    return start, end
+
+
 class SafeHttpClient:
     def __init__(self, *, timeout_seconds: float = 15.0) -> None:
         self.timeout_seconds = timeout_seconds
@@ -125,6 +142,7 @@ class SafeHttpClient:
     async def open(
         self, *, url: str, headers: Mapping[str, str], range_header: str | None
     ) -> UpstreamResponse:
+        requested_range = None if range_header is None else _request_range(range_header)
         resolver = PublicResolver()
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
         session = aiohttp.ClientSession(
@@ -169,7 +187,7 @@ class SafeHttpClient:
                     raise DomainError(ErrorCode.TASK_TOO_LARGE, "上游内容超过大小限制")
                 if response.status not in {200, 206}:
                     raise _upstream_error()
-                return self._response(session, response)
+                return self._response(session, response, requested_range)
         except DomainError:
             await session.close()
             raise
@@ -178,17 +196,54 @@ class SafeHttpClient:
             raise _upstream_error() from None
 
     def _response(
-        self, session: aiohttp.ClientSession, response: aiohttp.ClientResponse
+        self,
+        session: aiohttp.ClientSession,
+        response: aiohttp.ClientResponse,
+        requested_range: _RangeRequest | None,
     ) -> UpstreamResponse:
         try:
             length = _content_length(response.headers.get("Content-Length"))
             offset = 0
             total = length
             body_bytes = length
+            if response.status == 200 and requested_range is not None:
+                if isinstance(requested_range, int):
+                    full_entity = length is not None and requested_range >= length
+                else:
+                    requested_start, requested_end = requested_range
+                    full_entity = requested_start == 0 and (
+                        requested_end is None
+                        or length is not None
+                        and requested_end >= length - 1
+                    )
+                if not full_entity:
+                    raise _upstream_error("上游未按请求返回下载范围")
             if response.status == 206:
                 offset, end, total = _content_range(
                     response.headers.get("Content-Range", "")
                 )
+                if requested_range is not None:
+                    if isinstance(requested_range, int):
+                        if total is None:
+                            raise _upstream_error("上游后缀范围缺少实体总大小")
+                        suffix_length = min(requested_range, total)
+                        if (offset, end) != (total - suffix_length, total - 1):
+                            raise _upstream_error("上游后缀范围与请求不一致")
+                    else:
+                        requested_start, requested_end = requested_range
+                        if offset != requested_start:
+                            raise _upstream_error("上游范围起点与请求不一致")
+                        elif requested_end is None:
+                            if total is not None and end != total - 1:
+                                raise _upstream_error("上游开放范围终点与请求不一致")
+                        else:
+                            expected_end = (
+                                requested_end
+                                if total is None
+                                else min(requested_end, total - 1)
+                            )
+                            if end != expected_end:
+                                raise _upstream_error("上游范围终点与请求不一致")
                 range_length = end - offset + 1
                 if length is not None and length != range_length:
                     raise _upstream_error("上游范围响应长度不一致")

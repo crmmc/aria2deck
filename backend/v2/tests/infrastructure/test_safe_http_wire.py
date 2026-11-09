@@ -219,6 +219,82 @@ async def test_range_request_forwards_only_the_slice(
     assert repository.admitted == [(len(RAW), True)]
 
 
+@pytest.mark.parametrize(
+    ("range_header", "status", "content_range", "body", "valid"),
+    [
+        ("bytes=2-5", 206, f"bytes 2-5/{len(RAW)}", RAW[2:6], True),
+        (
+            f"bytes=2-{len(RAW) + 10}",
+            206,
+            f"bytes 2-{len(RAW) - 1}/{len(RAW)}",
+            RAW[2:],
+            True,
+        ),
+        ("bytes=2-", 206, f"bytes 2-{len(RAW) - 1}/{len(RAW)}", RAW[2:], True),
+        (
+            "bytes=-5",
+            206,
+            f"bytes {len(RAW) - 5}-{len(RAW) - 1}/{len(RAW)}",
+            RAW[-5:],
+            True,
+        ),
+        ("bytes=0-", 200, None, RAW, True),
+        ("bytes=2-5", 206, f"bytes 3-6/{len(RAW)}", RAW[3:7], False),
+        ("bytes=2-5", 206, f"bytes 2-4/{len(RAW)}", RAW[2:5], False),
+        ("bytes=-5", 206, f"bytes 0-4/{len(RAW)}", RAW[:5], False),
+        ("bytes=2-5", 200, None, RAW, False),
+    ],
+)
+async def test_wire_range_response_contract(
+    run_upstream: Callable[[Handler], Awaitable[TestServer]],
+    range_header: str,
+    status: int,
+    content_range: str | None,
+    body: bytes,
+    valid: bool,
+) -> None:
+    async def handler(request: web.Request) -> web.Response:
+        headers = {} if content_range is None else {"Content-Range": content_range}
+        return web.Response(status=status, body=body, headers=headers)
+
+    server = await run_upstream(handler)
+    gateway, _ = build_gateway(str(server.make_url("/file")), max_task_size=len(RAW) + 1024)
+    if valid:
+        opened, received = await collect(gateway, range_header=range_header)
+        assert opened.status == status
+        assert received == body
+    else:
+        with pytest.raises(DomainError) as caught:
+            await collect(gateway, range_header=range_header)
+        assert caught.value.code is ErrorCode.UPSTREAM_FAILURE
+
+
+async def test_wire_short_range_body_fails_at_eof(
+    run_upstream: Callable[[Handler], Awaitable[TestServer]],
+) -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(
+            status=206, headers={"Content-Range": f"bytes 0-9/{len(RAW)}"}
+        )
+        await response.prepare(request)
+        await response.write(RAW[:3])
+        await response.write_eof()
+        return response
+
+    server = await run_upstream(handler)
+    gateway, _ = build_gateway(str(server.make_url("/file")), max_task_size=len(RAW) + 1024)
+    opened = await gateway.open(
+        attempt_id=1,
+        source_index=0,
+        capability="valid",
+        range_header="bytes=0-9",
+    )
+    with pytest.raises(DomainError) as caught:
+        async for _chunk in opened.body:
+            pass
+    assert caught.value.code is ErrorCode.UPSTREAM_FAILURE
+
+
 @pytest.mark.parametrize("name", ["accept-encoding", "Accept-Encoding", "ACCEPT-ENCODING"])
 async def test_user_supplied_accept_encoding_is_not_duplicated(
     run_upstream: Callable[[Handler], Awaitable[TestServer]], name: str

@@ -16,6 +16,7 @@ from aria2deck.infrastructure.sqlite.repositories.quota import QuotaRepository
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
 from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, login
 from tests.api.test_download_writes import install_backend
+from tests.infrastructure.test_safe_http import Response, Session, install_session
 
 
 class FakeUpstream:
@@ -274,3 +275,69 @@ def test_range_metadata_is_forwarded_and_full_entity_is_reserved(
     )
     assert result.status_code == 206
     assert result.headers["Content-Range"] == "bytes 5-6/20"
+
+
+def test_streaming_rejects_actual_bytes_below_declaration(
+    client: TestClient, settings: Settings
+) -> None:
+    _, attempt_id = create_task(client, settings)
+    upstream_response, closed = response([b"ab"], total=None, body_bytes=3)
+    client.app.state.download_gateway.upstream = FakeUpstream(upstream_response)
+
+    async def collect() -> None:
+        opened = await client.app.state.download_gateway.open(
+            attempt_id=attempt_id,
+            source_index=0,
+            capability=capability(attempt_id),
+            range_header=None,
+        )
+        with pytest.raises(DomainError) as caught:
+            async for _ in opened.body:
+                pass
+        assert caught.value.code is ErrorCode.UPSTREAM_FAILURE
+
+    asyncio.run(collect())
+    assert closed == [True]
+
+
+def test_range_protocol_failure_uses_existing_retryable_boundary(
+    client: TestClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task_id, attempt_id = create_task(client, settings)
+    upstream = Response(200, {"Content-Length": "100"}, [b"x" * 100])
+    session = Session([upstream])
+    install_session(monkeypatch, session)
+
+    result = client.get(
+        f"/api/v2/internal/fetch/{attempt_id}/0",
+        headers={
+            "X-Mjiz-Fetch-Capability": capability(attempt_id),
+            "Range": "bytes=100-199",
+        },
+    )
+
+    assert result.status_code == 502
+    assert result.json()["error"]["code"] == "upstream_failure"
+    assert upstream.closed is True
+    assert session.closed is True
+
+    async def state() -> tuple[str, str, int | None, int, int]:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                downloads = DownloadRepository(uow.connection)
+                attempt = await downloads.get_attempt(attempt_id)
+                task = await downloads.get_task(user_id=1, task_id=task_id)
+                quota = await QuotaRepository(uow.connection).get(1)
+                return (
+                    attempt.status.value,
+                    task.subscription_status.value,
+                    attempt.completed_content_id,
+                    task.reserved_bytes,
+                    quota.reserved_bytes,
+                )
+        finally:
+            await database.close()
+
+    # 协议失败只返回 502 给 aria2；任务保持可重试，API 边界不擅自终态化。
+    assert asyncio.run(state()) == ("queued", "queued", None, 0, 0)

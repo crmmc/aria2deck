@@ -223,6 +223,164 @@ async def test_invalid_content_range_fails_closed(monkeypatch: pytest.MonkeyPatc
         await SafeHttpClient().open(url="https://example.com", headers={}, range_header=None)
 
 
+@pytest.mark.parametrize(
+    "range_header",
+    [
+        "",
+        "bytes=",
+        "bytes=-",
+        "bytes=-0",
+        "bytes=1",
+        "bytes=2-1",
+        "bytes=1-2,4-5",
+        "items=1-2",
+    ],
+)
+async def test_invalid_range_request_fails_before_upstream(
+    monkeypatch: pytest.MonkeyPatch, range_header: str
+) -> None:
+    session = Session([Response(200, {"Content-Length": "1"}, [b"x"])])
+    install_session(monkeypatch, session)
+
+    with pytest.raises(DomainError) as caught:
+        await SafeHttpClient().open(
+            url="https://example.com", headers={}, range_header=range_header
+        )
+
+    assert caught.value.code is ErrorCode.RANGE_NOT_SATISFIABLE
+    assert session.requests == []
+
+
+@pytest.mark.parametrize(
+    ("range_header", "status", "headers"),
+    [
+        ("bytes=100-199", 200, {"Content-Length": "1000"}),
+        (
+            "bytes=100-199",
+            206,
+            {"Content-Length": "100", "Content-Range": "bytes 0-99/1000"},
+        ),
+        (
+            "bytes=100-199",
+            206,
+            {"Content-Length": "50", "Content-Range": "bytes 100-149/1000"},
+        ),
+        (
+            "bytes=100-199",
+            206,
+            {"Content-Length": "100", "Content-Range": "bytes 100-199/150"},
+        ),
+        (
+            "bytes=100-",
+            206,
+            {"Content-Length": "100", "Content-Range": "bytes 100-199/1000"},
+        ),
+        (
+            "bytes=-100",
+            206,
+            {"Content-Length": "100", "Content-Range": "bytes 0-99/1000"},
+        ),
+        (
+            "bytes=-100",
+            206,
+            {"Content-Length": "100", "Content-Range": "bytes 900-999/*"},
+        ),
+        ("bytes=0-98", 200, {"Content-Length": "100"}),
+        ("bytes=-99", 200, {"Content-Length": "100"}),
+        ("bytes=0-99", 200, {}),
+        ("bytes=-100", 200, {}),
+    ],
+)
+async def test_range_rejects_response_not_matching_request(
+    monkeypatch: pytest.MonkeyPatch,
+    range_header: str,
+    status: int,
+    headers: dict[str, str],
+) -> None:
+    upstream = Response(status, headers)
+    session = Session([upstream])
+    install_session(monkeypatch, session)
+
+    with pytest.raises(DomainError) as caught:
+        await SafeHttpClient().open(
+            url="https://example.com", headers={}, range_header=range_header
+        )
+
+    assert caught.value.code is ErrorCode.UPSTREAM_FAILURE
+    assert upstream.closed is True
+    assert session.closed is True
+
+
+@pytest.mark.parametrize(
+    ("range_header", "status", "headers", "expected"),
+    [
+        (
+            "bytes=100-199",
+            206,
+            {"Content-Length": "100", "Content-Range": "bytes 100-199/1000"},
+            (1000, 100, 100),
+        ),
+        (
+            "bytes=100-199",
+            206,
+            {"Content-Length": "100", "Content-Range": "bytes 100-199/*"},
+            (None, 100, 100),
+        ),
+        (
+            "bytes=100-199",
+            206,
+            {"Content-Length": "50", "Content-Range": "bytes 100-149/150"},
+            (150, 50, 100),
+        ),
+        (
+            "bytes=100-",
+            206,
+            {"Content-Length": "900", "Content-Range": "bytes 100-999/1000"},
+            (1000, 900, 100),
+        ),
+        (
+            "bytes=100-",
+            206,
+            {"Content-Length": "100", "Content-Range": "bytes 100-199/*"},
+            (None, 100, 100),
+        ),
+        (
+            "bytes=-100",
+            206,
+            {"Content-Length": "100", "Content-Range": "bytes 900-999/1000"},
+            (1000, 100, 900),
+        ),
+        (
+            "bytes=-1000",
+            206,
+            {"Content-Length": "1000", "Content-Range": "bytes 0-999/1000"},
+            (1000, 1000, 0),
+        ),
+        ("bytes=0-", 200, {"Content-Length": "1000"}, (1000, 1000, 0)),
+        ("bytes=0-", 200, {}, (None, None, 0)),
+        ("bytes=0-999", 200, {"Content-Length": "1000"}, (1000, 1000, 0)),
+        ("bytes=0-1000", 200, {"Content-Length": "1000"}, (1000, 1000, 0)),
+        ("bytes=-1000", 200, {"Content-Length": "1000"}, (1000, 1000, 0)),
+    ],
+)
+async def test_range_accepts_only_the_requested_complete_slice(
+    monkeypatch: pytest.MonkeyPatch,
+    range_header: str,
+    status: int,
+    headers: dict[str, str],
+    expected: tuple[int | None, int | None, int],
+) -> None:
+    session = Session([Response(status, headers)])
+    install_session(monkeypatch, session)
+
+    opened = await SafeHttpClient().open(
+        url="https://example.com", headers={}, range_header=range_header
+    )
+
+    assert (opened.total_bytes, opened.body_bytes, opened.content_offset) == expected
+    await opened.close()
+
+
 @pytest.mark.parametrize("length", ["bad", "-1"])
 async def test_invalid_content_length_fails_closed(monkeypatch: pytest.MonkeyPatch, length: str) -> None:
     session = Session([Response(200, {"Content-Length": length})])
