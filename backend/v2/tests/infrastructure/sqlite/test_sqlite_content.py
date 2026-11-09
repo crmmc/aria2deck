@@ -67,6 +67,40 @@ async def test_directory_entries_are_unique_by_full_path(database: SQLiteDatabas
             await repo.add_entry(content_id=content_id, parent_path="../", name="a", entry_kind="file", size=10, now_ms=1)
 
 
+async def test_list_files_returns_only_real_entries_sorted_by_path(
+    database: SQLiteDatabase,
+) -> None:
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = ContentRepository(uow.connection)
+        content_id = await repo.create_object(
+            kind="directory",
+            digest=HASH,
+            size=30,
+            storage_path="objects/directory",
+            now_ms=1,
+        )
+        for parent_path, name, entry_kind, size in (
+            ("", "z.bin", "file", 20),
+            ("", "folder", "directory", 0),
+            ("folder", "a.bin", "file", 10),
+        ):
+            await repo.add_entry(
+                content_id=content_id,
+                parent_path=parent_path,
+                name=name,
+                entry_kind=entry_kind,
+                size=size,
+                now_ms=1,
+            )
+
+        files = await repo.list_files(content_id)
+
+    assert [(entry.path, entry.size) for entry in files] == [
+        ("folder/a.bin", 10),
+        ("z.bin", 20),
+    ]
+
+
 async def test_pending_delete_content_rejects_new_references(database: SQLiteDatabase) -> None:
     user_id = await create_user(database)
     content_id = await object_id(database)

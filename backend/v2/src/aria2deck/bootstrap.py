@@ -146,6 +146,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     download_queries = DownloadQueryService(
         uow_factory=uow_factory,
         repository_factory=download_repository,
+        content_repository_factory=content_repository,
         pack_repository_factory=pack_repository,
         account_repository_factory=account_repository,
         projector=task_projector,

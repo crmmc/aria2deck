@@ -326,6 +326,11 @@ class DownloadRepository:
             created_at_ms=int(row["subscription_created_at_ms"]),
             updated_at_ms=int(row["subscription_updated_at_ms"]),
             finished_at_ms=row["subscription_finished_at_ms"],
+            completed_content_id=(
+                None
+                if row["completed_content_id"] is None
+                else int(row["completed_content_id"])
+            ),
             ingestion_pending=(
                 row["completed_content_id"] is not None
                 and AttemptStatus(row["attempt_status"]) in LIVE_ATTEMPT_STATUSES

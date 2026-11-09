@@ -9,8 +9,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from aria2deck.application.downloads.models import DownloadObservation, ObservedFile
+from aria2deck.bootstrap import create_app
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
+from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
 from tests.api.conftest import create_admin, login
@@ -92,6 +95,81 @@ def _seed_task(settings, user_id: int, *, status: str = "active", name: str = "d
     return asyncio.run(write())
 
 
+def _seed_completed_content(
+    settings,
+    user_id: int,
+    *,
+    name: str = "completed.bin",
+    size: int = 577,
+    kind: str = "file",
+    entries: tuple[tuple[str, str, int], ...] = (),
+) -> tuple[int, str]:
+    now_ms = time.time_ns() // 1_000_000
+
+    async def write() -> tuple[int, str]:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                downloads = DownloadRepository(uow.connection)
+                content = ContentRepository(uow.connection)
+                content_id = await content.create_object(
+                    kind=kind,
+                    digest=("ab" if kind == "file" else "cd") * 32,
+                    size=size,
+                    storage_path=f"objects/completed-rpc-{kind}",
+                    now_ms=now_ms,
+                )
+                for path, entry_kind, entry_size in entries:
+                    parent_path, _, entry_name = path.rpartition("/")
+                    await content.add_entry(
+                        content_id=content_id,
+                        parent_path=parent_path,
+                        name=entry_name,
+                        entry_kind=entry_kind,
+                        size=entry_size,
+                        now_ms=now_ms,
+                    )
+                source_id = await downloads.create_source(
+                    kind="http",
+                    resource_key=f"http:rpc-completed-{user_id}-{name}",
+                    payload_json="{}",
+                    options_json="{}",
+                    selected_file_indexes_json=None,
+                    display_name=name,
+                    display_uri="https://example.com/completed.bin",
+                    now_ms=now_ms,
+                )
+                gid = "feedface0123456789abcdef"
+                attempt_id = await downloads.create_attempt(
+                    source_id=source_id,
+                    resource_key=f"http:rpc-completed-{user_id}-{name}",
+                    gid=gid,
+                    now_ms=now_ms,
+                )
+                task_id = await downloads.create_subscription(
+                    attempt_id=attempt_id,
+                    user_id=user_id,
+                    reserved_bytes=0,
+                    display_name=name,
+                    display_uri="https://example.com/completed.bin",
+                    now_ms=now_ms,
+                )
+                await downloads.begin_completion(
+                    attempt_id,
+                    expected_gid=gid,
+                    content_id=content_id,
+                    now_ms=now_ms + 1,
+                )
+                assert await downloads.finalize_completion(
+                    attempt_id, expected_gid=gid, now_ms=now_ms + 2
+                )
+                return task_id, gid
+        finally:
+            await database.close()
+
+    return asyncio.run(write())
+
+
 @pytest.fixture
 def rpc_client(client: TestClient) -> TestClient:
     _CURRENT_SECRET.clear()
@@ -104,6 +182,227 @@ def rpc_client(client: TestClient) -> TestClient:
     client.app.state.download_commands.backend = backend
     client.app.state.download_recovery.backend = backend
     return client
+
+
+def test_completed_single_file_is_projected_after_observation_is_empty(
+    rpc_client: TestClient, settings
+) -> None:
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    task_id, _ = _seed_completed_content(settings, user_id)
+    stopped = _rpc(rpc_client, "aria2.tellStopped", [0, 10]).json()["result"]
+    gid = next(item["gid"] for item in stopped if item["status"] == "complete")
+    expected = {
+        "index": "1",
+        "path": "completed.bin",
+        "length": "577",
+        "completedLength": "577",
+        "selected": "true",
+        "uris": [],
+    }
+
+    status = _rpc(rpc_client, "aria2.tellStatus", [gid])
+    assert status.json()["result"]["files"] == [expected]
+    files = _rpc(rpc_client, "aria2.getFiles", [gid])
+    assert files.json()["result"] == [expected]
+    rest = rpc_client.get(f"/api/v2/tasks/{task_id}")
+    assert rest.json()["files"] == [
+        {
+            "name": "completed.bin",
+            "total_bytes": 577,
+            "completed_bytes": 577,
+            "selected": True,
+        }
+    ]
+    projection = asyncio.run(
+        rpc_client.app.state.download_queries.get_task(user_id=user_id, task_id=task_id)
+    )
+    assert projection.files == (
+        ObservedFile(
+            name="completed.bin",
+            total_bytes=577,
+            completed_bytes=577,
+            selected=True,
+        ),
+    )
+
+
+def test_completed_directory_projects_sorted_real_files_and_safe_rpc_basenames(
+    rpc_client: TestClient, settings
+) -> None:
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    task_id, gid = _seed_completed_content(
+        settings,
+        user_id,
+        name="bundle",
+        size=11,
+        kind="directory",
+        entries=(
+            ("z-last.bin", "file", 5),
+            ("folder", "directory", 0),
+            ("folder/nested/b.bin", "file", 2),
+            ("folder/nested", "directory", 0),
+            ("folder/a-first.bin", "file", 4),
+        ),
+    )
+    expected = [
+        {
+            "index": "1",
+            "path": "a-first.bin",
+            "length": "4",
+            "completedLength": "4",
+            "selected": "true",
+            "uris": [],
+        },
+        {
+            "index": "2",
+            "path": "b.bin",
+            "length": "2",
+            "completedLength": "2",
+            "selected": "true",
+            "uris": [],
+        },
+        {
+            "index": "3",
+            "path": "z-last.bin",
+            "length": "5",
+            "completedLength": "5",
+            "selected": "true",
+            "uris": [],
+        },
+    ]
+
+    files = _rpc(rpc_client, "aria2.getFiles", [gid])
+    assert files.json()["result"] == expected
+    assert "folder/" not in files.text
+    rest = rpc_client.get(f"/api/v2/tasks/{task_id}").json()["files"]
+    assert rest == [
+        {
+            "name": path,
+            "total_bytes": size,
+            "completed_bytes": size,
+            "selected": True,
+        }
+        for path, size in (
+            ("folder/a-first.bin", 4),
+            ("folder/nested/b.bin", 2),
+            ("z-last.bin", 5),
+        )
+    ]
+    projection = asyncio.run(
+        rpc_client.app.state.download_queries.get_task(user_id=user_id, task_id=task_id)
+    )
+    assert projection.files == (
+        ObservedFile("folder/a-first.bin", 4, 4, True),
+        ObservedFile("folder/nested/b.bin", 2, 2, True),
+        ObservedFile("z-last.bin", 5, 5, True),
+    )
+
+
+def test_completed_files_prefer_nonempty_live_observation(
+    rpc_client: TestClient, settings
+) -> None:
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    task_id, gid = _seed_completed_content(settings, user_id)
+    rpc_client.app.state.download_observations.put(
+        DownloadObservation(
+            gid=gid,
+            observed_at_ms=time.time_ns() // 1_000_000,
+            status="complete",
+            download_speed=0,
+            upload_speed=0,
+            peer_count=0,
+            connection_count=0,
+            files=(
+                ObservedFile(
+                    name="live/current.bin",
+                    total_bytes=900,
+                    completed_bytes=300,
+                    selected=False,
+                ),
+            ),
+        )
+    )
+
+    status = _rpc(rpc_client, "aria2.tellStatus", [gid]).json()["result"]
+    assert status["files"] == [
+        {
+            "index": "1",
+            "path": "current.bin",
+            "length": "900",
+            "completedLength": "300",
+            "selected": "false",
+            "uris": [],
+        }
+    ]
+    rest = rpc_client.get(f"/api/v2/tasks/{task_id}").json()["files"]
+    assert rest == [
+        {
+            "name": "live/current.bin",
+            "total_bytes": 900,
+            "completed_bytes": 300,
+            "selected": False,
+        }
+    ]
+
+
+def test_completed_files_remain_user_scoped(rpc_client: TestClient, settings) -> None:
+    from tests.api.conftest import create_user
+
+    owner_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    task_id, gid = _seed_completed_content(settings, owner_id)
+    create_user(rpc_client, "intruder")
+    login(rpc_client, "intruder", "cd" * 32)
+    _enable_rpc(rpc_client)
+
+    for method in ("aria2.tellStatus", "aria2.getFiles"):
+        response = _rpc(rpc_client, method, [gid])
+        assert response.json()["error"]["code"] == 1
+        assert "completed.bin" not in response.text
+    assert rpc_client.get(f"/api/v2/tasks/{task_id}").status_code == 404
+
+
+def test_completed_files_survive_restart_with_empty_observations(settings) -> None:
+    from tests.application.test_download_lifecycle import LifecycleBackend
+
+    first_app = create_app(settings=settings)
+    first_backend = LifecycleBackend()
+    first_app.state.download_commands.backend = first_backend
+    first_app.state.download_recovery.backend = first_backend
+    first_app.state.download_lifecycle.backend = first_backend
+    with TestClient(first_app) as first:
+        create_admin(first)
+        login(first)
+        _enable_rpc(first)
+        secret = _secret()
+        user_id = int(first.get("/api/v2/auth/me").json()["id"])
+        _, gid = _seed_completed_content(settings, user_id)
+
+    restarted_app = create_app(settings=settings)
+    restarted_backend = LifecycleBackend()
+    restarted_app.state.download_commands.backend = restarted_backend
+    restarted_app.state.download_recovery.backend = restarted_backend
+    restarted_app.state.download_lifecycle.backend = restarted_backend
+    with TestClient(restarted_app) as restarted:
+        login(restarted)
+        assert restarted.app.state.download_observations.get(gid) is None
+        status = _rpc(restarted, "aria2.tellStatus", [gid], token=secret)
+        assert status.json()["result"]["files"] == [
+            {
+                "index": "1",
+                "path": "completed.bin",
+                "length": "577",
+                "completedLength": "577",
+                "selected": "true",
+                "uris": [],
+            }
+        ]
+
+
+def test_bootstrap_reuses_content_repository_for_completed_files(app: FastAPI) -> None:
+    assert (
+        app.state.download_queries.content_repository_factory
+        is app.state.library_queries.repository_factory
+    )
 
 
 def test_get_method_is_rejected(rpc_client: TestClient) -> None:

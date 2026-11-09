@@ -150,6 +150,8 @@ async def test_completed_content_supports_instant_attachment_after_reopen(
         assert (await downloads.get_attempt(attempt_id)).status is AttemptStatus.QUEUED
         await downloads.complete_attempt(attempt_id, content_id=content_id, now_ms=2)
         assert (await downloads.get_attempt(attempt_id)).completed_content_id == content_id
+        task = await downloads.get_task(user_id=user_id, task_id=subscription_id)
+        assert task.completed_content_id == content_id
         completed_content_id = await downloads.find_completed_content_id("http:key")
         assert completed_content_id == content_id
         file_id = await ContentRepository(uow.connection).add_user_file(

@@ -354,6 +354,17 @@ class ContentRepository:
         ).all()
         return [self._entry(row) for row in rows], total
 
+    async def list_files(self, content_id: int) -> list[ContentEntryRecord]:
+        rows = (
+            await self.connection.execute(
+                select(content_entries)
+                .where(content_entries.c.content_id == content_id)
+                .where(content_entries.c.entry_kind == ContentKind.FILE)
+                .order_by(content_entries.c.path)
+            )
+        ).all()
+        return [self._entry(row) for row in rows]
+
     async def get_entry(self, *, content_id: int, path: str) -> ContentEntryRecord:
         normalized = normalize_relative_path(path)
         row = (

@@ -341,6 +341,7 @@ async def test_lifecycle_broadcast_to_ws_end_to_end(tmp_path):
         queries = DownloadQueryService(
             uow_factory=uow_factory,
             repository_factory=lambda uow: DownloadRepository(uow.connection),
+            content_repository_factory=lambda uow: ContentRepository(uow.connection),
             pack_repository_factory=lambda uow: PackRepository(uow.connection),
             account_repository_factory=lambda uow: AccountRepository(uow.connection),
             projector=projector,

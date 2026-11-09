@@ -25,6 +25,7 @@ from aria2deck.domain.quota import (
 from aria2deck.domain.settings import SystemSettings
 from aria2deck.infrastructure.config import Settings
 from aria2deck.infrastructure.observations import InMemoryDownloadObservations
+from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from aria2deck.infrastructure.sqlite.repositories.packs import PackRepository
 
@@ -126,6 +127,7 @@ def service(records: list[DownloadRecord]) -> DownloadQueryService:
     return DownloadQueryService(
         uow_factory=FakeUoW,
         repository_factory=lambda _uow: ReadRepository(records),
+        content_repository_factory=lambda uow: ContentRepository(uow.connection),
         pack_repository_factory=lambda _uow: EmptyPackRepository(),
         account_repository_factory=lambda _uow: QuotaRepository(),
         projector=TaskProjector(observations=observations, clock_ms=lambda: 100_000),
@@ -181,6 +183,7 @@ async def test_query_service_passes_sort_order_and_defaults_to_repository() -> N
     queries = DownloadQueryService(
         uow_factory=FakeUoW,
         repository_factory=lambda _uow: repository,
+        content_repository_factory=lambda uow: ContentRepository(uow.connection),
         pack_repository_factory=lambda _uow: EmptyPackRepository(),
         account_repository_factory=lambda _uow: QuotaRepository(),
         projector=TaskProjector(

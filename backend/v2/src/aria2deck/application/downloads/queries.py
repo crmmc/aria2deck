@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from typing import Protocol
 
+from ...domain.content import ContentKind
 from ...domain.downloads import SubscriptionStatus
 from ...domain.quota import (
     PhysicalDownload,
@@ -12,8 +14,9 @@ from ...domain.quota import (
     visible_space,
 )
 from ...domain.settings import SystemSettings
+from ..library.models import ContentEntryRecord, ContentRecord
 from ..ports import AccountRepositoryPort, UnitOfWork
-from .models import DownloadRecord, TaskPage, TaskProjection, TaskStats
+from .models import DownloadRecord, ObservedFile, TaskPage, TaskProjection, TaskStats
 from .projection import TaskProjector
 
 
@@ -31,6 +34,12 @@ class DownloadReadRepository(Protocol):
     async def list_active_physical(self) -> list[PhysicalDownload]: ...
 
 
+class ContentReadRepository(Protocol):
+    async def get_object(self, content_id: int) -> ContentRecord: ...
+
+    async def list_files(self, content_id: int) -> list[ContentEntryRecord]: ...
+
+
 class PackReadRepository(Protocol):
     async def list_active_physical(self) -> list[PhysicalPack]: ...
 
@@ -40,6 +49,7 @@ class MachineSpacePort(Protocol):
 
 
 RepositoryFactory = Callable[[UnitOfWork], DownloadReadRepository]
+ContentRepositoryFactory = Callable[[UnitOfWork], ContentReadRepository]
 PackRepositoryFactory = Callable[[UnitOfWork], PackReadRepository]
 AccountRepositoryFactory = Callable[[UnitOfWork], AccountRepositoryPort]
 UowFactory = Callable[[], AbstractAsyncContextManager[UnitOfWork]]
@@ -51,6 +61,7 @@ class DownloadQueryService:
         *,
         uow_factory: UowFactory,
         repository_factory: RepositoryFactory,
+        content_repository_factory: ContentRepositoryFactory,
         pack_repository_factory: PackRepositoryFactory,
         account_repository_factory: AccountRepositoryFactory,
         projector: TaskProjector,
@@ -59,6 +70,7 @@ class DownloadQueryService:
     ) -> None:
         self.uow_factory = uow_factory
         self.repository_factory = repository_factory
+        self.content_repository_factory = content_repository_factory
         self.pack_repository_factory = pack_repository_factory
         self.account_repository_factory = account_repository_factory
         self.projector = projector
@@ -107,7 +119,32 @@ class DownloadQueryService:
             record = await self.repository_factory(uow).get_task(
                 user_id=user_id, task_id=task_id
             )
-        return self.projector.project(record)
+            projection = self.projector.project(record)
+            if projection.files or record.completed_content_id is None:
+                return projection
+            contents = self.content_repository_factory(uow)
+            content = await contents.get_object(record.completed_content_id)
+            files: tuple[ObservedFile, ...]
+            if content.kind is ContentKind.FILE:
+                files = (
+                    ObservedFile(
+                        name=projection.name,
+                        total_bytes=content.size,
+                        completed_bytes=content.size,
+                        selected=True,
+                    ),
+                )
+            else:
+                files = tuple(
+                    ObservedFile(
+                        name=entry.path,
+                        total_bytes=entry.size,
+                        completed_bytes=entry.size,
+                        selected=True,
+                    )
+                    for entry in await contents.list_files(content.id)
+                )
+        return replace(projection, files=files)
 
     async def list_user_records(self, *, user_id: int) -> list[DownloadRecord]:
         """RPC/WS 适配用的原始记录视图（含真实 GID，仅在服务端解析，绝不外发）。"""

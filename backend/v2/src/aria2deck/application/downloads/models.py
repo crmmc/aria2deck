@@ -25,6 +25,7 @@ class DownloadRecord:
     updated_at_ms: int
     finished_at_ms: int | None
     ingestion_pending: bool = False
+    completed_content_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
