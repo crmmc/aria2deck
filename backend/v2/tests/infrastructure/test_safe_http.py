@@ -189,6 +189,23 @@ async def test_http_boundaries_map_errors_and_close_session(
     assert session.closed is True
 
 
+async def test_redirect_to_private_target_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redirect = Response(302, {"Location": "http://127.0.0.1/private"})
+    session = Session([redirect])
+    install_session(monkeypatch, session)
+
+    with pytest.raises(DomainError) as caught:
+        await SafeHttpClient().open(
+            url="https://example.com/trackers", headers={}, range_header=None
+        )
+
+    assert caught.value.code is ErrorCode.PERMISSION_DENIED
+    assert len(session.requests) == 1
+    assert session.closed is True
+
+
 async def test_redirect_limit_is_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
     session = Session([Response(302, {"Location": "/next"}) for _ in range(11)])
     install_session(monkeypatch, session)

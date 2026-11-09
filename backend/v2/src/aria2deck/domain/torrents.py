@@ -179,9 +179,9 @@ def _selected_indexes(
     return tuple(sorted(selected))
 
 
-def parse_torrent(
-    payload_base64: str, selected_file_indexes: list[int] | tuple[int, ...] | None = None
-) -> TorrentMetadata:
+def _parse_payload(
+    payload_base64: str,
+) -> tuple[bytes, dict[bytes, object], dict[bytes, object], tuple[int, int]]:
     if not payload_base64 or len(payload_base64) > 14_000_000:
         raise _invalid("种子内容为空或过大")
     try:
@@ -195,23 +195,54 @@ def parse_torrent(
     info = root.get(b"info")
     if not isinstance(info, dict) or parser.info_span is None:
         raise _invalid("种子缺少 info 字典")
-    if b"url-list" in root or b"url-list" in info:
+    if any(key in root or key in info for key in (b"url-list", b"httpseeds")):
         raise _invalid("不支持种子 webseed")
+    return data, root, info, parser.info_span
+
+
+def _encode_shell(
+    data: bytes, root: dict[bytes, object], info_span: tuple[int, int]
+) -> str:
+    start, end = info_span
+    encoded = [b"d"]
+    for key, value in root.items():
+        encoded_value = data[start:end] if key == b"info" else _encode(value)
+        encoded.extend((_encode(key), encoded_value))
+    encoded.append(b"e")
+    return base64.b64encode(b"".join(encoded)).decode("ascii")
+
+
+def _peer_text(value: object) -> str | None:
+    if not isinstance(value, bytes):
+        return None
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _peer_node(value: object) -> tuple[str, int] | None:
+    if not isinstance(value, list) or len(value) != 2:
+        return None
+    host = _peer_text(value[0])
+    port = value[1]
+    if host is None or not isinstance(port, int) or isinstance(port, bool):
+        return None
+    return host, port
+
+
+def parse_torrent(
+    payload_base64: str, selected_file_indexes: list[int] | tuple[int, ...] | None = None
+) -> TorrentMetadata:
+    data, root, info, info_span = _parse_payload(payload_base64)
     name = _text(info.get(b"name"), "种子名称无效")
     files = _files(info, name)
     selected = _selected_indexes(selected_file_indexes, len(files))
     chosen = files if selected is None else tuple(files[index - 1] for index in selected)
-    start, end = parser.info_span
+    start, end = info_span
     info_hash = hashlib.sha1(data[start:end], usedforsecurity=False).hexdigest()
-    # Keep info bytes (and therefore its hash) exact, but remove peer endpoints from the outer shell.
-    sanitized = [b"d"]
-    for key, value in root.items():
-        if key in {b"announce", b"announce-list", b"nodes", b"url-list"}:
-            continue
-        encoded_value = data[start:end] if key == b"info" else _encode(value)
-        sanitized.extend((_encode(key), encoded_value))
-    sanitized.append(b"e")
-    safe_payload = base64.b64encode(b"".join(sanitized)).decode("ascii")
+    # Peer candidates are validated asynchronously at the aria2 submission boundary.
+    safe_payload = _encode_shell(data, root, info_span)
     return TorrentMetadata(
         info_hash=info_hash,
         name=name,
@@ -222,3 +253,87 @@ def parse_torrent(
         resource_key=torrent_resource_key(info_hash, selected),
         payload_base64=safe_payload,
     )
+
+
+def torrent_peer_candidates(
+    payload_base64: str,
+) -> tuple[tuple[str, ...], tuple[tuple[str, int], ...]]:
+    _data, root, _info, _info_span = _parse_payload(payload_base64)
+    trackers: list[str] = []
+    announce = _peer_text(root.get(b"announce"))
+    if announce is not None:
+        trackers.append(announce)
+    tiers = root.get(b"announce-list")
+    if isinstance(tiers, list):
+        for tier in tiers:
+            if not isinstance(tier, list):
+                continue
+            for value in tier:
+                tracker = _peer_text(value)
+                if tracker is not None:
+                    trackers.append(tracker)
+    raw_nodes = root.get(b"nodes")
+    nodes = (
+        tuple(node for value in raw_nodes if (node := _peer_node(value)) is not None)
+        if isinstance(raw_nodes, list)
+        else ()
+    )
+    return tuple(trackers), nodes
+
+
+def rebuild_torrent_peer_payload(
+    payload_base64: str,
+    *,
+    trackers: tuple[str, ...],
+    nodes: tuple[tuple[str, int], ...],
+) -> str:
+    data, root, _info, info_span = _parse_payload(payload_base64)
+    allowed_trackers = set(trackers)
+    allowed_nodes = set(nodes)
+    seen_trackers: set[str] = set()
+    rebuilt: dict[bytes, object] = {}
+    for key, value in root.items():
+        if key == b"announce":
+            tracker = _peer_text(value)
+            if tracker is None or tracker not in allowed_trackers:
+                continue
+            seen_trackers.add(tracker)
+        elif key == b"announce-list":
+            if not isinstance(value, list):
+                continue
+            tiers: list[object] = []
+            for tier in value:
+                if not isinstance(tier, list):
+                    continue
+                kept: list[object] = []
+                for raw in tier:
+                    tracker = _peer_text(raw)
+                    if (
+                        tracker is None
+                        or tracker not in allowed_trackers
+                        or tracker in seen_trackers
+                    ):
+                        continue
+                    seen_trackers.add(tracker)
+                    kept.append(raw)
+                if kept:
+                    tiers.append(kept)
+            if not tiers:
+                continue
+            value = tiers
+        elif key == b"nodes":
+            if not isinstance(value, list):
+                continue
+            seen_nodes: set[tuple[str, int]] = set()
+            kept_nodes: list[object] = []
+            for raw in value:
+                node = _peer_node(raw)
+                if node is None or node not in allowed_nodes or node in seen_nodes:
+                    continue
+                seen_nodes.add(node)
+                kept_nodes.append(raw)
+            if not kept_nodes:
+                continue
+            value = kept_nodes
+        rebuilt[key] = value
+    return _encode_shell(data, rebuilt, info_span)

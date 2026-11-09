@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json as json_codec
+import socket
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,10 +12,20 @@ import pytest
 from aria2deck.application.downloads.models import SourceRecord, Submission
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.settings import SystemSettings
+from aria2deck.domain.torrents import _Parser, parse_torrent
 from aria2deck.infrastructure.aria2_submission import Aria2SubmissionClient
 from aria2deck.infrastructure.security import CredentialManager
+from tests.download_fakes import bencode, make_torrent
 
 RPC_VALUE = "rpc-" + "value"
+
+
+@pytest.fixture(autouse=True)
+def fake_public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    def resolve(host: str, port: int, *, family: int, type: int) -> list[tuple[object, ...]]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
 
 
 def make_client(tmp_path: Path) -> Aria2SubmissionClient:
@@ -29,7 +41,7 @@ def submission(kind: str, gid: str) -> Submission:
     payloads = {
         "http": {"uris": ["https://origin.example/private", "https://mirror.example/private"]},
         "magnet": {"uri": "magnet:?xt=urn:btih:" + "ab" * 20},
-        "torrent": {"torrent": "cGF5bG9hZA=="},
+        "torrent": {"torrent": make_torrent()},
     }
     return Submission(
         attempt_id=7,
@@ -46,6 +58,350 @@ def submission(kind: str, gid: str) -> Submission:
             detached_at_ms=None,
         ),
     )
+
+
+def torrent_submission(root: dict[str, object]) -> Submission:
+    item = submission("torrent", "0000000000000001")
+    payload = base64.b64encode(bencode(root)).decode()
+    return replace(
+        item,
+        source=replace(
+            item.source,
+            payload={"torrent": payload},
+            selected_file_indexes=(1,),
+        ),
+    )
+
+
+def decoded_torrent_call(calls: list[dict[str, object]]) -> tuple[dict[bytes, object], str]:
+    nested = calls[0]["params"][0][0]
+    payload = nested["params"][0]
+    raw = base64.b64decode(payload)
+    return _Parser(raw).parse(), payload
+
+
+async def test_torrent_submission_preserves_only_validated_embedded_peers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    info = {"length": 3, "name": "file"}
+    item = torrent_submission({
+        "info": info,
+        "announce": "https://tracker.example/announce",
+        "announce-list": [
+            ["udp://tracker.example:6969/announce", "http://127.0.0.1:8080/announce"],
+            ["ftp://tracker.example:21/announce"],
+        ],
+        "nodes": [
+            ["dht.example", 6881],
+            ["127.0.0.1", 6881],
+            ["localhost", 6881],
+        ],
+    })
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object,
+        method: str,
+        params: list[object],
+        *,
+        authenticate: bool = True,
+    ) -> object:
+        calls.append({"method": method, "params": params, "authenticate": authenticate})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    original_payload = item.source.payload["torrent"]
+    original = parse_torrent(original_payload, [1])
+    replies = await client.submit_many([item], trackers=())
+
+    assert replies[0].accepted
+    root, cleaned_payload = decoded_torrent_call(calls)
+    assert root[b"announce"] == b"https://tracker.example/announce"
+    assert root[b"announce-list"] == [[b"udp://tracker.example:6969/announce"]]
+    assert root[b"nodes"] == [[b"dht.example", 6881]]
+    assert "127.0.0.1" not in repr(calls)
+    assert "localhost" not in repr(calls)
+    assert "ftp://" not in repr(calls)
+    cleaned = parse_torrent(cleaned_payload, [1])
+    assert cleaned.info_hash == original.info_hash
+    assert cleaned.resource_key == original.resource_key
+    assert cleaned.files == original.files
+    assert cleaned.selected_file_indexes == original.selected_file_indexes
+    assert cleaned.selected_size == original.selected_size
+
+
+async def test_global_trackers_are_filtered_deduped_and_never_attached_to_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = make_client(tmp_path)
+    submissions = [
+        submission("http", "0000000000000001"),
+        submission("magnet", "0000000000000002"),
+        submission("torrent", "0000000000000003"),
+    ]
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object,
+        method: str,
+        params: list[object],
+        *,
+        authenticate: bool = True,
+    ) -> object:
+        calls.append({"method": method, "params": params})
+        return [[item.gid] for item in submissions]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    trackers = (
+        "https://tracker.example/announce",
+        "http://tracker.example/announce",
+        "udp://tracker.example:6969/announce",
+        "https://tracker.example/announce",
+        "https://tracker.example/announce,http://127.0.0.1/announce",
+        "http://tracker.example:0/announce",
+        "http://example..com/announce",
+        "http:///announce",
+        "http://127.0.0.1/announce",
+        "udp://localhost:6969",
+        "ftp://tracker.example:21/announce",
+        "udp://tracker.example",
+        "udp://tracker.example:bad",
+        "udp://tracker.example:0",
+        "udp://tracker.example:65536",
+        "https://user@tracker.example/announce",
+        "udp://user@tracker.example:6969",
+        "udp://tracker.example:6969#fragment",
+    )
+    replies = await client.submit_many(submissions, trackers=trackers)
+
+    assert all(reply.accepted for reply in replies)
+    nested = calls[0]["params"][0]
+    assert "bt-tracker" not in nested[0]["params"][1]
+    expected = (
+        "https://tracker.example/announce,"
+        "http://tracker.example/announce,"
+        "udp://tracker.example:6969/announce"
+    )
+    assert nested[1]["params"][1]["bt-tracker"] == expected
+    assert nested[2]["params"][2]["bt-tracker"] == expected
+    for dangerous in (
+        "127.0.0.1",
+        "localhost",
+        "ftp://",
+        "http:///",
+        ":bad",
+        ":0",
+        ":65536",
+        "user@",
+        "example..com",
+        "fragment",
+    ):
+        assert dangerous not in repr(calls)
+
+
+async def test_torrent_peers_dedupe_in_order_and_drop_malformed_or_resolved_private_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = "https://one.example/announce"
+    second = "udp://two.example:6969/announce"
+    third = "https://three.example/announce"
+    item = torrent_submission({
+        "info": {"length": 3, "name": "file"},
+        "announce": first,
+        "announce-list": [
+            "not-a-tier",
+            [first, second, first, "http://private-tracker.example/announce", b"\xff"],
+            [second, third],
+            [1],
+        ],
+        "nodes": [
+            ["dht.example", 6881],
+            ["dht.example", 6881],
+            ["1.1.1.1", 6882],
+            ["2606:4700:4700::1111", 6883],
+            ["private-dht.example", 6881],
+            ["127.0.0.1", 6881],
+            ["::1", 6881],
+            ["localhost", 6881],
+            ["sub.localhost", 6881],
+            ["dht.example:6881", 6881],
+            ["dht.example/path", 6881],
+            [b"\xff", 6881],
+            ["dht.example", 0],
+            ["dht.example", 65536],
+            ["dht.example", "6881"],
+            ["dht.example"],
+            ["dht.example", 6881, "extra"],
+            [1, 6881],
+            "not-a-node",
+        ],
+    })
+
+    def resolve(host: str, port: int, *, family: int, type: int) -> list[tuple[object, ...]]:
+        address = "10.0.0.1" if host.startswith("private-") else "8.8.8.8"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object,
+        method: str,
+        params: list[object],
+        *,
+        authenticate: bool = True,
+    ) -> object:
+        calls.append({"method": method, "params": params})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    await client.submit_many([item], trackers=())
+
+    root, _ = decoded_torrent_call(calls)
+    assert root[b"announce"] == first.encode()
+    tiers = root[b"announce-list"]
+    flattened = [item.decode() for tier in tiers for item in tier]
+    assert flattened == [second, third]
+    assert root[b"nodes"] == [
+        [b"dht.example", 6881],
+        [b"1.1.1.1", 6882],
+        [b"2606:4700:4700::1111", 6883],
+    ]
+    for dangerous in (
+        "private-tracker",
+        "private-dht",
+        "127.0.0.1",
+        "localhost",
+        "dht.example:6881",
+        "dht.example/path",
+        "65536",
+    ):
+        assert dangerous not in repr(calls)
+
+
+@pytest.mark.parametrize(
+    "peers",
+    [
+        {
+            "announce": "http://localhost/announce",
+            "announce-list": [["ftp://tracker.example:21/announce"]],
+            "nodes": [["127.0.0.1", 6881]],
+        },
+        {"announce": 1, "announce-list": "not-a-list", "nodes": "not-a-list"},
+    ],
+)
+async def test_torrent_submission_omits_unsafe_or_malformed_peer_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, peers: dict[str, object]
+) -> None:
+    item = torrent_submission({"info": {"length": 3, "name": "file"}, **peers})
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object,
+        method: str,
+        params: list[object],
+        *,
+        authenticate: bool = True,
+    ) -> object:
+        calls.append({"method": method, "params": params})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    await client.submit_many([item], trackers=())
+
+    root, _ = decoded_torrent_call(calls)
+    assert b"announce" not in root
+    assert b"announce-list" not in root
+    assert b"nodes" not in root
+
+
+@pytest.mark.parametrize("kind", ["magnet", "torrent", "dht-node", "os-error"])
+async def test_resolution_failure_aborts_before_any_rpc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    def resolve(host: str, port: int, *, family: int, type: int) -> list[tuple[object, ...]]:
+        if host == "os-failure.example":
+            raise OSError("offline")
+        if host == "dns-failure.example":
+            raise socket.gaierror("offline")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    if kind in {"magnet", "os-error"}:
+        item = submission("magnet", "0000000000000001")
+    elif kind == "torrent":
+        item = torrent_submission({
+            "info": {"length": 3, "name": "file"},
+            "announce": "https://tracker.example/announce",
+            "announce-list": [["udp://dns-failure.example:6969/announce"]],
+        })
+    else:
+        item = torrent_submission({
+            "info": {"length": 3, "name": "file"},
+            "nodes": [["dns-failure.example", 6881]],
+        })
+    if kind == "magnet":
+        trackers = (
+            "https://tracker.example/announce",
+            "udp://dns-failure.example:6969/announce",
+        )
+    elif kind == "os-error":
+        trackers = ("udp://os-failure.example:6969/announce",)
+    else:
+        trackers = ()
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(*args: object, **kwargs: object) -> object:
+        calls.append({"args": args, "kwargs": kwargs})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    with pytest.raises(DomainError) as caught:
+        await client.submit_many([item], trackers=trackers)
+
+    assert caught.value.code is ErrorCode.UPSTREAM_FAILURE
+    assert "-failure.example" not in str(caught.value)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "key,inside_info",
+    [
+        ("url-list", False),
+        ("url-list", True),
+        ("httpseeds", False),
+        ("httpseeds", True),
+    ],
+)
+async def test_webseeds_are_rejected_before_any_rpc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    inside_info: bool,
+) -> None:
+    info: dict[str, object] = {"length": 3, "name": "file"}
+    root: dict[str, object] = {"info": info}
+    target = info if inside_info else root
+    target[key] = ["https://webseed.example/file"]
+    item = torrent_submission(root)
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(*args: object, **kwargs: object) -> object:
+        calls.append({"args": args, "kwargs": kwargs})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    with pytest.raises(DomainError) as caught:
+        await client.submit_many([item], trackers=())
+
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+    assert "webseed.example" not in str(caught.value)
+    assert calls == []
 
 
 async def test_submission_multicall_uses_internal_uris_pause_and_selection(

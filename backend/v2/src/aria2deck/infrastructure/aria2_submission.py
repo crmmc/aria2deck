@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import time
 import uuid
@@ -19,6 +20,8 @@ from ..application.downloads.models import (
 from ..domain.downloads import submission_pause_options
 from ..domain.errors import DomainError, ErrorCode
 from ..domain.settings import SystemSettings
+from ..domain.torrents import rebuild_torrent_peer_payload, torrent_peer_candidates
+from .http import PublicResolver, require_public_address, validate_public_url
 from .security import CredentialManager
 
 
@@ -33,6 +36,118 @@ class _RpcRejected(Exception):
     def __init__(self, code: int) -> None:
         super().__init__(code)
         self.code = code
+
+
+async def _require_public_host(host: str, port: int, resolver: PublicResolver) -> None:
+    normalized = host.rstrip(".").lower()
+    if (
+        not host
+        or not normalized
+        or any(not label for label in normalized.split("."))
+        or host != host.strip()
+        or any(ord(character) < 33 or ord(character) == 127 for character in host)
+        or any(character in host for character in "\\/?#@[]")
+        or normalized == "localhost"
+        or normalized.endswith(".localhost")
+    ):
+        raise DomainError(ErrorCode.PERMISSION_DENIED, "目标主机无效")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if ":" in host:
+            raise DomainError(ErrorCode.PERMISSION_DENIED, "目标主机无效") from None
+        try:
+            await resolver.resolve(host, port)
+        except DomainError:
+            raise
+        except (TimeoutError, OSError):
+            raise DomainError(ErrorCode.UPSTREAM_FAILURE, "目标域名无法解析") from None
+    else:
+        require_public_address(host)
+
+
+async def _valid_tracker(tracker: str, resolver: PublicResolver) -> bool:
+    try:
+        # bt-tracker 使用逗号分隔多个端点；候选项含逗号时必须拒绝，不能校验一部分却转发整串。
+        if "," in tracker:
+            return False
+        parsed = urlsplit(tracker)
+        host = parsed.hostname
+        if parsed.scheme in {"http", "https"}:
+            if host is None:
+                return False
+            validate_public_url(tracker)
+            port = parsed.port if parsed.port is not None else (
+                443 if parsed.scheme == "https" else 80
+            )
+        elif parsed.scheme == "udp":
+            udp_port = parsed.port
+            if (
+                not host
+                or udp_port is None
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment
+            ):
+                return False
+            port = udp_port
+        else:
+            return False
+        if not 1 <= port <= 65535:
+            return False
+        await _require_public_host(host, port, resolver)
+    except ValueError:
+        return False
+    except DomainError as error:
+        if error.code is ErrorCode.PERMISSION_DENIED:
+            return False
+        raise
+    return True
+
+
+async def _filter_trackers(
+    trackers: tuple[str, ...], resolver: PublicResolver
+) -> tuple[str, ...]:
+    valid: list[str] = []
+    seen: set[str] = set()
+    for tracker in trackers:
+        if tracker in seen:
+            continue
+        seen.add(tracker)
+        if await _valid_tracker(tracker, resolver):
+            valid.append(tracker)
+    return tuple(valid)
+
+
+async def _filter_nodes(
+    nodes: tuple[tuple[str, int], ...], resolver: PublicResolver
+) -> tuple[tuple[str, int], ...]:
+    valid: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for host, port in nodes:
+        node = (host, port)
+        if node in seen:
+            continue
+        seen.add(node)
+        if not 1 <= port <= 65535:
+            continue
+        try:
+            await _require_public_host(host, port, resolver)
+        except DomainError as error:
+            if error.code is ErrorCode.PERMISSION_DENIED:
+                continue
+            raise
+        valid.append(node)
+    return tuple(valid)
+
+
+async def _sanitize_torrent(payload: str, resolver: PublicResolver) -> str:
+    trackers, nodes = torrent_peer_candidates(payload)
+    valid_trackers = await _filter_trackers(trackers, resolver)
+    valid_nodes = await _filter_nodes(nodes, resolver)
+    return rebuild_torrent_peer_payload(
+        payload, trackers=valid_trackers, nodes=valid_nodes
+    )
 
 
 class Aria2SubmissionClient:
@@ -165,7 +280,31 @@ class Aria2SubmissionClient:
         if not submissions:
             return []
         settings = self.settings()
-        calls = [self._call_spec(submission, trackers) for submission in submissions]
+        resolver = PublicResolver()
+        try:
+            has_bittorrent = any(
+                submission.source.kind in {"magnet", "torrent"}
+                for submission in submissions
+            )
+            valid_trackers = (
+                await _filter_trackers(trackers, resolver) if has_bittorrent else ()
+            )
+            calls: list[dict[str, object]] = []
+            for submission in submissions:
+                if submission.source.kind == "torrent":
+                    torrent = submission.source.payload.get("torrent")
+                    if isinstance(torrent, str):
+                        cleaned = await _sanitize_torrent(torrent, resolver)
+                        submission = dataclasses_replace(
+                            submission,
+                            source=dataclasses_replace(
+                                submission.source,
+                                payload={**submission.source.payload, "torrent": cleaned},
+                            ),
+                        )
+                calls.append(self._call_spec(submission, valid_trackers))
+        finally:
+            await resolver.close()
         try:
             result = await self._call(settings, "system.multicall", [calls], authenticate=False)
         except _RpcRejected:

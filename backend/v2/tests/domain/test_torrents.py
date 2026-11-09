@@ -5,7 +5,7 @@ import base64
 import pytest
 
 from aria2deck.domain.errors import DomainError
-from aria2deck.domain.torrents import _encode, parse_torrent
+from aria2deck.domain.torrents import _encode, _Parser, parse_torrent
 from tests.download_fakes import bencode, make_torrent
 
 
@@ -34,6 +34,9 @@ def test_multi_file_preview_selection_and_identity() -> None:
         base64.b64encode(bencode({"info": {"name": "x"}}) + b"trailing").decode(),
         base64.b64encode(bencode({"name": "missing-info"})).decode(),
         make_torrent(webseed=True),
+        base64.b64encode(
+            bencode({"info": {"length": 1, "name": "x"}, "httpseeds": ["https://example.com"]})
+        ).decode(),
         make_torrent([("a", -1)]),
         make_torrent([("a", 1)], name="bad/name"),
         make_torrent([("a", 1), ("../b", 2)]),
@@ -98,6 +101,7 @@ def test_excessive_nesting_is_rejected() -> None:
         {"files": [{"length": 1, "path": [".."]}], "name": "bad"},
         {"files": [{"length": "1", "path": ["a"]}], "name": "bad"},
         {"length": 1, "name": "x", "url-list": ["https://example.com"]},
+        {"length": 1, "name": "x", "httpseeds": ["https://example.com"]},
     ],
 )
 def test_invalid_info_shapes_are_rejected(info: dict[str, object]) -> None:
@@ -112,23 +116,30 @@ def test_decoded_torrent_size_limit_is_enforced_before_parsing() -> None:
         parse_torrent(payload)
 
 
-def test_torrent_shell_removes_peer_endpoints_without_changing_info_identity() -> None:
+def test_torrent_shell_preserves_peer_candidates_without_changing_info_identity() -> None:
     info = {"length": 3, "name": "file"}
     original = bencode({
         "info": info,
-        "announce": "http://127.0.0.1/announce",
-        "announce-list": [["http://localhost/announce"]],
-        "nodes": [["127.0.0.1", 6881]],
+        "announce": "https://tracker.example/announce",
+        "announce-list": [["udp://tracker.example:6969/announce"]],
+        "nodes": [["dht.example", 6881]],
     })
-    metadata = parse_torrent(base64.b64encode(original).decode())
-    sanitized = base64.b64decode(metadata.payload_base64)
+    metadata = parse_torrent(base64.b64encode(original).decode(), [1])
+    preserved = base64.b64decode(metadata.payload_base64)
+    parser = _Parser(preserved)
+    root = parser.parse()
+    assert root[b"announce"] == b"https://tracker.example/announce"
+    assert root[b"announce-list"] == [[b"udp://tracker.example:6969/announce"]]
+    assert root[b"nodes"] == [[b"dht.example", 6881]]
     assert metadata.info_hash == parse_torrent(base64.b64encode(bencode({"info": info})).decode()).info_hash
-    assert b"announce" not in sanitized
-    assert b"nodes" not in sanitized
-    assert b"127.0.0.1" not in sanitized
-    reparsed = parse_torrent(metadata.payload_base64)
+    assert parser.info_span is not None
+    start, end = parser.info_span
+    assert preserved[start:end] == bencode(info)
+    reparsed = parse_torrent(metadata.payload_base64, [1])
     assert reparsed.resource_key == metadata.resource_key
     assert reparsed.files == metadata.files
+    assert reparsed.selected_file_indexes == (1,)
+    assert reparsed.selected_size == metadata.selected_size
 
 
 def test_torrent_shell_encoder_retains_safe_metadata_types() -> None:
