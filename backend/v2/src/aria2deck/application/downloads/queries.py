@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
 from typing import Protocol
@@ -81,7 +81,7 @@ class DownloadQueryService:
         self,
         *,
         user_id: int,
-        status: SubscriptionStatus | None,
+        status: SubscriptionStatus | Collection[SubscriptionStatus] | None,
         search: str,
         page: int,
         page_size: int,
@@ -93,8 +93,15 @@ class DownloadQueryService:
                 user_id=user_id, sort=sort, order=order
             )
         tasks = [self.projector.project(record) for record in records]
-        if status is not None:
-            tasks = [task for task in tasks if task.status is status]
+        statuses: Collection[SubscriptionStatus] | None
+        if status is None:
+            statuses = None
+        elif isinstance(status, SubscriptionStatus):
+            statuses = (status,)
+        else:
+            statuses = status
+        if statuses is not None:
+            tasks = [task for task in tasks if task.status in statuses]
         normalized_search = search.strip().casefold()
         if normalized_search:
             tasks = [

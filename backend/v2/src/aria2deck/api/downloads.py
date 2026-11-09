@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, Path, Query
 from fastapi.responses import StreamingResponse
@@ -101,7 +101,7 @@ async def task_stats(
 async def list_tasks(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
-    status: SubscriptionStatus | None = None,
+    status: Annotated[list[SubscriptionStatus] | None, Query()] = None,
     q: str = Query(default="", max_length=200),
     sort: Literal["created_at", "name", "size"] = "created_at",
     order: Literal["asc", "desc"] = "desc",

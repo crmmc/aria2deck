@@ -195,6 +195,89 @@ def test_task_list_is_user_scoped_paginated_searchable_and_filterable(
     assert client.get("/api/v2/tasks").text.find("Other user secret") == -1
 
 
+def test_task_list_combines_repeated_status_filters_with_or(
+    client: TestClient, settings: Settings
+) -> None:
+    admin = authenticated_admin(client)
+    user_id = int(admin["id"])
+    other_id = int(create_user(client)["id"])
+    for name, status in (
+        ("Failed", SubscriptionStatus.FAILED),
+        ("Cancelled", SubscriptionStatus.CANCELLED),
+        ("Expired", SubscriptionStatus.EXPIRED),
+    ):
+        seed_task(
+            settings,
+            user_id=user_id,
+            name=name,
+            subscription_status=status,
+            attempt_status=AttemptStatus.FAILED,
+        )
+    seed_task(
+        settings,
+        user_id=user_id,
+        name="Completed",
+        subscription_status=SubscriptionStatus.COMPLETED,
+        attempt_status=AttemptStatus.COMPLETED,
+    )
+    seed_task(
+        settings,
+        user_id=other_id,
+        name="Other failed",
+        subscription_status=SubscriptionStatus.FAILED,
+        attempt_status=AttemptStatus.FAILED,
+    )
+
+    response = client.get(
+        "/api/v2/tasks",
+        params=(("status", "failed"), ("status", "cancelled"), ("status", "expired")),
+    )
+    assert response.status_code == 200
+    assert {item["name"] for item in response.json()["items"]} == {
+        "Failed",
+        "Cancelled",
+        "Expired",
+    }
+    assert response.json()["total"] == 3
+
+    for name, status in (
+        ("Queued", SubscriptionStatus.QUEUED),
+        ("Active", SubscriptionStatus.ACTIVE),
+        ("Waiting", SubscriptionStatus.WAITING),
+        ("Paused", SubscriptionStatus.PAUSED),
+    ):
+        seed_task(
+            settings,
+            user_id=user_id,
+            name=name,
+            subscription_status=status,
+            attempt_status=AttemptStatus.ACTIVE,
+        )
+    current = client.get(
+        "/api/v2/tasks",
+        params=[
+            ("status", "queued"),
+            ("status", "active"),
+            ("status", "waiting"),
+            ("status", "paused"),
+        ],
+    )
+    assert current.status_code == 200
+    assert {item["name"] for item in current.json()["items"]} == {
+        "Queued",
+        "Active",
+        "Waiting",
+        "Paused",
+    }
+    assert client.get("/api/v2/tasks", params={"status": "invalid"}).status_code == 422
+
+    parameters = client.app.openapi()["paths"]["/api/v2/tasks"]["get"]["parameters"]
+    status_parameter = next(item for item in parameters if item["name"] == "status")
+    status_array = status_parameter["schema"]["anyOf"][0]
+    assert status_array["type"] == "array"
+    assert status_array["items"]["$ref"] == "#/components/schemas/SubscriptionStatus"
+
+
 def test_task_list_sorts_by_whitelisted_keys_in_both_directions(
     client: TestClient, settings: Settings
 ) -> None:
@@ -522,7 +605,9 @@ def test_download_read_openapi_matches_response_and_query_contract(app: FastAPI)
     assert parameters["page"]["schema"]["minimum"] == 1
     assert parameters["page_size"]["schema"]["maximum"] == 100
     assert parameters["q"]["schema"]["maxLength"] == 200
-    status_ref = parameters["status"]["schema"]["anyOf"][0]["$ref"]
+    status_array = parameters["status"]["schema"]["anyOf"][0]
+    assert status_array["type"] == "array"
+    status_ref = status_array["items"]["$ref"]
     status_schema = schema["components"]["schemas"][status_ref.rsplit("/", 1)[-1]]
     assert set(status_schema["enum"]) == {
         "queued",
