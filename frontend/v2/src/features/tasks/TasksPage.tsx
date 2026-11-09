@@ -66,18 +66,20 @@ export function TasksPage() {
   const tasksRef = useRef<TaskResponse[]>([]);
   tasksRef.current = tasks;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<boolean> => {
     const seq = ++requestSeq.current;
     setLoading(true);
     setError(null);
     try {
       const response = await fetchTasks(filter, page, PAGE_SIZE, sort, search);
-      if (seq !== requestSeq.current) return; // 丢弃过期响应。
+      if (seq !== requestSeq.current) return false; // 丢弃过期响应。
       setTasks(response.items);
       setTotal(response.total);
+      return true;
     } catch (caught) {
-      if (seq !== requestSeq.current) return;
+      if (seq !== requestSeq.current) return false;
       setError(errorMessage(caught, "加载失败"));
+      return false;
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
@@ -119,7 +121,7 @@ export function TasksPage() {
 
   const { connected } = useTaskWebSocket(handleFrame, {
     enabled: user !== null,
-    pollFallback: () => void load(),
+    pollFallback: load,
     onUnauthorized: () => {
       void logout();
     },

@@ -9,6 +9,33 @@ import type { TaskResponse, UserResponse } from "@/shared/api/types";
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
+type PageSocket = {
+  onopen: (() => void) | null;
+  onmessage: ((event: { data: string }) => void) | null;
+  onclose: ((event: { code: number }) => void) | null;
+  onerror: (() => void) | null;
+  readyState: number;
+  send: jest.Mock;
+  close: jest.Mock;
+};
+
+let pageSockets: PageSocket[] = [];
+
+class ControlledWebSocket {
+  static OPEN = 1;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  readyState = 0;
+  send = jest.fn();
+  close = jest.fn();
+
+  constructor() {
+    pageSockets.push(this);
+  }
+}
+
 const ME: UserResponse = {
   id: 1,
   username: "admin",
@@ -116,6 +143,12 @@ describe("TasksPage", () => {
   beforeEach(() => {
     resetNotificationDegradeFlag();
     window.localStorage.clear();
+    pageSockets = [];
+    (global as Record<string, unknown>).WebSocket = ControlledWebSocket;
+  });
+
+  afterEach(() => {
+    delete (global as Record<string, unknown>).WebSocket;
   });
 
   it("shows empty state when no tasks", async () => {
@@ -487,13 +520,19 @@ describe("TasksPage", () => {
     await screen.findByTestId("task-row-1");
     fireEvent.click(screen.getAllByLabelText("选择 task-1.bin")[0]);
     fireEvent.click(screen.getByRole("button", { name: /批量取消/ }));
-    mockFetch.mockResolvedValueOnce(
-      json(200, {
-        items: [{ accepted: false, error: { code: "invalid_state", message: "已终态" } }],
-        accepted_count: 0,
-        rejected_count: 1,
-      }),
-    );
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/v2/auth/me") return json(200, ME);
+      if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
+      if (url === "/api/v2/tasks/cancel") {
+        return json(200, {
+          items: [{ accepted: false, error: { code: "invalid_state", message: "已终态" } }],
+          accepted_count: 0,
+          rejected_count: 1,
+        });
+      }
+      return json(200, list([task(1), task(2)]));
+    });
     fireEvent.click(await screen.findByRole("button", { name: "确认取消" }));
     expect(await screen.findByText("已取消 0 个任务，1 个取消失败")).toBeInTheDocument();
 
@@ -942,6 +981,102 @@ describe("TasksPage", () => {
   });
 
   // ============ T15 完成/失败 Toast + 桌面通知 ============
+
+  it("WS 4408 resynchronizes both tasks to their latest REST states", async () => {
+    setup([
+      task(1, "active", { status_label: "下载中" }),
+      task(2, "waiting", { status_label: "等待中" }),
+    ]);
+    await screen.findByTestId("task-row-1");
+    await screen.findByTestId("task-row-2");
+    await waitFor(() => expect(pageSockets).toHaveLength(1));
+    const socket = pageSockets[0];
+    act(() => {
+      socket.readyState = ControlledWebSocket.OPEN;
+      socket.onopen?.();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/v2/auth/me") return json(200, ME);
+      if (url === "/api/v2/tasks/stats") return json(200, stats());
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
+      return json(200, list([
+        task(1, "completed", { status_label: "已完成", updated_at_ms: 10 }),
+        task(2, "failed", { status_label: "异常", updated_at_ms: 10 }),
+      ]));
+    });
+    act(() => socket.onclose?.({ code: 4408 }));
+
+    const firstRow = await screen.findByTestId("task-row-1");
+    expect(await within(firstRow).findByText("已完成")).toBeInTheDocument();
+    const secondRow = await screen.findByTestId("task-row-2");
+    expect(await within(secondRow).findByText("异常")).toBeInTheDocument();
+  });
+
+  it("WS reconnect keeps polling when the real load catches a REST failure", async () => {
+    jest.useFakeTimers();
+    try {
+      setup([task(1, "active")]);
+      expect(await screen.findByTestId("task-row-1")).toBeInTheDocument();
+      await waitFor(() => expect(pageSockets).toHaveLength(1));
+
+      const firstSocket = pageSockets[0];
+      act(() => {
+        firstSocket.readyState = ControlledWebSocket.OPEN;
+        firstSocket.onopen?.();
+      });
+      expect(await screen.findByTestId("task-row-1")).toBeInTheDocument();
+
+      act(() => firstSocket.onclose?.({ code: 4408 }));
+      expect(await screen.findByTestId("task-row-1")).toBeInTheDocument();
+      act(() => jest.advanceTimersByTime(3000));
+      expect(pageSockets).toHaveLength(2);
+
+      let failNextList = true;
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url === "/api/v2/auth/me") return json(200, ME);
+        if (url === "/api/v2/tasks/stats") return json(200, stats());
+        if (url === "/api/v2/public/site-info") return json(200, siteInfo());
+        if (failNextList) {
+          failNextList = false;
+          return json(502, { error: { code: "upstream", message: "重读失败" } });
+        }
+        return json(200, list([
+          task(1, "completed", { status_label: "已完成", updated_at_ms: 10 }),
+        ]));
+      });
+
+      const reconnectedSocket = pageSockets[1];
+      act(() => {
+        reconnectedSocket.readyState = ControlledWebSocket.OPEN;
+        reconnectedSocket.onopen?.();
+      });
+      expect(await screen.findByText("重读失败")).toBeInTheDocument();
+
+      const listCalls = () =>
+        mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v2/tasks?")).length;
+      const failedCount = listCalls();
+      await act(async () => {
+        jest.advanceTimersByTime(5000);
+        await Promise.resolve();
+      });
+      expect(listCalls()).toBe(failedCount + 1);
+
+      const row = await screen.findByTestId("task-row-1");
+      expect(await within(row).findByText("已完成")).toBeInTheDocument();
+      const recoveredCount = listCalls();
+      await act(async () => {
+        jest.advanceTimersByTime(10000);
+        await Promise.resolve();
+      });
+      expect(listCalls()).toBe(recoveredCount);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 
   it("WS completion transition toasts and sends a desktop notification", async () => {
     const constructed: Array<{ title: string; body: string; tag: string }> = [];

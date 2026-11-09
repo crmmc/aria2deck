@@ -20,6 +20,7 @@ REVALIDATE_INTERVAL_SECONDS = 30.0
 WS_UNAUTHENTICATED = 4401
 WS_FORBIDDEN_ORIGIN = 4403
 WS_NOT_FOUND = 4404
+WS_RESYNC_REQUIRED = 4408
 WS_TOO_MANY_CONNECTIONS = 4429
 WS_INTERNAL_ERROR = 1011
 WS_GOING_AWAY = 1001
@@ -268,6 +269,8 @@ class WebSocketTaskService:
     async def _send_loop(self, socket: WebSocketLike, sink: BroadcastSink) -> int:
         while True:
             message = await sink.next()
+            if sink.dirty:
+                return WS_RESYNC_REQUIRED
             if message is None:
                 return WS_GOING_AWAY
             await socket.send_text(_dump(message))

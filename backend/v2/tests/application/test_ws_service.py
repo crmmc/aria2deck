@@ -165,6 +165,26 @@ async def test_heartbeat_bad_messages_and_idle_timeout() -> None:
     assert socket.closed is not None
 
 
+async def test_queue_overflow_closes_4408_without_partial_update() -> None:
+    service, bus, _ = _service()
+    socket = FakeSocket()
+    handle = asyncio.create_task(_handle(service, socket))
+    for _ in range(100):
+        if bus.subscriber_count(PRINCIPAL_USER_ID) == 1:
+            break
+        await asyncio.sleep(0.01)
+    sink = next(iter(bus._subscribers[PRINCIPAL_USER_ID]))
+    sink.capacity = 1
+
+    bus.publish([PRINCIPAL_USER_ID], BroadcastMessage("task_update", 1, "active", {"id": 1}))
+    bus.publish([PRINCIPAL_USER_ID], BroadcastMessage("task_update", 2, "completed", {"id": 2}))
+
+    await asyncio.wait_for(handle, timeout=1)
+    assert socket.closed == 4408
+    assert [item for item in socket.sent if item.startswith("{")] == []
+    assert bus.subscriber_count(PRINCIPAL_USER_ID) == 0
+
+
 async def test_send_failure_closes_1011() -> None:
     service, bus, _ = _service()
     socket = FakeSocket()
