@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import Callable, Mapping
@@ -256,6 +257,7 @@ class DownloadCommandService:
         rate_limiter: RateLimiter,
         clock_ms: Callable[[], int],
         planned_gid: Callable[[int], str],
+        submission_lock: asyncio.Lock | None = None,
     ) -> None:
         self.uow_factory = uow_factory
         self.repository_factory = repository_factory
@@ -266,6 +268,7 @@ class DownloadCommandService:
         self.rate_limiter = rate_limiter
         self.clock_ms = clock_ms
         self.planned_gid = planned_gid
+        self.submission_lock = submission_lock or asyncio.Lock()
 
     async def _register(self, *, user_id: int, prepared: PreparedDownload) -> RegistrationResult:
         now_ms = self.clock_ms()
@@ -398,6 +401,10 @@ class DownloadCommandService:
             return RegistrationResult(task_id, attempt_id, gid, decision.outcome, True)
 
     async def _submit(self, pending: dict[int, DownloadWriteResult]) -> None:
+        async with self.submission_lock:
+            await self._submit_locked(pending)
+
+    async def _submit_locked(self, pending: dict[int, DownloadWriteResult]) -> None:
         if not pending:
             return
         submissions: list[Submission] = []
@@ -458,36 +465,37 @@ class DownloadCommandService:
     ) -> list[DownloadWriteResult]:
         if not 1 <= len(items) <= 30:
             raise DomainError(ErrorCode.INVALID_INPUT, "每批必须包含 1 到 30 个下载")
-        results: list[DownloadWriteResult] = []
-        pending: dict[int, DownloadWriteResult] = {}
-        seen: set[str] = set()
-        for item in items:
-            try:
-                prepared = prepare_uri_download(item.uri, item.options)
-                if prepared.resource_key not in seen:
-                    self.rate_limiter.check_create_task(user_id=user_id)
-                    seen.add(prepared.resource_key)
-                registered = await self._register(user_id=user_id, prepared=prepared)
-                result = DownloadWriteResult(
-                    accepted=True,
-                    task_id=registered.task_id,
-                    attempt_id=registered.attempt_id,
-                    outcome=registered.outcome,
-                )
-                if registered.should_submit:
-                    pending[registered.attempt_id] = result
-            except DomainError as error:
-                result = DownloadWriteResult(
-                    accepted=False, error_code=error.code.value, message=str(error)
-                )
-            results.append(result)
-        await self._submit(pending)
-        return [
-            pending.get(result.attempt_id, result)
-            if result.attempt_id is not None and result.outcome is RegistrationOutcome.CREATED
-            else result
-            for result in results
-        ]
+        async with self.submission_lock:
+            results: list[DownloadWriteResult] = []
+            pending: dict[int, DownloadWriteResult] = {}
+            seen: set[str] = set()
+            for item in items:
+                try:
+                    prepared = prepare_uri_download(item.uri, item.options)
+                    if prepared.resource_key not in seen:
+                        self.rate_limiter.check_create_task(user_id=user_id)
+                        seen.add(prepared.resource_key)
+                    registered = await self._register(user_id=user_id, prepared=prepared)
+                    result = DownloadWriteResult(
+                        accepted=True,
+                        task_id=registered.task_id,
+                        attempt_id=registered.attempt_id,
+                        outcome=registered.outcome,
+                    )
+                    if registered.should_submit:
+                        pending[registered.attempt_id] = result
+                except DomainError as error:
+                    result = DownloadWriteResult(
+                        accepted=False, error_code=error.code.value, message=str(error)
+                    )
+                results.append(result)
+            await self._submit_locked(pending)
+            return [
+                pending.get(result.attempt_id, result)
+                if result.attempt_id is not None and result.outcome is RegistrationOutcome.CREATED
+                else result
+                for result in results
+            ]
 
     def preview_torrent(self, *, user_id: int, payload_base64: str) -> TorrentMetadata:
         self.rate_limiter.check_create_torrent(user_id=user_id)
@@ -502,20 +510,21 @@ class DownloadCommandService:
     ) -> DownloadWriteResult:
         self.rate_limiter.check_create_torrent(user_id=user_id)
         metadata = parse_torrent(payload_base64, selected_file_indexes)
-        registered = await self._register(
-            user_id=user_id, prepared=prepare_torrent_download(metadata)
-        )
-        result = DownloadWriteResult(
-            accepted=True,
-            task_id=registered.task_id,
-            attempt_id=registered.attempt_id,
-            outcome=registered.outcome,
-        )
-        if registered.should_submit:
-            pending = {registered.attempt_id: result}
-            await self._submit(pending)
-            return pending[registered.attempt_id]
-        return result
+        async with self.submission_lock:
+            registered = await self._register(
+                user_id=user_id, prepared=prepare_torrent_download(metadata)
+            )
+            result = DownloadWriteResult(
+                accepted=True,
+                task_id=registered.task_id,
+                attempt_id=registered.attempt_id,
+                outcome=registered.outcome,
+            )
+            if registered.should_submit:
+                pending = {registered.attempt_id: result}
+                await self._submit_locked(pending)
+                return pending[registered.attempt_id]
+            return result
 
     async def retry(self, *, user_id: int, task_id: int) -> DownloadWriteResult:
         self.rate_limiter.check_create_task(user_id=user_id)
@@ -525,56 +534,58 @@ class DownloadCommandService:
             require_retryable(effective_task_status(record.subscription_status, record.attempt_status))
             source = await repository.get_source_for_attempt(record.attempt_id)
         prepared = replace(_from_source(source), total_bytes=record.total_bytes)
-        registered = await self._register(user_id=user_id, prepared=prepared)
-        result = DownloadWriteResult(
-            accepted=True,
-            task_id=registered.task_id,
-            attempt_id=registered.attempt_id,
-            outcome=registered.outcome,
-        )
-        if registered.should_submit:
-            pending = {registered.attempt_id: result}
-            await self._submit(pending)
-            return pending[registered.attempt_id]
-        return result
+        async with self.submission_lock:
+            registered = await self._register(user_id=user_id, prepared=prepared)
+            result = DownloadWriteResult(
+                accepted=True,
+                task_id=registered.task_id,
+                attempt_id=registered.attempt_id,
+                outcome=registered.outcome,
+            )
+            if registered.should_submit:
+                pending = {registered.attempt_id: result}
+                await self._submit_locked(pending)
+                return pending[registered.attempt_id]
+            return result
 
     async def cancel(
         self, *, user_id: int, task_ids: list[int]
     ) -> list[DownloadWriteResult]:
         if not 1 <= len(task_ids) <= 1000:
             raise DomainError(ErrorCode.INVALID_INPUT, "每批必须包含 1 到 1000 个任务")
-        results: list[DownloadWriteResult] = []
-        for task_id in task_ids:
-            try:
-                now_ms = self.clock_ms()
-                async with self.uow_factory() as uow:
-                    cancellation = await self.repository_factory(uow).cancel_subscription(
-                        user_id=user_id, task_id=task_id, now_ms=now_ms
-                    )
-                stop_confirmed = True
-                if cancellation.stop_attempt:
-                    try:
-                        await self.backend.stop(gid=cancellation.gid)
-                    except DomainError:
-                        stop_confirmed = False
+        async with self.submission_lock:
+            results: list[DownloadWriteResult] = []
+            for task_id in task_ids:
+                try:
+                    now_ms = self.clock_ms()
                     async with self.uow_factory() as uow:
-                        repository = self.repository_factory(uow)
-                        if stop_confirmed:
-                            await repository.mark_stop_confirmed(cancellation.attempt_id)
-                        else:
-                            await repository.mark_stop_uncertain(cancellation.attempt_id)
-                results.append(
-                    DownloadWriteResult(
-                        accepted=True, task_id=task_id, stop_confirmed=stop_confirmed
+                        cancellation = await self.repository_factory(uow).cancel_subscription(
+                            user_id=user_id, task_id=task_id, now_ms=now_ms
+                        )
+                    stop_confirmed = True
+                    if cancellation.stop_attempt:
+                        try:
+                            await self.backend.stop(gid=cancellation.gid)
+                        except DomainError:
+                            stop_confirmed = False
+                        async with self.uow_factory() as uow:
+                            repository = self.repository_factory(uow)
+                            if stop_confirmed:
+                                await repository.mark_stop_confirmed(cancellation.attempt_id)
+                            else:
+                                await repository.mark_stop_uncertain(cancellation.attempt_id)
+                    results.append(
+                        DownloadWriteResult(
+                            accepted=True, task_id=task_id, stop_confirmed=stop_confirmed
+                        )
                     )
-                )
-            except DomainError as error:
-                results.append(
-                    DownloadWriteResult(
-                        accepted=False,
-                        task_id=task_id,
-                        error_code=error.code.value,
-                        message=str(error),
+                except DomainError as error:
+                    results.append(
+                        DownloadWriteResult(
+                            accepted=False,
+                            task_id=task_id,
+                            error_code=error.code.value,
+                            message=str(error),
+                        )
                     )
-                )
-        return results
+            return results

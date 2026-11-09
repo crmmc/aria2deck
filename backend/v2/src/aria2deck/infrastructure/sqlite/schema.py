@@ -167,6 +167,7 @@ download_attempts = Table(
         Integer,
         ForeignKey("content_objects.id", ondelete="SET NULL"),
     ),
+    Column("ingestion_started_at_ms", BigInteger),
     Column("submission_state", Text, nullable=False, default="planned"),
     Column("total_length", BigInteger),
     Column("completed_length", BigInteger, nullable=False, default=0),

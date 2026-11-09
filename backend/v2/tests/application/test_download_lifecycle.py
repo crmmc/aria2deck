@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -505,6 +506,7 @@ async def test_listener_reconnects_with_backoff_and_polling_worker_is_cancellabl
             await state.lifecycle.run_listener()
         assert delays == [1.5, 2.5]
 
+        state.backend.snapshots[GID] = observation(status="active")
         polling_delays: list[float] = []
 
         async def stop_polling(delay: float) -> None:
@@ -514,7 +516,10 @@ async def test_listener_reconnects_with_backoff_and_polling_worker_is_cancellabl
         state.lifecycle.sleep = stop_polling
         with pytest.raises(asyncio.CancelledError):
             await state.lifecycle.run_polling()
-        assert polling_delays == [2.0]
+        state.backend.snapshots.clear()
+        with pytest.raises(asyncio.CancelledError):
+            await state.lifecycle.run_polling()
+        assert polling_delays == [2.0, 2.0]
 
 
 async def test_restart_resumes_installed_completion_intent(tmp_path: Path) -> None:
@@ -771,6 +776,359 @@ async def test_notification_missing_failure_and_success_share_the_same_reconcile
         state.backend.snapshot_errors[GID] = DomainError(ErrorCode.RPC_UNAVAILABLE, "offline")
         await state.lifecycle._on_gid(GID)
         assert state.observations.get(GID) is None
+
+
+async def test_missing_gid_requires_grace_and_a_second_missing_snapshot(
+    tmp_path: Path,
+) -> None:
+    async with runtime(tmp_path) as state:
+        now = [100]
+        state.lifecycle.clock_ms = lambda: now[0]
+
+        assert await state.lifecycle.reconcile_live() is False
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED
+        assert quota.reserved_bytes == 3
+
+        now[0] += 9_999
+        assert await state.lifecycle.reconcile_live() is False
+        attempt, _, _ = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED
+
+        now[0] += 1
+        assert await state.lifecycle.reconcile_live() is False
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_code == "aria2_gid_missing"
+        assert task.subscription_status is SubscriptionStatus.FAILED
+        assert quota.reserved_bytes == 0
+
+
+async def test_missing_gid_query_errors_do_not_start_or_confirm_failure(
+    tmp_path: Path,
+) -> None:
+    async with runtime(tmp_path) as state:
+        now = [100]
+        state.lifecycle.clock_ms = lambda: now[0]
+        state.backend.snapshot_errors[GID] = DomainError(ErrorCode.RPC_UNAVAILABLE, "offline")
+
+        assert await state.lifecycle.reconcile_live() is False
+        now[0] += 60_000
+        state.backend.snapshot_errors.clear()
+        assert await state.lifecycle.reconcile_live() is False
+        attempt, _, _ = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED
+
+        state.backend.snapshot_errors[GID] = DomainError(ErrorCode.RPC_UNAVAILABLE, "offline")
+        now[0] += 10_000
+        assert await state.lifecycle.reconcile_live() is False
+        attempt, _, _ = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED
+
+
+async def test_ingestion_started_before_scan_and_missing_gid_recovers_after_restart(
+    tmp_path: Path,
+) -> None:
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        original_scan = state.store.scan
+
+        async def scan_failed(attempt_id: int) -> object:
+            raise OSError("scan offline")
+
+        state.store.scan = scan_failed  # type: ignore[method-assign]
+        with pytest.raises(OSError, match="scan offline"):
+            await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        attempt, _, _ = await read(state)
+        assert attempt.ingestion_started_at_ms == 100
+        assert attempt.completed_content_id is None
+
+        state.store.scan = original_scan  # type: ignore[method-assign]
+        await state.database.close()
+        state.database = SQLiteDatabase(tmp_path / "v2.db")
+        restarted = make_lifecycle(state)
+        now = [100]
+        restarted.clock_ms = lambda: now[0]
+        restarted.ingestion_timeout_ms = 10
+
+        assert await restarted.reconcile_live() is False
+        now[0] += 10_000
+        assert await restarted.reconcile_live() is False
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert attempt.ingestion_started_at_ms == 100
+        assert task.subscription_status is SubscriptionStatus.COMPLETED
+        assert quota.used_bytes == 3
+        assert quota.reserved_bytes == 0
+
+
+@pytest.mark.parametrize("stage", ["scan", "install", "finalize"])
+async def test_persistent_ingestion_failure_times_out_without_resetting_age(
+    tmp_path: Path, stage: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with runtime(tmp_path / stage) as state:
+        put_download(state)
+
+        async def failed(*args: object, **kwargs: object) -> object:
+            raise OSError(f"{stage} offline")
+
+        if stage == "scan":
+            monkeypatch.setattr(state.store, "scan", failed)
+        elif stage == "install":
+            monkeypatch.setattr(state.store, "install", failed)
+        else:
+            monkeypatch.setattr(DownloadRepository, "finalize_completion", failed)
+        now = [100]
+        state.lifecycle.clock_ms = lambda: now[0]
+        state.lifecycle.ingestion_timeout_ms = 10_000
+        with pytest.raises(OSError, match=f"{stage} offline"):
+            await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        first, _, _ = await read(state)
+
+        now[0] += 9_999
+        assert await state.lifecycle.recover_ingestions() is False
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED
+        assert attempt.ingestion_started_at_ms == first.ingestion_started_at_ms
+        assert quota.reserved_bytes == 3
+
+        now[0] += 1
+        assert await state.lifecycle.recover_ingestions() is False
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_code == "ingestion_timeout"
+        assert task.subscription_status is SubscriptionStatus.FAILED
+        assert quota.reserved_bytes == 0
+
+
+@pytest.mark.parametrize("late_status", ["active", "error"])
+async def test_ingestion_intent_wins_over_late_non_completion_snapshots(
+    tmp_path: Path, late_status: str
+) -> None:
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        original_scan = state.store.scan
+
+        async def scan_failed(attempt_id: int) -> object:
+            raise OSError("scan offline")
+
+        state.store.scan = scan_failed  # type: ignore[method-assign]
+        with pytest.raises(OSError, match="scan offline"):
+            await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        state.store.scan = original_scan  # type: ignore[method-assign]
+
+        await state.lifecycle.reconcile(observation(status=late_status, completed=3))
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert quota.used_bytes == 3
+
+
+async def test_ingestion_timeout_cleanup_failure_remains_retryable(tmp_path: Path) -> None:
+    async with runtime(tmp_path) as state:
+        put_download(state)
+
+        async def scan_failed(attempt_id: int) -> object:
+            raise OSError("scan offline")
+
+        state.store.scan = scan_failed  # type: ignore[method-assign]
+        with pytest.raises(OSError, match="scan offline"):
+            await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        now = [100]
+        state.lifecycle.clock_ms = lambda: now[0]
+        now[0] += 60_000
+        state.backend.remove_error = DomainError(ErrorCode.RPC_UNAVAILABLE, "offline")
+
+        assert await state.lifecycle.recover_ingestions() is False
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_code == "ingestion_timeout"
+        assert attempt.result_consumed_at_ms is None
+        assert quota.reserved_bytes == 0
+
+        state.backend.remove_error = None
+        assert await state.lifecycle.cleanup_terminal() is True
+        attempt, _, _ = await read(state)
+        assert attempt.result_consumed_at_ms == now[0]
+
+
+async def test_polling_recovers_pending_ingestion_before_sleeping(tmp_path: Path) -> None:
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        original_scan = state.store.scan
+
+        async def scan_failed(attempt_id: int) -> object:
+            raise OSError("scan offline")
+
+        state.store.scan = scan_failed  # type: ignore[method-assign]
+        with pytest.raises(OSError, match="scan offline"):
+            await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        state.store.scan = original_scan  # type: ignore[method-assign]
+
+        async def stop(delay: float) -> None:
+            raise asyncio.CancelledError
+
+        state.lifecycle.sleep = stop
+        with pytest.raises(asyncio.CancelledError):
+            await state.lifecycle.run_polling()
+        attempt, _, _ = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    ("kind", "pause_code"),
+    [
+        ("http", ADMISSION_PAUSED),
+        ("magnet", METADATA_ADMISSION_PAUSED),
+    ],
+)
+async def test_followed_by_handoff_completes_actual_payload(
+    tmp_path: Path, kind: str, pause_code: str
+) -> None:
+    async with runtime(tmp_path, kind=kind, total=None, pause_code=pause_code) as state:
+        state.backend.snapshots[PAYLOAD_GID] = observation(PAYLOAD_GID, "paused")
+        await state.lifecycle.reconcile(
+            observation(status="complete", total=0, followed_by=(PAYLOAD_GID,))
+        )
+        put_download(state)
+        await state.lifecycle.reconcile(observation(PAYLOAD_GID, "complete", completed=3))
+
+        attempt, task, quota = await read(state)
+        assert attempt.gid == PAYLOAD_GID
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert task.subscription_status is SubscriptionStatus.COMPLETED
+        assert quota.used_bytes == 3
+        async with SQLiteUnitOfWork(state.database) as uow:
+            content = await ContentRepository(uow.connection).get_object(
+                attempt.completed_content_id
+            )
+            assert content.digest == hashlib.sha256(b"abc").hexdigest()
+
+
+async def test_missing_gid_recheck_uses_a_valid_second_snapshot(tmp_path: Path) -> None:
+    async with runtime(tmp_path) as state:
+        now = [100]
+        state.lifecycle.clock_ms = lambda: now[0]
+        original = state.backend.snapshot
+        calls = 0
+
+        async def snapshots(*, gid: str) -> DownloadObservation | None:
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                state.backend.snapshots[GID] = observation(status="active")
+            return await original(gid=gid)
+
+        state.backend.snapshot = snapshots  # type: ignore[method-assign]
+        assert await state.lifecycle.reconcile_live() is False
+        now[0] += 10_000
+        assert await state.lifecycle.reconcile_live() is False
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.ACTIVE
+        assert quota.reserved_bytes == 3
+        assert calls == 3
+
+
+async def test_missing_gid_recheck_transport_error_is_not_terminal(tmp_path: Path) -> None:
+    async with runtime(tmp_path) as state:
+        now = [100]
+        state.lifecycle.clock_ms = lambda: now[0]
+        await state.lifecycle.reconcile_live()
+        calls = 0
+
+        async def snapshots(*, gid: str) -> DownloadObservation | None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise DomainError(ErrorCode.RPC_UNAVAILABLE, "offline")
+            return None
+
+        state.backend.snapshot = snapshots  # type: ignore[method-assign]
+        now[0] += 10_000
+        assert await state.lifecycle.reconcile_live() is False
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED
+        assert quota.reserved_bytes == 3
+        assert calls == 2
+
+
+async def test_missing_failure_uses_the_lifecycle_broadcast_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with runtime(tmp_path) as state:
+        now = [100]
+        state.lifecycle.clock_ms = lambda: now[0]
+        broadcasts: list[int] = []
+
+        async def record(attempt_id: int) -> None:
+            broadcasts.append(attempt_id)
+
+        monkeypatch.setattr(state.lifecycle, "_broadcast_attempt", record)
+        await state.lifecycle.reconcile_live()
+        assert broadcasts == []
+        now[0] += 10_000
+        await state.lifecycle.reconcile_live()
+        assert broadcasts == [state.attempt_id]
+
+
+async def test_missing_recheck_does_not_overwrite_a_terminal_attempt(tmp_path: Path) -> None:
+    async with runtime(tmp_path) as state:
+        now = [100]
+        state.lifecycle.clock_ms = lambda: now[0]
+        original = state.backend.snapshot
+        calls = 0
+
+        async def snapshots(*, gid: str) -> DownloadObservation | None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                async with SQLiteUnitOfWork(state.database) as uow:
+                    await DownloadRepository(uow.connection).fail_attempt(
+                        state.attempt_id, error_code="cancelled_elsewhere", now_ms=now[0]
+                    )
+            return await original(gid=gid)
+
+        state.backend.snapshot = snapshots  # type: ignore[method-assign]
+        await state.lifecycle.reconcile_live()
+        now[0] += 10_000
+        await state.lifecycle.reconcile_live()
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_code == "cancelled_elsewhere"
+        assert quota.reserved_bytes == 0
+
+
+async def test_ingestion_recovery_rereads_a_terminal_candidate_under_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with runtime(tmp_path) as state:
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await DownloadRepository(uow.connection).start_ingestion(
+                state.attempt_id, expected_gid=GID, now_ms=100
+            )
+        listed = asyncio.Event()
+        original = DownloadRepository.list_completion_intents
+
+        async def list_candidates(repository: DownloadRepository):
+            attempts = await original(repository)
+            listed.set()
+            return attempts
+
+        monkeypatch.setattr(DownloadRepository, "list_completion_intents", list_candidates)
+        lock = state.lifecycle._locks.setdefault(state.attempt_id, asyncio.Lock())
+        await lock.acquire()
+        recovering = asyncio.create_task(state.lifecycle.recover_ingestions())
+        await listed.wait()
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await DownloadRepository(uow.connection).fail_attempt(
+                state.attempt_id, error_code="failed_elsewhere", now_ms=101
+            )
+        lock.release()
+
+        assert await recovering is True
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_code == "failed_elsewhere"
+        assert quota.reserved_bytes == 0
 
 
 async def test_listener_clean_disconnect_also_reconnects(tmp_path: Path) -> None:

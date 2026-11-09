@@ -431,3 +431,67 @@ async def test_download_reads_map_nullable_fields_and_enforce_user_scope(
         assert caught.value.code is ErrorCode.NOT_FOUND
         with pytest.raises(DomainError):
             await repository.get_task(user_id=first_user, task_id=999)
+
+
+async def test_ingestion_start_is_persistent_idempotent_and_a_recovery_candidate(
+    database: SQLiteDatabase,
+) -> None:
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        attempt_id = await repository.create_attempt(
+            source_id=source_id, resource_key="http:key", gid=GID, now_ms=7
+        )
+        await repository.start_ingestion(attempt_id, expected_gid=GID, now_ms=11)
+        await repository.start_ingestion(attempt_id, expected_gid=GID, now_ms=19)
+
+        attempt = await repository.get_attempt(attempt_id)
+        assert attempt.created_at_ms == 7
+        assert attempt.ingestion_started_at_ms == 11
+        assert [item.id for item in await repository.list_completion_intents()] == [attempt_id]
+        assert (await repository.get_submission(attempt_id)).created_at_ms == 7
+
+
+@pytest.mark.parametrize("status", [AttemptStatus.FAILED, AttemptStatus.CANCELLED])
+async def test_failed_and_cancelled_uncertain_stops_can_both_be_confirmed(
+    database: SQLiteDatabase, status: AttemptStatus
+) -> None:
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        attempt_id = await repository.create_attempt(
+            source_id=source_id,
+            resource_key="http:key",
+            gid=GID,
+            status=status,
+            now_ms=1,
+        )
+        await repository.mark_stop_uncertain(attempt_id)
+        await repository.confirm_stopped_gid(GID)
+        assert (await repository.get_attempt(attempt_id)).submission_state == "submitted"
+
+
+async def test_ingestion_start_rejects_terminal_and_concurrently_changed_attempts(
+    database: SQLiteDatabase,
+) -> None:
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        attempt_id = await repository.create_attempt(
+            source_id=source_id, resource_key="http:key", gid=GID, now_ms=1
+        )
+        await uow.connection.execute(
+            text(
+                "CREATE TRIGGER test_ignore_ingestion_start "
+                "BEFORE UPDATE OF ingestion_started_at_ms ON download_attempts "
+                "BEGIN SELECT RAISE(IGNORE); END"
+            )
+        )
+        with pytest.raises(DomainError) as caught:
+            await repository.start_ingestion(attempt_id, expected_gid=GID, now_ms=2)
+        assert caught.value.code is ErrorCode.STALE_EVENT
+        await uow.connection.execute(text("DROP TRIGGER test_ignore_ingestion_start"))
+        await repository.fail_attempt(attempt_id, error_code="failed", now_ms=3)
+        with pytest.raises(DomainError) as caught:
+            await repository.start_ingestion(attempt_id, expected_gid=GID, now_ms=4)
+        assert caught.value.code is ErrorCode.STALE_EVENT

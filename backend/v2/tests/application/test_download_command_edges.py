@@ -11,18 +11,22 @@ from aria2deck.application.accounts.models import Principal
 from aria2deck.application.downloads.commands import (
     DownloadCommandService,
     _from_source,
+    prepare_uri_download,
 )
 from aria2deck.application.downloads.models import (
     BackendSubmissionResult,
     DownloadWriteResult,
+    RegistrationResult,
     SourceRecord,
     UriDownloadInput,
 )
+from aria2deck.application.downloads.recovery import DownloadRecoveryService
 from aria2deck.bootstrap import create_app
 from aria2deck.domain.accounts import CredentialKind
-from aria2deck.domain.downloads import RegistrationOutcome
+from aria2deck.domain.downloads import AttemptStatus, RegistrationOutcome
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.infrastructure.config import Settings
+from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from tests.download_fakes import FakeSubmissionBackend, make_torrent
 
 
@@ -37,6 +41,7 @@ async def runtime(tmp_path: Path) -> AsyncIterator[tuple[DownloadCommandService,
         )
     )
     async with app.router.lifespan_context(app):
+        await app.state.supervisor.stop()
         view = await app.state.account_service.create_user(
             None,
             username="admin",
@@ -49,6 +54,70 @@ async def runtime(tmp_path: Path) -> AsyncIterator[tuple[DownloadCommandService,
         backend = FakeSubmissionBackend()
         app.state.download_commands.backend = backend
         yield app.state.download_commands, view.user.id, principal, backend
+
+
+@asynccontextmanager
+async def recovery_runtime(
+    tmp_path: Path,
+) -> AsyncIterator[tuple[DownloadCommandService, DownloadRecoveryService, int]]:
+    app = create_app(
+        settings=Settings(
+            database_path=tmp_path / "v2.db",
+            download_directory=tmp_path / "downloads",
+            static_directory=tmp_path / "static",
+            debug=True,
+        )
+    )
+    async with app.router.lifespan_context(app):
+        await app.state.supervisor.stop()
+        view = await app.state.account_service.create_user(
+            None,
+            username="admin",
+            password_hash="ab" * 32,
+            is_admin=True,
+            is_initial_password=False,
+            quota_bytes=None,
+        )
+        yield app.state.download_commands, app.state.download_recovery, view.user.id
+
+
+async def seed_recovery_candidate(
+    commands: DownloadCommandService, *, user_id: int, submission_state: str
+) -> RegistrationResult:
+    registered = await commands._register(
+        user_id=user_id,
+        prepared=prepare_uri_download("https://example.com/cancel-race", {}),
+    )
+    if submission_state == "uncertain":
+        async with commands.uow_factory() as uow:
+            await DownloadRepository(uow.connection).mark_uncertain(registered.attempt_id)
+    return registered
+
+
+class CoordinatedSubmissionBackend(FakeSubmissionBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.confirm_default = False
+        self.mark_confirmed_on_submit = True
+        self.confirm_started = asyncio.Event()
+        self.release_confirm = asyncio.Event()
+        self.confirm_entries = 0
+        self.operations: list[str] = []
+
+    async def confirm(self, *, gid: str) -> bool:
+        self.confirm_entries += 1
+        if self.confirm_entries == 1:
+            self.confirm_started.set()
+            await self.release_confirm.wait()
+        return await super().confirm(gid=gid)
+
+    async def submit_many(self, submissions, *, trackers):
+        self.operations.extend(f"submit:{item.gid}" for item in submissions)
+        return await super().submit_many(submissions, trackers=trackers)
+
+    async def stop(self, *, gid: str) -> None:
+        self.operations.append(f"stop:{gid}")
+        await super().stop(gid=gid)
 
 
 async def test_create_batch_validates_size_and_all_business_failures_skip_network(tmp_path: Path) -> None:
@@ -328,3 +397,158 @@ async def test_torrent_recreate_rebuilds_detached_selection(tmp_path: Path) -> N
         assert submission.source.payload != {}
         assert submission.source.selected_file_indexes == (2,)
         assert submission.source.detached_at_ms is None
+
+
+async def test_initial_submission_and_recovery_share_one_lock(tmp_path: Path) -> None:
+    app = create_app(
+        settings=Settings(
+            database_path=tmp_path / "v2.db",
+            download_directory=tmp_path / "downloads",
+            static_directory=tmp_path / "static",
+            debug=True,
+        )
+    )
+    async with app.router.lifespan_context(app):
+        view = await app.state.account_service.create_user(
+            None,
+            username="admin",
+            password_hash="ab" * 32,
+            is_admin=True,
+            is_initial_password=False,
+            quota_bytes=None,
+        )
+        await app.state.supervisor.stop()
+
+        class BlockingBackend(FakeSubmissionBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.confirm_default = False
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.second_submit = asyncio.Event()
+                self.submit_entries = 0
+
+            async def submit_many(self, submissions, *, trackers):
+                self.submit_entries += 1
+                if self.submit_entries == 2:
+                    self.second_submit.set()
+                if not self.started.is_set():
+                    self.started.set()
+                    await self.release.wait()
+                for item in submissions:
+                    self.confirm_results[item.gid] = True
+                return await super().submit_many(submissions, trackers=trackers)
+
+        backend = BlockingBackend()
+        app.state.download_commands.backend = backend
+        app.state.download_recovery.backend = backend
+        app.state.download_recovery.lifecycle = None
+        app.state.download_recovery.quota_repository_factory = None
+
+        creating = asyncio.create_task(
+            app.state.download_commands.create_uris(
+                user_id=view.user.id,
+                items=[UriDownloadInput("https://example.com/shared-lock")],
+            )
+        )
+        await backend.started.wait()
+        recovering = asyncio.create_task(app.state.download_recovery.recover())
+        try:
+            await asyncio.wait_for(backend.second_submit.wait(), timeout=0.05)
+        except TimeoutError:
+            pass
+        backend.release.set()
+        await asyncio.gather(creating, recovering)
+
+        assert len(backend.submit_calls) == 1
+
+
+@pytest.mark.parametrize("submission_state", ["planned", "uncertain"])
+async def test_recovery_submission_finishes_before_cancel_stops_physical_gid(
+    tmp_path: Path, submission_state: str
+) -> None:
+    async with recovery_runtime(tmp_path) as (commands, recovery, user_id):
+        candidate = await seed_recovery_candidate(
+            commands, user_id=user_id, submission_state=submission_state
+        )
+        backend = CoordinatedSubmissionBackend()
+        commands.backend = backend
+        recovery.backend = backend
+
+        recovering = asyncio.create_task(recovery.recover_pending())
+        await backend.confirm_started.wait()
+        cancelling = asyncio.create_task(
+            commands.cancel(user_id=user_id, task_ids=[candidate.task_id])
+        )
+        try:
+            await asyncio.wait_for(asyncio.shield(cancelling), timeout=0.05)
+        except TimeoutError:
+            pass
+        backend.release_confirm.set()
+        await asyncio.gather(recovering, cancelling)
+
+        assert backend.operations == [
+            f"submit:{candidate.gid}",
+            f"stop:{candidate.gid}",
+        ]
+        async with commands.uow_factory() as uow:
+            attempt = await DownloadRepository(uow.connection).get_attempt(
+                candidate.attempt_id
+            )
+            assert attempt.status is AttemptStatus.CANCELLED
+            assert attempt.submission_state == "submitted"
+
+
+@pytest.mark.parametrize("submission_state", ["planned", "uncertain"])
+async def test_cancel_before_recovery_prevents_stale_candidate_submission(
+    tmp_path: Path, submission_state: str
+) -> None:
+    async with recovery_runtime(tmp_path) as (commands, recovery, user_id):
+        candidate = await seed_recovery_candidate(
+            commands, user_id=user_id, submission_state=submission_state
+        )
+        backend = CoordinatedSubmissionBackend()
+        commands.backend = backend
+        recovery.backend = backend
+        cancel_started = asyncio.Event()
+        finish_cancel = asyncio.Event()
+
+        class BlockingCancelUoW:
+            def __init__(self, delegate) -> None:
+                self.delegate = delegate
+
+            async def __aenter__(self):
+                cancel_started.set()
+                await finish_cancel.wait()
+                return await self.delegate.__aenter__()
+
+            async def __aexit__(self, *args: object) -> None:
+                await self.delegate.__aexit__(*args)
+
+        original_uow_factory = commands.uow_factory
+        commands.uow_factory = lambda: BlockingCancelUoW(original_uow_factory())
+        cancelling = asyncio.create_task(
+            commands.cancel(user_id=user_id, task_ids=[candidate.task_id])
+        )
+        await cancel_started.wait()
+        recovering = asyncio.create_task(recovery.recover_pending())
+        try:
+            await asyncio.wait_for(backend.confirm_started.wait(), timeout=0.05)
+        except TimeoutError:
+            pass
+
+        finish_cancel.set()
+        await cancelling
+        backend.release_confirm.set()
+        report = await recovering
+
+        assert report.recovered == 0
+        assert backend.submit_calls == []
+        assert backend.stop_calls == (
+            [] if submission_state == "planned" else [candidate.gid]
+        )
+        async with commands.uow_factory() as uow:
+            attempt = await DownloadRepository(uow.connection).get_attempt(
+                candidate.attempt_id
+            )
+            assert attempt.status is AttemptStatus.CANCELLED

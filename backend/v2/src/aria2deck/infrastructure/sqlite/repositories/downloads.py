@@ -130,6 +130,12 @@ class DownloadRepository:
                 else int(record["result_consumed_at_ms"])
             ),
             error_code=record["error_code"],
+            created_at_ms=int(record["created_at_ms"]),
+            ingestion_started_at_ms=(
+                None
+                if record["ingestion_started_at_ms"] is None
+                else int(record["ingestion_started_at_ms"])
+            ),
         )
 
     async def create_attempt(
@@ -560,6 +566,7 @@ class DownloadRepository:
             attempt_id=attempt.id,
             gid=attempt.gid,
             source=await self.get_source(attempt.source_id),
+            created_at_ms=attempt.created_at_ms,
         )
 
     async def list_recovery_submissions(self) -> list[Submission]:
@@ -620,12 +627,16 @@ class DownloadRepository:
         result = await self.connection.execute(
             update(download_attempts)
             .where(download_attempts.c.gid == gid)
-            .where(download_attempts.c.status == AttemptStatus.CANCELLED)
+            .where(
+                download_attempts.c.status.in_(
+                    (AttemptStatus.CANCELLED, AttemptStatus.FAILED)
+                )
+            )
             .where(download_attempts.c.submission_state == "uncertain")
             .values(submission_state="submitted")
         )
         if result.rowcount != 1:
-            raise DomainError(ErrorCode.INVALID_STATE, "取消恢复目标已变化")
+            raise DomainError(ErrorCode.INVALID_STATE, "停止恢复目标已变化")
 
     async def fail_attempt(
         self,
@@ -844,7 +855,12 @@ class DownloadRepository:
             await self.connection.execute(
                 select(download_attempts)
                 .where(download_attempts.c.status.in_(LIVE_ATTEMPT_STATUSES))
-                .where(download_attempts.c.completed_content_id.is_not(None))
+                .where(
+                    or_(
+                        download_attempts.c.completed_content_id.is_not(None),
+                        download_attempts.c.ingestion_started_at_ms.is_not(None),
+                    )
+                )
                 .order_by(download_attempts.c.id)
             )
         ).all()
@@ -913,7 +929,7 @@ class DownloadRepository:
         self, attempt_id: int, *, expected_gid: str, new_gid: str, now_ms: int
     ) -> None:
         if not new_gid or new_gid == expected_gid:
-            raise DomainError(ErrorCode.INVALID_STATE, "磁链接交接 GID 无效")
+            raise DomainError(ErrorCode.INVALID_STATE, "下载交接 GID 无效")
         attempt = await self.get_attempt(attempt_id)
         require_gid_match(attempt_id, expected=expected_gid, observed=attempt.gid)
         if attempt.status not in LIVE_ATTEMPT_STATUSES:
@@ -954,6 +970,26 @@ class DownloadRepository:
                 .where(task_subscriptions.c.status == current)
                 .values(status=SubscriptionStatus.WAITING, updated_at_ms=now_ms)
             )
+
+    async def start_ingestion(
+        self, attempt_id: int, *, expected_gid: str, now_ms: int
+    ) -> None:
+        attempt = await self.get_attempt(attempt_id)
+        require_gid_match(attempt_id, expected=expected_gid, observed=attempt.gid)
+        if attempt.status not in LIVE_ATTEMPT_STATUSES:
+            raise DomainError(ErrorCode.STALE_EVENT, "下载已结束，忽略旧入库事件")
+        if attempt.ingestion_started_at_ms is not None:
+            return
+        result = await self.connection.execute(
+            update(download_attempts)
+            .where(download_attempts.c.id == attempt_id)
+            .where(download_attempts.c.gid == expected_gid)
+            .where(download_attempts.c.status.in_(LIVE_ATTEMPT_STATUSES))
+            .where(download_attempts.c.ingestion_started_at_ms.is_(None))
+            .values(ingestion_started_at_ms=now_ms, updated_at_ms=now_ms)
+        )
+        if result.rowcount != 1:
+            raise DomainError(ErrorCode.STALE_EVENT, "入库目标已变化")
 
     async def begin_completion(
         self, attempt_id: int, *, expected_gid: str, content_id: int, now_ms: int

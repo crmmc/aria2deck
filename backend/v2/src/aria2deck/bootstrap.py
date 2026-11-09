@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -198,6 +199,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         settings=settings_service.current,
         clock_ms=_clock_ms,
     )
+    submission_lock = asyncio.Lock()
     download_commands = DownloadCommandService(
         uow_factory=uow_factory,
         repository_factory=download_repository,
@@ -208,6 +210,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         rate_limiter=rate_limiter,
         clock_ms=_clock_ms,
         planned_gid=credentials.derive_download_gid,
+        submission_lock=submission_lock,
     )
     download_history = HistoryService(
         uow_factory=uow_factory,
@@ -239,6 +242,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         clock_ms=_clock_ms,
         lifecycle=download_lifecycle,
         quota_repository_factory=lambda uow: QuotaRepository(cast(AsyncConnection, uow.connection)),
+        submission_lock=submission_lock,
     )
     download_gateway = DownloadGatewayService(
         uow_factory=uow_factory,
@@ -261,6 +265,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         gids=virtual_gids,
     )
     supervisor.register("download-polling", download_lifecycle.run_polling)
+    supervisor.register("download-recovery-pending", download_recovery.run_worker)
     supervisor.register("download-listener", download_lifecycle.run_listener)
     supervisor.register("account-deletion", account_service.run_deletion_worker)
     supervisor.register("history-retention", download_history.run_worker)

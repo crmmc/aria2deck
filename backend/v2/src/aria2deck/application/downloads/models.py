@@ -106,6 +106,8 @@ class AttemptRecord:
     physical_reserved_bytes: int
     result_consumed_at_ms: int | None = None
     error_code: str | None = None
+    created_at_ms: int = 0
+    ingestion_started_at_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +154,7 @@ class Submission:
     attempt_id: int
     gid: str
     source: SourceRecord
+    created_at_ms: int = 0
 
 
 @dataclass(frozen=True, slots=True)

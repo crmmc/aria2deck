@@ -1,10 +1,25 @@
 from __future__ import annotations
 
-import pytest
+import asyncio
+from dataclasses import replace
+from pathlib import Path
 
-from aria2deck.application.downloads.models import BackendSubmissionResult, SourceRecord, Submission
+import pytest
+from sqlalchemy import select
+
+from aria2deck.application.downloads.models import (
+    AttemptRecord,
+    BackendSubmissionResult,
+    SourceRecord,
+    Submission,
+)
 from aria2deck.application.downloads.recovery import DownloadRecoveryService, RecoveryReport
+from aria2deck.domain.downloads import AttemptStatus, SubscriptionStatus
 from aria2deck.domain.errors import DomainError, ErrorCode
+from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
+from aria2deck.infrastructure.sqlite.schema import content_objects, user_files
+from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
+from tests.application.test_download_lifecycle import observation, put_download, read, runtime
 from tests.download_fakes import FakeSubmissionBackend, FakeTrackers
 
 
@@ -23,7 +38,25 @@ class Repository:
         self.submitted: list[int] = []
         self.uncertain: list[int] = []
         self.failed: list[int] = []
+        self.failure_codes: list[str] = []
+        self.failure_gids: list[str | None] = []
         self.confirmed_stops: list[str] = []
+        self.attempts = {
+            item.attempt_id: AttemptRecord(
+                id=item.attempt_id,
+                source_id=item.source.id,
+                resource_key=item.source.resource_key,
+                gid=item.gid,
+                status=AttemptStatus.QUEUED,
+                completed_content_id=None,
+                submission_state="uncertain",
+                total_length=None,
+                completed_length=0,
+                physical_reserved_bytes=0,
+                created_at_ms=item.created_at_ms,
+            )
+            for item in submissions
+        }
 
     async def list_recovery_submissions(self) -> list[Submission]:
         return list(self.submissions)
@@ -37,8 +70,20 @@ class Repository:
     async def mark_uncertain(self, attempt_id: int) -> None:
         self.uncertain.append(attempt_id)
 
-    async def fail_attempt(self, attempt_id: int, *, error_code: str, now_ms: int) -> None:
+    async def get_attempt(self, attempt_id: int) -> AttemptRecord:
+        return self.attempts[attempt_id]
+
+    async def fail_attempt(
+        self,
+        attempt_id: int,
+        *,
+        error_code: str,
+        now_ms: int,
+        expected_gid: str | None = None,
+    ) -> None:
         self.failed.append(attempt_id)
+        self.failure_codes.append(error_code)
+        self.failure_gids.append(expected_gid)
 
     async def confirm_stopped_gid(self, gid: str) -> None:
         self.confirmed_stops.append(gid)
@@ -118,6 +163,7 @@ async def test_definite_recovery_rejection_is_failed_not_retried() -> None:
     result = await service(repository, backend).recover()
     assert result.failed == 1
     assert repository.failed == [1]
+    assert repository.failure_gids == ["0000000000000001"]
     assert repository.uncertain == []
 
 
@@ -159,6 +205,9 @@ class RecordingLifecycle:
         self.reconcile_ok = True
         self.cleanup_ok = True
         self.purge_error = False
+
+    async def _broadcast_attempt(self, attempt_id: int) -> None:
+        self.events.append(f"broadcast:{attempt_id}")
 
     async def recover_ingestions(self) -> bool:
         self.events.append("ingestions")
@@ -220,3 +269,171 @@ async def test_orphan_enumeration_failure_is_non_destructive_and_does_not_abort_
     result = await service(Repository([]), FakeSubmissionBackend(), lifecycle=lifecycle).recover()
     assert result == RecoveryReport()
     assert events[-1] == "orphans"
+
+
+async def test_submission_timeout_keeps_stop_uncertain_and_broadcasts_failure() -> None:
+    repository = Repository([replace(submission(), created_at_ms=100)])
+    backend = FakeSubmissionBackend()
+    backend.confirm_error = DomainError(ErrorCode.SUBMISSION_UNCERTAIN, "offline")
+    events: list[str] = []
+    recovery = service(repository, backend, lifecycle=RecordingLifecycle(events))
+    recovery.clock_ms = lambda: 60_100
+
+    result = await recovery.recover_pending()
+
+    assert result.failed == 1
+    assert result.uncertain == 1
+    assert repository.failed == [1]
+    assert repository.failure_codes == ["submission_timeout"]
+    assert repository.failure_gids == ["0000000000000001"]
+    assert repository.uncertain == [1]
+    assert events == ["broadcast:1"]
+
+
+async def test_submission_retries_do_not_refresh_total_age() -> None:
+    repository = Repository([replace(submission(), created_at_ms=100)])
+    backend = FakeSubmissionBackend()
+    backend.confirm_default = False
+    now = [50_100]
+    recovery = service(repository, backend)
+    recovery.clock_ms = lambda: now[0]
+
+    first = await recovery.recover_pending()
+    assert first.uncertain == 1
+    assert repository.failed == []
+
+    now[0] = 60_100
+    second = await recovery.recover_pending()
+    assert second.failed == 1
+    assert repository.failure_codes == ["submission_timeout"]
+    assert len(backend.submit_calls) == 2
+
+
+async def test_expired_submission_still_recovers_when_confirmation_succeeds() -> None:
+    repository = Repository([replace(submission(), created_at_ms=100)])
+    recovery = service(repository, FakeSubmissionBackend())
+    recovery.clock_ms = lambda: 60_100
+
+    result = await recovery.recover_pending()
+
+    assert result.recovered == 1
+    assert result.failed == 0
+    assert repository.submitted == [1]
+
+
+async def test_pending_worker_never_runs_full_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    recovery = service(
+        Repository([]),
+        FakeSubmissionBackend(),
+        lifecycle=RecordingLifecycle(events),
+        quota=RecordingQuota(events),
+    )
+
+    async def pending() -> RecoveryReport:
+        events.append("pending")
+        return RecoveryReport()
+
+    async def full() -> RecoveryReport:
+        events.append("full")
+        return RecoveryReport()
+
+    async def stop(delay: float) -> None:
+        assert delay == 2.0
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(recovery, "recover_pending", pending, raising=False)
+    monkeypatch.setattr(recovery, "recover", full)
+    monkeypatch.setattr(recovery, "sleep", stop, raising=False)
+    with pytest.raises(asyncio.CancelledError):
+        await recovery.run_worker()
+    assert events == ["pending"]
+
+
+@pytest.mark.parametrize("failure", ["rejection", "timeout"])
+@pytest.mark.parametrize(
+    "stale",
+    ["cancelled", "handoff", "failed", "completed", "content_intent", "ingestion_intent"],
+)
+async def test_submission_failure_ignores_stale_or_ingesting_attempt(
+    failure: str, stale: str
+) -> None:
+    candidate = replace(submission(), created_at_ms=100)
+    repository = Repository([candidate])
+    current = repository.attempts[candidate.attempt_id]
+    if stale == "cancelled":
+        current = replace(current, status=AttemptStatus.CANCELLED)
+    elif stale == "handoff":
+        current = replace(current, gid="0000000000000002")
+    elif stale == "failed":
+        current = replace(current, status=AttemptStatus.FAILED)
+    elif stale == "completed":
+        current = replace(current, status=AttemptStatus.COMPLETED)
+    elif stale == "content_intent":
+        current = replace(current, completed_content_id=9)
+    else:
+        current = replace(current, ingestion_started_at_ms=100)
+    repository.attempts[candidate.attempt_id] = current
+    backend = FakeSubmissionBackend()
+    events: list[str] = []
+    recovery = service(repository, backend, lifecycle=RecordingLifecycle(events))
+    if failure == "rejection":
+        backend.confirm_default = False
+        backend.reject_indexes = {0}
+    else:
+        backend.confirm_error = DomainError(ErrorCode.SUBMISSION_UNCERTAIN, "offline")
+        recovery.clock_ms = lambda: 60_100
+
+    result = await recovery.recover_pending()
+
+    assert result.recovered == 0
+    assert result.failed == 0
+    assert repository.failed == []
+    assert events == []
+
+
+async def test_submission_timeout_defers_to_persisted_ingestion_and_settles_once(
+    tmp_path: Path,
+) -> None:
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        async with SQLiteUnitOfWork(state.database) as uow:
+            downloads = DownloadRepository(uow.connection)
+            await downloads.mark_uncertain(state.attempt_id)
+            await downloads.start_ingestion(
+                state.attempt_id, expected_gid="0123456789abcdef", now_ms=50
+            )
+        state.backend.confirm_error = DomainError(
+            ErrorCode.SUBMISSION_UNCERTAIN, "offline"
+        )
+        recovery = DownloadRecoveryService(
+            uow_factory=lambda: SQLiteUnitOfWork(state.database),
+            repository_factory=lambda uow: DownloadRepository(uow.connection),
+            backend=state.backend,
+            trackers=FakeTrackers(),
+            clock_ms=lambda: 60_100,
+            lifecycle=state.lifecycle,
+        )
+
+        report = await recovery.recover_pending()
+
+        assert report.failed == 0
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED
+        assert attempt.ingestion_started_at_ms == 50
+        assert quota.reserved_bytes == 3
+
+        assert await state.lifecycle.recover_ingestions() is True
+        assert await state.lifecycle.recover_ingestions() is True
+        await state.lifecycle.reconcile(observation(status="complete", completed=3))
+
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert task.subscription_status is SubscriptionStatus.COMPLETED
+        assert quota.used_bytes == 3
+        assert quota.reserved_bytes == 0
+        async with SQLiteUnitOfWork(state.database) as uow:
+            assert len((await uow.connection.execute(select(content_objects))).all()) == 1
+            assert len((await uow.connection.execute(select(user_files))).all()) == 1

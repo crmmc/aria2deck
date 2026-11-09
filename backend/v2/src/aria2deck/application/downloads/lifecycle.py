@@ -65,6 +65,10 @@ class LifecycleRepository(Protocol):
         self, attempt_id: int, *, expected_gid: str, new_gid: str, now_ms: int
     ) -> None: ...
 
+    async def start_ingestion(
+        self, attempt_id: int, *, expected_gid: str, now_ms: int
+    ) -> None: ...
+
     async def begin_completion(
         self, attempt_id: int, *, expected_gid: str, content_id: int, now_ms: int
     ) -> None: ...
@@ -190,6 +194,8 @@ class DownloadLifecycleService:
         clock_ms: Callable[[], int],
         poll_interval_seconds: float = 2.0,
         reconnect_max_seconds: float = 30.0,
+        missing_grace_ms: int = 10_000,
+        ingestion_timeout_ms: int = 60_000,
         jitter: Callable[[], float] = lambda: 0.0,
         sleep: Sleep = asyncio.sleep,
         broadcast: BroadcastPort | None = None,
@@ -205,11 +211,14 @@ class DownloadLifecycleService:
         self.clock_ms = clock_ms
         self.poll_interval_seconds = poll_interval_seconds
         self.reconnect_max_seconds = reconnect_max_seconds
+        self.missing_grace_ms = missing_grace_ms
+        self.ingestion_timeout_ms = ingestion_timeout_ms
         self.jitter = jitter
         self.sleep = sleep
         self.broadcast = broadcast
         self.queries = queries
         self._locks: dict[int, asyncio.Lock] = {}
+        self._missing_since: dict[int, int] = {}
         # 终态帧幂等：每个 attempt 的终态只推送一次（跨 _admit/_handoff/_apply 全路径）。
         self._terminal_broadcast: set[int] = set()
 
@@ -230,6 +239,7 @@ class DownloadLifecycleService:
             return
         lock = self._locks.setdefault(attempt.id, asyncio.Lock())
         async with lock:
+            self._missing_since.pop(attempt.id, None)
             try:
                 await self._reconcile(snapshot, attempt.id)
             except DomainError as error:
@@ -269,11 +279,12 @@ class DownloadLifecycleService:
             AttemptStatus.PAUSED,
         }:
             return
-        if (
-            source.kind == "magnet"
-            and attempt.error_code == METADATA_ADMISSION_PAUSED
-            and snapshot.followed_by
-        ):
+        if attempt.completed_content_id is not None or attempt.ingestion_started_at_ms is not None:
+            await self._ingest(
+                attempt, snapshot if snapshot.status == "complete" else None
+            )
+            return
+        if snapshot.followed_by:
             await self._handoff(attempt, snapshot)
             return
         if snapshot.status in {"error", "removed"}:
@@ -388,8 +399,9 @@ class DownloadLifecycleService:
     async def _handoff(self, attempt: AttemptRecord, snapshot: DownloadObservation) -> None:
         targets = tuple(dict.fromkeys(snapshot.followed_by))
         if len(targets) != 1:
-            raise DomainError(ErrorCode.INVALID_STATE, "磁链接交接目标不唯一")
+            raise DomainError(ErrorCode.INVALID_STATE, "下载交接目标不唯一")
         new_gid = targets[0]
+        self._missing_since.pop(attempt.id, None)
         async with self.uow_factory() as uow:
             await self.repository_factory(uow).handoff_attempt(
                 attempt.id, expected_gid=snapshot.gid, new_gid=new_gid, now_ms=self.clock_ms()
@@ -398,7 +410,7 @@ class DownloadLifecycleService:
         try:
             await self.backend.remove_result(gid=snapshot.gid)
         except DomainError:
-            logger.warning("磁链接父任务结果暂未清理 error_type=DomainError")
+            logger.warning("交接父任务结果暂未清理 error_type=DomainError")
         try:
             following = await self.backend.snapshot(gid=new_gid)
         except DomainError:
@@ -462,6 +474,10 @@ class DownloadLifecycleService:
     async def _ingest(
         self, attempt: AttemptRecord, snapshot: DownloadObservation | None
     ) -> None:
+        async with self.uow_factory() as uow:
+            await self.repository_factory(uow).start_ingestion(
+                attempt.id, expected_gid=attempt.gid, now_ms=self.clock_ms()
+            )
         if snapshot is not None:
             self.observations.put(snapshot)
         try:
@@ -482,9 +498,11 @@ class DownloadLifecycleService:
                 raise
             await self._fail(attempt, error.code.value, cleanup=True)
             return
+        self._missing_since.pop(attempt.id, None)
         await self._cleanup_terminal(attempt)
 
     async def _fail(self, attempt: AttemptRecord, error_code: str, *, cleanup: bool) -> None:
+        self._missing_since.pop(attempt.id, None)
         async with self.uow_factory() as uow:
             await self.repository_factory(uow).fail_attempt(
                 attempt.id,
@@ -515,6 +533,36 @@ class DownloadLifecycleService:
                 attempt.id, expected_gid=attempt.gid, now_ms=self.clock_ms()
             )
 
+    async def _confirm_missing(self, attempt: AttemptRecord) -> None:
+        lock = self._locks.setdefault(attempt.id, asyncio.Lock())
+        async with lock:
+            try:
+                async with self.uow_factory() as uow:
+                    current = await self.repository_factory(uow).get_attempt(attempt.id)
+                if current.status not in {
+                    AttemptStatus.QUEUED,
+                    AttemptStatus.ACTIVE,
+                    AttemptStatus.WAITING,
+                    AttemptStatus.PAUSED,
+                } or current.submission_state != "submitted":
+                    self._missing_since.pop(attempt.id, None)
+                    return
+                if (
+                    current.completed_content_id is not None
+                    or current.ingestion_started_at_ms is not None
+                ):
+                    await self._ingest(current, None)
+                    self._missing_since.pop(attempt.id, None)
+                    return
+                confirmed = await self.backend.snapshot(gid=current.gid)
+                if confirmed is not None:
+                    self._missing_since.pop(attempt.id, None)
+                    await self._reconcile(confirmed, current.id)
+                    return
+                await self._fail(current, "aria2_gid_missing", cleanup=True)
+            finally:
+                await self._broadcast_attempt(attempt.id)
+
     async def reconcile_live(self) -> bool | None:
         async with self.uow_factory() as uow:
             attempts = await self.repository_factory(uow).list_live_attempts(submitted_only=True)
@@ -527,7 +575,11 @@ class DownloadLifecycleService:
                 if snapshot is None:
                     self.observations.discard(attempt.gid)
                     complete = False
+                    first_seen = self._missing_since.setdefault(attempt.id, self.clock_ms())
+                    if self.clock_ms() - first_seen >= self.missing_grace_ms:
+                        await self._confirm_missing(attempt)
                     continue
+                self._missing_since.pop(attempt.id, None)
                 await self.reconcile(snapshot)
             except Exception as error:  # noqa: BLE001  # 单轮单任务故障必须隔离
                 complete = False
@@ -541,11 +593,38 @@ class DownloadLifecycleService:
         async with self.uow_factory() as uow:
             attempts = await self.repository_factory(uow).list_completion_intents()
         complete = True
-        for attempt in attempts:
-            lock = self._locks.setdefault(attempt.id, asyncio.Lock())
+        for candidate in attempts:
+            lock = self._locks.setdefault(candidate.id, asyncio.Lock())
             try:
                 async with lock:
-                    await self._ingest(attempt, None)
+                    async with self.uow_factory() as uow:
+                        attempt = await self.repository_factory(uow).get_attempt(candidate.id)
+                    if attempt.status not in {
+                        AttemptStatus.QUEUED,
+                        AttemptStatus.ACTIVE,
+                        AttemptStatus.WAITING,
+                        AttemptStatus.PAUSED,
+                    } or (
+                        attempt.completed_content_id is None
+                        and attempt.ingestion_started_at_ms is None
+                    ):
+                        continue
+                    try:
+                        await self._ingest(attempt, None)
+                    except Exception as error:  # noqa: BLE001  # 入库失败保留到下轮或到期终结
+                        complete = False
+                        started = attempt.ingestion_started_at_ms
+                        if (
+                            started is not None
+                            and self.clock_ms() - started >= self.ingestion_timeout_ms
+                        ):
+                            await self._fail(attempt, "ingestion_timeout", cleanup=True)
+                        else:
+                            logger.warning(
+                                "入库恢复单项失败 error_type=%s", type(error).__name__
+                            )
+                    finally:
+                        await self._broadcast_attempt(attempt.id)
             except Exception as error:  # noqa: BLE001  # 保留其他恢复候选并禁止孤儿清理
                 complete = False
                 logger.warning("入库恢复单项失败 error_type=%s", type(error).__name__)
@@ -585,9 +664,10 @@ class DownloadLifecycleService:
 
     async def run_polling(self) -> None:
         while True:
+            ingestions_complete = await self.recover_ingestions()
             result = await self.reconcile_live()
-            if result is not None:
-                if result:
+            if result is not None or not ingestions_complete:
+                if ingestions_complete and result is not False:
                     self.connectivity.record_success()
                 else:
                     self.connectivity.record_failure()

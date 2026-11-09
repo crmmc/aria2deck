@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,40 +31,41 @@ def prepare_database(settings: Settings, *, mode: str) -> int:
         user_id = int(create_admin(client)["id"])
 
     async def seed() -> None:
+        now_ms = time.time_ns() // 1_000_000
         database = SQLiteDatabase(settings.database_path)
         try:
             async with SQLiteUnitOfWork(database) as uow:
                 downloads = DownloadRepository(uow.connection)
                 if mode in {"mixed", "failure"}:
                     source_id = await downloads.create_source(
-                        kind="http", resource_key="http:planned", payload_json='{"uris":["https://example.com/a"]}', options_json='{"headers":{},"mirrors":[]}', selected_file_indexes_json=None, display_name="a", display_uri="https://example.com/a", now_ms=1,
+                        kind="http", resource_key="http:planned", payload_json='{"uris":["https://example.com/a"]}', options_json='{"headers":{},"mirrors":[]}', selected_file_indexes_json=None, display_name="a", display_uri="https://example.com/a", now_ms=now_ms,
                     )
                     attempt_id = await downloads.create_attempt(
-                        source_id=source_id, resource_key="http:planned", gid=PLANNED_GID, total_length=7, physical_reserved_bytes=7, now_ms=1,
+                        source_id=source_id, resource_key="http:planned", gid=PLANNED_GID, total_length=7, physical_reserved_bytes=7, now_ms=now_ms,
                     )
                     await downloads.create_subscription(
-                        attempt_id=attempt_id, user_id=user_id, reserved_bytes=7, display_name="a", display_uri="https://example.com/a", now_ms=1,
+                        attempt_id=attempt_id, user_id=user_id, reserved_bytes=7, display_name="a", display_uri="https://example.com/a", now_ms=now_ms,
                     )
                     await QuotaRepository(uow.connection).reserve(user_id, 7)
                 if mode == "mixed":
                     source_id = await downloads.create_source(
-                        kind="magnet", resource_key="magnet:existing", payload_json='{"uri":"magnet:?xt=urn:btih:' + 'ab' * 20 + '"}', options_json="{}", selected_file_indexes_json=None, display_name="existing", display_uri=None, now_ms=1,
+                        kind="magnet", resource_key="magnet:existing", payload_json='{"uri":"magnet:?xt=urn:btih:' + 'ab' * 20 + '"}', options_json="{}", selected_file_indexes_json=None, display_name="existing", display_uri=None, now_ms=now_ms,
                     )
                     attempt_id = await downloads.create_attempt(
-                        source_id=source_id, resource_key="magnet:existing", gid=EXISTING_GID, now_ms=1,
+                        source_id=source_id, resource_key="magnet:existing", gid=EXISTING_GID, now_ms=now_ms,
                     )
                     await downloads.create_subscription(
-                        attempt_id=attempt_id, user_id=user_id, reserved_bytes=0, display_name="existing", display_uri=None, now_ms=1,
+                        attempt_id=attempt_id, user_id=user_id, reserved_bytes=0, display_name="existing", display_uri=None, now_ms=now_ms,
                     )
                     await uow.connection.execute(update(download_attempts).where(download_attempts.c.id == attempt_id).values(submission_state="uncertain"))
                     source_id = await downloads.create_source(
-                        kind="http", resource_key="http:stop", payload_json='{"uris":["https://example.com/stop"]}', options_json="{}", selected_file_indexes_json=None, display_name="stop", display_uri=None, now_ms=1,
+                        kind="http", resource_key="http:stop", payload_json='{"uris":["https://example.com/stop"]}', options_json="{}", selected_file_indexes_json=None, display_name="stop", display_uri=None, now_ms=now_ms,
                     )
                     attempt_id = await downloads.create_attempt(
-                        source_id=source_id, resource_key="http:stop", gid=STOP_GID, status=AttemptStatus.CANCELLED, now_ms=1,
+                        source_id=source_id, resource_key="http:stop", gid=STOP_GID, status=AttemptStatus.CANCELLED, now_ms=now_ms,
                     )
                     await downloads.create_subscription(
-                        attempt_id=attempt_id, user_id=user_id, reserved_bytes=0, display_name="stop", display_uri=None, status=SubscriptionStatus.CANCELLED, now_ms=1,
+                        attempt_id=attempt_id, user_id=user_id, reserved_bytes=0, display_name="stop", display_uri=None, status=SubscriptionStatus.CANCELLED, now_ms=now_ms,
                     )
                     await uow.connection.execute(update(download_attempts).where(download_attempts.c.id == attempt_id).values(submission_state="uncertain"))
         finally:
@@ -203,3 +205,40 @@ def test_cancel_commit_before_process_exit_is_stopped_on_restart(settings: Setti
     }
     assert after_recovery[target_gid] == (AttemptStatus.CANCELLED, "submitted")
     assert after_recovery[other_gid] == (AttemptStatus.QUEUED, "submitted")
+
+
+def test_pending_recovery_worker_shares_the_command_submission_lock(settings: Settings) -> None:
+    app = create_app(settings=settings)
+
+    assert app.state.download_commands.submission_lock is app.state.download_recovery.submission_lock
+    assert "download-recovery-pending" in {
+        worker.name for worker in app.state.supervisor.snapshot()
+    }
+
+
+def test_submission_timeout_releases_quota_then_confirms_failed_stop(settings: Settings) -> None:
+    user_id = prepare_database(settings, mode="failure")
+    app = create_app(settings=settings)
+    backend = FakeSubmissionBackend()
+    backend.confirm_error = DomainError(ErrorCode.SUBMISSION_UNCERTAIN, "offline")
+    app.state.download_recovery.backend = backend
+    app.state.download_recovery.clock_ms = lambda: time.time_ns() // 1_000_000 + 60_000
+
+    async def recover_and_check() -> None:
+        first = await app.state.download_recovery.recover_pending()
+        assert first.failed == 1
+        async with app.state.download_recovery.uow_factory() as uow:
+            attempt = await DownloadRepository(uow.connection).get_attempt(1)
+            assert attempt.status is AttemptStatus.FAILED
+            assert attempt.error_code == "submission_timeout"
+            assert attempt.submission_state == "uncertain"
+            assert (await QuotaRepository(uow.connection).get(user_id)).reserved_bytes == 0
+
+        second = await app.state.download_recovery.recover_pending()
+        assert second.stopped == 1
+        assert backend.stop_calls == [PLANNED_GID]
+        async with app.state.download_recovery.uow_factory() as uow:
+            attempt = await DownloadRepository(uow.connection).get_attempt(1)
+            assert attempt.submission_state == "submitted"
+
+    asyncio.run(recover_and_check())

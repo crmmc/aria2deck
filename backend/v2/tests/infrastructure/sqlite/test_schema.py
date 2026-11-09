@@ -14,6 +14,7 @@ from aria2deck.infrastructure.sqlite.schema import (
     SCHEMA_VERSION,
     TARGET_TABLES,
     app_settings,
+    download_attempts,
     tracker_cache,
 )
 
@@ -146,3 +147,9 @@ async def test_failed_initialization_rolls_back_every_object(tmp_path: Path, mon
         count = (await connection.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"))).scalar_one()
     assert count == 0
     await db.close()
+
+
+def test_download_attempt_schema_persists_optional_ingestion_start() -> None:
+    column = download_attempts.c.ingestion_started_at_ms
+    assert column.nullable is True
+    assert column.default is None
