@@ -84,10 +84,17 @@ class RecordingRepository:
         attempt_id: int,
         observed_bytes: int,
         known_total: bool,
+        disk_free_bytes: int,
+        min_free_bytes: int,
         now_ms: int,
     ) -> DomainError | None:
         self.admitted.append((observed_bytes, known_total))
         return None
+
+
+class MachineSpace:
+    def machine_free_bytes(self) -> int:
+        return 1_000_000_000
 
 
 def build_gateway(
@@ -98,6 +105,7 @@ def build_gateway(
         uow_factory=lambda: UoW(),
         repository_factory=lambda _uow: repository,
         upstream=SafeHttpClient(),
+        machine_space=MachineSpace(),
         settings=lambda: SystemSettings(max_task_size=max_task_size),
         clock_ms=lambda: 1,
         verify_capability=lambda _attempt_id, _index, _capability: True,

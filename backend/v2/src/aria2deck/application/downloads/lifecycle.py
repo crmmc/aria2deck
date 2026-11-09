@@ -15,6 +15,7 @@ from ...domain.downloads import (
     AttemptStatus,
 )
 from ...domain.errors import DomainError, ErrorCode
+from ...domain.settings import SystemSettings
 from ..ports import UnitOfWork
 from .broadcast import BroadcastPort, task_message
 from .commands import SubmissionBackend
@@ -58,7 +59,14 @@ class LifecycleRepository(Protocol):
     ) -> bool: ...
 
     async def admit_size(
-        self, *, attempt_id: int, observed_bytes: int, known_total: bool, now_ms: int
+        self,
+        *,
+        attempt_id: int,
+        observed_bytes: int,
+        known_total: bool,
+        disk_free_bytes: int,
+        min_free_bytes: int,
+        now_ms: int,
     ) -> DomainError | None: ...
 
     async def handoff_attempt(
@@ -157,6 +165,8 @@ class ObservationSink(Protocol):
 
 
 class ContentStore(Protocol):
+    def machine_free_bytes(self) -> int: ...
+
     async def scan(self, attempt_id: int) -> ContentPreparation: ...
 
     async def install(self, attempt_id: int, expected: ContentPreparation) -> None: ...
@@ -191,6 +201,7 @@ class DownloadLifecycleService:
         content_store: ContentStore,
         observations: ObservationSink,
         connectivity: Connectivity,
+        settings: Callable[[], SystemSettings],
         clock_ms: Callable[[], int],
         poll_interval_seconds: float = 2.0,
         reconnect_max_seconds: float = 30.0,
@@ -208,6 +219,7 @@ class DownloadLifecycleService:
         self.content_store = content_store
         self.observations = observations
         self.connectivity = connectivity
+        self.settings = settings
         self.clock_ms = clock_ms
         self.poll_interval_seconds = poll_interval_seconds
         self.reconnect_max_seconds = reconnect_max_seconds
@@ -362,6 +374,8 @@ class DownloadLifecycleService:
                     else snapshot.completed_length
                 ),
                 known_total=snapshot.total_length is not None,
+                disk_free_bytes=self.content_store.machine_free_bytes(),
+                min_free_bytes=self.settings().min_free_disk,
                 now_ms=self.clock_ms(),
             )
 

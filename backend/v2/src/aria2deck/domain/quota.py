@@ -115,18 +115,23 @@ class PhysicalDownload:
     status: AttemptStatus
     total_length: int | None
     completed_length: int
+    committed_bytes: int = 0
 
     @property
     def reserved_bytes(self) -> int:
-        if self.total_length is not None and self.total_length < 0 or self.completed_length < 0:
+        if (
+            self.total_length is not None
+            and self.total_length < 0
+            or self.completed_length < 0
+            or self.committed_bytes < 0
+        ):
             raise DomainError(ErrorCode.INVALID_INPUT, "物理下载账目不能为负数")
         if self.total_length is not None and self.completed_length > self.total_length:
             raise DomainError(ErrorCode.INVALID_INPUT, "完成大小不能超过总大小")
         if self.status not in {AttemptStatus.QUEUED, AttemptStatus.ACTIVE}:
             return 0
-        if self.total_length is None:
-            return 0
-        return self.total_length - self.completed_length
+        committed = max(self.total_length or 0, self.committed_bytes)
+        return max(committed - self.completed_length, 0)
 
 
 @dataclass(frozen=True, slots=True)

@@ -5,8 +5,13 @@ import asyncio
 import pytest
 from sqlalchemy import delete, select, text, update
 
-from aria2deck.domain.downloads import AttemptStatus, SubscriptionStatus
+from aria2deck.domain.downloads import (
+    LIVE_ATTEMPT_STATUSES,
+    AttemptStatus,
+    SubscriptionStatus,
+)
 from aria2deck.domain.errors import DomainError, ErrorCode
+from aria2deck.domain.quota import PhysicalDownload
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
@@ -495,3 +500,93 @@ async def test_ingestion_start_rejects_terminal_and_concurrently_changed_attempt
         with pytest.raises(DomainError) as caught:
             await repository.start_ingestion(attempt_id, expected_gid=GID, now_ms=4)
         assert caught.value.code is ErrorCode.STALE_EVENT
+
+
+@pytest.mark.parametrize(
+    "status,total,completed,expected",
+    [
+        (AttemptStatus.QUEUED, 100, 20, 80),
+        (AttemptStatus.ACTIVE, 100, 20, 80),
+        (AttemptStatus.WAITING, 100, 20, 0),
+        (AttemptStatus.PAUSED, 100, 20, 0),
+        (AttemptStatus.COMPLETED, 100, 20, 0),
+        (AttemptStatus.CANCELLED, 100, 20, 0),
+        (AttemptStatus.FAILED, 100, 20, 0),
+        (AttemptStatus.ACTIVE, None, 20, 80),
+    ],
+)
+async def test_list_active_physical_maps_attempt_status_and_remaining_bytes(
+    database: SQLiteDatabase,
+    status: AttemptStatus,
+    total: int | None,
+    completed: int,
+    expected: int,
+) -> None:
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        attempt_id = await repository.create_attempt(
+            source_id=source_id,
+            resource_key="http:key",
+            gid=GID,
+            status=status,
+            total_length=total,
+            physical_reserved_bytes=100,
+            now_ms=1,
+        )
+        await uow.connection.execute(
+            update(download_attempts)
+            .where(download_attempts.c.id == attempt_id)
+            .values(completed_length=completed)
+        )
+
+        physical = await repository.list_active_physical()
+
+    expected_items = (
+        [PhysicalDownload(status, total, completed, 100)]
+        if status in LIVE_ATTEMPT_STATUSES
+        else []
+    )
+    assert physical == expected_items
+    assert sum(item.reserved_bytes for item in physical) == expected
+
+
+async def test_list_active_physical_stays_empty_after_completion_and_history_delete(
+    database: SQLiteDatabase,
+) -> None:
+    user_id = await create_user(database)
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        content_id = await ContentRepository(uow.connection).create_object(
+            kind="file",
+            digest="ab" * 32,
+            size=100,
+            storage_path="objects/done",
+            now_ms=1,
+        )
+        attempt_id = await repository.create_attempt(
+            source_id=source_id,
+            resource_key="http:key",
+            gid=GID,
+            status=AttemptStatus.ACTIVE,
+            total_length=100,
+            physical_reserved_bytes=100,
+            now_ms=1,
+        )
+        task_id = await repository.create_subscription(
+            attempt_id=attempt_id,
+            user_id=user_id,
+            reserved_bytes=100,
+            display_name="file",
+            display_uri=None,
+            now_ms=1,
+        )
+        assert [item.reserved_bytes for item in await repository.list_active_physical()] == [
+            100
+        ]
+
+        await repository.complete_attempt(attempt_id, content_id=content_id, now_ms=2)
+        assert await repository.list_active_physical() == []
+        assert await repository.delete_history(user_id=user_id, task_id=task_id, now_ms=3)
+        assert await repository.list_active_physical() == []

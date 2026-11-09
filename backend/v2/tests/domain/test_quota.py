@@ -81,20 +81,31 @@ def test_rebuild_uses_authoritative_files_and_active_reservations() -> None:
 
 
 @pytest.mark.parametrize(
-    "status,total,completed,expected",
+    "status,total,completed,committed,expected",
     [
-        (AttemptStatus.QUEUED, 100, 20, 80),
-        (AttemptStatus.ACTIVE, 100, 20, 80),
-        (AttemptStatus.WAITING, 100, 20, 0),
-        (AttemptStatus.PAUSED, 100, 20, 0),
-        (AttemptStatus.COMPLETED, 100, 100, 0),
-        (AttemptStatus.ACTIVE, None, 0, 0),
+        (AttemptStatus.QUEUED, 100, 20, 100, 80),
+        (AttemptStatus.ACTIVE, 100, 20, 100, 80),
+        (AttemptStatus.WAITING, 100, 20, 100, 0),
+        (AttemptStatus.PAUSED, 100, 20, 100, 0),
+        (AttemptStatus.COMPLETED, 100, 100, 100, 0),
+        (AttemptStatus.ACTIVE, None, 0, 0, 0),
+        (AttemptStatus.ACTIVE, None, 20, 100, 80),
+        (AttemptStatus.ACTIVE, 100, 20, 120, 100),
     ],
 )
 def test_physical_download_budget_is_not_user_quota(
-    status: AttemptStatus, total: int | None, completed: int, expected: int
+    status: AttemptStatus,
+    total: int | None,
+    completed: int,
+    committed: int,
+    expected: int,
 ) -> None:
-    item = PhysicalDownload(status=status, total_length=total, completed_length=completed)
+    item = PhysicalDownload(
+        status=status,
+        total_length=total,
+        completed_length=completed,
+        committed_bytes=committed,
+    )
     assert item.reserved_bytes == expected
 
 
@@ -103,6 +114,8 @@ def test_physical_download_rejects_invalid_progress() -> None:
         _ = PhysicalDownload(AttemptStatus.ACTIVE, 10, 11).reserved_bytes
     with pytest.raises(DomainError):
         _ = PhysicalDownload(AttemptStatus.ACTIVE, -1, 0).reserved_bytes
+    with pytest.raises(DomainError):
+        _ = PhysicalDownload(AttemptStatus.ACTIVE, 10, 0, -1).reserved_bytes
 
 
 @pytest.mark.parametrize(

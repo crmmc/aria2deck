@@ -7,6 +7,7 @@ from typing import Protocol
 from ...domain.content import ContentDeletionState, validate_display_name
 from ...domain.errors import DomainError, ErrorCode
 from ...domain.quota import (
+    PhysicalDownload,
     PhysicalPack,
     Quota,
     available_machine_bytes,
@@ -22,6 +23,10 @@ from .models import (
 )
 
 MAX_PACK_SOURCES = 100
+
+
+class DownloadRepositoryPort(Protocol):
+    async def list_active_physical(self) -> list[PhysicalDownload]: ...
 
 
 class PackRepositoryPort(Protocol):
@@ -58,6 +63,7 @@ class MachineSpacePort(Protocol):
 
 
 RepositoryFactory = Callable[[UnitOfWork], PackRepositoryPort]
+DownloadRepositoryFactory = Callable[[UnitOfWork], DownloadRepositoryPort]
 QuotaRepositoryFactory = Callable[[UnitOfWork], QuotaRepositoryPort]
 UowFactory = Callable[[], AbstractAsyncContextManager[UnitOfWork]]
 ClockMs = Callable[[], int]
@@ -70,6 +76,7 @@ class PackAdmissionService:
         *,
         uow_factory: UowFactory,
         repository_factory: RepositoryFactory,
+        download_repository_factory: DownloadRepositoryFactory,
         quota_repository_factory: QuotaRepositoryFactory,
         machine_space: MachineSpacePort,
         settings: SettingsGetter,
@@ -77,6 +84,7 @@ class PackAdmissionService:
     ) -> None:
         self.uow_factory = uow_factory
         self.repository_factory = repository_factory
+        self.download_repository_factory = download_repository_factory
         self.quota_repository_factory = quota_repository_factory
         self.machine_space = machine_space
         self.settings = settings
@@ -84,7 +92,6 @@ class PackAdmissionService:
 
     async def precompute(self, user_id: int, user_file_ids: list[int]) -> PrecomputeResultView:
         unique_ids = list(dict.fromkeys(user_file_ids))
-        physical = await self._machine_available()
         async with self.uow_factory() as uow:
             sources = {
                 source.user_file_id: source
@@ -93,6 +100,7 @@ class PackAdmissionService:
                 )
             }
             quota = await self.quota_repository_factory(uow).get(user_id)
+            physical = await self._machine_available(uow)
         items: list[PrecomputeItemView] = []
         total = 0
         for file_id in unique_ids:
@@ -131,7 +139,6 @@ class PackAdmissionService:
         validate_display_name(output_name)
         unique_ids = list(dict.fromkeys(user_file_ids))
         now_ms = self.clock_ms()
-        machine_available = await self._machine_available()
         async with self.uow_factory() as uow:
             repository = self.repository_factory(uow)
             sources = await repository.list_admission_sources(
@@ -143,6 +150,7 @@ class PackAdmissionService:
                 if source.deletion_state is not ContentDeletionState.ACTIVE:
                     raise DomainError(ErrorCode.CONTENT_PENDING_DELETE, "来源正在删除，不能打包")
             total = sum(source.size for source in sources)
+            machine_available = await self._machine_available(uow)
             if total > machine_available:
                 raise DomainError(ErrorCode.PHYSICAL_SPACE_EXCEEDED, "机器可用空间不足")
             pack_id = await repository.create_job(
@@ -160,10 +168,12 @@ class PackAdmissionService:
             await self.quota_repository_factory(uow).reserve(user_id, total)
         return pack_id
 
-    async def _machine_available(self) -> int:
-        async with self.uow_factory() as uow:
-            packs = await self.repository_factory(uow).list_active_physical()
-        # shortcut: 下载侧物理承诺暂不可枚举（STAT-02 未实现），先只计入打包预留；实现后在此并入。
+    async def _machine_available(self, uow: UnitOfWork) -> int:
+        downloads = await self.download_repository_factory(uow).list_active_physical()
+        packs = await self.repository_factory(uow).list_active_physical()
         return available_machine_bytes(
-            self.machine_space.machine_free_bytes(), self.settings().min_free_disk, (), packs
+            self.machine_space.machine_free_bytes(),
+            self.settings().min_free_disk,
+            downloads,
+            packs,
         )

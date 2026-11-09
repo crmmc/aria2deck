@@ -99,6 +99,7 @@ async def test_terminal_frame_published_exactly_once() -> None:
     from aria2deck.application.downloads.lifecycle import DownloadLifecycleService
     from aria2deck.application.downloads.models import TaskProjection
     from aria2deck.domain.downloads import SubscriptionStatus
+    from aria2deck.domain.settings import SystemSettings
 
     bus = TaskBroadcast()
     sink = bus.subscribe(1)
@@ -134,6 +135,7 @@ async def test_terminal_frame_published_exactly_once() -> None:
         content_store=AsyncMock(),
         observations=AsyncMock(),
         connectivity=AsyncMock(),
+        settings=lambda: SystemSettings(min_free_disk=0),
         clock_ms=lambda: 100,
         broadcast=bus,
         queries=FakeQueries(),

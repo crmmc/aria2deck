@@ -323,6 +323,7 @@ async def test_lifecycle_broadcast_to_ws_end_to_end(tmp_path):
     from aria2deck.infrastructure.sqlite.repositories.accounts import AccountRepository
     from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
     from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
+    from aria2deck.infrastructure.sqlite.repositories.packs import PackRepository
 
     from .test_download_lifecycle import GID, observation, runtime
 
@@ -340,6 +341,7 @@ async def test_lifecycle_broadcast_to_ws_end_to_end(tmp_path):
         queries = DownloadQueryService(
             uow_factory=uow_factory,
             repository_factory=lambda uow: DownloadRepository(uow.connection),
+            pack_repository_factory=lambda uow: PackRepository(uow.connection),
             account_repository_factory=lambda uow: AccountRepository(uow.connection),
             projector=projector,
             machine_space=rt.store,
@@ -353,6 +355,7 @@ async def test_lifecycle_broadcast_to_ws_end_to_end(tmp_path):
             content_store=rt.store,
             observations=rt.observations,
             connectivity=rt.connectivity,
+            settings=lambda: SystemSettings(min_free_disk=0),
             clock_ms=lambda: 100,
             broadcast=bus,
             queries=queries,

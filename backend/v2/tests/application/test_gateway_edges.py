@@ -11,12 +11,21 @@ from aria2deck.application.downloads.models import UriDownloadInput
 from aria2deck.bootstrap import create_app
 from aria2deck.domain.accounts import CredentialKind
 from aria2deck.domain.errors import DomainError, ErrorCode
+from aria2deck.domain.settings import SystemSettings
 from aria2deck.infrastructure.config import Settings
 from aria2deck.infrastructure.security import CredentialManager
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from aria2deck.infrastructure.sqlite.schema import download_sources
 from tests.api.test_internal_gateway import FakeUpstream, response
 from tests.download_fakes import FakeSubmissionBackend
+
+
+class FixedMachineSpace:
+    def __init__(self, free_bytes: int) -> None:
+        self.free_bytes = free_bytes
+
+    def machine_free_bytes(self) -> int:
+        return self.free_bytes
 
 
 def capability(attempt_id: int) -> str:
@@ -105,6 +114,64 @@ def test_gateway_direct_admission_success_and_failures(tmp_path: Path) -> None:
     asyncio.run(_gateway_direct_admission_success_and_failures(tmp_path))
 
 
+async def test_gateway_unknown_growth_and_larger_header_use_machine_budget(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(tmp_path / "v2.db", tmp_path / "downloads", tmp_path / "static", True)
+    app = create_app(settings=settings)
+    async with app.router.lifespan_context(app):
+        view = await app.state.account_service.create_user(
+            None,
+            username="admin",
+            password_hash="ab" * 32,
+            is_admin=True,
+            is_initial_password=False,
+            quota_bytes=100,
+        )
+        app.state.download_commands.backend = FakeSubmissionBackend()
+        created = (
+            await app.state.download_commands.create_uris(
+                user_id=view.user.id,
+                items=[UriDownloadInput("https://example.com/unknown")],
+            )
+        )[0]
+        gateway = app.state.download_gateway
+        gateway.settings = lambda: SystemSettings(min_free_disk=0)
+        gateway.machine_space = FixedMachineSpace(2)
+        upstream, _ = response([b"a", b"b"], total=None, body_bytes=None)
+        gateway.upstream = FakeUpstream(upstream)
+
+        opened = await gateway.open(
+            attempt_id=created.attempt_id,
+            source_index=0,
+            capability=capability(created.attempt_id),
+            range_header=None,
+        )
+        assert await anext(opened.body) == b"a"
+        async with app.state.download_commands.uow_factory() as uow:
+            attempt = await DownloadRepository(uow.connection).get_attempt(created.attempt_id)
+            assert attempt.physical_reserved_bytes == 1
+        assert await anext(opened.body) == b"b"
+        with pytest.raises(StopAsyncIteration):
+            await anext(opened.body)
+        async with app.state.download_commands.uow_factory() as uow:
+            attempt = await DownloadRepository(uow.connection).get_attempt(created.attempt_id)
+            assert attempt.physical_reserved_bytes == 2
+
+        gateway.machine_space = FixedMachineSpace(3)
+        upstream, closed = response([b"abcd"], total=4, body_bytes=4)
+        gateway.upstream = FakeUpstream(upstream)
+        with pytest.raises(DomainError) as caught:
+            await gateway.open(
+                attempt_id=created.attempt_id,
+                source_index=0,
+                capability=capability(created.attempt_id),
+                range_header=None,
+            )
+        assert caught.value.code is ErrorCode.PHYSICAL_SPACE_EXCEEDED
+        assert closed == [True]
+
+
 def test_gateway_rejects_non_mapping_header_data() -> None:
     async def exercise() -> None:
         from aria2deck.application.downloads.gateway import DownloadGatewayService
@@ -123,6 +190,7 @@ def test_gateway_rejects_non_mapping_header_data() -> None:
         gateway = DownloadGatewayService(
             uow_factory=lambda: UoW(), repository_factory=lambda _uow: Repository(),
             upstream=FakeUpstream(response([], total=None, body_bytes=None)[0]),
+            machine_space=FixedMachineSpace(100),
             settings=SystemSettings, clock_ms=lambda: 1, verify_capability=lambda *args: True,
         )
         with pytest.raises(DomainError) as caught:
@@ -150,7 +218,8 @@ def test_gateway_closes_an_over_limit_response_before_streaming() -> None:
         upstream, closed = response([b"abc"], total=3, body_bytes=3)
         gateway = DownloadGatewayService(
             uow_factory=lambda: UoW(), repository_factory=lambda _uow: Repository(),
-            upstream=FakeUpstream(upstream), settings=lambda: SystemSettings(max_task_size=2),
+            upstream=FakeUpstream(upstream), machine_space=FixedMachineSpace(100),
+            settings=lambda: SystemSettings(max_task_size=2),
             clock_ms=lambda: 1, verify_capability=lambda *args: True,
         )
         with pytest.raises(DomainError) as caught:

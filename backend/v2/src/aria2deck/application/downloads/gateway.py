@@ -30,8 +30,14 @@ class GatewayRepository(Protocol):
         attempt_id: int,
         observed_bytes: int,
         known_total: bool,
+        disk_free_bytes: int,
+        min_free_bytes: int,
         now_ms: int,
     ) -> DomainError | None: ...
+
+
+class MachineSpacePort(Protocol):
+    def machine_free_bytes(self) -> int: ...
 
 
 class UpstreamPort(Protocol):
@@ -50,6 +56,7 @@ class DownloadGatewayService:
         uow_factory: UowFactory,
         repository_factory: RepositoryFactory,
         upstream: UpstreamPort,
+        machine_space: MachineSpacePort,
         settings: Callable[[], SystemSettings],
         clock_ms: Callable[[], int],
         verify_capability: Callable[[int, int, str], bool],
@@ -57,6 +64,7 @@ class DownloadGatewayService:
         self.uow_factory = uow_factory
         self.repository_factory = repository_factory
         self.upstream = upstream
+        self.machine_space = machine_space
         self.settings = settings
         self.clock_ms = clock_ms
         self.verify_capability = verify_capability
@@ -67,6 +75,8 @@ class DownloadGatewayService:
                 attempt_id=attempt_id,
                 observed_bytes=size,
                 known_total=known_total,
+                disk_free_bytes=self.machine_space.machine_free_bytes(),
+                min_free_bytes=self.settings().min_free_disk,
                 now_ms=self.clock_ms(),
             )
         if failure is not None:

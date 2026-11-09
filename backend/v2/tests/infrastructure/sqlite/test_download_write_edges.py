@@ -8,7 +8,11 @@ from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from aria2deck.infrastructure.sqlite.repositories.quota import QuotaRepository
-from aria2deck.infrastructure.sqlite.schema import download_sources, task_subscriptions
+from aria2deck.infrastructure.sqlite.schema import (
+    download_attempts,
+    download_sources,
+    task_subscriptions,
+)
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
 from tests.infrastructure.sqlite.test_accounts_quota import create_user
 from tests.infrastructure.sqlite.test_sqlite_downloads import GID, source
@@ -113,9 +117,9 @@ async def test_admission_rejects_negative_terminal_and_subscriptionless_attempts
     async with SQLiteUnitOfWork(database) as uow:
         repository = DownloadRepository(uow.connection)
         with pytest.raises(DomainError):
-            await repository.admit_size(attempt_id=attempt_id, observed_bytes=-1, known_total=True, now_ms=1)
+            await repository.admit_size(attempt_id=attempt_id, observed_bytes=-1, known_total=True, disk_free_bytes=1_000_000, min_free_bytes=0, now_ms=1)
         with pytest.raises(DomainError) as caught:
-            await repository.admit_size(attempt_id=attempt_id, observed_bytes=1, known_total=True, now_ms=1)
+            await repository.admit_size(attempt_id=attempt_id, observed_bytes=1, known_total=True, disk_free_bytes=1_000_000, min_free_bytes=0, now_ms=1)
         assert caught.value.code is ErrorCode.DOWNLOAD_UNAVAILABLE
     async with SQLiteUnitOfWork(database) as uow:
         repository = DownloadRepository(uow.connection)
@@ -124,7 +128,7 @@ async def test_admission_rejects_negative_terminal_and_subscriptionless_attempts
         # Marking the source detached does not change the attempt; use the real terminal transition next.
         await uow.connection.execute(text("UPDATE download_attempts SET status = 'cancelled' WHERE id = :id"), {"id": attempt_id})
         with pytest.raises(DomainError) as caught:
-            await repository.admit_size(attempt_id=attempt_id, observed_bytes=1, known_total=True, now_ms=2)
+            await repository.admit_size(attempt_id=attempt_id, observed_bytes=1, known_total=True, disk_free_bytes=1_000_000, min_free_bytes=0, now_ms=2)
         assert caught.value.code is ErrorCode.DOWNLOAD_UNAVAILABLE
 
 
@@ -133,7 +137,7 @@ async def test_admission_releases_existing_reservation_when_growth_exceeds_quota
     attempt_id = await make_attempt(database, user_id=user_id, reserved=2)
     async with SQLiteUnitOfWork(database) as uow:
         repository = DownloadRepository(uow.connection)
-        failure = await repository.admit_size(attempt_id=attempt_id, observed_bytes=3, known_total=True, now_ms=2)
+        failure = await repository.admit_size(attempt_id=attempt_id, observed_bytes=3, known_total=True, disk_free_bytes=1_000_000, min_free_bytes=0, now_ms=2)
         assert failure is not None and failure.code is ErrorCode.QUOTA_EXCEEDED
         assert (await QuotaRepository(uow.connection).get(user_id)).reserved_bytes == 0
         assert (await repository.get_attempt(attempt_id)).status is AttemptStatus.FAILED
@@ -149,7 +153,7 @@ async def test_admission_does_not_mask_unexpected_quota_failure(database: SQLite
     monkeypatch.setattr(QuotaRepository, "reserve", fail)
     async with SQLiteUnitOfWork(database) as uow:
         with pytest.raises(DomainError) as caught:
-            await DownloadRepository(uow.connection).admit_size(attempt_id=attempt_id, observed_bytes=1, known_total=True, now_ms=2)
+            await DownloadRepository(uow.connection).admit_size(attempt_id=attempt_id, observed_bytes=1, known_total=True, disk_free_bytes=1_000_000, min_free_bytes=0, now_ms=2)
         assert caught.value.code is ErrorCode.NOT_FOUND
 
 
@@ -183,8 +187,8 @@ async def test_admission_is_monotonic_for_repeated_and_unknown_sizes(database: S
     attempt_id = await make_attempt(database, user_id=user_id)
     async with SQLiteUnitOfWork(database) as uow:
         repository = DownloadRepository(uow.connection)
-        assert await repository.admit_size(attempt_id=attempt_id, observed_bytes=2, known_total=False, now_ms=2) is None
-        assert await repository.admit_size(attempt_id=attempt_id, observed_bytes=2, known_total=True, now_ms=3) is None
+        assert await repository.admit_size(attempt_id=attempt_id, observed_bytes=2, known_total=False, disk_free_bytes=1_000_000, min_free_bytes=0, now_ms=2) is None
+        assert await repository.admit_size(attempt_id=attempt_id, observed_bytes=2, known_total=True, disk_free_bytes=1_000_000, min_free_bytes=0, now_ms=3) is None
         assert (await repository.get_attempt(attempt_id)).total_length == 2
         assert (await QuotaRepository(uow.connection).get(user_id)).reserved_bytes == 2
 
@@ -194,9 +198,98 @@ async def test_zero_reservation_failure_is_persistent(database: SQLiteDatabase) 
     attempt_id = await make_attempt(database, user_id=user_id)
     async with SQLiteUnitOfWork(database) as uow:
         failure = await DownloadRepository(uow.connection).admit_size(
-            attempt_id=attempt_id, observed_bytes=1, known_total=True, now_ms=2,
+            attempt_id=attempt_id, observed_bytes=1, known_total=True, disk_free_bytes=1_000_000, min_free_bytes=0, now_ms=2,
         )
         assert failure is not None and failure.code is ErrorCode.QUOTA_EXCEEDED
+
+
+async def test_unknown_growth_and_larger_total_charge_only_machine_delta(
+    database: SQLiteDatabase,
+) -> None:
+    user_id = await create_user(database)
+    attempt_id = await make_attempt(
+        database, user_id=user_id, status=AttemptStatus.ACTIVE
+    )
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        await uow.connection.execute(
+            update(download_attempts)
+            .where(download_attempts.c.id == attempt_id)
+            .values(total_length=None)
+        )
+        assert await repository.admit_size(
+            attempt_id=attempt_id,
+            observed_bytes=40,
+            known_total=False,
+            disk_free_bytes=40,
+            min_free_bytes=0,
+            now_ms=2,
+        ) is None
+        await uow.connection.execute(
+            update(download_attempts)
+            .where(download_attempts.c.id == attempt_id)
+            .values(completed_length=10)
+        )
+        assert await repository.admit_size(
+            attempt_id=attempt_id,
+            observed_bytes=60,
+            known_total=False,
+            disk_free_bytes=50,
+            min_free_bytes=0,
+            now_ms=3,
+        ) is None
+        assert await repository.admit_size(
+            attempt_id=attempt_id,
+            observed_bytes=100,
+            known_total=True,
+            disk_free_bytes=100,
+            min_free_bytes=0,
+            now_ms=4,
+        ) is None
+        attempt = await repository.get_attempt(attempt_id)
+        assert attempt.total_length == 100
+        assert attempt.physical_reserved_bytes == 100
+        assert (await QuotaRepository(uow.connection).get(user_id)).reserved_bytes == 100
+
+
+@pytest.mark.parametrize("disk_free,succeeds", [(79, False), (80, True)])
+async def test_paused_admission_checks_the_full_target_remaining(
+    database: SQLiteDatabase, disk_free: int, succeeds: bool
+) -> None:
+    user_id = await create_user(database)
+    attempt_id = await make_attempt(
+        database,
+        user_id=user_id,
+        reserved=100,
+        status=AttemptStatus.PAUSED,
+    )
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        await uow.connection.execute(
+            update(download_attempts)
+            .where(download_attempts.c.id == attempt_id)
+            .values(completed_length=20)
+        )
+        failure = await repository.admit_size(
+            attempt_id=attempt_id,
+            observed_bytes=100,
+            known_total=True,
+            disk_free_bytes=disk_free,
+            min_free_bytes=0,
+            now_ms=2,
+        )
+        attempt = await repository.get_attempt(attempt_id)
+        quota = await QuotaRepository(uow.connection).get(user_id)
+        if succeeds:
+            assert failure is None
+            assert attempt.status is AttemptStatus.PAUSED
+            assert quota.reserved_bytes == 100
+        else:
+            assert failure is not None
+            assert failure.code is ErrorCode.PHYSICAL_SPACE_EXCEEDED
+            assert attempt.status is AttemptStatus.FAILED
+            assert attempt.error_code == ErrorCode.PHYSICAL_SPACE_EXCEEDED.value
+            assert quota.reserved_bytes == 0
 
 
 async def test_failed_attempt_with_zero_reservation_skips_release(database: SQLiteDatabase) -> None:

@@ -22,6 +22,8 @@ from ...domain.downloads import (
     resource_display_name,
 )
 from ...domain.errors import DomainError, ErrorCode
+from ...domain.quota import PhysicalDownload, PhysicalPack, available_machine_bytes
+from ...domain.settings import SystemSettings
 from ...domain.torrents import TorrentMetadata, parse_torrent
 from ..ports import UnitOfWork
 from ..settings.rate_limit import RateLimiter
@@ -52,6 +54,8 @@ class CommandRepository(Protocol):
     ) -> DownloadRecord | None: ...
 
     async def find_live_attempt(self, resource_key: str) -> AttemptRecord | None: ...
+
+    async def list_active_physical(self) -> list[PhysicalDownload]: ...
 
     async def find_completed_attempt(self, resource_key: str) -> AttemptRecord | None: ...
 
@@ -154,6 +158,14 @@ class QuotaCommands(Protocol):
     ) -> object: ...
 
 
+class PackPhysicalRepository(Protocol):
+    async def list_active_physical(self) -> list[PhysicalPack]: ...
+
+
+class MachineSpacePort(Protocol):
+    def machine_free_bytes(self) -> int: ...
+
+
 class SubmissionBackend(Protocol):
     async def submit_many(
         self, submissions: list[Submission], *, trackers: tuple[str, ...]
@@ -171,6 +183,7 @@ class TrackerProvider(Protocol):
 RepositoryFactory = Callable[[UnitOfWork], CommandRepository]
 ContentRepositoryFactory = Callable[[UnitOfWork], ContentCommands]
 QuotaRepositoryFactory = Callable[[UnitOfWork], QuotaCommands]
+PackRepositoryFactory = Callable[[UnitOfWork], PackPhysicalRepository]
 
 
 def _json(value: object) -> str:
@@ -252,9 +265,12 @@ class DownloadCommandService:
         repository_factory: RepositoryFactory,
         content_repository_factory: ContentRepositoryFactory,
         quota_repository_factory: QuotaRepositoryFactory,
+        pack_repository_factory: PackRepositoryFactory,
         backend: SubmissionBackend,
         trackers: TrackerProvider,
         rate_limiter: RateLimiter,
+        machine_space: MachineSpacePort,
+        settings: Callable[[], SystemSettings],
         clock_ms: Callable[[], int],
         planned_gid: Callable[[int], str],
         submission_lock: asyncio.Lock | None = None,
@@ -263,9 +279,12 @@ class DownloadCommandService:
         self.repository_factory = repository_factory
         self.content_repository_factory = content_repository_factory
         self.quota_repository_factory = quota_repository_factory
+        self.pack_repository_factory = pack_repository_factory
         self.backend = backend
         self.trackers = trackers
         self.rate_limiter = rate_limiter
+        self.machine_space = machine_space
+        self.settings = settings
         self.clock_ms = clock_ms
         self.planned_gid = planned_gid
         self.submission_lock = submission_lock or asyncio.Lock()
@@ -373,6 +392,16 @@ class DownloadCommandService:
             else:
                 source_id = source.id
             reserved = prepared.total_bytes or 0
+            downloads = await repository.list_active_physical()
+            packs = await self.pack_repository_factory(uow).list_active_physical()
+            machine_available = available_machine_bytes(
+                self.machine_space.machine_free_bytes(),
+                self.settings().min_free_disk,
+                downloads,
+                packs,
+            )
+            if reserved > machine_available:
+                raise DomainError(ErrorCode.PHYSICAL_SPACE_EXCEEDED, "机器可用空间不足")
             if reserved:
                 await self.quota_repository_factory(uow).reserve(user_id, reserved)
             attempt_id = await repository.create_attempt(

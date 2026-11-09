@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import TracebackType
 
 import pytest
 
 from aria2deck.application.downloads.models import (
-    AttemptRecord,
     DownloadObservation,
     DownloadRecord,
     TaskPage,
@@ -13,11 +13,20 @@ from aria2deck.application.downloads.models import (
 )
 from aria2deck.application.downloads.projection import TaskProjector
 from aria2deck.application.downloads.queries import DownloadQueryService
+from aria2deck.bootstrap import create_app
 from aria2deck.domain.downloads import AttemptStatus, SubscriptionStatus
 from aria2deck.domain.errors import DomainError, ErrorCode
-from aria2deck.domain.quota import Quota, available_user_bytes
+from aria2deck.domain.quota import (
+    PhysicalDownload,
+    PhysicalPack,
+    Quota,
+    available_user_bytes,
+)
 from aria2deck.domain.settings import SystemSettings
+from aria2deck.infrastructure.config import Settings
 from aria2deck.infrastructure.observations import InMemoryDownloadObservations
+from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
+from aria2deck.infrastructure.sqlite.repositories.packs import PackRepository
 
 
 class FakeUoW:
@@ -56,7 +65,12 @@ class ReadRepository:
                 return record
         raise DomainError(ErrorCode.NOT_FOUND, "任务不存在")
 
-    async def list_live_attempts(self, *, submitted_only: bool = False) -> list[AttemptRecord]:
+    async def list_active_physical(self) -> list[PhysicalDownload]:
+        return []
+
+
+class EmptyPackRepository:
+    async def list_active_physical(self) -> list[PhysicalPack]:
         return []
 
 
@@ -112,6 +126,7 @@ def service(records: list[DownloadRecord]) -> DownloadQueryService:
     return DownloadQueryService(
         uow_factory=FakeUoW,
         repository_factory=lambda _uow: ReadRepository(records),
+        pack_repository_factory=lambda _uow: EmptyPackRepository(),
         account_repository_factory=lambda _uow: QuotaRepository(),
         projector=TaskProjector(observations=observations, clock_ms=lambda: 100_000),
         machine_space=MachineSpace(),
@@ -166,6 +181,7 @@ async def test_query_service_passes_sort_order_and_defaults_to_repository() -> N
     queries = DownloadQueryService(
         uow_factory=FakeUoW,
         repository_factory=lambda _uow: repository,
+        pack_repository_factory=lambda _uow: EmptyPackRepository(),
         account_repository_factory=lambda _uow: QuotaRepository(),
         projector=TaskProjector(
             observations=InMemoryDownloadObservations(), clock_ms=lambda: 100_000
@@ -207,3 +223,98 @@ async def test_query_service_detail_and_stats_use_the_same_projection() -> None:
     with pytest.raises(DomainError) as caught:
         await queries.get_task(user_id=7, task_id=999)
     assert caught.value.code is ErrorCode.NOT_FOUND
+
+
+async def test_stats_subtract_download_and_pack_physical_commitments(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        settings=Settings(
+            database_path=tmp_path / "v2.db",
+            download_directory=tmp_path / "downloads",
+            static_directory=tmp_path / "static",
+            debug=True,
+        )
+    )
+    async with app.router.lifespan_context(app):
+        await app.state.supervisor.stop()
+        view = await app.state.account_service.create_user(
+            None,
+            username="admin",
+            password_hash="ab" * 32,
+            is_admin=True,
+            is_initial_password=False,
+            quota_bytes=None,
+        )
+        async with app.state.download_commands.uow_factory() as uow:
+            downloads = DownloadRepository(uow.connection)
+            source_id = await downloads.create_source(
+                kind="http",
+                resource_key="http:budget",
+                payload_json="{}",
+                options_json="{}",
+                selected_file_indexes_json=None,
+                display_name="budget",
+                display_uri=None,
+                now_ms=1,
+            )
+            attempt_id = await downloads.create_attempt(
+                source_id=source_id,
+                resource_key="http:budget",
+                gid="0123456789abcdef",
+                status=AttemptStatus.ACTIVE,
+                total_length=100,
+                physical_reserved_bytes=100,
+                now_ms=1,
+            )
+            await downloads.apply_observation(
+                attempt_id,
+                expected_gid="0123456789abcdef",
+                status=AttemptStatus.ACTIVE,
+                completed_length=20,
+                total_length=100,
+                now_ms=2,
+            )
+            unknown_source_id = await downloads.create_source(
+                kind="http",
+                resource_key="http:unknown-budget",
+                payload_json="{}",
+                options_json="{}",
+                selected_file_indexes_json=None,
+                display_name="unknown-budget",
+                display_uri=None,
+                now_ms=2,
+            )
+            unknown_attempt_id = await downloads.create_attempt(
+                source_id=unknown_source_id,
+                resource_key="http:unknown-budget",
+                gid="fedcba0987654321",
+                status=AttemptStatus.ACTIVE,
+                total_length=None,
+                physical_reserved_bytes=40,
+                now_ms=2,
+            )
+            await downloads.apply_observation(
+                unknown_attempt_id,
+                expected_gid="fedcba0987654321",
+                status=AttemptStatus.ACTIVE,
+                completed_length=10,
+                total_length=None,
+                now_ms=3,
+            )
+            await PackRepository(uow.connection).create_job(
+                owner_id=view.user.id,
+                output_name="budget.zip",
+                pack_format="zip",
+                source_size=50,
+                reserved_bytes=50,
+                physical_reserved_bytes=50,
+                delete_source=False,
+                now_ms=2,
+            )
+        app.state.download_queries.machine_space = MachineSpace()
+        app.state.download_queries.settings = lambda: SystemSettings(min_free_disk=0)
+
+        stats = await app.state.download_queries.stats(user_id=view.user.id)
+
+    assert stats.disk.available_bytes == 340

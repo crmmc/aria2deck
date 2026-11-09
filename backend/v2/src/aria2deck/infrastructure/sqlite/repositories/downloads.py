@@ -34,8 +34,10 @@ from ....domain.downloads import (
     transition_subscription,
 )
 from ....domain.errors import DomainError, ErrorCode
+from ....domain.quota import PhysicalDownload, available_machine_bytes
 from ..schema import content_objects, download_attempts, download_sources, task_subscriptions, users
 from .content import ContentRepository
+from .packs import PackRepository
 from .quota import QuotaRepository
 
 # 排序键白名单：枚举值映射到列对象，禁止任何用户输入以字符串形式拼进 SQL。
@@ -841,6 +843,31 @@ class DownloadRepository:
         ).first()
         return None if row is None else self._attempt(row)
 
+    async def list_active_physical(self) -> list[PhysicalDownload]:
+        rows = (
+            await self.connection.execute(
+                select(
+                    download_attempts.c.status,
+                    download_attempts.c.total_length,
+                    download_attempts.c.completed_length,
+                    download_attempts.c.physical_reserved_bytes,
+                )
+                .where(download_attempts.c.status.in_(LIVE_ATTEMPT_STATUSES))
+                .order_by(download_attempts.c.id)
+            )
+        ).all()
+        return [
+            PhysicalDownload(
+                status=AttemptStatus(row.status),
+                total_length=(
+                    None if row.total_length is None else int(row.total_length)
+                ),
+                completed_length=int(row.completed_length),
+                committed_bytes=int(row.physical_reserved_bytes),
+            )
+            for row in rows
+        ]
+
     async def list_live_attempts(self, *, submitted_only: bool = False) -> list[AttemptRecord]:
         statement = select(download_attempts).where(
             download_attempts.c.status.in_(LIVE_ATTEMPT_STATUSES)
@@ -1136,6 +1163,8 @@ class DownloadRepository:
         attempt_id: int,
         observed_bytes: int,
         known_total: bool,
+        disk_free_bytes: int,
+        min_free_bytes: int,
         now_ms: int,
     ) -> DomainError | None:
         if observed_bytes < 0:
@@ -1154,6 +1183,28 @@ class DownloadRepository:
         ).all()
         if not rows:
             raise DomainError(ErrorCode.DOWNLOAD_UNAVAILABLE, "下载已没有有效订阅")
+        current = PhysicalDownload(
+            status=attempt.status,
+            total_length=attempt.total_length,
+            completed_length=attempt.completed_length,
+            committed_bytes=attempt.physical_reserved_bytes,
+        )
+        target_reservation = max(attempt.physical_reserved_bytes, target)
+        target_remaining = max(target_reservation - attempt.completed_length, 0)
+        additional = max(target_remaining - current.reserved_bytes, 0)
+        downloads = await self.list_active_physical()
+        packs = await PackRepository(self.connection).list_active_physical()
+        machine_available = available_machine_bytes(
+            disk_free_bytes,
+            min_free_bytes,
+            downloads,
+            packs,
+        )
+        machine_failure: DomainError | None = None
+        if additional > machine_available:
+            machine_failure = DomainError(
+                ErrorCode.PHYSICAL_SPACE_EXCEEDED, "机器可用空间不足"
+            )
         first_failure: DomainError | None = None
         for row in rows:
             user_id = int(row.user_id)
@@ -1161,6 +1212,8 @@ class DownloadRepository:
             desired = max(reserved, target)
             delta = desired - reserved
             try:
+                if machine_failure is not None:
+                    raise machine_failure
                 if delta:
                     await QuotaRepository(self.connection).reserve(user_id, delta)
             except DomainError as error:

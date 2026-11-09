@@ -11,6 +11,7 @@ from aria2deck.application.accounts.models import Principal
 from aria2deck.application.downloads.commands import (
     DownloadCommandService,
     _from_source,
+    prepare_torrent_download,
     prepare_uri_download,
 )
 from aria2deck.application.downloads.models import (
@@ -25,9 +26,20 @@ from aria2deck.bootstrap import create_app
 from aria2deck.domain.accounts import CredentialKind
 from aria2deck.domain.downloads import AttemptStatus, RegistrationOutcome
 from aria2deck.domain.errors import DomainError, ErrorCode
+from aria2deck.domain.settings import SystemSettings
+from aria2deck.domain.torrents import parse_torrent
 from aria2deck.infrastructure.config import Settings
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
+from aria2deck.infrastructure.sqlite.repositories.packs import PackRepository
 from tests.download_fakes import FakeSubmissionBackend, make_torrent
+
+
+class FixedMachineSpace:
+    def __init__(self, free_bytes: int) -> None:
+        self.free_bytes = free_bytes
+
+    def machine_free_bytes(self) -> int:
+        return self.free_bytes
 
 
 @asynccontextmanager
@@ -552,3 +564,92 @@ async def test_cancel_before_recovery_prevents_stale_candidate_submission(
                 candidate.attempt_id
             )
             assert attempt.status is AttemptStatus.CANCELLED
+
+
+async def test_download_registration_counts_active_pack_physical_commitment(
+    tmp_path: Path,
+) -> None:
+    async with runtime(tmp_path) as (service, user_id, _principal, _backend):
+        service.machine_space = FixedMachineSpace(100)
+        service.settings = lambda: SystemSettings(min_free_disk=0)
+        async with service.uow_factory() as uow:
+            await PackRepository(uow.connection).create_job(
+                owner_id=user_id,
+                output_name="existing.zip",
+                pack_format="zip",
+                source_size=80,
+                reserved_bytes=80,
+                physical_reserved_bytes=80,
+                delete_source=False,
+                now_ms=1,
+            )
+        prepared = prepare_torrent_download(
+            parse_torrent(make_torrent([("new.bin", 30)]))
+        )
+
+        with pytest.raises(DomainError) as caught:
+            await service._register(user_id=user_id, prepared=prepared)
+
+        assert caught.value.code is ErrorCode.PHYSICAL_SPACE_EXCEEDED
+        async with service.uow_factory() as uow:
+            assert (
+                await DownloadRepository(uow.connection).find_live_attempt(
+                    prepared.resource_key
+                )
+                is None
+            )
+
+
+async def test_join_and_completed_attach_add_no_new_physical_commitment(
+    tmp_path: Path,
+) -> None:
+    async with runtime(tmp_path) as (service, user_id, _principal, _backend):
+        from aria2deck.infrastructure.sqlite.repositories.accounts import AccountRepository
+        from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
+
+        service.machine_space = FixedMachineSpace(100)
+        service.settings = lambda: SystemSettings(min_free_disk=0)
+        async with service.uow_factory() as uow:
+            accounts = AccountRepository(uow.connection)
+            other_id = await accounts.create_user(
+                username="other",
+                password_hash="cd" * 32,
+                is_admin=False,
+                is_initial_password=False,
+                quota_bytes=None,
+                now_ms=1,
+            )
+            third_id = await accounts.create_user(
+                username="third",
+                password_hash="ef" * 32,
+                is_admin=False,
+                is_initial_password=False,
+                quota_bytes=None,
+                now_ms=1,
+            )
+        payload = make_torrent([("shared.bin", 30)])
+        created = await service.create_torrent(
+            user_id=user_id, payload_base64=payload, selected_file_indexes=None
+        )
+        service.machine_space = FixedMachineSpace(0)
+
+        joined = await service.create_torrent(
+            user_id=other_id, payload_base64=payload, selected_file_indexes=None
+        )
+        assert joined.outcome is RegistrationOutcome.JOINED_LIVE
+
+        async with service.uow_factory() as uow:
+            content_id = await ContentRepository(uow.connection).create_object(
+                kind="file",
+                digest="ab" * 32,
+                size=30,
+                storage_path="objects/shared",
+                now_ms=2,
+            )
+            await DownloadRepository(uow.connection).complete_attempt(
+                created.attempt_id, content_id=content_id, now_ms=2
+            )
+        attached = await service.create_torrent(
+            user_id=third_id, payload_base64=payload, selected_file_indexes=None
+        )
+        assert attached.outcome is RegistrationOutcome.ATTACHED_COMPLETED

@@ -1,22 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 from sqlalchemy import text
 
-from aria2deck.application.packs.admission import PackAdmissionService
+from aria2deck.application.downloads.commands import prepare_torrent_download
+from aria2deck.application.packs.admission import (
+    MachineSpacePort,
+    PackAdmissionService,
+)
+from aria2deck.domain.downloads import AttemptStatus
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.settings import SystemSettings
+from aria2deck.domain.torrents import parse_torrent
 from aria2deck.infrastructure.content_store import DownloadContentStore
 from aria2deck.infrastructure.sqlite.bootstrap import initialize_database
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.accounts import AccountRepository
 from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
+from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from aria2deck.infrastructure.sqlite.repositories.packs import PackRepository
 from aria2deck.infrastructure.sqlite.repositories.quota import QuotaRepository
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
+from tests.download_fakes import make_torrent
 
+from .test_download_command_edges import FixedMachineSpace, runtime
 from .test_library_services import FakeClock, _digest
 
 
@@ -81,7 +91,7 @@ async def seed_pack_file(
 def make_admission(
     database: SQLiteDatabase,
     clock: FakeClock,
-    store: DownloadContentStore,
+    store: MachineSpacePort,
     *,
     min_free_disk: int = 0,
     pack_format: str = "zip",
@@ -90,6 +100,7 @@ def make_admission(
     return PackAdmissionService(
         uow_factory=lambda: SQLiteUnitOfWork(database),
         repository_factory=lambda uow: PackRepository(uow.connection),
+        download_repository_factory=lambda uow: DownloadRepository(uow.connection),
         quota_repository_factory=lambda uow: QuotaRepository(uow.connection),
         machine_space=store,
         settings=lambda: settings,
@@ -184,3 +195,181 @@ async def test_create_rejects_when_quota_or_disk_insufficient(tmp_path: Path) ->
     assert caught.value.code is ErrorCode.PHYSICAL_SPACE_EXCEEDED
     result = await starving.precompute(roomy, [small])
     assert result.available_bytes == 0
+
+
+async def test_pack_admission_counts_active_download_physical_commitment(
+    tmp_path: Path,
+) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, file_id = await seed_pack_file(
+        database, root, user_id, 1, payload=b"x" * 30
+    )
+    async with SQLiteUnitOfWork(database) as uow:
+        downloads = DownloadRepository(uow.connection)
+        source_id = await downloads.create_source(
+            kind="http",
+            resource_key="http:existing",
+            payload_json="{}",
+            options_json="{}",
+            selected_file_indexes_json=None,
+            display_name="existing",
+            display_uri=None,
+            now_ms=1,
+        )
+        await downloads.create_attempt(
+            source_id=source_id,
+            resource_key="http:existing",
+            gid="0123456789abcdef",
+            status=AttemptStatus.ACTIVE,
+            total_length=80,
+            physical_reserved_bytes=80,
+            now_ms=1,
+        )
+    service = make_admission(database, clock, FixedMachineSpace(100))
+
+    uow_entries = 0
+    original_uow_factory = service.uow_factory
+
+    def counted_uow() -> SQLiteUnitOfWork:
+        nonlocal uow_entries
+        uow_entries += 1
+        return original_uow_factory()
+
+    service.uow_factory = counted_uow
+    with pytest.raises(DomainError) as caught:
+        await service.create(
+            user_id,
+            user_file_ids=[file_id],
+            output_name="new.zip",
+            delete_source=False,
+        )
+    assert caught.value.code is ErrorCode.PHYSICAL_SPACE_EXCEEDED
+    assert uow_entries == 1
+    result = await service.precompute(user_id, [file_id])
+    assert result.available_bytes == 20
+    assert uow_entries == 2
+
+
+async def test_concurrent_download_and_pack_admission_share_one_machine_budget(
+    tmp_path: Path,
+) -> None:
+    async with runtime(tmp_path) as (commands, user_id, _principal, _backend):
+        database = SQLiteDatabase(tmp_path / "v2.db")
+        try:
+            root = tmp_path / "downloads"
+            _, file_id = await seed_pack_file(
+                database, root, user_id, 1, payload=b"x" * 60
+            )
+            packs = make_admission(database, FakeClock(2_000), FixedMachineSpace(100))
+            commands.machine_space = FixedMachineSpace(100)
+            commands.settings = lambda: SystemSettings(min_free_disk=0)
+            prepared = prepare_torrent_download(
+                parse_torrent(make_torrent([("new.bin", 60)]))
+            )
+
+            results = await asyncio.gather(
+                commands._register(user_id=user_id, prepared=prepared),
+                packs.create(
+                    user_id,
+                    user_file_ids=[file_id],
+                    output_name="new.zip",
+                    delete_source=False,
+                ),
+                return_exceptions=True,
+            )
+            async with SQLiteUnitOfWork(database) as uow:
+                quota = await QuotaRepository(uow.connection).get(user_id)
+                rebuilt = await QuotaRepository(uow.connection).rebuild(user_id)
+            assert quota == rebuilt
+        finally:
+            await database.close()
+
+    successes = [result for result in results if not isinstance(result, Exception)]
+    failures = [result for result in results if isinstance(result, DomainError)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert failures[0].code is ErrorCode.PHYSICAL_SPACE_EXCEEDED
+
+
+async def test_concurrent_download_growth_and_pack_admission_share_one_machine_budget(
+    tmp_path: Path,
+) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    try:
+        _, file_id = await seed_pack_file(
+            database, root, user_id, 1, payload=b"x" * 60
+        )
+        async with SQLiteUnitOfWork(database) as uow:
+            downloads = DownloadRepository(uow.connection)
+            source_id = await downloads.create_source(
+                kind="http",
+                resource_key="http:growing",
+                payload_json="{}",
+                options_json="{}",
+                selected_file_indexes_json=None,
+                display_name="growing",
+                display_uri=None,
+                now_ms=1,
+            )
+            attempt_id = await downloads.create_attempt(
+                source_id=source_id,
+                resource_key="http:growing",
+                gid="0123456789abcdef",
+                status=AttemptStatus.ACTIVE,
+                total_length=None,
+                physical_reserved_bytes=0,
+                now_ms=1,
+            )
+            await downloads.create_subscription(
+                attempt_id=attempt_id,
+                user_id=user_id,
+                reserved_bytes=0,
+                display_name="growing",
+                display_uri=None,
+                now_ms=1,
+            )
+        packs = make_admission(database, clock, FixedMachineSpace(100))
+
+        async def grow() -> DomainError | None:
+            async with SQLiteUnitOfWork(database) as uow:
+                return await DownloadRepository(uow.connection).admit_size(
+                    attempt_id=attempt_id,
+                    observed_bytes=60,
+                    known_total=False,
+                    disk_free_bytes=100,
+                    min_free_bytes=0,
+                    now_ms=2,
+                )
+
+        growth, pack = await asyncio.gather(
+            grow(),
+            packs.create(
+                user_id,
+                user_file_ids=[file_id],
+                output_name="growth.zip",
+                delete_source=False,
+            ),
+            return_exceptions=True,
+        )
+        assert (growth is None) + (not isinstance(pack, Exception)) == 1
+        failures = [
+            result for result in (growth, pack) if isinstance(result, DomainError)
+        ]
+        assert len(failures) == 1
+        assert failures[0].code is ErrorCode.PHYSICAL_SPACE_EXCEEDED
+        async with SQLiteUnitOfWork(database) as uow:
+            quota = await QuotaRepository(uow.connection).get(user_id)
+            rebuilt = await QuotaRepository(uow.connection).rebuild(user_id)
+            physical_downloads = await DownloadRepository(
+                uow.connection
+            ).list_active_physical()
+            physical_packs = await PackRepository(uow.connection).list_active_physical()
+        assert quota == rebuilt
+        committed = sum(item.reserved_bytes for item in physical_downloads) + sum(
+            item.reserved_bytes for item in physical_packs
+        )
+        assert committed <= 100
+    finally:
+        await database.close()

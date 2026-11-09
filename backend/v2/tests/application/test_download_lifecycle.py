@@ -22,6 +22,7 @@ from aria2deck.domain.downloads import (
     SubscriptionStatus,
 )
 from aria2deck.domain.errors import DomainError, ErrorCode
+from aria2deck.domain.settings import SystemSettings
 from aria2deck.infrastructure.content_store import DownloadContentStore
 from aria2deck.infrastructure.observations import InMemoryDownloadObservations
 from aria2deck.infrastructure.sqlite.bootstrap import initialize_database
@@ -136,6 +137,7 @@ def make_lifecycle(runtime: Runtime) -> DownloadLifecycleService:
         content_store=runtime.store,
         observations=runtime.observations,
         connectivity=runtime.connectivity,
+        settings=lambda: SystemSettings(min_free_disk=0),
         clock_ms=lambda: 100,
         jitter=lambda: 0.5,
     )
@@ -612,6 +614,22 @@ async def test_paused_admission_failure_does_not_send_unpause(tmp_path: Path) ->
         assert attempt.status is AttemptStatus.FAILED
         assert state.backend.unpause_calls == []
         assert state.backend.stop_calls == [GID]
+
+
+async def test_paused_resume_checks_full_remaining_machine_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with runtime(tmp_path, total=None, quota=100) as state:
+        state.lifecycle.settings = lambda: SystemSettings(min_free_disk=0)
+        monkeypatch.setattr(state.store, "machine_free_bytes", lambda: 2)
+
+        await state.lifecycle.reconcile(observation(status="paused", total=3))
+
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_code == ErrorCode.PHYSICAL_SPACE_EXCEEDED.value
+        assert quota.reserved_bytes == 0
+        assert state.backend.unpause_calls == []
 
 
 async def test_directory_completion_persists_entries_and_reuses_existing_content(
