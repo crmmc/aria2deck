@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
@@ -368,6 +369,84 @@ def test_remove_cancels_and_rejects_terminal(rpc_client: TestClient, settings) -
     assert terminal.json()["error"]["code"] == 1
     unknown = _rpc(rpc_client, "aria2.remove", ["aaaaaaaaaaaaaaaa"])
     assert unknown.json()["error"]["code"] == 1
+
+
+@pytest.mark.parametrize("mode", ["batch", "multicall"])
+def test_mixed_remove_results_keep_per_item_errors(
+    rpc_client: TestClient, mode: str
+) -> None:
+    confirmed = _rpc(
+        rpc_client, "aria2.addUri", [["https://example.com/rpc-confirmed.bin"]]
+    )
+    unconfirmed = _rpc(
+        rpc_client, "aria2.addUri", [["https://example.com/rpc-unconfirmed.bin"]]
+    )
+    assert "result" in confirmed.json(), confirmed.text
+    assert "result" in unconfirmed.json(), unconfirmed.text
+    confirmed_gid = confirmed.json()["result"]
+    unconfirmed_gid = unconfirmed.json()["result"]
+
+    backend = rpc_client.app.state.download_commands.backend
+    assert isinstance(backend, FakeSubmissionBackend)
+    confirmed_raw_gid = backend.submit_calls[0][0].gid
+    unconfirmed_raw_gid = backend.submit_calls[1][0].gid
+
+    async def stop(*, gid: str) -> None:
+        backend.stop_calls.append(gid)
+        if gid == unconfirmed_raw_gid:
+            raise DomainError(ErrorCode.RPC_UNAVAILABLE, "停止超时")
+
+    backend.stop = stop
+    token = f"token:{_secret()}"
+    if mode == "batch":
+        response = rpc_client.post(
+            "/aria2/jsonrpc",
+            json=[
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "aria2.remove",
+                    "params": [token, confirmed_gid],
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "aria2.forceRemove",
+                    "params": [token, unconfirmed_gid],
+                },
+            ],
+        )
+        body = response.json()
+        assert body[0]["result"] == confirmed_gid
+        assert "error" in body[1]
+        assert body[1]["error"]["code"] == 1
+        assert "停止结果无法确认" in body[1]["error"]["message"]
+    else:
+        response = rpc_client.post(
+            "/aria2/jsonrpc",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "system.multicall",
+                "params": [
+                    token,
+                    [
+                        {"methodName": "aria2.remove", "params": [confirmed_gid]},
+                        {
+                            "methodName": "aria2.forceRemove",
+                            "params": [unconfirmed_gid],
+                        },
+                    ],
+                ],
+            },
+        )
+        results = response.json()["result"]
+        assert results[0] == [confirmed_gid]
+        assert "faultCode" in results[1]
+        assert results[1]["faultCode"] == 1
+        assert "停止结果无法确认" in results[1]["faultString"]
+
+    assert set(backend.stop_calls) == {confirmed_raw_gid, unconfirmed_raw_gid}
 
 
 def test_addtorrent_rejects_bad_options(rpc_client: TestClient) -> None:

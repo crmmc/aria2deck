@@ -94,8 +94,9 @@ class FakeQueries:
 
 
 class FakeCommands:
-    def __init__(self) -> None:
+    def __init__(self, *, stop_confirmed: bool | None = True) -> None:
         self.cancelled: list[int] = []
+        self.stop_confirmed = stop_confirmed
 
     async def create_uris(self, *, user_id: int, items: list) -> list:
         raise DomainError(ErrorCode.INVALID_INPUT, "不应在单元测试中触发真实创建")
@@ -105,7 +106,14 @@ class FakeCommands:
 
     async def cancel(self, *, user_id: int, task_ids: list[int]) -> list:
         self.cancelled.extend(task_ids)
-        return [DownloadWriteResult(accepted=True, task_id=task_id) for task_id in task_ids]
+        return [
+            DownloadWriteResult(
+                accepted=True,
+                task_id=task_id,
+                stop_confirmed=self.stop_confirmed,
+            )
+            for task_id in task_ids
+        ]
 
 
 class FakeHistory:
@@ -285,6 +293,46 @@ async def test_remove_and_force_remove_cancel_live_tasks() -> None:
     with pytest.raises(RpcMethodError) as caught:
         await service.dispatch("aria2.remove", ["nosuchgid000000"], user_id=USER_ID)
     assert caught.value.code == 1
+
+
+@pytest.mark.parametrize("method", ["aria2.remove", "aria2.forceRemove"])
+@pytest.mark.parametrize("stop_confirmed", [False, None])
+async def test_remove_requires_confirmed_stop(
+    method: str, stop_confirmed: bool | None
+) -> None:
+    service, gids = _service([_record(9, SubscriptionStatus.ACTIVE)])
+    service.commands = FakeCommands(stop_confirmed=stop_confirmed)
+    gid = gids.virtual_gid(9)
+
+    with pytest.raises(RpcMethodError) as caught:
+        await service.dispatch(method, [gid], user_id=USER_ID)
+
+    assert caught.value.code == 1
+    assert "停止结果无法确认" in str(caught.value)
+
+
+async def test_remove_preserves_business_rejection() -> None:
+    class RejectingCommands(FakeCommands):
+        async def cancel(self, *, user_id: int, task_ids: list[int]) -> list:
+            return [
+                DownloadWriteResult(
+                    accepted=False,
+                    task_id=task_ids[0],
+                    message="任务状态不允许取消",
+                    stop_confirmed=True,
+                )
+            ]
+
+    service, gids = _service([_record(9, SubscriptionStatus.ACTIVE)])
+    service.commands = RejectingCommands()
+
+    with pytest.raises(RpcMethodError) as caught:
+        await service.dispatch(
+            "aria2.remove", [gids.virtual_gid(9)], user_id=USER_ID
+        )
+
+    assert caught.value.code == 1
+    assert str(caught.value) == "任务状态不允许取消"
 
 
 async def test_change_position_returns_compat_value() -> None:

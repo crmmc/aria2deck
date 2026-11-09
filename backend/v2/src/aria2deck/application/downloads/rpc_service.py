@@ -181,6 +181,8 @@ class Aria2RpcService:
             raise _bad(str(error)) from None
         if not results or not results[0].accepted:
             raise _bad(results[0].message or "取消失败" if results else "取消失败")
+        if results[0].stop_confirmed is not True:
+            raise _bad("下载停止结果无法确认")
         return gid
 
     async def _aria2_forceRemove(self, params: list[object], user_id: int) -> str:
