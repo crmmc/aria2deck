@@ -240,7 +240,10 @@ def parse_torrent(
     selected = _selected_indexes(selected_file_indexes, len(files))
     chosen = files if selected is None else tuple(files[index - 1] for index in selected)
     start, end = info_span
-    info_hash = hashlib.sha1(data[start:end], usedforsecurity=False).hexdigest()
+    # BitTorrent 协议以 SHA-1 info 摘要标识内容，不用于数字签名；不得改为其他算法。
+    info_hash = hashlib.sha1(  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
+        data[start:end], usedforsecurity=False
+    ).hexdigest()
     # Peer candidates are validated asynchronously at the aria2 submission boundary.
     safe_payload = _encode_shell(data, root, info_span)
     return TorrentMetadata(

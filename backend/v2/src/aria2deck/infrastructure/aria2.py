@@ -58,8 +58,9 @@ class Aria2DownloadControl:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        # SystemSettings 已限制为 HTTP(S)，此处固定 POST RPC，不支持 file:// 读取。
         try:
-            with urlopen(  # noqa: S310  # 配置入口仅允许 HTTP(S) 地址
+            with urlopen(  # noqa: S310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
                 request, timeout=self.timeout_seconds
             ) as response:
                 body = response.read()
