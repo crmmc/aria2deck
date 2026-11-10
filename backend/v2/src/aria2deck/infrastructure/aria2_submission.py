@@ -224,6 +224,8 @@ class Aria2SubmissionClient:
         options["dir"] = str(self.download_directory / str(submission.attempt_id))
         if source.kind in {"magnet", "torrent"}:
             options["bt-stop-timeout"] = str(self.settings().aria2_bt_stop_timeout_seconds)
+            # 平台在下载完成后立即入库，不做种，避免 aria2 长期停留 active。
+            options["seed-time"] = "0"
         if trackers and source.kind in {"magnet", "torrent"}:
             options["bt-tracker"] = ",".join(trackers)
         params: list[object]
@@ -455,6 +457,12 @@ class Aria2SubmissionClient:
                     selected=selected in {"true", True},
                 )
             )
+        following_value = result.get("following")
+        following: tuple[str, ...]
+        if isinstance(following_value, str):
+            following = (following_value,) if following_value else ()
+        else:
+            following = self._gids(following_value)
         return DownloadObservation(
             gid=gid,
             observed_at_ms=self.clock_ms(),
@@ -467,7 +475,7 @@ class Aria2SubmissionClient:
             connection_count=self._number(result.get("connections", "0")),
             files=tuple(files),
             followed_by=self._gids(result.get("followedBy")),
-            following=self._gids(result.get("following")),
+            following=following,
         )
 
     async def snapshot(self, *, gid: str) -> DownloadObservation | None:

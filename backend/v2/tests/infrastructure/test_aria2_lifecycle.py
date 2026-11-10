@@ -102,6 +102,35 @@ async def test_snapshot_rejects_malformed_or_inconsistent_payloads(
     assert caught.value.code is ErrorCode.RPC_UNAVAILABLE
 
 
+async def test_snapshot_accepts_single_following_gid_string(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = client(tmp_path)
+    parent_gid = "fedcba0987654321"
+
+    async def call(*args: object, **kwargs: object) -> object:
+        return {**snapshot(), "following": parent_gid}
+
+    monkeypatch.setattr(adapter, "_call", call)
+    observed = await adapter.snapshot(gid=GID)
+    assert observed is not None
+    assert observed.following == (parent_gid,)
+
+
+async def test_snapshot_accepts_empty_following_string(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = client(tmp_path)
+
+    async def call(*args: object, **kwargs: object) -> object:
+        return {**snapshot(), "following": ""}
+
+    monkeypatch.setattr(adapter, "_call", call)
+    observed = await adapter.snapshot(gid=GID)
+    assert observed is not None
+    assert observed.following == ()
+
+
 async def test_missing_snapshot_and_result_are_idempotent_but_other_rejections_fail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

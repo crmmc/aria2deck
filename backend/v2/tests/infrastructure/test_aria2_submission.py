@@ -482,8 +482,11 @@ async def test_bt_stop_timeout_is_a_string_for_bt_submissions_only(
     magnet_options = calls[1]["params"][1]
     torrent_options = calls[2]["params"][2]
     assert "bt-stop-timeout" not in http_options
+    assert "seed-time" not in http_options
     assert magnet_options["bt-stop-timeout"] == "17"
     assert torrent_options["bt-stop-timeout"] == "17"
+    assert magnet_options["seed-time"] == "0"
+    assert torrent_options["seed-time"] == "0"
 
 
 async def test_empty_submission_does_not_call_network(tmp_path: Path) -> None:
