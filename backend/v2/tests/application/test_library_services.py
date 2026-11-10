@@ -16,7 +16,7 @@ from aria2deck.application.library.models import StorageDeleteOutcome
 from aria2deck.application.library.queries import LibraryQueryService
 from aria2deck.domain.content import ContentDeletionState, ContentKind
 from aria2deck.domain.errors import DomainError, ErrorCode
-from aria2deck.domain.packs import PackSourceSnapshot
+from aria2deck.domain.packs import PackSourceSnapshot, PackStatus
 from aria2deck.domain.quota import Quota
 from aria2deck.infrastructure.sqlite.bootstrap import initialize_database
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
@@ -345,6 +345,26 @@ async def _seed_pack_source(database: SQLiteDatabase, user_id: int, file_id: int
             pack_id,
             PackSourceSnapshot(file_id, content_id, "file:" + _digest(1), "a", 1, 10),
         )
+
+
+async def _seed_done_pack_job(
+    database: SQLiteDatabase, user_id: int, content_id: int, *, output_name: str = "bundle.zip"
+) -> int:
+    """构造已完成并把打包产物指向指定内容的打包历史。"""
+    async with SQLiteUnitOfWork(database) as uow:
+        pack_id = await PackRepository(uow.connection).create_job(
+            owner_id=user_id, output_name=output_name, pack_format="zip",
+            source_size=10, reserved_bytes=0, physical_reserved_bytes=0,
+            delete_source=False, now_ms=1,
+        )
+        await uow.connection.execute(
+            text(
+                "UPDATE pack_jobs SET status = 'done', step = NULL, step_progress = 100, "
+                "output_content_id = :content_id, finished_at_ms = 2 WHERE id = :pack_id"
+            ),
+            {"content_id": content_id, "pack_id": pack_id},
+        )
+    return pack_id
 
 
 async def test_delete_user_file_decision_matrix(tmp_path: Path) -> None:
@@ -719,6 +739,62 @@ async def test_deletion_worker_backoff_sequence_and_reset(tmp_path: Path) -> Non
     async with SQLiteUnitOfWork(database) as uow:
         with pytest.raises(DomainError):
             await ContentRepository(uow.connection).get_object(content_id)
+
+
+async def test_deletion_worker_finalizes_pack_output_and_marks_history(tmp_path: Path) -> None:
+    database, clock = await _setup(tmp_path)
+    user_id = await _create_user(database, "admin")
+    payload = b"archive-bytes"
+    content_id, file_id = await _seed_file(database, user_id, 2, name="bundle.zip", payload=payload)
+    root = tmp_path / "downloads"
+    _write_store_file(root, "objects/file-2", payload)
+    store = FakeStore(root)
+    pack_id = await _seed_done_pack_job(database, user_id, content_id)
+    async with SQLiteUnitOfWork(database) as uow:
+        await QuotaRepository(uow.connection).rebuild(user_id)
+        assert await QuotaRepository(uow.connection).get(user_id) == Quota(1000, len(payload), 0)
+    _, commands, _, _ = _make_services(database, clock, store)
+
+    def make_worker() -> ContentDeletionWorker:
+        return ContentDeletionWorker(
+            uow_factory=lambda: SQLiteUnitOfWork(database),
+            repository_factory=lambda uow: ContentRepository(uow.connection),
+            content_store=store,
+            clock_ms=clock,
+            owner=DELETE_LEASE_OWNER,
+            lease_ttl_ms=DELETE_LEASE_TTL_MS,
+        )
+
+    worker = make_worker()
+    await commands.delete_user_file(user_id=user_id, file_id=file_id)
+    await worker.step_once()
+
+    assert store.deleted == ["objects/file-2"]
+    assert not (root / "objects" / "file-2").exists()
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = ContentRepository(uow.connection)
+        with pytest.raises(DomainError) as caught:
+            await repository.get_object(content_id)
+        job = await PackRepository(uow.connection).get_job(pack_id)
+        quota = await QuotaRepository(uow.connection).get(user_id)
+        rebuilt = await QuotaRepository(uow.connection).rebuild(user_id)
+        candidates = await repository.list_deletion_candidates(
+            owner=DELETE_LEASE_OWNER, now_ms=clock()
+        )
+    assert caught.value.code is ErrorCode.NOT_FOUND
+    assert job.status is PackStatus.FAILED
+    assert job.error_code == "pack_output_deleted"
+    assert job.output_content_id is None
+    assert job.output_name == "bundle.zip"
+    assert job.finished_at_ms == 2
+    assert quota == rebuilt == Quota(1000, 0, 0)
+    assert candidates == []
+    assert worker.failure_counts == {}
+
+    fresh = make_worker()
+    await fresh.step_once()
+    assert store.deleted == ["objects/file-2"]
+    assert fresh.failure_counts == {}
 
 
 async def test_deletion_worker_skips_when_lease_owned_elsewhere(tmp_path: Path) -> None:

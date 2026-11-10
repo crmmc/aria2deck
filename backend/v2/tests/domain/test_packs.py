@@ -4,6 +4,7 @@ import pytest
 
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.packs import (
+    PACK_OUTPUT_DELETED_ERROR_CODE,
     PackProgress,
     PackSourceSnapshot,
     PackStatus,
@@ -14,6 +15,7 @@ from aria2deck.domain.packs import (
     can_delete_pack,
     complete_pack,
     failure_disposition,
+    mark_output_deleted,
     plan_source_cleanup,
     prepare_output,
     retry_delay_ms,
@@ -79,6 +81,7 @@ def test_prepare_output_only_happens_during_verification() -> None:
         (PackStatus.PACKING, PackStatus.FAILED, True),
         (PackStatus.PENDING, PackStatus.CANCELLED, True),
         (PackStatus.DONE, PackStatus.PACKING, False),
+        (PackStatus.DONE, PackStatus.FAILED, False),
         (PackStatus.FAILED, PackStatus.PENDING, False),
     ],
 )
@@ -91,6 +94,21 @@ def test_pack_state_machine_supports_requeue_but_not_terminal_reuse(
     else:
         with pytest.raises(DomainError):
             transition_pack(current, target)
+
+
+def test_pack_output_deletion_reuses_done_history_with_a_dedicated_code() -> None:
+    assert mark_output_deleted(PackStatus.DONE) is PackStatus.FAILED
+    assert PACK_OUTPUT_DELETED_ERROR_CODE == "pack_output_deleted"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [PackStatus.PENDING, PackStatus.PACKING, PackStatus.FAILED, PackStatus.CANCELLED],
+)
+def test_pack_output_deletion_rejects_non_done_history(status: PackStatus) -> None:
+    with pytest.raises(DomainError) as caught:
+        mark_output_deleted(status)
+    assert caught.value.code is ErrorCode.INVALID_STATE
 
 
 def snapshot() -> PackSourceSnapshot:

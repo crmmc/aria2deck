@@ -237,6 +237,7 @@ export function ShareCreateDialog({
 
 const PACK_POLL_MS = 1000;
 const TERMINAL_STATUSES = ["done", "failed", "cancelled"];
+const PACK_OUTPUT_DELETED = "pack_output_deleted";
 
 /** 打包弹窗：预计算 → 创建 → 轮询进度直到终态。 */
 export function PackDialog({
@@ -304,6 +305,8 @@ export function PackDialog({
 
   const insufficient =
     precompute !== null && precompute.total_size > precompute.available_bytes;
+  const outputDeleted =
+    pack !== null && pack.status === "failed" && pack.error_code === PACK_OUTPUT_DELETED;
 
   const confirm = async () => {
     if (creating || insufficient || precompute === null) return;
@@ -362,13 +365,18 @@ export function PackDialog({
       {pack !== null ? (
         <div aria-live="polite">
           <p>
-            状态：{pack.status === "pending" ? "排队中" : stepLabel[pack.step ?? ""] ?? pack.status}
+            状态：
+            {outputDeleted
+              ? "产物已删除"
+              : pack.status === "pending"
+                ? "排队中"
+                : stepLabel[pack.step ?? ""] ?? pack.status}
           </p>
           <div className="progress-track" role="progressbar" aria-valuenow={pack.step_progress}>
             <div className="progress-fill" style={{ width: `${pack.step_progress}%` }} />
           </div>
           <p className="hint-text">进度 {pack.step_progress}%（页面可保持打开，也可稍后在文件列表查看结果）</p>
-          {pack.status === "failed" && (
+          {pack.status === "failed" && !outputDeleted && (
             <p className="form-error">打包失败：{pack.error_code ?? "未知错误"}</p>
           )}
           {pack.status === "cancelled" && <p className="hint-text">打包已取消</p>}

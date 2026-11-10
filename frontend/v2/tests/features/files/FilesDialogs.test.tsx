@@ -301,4 +301,53 @@ describe("PackDialog", () => {
       jest.useRealTimers();
     }
   });
+
+  it("polls a deleted pack output and skips the raw failure code", async () => {
+    jest.useFakeTimers();
+    try {
+      mockFetch.mockReset();
+      let polls = 0;
+      mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+        if (init?.method === "POST" && url === "/api/v2/packs") {
+          return json(201, packView("pending"));
+        }
+        if (url === "/api/v2/packs/7") {
+          polls += 1;
+          return json(
+            200,
+            packView(polls === 1 ? "pending" : "failed", { error_code: "pack_output_deleted" }),
+          );
+        }
+        return json(200, {});
+      });
+      const { unmount } = renderDialog(
+        <PackDialog
+          selectedIds={[1]}
+          onClose={jest.fn()}
+          onPrecompute={jest.fn().mockResolvedValue(precompute(10, 100))}
+          onCreated={jest.fn()}
+        />,
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "确认打包" }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(1000);
+      });
+      expect(await screen.findByText(/排队中/)).toBeInTheDocument();
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(1000);
+      });
+      expect(await screen.findByText(/产物已删除/)).toBeInTheDocument();
+      expect(screen.queryByText(/打包失败/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/pack_output_deleted/)).not.toBeInTheDocument();
+      unmount();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

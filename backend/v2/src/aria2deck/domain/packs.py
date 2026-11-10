@@ -42,6 +42,16 @@ def transition_pack(current: PackStatus, target: PackStatus) -> PackStatus:
     return target
 
 
+PACK_OUTPUT_DELETED_ERROR_CODE = "pack_output_deleted"
+
+
+def mark_output_deleted(status: PackStatus) -> PackStatus:
+    """产物已物理删除时只允许已完成历史改写为失败；通用终态复用规则不因此放开。"""
+    if status is not PackStatus.DONE:
+        raise DomainError(ErrorCode.INVALID_STATE, "只有已完成的打包历史可以标记产物已删除")
+    return PackStatus.FAILED
+
+
 @dataclass(frozen=True, slots=True)
 class PackProgress:
     status: PackStatus

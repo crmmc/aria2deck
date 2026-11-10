@@ -14,6 +14,7 @@ const TICK_MS = 1000;
 const PACK_LIMIT = 10;
 const ACTIVE_STATUSES = ["pending", "packing"];
 const TERMINAL_STATUSES = ["done", "failed", "cancelled"];
+const PACK_OUTPUT_DELETED = "pack_output_deleted";
 
 const STATUS_LABEL: Record<string, string> = {
   pending: "排队中",
@@ -32,6 +33,22 @@ const STEP_LABEL: Record<string, string> = {
 function packTitle(pack: PackViewResponse): string {
   if (pack.output !== null) return pack.output.display_name;
   return pack.output_name || `打包任务 #${pack.id}`;
+}
+
+/** 产物已不可用：物理回收后的专用失败历史，或共享引用下当前用户已删除的完成记录。 */
+function isOutputDeleted(pack: PackViewResponse): boolean {
+  return (
+    (pack.status === "failed" && pack.error_code === PACK_OUTPUT_DELETED) ||
+    (pack.status === "done" && pack.output === null)
+  );
+}
+
+function statusTone(pack: PackViewResponse): string {
+  if (isOutputDeleted(pack)) return "muted";
+  if (pack.status === "done") return "ok";
+  if (pack.status === "failed") return "error";
+  if (pack.status === "packing" || pack.status === "pending") return "info";
+  return "muted";
 }
 
 function stepTiming(pack: PackViewResponse, nowMs: number): string {
@@ -184,18 +201,8 @@ export function PackTasksCard({
               <span className="pack-card-name" title={packTitle(pack)}>
                 {packTitle(pack)}
               </span>
-              <span
-                className={`badge tone-${
-                  pack.status === "done"
-                    ? "ok"
-                    : pack.status === "failed"
-                      ? "error"
-                      : pack.status === "packing" || pack.status === "pending"
-                        ? "info"
-                        : "muted"
-                }`}
-              >
-                {STATUS_LABEL[pack.status] ?? pack.status}
+              <span className={`badge tone-${statusTone(pack)}`}>
+                {isOutputDeleted(pack) ? "产物已删除" : STATUS_LABEL[pack.status] ?? pack.status}
               </span>
             </div>
             {ACTIVE_STATUSES.includes(pack.status) && (
@@ -227,7 +234,7 @@ export function PackTasksCard({
                 </div>
               </>
             )}
-            {pack.status === "done" && (
+            {pack.status === "done" && !isOutputDeleted(pack) && (
               <div className="pack-card-row">
                 <span className="hint-text">
                   输出：{formatBytes(pack.output?.size ?? 0)}
@@ -242,7 +249,18 @@ export function PackTasksCard({
                 </button>
               </div>
             )}
-            {(pack.status === "failed" || pack.status === "cancelled") && (
+            {isOutputDeleted(pack) && (
+              <div className="pack-card-row">
+                <button
+                  type="button"
+                  className="link-button danger-link"
+                  onClick={() => void handleDeleteRecord(pack)}
+                >
+                  删除记录
+                </button>
+              </div>
+            )}
+            {(pack.status === "failed" || pack.status === "cancelled") && !isOutputDeleted(pack) && (
               <div className="pack-card-row">
                 {pack.status === "failed" && pack.error_code !== null && (
                   <span className="hint-text">错误码：{pack.error_code}</span>

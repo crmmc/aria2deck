@@ -309,6 +309,7 @@ export function FilesPage() {
     }
     if (failed > 0) push("error", `已删除 ${deleted} 个文件，${failed} 个删除失败`);
     else push("success", `已删除 ${deleted} 个文件`);
+    if (deleted > 0) setPackRefreshKey((current) => current + 1); // 整轮只重读一次打包卡。
     setSelected(new Set());
     const remaining = Math.max(0, total - deleted);
     const maxPage = Math.max(1, Math.ceil(remaining / ROOT_PAGE_SIZE));
@@ -330,6 +331,7 @@ export function FilesPage() {
     try {
       await deleteFile(target.id);
       push("success", "已删除");
+      setPackRefreshKey((current) => current + 1); // 删除后打包产物可能已不可用，重读常驻卡。
       // 删空末页回退：当前页只剩被删项时回上一页。
       const remaining = total - 1;
       const maxPage = Math.max(1, Math.ceil(remaining / ROOT_PAGE_SIZE));

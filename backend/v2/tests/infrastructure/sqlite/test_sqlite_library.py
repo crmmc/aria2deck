@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from aria2deck.domain.content import ContentDeletionState, ContentKind
 from aria2deck.domain.errors import DomainError, ErrorCode
@@ -41,6 +42,42 @@ async def make_object(
             storage_path=f"objects/{index}",
             now_ms=now_ms,
         )
+
+
+async def make_pack_output_job(
+    database: SQLiteDatabase,
+    owner_id: int,
+    content_id: int,
+    *,
+    status: str = "done",
+    output_name: str = "output.zip",
+    now_ms: int = 1,
+) -> int:
+    """构造引用指定输出内容的打包历史；正常流程由 complete_job 写入同一状态。"""
+    async with SQLiteUnitOfWork(database) as uow:
+        pack_id = await PackRepository(uow.connection).create_job(
+            owner_id=owner_id,
+            output_name=output_name,
+            pack_format="zip",
+            source_size=10,
+            reserved_bytes=0,
+            physical_reserved_bytes=0,
+            delete_source=False,
+            now_ms=now_ms,
+        )
+        await uow.connection.execute(
+            text(
+                "UPDATE pack_jobs SET status = :status, step = NULL, step_progress = 100, "
+                "output_content_id = :content_id, finished_at_ms = :finished_ms WHERE id = :pack_id"
+            ),
+            {
+                "status": status,
+                "content_id": content_id,
+                "finished_ms": now_ms + 1,
+                "pack_id": pack_id,
+            },
+        )
+    return pack_id
 
 
 async def test_user_file_listing_pages_with_real_total_and_directories_first(
@@ -469,6 +506,169 @@ async def test_finalize_tombstoned_is_idempotent_and_cascades_entries(database: 
         ).scalar_one()
     assert objects == 0
     assert entries == 0
+
+
+async def test_finalize_tombstoned_marks_done_pack_history_and_deletes_content(
+    database: SQLiteDatabase,
+) -> None:
+    user_id = await create_user(database, "admin")
+    content_id = await make_object(database, 1, size=32)
+    first_pack = await make_pack_output_job(database, user_id, content_id, output_name="first.zip")
+    second_pack = await make_pack_output_job(database, user_id, content_id, output_name="second.zip")
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = ContentRepository(uow.connection)
+        assert await repo.claim_orphan_delete(
+            content_id, now_ms=100, lease_owner="w1", lease_ttl_ms=1000
+        )
+        assert await repo.write_tombstone(content_id, owner="w1", now_ms=200)
+        assert await repo.finalize_tombstoned(content_id) is True
+        assert await repo.finalize_tombstoned(content_id) is False
+    async with database.connection() as connection:
+        objects = (
+            await connection.execute(
+                text("SELECT COUNT(*) FROM content_objects WHERE id = :id"), {"id": content_id}
+            )
+        ).scalar_one()
+        jobs = (
+            await connection.execute(
+                text(
+                    "SELECT id, status, error_code, output_content_id, output_name, pack_format, "
+                    "source_size, created_at_ms, finished_at_ms FROM pack_jobs ORDER BY id"
+                )
+            )
+        ).all()
+    assert objects == 0
+    assert [tuple(row) for row in jobs] == [
+        (first_pack, "failed", "pack_output_deleted", None, "first.zip", "zip", 10, 1, 2),
+        (second_pack, "failed", "pack_output_deleted", None, "second.zip", "zip", 10, 1, 2),
+    ]
+
+
+async def test_finalize_tombstoned_ignores_active_and_pending_targets_and_their_history(
+    database: SQLiteDatabase,
+) -> None:
+    user_id = await create_user(database, "admin")
+    active_id = await make_object(database, 1)
+    pending_id = await make_object(database, 2)
+    active_pack = await make_pack_output_job(database, user_id, active_id, output_name="active.zip")
+    pending_pack = await make_pack_output_job(
+        database, user_id, pending_id, output_name="pending.zip"
+    )
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = ContentRepository(uow.connection)
+        assert await repo.claim_orphan_delete(
+            pending_id, now_ms=100, lease_owner="w1", lease_ttl_ms=1000
+        )
+        assert not await repo.finalize_tombstoned(active_id)
+        assert not await repo.finalize_tombstoned(pending_id)
+        assert (await repo.get_object(active_id)).deletion_state is ContentDeletionState.ACTIVE
+        assert (
+            await repo.get_object(pending_id)
+        ).deletion_state is ContentDeletionState.PENDING_DELETE
+        jobs = (
+            await uow.connection.execute(
+                text(
+                    "SELECT id, status, error_code, output_content_id FROM pack_jobs ORDER BY id"
+                )
+            )
+        ).all()
+    assert [tuple(row) for row in jobs] == [
+        (active_pack, "done", None, active_id),
+        (pending_pack, "done", None, pending_id),
+    ]
+
+
+async def test_finalize_tombstoned_fails_closed_on_abnormal_output_history(
+    database: SQLiteDatabase,
+) -> None:
+    user_id = await create_user(database, "admin")
+    content_id = await make_object(database, 1)
+    failed_pack = await make_pack_output_job(
+        database, user_id, content_id, status="failed", output_name="failed.zip"
+    )
+    cancelled_pack = await make_pack_output_job(
+        database, user_id, content_id, status="cancelled", output_name="cancelled.zip"
+    )
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = ContentRepository(uow.connection)
+        assert await repo.claim_orphan_delete(
+            content_id, now_ms=100, lease_owner="w1", lease_ttl_ms=1000
+        )
+        assert await repo.write_tombstone(content_id, owner="w1", now_ms=200)
+    with pytest.raises(IntegrityError):
+        async with SQLiteUnitOfWork(database) as uow:
+            await ContentRepository(uow.connection).finalize_tombstoned(content_id)
+    async with database.connection() as connection:
+        state = (
+            await connection.execute(
+                text("SELECT deletion_state FROM content_objects WHERE id = :id"),
+                {"id": content_id},
+            )
+        ).scalar_one()
+        jobs = (
+            await connection.execute(
+                text("SELECT id, status, error_code, output_content_id FROM pack_jobs ORDER BY id")
+            )
+        ).all()
+    assert state == "tombstoned"
+    assert [tuple(row) for row in jobs] == [
+        (failed_pack, "failed", None, content_id),
+        (cancelled_pack, "cancelled", None, content_id),
+    ]
+
+
+async def test_finalize_tombstoned_rolls_back_history_update_when_delete_fails(
+    database: SQLiteDatabase,
+) -> None:
+    user_id = await create_user(database, "admin")
+    late_user_id = await create_user(database, "late", admin=False)
+    content_id = await make_object(database, 1)
+    pack_id = await make_pack_output_job(database, user_id, content_id, output_name="kept.zip")
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = ContentRepository(uow.connection)
+        assert await repo.claim_orphan_delete(
+            content_id, now_ms=100, lease_owner="w1", lease_ttl_ms=1000
+        )
+        assert await repo.write_tombstone(content_id, owner="w1", now_ms=200)
+    # tombstone 后回填新引用：UPDATE 仍命中 done 历史，随后 DELETE 被 user_files 的 RESTRICT 拒绝。
+    async with SQLiteUnitOfWork(database) as uow:
+        await uow.connection.execute(
+            text(
+                "INSERT INTO user_files (user_id, content_id, display_name, created_at_ms) "
+                "VALUES (:user_id, :content_id, 'late', 300)"
+            ),
+            {"user_id": late_user_id, "content_id": content_id},
+        )
+    with pytest.raises(IntegrityError):
+        async with SQLiteUnitOfWork(database) as uow:
+            await ContentRepository(uow.connection).finalize_tombstoned(content_id)
+    async with database.connection() as connection:
+        state = (
+            await connection.execute(
+                text("SELECT deletion_state FROM content_objects WHERE id = :id"),
+                {"id": content_id},
+            )
+        ).scalar_one()
+        job = (
+            await connection.execute(
+                text(
+                    "SELECT id, status, error_code, output_content_id FROM pack_jobs WHERE id = :id"
+                ),
+                {"id": pack_id},
+            )
+        ).one()
+        late_references = (
+            await connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM user_files "
+                    "WHERE user_id = :user_id AND content_id = :content_id"
+                ),
+                {"user_id": late_user_id, "content_id": content_id},
+            )
+        ).scalar_one()
+    assert state == "tombstoned"
+    assert tuple(job) == (pack_id, "done", None, content_id)
+    assert late_references == 1
 
 
 async def test_storage_objects_listing_filters_orphans_and_searches_paths(

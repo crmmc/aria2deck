@@ -781,11 +781,39 @@ describe("FilesPage", () => {
   });
 
   it("deletes through confirm dialog and reloads", async () => {
+    setPacksResponse([
+      packView({
+        id: 21,
+        status: "done",
+        step: null,
+        step_progress: 100,
+        output: { user_file_id: 1, display_name: "out.zip", size: 1024 },
+      }),
+    ]);
     setup((url, init) => {
+      if (init?.method === "DELETE" && url === "/api/v2/files/1") {
+        // 删除成功后后端把打包历史改为专用失败：常驻卡需自行重读。
+        setPacksResponse([
+          packView({
+            id: 21,
+            status: "failed",
+            step: null,
+            step_progress: 100,
+            error_code: "pack_output_deleted",
+            output: null,
+          }),
+        ]);
+        return { ok: true };
+      }
       if (init?.method === "DELETE") return { ok: true };
       return rootList([file(1)]);
     });
     await screen.findAllByText("file-1.bin"); // 等待渲染（双布局出现两处）
+    const cardItem = () => screen.getByTestId("pack-item-21");
+    const packCalls = () =>
+      mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v2/packs?")).length;
+    await waitFor(() => expect(cardItem().textContent).toContain("已完成"));
+    const packsBefore = packCalls();
     fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
     const dialog = await screen.findByRole("dialog", { name: "删除文件" });
     expect(dialog.textContent).toContain("删除后不可恢复");
@@ -800,6 +828,9 @@ describe("FilesPage", () => {
       expect(call![0]).toBe("/api/v2/files/1");
     });
     expect(await screen.findByText("已删除")).toBeInTheDocument();
+    // 同页删除后必须多一次权威重读，不得等手动 reload。
+    await waitFor(() => expect(packCalls()).toBe(packsBefore + 1));
+    await waitFor(() => expect(cardItem().textContent).toContain("产物已删除"));
   });
 
   it("creates a share and copies link with password line", async () => {
@@ -1171,6 +1202,41 @@ describe("PackTasksCard 补充分支（F1）", () => {
     expect(await screen.findByText("已删除任务记录")).toBeInTheDocument();
   });
 
+  it("labels a finalized pack output as deleted instead of a plain failure (F1)", async () => {
+    setPacksResponse([
+      packView({ id: 30, status: "failed", step: null, step_progress: 0, error_code: "pack_output_deleted" }),
+    ]);
+    setup((url) => {
+      if (url.startsWith("/api/v2/files?")) return rootList([file(1)]);
+      return {};
+    });
+    const item = await screen.findByTestId("pack-item-30");
+    const badge = item.querySelector(".badge");
+    expect(badge?.textContent).toBe("产物已删除");
+    expect(badge?.className).not.toContain("tone-error");
+    expect(item.textContent).not.toContain("失败");
+    expect(item.textContent).not.toContain("错误码");
+    expect(item.textContent).not.toContain("pack_output_deleted");
+    expect(within(item).getByRole("button", { name: "删除记录" })).toBeInTheDocument();
+  });
+
+  it("labels a shared pack output already removed for this user as deleted (F1)", async () => {
+    setPacksResponse([
+      packView({ id: 31, status: "done", step: null, step_progress: 100, output: null }),
+    ]);
+    setup((url) => {
+      if (url.startsWith("/api/v2/files?")) return rootList([file(1)]);
+      return {};
+    });
+    const item = await screen.findByTestId("pack-item-31");
+    const badge = item.querySelector(".badge");
+    expect(badge?.textContent).toBe("产物已删除");
+    expect(badge?.className).not.toContain("tone-error");
+    expect(item.textContent).not.toContain("已完成");
+    expect(item.textContent).not.toContain("输出：0 B");
+    expect(within(item).getByRole("button", { name: "删除记录" })).toBeInTheDocument();
+  });
+
   it("cancel failure surfaces the API message and clear reports partial failure", async () => {
     setPacksResponse([
       packView({ id: 17, status: "packing" }),
@@ -1205,11 +1271,40 @@ describe("PackTasksCard 补充分支（F1）", () => {
 
 describe("FilesPage 补充分支", () => {
   it("batch delete with all success reports the success toast (F6)", async () => {
+    setPacksResponse([
+      packView({
+        id: 22,
+        status: "done",
+        step: null,
+        step_progress: 100,
+        output: { user_file_id: 3, display_name: "batch.zip", size: 2048 },
+      }),
+    ]);
+    let deletes = 0;
     setup((url, init) => {
-      if (init?.method === "DELETE") return { ok: true };
+      if (init?.method === "DELETE") {
+        deletes += 1;
+        if (deletes === 1) {
+          setPacksResponse([
+            packView({
+              id: 22,
+              status: "failed",
+              step: null,
+              step_progress: 100,
+              error_code: "pack_output_deleted",
+              output: null,
+            }),
+          ]);
+        }
+        return { ok: true };
+      }
       return rootList([file(1), file(2)]);
     });
     await screen.findAllByText("file-1.bin");
+    const packCalls = () =>
+      mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v2/packs?")).length;
+    await waitFor(() => expect(screen.getByTestId("pack-item-22").textContent).toContain("已完成"));
+    const packsBefore = packCalls();
     fireEvent.click(screen.getAllByLabelText("选择 file-1.bin")[0]);
     fireEvent.click(screen.getAllByLabelText("选择 file-2.bin")[0]);
     fireEvent.click(screen.getByRole("button", { name: /批量删除（2）/ }));
@@ -1217,6 +1312,54 @@ describe("FilesPage 补充分支", () => {
       within(await screen.findByRole("dialog", { name: "批量删除" })).getByRole("button", { name: "删除" }),
     );
     expect(await screen.findByText("已删除 2 个文件")).toBeInTheDocument();
+    // 批量删除只触发一次权威重读，不按项重复。
+    await waitFor(() => expect(packCalls()).toBe(packsBefore + 1));
+    await waitFor(() =>
+      expect(screen.getByTestId("pack-item-22").textContent).toContain("产物已删除"),
+    );
+    expect(deletes).toBe(2);
+  });
+
+  it("batch delete with all failures keeps the pack card unchanged (F6)", async () => {
+    setPacksResponse([
+      packView({
+        id: 23,
+        status: "done",
+        step: null,
+        step_progress: 100,
+        output: { user_file_id: 3, display_name: "keep.zip", size: 2048 },
+      }),
+    ]);
+    let deletes = 0;
+    setup((url, init) => {
+      if (init?.method === "DELETE") {
+        deletes += 1;
+        return json(500, { error: { code: "internal", message: "删除失败" } });
+      }
+      return rootList([file(1), file(2)]);
+    });
+    await screen.findAllByText("file-1.bin");
+    const packItem = () => screen.getByTestId("pack-item-23");
+    const packCalls = () =>
+      mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v2/packs?")).length;
+    await waitFor(() => expect(packItem().textContent).toContain("已完成"));
+    const packsBefore = packCalls();
+    fireEvent.click(screen.getAllByLabelText("选择 file-1.bin")[0]);
+    fireEvent.click(screen.getAllByLabelText("选择 file-2.bin")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /批量删除（2）/ }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog", { name: "批量删除" })).getByRole("button", { name: "删除" }),
+    );
+    expect(await screen.findByText("已删除 0 个文件，2 个删除失败")).toBeInTheDocument();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // deleted=0 不得触发打包卡重读，卡片保持原状态。
+    expect(packCalls()).toBe(packsBefore);
+    expect(deletes).toBe(2);
+    expect(packItem().textContent).toContain("已完成");
+    expect(packItem().textContent).toContain("输出：2.00 KiB");
+    expect(packItem().textContent).not.toContain("产物已删除");
   });
 
   it("entry selection toggles off and entry sort headers cycle (F7/F3)", async () => {

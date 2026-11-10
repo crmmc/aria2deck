@@ -26,7 +26,20 @@ from ....domain.content import (
     validate_display_name,
 )
 from ....domain.errors import DomainError, ErrorCode
-from ..schema import content_entries, content_objects, pack_sources, share_links, user_files, users
+from ....domain.packs import (
+    PACK_OUTPUT_DELETED_ERROR_CODE,
+    PackStatus,
+    mark_output_deleted,
+)
+from ..schema import (
+    content_entries,
+    content_objects,
+    pack_jobs,
+    pack_sources,
+    share_links,
+    user_files,
+    users,
+)
 from .quota import QuotaRepository
 
 DELETE_LEASE_OWNER = "content-deletion"
@@ -642,6 +655,25 @@ class ContentRepository:
         return result.rowcount == 1
 
     async def finalize_tombstoned(self, content_id: int) -> bool:
+        tombstoned = (
+            select(content_objects.c.id)
+            .where(content_objects.c.id == content_id)
+            .where(content_objects.c.deletion_state == ContentDeletionState.TOMBSTONED)
+            .exists()
+        )
+        source_status = PackStatus.DONE
+        deleted_status = mark_output_deleted(source_status)
+        await self.connection.execute(
+            update(pack_jobs)
+            .where(pack_jobs.c.output_content_id == content_id)
+            .where(pack_jobs.c.status == source_status)
+            .where(tombstoned)
+            .values(
+                status=deleted_status,
+                error_code=PACK_OUTPUT_DELETED_ERROR_CODE,
+                output_content_id=None,
+            )
+        )
         result = await self.connection.execute(
             delete(content_objects)
             .where(content_objects.c.id == content_id)
