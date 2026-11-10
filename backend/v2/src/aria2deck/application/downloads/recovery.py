@@ -107,7 +107,7 @@ class DownloadRecoveryService:
                 expected_gid=submission.gid,
             )
         if self.lifecycle is not None:
-            await self.lifecycle._broadcast_attempt(submission.attempt_id)
+            await self.lifecycle.broadcast_attempt(submission.attempt_id)
         return True
 
     async def recover_pending(self) -> RecoveryReport:

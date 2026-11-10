@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Protocol
@@ -211,6 +212,7 @@ class DownloadLifecycleService:
         sleep: Sleep = asyncio.sleep,
         broadcast: BroadcastPort | None = None,
         queries: TaskQueryPort | None = None,
+        terminal_broadcast_capacity: int = 10_000,
     ) -> None:
         self.uow_factory = uow_factory
         self.repository_factory = repository_factory
@@ -231,8 +233,9 @@ class DownloadLifecycleService:
         self.queries = queries
         self._locks: dict[int, asyncio.Lock] = {}
         self._missing_since: dict[int, int] = {}
-        # 终态帧幂等：每个 attempt 的终态只推送一次（跨 _admit/_handoff/_apply 全路径）。
-        self._terminal_broadcast: set[int] = set()
+        # 终态帧幂等：粒度 (attempt_id, task_id)，按插入顺序有界淘汰；淘汰后由前端与 REST 重读兜底。
+        self._terminal_broadcast: OrderedDict[tuple[int, int], None] = OrderedDict()
+        self._terminal_broadcast_capacity = terminal_broadcast_capacity
 
     async def _attempt_and_source(
         self, attempt_id: int, gid: str
@@ -263,8 +266,14 @@ class DownloadLifecycleService:
                 # 单一广播挂接点：决策结束后推送 DB 权威状态（快照缺失也不清空）。
                 await self._broadcast_attempt(attempt.id)
 
+    async def broadcast_attempt(self, attempt_id: int) -> None:
+        """公开广播入口：已持有该 attempt 锁的调用方不得再调用（asyncio.Lock 不可重入）。"""
+        lock = self._locks.setdefault(attempt_id, asyncio.Lock())
+        async with lock:
+            await self._broadcast_attempt(attempt_id)
+
     async def _broadcast_attempt(self, attempt_id: int) -> None:
-        """统一广播出口：任何路径进入终态的尝试都会推送一次终态帧（幂等）。"""
+        """统一广播出口：每个订阅进入终态时推送一次自己的终态帧（幂等）。"""
         if self.broadcast is None or self.queries is None:
             return
         try:
@@ -273,11 +282,19 @@ class DownloadLifecycleService:
                     attempt_id
                 )
             for task_id, user_id in subscriptions:
-                projection = await self.queries.get_task(user_id=user_id, task_id=task_id)
+                try:
+                    projection = await self.queries.get_task(user_id=user_id, task_id=task_id)
+                except DomainError as error:
+                    if error.code is ErrorCode.NOT_FOUND:
+                        continue  # 订阅已删除或内容已清理：只跳过当前订阅。
+                    raise
                 if projection.status in TERMINAL_SUBSCRIPTION_STATUSES:
-                    if attempt_id in self._terminal_broadcast:
-                        continue  # 终态帧只发一次。
-                    self._terminal_broadcast.add(attempt_id)
+                    key = (attempt_id, task_id)
+                    if key in self._terminal_broadcast:
+                        continue  # 该订阅的终态帧只发一次。
+                    self._terminal_broadcast[key] = None
+                    while len(self._terminal_broadcast) > self._terminal_broadcast_capacity:
+                        self._terminal_broadcast.popitem(last=False)
                 self.broadcast.publish([user_id], task_message(projection))
         except Exception as error:  # noqa: BLE001  # 广播失败不阻断生命周期决策
             logger.warning("任务广播失败 error_type=%s", type(error).__name__)

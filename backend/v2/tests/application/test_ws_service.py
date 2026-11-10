@@ -4,6 +4,9 @@ import asyncio
 import json
 
 from aria2deck.application.downloads.broadcast import BroadcastMessage, TaskBroadcast
+from aria2deck.application.downloads.lifecycle import DownloadLifecycleService
+from aria2deck.application.downloads.projection import TaskProjector
+from aria2deck.application.downloads.queries import DownloadQueryService
 from aria2deck.application.downloads.ws_service import (
     ConnectionRegistry,
     WebSocketTaskService,
@@ -11,6 +14,13 @@ from aria2deck.application.downloads.ws_service import (
 from aria2deck.domain.accounts import CredentialKind, User
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.settings import SystemSettings
+from aria2deck.infrastructure.sqlite.repositories.accounts import AccountRepository
+from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
+from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
+from aria2deck.infrastructure.sqlite.repositories.packs import PackRepository
+from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
+
+from .test_download_lifecycle import GID, Runtime, observation, runtime
 
 SESSION = "session-raw-id"
 PRINCIPAL_USER_ID = 11
@@ -313,57 +323,86 @@ async def test_shutdown_closes_all_connections() -> None:
         assert socket.closed is not None
 
 
+def _lifecycle_with_broadcast(rt: Runtime, bus: TaskBroadcast) -> DownloadLifecycleService:
+    """真实 SQLite 仓储 + 真实投影 + 广播总线的生命周期服务。"""
+    projector = TaskProjector(observations=rt.observations, clock_ms=lambda: 100)
+    queries = DownloadQueryService(
+        uow_factory=lambda: SQLiteUnitOfWork(rt.database),
+        repository_factory=lambda uow: DownloadRepository(uow.connection),
+        content_repository_factory=lambda uow: ContentRepository(uow.connection),
+        pack_repository_factory=lambda uow: PackRepository(uow.connection),
+        account_repository_factory=lambda uow: AccountRepository(uow.connection),
+        projector=projector,
+        machine_space=rt.store,
+        settings=lambda: SystemSettings(min_free_disk=0),
+    )
+    return DownloadLifecycleService(
+        uow_factory=lambda: SQLiteUnitOfWork(rt.database),
+        repository_factory=lambda uow: DownloadRepository(uow.connection),
+        content_repository_factory=lambda uow: ContentRepository(uow.connection),
+        backend=rt.backend,
+        content_store=rt.store,
+        observations=rt.observations,
+        connectivity=rt.connectivity,
+        settings=lambda: SystemSettings(min_free_disk=0),
+        clock_ms=lambda: 100,
+        broadcast=bus,
+        queries=queries,
+    )
+
+
 async def test_lifecycle_broadcast_to_ws_end_to_end(tmp_path):
     """P2-8：真实 lifecycle→broadcast→订阅者 端到端推送（状态转换即帧到达）。"""
-
-    from aria2deck.application.downloads.broadcast import TaskBroadcast
-    from aria2deck.application.downloads.lifecycle import DownloadLifecycleService
-    from aria2deck.application.downloads.projection import TaskProjector
-    from aria2deck.application.downloads.queries import DownloadQueryService
-    from aria2deck.infrastructure.sqlite.repositories.accounts import AccountRepository
-    from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
-    from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
-    from aria2deck.infrastructure.sqlite.repositories.packs import PackRepository
-
-    from .test_download_lifecycle import GID, observation, runtime
 
     async with runtime(tmp_path, total=3) as rt:
         bus = TaskBroadcast()
         sink = bus.subscribe(rt.user_id)
-
-        from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
-
-        def uow_factory() -> SQLiteUnitOfWork:
-            return SQLiteUnitOfWork(rt.database)
-
-
-        projector = TaskProjector(observations=rt.observations, clock_ms=lambda: 100)
-        queries = DownloadQueryService(
-            uow_factory=uow_factory,
-            repository_factory=lambda uow: DownloadRepository(uow.connection),
-            content_repository_factory=lambda uow: ContentRepository(uow.connection),
-            pack_repository_factory=lambda uow: PackRepository(uow.connection),
-            account_repository_factory=lambda uow: AccountRepository(uow.connection),
-            projector=projector,
-            machine_space=rt.store,
-            settings=lambda: SystemSettings(min_free_disk=0),
-        )
-        lifecycle = DownloadLifecycleService(
-            uow_factory=uow_factory,
-            repository_factory=lambda uow: DownloadRepository(uow.connection),
-            content_repository_factory=lambda uow: ContentRepository(uow.connection),
-            backend=rt.backend,
-            content_store=rt.store,
-            observations=rt.observations,
-            connectivity=rt.connectivity,
-            settings=lambda: SystemSettings(min_free_disk=0),
-            clock_ms=lambda: 100,
-            broadcast=bus,
-            queries=queries,
-        )
+        lifecycle = _lifecycle_with_broadcast(rt, bus)
         await lifecycle.reconcile(observation(gid=GID, status="error"))
         message = await asyncio.wait_for(sink.next(), timeout=2)
         assert message.type == "task_update"
         assert message.task_id == rt.task_id
         # 终态帧：error 快照 → 订阅 failed（RPC 投影映射为 error，REST 状态为 failed）。
         assert message.status in {"failed", "error"}
+
+
+async def test_shared_download_terminal_frame_reaches_every_subscriber(tmp_path):
+    """两个用户共享同一 attempt：终态后各自收到一次自己的帧。"""
+
+    async with runtime(tmp_path, total=3) as rt:
+        async with SQLiteUnitOfWork(rt.database) as uow:
+            bob_id = await AccountRepository(uow.connection).create_user(
+                username="bob",
+                password_hash="cd" * 32,
+                is_admin=False,
+                quota_bytes=100,
+                now_ms=1,
+            )
+            bob_task_id = await DownloadRepository(uow.connection).create_subscription(
+                attempt_id=rt.attempt_id,
+                user_id=bob_id,
+                reserved_bytes=0,
+                display_name="file.bin",
+                display_uri=None,
+                now_ms=2,
+            )
+        bus = TaskBroadcast()
+        alice_sink = bus.subscribe(rt.user_id)
+        bob_sink = bus.subscribe(bob_id)
+        lifecycle = _lifecycle_with_broadcast(rt, bus)
+
+        await lifecycle.reconcile(observation(gid=GID, status="error"))
+
+        alice_frame = await asyncio.wait_for(alice_sink.next(), timeout=2)
+        bob_frame = await asyncio.wait_for(bob_sink.next(), timeout=2)
+        assert (alice_frame.task_id, alice_frame.status) == (rt.task_id, "failed")
+        assert (bob_frame.task_id, bob_frame.status) == (bob_task_id, "failed")
+        assert bob_frame.payload["id"] == bob_task_id
+        assert bob_frame.payload["status"] == "failed"
+        assert list(alice_sink.queue) == []
+        assert list(bob_sink.queue) == []
+
+        # 重复终态事件在去重窗口内不重复推送。
+        await lifecycle.reconcile(observation(gid=GID, status="error"))
+        assert list(alice_sink.queue) == []
+        assert list(bob_sink.queue) == []

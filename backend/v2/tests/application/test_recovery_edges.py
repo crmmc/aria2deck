@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
+from aria2deck.application.downloads.broadcast import TaskBroadcast
 from aria2deck.application.downloads.models import (
     AttemptRecord,
     BackendSubmissionResult,
     SourceRecord,
     Submission,
+    TaskProjection,
 )
 from aria2deck.application.downloads.recovery import DownloadRecoveryService, RecoveryReport
 from aria2deck.domain.downloads import AttemptStatus, SubscriptionStatus
@@ -19,7 +21,13 @@ from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from aria2deck.infrastructure.sqlite.schema import content_objects, user_files
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
-from tests.application.test_download_lifecycle import observation, put_download, read, runtime
+from tests.application.test_download_lifecycle import (
+    make_lifecycle,
+    observation,
+    put_download,
+    read,
+    runtime,
+)
 from tests.download_fakes import FakeSubmissionBackend, FakeTrackers
 
 
@@ -206,7 +214,7 @@ class RecordingLifecycle:
         self.cleanup_ok = True
         self.purge_error = False
 
-    async def _broadcast_attempt(self, attempt_id: int) -> None:
+    async def broadcast_attempt(self, attempt_id: int) -> None:
         self.events.append(f"broadcast:{attempt_id}")
 
     async def recover_ingestions(self) -> bool:
@@ -437,3 +445,69 @@ async def test_submission_timeout_defers_to_persisted_ingestion_and_settles_once
         async with SQLiteUnitOfWork(state.database) as uow:
             assert len((await uow.connection.execute(select(content_objects))).all()) == 1
             assert len((await uow.connection.execute(select(user_files))).all()) == 1
+
+
+class _FailedProjection:
+    """恢复入口用例的终态投影：只验证锁与单帧，不重复真实投影断言。"""
+
+    async def get_task(self, *, user_id: int, task_id: int) -> TaskProjection:
+        return TaskProjection(
+            id=task_id,
+            status=SubscriptionStatus.FAILED,
+            status_label="失败",
+            name="file.bin",
+            display_uri=None,
+            total_bytes=3,
+            completed_bytes=0,
+            download_speed=0,
+            upload_speed=0,
+            peer_count=0,
+            connection_count=0,
+            files=(),
+            observation_fresh=False,
+            reserved_bytes=0,
+            error_code="failed_elsewhere",
+            retryable=True,
+            created_at_ms=1,
+            updated_at_ms=1,
+            finished_at_ms=1,
+        )
+
+
+async def test_broadcast_entry_waits_for_the_attempt_lock_and_publishes_once(
+    tmp_path: Path,
+) -> None:
+    async with runtime(tmp_path) as state:
+        bus = TaskBroadcast()
+        sink = bus.subscribe(state.user_id)
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await DownloadRepository(uow.connection).fail_attempt(
+                state.attempt_id, error_code="failed_elsewhere", now_ms=100
+            )
+        lifecycle = make_lifecycle(state)
+        lifecycle.broadcast = bus
+        lifecycle.queries = _FailedProjection()
+        lock = lifecycle._locks.setdefault(state.attempt_id, asyncio.Lock())
+        await lock.acquire()
+        started = asyncio.Event()
+
+        async def call() -> None:
+            started.set()
+            await lifecycle.broadcast_attempt(state.attempt_id)
+
+        task = asyncio.create_task(call())
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.sleep(0.05)
+        assert not task.done(), "公开广播入口必须先取得 attempt 锁"
+        lock.release()
+        await asyncio.wait_for(task, timeout=2)
+
+        frames = []
+        while sink.queue:
+            frames.append(sink.queue.popleft())
+        assert [(message.task_id, message.status) for message in frames] == [
+            (state.task_id, "failed")
+        ]
+
+        await lifecycle.broadcast_attempt(state.attempt_id)
+        assert list(sink.queue) == [], "去重窗口内再次广播不重复推送"
