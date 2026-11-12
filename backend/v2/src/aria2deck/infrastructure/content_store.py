@@ -4,10 +4,12 @@ import asyncio
 import hashlib
 import os
 import shutil
+import stat
 from pathlib import Path
 from typing import IO
 
 from ..application.downloads.models import ContentPreparation
+from ..application.packs.models import InstallOutcome
 from ..domain.content import (
     ContentEntryIdentity,
     ContentKind,
@@ -195,9 +197,14 @@ class DownloadContentStore:
 
     def _verify_prepared(self, storage_path: str) -> tuple[int, str]:
         target = self._destination(storage_path)
-        if not target.is_file():
-            raise DomainError(ErrorCode.INVALID_STATE, "prepared 输出文件不存在")
-        return target.stat().st_size, _file_digest(target)
+        try:
+            info = os.lstat(target)
+        except FileNotFoundError:
+            raise DomainError(ErrorCode.NOT_FOUND, "prepared 输出文件不存在") from None
+        if not stat.S_ISREG(info.st_mode):
+            # 目录、符号链接或其他非普通文件是持久冲突，不能当作缺失重排。
+            raise DomainError(ErrorCode.INVALID_STATE, "prepared 输出不是普通文件")
+        return info.st_size, _file_digest(target)
 
     async def verify_prepared(self, storage_path: str) -> tuple[int, str]:
         return await asyncio.to_thread(self._verify_prepared, storage_path)
@@ -210,22 +217,30 @@ class DownloadContentStore:
     async def remove_prepared(self, storage_path: str) -> None:
         await asyncio.to_thread(self._remove_prepared, storage_path)
 
-    def _install_prepared(self, storage_path: str, digest: str) -> str:
+    def _install_prepared(self, storage_path: str, digest: str) -> InstallOutcome:
         canonical = f"objects/file-{digest}"
         source = self._destination(storage_path)
         destination = self._destination(canonical)
-        if destination.exists():
-            # 规范对象已在位（此前安装过）：丢弃 part 文件即可。
+        try:
+            canonical_info = os.lstat(destination)
+        except FileNotFoundError:
+            canonical_info = None
+        if canonical_info is not None:
+            # 规范位必须是普通文件：符号链接（含失效链接）不能复用、覆盖或跟随。
+            if not stat.S_ISREG(canonical_info.st_mode):
+                raise DomainError(ErrorCode.INVALID_STATE, "规范位不是普通文件")
+            if _file_digest(destination) != digest:
+                raise DomainError(ErrorCode.INVALID_STATE, "规范位内容与待安装摘要不一致")
             if source.exists() or source.is_symlink():
                 source.unlink()
-            return canonical
+            return InstallOutcome(canonical, created_by_this_attempt=False)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.parent.is_symlink():
             raise DomainError(ErrorCode.INVALID_INPUT, "内容存储目录不能是符号链接")
         source.replace(destination)
-        return canonical
+        return InstallOutcome(canonical, created_by_this_attempt=True)
 
-    async def install_prepared(self, storage_path: str, digest: str) -> str:
+    async def install_prepared(self, storage_path: str, digest: str) -> InstallOutcome:
         return await asyncio.to_thread(self._install_prepared, storage_path, digest)
 
     def _scan_entries(self, storage_path: str) -> list[ContentEntryIdentity]:

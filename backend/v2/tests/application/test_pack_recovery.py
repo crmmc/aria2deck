@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import zipfile
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from aria2deck.domain.packs import PackStatus, PackStep, PreparedOutput
 from aria2deck.domain.quota import Quota
 from aria2deck.infrastructure.archive_writer import ArchiveWriter
 from aria2deck.infrastructure.content_store import DownloadContentStore
+from aria2deck.infrastructure.pack_writer import PackWriterControl
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
 from aria2deck.infrastructure.sqlite.repositories.packs import PackRepository
@@ -20,7 +22,15 @@ from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
 from .test_library_services import FakeClock
 from .test_pack_admission import create_pack_user, seed_pack_file, setup_pack_world
 from .test_pack_cleanup import make_cleanup_worker, make_control
-from .test_pack_dispatcher import RETRY_DELAYS, create_pack, get_job, make_dispatcher
+from .test_pack_dispatcher import (
+    RETRY_DELAYS,
+    GatedContentStore,
+    RecordingControl,
+    RecordingWriter,
+    create_pack,
+    get_job,
+    make_dispatcher,
+)
 
 
 async def _prepare_real_output(
@@ -32,6 +42,8 @@ async def _prepare_real_output(
     file_id: int,
 ) -> PreparedOutput:
     """Manually drive the job to the prepared state with a real archive on disk."""
+    import threading
+
     from aria2deck.application.packs.models import ArchiveSource
     from aria2deck.domain.content import ContentKind
 
@@ -40,6 +52,7 @@ async def _prepare_real_output(
         await repository.claim_next_pending(now_ms=clock())
         await repository.update_step(pack_id, from_step=PackStep.VALIDATING, to_step=PackStep.COMPRESSING, now_ms=clock())
         await repository.update_step(pack_id, from_step=PackStep.COMPRESSING, to_step=PackStep.VERIFYING, now_ms=clock())
+        job = await repository.get_job(pack_id)
         current = await repository.list_admission_sources(user_id=user_id, user_file_ids=[file_id])
     part = f"packs/prepared-{pack_id}.part"
     await ArchiveWriter().write_archive(
@@ -53,6 +66,9 @@ async def _prepare_real_output(
         ],
         pack_format="zip",
         compression_level=3,
+        max_output_bytes=job.reserved_bytes,
+        min_free_bytes=0,
+        cancel_event=threading.Event(),
     )
     size, digest = await store.verify_prepared(part)
     async with SQLiteUnitOfWork(database) as uow:
@@ -176,9 +192,11 @@ async def test_recovery_from_prepared_interruption_installs_without_recompress(
     original_size = (root / "packs" / f"prepared-{pack_id}.part").stat().st_size
     assert (root / "packs" / f"prepared-{pack_id}.part").exists()
 
-    dispatcher = make_dispatcher(database, clock, store)
+    control = RecordingControl()
+    dispatcher = make_dispatcher(database, clock, store, control=control)
     await dispatcher.step_once()  # 重启：重验直接安装，不重压缩。
     job = await get_job(database, pack_id)
+    assert control.registered == [pack_id], "恢复任务只注册一次"
     assert job.prepared == prepared
     canonical = root / "objects" / f"file-{prepared.digest}"
     assert canonical.stat().st_size == original_size
@@ -218,9 +236,11 @@ async def test_recovery_with_corrupted_prepared_requeues(tmp_path: Path) -> None
 
     dispatcher = make_dispatcher(database, clock, store)
     await dispatcher.step_once()
+    assert not (root / "packs" / f"prepared-{pack_id}.part").exists(), "篡改 part 必须在重排前清理"
     job = await get_job(database, pack_id)
     assert job.status is PackStatus.PENDING, "内容不匹配：暂态重排而非失败"
     assert job.retry_count == 1
+    assert job.prepared is None, "重排必须同事务清掉不可用的 prepared 登记"
     clock.advance(RETRY_DELAYS[0])
     await dispatcher.step_once()
     await make_cleanup_worker(database, clock).step_once()
@@ -341,3 +361,129 @@ async def test_multi_source_quota_matches_rebuild_after_cleanup(tmp_path: Path) 
         output = await ContentRepository(uow.connection).get_object(job.output_content_id)
     # 仅剩输出归档计入 used；预留清零。
     assert quota == Quota(100 * 1024 * 1024, output.size, 0)
+
+
+class TransientCompleteRepository(PackRepository):
+    """完成结算首次抛暂态错误：本次新建的无归属输出先回收，再沿恢复链收敛。"""
+
+    def __init__(self, connection, failures: list[int]) -> None:
+        super().__init__(connection)
+        self._failures = failures
+
+    async def complete_job(self, pack_id: int, *, now_ms: int) -> int:
+        if self._failures:
+            self._failures.pop()
+            raise OSError("simulated transient completion failure")
+        return await super().complete_job(pack_id, now_ms=now_ms)
+
+
+async def test_completion_transient_error_reclaims_owned_output_and_recovers(tmp_path: Path) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, first = await seed_pack_file(database, root, user_id, 1)
+    store = DownloadContentStore(root)
+    pack_id = await create_pack(database, clock, store, user_id, [first])
+    prepared = await _prepare_real_output(database, clock, store, user_id, pack_id, first)
+    failures = [1]
+    writer = RecordingWriter()
+    dispatcher = make_dispatcher(
+        database,
+        clock,
+        store,
+        writer=writer,
+        repository_factory=lambda uow: TransientCompleteRepository(uow.connection, failures),
+    )
+
+    await dispatcher.step_once()
+    job = await get_job(database, pack_id)
+    assert job.status is PackStatus.PENDING
+    assert job.retry_count == 1
+    assert job.prepared == prepared, "暂态重排本身保留登记，但无归属物理输出必须按 ownership 回收"
+    canonical = root / "objects" / f"file-{prepared.digest}"
+    assert not canonical.exists(), "complete 失败后不得留下本次新建且无内容对象的 canonical"
+    assert not (root / "packs" / f"prepared-{pack_id}.part").exists()
+
+    clock.advance(RETRY_DELAYS[0])
+    await dispatcher.step_once()
+    job = await get_job(database, pack_id)
+    assert job.status is PackStatus.PENDING and job.retry_count == 2
+    assert job.prepared is None, "part 与 canonical 均缺失后清登记，下一轮重新压缩"
+    assert writer.calls == [], "双缺失恢复先重排，不直接写新归档"
+
+    clock.advance(RETRY_DELAYS[1])
+    await dispatcher.step_once()
+    assert (await get_job(database, pack_id)).status is PackStatus.DONE
+    assert len(writer.calls) == 1, "无可用 part/canonical 时才重新压缩一次"
+
+
+async def test_recovery_completion_failure_reclaims_the_canonical_created_by_this_attempt(
+    tmp_path: Path,
+) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, first = await seed_pack_file(database, root, user_id, 1)
+    await seed_pack_file(database, root, user_id, 2, payload=b"c" * 5, name="bundle.zip")
+    store = DownloadContentStore(root)
+    pack_id = await create_pack(database, clock, store, user_id, [first], output_name="bundle.zip")
+    prepared = await _prepare_real_output(database, clock, store, user_id, pack_id, first)
+
+    await make_dispatcher(database, clock, store).step_once()  # 重启恢复：安装后完成失败。
+
+    job = await get_job(database, pack_id)
+    assert job.status is PackStatus.FAILED and job.error_code == "duplicate_resource"
+    assert not (root / "objects" / f"file-{prepared.digest}").exists(), "恢复安装的新建 canonical 同样回收"
+    assert not (root / "packs" / f"prepared-{pack_id}.part").exists()
+    async with SQLiteUnitOfWork(database) as uow:
+        assert (
+            await ContentRepository(uow.connection).find_object_by_key(f"file:{prepared.digest}")
+            is None
+        )
+        quota = await QuotaRepository(uow.connection).get(user_id)
+    assert quota.reserved_bytes == 0
+
+
+async def test_canonical_only_recovery_failure_keeps_the_existing_canonical(tmp_path: Path) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, first = await seed_pack_file(database, root, user_id, 1)
+    await seed_pack_file(database, root, user_id, 2, payload=b"c" * 5, name="bundle.zip")
+    store = DownloadContentStore(root)
+    pack_id = await create_pack(database, clock, store, user_id, [first], output_name="bundle.zip")
+    prepared = await _prepare_real_output(database, clock, store, user_id, pack_id, first)
+    canonical = root / "objects" / f"file-{prepared.digest}"
+    await store.install_prepared(prepared.path, prepared.digest)  # part 已不在：只能走 canonical 补登记。
+
+    await make_dispatcher(database, clock, store).step_once()
+
+    job = await get_job(database, pack_id)
+    assert job.status is PackStatus.FAILED and job.error_code == "duplicate_resource"
+    assert canonical.is_file(), "part 缺失的恢复没有本次 ownership，不得回收既有 canonical"
+    assert canonical.read_bytes()
+
+
+async def test_cancel_during_recovery_install_reclaims_the_new_canonical(tmp_path: Path) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, first = await seed_pack_file(database, root, user_id, 1)
+    store = GatedContentStore(root)
+    pack_id = await create_pack(database, clock, store, user_id, [first])
+    prepared = await _prepare_real_output(database, clock, store, user_id, pack_id, first)
+    control = PackWriterControl(stop_timeout_seconds=2.0)
+    dispatcher = make_dispatcher(database, clock, store, control=control)
+
+    stepping = asyncio.create_task(dispatcher.step_once())  # 重启恢复：直接安装 prepared。
+    await asyncio.wait_for(store.install_entered.wait(), timeout=5)
+    stopping = asyncio.create_task(control.stop_and_wait(pack_id))
+    await asyncio.sleep(0.05)
+    assert not stopping.done(), "恢复安装进行中：停止必须等真实安装返回"
+
+    store.install_gate.set()
+    await asyncio.wait_for(stopping, timeout=5)
+    await asyncio.wait_for(stepping, timeout=5)
+
+    assert store.install_returned, "恢复安装同样必须拿到 InstallOutcome"
+    assert not (root / "objects" / f"file-{prepared.digest}").exists(), "本次新建且无内容对象：回收"
+    assert not (root / "packs" / f"prepared-{pack_id}.part").exists()
+    job = await get_job(database, pack_id)
+    assert job.status is PackStatus.PACKING, "取消不完成结算"
+    assert job.output_content_id is None

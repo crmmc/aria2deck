@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError
 
+from aria2deck.domain import packs as pack_domain
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.packs import PackSourceSnapshot, PackStatus, PackStep, PreparedOutput
 from aria2deck.domain.quota import PhysicalPack, Quota
@@ -76,8 +77,9 @@ async def test_pack_source_snapshot_is_unique_and_does_not_follow_current_file(d
 
 async def test_pack_job_rejects_invalid_format_and_owner(database: SQLiteDatabase) -> None:
     async with SQLiteUnitOfWork(database) as uow:
-        with pytest.raises(IntegrityError):
+        with pytest.raises(DomainError) as caught:
             await PackRepository(uow.connection).create_job(owner_id=999, output_name="bad.zip", pack_format="zip", source_size=1, reserved_bytes=1, physical_reserved_bytes=1, delete_source=False, now_ms=1)
+        assert caught.value.code is ErrorCode.NOT_FOUND
     owner = await create_user(database)
     async with SQLiteUnitOfWork(database) as uow:
         with pytest.raises(IntegrityError):
@@ -223,15 +225,111 @@ async def test_user_cleanup_fails_if_pack_cancellation_is_not_persisted(
             )
         )
         with pytest.raises(DomainError) as caught:
-            await packs.cleanup_user(user_id=owner, now_ms=2)
+            await packs.mark_user_jobs_cancelled(user_id=owner, now_ms=2)
         assert caught.value.code is ErrorCode.INVALID_STATE
         assert (await packs.get_job(job_id)).status is PackStatus.PENDING
 
 
-async def _seed_user(database, username: str = "owner") -> int:
+async def test_user_cleanup_lists_every_undeleted_pack_and_latches_live_jobs(
+    database: SQLiteDatabase,
+) -> None:
+    owner = await create_user(database, quota=100_000)
+    other = await create_user(database, username="other", quota=100_000)
+    pending = await pack_id(database, owner)
+    async with SQLiteUnitOfWork(database) as uow:
+        packs = PackRepository(uow.connection)
+        packing = await packs.create_job(
+            owner_id=owner, output_name="packing.zip", pack_format="zip",
+            source_size=20, reserved_bytes=30, physical_reserved_bytes=30,
+            delete_source=False, now_ms=1,
+        )
+        cancelled = await packs.create_job(
+            owner_id=owner, output_name="cancelled.zip", pack_format="zip",
+            source_size=20, reserved_bytes=30, physical_reserved_bytes=30,
+            delete_source=False, now_ms=1,
+        )
+        failed = await packs.create_job(
+            owner_id=owner, output_name="failed.zip", pack_format="zip",
+            source_size=20, reserved_bytes=30, physical_reserved_bytes=30,
+            delete_source=False, now_ms=1,
+        )
+        foreign = await packs.create_job(
+            owner_id=other, output_name="foreign.zip", pack_format="zip",
+            source_size=20, reserved_bytes=30, physical_reserved_bytes=30,
+            delete_source=False, now_ms=1,
+        )
+        await uow.connection.execute(
+            text(
+                "UPDATE pack_jobs SET status = 'packing', step = 'compressing', "
+                "step_started_at_ms = 2 WHERE id = :id"
+            ),
+            {"id": packing},
+        )
+        await uow.connection.execute(
+            text("UPDATE pack_jobs SET status = 'cancelled' WHERE id = :id"),
+            {"id": cancelled},
+        )
+        await uow.connection.execute(
+            text("UPDATE pack_jobs SET status = 'failed' WHERE id = :id"),
+            {"id": failed},
+        )
+
+        candidates = [pending, packing, cancelled, failed]
+        assert await packs.list_user_job_ids(owner) == candidates
+        assert foreign not in await packs.list_user_job_ids(owner)
+
+        await packs.mark_user_jobs_cancelled(user_id=owner, now_ms=5)
+
+        for job_id in (pending, packing):
+            job = await packs.get_job(job_id)
+            assert job.status is PackStatus.CANCELLED
+            assert job.step is None and job.step_progress == 0
+            assert job.reserved_bytes == 0
+            assert job.physical_reserved_bytes == 0
+            assert job.finished_at_ms == 5
+        assert (await packs.get_job(cancelled)).status is PackStatus.CANCELLED
+        assert (await packs.get_job(failed)).status is PackStatus.FAILED
+        assert (await packs.get_job(foreign)).status is PackStatus.PENDING
+        # cancelled 门闩提交后，剩余记录仍在但无法再被领取。
+        assert await packs.list_user_job_ids(owner) == candidates
+        assert await packs.claim_next_pending(now_ms=10) == foreign
+
+
+async def test_delete_user_jobs_rolls_back_when_the_quota_rebuild_fails(
+    database: SQLiteDatabase,
+) -> None:
+    owner = await create_user(database, quota=1000)
+    job_id = await pack_id(database, owner)
+    async with SQLiteUnitOfWork(database) as uow:
+        await QuotaRepository(uow.connection).reserve(owner, 120)
+        await uow.connection.execute(
+            text(
+                "CREATE TRIGGER test_block_quota_rebuild "
+                "BEFORE UPDATE ON quota_accounts "
+                "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
+            )
+        )
+
+    with pytest.raises(IntegrityError):
+        async with SQLiteUnitOfWork(database) as uow:
+            await PackRepository(uow.connection).delete_user_jobs_and_rebuild_quota(
+                user_id=owner
+            )
+
+    async with SQLiteUnitOfWork(database) as uow:
+        packs = PackRepository(uow.connection)
+        assert await packs.list_user_job_ids(owner) == [job_id], "删除必须随 rebuild 失败整体回滚"
+        assert (await QuotaRepository(uow.connection).get(owner)).reserved_bytes == 120
+        await uow.connection.execute(text("DROP TRIGGER test_block_quota_rebuild"))
+        await packs.delete_user_jobs_and_rebuild_quota(user_id=owner)
+        assert await packs.list_user_job_ids(owner) == []
+        assert (await QuotaRepository(uow.connection).get(owner)).reserved_bytes == 0
+
+
+async def _seed_user(database, username: str = "owner", *, quota: int = 10_000) -> int:
     async with SQLiteUnitOfWork(database) as uow:
         return await AccountRepository(uow.connection).create_user(
-            username=username, password_hash="ab" * 32, is_admin=True, quota_bytes=10_000, now_ms=1
+            username=username, password_hash="ab" * 32, is_admin=True, quota_bytes=quota, now_ms=1
         )
 
 
@@ -310,7 +408,7 @@ async def test_step_updates_are_conditional_and_progress_validated(database) -> 
     owner = await _seed_user(database)
     async with SQLiteUnitOfWork(database) as uow:
         repo = PackRepository(uow.connection)
-        pack_id = await repo.create_job(owner_id=owner, output_name="a.zip", pack_format="zip", source_size=1, reserved_bytes=1, physical_reserved_bytes=1, delete_source=False, now_ms=1)
+        pack_id = await repo.create_job(owner_id=owner, output_name="a.zip", pack_format="zip", source_size=1, reserved_bytes=4, physical_reserved_bytes=4, delete_source=False, now_ms=1)
         await repo.claim_next_pending(now_ms=10)
         assert not await repo.update_step(pack_id, from_step=PackStep.COMPRESSING, to_step=PackStep.VERIFYING, now_ms=11)
         assert await repo.update_step(pack_id, from_step=PackStep.VALIDATING, to_step=PackStep.COMPRESSING, now_ms=12)
@@ -405,13 +503,15 @@ async def test_mark_cancelled_clears_reservation_and_prepared(database) -> None:
 
 
 async def test_source_cleanup_state_machine_converges(database) -> None:
-    owner = await _seed_user(database)
+    owner = await _seed_user(database, quota=100_000)
     _, first = await _seed_file(database, owner, 1)
     _, second = await _seed_file(database, owner, 2)
     digest = f"{4:064x}"
     async with SQLiteUnitOfWork(database) as uow:
         repo = PackRepository(uow.connection)
-        pack_id = await repo.create_job(owner_id=owner, output_name="a.zip", pack_format="zip", source_size=20, reserved_bytes=0, physical_reserved_bytes=0, delete_source=True, now_ms=1)
+        # 合法预算：20 来源 + 2*(512+2*5) 元数据 + 65536 冗余。
+        pack_id = await repo.create_job(owner_id=owner, output_name="a.zip", pack_format="zip", source_size=20, reserved_bytes=66_600, physical_reserved_bytes=66_600, delete_source=True, now_ms=1)
+        await QuotaRepository(uow.connection).reserve(owner, 66_600)
         await repo.add_source(pack_id, PackSourceSnapshot(first, 1, "file:a", "src-1", 5, 10))
         await repo.add_source(pack_id, PackSourceSnapshot(second, 2, "file:b", "src-2", 5, 10))
         await repo.claim_next_pending(now_ms=2)
@@ -485,3 +585,143 @@ async def test_requeue_rejects_negative_delay_and_output_identity_conflict_fails
             await repo.complete_job(pack_id, now_ms=7)
         assert caught.value.code is ErrorCode.INVALID_STATE
         assert (await repo.get_job(pack_id)).status is PackStatus.PACKING
+
+
+async def _seed_directory(database, user_id: int, *, index: int) -> tuple[int, int]:
+    """真实目录内容：UTF-8 路径、文件与目录行各一组。"""
+    async with SQLiteUnitOfWork(database) as uow:
+        content = ContentRepository(uow.connection)
+        content_id = await content.create_object(
+            kind="directory",
+            digest=f"{index:064x}",
+            size=10,
+            storage_path=f"objects/directory-{index}",
+            now_ms=1,
+        )
+        for parent_path, name, kind, size in (
+            ("", "目录", "directory", 0),
+            ("目录", "空文件.txt", "file", 0),
+            ("目录", "数据.bin", "file", 10),
+        ):
+            await content.add_entry(
+                content_id=content_id,
+                parent_path=parent_path,
+                name=name,
+                entry_kind=kind,
+                size=size,
+                now_ms=1,
+            )
+        file_id = await content.add_user_file(
+            user_id=user_id, content_id=content_id, display_name="dir-1", now_ms=5
+        )
+        await QuotaRepository(uow.connection).rebuild(user_id)
+    return content_id, file_id
+
+
+async def test_content_entry_aggregates_group_by_content_without_loading_rows(database) -> None:
+    owner = await _seed_user(database)
+    first_id, _ = await _seed_directory(database, owner, index=31)
+    async with SQLiteUnitOfWork(database) as uow:
+        content = ContentRepository(uow.connection)
+        empty_id = await content.create_object(
+            kind="directory", digest=f"{32:064x}", size=0,
+            storage_path="objects/directory-32", now_ms=1,
+        )
+        other_id = await content.create_object(
+            kind="directory", digest=f"{33:064x}", size=5,
+            storage_path="objects/directory-33", now_ms=1,
+        )
+        await content.add_entry(
+            content_id=other_id, parent_path="", name="x", entry_kind="file", size=5, now_ms=1
+        )
+        await content.add_entry(
+            content_id=other_id, parent_path="", name="y", entry_kind="directory", size=0, now_ms=1
+        )
+
+    statements: list[str] = []
+
+    def capture(_conn, _cursor, statement, *_args) -> None:
+        if "content_entries" in statement.lower():
+            statements.append(statement)
+
+    event.listen(database.engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        async with SQLiteUnitOfWork(database) as uow:
+            summaries = await PackRepository(uow.connection).list_content_summaries(
+                content_ids=[first_id, empty_id, other_id, 999]
+            )
+            empty = await PackRepository(uow.connection).list_content_summaries(content_ids=[])
+    finally:
+        event.remove(database.engine.sync_engine, "before_cursor_execute", capture)
+
+    summary_type = pack_domain.ArchiveEntrySummary
+    assert summaries == {
+        first_id: summary_type(
+            entry_count=3, path_bytes=43, file_bytes=10, directory_count=1, max_path_bytes=20
+        ),
+        other_id: summary_type(
+            entry_count=2, path_bytes=2, file_bytes=5, directory_count=1, max_path_bytes=2
+        ),
+    }, "缺失聚合表示空目录（零摘要），不返回原始条目"
+    assert empty == {}
+    assert len(statements) == 1, "只允许一条聚合查询，不加载原始条目"
+    assert "group by" in " ".join(statements[0].lower().split())
+
+
+async def test_create_job_rejects_pending_delete_owner_and_missing_user(database) -> None:
+    owner = await _seed_user(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        accounts = AccountRepository(uow.connection)
+        await accounts.mark_pending_delete(user_id=owner, now_ms=2)
+        with pytest.raises(DomainError) as caught:
+            await PackRepository(uow.connection).create_job(
+                owner_id=owner, output_name="late.zip", pack_format="zip",
+                source_size=10, reserved_bytes=66_068, physical_reserved_bytes=66_068,
+                delete_source=False, now_ms=3,
+            )
+        assert caught.value.code is ErrorCode.CONTENT_PENDING_DELETE
+        with pytest.raises(DomainError) as caught:
+            await PackRepository(uow.connection).create_job(
+                owner_id=999, output_name="ghost.zip", pack_format="zip",
+                source_size=10, reserved_bytes=66_068, physical_reserved_bytes=66_068,
+                delete_source=False, now_ms=3,
+            )
+        assert caught.value.code is ErrorCode.NOT_FOUND
+        count = (await uow.connection.execute(text("SELECT COUNT(*) FROM pack_jobs"))).scalar_one()
+    assert count == 0, "被拒绝的创建不得留下半任务"
+
+
+async def test_prepared_and_complete_reject_an_output_over_the_frozen_budget(database) -> None:
+    owner = await _seed_user(database)
+    digest = f"{34:064x}"
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = PackRepository(uow.connection)
+        pack_id = await repo.create_job(
+            owner_id=owner, output_name="over.zip", pack_format="zip",
+            source_size=10, reserved_bytes=120, physical_reserved_bytes=120,
+            delete_source=False, now_ms=1,
+        )
+        await repo.claim_next_pending(now_ms=2)
+        await repo.update_step(pack_id, from_step=PackStep.VALIDATING, to_step=PackStep.COMPRESSING, now_ms=3)
+        await repo.update_step(pack_id, from_step=PackStep.COMPRESSING, to_step=PackStep.VERIFYING, now_ms=4)
+
+        with pytest.raises(DomainError) as caught:
+            await repo.set_prepared(pack_id, PreparedOutput("packs/prepared-1.part", 121, digest), now_ms=5)
+        assert caught.value.code is ErrorCode.TASK_TOO_LARGE
+        assert (await repo.get_job(pack_id)).prepared is None
+        await repo.set_prepared(pack_id, PreparedOutput("packs/prepared-1.part", 120, digest), now_ms=6)
+
+        # 受控异常路径：模拟历史/漂移的已批准预算小于已登记输出。
+        await uow.connection.execute(
+            text("UPDATE pack_jobs SET reserved_bytes = 119 WHERE id = :id"), {"id": pack_id}
+        )
+        with pytest.raises(DomainError) as caught:
+            await repo.complete_job(pack_id, now_ms=7)
+        assert caught.value.code is ErrorCode.TASK_TOO_LARGE
+        job = await repo.get_job(pack_id)
+        objects = (
+            await uow.connection.execute(text("SELECT COUNT(*) FROM content_objects"))
+        ).scalar_one()
+    assert job.status is PackStatus.PACKING
+    assert job.output_content_id is None
+    assert objects == 0, "超预算结算不得创建内容对象"

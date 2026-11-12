@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import ColumnElement, Row, delete, func, not_, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    LargeBinary,
+    Row,
+    case,
+    cast,
+    delete,
+    func,
+    not_,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -18,17 +30,26 @@ from ....domain.content import (
 )
 from ....domain.errors import DomainError, ErrorCode
 from ....domain.packs import (
+    ArchiveEntrySummary,
     PackProgress,
     PackSourceSnapshot,
     PackStatus,
     PackStep,
     PreparedOutput,
     prepare_output,
+    require_pack_output_within_budget,
     transition_pack,
     validate_prepared_values,
 )
 from ....domain.quota import PhysicalPack
-from ..schema import content_objects, pack_jobs, pack_sources, user_files, users
+from ..schema import (
+    content_entries,
+    content_objects,
+    pack_jobs,
+    pack_sources,
+    user_files,
+    users,
+)
 from .content import ContentRepository
 from .quota import QuotaRepository
 
@@ -62,6 +83,15 @@ class PackRepository:
         name = validate_display_name(output_name)
         if min(source_size, reserved_bytes, physical_reserved_bytes) < 0:
             raise DomainError(ErrorCode.INVALID_INPUT, "打包大小或预留不能为负数")
+        owner = (
+            await self.connection.execute(
+                select(users.c.pending_delete).where(users.c.id == owner_id)
+            )
+        ).first()
+        if owner is None:
+            raise DomainError(ErrorCode.NOT_FOUND, "打包任务的用户不存在")
+        if bool(owner.pending_delete):
+            raise DomainError(ErrorCode.CONTENT_PENDING_DELETE, "账号正在删除，不能创建打包任务")
         result = await self.connection.execute(
             pack_jobs.insert().values(
                 owner_id=owner_id,
@@ -199,6 +229,50 @@ class PackRepository:
             for row in rows
         ]
 
+    async def list_content_summaries(
+        self, *, content_ids: list[int]
+    ) -> dict[int, ArchiveEntrySummary]:
+        """Aggregate directory entries per content id: one row per distinct content.
+
+        Returns no row for a content without entries (an empty directory), so callers
+        must treat a missing key as a zero summary rather than as projection drift.
+        """
+        if not content_ids:
+            return {}
+        path_bytes = func.length(cast(content_entries.c.path, LargeBinary))
+        is_directory = content_entries.c.entry_kind == ContentKind.DIRECTORY
+        rows = (
+            await self.connection.execute(
+                select(
+                    content_entries.c.content_id,
+                    func.count().label("entry_count"),
+                    func.coalesce(func.sum(path_bytes), 0).label("path_bytes"),
+                    func.coalesce(
+                        func.sum(case((is_directory, 0), else_=content_entries.c.size)), 0
+                    ).label("file_bytes"),
+                    func.coalesce(func.sum(case((is_directory, 1), else_=0)), 0).label(
+                        "directory_count"
+                    ),
+                    func.coalesce(
+                        func.max(path_bytes + case((is_directory, 1), else_=0)), 0
+                    ).label("max_path_bytes"),
+                )
+                .select_from(content_entries)
+                .where(content_entries.c.content_id.in_(content_ids))
+                .group_by(content_entries.c.content_id)
+            )
+        ).all()
+        return {
+            int(row.content_id): ArchiveEntrySummary(
+                entry_count=int(row.entry_count),
+                path_bytes=int(row.path_bytes),
+                file_bytes=int(row.file_bytes),
+                directory_count=int(row.directory_count),
+                max_path_bytes=int(row.max_path_bytes),
+            )
+            for row in rows
+        }
+
     async def list_active_physical(self) -> list[PhysicalPack]:
         rows = (
             await self.connection.execute(
@@ -294,6 +368,7 @@ class PackRepository:
             size=validated.size,
             digest=validated.digest,
         )
+        require_pack_output_within_budget(candidate.size, job.reserved_bytes)
         if job.prepared is not None:
             if job.prepared == candidate:
                 return
@@ -314,22 +389,33 @@ class PackRepository:
         if result.rowcount != 1:
             raise DomainError(ErrorCode.INVALID_STATE, "打包状态或 prepared 输出已变化，请重试")
 
-    async def requeue_transient(self, pack_id: int, *, delay_ms: int, now_ms: int) -> bool:
+    async def requeue_transient(
+        self,
+        pack_id: int,
+        *,
+        delay_ms: int,
+        now_ms: int,
+        discard_prepared: bool = False,
+    ) -> bool:
         if delay_ms < 0:
             raise DomainError(ErrorCode.INVALID_INPUT, "重试延迟不能为负数")
+        values: dict[str, object] = {
+            "status": PackStatus.PENDING,
+            "step": None,
+            "step_progress": 0,
+            "step_started_at_ms": None,
+            "retry_count": pack_jobs.c.retry_count + 1,
+            "next_attempt_at_ms": now_ms + delay_ms,
+            "updated_at_ms": now_ms,
+        }
+        if discard_prepared:
+            # 同事务清掉不可用的 prepared 登记，下一次领取必须重新压缩。
+            values |= {"prepared_path": None, "prepared_size": None, "prepared_digest": None}
         result = await self.connection.execute(
             update(pack_jobs)
             .where(pack_jobs.c.id == pack_id)
             .where(pack_jobs.c.status == PackStatus.PACKING)
-            .values(
-                status=PackStatus.PENDING,
-                step=None,
-                step_progress=0,
-                step_started_at_ms=None,
-                retry_count=pack_jobs.c.retry_count + 1,
-                next_attempt_at_ms=now_ms + delay_ms,
-                updated_at_ms=now_ms,
-            )
+            .values(**values)
         )
         return result.rowcount == 1
 
@@ -387,11 +473,16 @@ class PackRepository:
             await self.mark_sources_kept(pack_id)
         return result.rowcount == 1
 
+    async def content_object_exists(self, content_key: str) -> bool:
+        """只读查询：输出是否已被任何引用登记（安装后回收的安全前提）。"""
+        return await ContentRepository(self.connection).find_object_by_key(content_key) is not None
+
     async def complete_job(self, pack_id: int, *, now_ms: int) -> int:
         """Atomically install the output reference and convert reservation to used bytes."""
         job = await self.get_job(pack_id)
         if job.status is not PackStatus.PACKING or job.prepared is None:
             raise DomainError(ErrorCode.INVALID_STATE, "打包任务尚未完成最终验收")
+        require_pack_output_within_budget(job.prepared.size, job.reserved_bytes)
         digest = job.prepared.digest
         storage_path = f"objects/file-{digest}"
         content = ContentRepository(self.connection)
@@ -586,18 +677,19 @@ class PackRepository:
         )
         return int(result.rowcount)
 
-    async def list_active_jobs(self, user_id: int) -> list[int]:
+    async def list_user_job_ids(self, user_id: int) -> list[int]:
+        """列出该用户全部尚未删除的打包记录，含已 cancelled 的记录。"""
         rows = (
             await self.connection.execute(
                 select(pack_jobs.c.id)
                 .where(pack_jobs.c.owner_id == user_id)
-                .where(pack_jobs.c.status.in_([PackStatus.PENDING, PackStatus.PACKING]))
                 .order_by(pack_jobs.c.id)
             )
         ).scalars().all()
         return [int(pack_id) for pack_id in rows]
 
-    async def cleanup_user(self, *, user_id: int, now_ms: int) -> None:
+    async def mark_user_jobs_cancelled(self, *, user_id: int, now_ms: int) -> None:
+        """把该用户仍在进行中的任务标 cancelled；已终态记录保持原状。"""
         if (
             await self.connection.execute(select(users.c.id).where(users.c.id == user_id))
         ).first() is None:
@@ -628,5 +720,12 @@ class PackRepository:
             )
             if result.rowcount != 1:
                 raise DomainError(ErrorCode.INVALID_STATE, "打包任务已变化，请重试清理")
+
+    async def delete_user_jobs_and_rebuild_quota(self, *, user_id: int) -> None:
+        """删除该用户全部打包记录并在同一 UoW 内重建配额。"""
+        if (
+            await self.connection.execute(select(users.c.id).where(users.c.id == user_id))
+        ).first() is None:
+            return
         await self.connection.execute(delete(pack_jobs).where(pack_jobs.c.owner_id == user_id))
         await QuotaRepository(self.connection).rebuild(user_id)

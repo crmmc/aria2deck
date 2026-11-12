@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -225,22 +226,27 @@ async def test_scan_entries_matches_the_completion_layout(tmp_path: Path) -> Non
     assert await store.scan_entries(file_preparation.storage_path) == []
 
 
-async def test_install_prepared_is_idempotent_and_guards_symlink_parent(tmp_path: Path) -> None:
+async def test_install_prepared_reports_created_reuse_and_guards_symlink_parent(
+    tmp_path: Path,
+) -> None:
     store = DownloadContentStore(tmp_path)
     part = tmp_path / "packs" / "prepared-1.part"
     part.parent.mkdir(parents=True)
-    part.write_bytes(b"payload")
-    digest = "ab" * 32
+    payload = b"payload"
+    part.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    storage_path = f"objects/file-{digest}"
 
-    canonical = await store.install_prepared("packs/prepared-1.part", digest)
-    assert canonical == f"objects/file-{digest}"
-    assert (tmp_path / "objects" / f"file-{digest}").read_bytes() == b"payload"
-
-    part.write_bytes(b"stale copy")  # 规范位已存在：再次安装只清 part。
-    canonical = await store.install_prepared("packs/prepared-1.part", digest)
-    assert canonical == f"objects/file-{digest}"
+    created = await store.install_prepared("packs/prepared-1.part", digest)
+    assert (created.storage_path, created.created_by_this_attempt) == (storage_path, True)
+    assert (tmp_path / storage_path).read_bytes() == payload
     assert not part.exists()
-    assert (tmp_path / "objects" / f"file-{digest}").read_bytes() == b"payload"
+
+    part.write_bytes(payload)  # 同摘要 part 回到现场：规范位已存在，只能复用。
+    reused = await store.install_prepared("packs/prepared-1.part", digest)
+    assert (reused.storage_path, reused.created_by_this_attempt) == (storage_path, False)
+    assert not part.exists()
+    assert (tmp_path / storage_path).read_bytes() == payload
 
     import shutil
 
@@ -251,6 +257,71 @@ async def test_install_prepared_is_idempotent_and_guards_symlink_parent(tmp_path
     with pytest.raises(DomainError) as caught:
         await store.install_prepared("packs/prepared-1.part", "cd" * 32)
     assert caught.value.code is ErrorCode.INVALID_INPUT
+
+
+async def test_install_prepared_rejects_a_conflicting_canonical_and_keeps_both(
+    tmp_path: Path,
+) -> None:
+    store = DownloadContentStore(tmp_path)
+    payload = b"expected prepared"
+    digest = hashlib.sha256(payload).hexdigest()
+    part = tmp_path / "packs" / "prepared-1.part"
+    part.parent.mkdir(parents=True)
+    part.write_bytes(payload)
+    canonical = tmp_path / "objects" / f"file-{digest}"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(b"stale canonical")
+
+    with pytest.raises(DomainError) as caught:
+        await store.install_prepared("packs/prepared-1.part", digest)
+
+    assert caught.value.code is ErrorCode.INVALID_STATE
+    assert canonical.read_bytes() == b"stale canonical", "冲突 canonical 不在存储层回收"
+    assert part.read_bytes() == payload, "冲突 part 交给 dispatcher 的确定性失败清理"
+
+
+async def test_install_prepared_rejects_a_canonical_directory(tmp_path: Path) -> None:
+    store = DownloadContentStore(tmp_path)
+    part = tmp_path / "packs" / "prepared-1.part"
+    part.parent.mkdir(parents=True)
+    part.write_bytes(b"payload")
+    digest = hashlib.sha256(b"payload").hexdigest()
+    (tmp_path / "objects" / f"file-{digest}").mkdir(parents=True)
+
+    with pytest.raises(DomainError) as caught:
+        await store.install_prepared("packs/prepared-1.part", digest)
+
+    assert caught.value.code is ErrorCode.INVALID_STATE
+    assert part.exists()
+
+
+@pytest.mark.parametrize("link_target_exists", [True, False], ids=["matching", "broken"])
+async def test_install_prepared_rejects_canonical_symlinks(
+    tmp_path: Path, link_target_exists: bool
+) -> None:
+    store = DownloadContentStore(tmp_path)
+    payload = b"expected prepared"
+    digest = hashlib.sha256(payload).hexdigest()
+    part = tmp_path / "packs" / "prepared-1.part"
+    part.parent.mkdir(parents=True)
+    part.write_bytes(payload)
+    canonical = tmp_path / "objects" / f"file-{digest}"
+    canonical.parent.mkdir(parents=True)
+    target = tmp_path / "outside" / f"file-{digest}"
+    target.parent.mkdir()
+    if link_target_exists:
+        target.write_bytes(payload)  # 同摘要：旧实现会跟随链接并复用，再删掉 part。
+    canonical.symlink_to(target)
+
+    with pytest.raises(DomainError) as caught:
+        await store.install_prepared("packs/prepared-1.part", digest)
+
+    assert caught.value.code is ErrorCode.INVALID_STATE
+    assert part.read_bytes() == payload, "拒绝规范位符号链接时不得删除 part"
+    assert canonical.is_symlink(), "失效或匹配的规范位符号链接都不得被覆盖或复用"
+    assert canonical.readlink() == target
+    if link_target_exists:
+        assert target.read_bytes() == payload
 
 
 async def test_remove_prepared_is_idempotent_for_missing_and_symlinks(tmp_path: Path) -> None:
@@ -265,3 +336,43 @@ async def test_remove_prepared_is_idempotent_for_missing_and_symlinks(tmp_path: 
     await store.remove_prepared("packs/prepared-9.part")
     assert not part.exists()
     assert target.exists()
+
+
+async def test_verify_prepared_distinguishes_missing_from_non_regular_entries(
+    tmp_path: Path,
+) -> None:
+    store = DownloadContentStore(tmp_path)
+    part = tmp_path / "packs" / "prepared-1.part"
+    part.parent.mkdir(parents=True)
+    payload = b"prepared payload"
+    part.write_bytes(payload)
+
+    assert await store.verify_prepared("packs/prepared-1.part") == (
+        len(payload),
+        hashlib.sha256(payload).hexdigest(),
+    )
+
+    with pytest.raises(DomainError) as caught:
+        await store.verify_prepared("packs/prepared-2.part")
+    assert caught.value.code is ErrorCode.NOT_FOUND, "真实不存在才允许按缺失处理"
+
+    part.unlink()
+    part.mkdir()
+    with pytest.raises(DomainError) as caught:
+        await store.verify_prepared("packs/prepared-1.part")
+    assert caught.value.code is ErrorCode.INVALID_STATE, "目录不得伪装成缺失"
+
+    part.rmdir()
+    external = tmp_path / "outside.bin"
+    external.write_bytes(b"outside")
+    part.symlink_to(external)
+    with pytest.raises(DomainError) as caught:
+        await store.verify_prepared("packs/prepared-1.part")
+    assert caught.value.code is ErrorCode.INVALID_STATE, "符号链接不得伪装成缺失"
+    assert external.read_bytes() == b"outside"
+
+    part.unlink()
+    (tmp_path / "packs" / "prepared-3.part").mkdir()
+    with pytest.raises(DomainError) as caught:
+        await store.verify_prepared("packs/prepared-3.part")
+    assert caught.value.code is ErrorCode.INVALID_STATE

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -11,6 +13,7 @@ from aria2deck.application.packs.admission import (
     MachineSpacePort,
     PackAdmissionService,
 )
+from aria2deck.application.packs.models import PackAdmissionSource
 from aria2deck.domain.downloads import AttemptStatus
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.settings import SystemSettings
@@ -126,7 +129,8 @@ async def test_precompute_deduplicates_and_reports_item_failures(tmp_path: Path)
     accepted = [item for item in result.items if item.accepted]
     rejected = {item.user_file_id: item for item in result.items if not item.accepted}
     assert [item.user_file_id for item in accepted] == [first, 2]
-    assert result.total_size == 50
+    # 预算 = 50 来源 + 2*(512+2*5) 元数据 + 65536 冗余。
+    assert result.total_size == 66_630
     assert rejected[999].error_code == "not_found"
     assert rejected[deleting].error_code == "content_pending_delete"
     assert 0 < result.available_bytes <= 100 * 1024 * 1024 - 55
@@ -150,10 +154,11 @@ async def test_create_reserves_and_snapshots_atomically(tmp_path: Path) -> None:
         sources = await PackRepository(uow.connection).list_sources(pack_id)
         quota = await QuotaRepository(uow.connection).get(user_id)
     assert (job.status, job.reserved_bytes, job.physical_reserved_bytes, job.delete_source) == (
-        "pending", 35, 35, True,
+        "pending", 66_615, 66_615, True,
     )
+    assert job.source_size == 35, "source_size 保留真实来源内容字节"
     assert len(sources) == 2
-    assert quota.reserved_bytes == 35
+    assert quota.reserved_bytes == 66_615
 
     with pytest.raises(DomainError) as caught:
         await service.create(user_id, user_file_ids=[999], output_name="x.zip", delete_source=False)
@@ -243,7 +248,8 @@ async def test_pack_admission_counts_active_download_physical_commitment(
             physical_reserved_bytes=80,
             now_ms=1,
         )
-    service = make_admission(database, clock, FixedMachineSpace(100))
+    # 已有下载 80：S = B + 80 - 1，单独看来源可容，合并后恰好卡掉打包预算。
+    service = make_admission(database, clock, FixedMachineSpace(66_167))
 
     uow_entries = 0
     original_uow_factory = service.uow_factory
@@ -264,7 +270,7 @@ async def test_pack_admission_counts_active_download_physical_commitment(
     assert caught.value.code is ErrorCode.PHYSICAL_SPACE_EXCEEDED
     assert uow_entries == 1
     result = await service.precompute(user_id, [file_id])
-    assert result.available_bytes == 20
+    assert result.available_bytes == 66_087, "机器余量必须扣除已有下载的 80 字节承诺"
     assert uow_entries == 2
 
 
@@ -278,8 +284,9 @@ async def test_concurrent_download_and_pack_admission_share_one_machine_budget(
             _, file_id = await seed_pack_file(
                 database, root, user_id, 1, payload=b"x" * 60
             )
-            packs = make_admission(database, FakeClock(2_000), FixedMachineSpace(100))
-            commands.machine_space = FixedMachineSpace(100)
+            # 60 字节下载与 66_118 字节打包预算各自可容，合并后只允许一个成功。
+            packs = make_admission(database, FakeClock(2_000), FixedMachineSpace(66_177))
+            commands.machine_space = FixedMachineSpace(66_177)
             commands.settings = lambda: SystemSettings(min_free_disk=0)
             prepared = prepare_torrent_download(
                 parse_torrent(make_torrent([("new.bin", 60)]))
@@ -347,7 +354,8 @@ async def test_concurrent_download_growth_and_pack_admission_share_one_machine_b
                 display_uri=None,
                 now_ms=1,
             )
-        packs = make_admission(database, clock, FixedMachineSpace(100))
+        # 60 字节增长与 66_118 字节打包预算各自可容，合并后只允许一个成功。
+        packs = make_admission(database, clock, FixedMachineSpace(66_177))
 
         async def grow() -> DomainError | None:
             async with SQLiteUnitOfWork(database) as uow:
@@ -355,7 +363,7 @@ async def test_concurrent_download_growth_and_pack_admission_share_one_machine_b
                     attempt_id=attempt_id,
                     observed_bytes=60,
                     known_total=False,
-                    disk_free_bytes=100,
+                    disk_free_bytes=66_177,
                     min_free_bytes=0,
                     now_ms=2,
                 )
@@ -387,6 +395,220 @@ async def test_concurrent_download_growth_and_pack_admission_share_one_machine_b
         committed = sum(item.reserved_bytes for item in physical_downloads) + sum(
             item.reserved_bytes for item in physical_packs
         )
-        assert committed <= 100
+        assert committed <= 66_177
     finally:
         await database.close()
+
+
+LONG_DIRECTORY_NAME = "d" * 200
+# 单条 4019 字节的合法目录条目路径（20 段 × 200 字节）：加前缀才会越过 4096。
+LONG_DIRECTORY_ENTRY = "/".join(["a" * 200] * 20)
+
+
+async def seed_pack_directory(
+    database: SQLiteDatabase,
+    user_id: int,
+    *,
+    index: int,
+    name: str,
+    entries: list[tuple[str, str, int]],
+) -> tuple[int, int]:
+    """建一个真实目录内容（含 content_entries），供聚合预算使用。"""
+    async with SQLiteUnitOfWork(database) as uow:
+        content = ContentRepository(uow.connection)
+        content_id = await content.create_object(
+            kind="directory",
+            digest=_digest(index),
+            size=sum(size for _path, kind, size in entries if kind == "file"),
+            storage_path=f"objects/directory-{index}",
+            now_ms=1,
+        )
+        for entry_path, kind, size in entries:
+            parent, _, leaf = entry_path.rpartition("/")
+            await content.add_entry(
+                content_id=content_id,
+                parent_path=parent,
+                name=leaf,
+                entry_kind=kind,
+                size=size,
+                now_ms=1,
+            )
+        file_id = await content.add_user_file(
+            user_id=user_id, content_id=content_id, display_name=name, now_ms=5
+        )
+        await QuotaRepository(uow.connection).rebuild(user_id)
+    return content_id, file_id
+
+
+class DuplicateAdmissionRepository:
+    """受控仓储：把一条真实来源按不同 display_name 复制为多个候选。
+
+    当前 schema 的 UNIQUE(user_id, content_id) 不允许同一用户正常建立这种重复归属，
+    这里只在内存里复制 PackAdmissionSource 验证预算代数，不改 schema，也不冒充正常 API。
+    """
+
+    def __init__(
+        self, inner: PackRepository, *, real_file_id: int, variants: dict[int, str]
+    ) -> None:
+        self.inner = inner
+        self.real_file_id = real_file_id
+        self.variants = variants
+
+    async def list_admission_sources(
+        self, *, user_id: int, user_file_ids: list[int]
+    ) -> list[PackAdmissionSource]:
+        real = await self.inner.list_admission_sources(
+            user_id=user_id, user_file_ids=[self.real_file_id]
+        )
+        if not real:
+            return []
+        return [
+            replace(real[0], user_file_id=file_id, display_name=self.variants[file_id])
+            for file_id in user_file_ids
+            if file_id in self.variants
+        ]
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+
+async def test_empty_directory_still_reserves_the_minimum_slack(tmp_path: Path) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, file_id = await seed_pack_directory(database, user_id, index=20, name="empty-dir", entries=[])
+    service = make_admission(database, clock, DownloadContentStore(root))
+
+    result = await service.precompute(user_id, [file_id])
+    assert result.items[0].accepted and result.items[0].size == 0
+    assert result.total_size == 66_068, "空目录仍需要根条目与 64 KiB 固定冗余"
+
+    pack_id = await service.create(
+        user_id, user_file_ids=[file_id], output_name="empty.zip", delete_source=False
+    )
+    async with SQLiteUnitOfWork(database) as uow:
+        job = await PackRepository(uow.connection).get_job(pack_id)
+        quota = await QuotaRepository(uow.connection).get(user_id)
+    assert (job.source_size, job.reserved_bytes, job.physical_reserved_bytes) == (
+        0,
+        66_068,
+        66_068,
+    )
+    assert quota.reserved_bytes == 66_068
+
+
+async def test_precompute_rejects_only_the_source_that_breaks_the_path_limit(
+    tmp_path: Path,
+) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, valid_file = await seed_pack_file(database, root, user_id, 1, payload=b"x" * 10)
+    _, oversized = await seed_pack_directory(
+        database,
+        user_id,
+        index=21,
+        name="x" * 80,
+        entries=[(LONG_DIRECTORY_ENTRY, "file", 0)],
+    )
+    _, valid_directory = await seed_pack_directory(
+        database,
+        user_id,
+        index=22,
+        name="ok",
+        entries=[(LONG_DIRECTORY_ENTRY, "file", 0)],
+    )
+    service = make_admission(database, clock, DownloadContentStore(root))
+
+    result = await service.precompute(user_id, [valid_file, oversized, valid_directory])
+
+    accepted = [item.user_file_id for item in result.items if item.accepted]
+    rejected = {item.user_file_id: item for item in result.items if not item.accepted}
+    assert accepted == [valid_file, valid_directory]
+    assert rejected[oversized].error_code == "invalid_input"
+    # 10 来源 + 3*512 条目 + 2*(5 + 3 + 4022) 路径 + 65536 冗余。
+    assert result.total_size == 75_142, "被拒绝来源不得污染已接受来源的累计预算"
+
+    with pytest.raises(DomainError) as caught:
+        await service.create(
+            user_id,
+            user_file_ids=[valid_file, oversized, valid_directory],
+            output_name="mixed.zip",
+            delete_source=False,
+        )
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+    async with SQLiteUnitOfWork(database) as uow:
+        assert (
+            await uow.connection.execute(text("SELECT COUNT(*) FROM pack_jobs"))
+        ).scalar_one() == 0
+
+
+async def test_directory_projection_drift_is_an_invalid_state(tmp_path: Path) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    content_id, file_id = await seed_pack_directory(
+        database, user_id, index=23, name="drift", entries=[("a", "file", 4), ("b", "file", 4)]
+    )
+    async with SQLiteUnitOfWork(database) as uow:
+        await uow.connection.execute(
+            text("UPDATE content_objects SET size = size + 1 WHERE id = :id"),
+            {"id": content_id},
+        )
+    service = make_admission(database, clock, DownloadContentStore(root))
+
+    result = await service.precompute(user_id, [file_id])
+    assert result.items[0].error_code == "invalid_state"
+    assert result.total_size == 0
+
+    with pytest.raises(DomainError) as caught:
+        await service.create(
+            user_id, user_file_ids=[file_id], output_name="drift.zip", delete_source=False
+        )
+    assert caught.value.code is ErrorCode.INVALID_STATE
+    async with SQLiteUnitOfWork(database) as uow:
+        assert (
+            await uow.connection.execute(text("SELECT COUNT(*) FROM pack_jobs"))
+        ).scalar_one() == 0
+        assert (await QuotaRepository(uow.connection).get(user_id)).reserved_bytes == 0
+
+
+async def test_controlled_duplicate_content_charges_each_arcname(tmp_path: Path) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, real_id = await seed_pack_directory(
+        database, user_id, index=24, name="a", entries=[("f", "file", 135)]
+    )
+    fake_id = real_id + 1000
+    service = make_admission(database, clock, DownloadContentStore(root))
+    service.repository_factory = lambda uow: DuplicateAdmissionRepository(
+        PackRepository(uow.connection),
+        real_file_id=real_id,
+        variants={real_id: "a", fake_id: LONG_DIRECTORY_NAME},
+    )
+
+    result = await service.precompute(user_id, [real_id, fake_id])
+
+    assert all(item.accepted for item in result.items)
+    assert [item.size for item in result.items] == [135, 135]
+    # 270 来源 + [a/(516)+a/f(518)] + [200 字节目录根(914)+条目(916)] + 65536。
+    assert result.total_size == 68_670
+
+
+async def test_create_rejects_pending_delete_owner_without_leaving_a_job(
+    tmp_path: Path,
+) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, file_id = await seed_pack_file(database, root, user_id, 1)
+    async with SQLiteUnitOfWork(database) as uow:
+        await AccountRepository(uow.connection).mark_pending_delete(user_id=user_id, now_ms=5)
+    service = make_admission(database, clock, DownloadContentStore(root))
+
+    with pytest.raises(DomainError) as caught:
+        await service.create(
+            user_id, user_file_ids=[file_id], output_name="late.zip", delete_source=False
+        )
+    assert caught.value.code is ErrorCode.CONTENT_PENDING_DELETE
+    async with SQLiteUnitOfWork(database) as uow:
+        assert (
+            await uow.connection.execute(text("SELECT COUNT(*) FROM pack_jobs"))
+        ).scalar_one() == 0
+        assert (await QuotaRepository(uow.connection).get(user_id)).reserved_bytes == 0

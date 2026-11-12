@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import threading
 from pathlib import Path
 
 import pytest
@@ -58,11 +60,11 @@ async def test_execute_ignores_non_packing_job(tmp_path: Path) -> None:
     service = make_control(database, clock, store)
     await service.cancel(user_id, pack_id)
     dispatcher = make_dispatcher(database, clock, store)
-    await dispatcher._execute(pack_id)  # 已取消：静默跳过。
+    await dispatcher._execute(pack_id, threading.Event())  # 已取消：静默跳过。
     assert (await get_job(database, pack_id)).status is PackStatus.CANCELLED
 
 
-async def test_resume_requeues_when_canonical_mismatches(tmp_path: Path) -> None:
+async def test_resume_fails_when_canonical_mismatches(tmp_path: Path) -> None:
     database, clock, root = await setup_pack_world(tmp_path)
     user_id = await create_pack_user(database)
     _, first = await seed_pack_file(database, root, user_id, 1)
@@ -70,16 +72,25 @@ async def test_resume_requeues_when_canonical_mismatches(tmp_path: Path) -> None
     pack_id = await create_pack(database, clock, store, user_id, [first])
     prepared = await _prepare_real_output(database, clock, store, user_id, pack_id, first)
     await store.install_prepared(prepared.path, prepared.digest)
-    # 规范位内容被篡改：与登记的 prepared 不一致 → 暂态重排。
-    (root / "objects" / f"file-{prepared.digest}").write_bytes(b"tampered canonical")
+    canonical = root / "objects" / f"file-{prepared.digest}"
+    # 规范位内容被篡改：与登记的 prepared 不一致 → 确定性失败，不得循环重排。
+    canonical.write_bytes(b"tampered canonical")
+
     dispatcher = make_dispatcher(database, clock, store)
     await dispatcher.step_once()
+
     job = await get_job(database, pack_id)
-    assert job.status is PackStatus.PENDING
-    assert job.retry_count == 1
-    clock.advance(250)
-    await dispatcher.step_once()
-    assert (await get_job(database, pack_id)).status is PackStatus.DONE
+    assert job.status is PackStatus.FAILED
+    assert job.error_code == "invalid_state"
+    assert job.retry_count == 0
+    assert job.next_attempt_at_ms is None
+    assert job.reserved_bytes == 0
+    assert job.physical_reserved_bytes == 0
+    assert not (root / "packs" / f"prepared-{pack_id}.part").exists()
+    assert canonical.read_bytes() == b"tampered canonical", "冲突 canonical 不在本层回收"
+    async with SQLiteUnitOfWork(database) as uow:
+        quota = await QuotaRepository(uow.connection).get(user_id)
+    assert quota.reserved_bytes == 0
 
 
 async def test_install_rejects_missing_or_tampered_prepared(tmp_path: Path) -> None:
@@ -103,6 +114,71 @@ async def test_install_rejects_missing_or_tampered_prepared(tmp_path: Path) -> N
     assert caught.value.code is ErrorCode.INVALID_STATE
 
 
+async def test_probe_treats_only_truly_missing_entries_as_absent(tmp_path: Path) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    dispatcher = make_dispatcher(database, clock, DownloadContentStore(root))
+    payload = b"real output"
+    real = root / "objects" / "file-real"
+    real.parent.mkdir(parents=True)
+    real.write_bytes(payload)
+    assert await dispatcher._probe("objects/file-real") == (
+        len(payload),
+        hashlib.sha256(payload).hexdigest(),
+    )
+    assert await dispatcher._probe("packs/prepared-9.part") is None
+
+    directory = root / "objects" / "file-directory"
+    directory.mkdir()
+    with pytest.raises(DomainError) as caught:
+        await dispatcher._probe("objects/file-directory")
+    assert caught.value.code is ErrorCode.INVALID_STATE, "目录不得被折成缺失"
+
+    link = directory / "link"
+    link.symlink_to(real)
+    with pytest.raises(DomainError) as caught:
+        await dispatcher._probe("objects/file-directory/link")
+    assert caught.value.code is ErrorCode.INVALID_STATE, "符号链接不得被折成缺失"
+
+
+class StopOnCanonicalVerify:
+    def __init__(self, inner: DownloadContentStore, canonical: str, event: threading.Event) -> None:
+        self.inner = inner
+        self.canonical = canonical
+        self.event = event
+
+    async def verify_prepared(self, storage_path: str) -> tuple[int, str]:
+        result = await self.inner.verify_prepared(storage_path)
+        if storage_path == self.canonical:
+            self.event.set()
+        return result
+
+    def __getattr__(self, name: str):
+        return getattr(self.inner, name)
+
+
+async def test_cancel_during_canonical_only_recovery_stops_before_completion(
+    tmp_path: Path,
+) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, first = await seed_pack_file(database, root, user_id, 1)
+    store = DownloadContentStore(root)
+    pack_id = await create_pack(database, clock, store, user_id, [first])
+    prepared = await _prepare_real_output(database, clock, store, user_id, pack_id, first)
+    canonical_path = f"objects/file-{prepared.digest}"
+    await store.install_prepared(prepared.path, prepared.digest)  # part 已不在，走 canonical-only 恢复。
+    job = await get_job(database, pack_id)
+    event = threading.Event()
+    gated = StopOnCanonicalVerify(store, canonical_path, event)
+    dispatcher = make_dispatcher(database, clock, gated)
+
+    with pytest.raises(asyncio.CancelledError):
+        await dispatcher._install_and_complete(job, event)
+    current = await get_job(database, pack_id)
+    assert current.status is PackStatus.PACKING
+    assert current.output_content_id is None
+
+
 async def test_handle_failure_skips_terminal_job(tmp_path: Path) -> None:
     database, clock, root = await setup_pack_world(tmp_path)
     user_id = await create_pack_user(database)
@@ -121,6 +197,7 @@ async def test_cancel_race_terminal_between_stop_and_write(tmp_path: Path) -> No
     _, first = await seed_pack_file(database, root, user_id, 1)
     store = DownloadContentStore(root)
     pack_id = await create_pack(database, clock, store, user_id, [first])
+    control = PackWriterControl(stop_timeout_seconds=1.0)
 
     async def racing_stop(pack_id_arg: int) -> None:
         # 模拟竞态：写入者停止期间任务被其他路径置为终态。
@@ -133,14 +210,18 @@ async def test_cancel_race_terminal_between_stop_and_write(tmp_path: Path) -> No
         content_repository_factory=lambda uow: ContentRepository(uow.connection),
         quota_repository_factory=lambda uow: QuotaRepository(uow.connection),
         stop_writer=racing_stop,
+        clear_writer=control.clear,
         prepared_store=store,
         clock_ms=clock,
         lease_owner="content-deletion",
         lease_ttl_ms=300_000,
+        lock=asyncio.Lock(),
     )
+    await control.stop_and_wait(pack_id)  # 控制状态里确认已请求停止
     with pytest.raises(DomainError) as caught:
         await service.cancel(user_id, pack_id)
     assert caught.value.code is ErrorCode.INVALID_STATE
+    assert control.allows_resume(pack_id) is True, "终态任务的控制状态必须清理"
 
 
 async def test_delete_pack_without_owner_reference_skips_removal(tmp_path: Path) -> None:
@@ -234,17 +315,20 @@ async def test_outer_cancellation_propagates_and_stops_writer(tmp_path: Path) ->
 
     from .test_pack_dispatcher import BlockingWriter
 
-    control = PackWriterControl()
+    control = PackWriterControl(stop_timeout_seconds=2.0)
     blocking = BlockingWriter(database)
     dispatcher = make_dispatcher(database, clock, store, writer=blocking, control=control)
     stepping = asyncio.create_task(dispatcher.step_once())
     await asyncio.wait_for(blocking.started.wait(), timeout=5)
-    stepping.cancel()  # supervisor 关闭：整棵执行树必须一起取消。
+    stepping.cancel()  # supervisor 关停：整棵执行树必须一起收敛。
     with pytest.raises(asyncio.CancelledError):
-        await stepping
-    await asyncio.sleep(0)  # 让 finally 的 stop_and_wait 完成。
-    writer = control._writers.get(pack_id)
-    assert writer is None or writer.done()
+        await asyncio.wait_for(stepping, timeout=5)
+
+    assert blocking.observed == ["packing"], "外部取消必须先停写入者，再传播原取消"
+    record = control._records[pack_id]
+    assert record.writer is not None and record.writer.done()
+    assert control.allows_resume(pack_id) is False
+    assert (await get_job(database, pack_id)).status is PackStatus.PACKING
 
 
 async def test_resume_failure_is_dispositioned_not_fatal(tmp_path: Path) -> None:
@@ -281,9 +365,32 @@ async def test_resume_requeues_when_part_and_canonical_both_missing(tmp_path: Pa
     await dispatcher.step_once()
     job = await get_job(database, pack_id)
     assert job.status is PackStatus.PENDING and job.retry_count == 1
+    assert job.prepared is None, "无法证明可用的 prepared 必须同事务清空"
     clock.advance(250)
     await dispatcher.step_once()
     assert (await get_job(database, pack_id)).status is PackStatus.DONE
+
+
+async def test_conflicting_canonical_with_live_part_fails_and_cleans_the_part(
+    tmp_path: Path,
+) -> None:
+    database, clock, root = await setup_pack_world(tmp_path)
+    user_id = await create_pack_user(database)
+    _, first = await seed_pack_file(database, root, user_id, 1)
+    store = DownloadContentStore(root)
+    pack_id = await create_pack(database, clock, store, user_id, [first])
+    prepared = await _prepare_real_output(database, clock, store, user_id, pack_id, first)
+    canonical = root / "objects" / f"file-{prepared.digest}"
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    canonical.write_bytes(b"a different object")
+
+    await make_dispatcher(database, clock, store).step_once()
+
+    job = await get_job(database, pack_id)
+    assert job.status is PackStatus.FAILED
+    assert job.error_code == "invalid_state"
+    assert not (root / "packs" / f"prepared-{pack_id}.part").exists(), "冲突 part 按失败清理"
+    assert canonical.read_bytes() == b"a different object"
 
 
 async def test_create_rejects_deleting_source_at_pack_time(tmp_path: Path) -> None:

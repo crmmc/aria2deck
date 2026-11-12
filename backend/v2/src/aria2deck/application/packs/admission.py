@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 
-from ...domain.content import ContentDeletionState, validate_display_name
+from ...domain.content import ContentDeletionState, ContentKind, validate_display_name
 from ...domain.errors import DomainError, ErrorCode
+from ...domain.packs import (
+    ArchiveBudget,
+    ArchiveEntrySummary,
+    ArchiveItem,
+)
 from ...domain.quota import (
     PhysicalDownload,
     PhysicalPack,
@@ -35,6 +40,10 @@ class PackRepositoryPort(Protocol):
     ) -> list[PackAdmissionSource]: ...
 
     async def list_active_physical(self) -> list[PhysicalPack]: ...
+
+    async def list_content_summaries(
+        self, *, content_ids: list[int]
+    ) -> dict[int, ArchiveEntrySummary]: ...
 
     async def create_job(
         self,
@@ -93,16 +102,18 @@ class PackAdmissionService:
     async def precompute(self, user_id: int, user_file_ids: list[int]) -> PrecomputeResultView:
         unique_ids = list(dict.fromkeys(user_file_ids))
         async with self.uow_factory() as uow:
+            repository = self.repository_factory(uow)
             sources = {
                 source.user_file_id: source
-                for source in await self.repository_factory(uow).list_admission_sources(
+                for source in await repository.list_admission_sources(
                     user_id=user_id, user_file_ids=unique_ids
                 )
             }
+            summaries = await self._directory_summaries(repository, sources.values())
             quota = await self.quota_repository_factory(uow).get(user_id)
             physical = await self._machine_available(uow)
         items: list[PrecomputeItemView] = []
-        total = 0
+        budget = ArchiveBudget()
         for file_id in unique_ids:
             source = sources.get(file_id)
             if source is None:
@@ -117,14 +128,23 @@ class PackAdmissionService:
                     )
                 )
                 continue
-            total += source.size
+            try:
+                # 来源级原子试加：失败只拒绝该来源，不污染已接受来源的累计预算。
+                budget = self._add_source(budget, source, summaries)
+            except DomainError as error:
+                items.append(
+                    PrecomputeItemView(file_id, False, str(error.code), str(error))
+                )
+                continue
             items.append(
                 PrecomputeItemView(
                     file_id, True, display_name=source.display_name, size=source.size
                 )
             )
         available = min(available_user_bytes(quota), physical)
-        return PrecomputeResultView(items=items, total_size=total, available_bytes=available)
+        return PrecomputeResultView(
+            items=items, total_size=budget.reserved_bytes, available_bytes=available
+        )
 
     async def create(
         self,
@@ -149,24 +169,54 @@ class PackAdmissionService:
             for source in sources:
                 if source.deletion_state is not ContentDeletionState.ACTIVE:
                     raise DomainError(ErrorCode.CONTENT_PENDING_DELETE, "来源正在删除，不能打包")
-            total = sum(source.size for source in sources)
+            summaries = await self._directory_summaries(repository, sources)
+            budget = ArchiveBudget()
+            for source in sources:
+                budget = self._add_source(budget, source, summaries)
+            reserved = budget.reserved_bytes
             machine_available = await self._machine_available(uow)
-            if total > machine_available:
+            if reserved > machine_available:
                 raise DomainError(ErrorCode.PHYSICAL_SPACE_EXCEEDED, "机器可用空间不足")
             pack_id = await repository.create_job(
                 owner_id=user_id,
                 output_name=output_name,
                 pack_format=self.settings().pack_format,
-                source_size=total,
-                reserved_bytes=total,
-                physical_reserved_bytes=total,
+                source_size=sum(source.size for source in sources),
+                reserved_bytes=reserved,
+                physical_reserved_bytes=reserved,
                 delete_source=delete_source,
                 now_ms=now_ms,
             )
             for source in sources:
                 await repository.add_source(pack_id, source.snapshot())
-            await self.quota_repository_factory(uow).reserve(user_id, total)
+            await self.quota_repository_factory(uow).reserve(user_id, reserved)
         return pack_id
+
+    async def _directory_summaries(
+        self, repository: PackRepositoryPort, sources: Iterable[PackAdmissionSource]
+    ) -> dict[int, ArchiveEntrySummary]:
+        content_ids = sorted(
+            {source.content_id for source in sources if source.kind is ContentKind.DIRECTORY}
+        )
+        if not content_ids:
+            return {}
+        return await repository.list_content_summaries(content_ids=content_ids)
+
+    def _add_source(
+        self,
+        budget: ArchiveBudget,
+        source: PackAdmissionSource,
+        summaries: dict[int, ArchiveEntrySummary],
+    ) -> ArchiveBudget:
+        if source.kind is ContentKind.FILE:
+            return budget.with_items(
+                [ArchiveItem(arcname=source.display_name, is_dir=False, size=source.size)]
+            )
+        # 缺失聚合是空目录的零摘要，不是投影漂移；目录 file_bytes 必须等于内容大小。
+        summary = summaries.get(source.content_id, ArchiveEntrySummary())
+        if summary.file_bytes != source.size:
+            raise DomainError(ErrorCode.INVALID_STATE, "目录内容投影与来源大小不一致")
+        return budget.with_directory(prefix=source.display_name, summary=summary)
 
     async def _machine_available(self, uow: UnitOfWork) -> int:
         downloads = await self.download_repository_factory(uow).list_active_physical()

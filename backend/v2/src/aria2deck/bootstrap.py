@@ -172,11 +172,14 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         clock_ms=_clock_ms,
     )
     pack_writer_control = PackWriterControl()
+    pack_lifecycle_lock = asyncio.Lock()
     pack_cleanup = PackUserCleanup(
         uow_factory=uow_factory,
         repository_factory=pack_repository,
         control=pack_writer_control,
+        prepared_store=content_store,
         clock_ms=_clock_ms,
+        lock=pack_lifecycle_lock,
     )
     library_cleanup = LibraryUserCleanup(
         uow_factory=uow_factory, repository_factory=content_repository, clock_ms=_clock_ms
@@ -327,10 +330,12 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         content_repository_factory=content_repository,
         quota_repository_factory=lambda uow: QuotaRepository(cast(AsyncConnection, uow.connection)),
         stop_writer=pack_writer_control.stop_and_wait,
+        clear_writer=pack_writer_control.clear,
         prepared_store=content_store,
         clock_ms=_clock_ms,
         lease_owner=DELETE_LEASE_OWNER,
         lease_ttl_ms=DELETE_LEASE_TTL_MS,
+        lock=pack_lifecycle_lock,
     )
     pack_dispatcher = PackDispatcher(
         uow_factory=uow_factory,

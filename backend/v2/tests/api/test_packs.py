@@ -52,7 +52,8 @@ def test_precompute_contract(client: TestClient, settings) -> None:
     response = client.post("/api/v2/packs/precompute", json={"items": [first[1], first[1], 999, second[1]]})
     assert response.status_code == 200
     body = response.json()
-    assert body["total_size"] == 15
+    # 预算 = 15 来源 + 2*(512+2*6) 元数据 + 65536 冗余。
+    assert body["total_size"] == 66_599
     accepted = [item for item in body["items"] if item["accepted"]]
     rejected = {item["user_file_id"]: item for item in body["items"] if not item["accepted"]}
     assert len(accepted) == 2

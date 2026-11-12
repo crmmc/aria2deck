@@ -32,6 +32,14 @@ class ArchiveResult:
 
 
 @dataclass(frozen=True, slots=True)
+class InstallOutcome:
+    """安装结果：规范位路径，以及本次尝试是否新建了该规范对象。"""
+
+    storage_path: str
+    created_by_this_attempt: bool
+
+
+@dataclass(frozen=True, slots=True)
 class PrecomputeItemView:
     user_file_id: int
     accepted: bool
@@ -145,6 +153,7 @@ class PackSourceRecord:
 __all__ = [
     "ArchiveResult",
     "ArchiveSource",
+    "InstallOutcome",
     "PackAdmissionSource",
     "PackJobRecord",
     "PackOutputFileView",

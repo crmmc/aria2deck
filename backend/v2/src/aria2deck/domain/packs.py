@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import overload
@@ -131,6 +132,142 @@ def complete_pack(progress: PackProgress, prepared: PreparedOutput | None) -> Pa
     if progress.status is not PackStatus.PACKING or progress.step is not PackStep.VERIFYING:
         raise DomainError(ErrorCode.INVALID_STATE, "打包任务尚未完成最终验收")
     return PackProgress(PackStatus.DONE, None, 100)
+
+
+MAX_ARCHIVE_ENTRIES = 100_000
+MAX_ARCHIVE_PATH_BYTES = 4096
+MAX_TOTAL_ARCHIVE_PATH_BYTES = 16 * 1024 * 1024
+METADATA_ENTRY_BYTES = 512
+METADATA_MIN_SLACK_BYTES = 64 * 1024
+
+
+def _pack_path_bytes(arcname: str) -> int:
+    try:
+        return len(arcname.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise DomainError(ErrorCode.INVALID_INPUT, "打包路径编码无效") from None
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveItem:
+    """One physical archive entry: a source file, a source root or a directory marker."""
+
+    arcname: str
+    is_dir: bool
+    size: int = 0
+
+    def __post_init__(self) -> None:
+        if self.size < 0:
+            raise DomainError(ErrorCode.INVALID_INPUT, "打包条目大小不能为负数")
+        if not self.arcname:
+            raise DomainError(ErrorCode.INVALID_INPUT, "打包条目名称不能为空")
+        if self.arcname.endswith("/") is not self.is_dir:
+            raise DomainError(ErrorCode.INVALID_INPUT, "目录条目必须以 / 结尾，文件条目不能以 / 结尾")
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveEntrySummary:
+    """Aggregate of one directory content; used instead of loading raw entry rows.
+
+    `path_bytes` excludes directory trailing markers, `max_path_bytes` includes them.
+    """
+
+    entry_count: int = 0
+    path_bytes: int = 0
+    file_bytes: int = 0
+    directory_count: int = 0
+    max_path_bytes: int = 0
+
+    def __post_init__(self) -> None:
+        if (
+            min(
+                self.entry_count,
+                self.path_bytes,
+                self.file_bytes,
+                self.directory_count,
+                self.max_path_bytes,
+            )
+            < 0
+        ):
+            raise DomainError(ErrorCode.INVALID_INPUT, "目录聚合摘要不能为负数")
+        if self.directory_count > self.entry_count:
+            raise DomainError(ErrorCode.INVALID_INPUT, "目录条目数不能超过总条目数")
+
+
+def _require_archive_limits(entries: int, path_bytes: int) -> None:
+    if entries > MAX_ARCHIVE_ENTRIES:
+        raise DomainError(ErrorCode.INVALID_INPUT, "打包条目超过 100000 条上限")
+    if path_bytes > MAX_TOTAL_ARCHIVE_PATH_BYTES:
+        raise DomainError(ErrorCode.INVALID_INPUT, "打包路径总量超过 16 MiB 上限")
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveBudget:
+    """Empirical output reservation: source bytes + entry metadata + minimum slack.
+
+    Every trial add returns a new instance, so a rejected source cannot pollute the
+    already accepted ones. The same accumulator serves precompute, creation and the
+    persisted budget re-checks.
+    """
+
+    entries: int = 0
+    path_bytes: int = 0
+    source_bytes: int = 0
+
+    def __post_init__(self) -> None:
+        if min(self.entries, self.path_bytes, self.source_bytes) < 0:
+            raise DomainError(ErrorCode.INVALID_INPUT, "打包预算不能为负数")
+
+    @property
+    def metadata_bytes(self) -> int:
+        return self.entries * METADATA_ENTRY_BYTES + 2 * self.path_bytes
+
+    @property
+    def reserved_bytes(self) -> int:
+        if not self.entries:
+            return 0
+        return self.source_bytes + self.metadata_bytes + max(
+            METADATA_MIN_SLACK_BYTES, self.source_bytes // 100
+        )
+
+    def with_items(self, items: Iterable[ArchiveItem]) -> ArchiveBudget:
+        entries, path_bytes, source_bytes = self.entries, self.path_bytes, self.source_bytes
+        for item in items:
+            encoded = _pack_path_bytes(item.arcname)
+            if encoded > MAX_ARCHIVE_PATH_BYTES:
+                raise DomainError(ErrorCode.INVALID_INPUT, "打包路径超过 4096 字节上限")
+            entries += 1
+            path_bytes += encoded
+            if not item.is_dir:
+                source_bytes += item.size
+        _require_archive_limits(entries, path_bytes)
+        return ArchiveBudget(entries, path_bytes, source_bytes)
+
+    def with_directory(self, *, prefix: str, summary: ArchiveEntrySummary) -> ArchiveBudget:
+        """Expand one directory source from its aggregate summary, without entry rows."""
+        prefix_bytes = _pack_path_bytes(prefix)
+        root_bytes = prefix_bytes + 1
+        if root_bytes + summary.max_path_bytes > MAX_ARCHIVE_PATH_BYTES:
+            raise DomainError(ErrorCode.INVALID_INPUT, "打包路径超过 4096 字节上限")
+        entries = self.entries + summary.entry_count + 1
+        path_bytes = (
+            self.path_bytes
+            + (summary.entry_count + 1) * root_bytes
+            + summary.path_bytes
+            + summary.directory_count
+        )
+        _require_archive_limits(entries, path_bytes)
+        return ArchiveBudget(
+            entries, path_bytes, self.source_bytes + summary.file_bytes
+        )
+
+
+def require_pack_output_within_budget(size: int, budget: int) -> None:
+    """A real output length may equal the approved budget but never exceed it."""
+    if size < 0 or budget < 0:
+        raise DomainError(ErrorCode.INVALID_INPUT, "打包输出大小与预算不能为负数")
+    if size > budget:
+        raise DomainError(ErrorCode.TASK_TOO_LARGE, "打包输出超过已批准的空间预算")
 
 
 @dataclass(frozen=True, slots=True)
