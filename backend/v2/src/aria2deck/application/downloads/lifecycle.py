@@ -67,6 +67,7 @@ class LifecycleRepository(Protocol):
         known_total: bool,
         disk_free_bytes: int,
         min_free_bytes: int,
+        max_task_bytes: int,
         now_ms: int,
     ) -> DomainError | None: ...
 
@@ -393,6 +394,7 @@ class DownloadLifecycleService:
                 known_total=snapshot.total_length is not None,
                 disk_free_bytes=self.content_store.machine_free_bytes(),
                 min_free_bytes=self.settings().min_free_disk,
+                max_task_bytes=self.settings().max_task_size,
                 now_ms=self.clock_ms(),
             )
 

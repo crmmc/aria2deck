@@ -385,10 +385,19 @@ class DownloadCommandService:
                     now_ms=now_ms,
                 )
                 return RegistrationResult(task_id, live_attempt.id, live_attempt.gid, decision.outcome, False)
-            # CREATED：在任何 source/attempt/配额写入前分配最终名（严格冲突整笔回滚）。
+            # CREATED：在任何 source/attempt/配额写入前分配最终名并核对已知大小（严格冲突/超限整笔回滚）。
             final_name = allocate_download_display_name(
                 prepared.display_name, occupied_names, prepared.allow_rename
             )
+            maximum = self.settings().max_task_size
+            if (
+                prepared.total_bytes is not None
+                and maximum > 0
+                and prepared.total_bytes > maximum
+            ):
+                raise DomainError(
+                    ErrorCode.TASK_TOO_LARGE, "下载超过系统单任务大小上限"
+                )
             source = await repository.find_source(prepared.resource_key)
             if source is None:
                 source_id = await repository.create_source(

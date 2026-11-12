@@ -10,6 +10,7 @@ from ...domain.downloads import SubscriptionStatus
 from ...domain.quota import (
     PhysicalDownload,
     PhysicalPack,
+    VisibleSpace,
     available_machine_bytes,
     visible_space,
 )
@@ -158,27 +159,33 @@ class DownloadQueryService:
         async with self.uow_factory() as uow:
             return await self.repository_factory(uow).list_tasks(user_id=user_id)
 
-    async def stats(self, *, user_id: int) -> TaskStats:
+    async def user_visible_space(self, *, user_id: int) -> VisibleSpace:
+        """用户可见空间的唯一计算入口：/tasks/stats 的 disk 块与 /files 的 space 块共用。"""
         async with self.uow_factory() as uow:
-            records = await self.repository_factory(uow).list_tasks(user_id=user_id)
             quota = await self.account_repository_factory(uow).get_quota(user_id)
             downloads = await self.repository_factory(uow).list_active_physical()
             packs = await self.pack_repository_factory(uow).list_active_physical()
-        tasks = [self.projector.project(record) for record in records]
-        counts = {status: 0 for status in SubscriptionStatus}
-        for task in tasks:
-            counts[task.status] += 1
         headroom = available_machine_bytes(
             self.machine_space.machine_free_bytes(),
             self.settings().min_free_disk,
             downloads,
             packs,
         )
+        return visible_space(quota, machine_available_bytes=headroom)
+
+    async def stats(self, *, user_id: int) -> TaskStats:
+        async with self.uow_factory() as uow:
+            records = await self.repository_factory(uow).list_tasks(user_id=user_id)
+            quota = await self.account_repository_factory(uow).get_quota(user_id)
+        tasks = [self.projector.project(record) for record in records]
+        counts = {status: 0 for status in SubscriptionStatus}
+        for task in tasks:
+            counts[task.status] += 1
         return TaskStats(
             counts=counts,
             total=len(tasks),
             download_speed=sum(task.download_speed for task in tasks),
             upload_speed=sum(task.upload_speed for task in tasks),
             quota=quota,
-            disk=visible_space(quota, machine_available_bytes=headroom),
+            disk=await self.user_visible_space(user_id=user_id),
         )

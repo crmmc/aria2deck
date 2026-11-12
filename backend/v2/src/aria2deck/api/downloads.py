@@ -71,6 +71,8 @@ def _stats(stats: TaskStats) -> TaskStatsResponse:
             used_bytes=stats.quota.used_bytes,
             reserved_bytes=stats.quota.reserved_bytes,
             available_bytes=available_user_bytes(stats.quota),
+            # 配额账目块不受磁盘余量限制；limited 只属于 disk/space 可见口径块。
+            limited=False,
         ),
         disk=DiskSpaceResponse(
             total_bytes=stats.disk.total_bytes,

@@ -95,6 +95,12 @@ export function SpaceUsageCard({ space }: { space: TaskQuotaResponse }) {
         <p className="space-card-values">
           {formatBytes(space.available_bytes)}{" "}
           <span className="hint-text">/ {formatBytes(total)}</span>
+          {space.limited && (
+            <span className="hint-text" role="note">
+              {" "}
+              · 受磁盘限制
+            </span>
+          )}
         </p>
       </div>
       <div

@@ -86,6 +86,7 @@ class RecordingRepository:
         known_total: bool,
         disk_free_bytes: int,
         min_free_bytes: int,
+        max_task_bytes: int,
         now_ms: int,
     ) -> DomainError | None:
         self.admitted.append((observed_bytes, known_total))

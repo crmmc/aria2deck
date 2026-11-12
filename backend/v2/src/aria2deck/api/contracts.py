@@ -262,10 +262,13 @@ class TaskStatusCountsResponse(BaseModel):
 
 
 class TaskQuotaResponse(BaseModel):
+    """用户可见空间口径：与 /tasks/stats 的 disk 块同为 visible_space 结果。"""
+
     quota_bytes: int
     used_bytes: int
     reserved_bytes: int
     available_bytes: int
+    limited: bool
 
 
 class TaskStatsResponse(BaseModel):

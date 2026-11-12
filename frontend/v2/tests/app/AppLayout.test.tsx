@@ -48,7 +48,7 @@ function stats(overrides: Partial<TaskStatsResponse> = {}): TaskStatsResponse {
     total: 1,
     download_speed: 4096,
     upload_speed: 1024,
-    quota: { quota_bytes: 200, used_bytes: 80, reserved_bytes: 20, available_bytes: 100 },
+    quota: { quota_bytes: 200, used_bytes: 80, reserved_bytes: 20, available_bytes: 100, limited: false },
     ...overrides,
   };
 }
@@ -131,7 +131,7 @@ describe("AppLayout", () => {
     setup((url) => {
       if (url === "/api/v2/tasks/stats") {
         return stats({
-          quota: { quota_bytes: 0, used_bytes: 0, reserved_bytes: 0, available_bytes: 0 },
+          quota: { quota_bytes: 0, used_bytes: 0, reserved_bytes: 0, available_bytes: 0, limited: false },
         });
       }
       return defaultHandler(url);

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Header, Path, Query
 from starlette.background import BackgroundTask
 
 from ..application.accounts.models import Principal
+from ..application.downloads.queries import DownloadQueryService
 from ..application.library.commands import LibraryCommandService
 from ..application.library.download import LibraryDownloadService
 from ..application.library.models import DownloadTarget, UserFileView
@@ -16,7 +17,7 @@ from ..application.settings.rate_limit import RateLimiter
 from ..domain.accounts import require_session
 from ..domain.content import ContentKind
 from ..domain.errors import DomainError, ErrorCode
-from ..domain.quota import Quota, available_user_bytes
+from ..domain.quota import VisibleSpace
 from .contracts import (
     DirectoryBreadcrumbResponse,
     ErrorBody,
@@ -42,6 +43,7 @@ from .contracts import (
 )
 from .dependencies import (
     download_connections,
+    download_queries,
     library_commands,
     library_download,
     library_queries,
@@ -70,12 +72,14 @@ def _file(item: UserFileView) -> FileItemResponse:
     )
 
 
-def _space(quota: Quota) -> TaskQuotaResponse:
+def _space(visible: VisibleSpace) -> TaskQuotaResponse:
+    # 与 /tasks/stats 的 disk 块同一 user_visible_space 结果（S1：唯一口径）。
     return TaskQuotaResponse(
-        quota_bytes=quota.quota_bytes,
-        used_bytes=quota.used_bytes,
-        reserved_bytes=quota.reserved_bytes,
-        available_bytes=available_user_bytes(quota),
+        quota_bytes=visible.total_bytes,
+        used_bytes=visible.used_bytes,
+        reserved_bytes=visible.reserved_bytes,
+        available_bytes=visible.available_bytes,
+        limited=visible.limited,
     )
 
 
@@ -96,6 +100,7 @@ async def list_files(
     scope: int | None = Query(default=None, ge=1),
     principal: Principal = Depends(required_principal),
     service: LibraryQueryService = Depends(library_queries),
+    queries: DownloadQueryService = Depends(download_queries),
     limiter: RateLimiter = Depends(rate_limiter),
 ) -> FileListResponse | FileSearchResponse:
     if search is not None:
@@ -116,7 +121,7 @@ async def list_files(
             ],
             truncated=truncated,
         )
-    items, total, quota = await service.list_root_files(
+    items, total, _quota = await service.list_root_files(
         user_id=principal.user.id, page=page, page_size=page_size
     )
     return FileListResponse(
@@ -124,7 +129,7 @@ async def list_files(
         total=total,
         page=page,
         page_size=page_size,
-        space=_space(quota),
+        space=_space(await queries.user_visible_space(user_id=principal.user.id)),
     )
 
 

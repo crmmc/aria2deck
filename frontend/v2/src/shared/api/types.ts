@@ -85,6 +85,7 @@ export interface TaskQuotaResponse {
   used_bytes: number;
   reserved_bytes: number;
   available_bytes: number;
+  limited: boolean;
 }
 
 export interface TaskStatsResponse {

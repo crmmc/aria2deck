@@ -1936,12 +1936,14 @@
     "TaskQuotaResponse": {
       "fields": [
         "available_bytes",
+        "limited",
         "quota_bytes",
         "reserved_bytes",
         "used_bytes"
       ],
       "required": [
         "available_bytes",
+        "limited",
         "quota_bytes",
         "reserved_bytes",
         "used_bytes"

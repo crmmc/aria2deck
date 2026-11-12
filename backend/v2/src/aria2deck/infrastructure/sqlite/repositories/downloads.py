@@ -1220,10 +1220,18 @@ class DownloadRepository:
         known_total: bool,
         disk_free_bytes: int,
         min_free_bytes: int,
+        max_task_bytes: int,
         now_ms: int,
     ) -> DomainError | None:
         if observed_bytes < 0:
             raise DomainError(ErrorCode.INVALID_INPUT, "下载大小不能为负数")
+        # 单任务大小规则的唯一所有者：大小可信（known_total）即对照上限，
+        # 未知大小不查——等观测给出 total 时由本函数拦截。
+        size_failure: DomainError | None = None
+        if known_total and max_task_bytes > 0 and observed_bytes > max_task_bytes:
+            size_failure = DomainError(
+                ErrorCode.TASK_TOO_LARGE, "下载超过系统单任务大小上限"
+            )
         attempt = await self.get_attempt(attempt_id)
         if attempt.status not in LIVE_ATTEMPT_STATUSES:
             raise DomainError(ErrorCode.DOWNLOAD_UNAVAILABLE, "下载已结束")
@@ -1267,6 +1275,8 @@ class DownloadRepository:
             desired = max(reserved, target)
             delta = desired - reserved
             try:
+                if size_failure is not None:
+                    raise size_failure
                 if machine_failure is not None:
                     raise machine_failure
                 if delta:
@@ -1275,6 +1285,7 @@ class DownloadRepository:
                 if error.code not in {
                     ErrorCode.QUOTA_EXCEEDED,
                     ErrorCode.PHYSICAL_SPACE_EXCEEDED,
+                    ErrorCode.TASK_TOO_LARGE,
                 }:
                     raise
                 if reserved:

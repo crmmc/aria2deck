@@ -32,6 +32,7 @@ class GatewayRepository(Protocol):
         known_total: bool,
         disk_free_bytes: int,
         min_free_bytes: int,
+        max_task_bytes: int,
         now_ms: int,
     ) -> DomainError | None: ...
 
@@ -77,6 +78,7 @@ class DownloadGatewayService:
                 known_total=known_total,
                 disk_free_bytes=self.machine_space.machine_free_bytes(),
                 min_free_bytes=self.settings().min_free_disk,
+                max_task_bytes=self.settings().max_task_size,
                 now_ms=self.clock_ms(),
             )
         if failure is not None:
@@ -129,11 +131,12 @@ class DownloadGatewayService:
             headers=upstream_headers,
             range_header=range_header,
         )
+        # known-total 的上限检查由 admit_size 统一承担（M1 唯一所有者）；
+        # 这里只保留流式防线：响应头到达时已读字节（含区间偏移）超限立即拒绝。
         maximum = self.settings().max_task_size
         if (
-            upstream.total_bytes is not None
-            and upstream.total_bytes > maximum
-            or upstream.content_offset + (upstream.body_bytes or 0) > maximum
+            maximum > 0
+            and upstream.content_offset + (upstream.body_bytes or 0) > maximum
         ):
             await upstream.close()
             raise DomainError(ErrorCode.TASK_TOO_LARGE, "下载超过系统单任务大小上限")
@@ -170,7 +173,7 @@ class DownloadGatewayService:
                     continue
                 received += len(chunk)
                 absolute = upstream.content_offset + received
-                if absolute > maximum:
+                if maximum > 0 and absolute > maximum:
                     raise DomainError(ErrorCode.TASK_TOO_LARGE, "下载超过系统单任务大小上限")
                 if upstream.body_bytes is not None and received > upstream.body_bytes:
                     raise DomainError(ErrorCode.UPSTREAM_FAILURE, "上游响应超过声明大小")

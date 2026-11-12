@@ -20,6 +20,7 @@ from tests.api.conftest import (
     create_user,
     login,
 )
+from tests.api.test_space_consistency import FixedMachineSpace
 
 
 def _digest(index: int) -> str:
@@ -204,7 +205,14 @@ def test_root_files_list_contract(
     assert body["items"][0]["kind"] == "file"
     assert body["items"][0]["size"] == 10
     assert body["space"]["used_bytes"] == 20
-    assert body["space"]["quota_bytes"] == 100 * 1024**3
+    # S1：space 块与 /tasks/stats 的 disk 块共用同一可见空间口径。
+    # 两次请求比较必须基于固定机器余量：真实磁盘在请求间漂移会让相等断言偶发失败。
+    client.app.state.download_queries.machine_space = FixedMachineSpace(50 * 1024**3)
+    body = client.get("/api/v2/files?page=1&page_size=2").json()
+    disk = client.get("/api/v2/tasks/stats").json()["disk"]
+    assert body["space"]["quota_bytes"] == disk["total_bytes"]
+    assert body["space"]["available_bytes"] == disk["available_bytes"]
+    assert body["space"]["limited"] == disk["limited"]
 
     beyond = client.get("/api/v2/files?page=9&page_size=2")
     assert beyond.status_code == 200

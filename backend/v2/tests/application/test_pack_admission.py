@@ -365,6 +365,7 @@ async def test_concurrent_download_growth_and_pack_admission_share_one_machine_b
                     known_total=False,
                     disk_free_bytes=66_177,
                     min_free_bytes=0,
+                    max_task_bytes=0,
                     now_ms=2,
                 )
 

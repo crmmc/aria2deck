@@ -215,6 +215,10 @@ def test_gateway_closes_an_over_limit_response_before_streaming() -> None:
             async def get_source_for_attempt(self, attempt_id: int) -> SourceRecord:
                 return SourceRecord(1, "http", "http:key", {"uris": ["https://example.com"]}, {"headers": {}}, None, "file", None, None)
 
+            async def admit_size(self, **kwargs: object) -> DomainError:
+                # known-total 上限拦截现由 admit_size 唯一所有者承担（M1/M2）。
+                return DomainError(ErrorCode.TASK_TOO_LARGE, "下载超过系统单任务大小上限")
+
         upstream, closed = response([b"abc"], total=3, body_bytes=3)
         gateway = DownloadGatewayService(
             uow_factory=lambda: UoW(), repository_factory=lambda _uow: Repository(),
@@ -226,6 +230,38 @@ def test_gateway_closes_an_over_limit_response_before_streaming() -> None:
             await gateway.open(attempt_id=1, source_index=0, capability="valid", range_header=None)
         assert caught.value.code is ErrorCode.TASK_TOO_LARGE
         assert closed == [True]
+
+    asyncio.run(exercise())
+
+
+def test_gateway_streaming_defense_is_disabled_at_max_task_size_zero() -> None:
+    async def exercise() -> None:
+        from aria2deck.application.downloads.gateway import DownloadGatewayService
+        from aria2deck.application.downloads.models import AttemptRecord, SourceRecord
+        from aria2deck.domain.downloads import AttemptStatus
+        from aria2deck.domain.settings import SystemSettings
+        from tests.application.test_history_edges import UoW
+
+        class Repository:
+            async def get_attempt(self, attempt_id: int) -> AttemptRecord:
+                return AttemptRecord(1, 1, "http:key", "gid", AttemptStatus.QUEUED, None, "submitted", None, 0, 0)
+
+            async def get_source_for_attempt(self, attempt_id: int) -> SourceRecord:
+                return SourceRecord(1, "http", "http:key", {"uris": ["https://example.com"]}, {"headers": {}}, None, "file", None, None)
+
+            async def admit_size(self, **kwargs: object) -> None:
+                return None
+
+        upstream, closed = response([b"abc", b"def"], total=None, body_bytes=None)
+        gateway = DownloadGatewayService(
+            uow_factory=lambda: UoW(), repository_factory=lambda _uow: Repository(),
+            upstream=FakeUpstream(upstream), machine_space=FixedMachineSpace(100),
+            settings=lambda: SystemSettings(max_task_size=0),
+            clock_ms=lambda: 1, verify_capability=lambda *args: True,
+        )
+        opened = await gateway.open(attempt_id=1, source_index=0, capability="valid", range_header=None)
+        chunks = [chunk async for chunk in opened.body]
+        assert chunks == [b"abc", b"def"]
 
     asyncio.run(exercise())
 
