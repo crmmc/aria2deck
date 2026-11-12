@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header, Path, Query
+from fastapi import APIRouter, Body, Depends, Header, Path, Query
 from fastapi.responses import StreamingResponse
 
 from ..application.accounts.models import Principal
@@ -31,6 +31,7 @@ from .contracts import (
     TaskListResponse,
     TaskQuotaResponse,
     TaskResponse,
+    TaskRetryRequest,
     TaskStatsResponse,
     TaskStatusCountsResponse,
     TaskWriteResultResponse,
@@ -247,6 +248,7 @@ async def create_torrent(
         user_id=principal.user.id,
         payload_base64=payload.torrent,
         selected_file_indexes=payload.selected_file_indexes,
+        allow_rename=payload.allow_rename,
     )
     return await _write_result(result, queries, user_id=principal.user.id)
 
@@ -272,12 +274,17 @@ async def cancel_tasks(
     responses=error_responses(401, 404, 409, 422, 429, 500, 502),
 )
 async def retry_task(
+    payload: Annotated[TaskRetryRequest | None, Body()] = None,
     task_id: int = Path(ge=1),
     principal: Principal = Depends(required_principal),
     service: DownloadCommandService = Depends(download_commands),
     queries: DownloadQueryService = Depends(download_queries),
 ) -> TaskWriteResultResponse:
-    result = await service.retry(user_id=principal.user.id, task_id=task_id)
+    result = await service.retry(
+        user_id=principal.user.id,
+        task_id=task_id,
+        allow_rename=True if payload is None else payload.allow_rename,
+    )
     return await _write_result(result, queries, user_id=principal.user.id)
 
 

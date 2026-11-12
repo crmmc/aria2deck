@@ -21,7 +21,7 @@ import {
   type TaskSortKey,
   type TaskSort,
 } from "./api";
-import { FailureDialog, TorrentCreateWizard, UriCreateDialog } from "./CreateDialogs";
+import { FailureDialog, RetryTaskDialog, TorrentCreateWizard, UriCreateDialog } from "./CreateDialogs";
 import { TaskTable } from "./TaskTable";
 
 const PAGE_SIZE = 20;
@@ -39,6 +39,7 @@ const REMOVABLE_STATUSES = ["failed", "cancelled", "expired"];
 type ConfirmState =
   | { kind: "cancel"; task: TaskResponse }
   | { kind: "delete"; task: TaskResponse }
+  | { kind: "retry"; task: TaskResponse }
   | { kind: "batch-cancel"; ids: number[] }
   | null;
 
@@ -62,6 +63,8 @@ export function TasksPage() {
     | null
   >(null);
   const [confirm, setConfirm] = useState<ConfirmState>(null);
+  // 命名策略贯穿创建、失败重提与单任务重试：默认自动加后缀。
+  const [allowRename, setAllowRename] = useState(true);
   const requestSeq = useRef(0);
   const tasksRef = useRef<TaskResponse[]>([]);
   tasksRef.current = tasks;
@@ -150,9 +153,13 @@ export function TasksPage() {
     setSelected(checked ? new Set(tasks.map((task) => task.id)) : new Set());
   };
 
-  const handleCreate = async (text: string): Promise<CreateOutcome | null> => {
+  const handleCreate = async (
+    text: string,
+    keepAllowRename: boolean,
+  ): Promise<CreateOutcome | null> => {
+    setAllowRename(keepAllowRename);
     try {
-      const outcome = await createTasks(text);
+      const outcome = await createTasks(text, keepAllowRename);
       if (outcome.rejectedCount > 0) {
         setDialog({ kind: "failures", items: outcome.failedItems });
       } else {
@@ -172,11 +179,18 @@ export function TasksPage() {
   };
 
   // 仅重试失败项：载荷来自弹窗持有的本轮失败 URI，不重放原始全文。
-  const handleRetryFailed = async (items: { uri: string; message: string }[]) => {
+  const handleRetryFailed = async (
+    items: { uri: string; message: string }[],
+    keepAllowRename: boolean,
+  ) => {
+    setAllowRename(keepAllowRename);
     setDialog(null);
     if (items.length === 0) return;
     try {
-      const outcome = await createTasks(items.map((item) => item.uri).join("\n"));
+      const outcome = await createTasks(
+        items.map((item) => item.uri).join("\n"),
+        keepAllowRename,
+      );
       if (outcome.rejectedCount > 0) {
         // 新弹窗只包含本轮失败项，避免失败集合跨轮累积。
         setDialog({ kind: "failures", items: outcome.failedItems });
@@ -222,16 +236,16 @@ export function TasksPage() {
     input.click();
   };
 
-  const handleTorrentCreate = async (selectedIndexes: number[]) => {
+  const handleTorrentCreate = async (
+    selectedIndexes: number[],
+    keepAllowRename: boolean,
+  ) => {
     const base64 = (window as unknown as { __torrentBase64?: string }).__torrentBase64;
     if (base64 === undefined) throw new Error("种子数据丢失，请重新选择");
-    const outcome = await createTorrent(base64, selectedIndexes);
-    if (outcome.rejectedCount > 0) {
-      setDialog({ kind: "failures", items: outcome.failedItems });
-    } else {
-      push("success", "种子任务已创建");
-      setDialog(null);
-    }
+    // 成功才关闭向导；业务拒绝由 createTorrent 抛错，向导内显示并保留原选择与策略。
+    await createTorrent(base64, selectedIndexes, keepAllowRename);
+    push("success", "种子任务已创建");
+    setDialog(null);
     setPage(1);
     await load();
   };
@@ -277,7 +291,7 @@ export function TasksPage() {
       void performCancel([confirm.task.id], "取消");
     } else if (confirm.kind === "delete") {
       void performCancel([confirm.task.id], "删除");
-    } else {
+    } else if (confirm.kind === "batch-cancel") {
       void performCancel(confirm.ids, "取消");
     }
     setConfirm(null);
@@ -295,9 +309,18 @@ export function TasksPage() {
     setConfirm({ kind: "batch-cancel", ids });
   };
 
-  const handleRetry = async (id: number) => {
+  const handleRetry = (task: TaskResponse) => {
+    setAllowRename(true); // 每次重试弹窗重新默认勾选自动加后缀。
+    setConfirm({ kind: "retry", task });
+  };
+
+  const performRetry = async (keepAllowRename: boolean) => {
+    if (confirm === null || confirm.kind !== "retry") return;
+    const id = confirm.task.id;
+    setAllowRename(keepAllowRename);
+    setConfirm(null);
     try {
-      await retryTask(id);
+      await retryTask(id, keepAllowRename);
       push("success", "重试已创建");
       await load();
     } catch (caught) {
@@ -344,6 +367,14 @@ export function TasksPage() {
         danger
         onConfirm={handleConfirm}
         onCancel={() => setConfirm(null)}
+      />
+    ) : confirm.kind === "retry" ? (
+      <RetryTaskDialog
+        taskName={confirm.task.name}
+        allowRename={allowRename}
+        onAllowRenameChange={setAllowRename}
+        onConfirm={() => void performRetry(allowRename)}
+        onClose={() => setConfirm(null)}
       />
     ) : (
       <ConfirmDialog
@@ -448,7 +479,10 @@ export function TasksPage() {
             onRequestCancel={(task) => setConfirm({ kind: "cancel", task })}
             onRequestDelete={(task) => setConfirm({ kind: "delete", task })}
             onCopy={(uri) => void handleCopyUri(uri)}
-            onRetry={(id) => void handleRetry(id)}
+            onRetry={(id) => {
+              const task = tasksRef.current.find((item) => item.id === id);
+              if (task !== undefined) handleRetry(task);
+            }}
             onSort={handleSort}
           />
           <Pagination page={page} pageSize={PAGE_SIZE} total={total} onChange={setPage} />
@@ -468,7 +502,9 @@ export function TasksPage() {
       {dialog?.kind === "failures" && (
         <FailureDialog
           failedItems={dialog.items}
-          onRetryFailed={() => void handleRetryFailed(dialog.items)}
+          allowRename={allowRename}
+          onAllowRenameChange={setAllowRename}
+          onRetryFailed={(items, keepAllowRename) => void handleRetryFailed(items, keepAllowRename)}
           onClose={() => setDialog(null)}
         />
       )}

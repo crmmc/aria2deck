@@ -592,3 +592,114 @@ async def test_list_active_physical_stays_empty_after_completion_and_history_del
         assert await repository.list_active_physical() == []
         assert await repository.delete_history(user_id=user_id, task_id=task_id, now_ms=3)
         assert await repository.list_active_physical() == []
+
+
+# --- 回归（D2）：终态 attempt 的 begin_completion 必须抛 STALE_EVENT，禁止静默返回 ---
+async def test_begin_completion_rejects_terminal_attempt_with_stale_event(
+    database: SQLiteDatabase,
+) -> None:
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        downloads = DownloadRepository(uow.connection)
+        content_id = await ContentRepository(uow.connection).create_object(
+            kind="file", digest="ab" * 32, size=3, storage_path="objects/d2", now_ms=1
+        )
+        attempt_id = await downloads.create_attempt(
+            source_id=source_id, resource_key="http:key", gid=GID, now_ms=1
+        )
+        await downloads.fail_attempt(attempt_id, error_code="cancelled", now_ms=2)
+        with pytest.raises(DomainError) as caught:
+            await downloads.begin_completion(
+                attempt_id, expected_gid=GID, content_id=content_id, now_ms=3
+            )
+        assert caught.value.code is ErrorCode.STALE_EVENT
+        assert (await downloads.get_attempt(attempt_id)).completed_content_id is None
+
+
+# --- 回归（D4）：终态 attempt 必须有原子 result_consumed + 最终认领入口 ---
+async def test_finish_terminal_cleanup_consumes_result_and_claims_orphan_content(
+    database: SQLiteDatabase,
+) -> None:
+    from aria2deck.domain.content import ContentDeletionState
+    from aria2deck.infrastructure.sqlite.repositories.content import DELETE_LEASE_OWNER
+
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        downloads = DownloadRepository(uow.connection)
+        content_id = await ContentRepository(uow.connection).create_object(
+            kind="file", digest="ab" * 32, size=3, storage_path="objects/d4", now_ms=1
+        )
+        attempt_id = await downloads.create_attempt(
+            source_id=source_id, resource_key="http:key", gid=GID, now_ms=1
+        )
+        await downloads.begin_completion(
+            attempt_id, expected_gid=GID, content_id=content_id, now_ms=2
+        )
+        await downloads.fail_attempt(attempt_id, error_code="failed", now_ms=3)
+        await downloads.finish_terminal_cleanup(attempt_id, expected_gid=GID, now_ms=4)
+
+        attempt = await downloads.get_attempt(attempt_id)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.result_consumed_at_ms == 4
+        content = await ContentRepository(uow.connection).get_object(content_id)
+        assert content.deletion_state is ContentDeletionState.PENDING_DELETE
+        assert content.delete_lease_owner == DELETE_LEASE_OWNER
+
+
+# --- 回归（D4）：已有用户引用的内容认领被阻挡，但 consumed 写入仍要提交 ---
+async def test_finish_terminal_cleanup_keeps_referenced_content_but_consumes(
+    database: SQLiteDatabase,
+) -> None:
+    from aria2deck.domain.content import ContentDeletionState
+
+    user_id = await create_user(database)
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        downloads = DownloadRepository(uow.connection)
+        content = ContentRepository(uow.connection)
+        content_id = await content.create_object(
+            kind="file", digest="ab" * 32, size=3, storage_path="objects/d4b", now_ms=1
+        )
+        await content.add_user_file(
+            user_id=user_id, content_id=content_id, display_name="keep.bin", now_ms=1
+        )
+        attempt_id = await downloads.create_attempt(
+            source_id=source_id, resource_key="http:key", gid=GID, now_ms=1
+        )
+        await downloads.begin_completion(
+            attempt_id, expected_gid=GID, content_id=content_id, now_ms=2
+        )
+        await downloads.fail_attempt(attempt_id, error_code="failed", now_ms=3)
+        await downloads.finish_terminal_cleanup(attempt_id, expected_gid=GID, now_ms=4)
+
+        assert (await downloads.get_attempt(attempt_id)).result_consumed_at_ms == 4
+        assert (await content.get_object(content_id)).deletion_state is ContentDeletionState.ACTIVE
+
+
+# --- 回归：finish_terminal_cleanup 重复调用保持幂等（consumed 时间戳不覆盖、不重复认领） ---
+async def test_finish_terminal_cleanup_is_idempotent_on_repeat_call(database: SQLiteDatabase) -> None:
+    from aria2deck.domain.content import ContentDeletionState
+    from aria2deck.infrastructure.sqlite.repositories.content import DELETE_LEASE_OWNER
+
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        downloads = DownloadRepository(uow.connection)
+        content_id = await ContentRepository(uow.connection).create_object(
+            kind="file", digest="ab" * 32, size=3, storage_path="objects/d4-idem", now_ms=1
+        )
+        attempt_id = await downloads.create_attempt(
+            source_id=source_id, resource_key="http:key", gid=GID, now_ms=1
+        )
+        await downloads.begin_completion(
+            attempt_id, expected_gid=GID, content_id=content_id, now_ms=2
+        )
+        await downloads.fail_attempt(attempt_id, error_code="failed", now_ms=3)
+        await downloads.finish_terminal_cleanup(attempt_id, expected_gid=GID, now_ms=4)
+        # 重复调用：不抛错，consumed 保持第一时间戳。
+        await downloads.finish_terminal_cleanup(attempt_id, expected_gid=GID, now_ms=9)
+
+        attempt = await downloads.get_attempt(attempt_id)
+        assert attempt.result_consumed_at_ms == 4
+        content = await ContentRepository(uow.connection).get_object(content_id)
+        assert content.deletion_state is ContentDeletionState.PENDING_DELETE
+        assert content.delete_lease_owner == DELETE_LEASE_OWNER

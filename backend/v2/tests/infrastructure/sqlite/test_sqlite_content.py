@@ -161,3 +161,106 @@ async def test_content_repository_rejects_invalid_kind_size_and_missing_records(
             await repo.add_entry(content_id=content_id, parent_path="", name="a", entry_kind="link", size=1, now_ms=1)
         with pytest.raises(DomainError):
             await repo.add_entry(content_id=content_id, parent_path="", name="a", entry_kind="file", size=-1, now_ms=1)
+
+
+# --- 回归（D5）：认领必须保护其他未完成 consumption 的同内容 attempt ---
+async def test_claim_orphan_delete_is_blocked_by_other_unconsumed_attempt(
+    database: SQLiteDatabase,
+) -> None:
+    from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
+
+    content_id = await object_id(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        downloads = DownloadRepository(uow.connection)
+        repo = ContentRepository(uow.connection)
+        first_source = await downloads.create_source(
+            kind="http", resource_key="http:d5-a", payload_json="{}", options_json="{}",
+            selected_file_indexes_json=None, display_name="a", display_uri=None, now_ms=1,
+        )
+        second_source = await downloads.create_source(
+            kind="http", resource_key="http:d5-b", payload_json="{}", options_json="{}",
+            selected_file_indexes_json=None, display_name="b", display_uri=None, now_ms=1,
+        )
+        current = await downloads.create_attempt(
+            source_id=first_source, resource_key="http:d5-a", gid="a" * 16, now_ms=1
+        )
+        other = await downloads.create_attempt(
+            source_id=second_source, resource_key="http:d5-b", gid="b" * 16, now_ms=1
+        )
+        for attempt_id, gid in ((current, "a" * 16), (other, "b" * 16)):
+            await downloads.begin_completion(
+                attempt_id, expected_gid=gid, content_id=content_id, now_ms=2
+            )
+        await downloads.fail_attempt(current, error_code="failed", now_ms=3)
+
+        # 其他 attempt 的完成意图尚未消费（result_consumed IS NULL）：认领必须失败。
+        assert not await repo.claim_orphan_delete(
+            content_id,
+            now_ms=4,
+            lease_owner="content-deletion",
+            lease_ttl_ms=1000,
+            exclude_attempt_id=current,
+        )
+        # 其他 attempt 退出完成意图后：认领恢复。
+        await uow.connection.execute(
+            text("UPDATE download_attempts SET completed_content_id = NULL WHERE id = :id"),
+            {"id": other},
+        )
+        assert await repo.claim_orphan_delete(
+            content_id,
+            now_ms=5,
+            lease_owner="content-deletion",
+            lease_ttl_ms=1000,
+            exclude_attempt_id=current,
+        )
+
+
+async def _seed_live_subscription(database: SQLiteDatabase, user_id: int, display_name: str) -> None:
+    async with SQLiteUnitOfWork(database) as uow:
+        await uow.connection.execute(
+            text(
+                "INSERT INTO download_sources (kind, resource_key, payload_json, options_json, display_name, created_at_ms)"
+                " VALUES ('http', :key, '{}', '{}', :name, 1)"
+            ),
+            {"key": f"key-{display_name}", "name": display_name},
+        )
+        source_id = (await uow.connection.execute(text("SELECT id FROM download_sources WHERE resource_key = :key"), {"key": f"key-{display_name}"})).scalar_one()
+        await uow.connection.execute(
+            text(
+                "INSERT INTO download_attempts (source_id, resource_key, gid, status, submission_state, completed_length, physical_reserved_bytes, created_at_ms, updated_at_ms)"
+                " VALUES (:sid, :key, :gid, 'active', 'submitted', 0, 0, 1, 1)"
+            ),
+            {"sid": source_id, "key": f"key-{display_name}", "gid": f"gid-{display_name}"},
+        )
+        attempt_id = (await uow.connection.execute(text("SELECT id FROM download_attempts WHERE gid = :gid"), {"gid": f"gid-{display_name}"})).scalar_one()
+        await uow.connection.execute(
+            text(
+                "INSERT INTO task_subscriptions (attempt_id, user_id, status, reserved_bytes, display_name, created_at_ms, updated_at_ms)"
+                " VALUES (:aid, :uid, 'active', 0, :name, 1, 1)"
+            ),
+            {"aid": attempt_id, "uid": user_id, "name": display_name},
+        )
+
+
+# --- 回归（G2）：改名撞上同用户 live 订阅名被拒绝；与当前名相同是幂等成功。 ---
+async def test_rename_user_file_live_subscription_guard_and_idempotent_same_name(
+    database: SQLiteDatabase,
+) -> None:
+    user_id = await create_user(database)
+    content_id = await object_id(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = ContentRepository(uow.connection)
+        file_id = await repo.add_user_file(
+            user_id=user_id, content_id=content_id, display_name="keep.bin", now_ms=1
+        )
+    await _seed_live_subscription(database, user_id, "busy.bin")
+    await _seed_live_subscription(database, user_id, "keep.bin")
+
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = ContentRepository(uow.connection)
+        with pytest.raises(DomainError) as caught:
+            await repo.rename_user_file(user_id=user_id, file_id=file_id, new_name="busy.bin")
+        assert caught.value.code is ErrorCode.DUPLICATE_RESOURCE
+        # 与当前名相同：幂等成功，不被自身 live 订阅误判为冲突。
+        await repo.rename_user_file(user_id=user_id, file_id=file_id, new_name="keep.bin")
+        assert (await repo.get_user_file(user_id=user_id, file_id=file_id)).display_name == "keep.bin"

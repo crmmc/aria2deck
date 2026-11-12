@@ -6,11 +6,12 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
+from .content import validate_display_name
 from .errors import DomainError, ErrorCode
 
 
@@ -538,3 +539,63 @@ def resource_display_name(resource: NormalizedResource, original_uri: str) -> st
     ) or any(ord(character) < 32 for character in candidate):
         raise DomainError(ErrorCode.INVALID_INPUT, "下载名称无效")
     return candidate
+
+
+_DISPLAY_NAME_HARD_LIMIT = 200
+
+
+def parse_allow_rename_policy(value: object) -> bool:
+    """解析 allow_rename 命名策略：默认自动加后缀，仅接受布尔或 aria2 风格 "true"/"false"。"""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value in {"true", "false"}:
+        return value == "true"
+    raise DomainError(ErrorCode.INVALID_INPUT, "allow_rename 取值无效：仅支持 true 或 false")
+
+
+_SUFFIX_COUNTER = re.compile(r"^(.+) \((\d+)\)$")
+
+
+def _split_display_name(name: str) -> tuple[str, str]:
+    """按第一个非前导点拆分主体与完整扩展名：.env 不拆，.env.local 拆为 (.env, .local)。"""
+    dot = next((index for index, character in enumerate(name) if character == "." and index > 0), None)
+    if dot is None:
+        return name, ""
+    return name[:dot], name[dot:]
+
+
+def allocate_download_display_name(
+    requested: str,
+    occupied: Collection[str],
+    allow_rename: bool = True,
+    *,
+    max_attempts: int = 10_000,
+) -> str:
+    """按用户级占用分配显示名：冲突时从已有序号继续递增或追加 " (n)"，耗尽后拒绝。"""
+    name = validate_display_name(requested)
+    if name not in occupied:
+        return name
+    if not allow_rename:
+        raise DomainError(ErrorCode.DUPLICATE_RESOURCE, "同名文件或活动任务已存在")
+    body, extension = _split_display_name(name)
+    match = _SUFFIX_COUNTER.fullmatch(body)
+    if match is not None:
+        root = match.group(1)
+        start = int(match.group(2)) + 1
+    else:
+        root = body
+        start = 2
+    taken = set(occupied)
+    for index in range(start, start + max_attempts):
+        counter = f" ({index})"
+        candidate_body = root
+        if len(candidate_body) + len(counter) + len(extension) > _DISPLAY_NAME_HARD_LIMIT:
+            candidate_body = root[: _DISPLAY_NAME_HARD_LIMIT - len(counter) - len(extension)]
+            if not candidate_body:
+                raise DomainError(ErrorCode.DUPLICATE_RESOURCE, "没有可用的同名后缀名称")
+        candidate = validate_display_name(f"{candidate_body}{counter}{extension}")
+        if candidate not in taken:
+            return candidate
+    raise DomainError(ErrorCode.DUPLICATE_RESOURCE, "没有可用的同名后缀名称")

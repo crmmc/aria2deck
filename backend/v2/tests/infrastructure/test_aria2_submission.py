@@ -576,6 +576,9 @@ class FakeSession:
             raise value
         if isinstance(value, int):
             return FakeResponse(b"{}", status=value)
+        if isinstance(value, tuple):
+            status_code, body = value
+            return FakeResponse(body, status=status_code)
         if isinstance(value, bytes):
             return FakeResponse(value)
         return FakeResponse(json_codec.dumps(value).encode())
@@ -621,6 +624,60 @@ async def test_rpc_transport_protocol_and_rejection_fail_closed(
         with pytest.raises(DomainError) as caught:
             await client.confirm(gid="abc")
         assert caught.value.code is ErrorCode.SUBMISSION_UNCERTAIN
+
+
+# --- 回归：aria2 对方法级错误返回非 200（error.code=1），必须按协议解析为 ---
+# --- _RpcRejected 而非传输故障，否则 missing_ok（GID 缺失）语义永不生效。 ---
+def _non_200_error_body(request: dict[str, object], code: int) -> tuple[int, bytes]:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": request["id"],
+        "error": {"code": code, "message": "GID not found"},
+    }
+    return 400, json_codec.dumps(payload).encode()
+
+
+async def test_rpc_non_200_method_error_code_one_is_missing_not_uncertain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = FakeSession(lambda request: _non_200_error_body(request, code=1))
+    monkeypatch.setattr("aria2deck.infrastructure.aria2_submission.aiohttp.ClientSession", lambda **kwargs: session)
+    client = make_client(tmp_path)
+    assert await client.snapshot(gid="gone-gid") is None
+    await client.remove_result(gid="gone-gid")  # 结果已不在 aria2：静默成功
+
+
+async def test_rpc_non_200_method_error_non_one_code_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = FakeSession(lambda request: _non_200_error_body(request, code=-32603))
+    monkeypatch.setattr("aria2deck.infrastructure.aria2_submission.aiohttp.ClientSession", lambda **kwargs: session)
+    client = make_client(tmp_path)
+    with pytest.raises(DomainError) as caught:
+        await client.remove_result(gid="gid")
+    assert caught.value.code is ErrorCode.RPC_UNAVAILABLE
+
+
+async def test_rpc_non_200_non_json_body_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = FakeSession((503, b"<html>proxy error</html>"))
+    monkeypatch.setattr("aria2deck.infrastructure.aria2_submission.aiohttp.ClientSession", lambda **kwargs: session)
+    client = make_client(tmp_path)
+    with pytest.raises(DomainError) as caught:
+        await client.remove_result(gid="gid")
+    assert caught.value.code is ErrorCode.RPC_UNAVAILABLE
+
+
+async def test_rpc_non_200_json_non_object_body_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = FakeSession((400, b"[1, 2, 3]"))
+    monkeypatch.setattr("aria2deck.infrastructure.aria2_submission.aiohttp.ClientSession", lambda **kwargs: session)
+    client = make_client(tmp_path)
+    with pytest.raises(DomainError) as caught:
+        await client.remove_result(gid="gid")
+    assert caught.value.code is ErrorCode.RPC_UNAVAILABLE
 
 
 async def test_stop_validates_result_and_accepts_terminal_after_rejection(

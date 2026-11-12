@@ -375,9 +375,15 @@ class RecordingCommands(FakeCommands):
         self.uri_items.extend(items)
         return [DownloadWriteResult(accepted=True, task_id=42)]
 
-    async def create_torrent(self, *, user_id: int, payload_base64: str, selected_file_indexes):
+    async def create_torrent(
+        self, *, user_id: int, payload_base64: str, selected_file_indexes, allow_rename: bool = True
+    ):
         self.torrent_calls.append(
-            {"payload": payload_base64, "selected": selected_file_indexes}
+            {
+                "payload": payload_base64,
+                "selected": selected_file_indexes,
+                "allow_rename": allow_rename,
+            }
         )
         return DownloadWriteResult(accepted=True, task_id=99)
 
@@ -422,11 +428,22 @@ async def test_addtorrent_option_parsing_paths() -> None:
     )
     assert gid == gids.virtual_gid(99)
     assert service.commands.torrent_calls[0]["selected"] == [1, 3]
+    assert service.commands.torrent_calls[0]["allow_rename"] is True
 
     await service.dispatch(
-        "aria2.addTorrent", ["dG9ycmVudA==", {"select-file": [0, 2]}], user_id=USER_ID
+        "aria2.addTorrent",
+        ["dG9ycmVudA==", {"select-file": [0, 2], "allow_rename": "false"}],
+        user_id=USER_ID,
     )
     assert service.commands.torrent_calls[1]["selected"] == [0, 2]
+    assert service.commands.torrent_calls[1]["allow_rename"] is False
+
+    with pytest.raises(RpcMethodError):
+        await service.dispatch(
+            "aria2.addTorrent",
+            ["dG9ycmVudA==", {"allow_rename": "yes"}],
+            user_id=USER_ID,
+        )
 
     with pytest.raises(RpcMethodError) as caught:
         await service.dispatch("aria2.addTorrent", ["dG9ycmVudA==", {"select-file": 5}], user_id=USER_ID)
@@ -439,7 +456,9 @@ async def test_addtorrent_option_parsing_paths() -> None:
         await service.dispatch("aria2.addTorrent", [], user_id=USER_ID)
 
     class FailingTorrent(RecordingCommands):
-        async def create_torrent(self, *, user_id: int, payload_base64: str, selected_file_indexes):
+        async def create_torrent(
+            self, *, user_id: int, payload_base64: str, selected_file_indexes, allow_rename: bool = True
+        ):
             return DownloadWriteResult(accepted=False, message="种子无效")
 
     service.commands = FailingTorrent()

@@ -299,6 +299,11 @@ class DownloadOptionsRequest(BaseModel):
     max_connection_per_server: int | None = Field(
         default=None, alias="max-connection-per-server", ge=1, le=16
     )
+    allow_rename: bool = Field(
+        default=True,
+        alias="allow_rename",
+        description="同名时自动追加后缀；false 表示严格拒绝（duplicate_resource）",
+    )
 
 
 class TaskCreateRequest(BaseModel):
@@ -338,7 +343,15 @@ class TorrentPreviewRequest(BaseModel):
 
 class TorrentCreateRequest(TorrentPreviewRequest):
     selected_file_indexes: list[int] | None = Field(default=None, min_length=1)
+    allow_rename: bool = Field(default=True, description="同名时自动追加后缀；false 表示严格拒绝")
     model_config = ConfigDict(extra="forbid")
+
+
+class TaskRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    allow_rename: bool = Field(
+        default=True, description="同名时自动追加后缀；false 表示严格拒绝（duplicate_resource）"
+    )
 
 
 class TorrentFilePreviewResponse(BaseModel):

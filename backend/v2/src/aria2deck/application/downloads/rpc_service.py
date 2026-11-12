@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from ...domain.downloads import LIVE_SUBSCRIPTION_STATUSES
+from ...domain.downloads import LIVE_SUBSCRIPTION_STATUSES, parse_allow_rename_policy
 from ...domain.errors import DomainError
 from .commands import DownloadCommandService
 from .history import HistoryService
@@ -148,6 +148,7 @@ class Aria2RpcService:
             # 非空 URI 列表即 webseed：按 RPC-11 拒绝，不旁路提交。
             raise _bad("不支持通过种子 URI 列表提供 webseed")
         selected: list[int] | None = None
+        allow_rename = True
         for key, value in options.items():
             if key == "select-file":
                 if isinstance(value, list):
@@ -156,6 +157,11 @@ class Aria2RpcService:
                     selected = [int(part) for part in value.split(",") if part.strip()]
                 else:
                     raise _bad("select-file 参数无效")
+            elif key == "allow_rename":
+                try:
+                    allow_rename = parse_allow_rename_policy(value)
+                except DomainError as error:
+                    raise _bad(str(error)) from None
             else:
                 # webseed / tracker 等参数一律拒绝，不旁路提交。
                 raise _bad(f"不支持的种子选项：{key}")
@@ -163,6 +169,7 @@ class Aria2RpcService:
             user_id=user_id,
             payload_base64=params[0],
             selected_file_indexes=selected,
+            allow_rename=allow_rename,
         )
         if not result.accepted or result.task_id is None:
             raise _bad(result.message or "创建种子下载失败")

@@ -653,3 +653,17 @@ async def test_join_and_completed_attach_add_no_new_physical_commitment(
             user_id=third_id, payload_base64=payload, selected_file_indexes=None
         )
         assert attached.outcome is RegistrationOutcome.ATTACHED_COMPLETED
+
+
+# --- 回归（D7/D1）：allow_rename 是每次调用策略，进入 PreparedDownload 而不进共享 options ---
+def test_prepare_uri_download_carries_allow_rename_without_persisting_it() -> None:
+    strict = prepare_uri_download(
+        "https://example.com/policy.bin", {"out": "policy.bin", "allow_rename": False}
+    )
+    assert strict.allow_rename is False
+    assert "allow_rename" not in strict.options
+    auto = prepare_uri_download("https://example.com/policy.bin", {"out": "policy.bin"})
+    assert auto.allow_rename is True
+    with pytest.raises(DomainError) as caught:
+        prepare_uri_download("https://example.com/policy.bin", {"allow_rename": "yes"})
+    assert caught.value.code is ErrorCode.INVALID_INPUT

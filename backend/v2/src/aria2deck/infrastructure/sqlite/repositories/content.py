@@ -25,6 +25,7 @@ from ....domain.content import (
     normalize_relative_path,
     validate_display_name,
 )
+from ....domain.downloads import LIVE_SUBSCRIPTION_STATUSES
 from ....domain.errors import DomainError, ErrorCode
 from ....domain.packs import (
     PACK_OUTPUT_DELETED_ERROR_CODE,
@@ -34,9 +35,11 @@ from ....domain.packs import (
 from ..schema import (
     content_entries,
     content_objects,
+    download_attempts,
     pack_jobs,
     pack_sources,
     share_links,
+    task_subscriptions,
     user_files,
     users,
 )
@@ -224,6 +227,9 @@ class ContentRepository:
 
     async def rename_user_file(self, *, user_id: int, file_id: int, new_name: str) -> None:
         name = validate_display_name(new_name)
+        current = await self.get_user_file(user_id=user_id, file_id=file_id)
+        if current.display_name == name:
+            return  # 幂等：名称未变更，不被自身 live 订阅误判为冲突
         try:
             result = await self.connection.execute(
                 update(user_files)
@@ -236,18 +242,21 @@ class ContentRepository:
                     .where(user_files.c.id != file_id)
                     .exists()
                 )
+                .where(
+                    # live 任务订阅名称同用户唯一：占用即拒绝，其他用户与历史终态订阅不保护。
+                    ~select(task_subscriptions.c.id)
+                    .where(task_subscriptions.c.user_id == user_id)
+                    .where(task_subscriptions.c.display_name == name)
+                    .where(task_subscriptions.c.status.in_(LIVE_SUBSCRIPTION_STATUSES))
+                    .exists()
+                )
                 .values(display_name=name)
             )
         except IntegrityError:  # pragma: no cover -- 写事务内 NOT EXISTS 已排除并发同名，兜底不可达
             raise DomainError(ErrorCode.DUPLICATE_RESOURCE, "同名文件已存在") from None
         if result.rowcount == 1:
             return
-        exists = (
-            await self.connection.execute(select(user_files.c.id).where(user_files.c.id == file_id))
-        ).first()
-        if exists is None:
-            raise DomainError(ErrorCode.NOT_FOUND, "用户文件不存在")
-        raise DomainError(ErrorCode.DUPLICATE_RESOURCE, "同名文件已存在")
+        raise DomainError(ErrorCode.DUPLICATE_RESOURCE, "同名文件或活动任务已存在")
 
     async def count_references(self, content_id: int) -> int:
         return int(
@@ -545,9 +554,25 @@ class ContentRepository:
         now_ms: int,
         lease_owner: str,
         lease_ttl_ms: int,
+        exclude_attempt_id: int | None = None,
     ) -> bool:
+        """认领无引用 active 内容进入删除链。
+
+        其他指向同一内容且 result_consumed_at_ms IS NULL 的 download attempt
+        （无论 live 还是已终态等待清理）都是保护者；下载调用方用
+        exclude_attempt_id 显式排除自身，避免自我阻塞。
+        """
         if lease_ttl_ms < 0:
             raise DomainError(ErrorCode.INVALID_INPUT, "删除租约时长不能为负数")
+        unconsumed_attempts = (
+            select(download_attempts.c.id)
+            .where(download_attempts.c.completed_content_id == content_id)
+            .where(download_attempts.c.result_consumed_at_ms.is_(None))
+        )
+        if exclude_attempt_id is not None:
+            unconsumed_attempts = unconsumed_attempts.where(
+                download_attempts.c.id != exclude_attempt_id
+            )
         result = await self.connection.execute(
             update(content_objects)
             .where(content_objects.c.id == content_id)
@@ -559,6 +584,7 @@ class ContentRepository:
                 .where(pack_sources.c.cleanup_status == "pending")
                 .exists()
             )
+            .where(~unconsumed_attempts.exists())
             .values(
                 deletion_state=ContentDeletionState.PENDING_DELETE,
                 delete_lease_owner=lease_owner,

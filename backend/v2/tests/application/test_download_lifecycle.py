@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from aria2deck.application.downloads.lifecycle import DownloadLifecycleService
 from aria2deck.application.downloads.models import DownloadObservation
@@ -1179,3 +1179,198 @@ async def test_stale_lock_read_and_unapplied_snapshot_never_update_observations(
         monkeypatch.setattr(DownloadRepository, "apply_observation", not_applied)
         await state.lifecycle.reconcile(observation(status="active"))
         assert state.observations.get(GID) is None
+
+
+# --- 回归（D2）：建立意图前取消必须回滚 content/entries 与完成意图，且不再 install ---
+async def test_cancel_before_completion_intent_rolls_back_content_and_stops_install(
+    tmp_path: Path,
+) -> None:
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        original_scan = state.store.scan
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def gated_scan(attempt_id: int):
+            entered.set()
+            await release.wait()
+            return await original_scan(attempt_id)
+
+        state.store.scan = gated_scan  # type: ignore[method-assign]
+        completing = asyncio.create_task(
+            state.lifecycle.reconcile(observation(status="complete", completed=3))
+        )
+        await entered.wait()
+        async with SQLiteUnitOfWork(state.database) as uow:
+            repository = DownloadRepository(uow.connection)
+            cancellation = await repository.cancel_subscription(
+                user_id=state.user_id, task_id=state.task_id, now_ms=101
+            )
+            await repository.mark_stop_confirmed(cancellation.attempt_id)
+        release.set()
+        await completing
+
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.CANCELLED
+        assert task.subscription_status is SubscriptionStatus.CANCELLED
+        assert quota.reserved_bytes == 0
+        assert attempt.completed_content_id is None
+        async with SQLiteUnitOfWork(state.database) as uow:
+            rows = (await uow.connection.execute(select(content_objects))).all()
+        assert rows == []
+        assert not (state.root / "objects").exists()
+
+
+# --- 回归（D3/D4）：安装期间取消（停止已确认）在 install 返回后必须原子终态完成 ---
+async def test_cancel_during_install_reclaims_orphan_content_after_install_returns(
+    tmp_path: Path,
+) -> None:
+    from aria2deck.domain.content import ContentDeletionState
+
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        original_install = state.store.install
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def gated_install(attempt_id: int, preparation: object):
+            entered.set()
+            await release.wait()
+            return await original_install(attempt_id, preparation)
+
+        state.store.install = gated_install  # type: ignore[method-assign]
+        completing = asyncio.create_task(
+            state.lifecycle.reconcile(observation(status="complete", completed=3))
+        )
+        await entered.wait()
+        async with SQLiteUnitOfWork(state.database) as uow:
+            repository = DownloadRepository(uow.connection)
+            cancellation = await repository.cancel_subscription(
+                user_id=state.user_id, task_id=state.task_id, now_ms=101
+            )
+            await repository.mark_stop_confirmed(cancellation.attempt_id)
+        release.set()
+        await completing
+
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.CANCELLED
+        assert quota.reserved_bytes == 0
+        assert attempt.result_consumed_at_ms is not None
+        assert attempt.completed_content_id is not None
+        async with SQLiteUnitOfWork(state.database) as uow:
+            content = await ContentRepository(uow.connection).get_object(
+                attempt.completed_content_id
+            )
+        assert content.deletion_state is ContentDeletionState.PENDING_DELETE
+
+
+# --- 回归（D3）：停止未确认期间不清理、不认领；确认后由终态清理链完成认领 ---
+async def test_uncertain_stop_waits_for_confirmation_before_reclaim(tmp_path: Path) -> None:
+    from aria2deck.domain.content import ContentDeletionState
+
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        original_install = state.store.install
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def gated_install(attempt_id: int, preparation: object):
+            entered.set()
+            await release.wait()
+            return await original_install(attempt_id, preparation)
+
+        state.store.install = gated_install  # type: ignore[method-assign]
+        completing = asyncio.create_task(
+            state.lifecycle.reconcile(observation(status="complete", completed=3))
+        )
+        await entered.wait()
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await DownloadRepository(uow.connection).cancel_subscription(
+                user_id=state.user_id, task_id=state.task_id, now_ms=101
+            )
+        release.set()
+        await completing
+
+        attempt, _, _ = await read(state)
+        assert attempt.status is AttemptStatus.CANCELLED
+        assert attempt.submission_state == "uncertain"
+        assert attempt.result_consumed_at_ms is None
+
+        assert await state.lifecycle.cleanup_terminal() is True
+        uncertain, _, _ = await read(state)
+        assert uncertain.result_consumed_at_ms is None  # 未确认：不清理、不认领、不标 consumed
+
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await DownloadRepository(uow.connection).confirm_stopped_gid(GID)
+        assert await state.lifecycle.cleanup_terminal() is True
+        confirmed, _, _ = await read(state)
+        async with SQLiteUnitOfWork(state.database) as uow:
+            content = await ContentRepository(uow.connection).get_object(
+                confirmed.completed_content_id
+            )
+        assert content.deletion_state is ContentDeletionState.PENDING_DELETE
+
+
+# --- 回归（D6）：cleanup_terminal 必须与 reconcile/recover_ingestions 共用 attempt 锁 ---
+async def test_cleanup_terminal_waits_for_the_attempt_lock_instead_of_racing(
+    tmp_path: Path,
+) -> None:
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await DownloadRepository(uow.connection).fail_attempt(
+                state.attempt_id, error_code="failed", now_ms=101
+            )
+        lock = state.lifecycle._locks.setdefault(state.attempt_id, asyncio.Lock())
+        await lock.acquire()
+        cleaning = asyncio.create_task(state.lifecycle.cleanup_terminal())
+        # attempt 锁被占（如 install 进行中）时，终态清理必须等待，不得与安装并发触碰同一目录。
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2.0
+        while not cleaning.done() and loop.time() < deadline:
+            await asyncio.sleep(0.01)
+        assert not cleaning.done()  # 修复前：不取 attempt 锁，清理直接完成
+
+        lock.release()
+        assert await cleaning is True
+        attempt, _, _ = await read(state)
+        assert attempt.result_consumed_at_ms is not None
+        assert not (state.root / str(state.attempt_id)).exists()
+        assert state.backend.remove_calls == [GID]
+
+
+# --- 回归（D4/R4）：建立意图遇 STALE 时，若最新 attempt 的 GID 已变化（如 Magnet ---
+# --- handoff 换 GID）或仍 live，必须保留原异常向上传播，而不是吞成清理。 ---
+async def test_stale_ingest_abort_reraises_when_gid_changed(tmp_path: Path) -> None:
+    async with runtime(tmp_path) as state:
+        async with SQLiteUnitOfWork(state.database) as uow:
+            stale_snapshot = await DownloadRepository(uow.connection).get_attempt(
+                state.attempt_id
+            )
+        # 模拟 handoff：DB 中 GID 已换新，完成事件携带的还是旧 GID 快照。
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await uow.connection.execute(
+                text("UPDATE download_attempts SET gid = 'newgid-handoff' WHERE id = :id"),
+                {"id": state.attempt_id},
+            )
+        error = DomainError(ErrorCode.STALE_EVENT, "下载已结束，忽略旧完成事件")
+        with pytest.raises(DomainError) as caught:
+            await state.lifecycle._abort_stale_ingest(stale_snapshot, error)
+        assert caught.value is error  # 原异常保留，不按取消清理
+
+
+async def test_stale_ingest_abort_reraises_when_attempt_still_live(tmp_path: Path) -> None:
+    async with runtime(tmp_path) as state:
+        async with SQLiteUnitOfWork(state.database) as uow:
+            stale_snapshot = await DownloadRepository(uow.connection).get_attempt(
+                state.attempt_id
+            )
+        # 并发交错：事件处理期间 attempt 仍是 live（未完成取消）。
+        error = DomainError(ErrorCode.STALE_EVENT, "下载已结束，忽略旧完成事件")
+        with pytest.raises(DomainError) as caught:
+            await state.lifecycle._abort_stale_ingest(stale_snapshot, error)
+        assert caught.value is error
+        # 未按取消清理：consumed 未写、aria2 结果未删。
+        attempt, _, _ = await read(state)
+        assert attempt.result_consumed_at_ms is None
+        assert state.backend.remove_calls == []

@@ -191,11 +191,33 @@ class Aria2SubmissionClient:
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(settings.aria2_rpc_url, json=body) as response:
-                    if response.status != 200:
-                        raise _uncertain()
                     raw = await response.read()
-        except (TimeoutError, aiohttp.ClientError, OSError):
-            raise _uncertain() from None
+                    if response.status != 200:
+                        # aria2 对 JSON-RPC 方法级错误（如 GID 不存在、结果未完成）也返回非 200：
+                        # 按协议解析 error，让 missing_ok 等方法级语义生效，不误判为传输故障。
+                        try:
+                            error_payload: object = json.loads(raw)
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            raise _uncertain(
+                                f"aria2 非 200 响应无法解析: status={response.status} raw={raw[:200]!r}"
+                            ) from None
+                        if not isinstance(error_payload, dict):
+                            raise _uncertain(
+                                f"aria2 非 200 响应缺少协议字段: status={response.status} raw={raw[:200]!r}"
+                            )
+                        error = error_payload.get("error")
+                        if (
+                            isinstance(error, dict)
+                            and error_payload.get("jsonrpc") == "2.0"
+                            and error_payload.get("id") == request_id
+                        ):
+                            code = error.get("code")
+                            raise _RpcRejected(code if isinstance(code, int) else -32603)
+                        raise _uncertain(
+                            f"aria2 非 200 响应缺少协议字段: status={response.status} raw={raw[:200]!r}"
+                        )
+        except (TimeoutError, aiohttp.ClientError, OSError) as transport_error:
+            raise _uncertain(f"aria2 传输异常: {type(transport_error).__name__}: {transport_error}") from None
         try:
             payload: object = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -405,8 +427,8 @@ class Aria2SubmissionClient:
             if missing_ok and error.code == 1:
                 return _MISSING
             raise self._unavailable() from None
-        except DomainError:
-            raise self._unavailable() from None
+        except DomainError as error:
+            raise DomainError(ErrorCode.RPC_UNAVAILABLE, f"aria2 暂时不可用: {error}") from None
 
     @staticmethod
     def _number(value: object) -> int:

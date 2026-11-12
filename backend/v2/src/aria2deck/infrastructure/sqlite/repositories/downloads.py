@@ -35,8 +35,15 @@ from ....domain.downloads import (
 )
 from ....domain.errors import DomainError, ErrorCode
 from ....domain.quota import PhysicalDownload, available_machine_bytes
-from ..schema import content_objects, download_attempts, download_sources, task_subscriptions, users
-from .content import ContentRepository
+from ..schema import (
+    content_objects,
+    download_attempts,
+    download_sources,
+    task_subscriptions,
+    user_files,
+    users,
+)
+from .content import DELETE_LEASE_OWNER, DELETE_LEASE_TTL_MS, ContentRepository
 from .packs import PackRepository
 from .quota import QuotaRepository
 
@@ -557,6 +564,22 @@ class DownloadRepository:
         ).first()
         return None if row is None else self._attempt(row)
 
+    async def list_occupied_display_names(self, user_id: int) -> set[str]:
+        """同用户已占用的显示名：全部用户文件 + 所有 live 任务订阅（注册 UoW 内调用）。"""
+        file_names = (
+            await self.connection.execute(
+                select(user_files.c.display_name).where(user_files.c.user_id == user_id)
+            )
+        ).scalars().all()
+        live_names = (
+            await self.connection.execute(
+                select(task_subscriptions.c.display_name)
+                .where(task_subscriptions.c.user_id == user_id)
+                .where(task_subscriptions.c.status.in_(LIVE_SUBSCRIPTION_STATUSES))
+            )
+        ).scalars().all()
+        return {str(name) for name in [*file_names, *live_names]}
+
     async def set_planned_gid(self, attempt_id: int, gid: str) -> None:
         result = await self.connection.execute(
             update(download_attempts)
@@ -1029,7 +1052,8 @@ class DownloadRepository:
         attempt = await self.get_attempt(attempt_id)
         require_gid_match(attempt_id, expected=expected_gid, observed=attempt.gid)
         if attempt.status not in LIVE_ATTEMPT_STATUSES:
-            return
+            # 已终态必须整体回滚本次 content/entries/完成意图 UoW，禁止继续 install。
+            raise DomainError(ErrorCode.STALE_EVENT, "下载已结束，忽略旧完成事件")
         if attempt.completed_content_id not in {None, content_id}:
             raise DomainError(ErrorCode.INVALID_STATE, "入库意图已指向其他内容")
         result = await self.connection.execute(
@@ -1137,9 +1161,26 @@ class DownloadRepository:
         ).all()
         return [self._attempt(row) for row in rows]
 
-    async def mark_result_consumed(
+    async def finish_terminal_cleanup(
         self, attempt_id: int, *, expected_gid: str, now_ms: int
     ) -> None:
+        """终态 attempt 的原子收尾：同一 UoW 内条件写 consumed 并做最终内容认领。
+
+        认领被其他保护者、合法引用或 pending pack source 阻挡时仍提交 consumed；
+        任何异常回滚全部写入，保留终态清理入口。重复调用保持幂等。
+        """
+        attempt = await self.get_attempt(attempt_id)
+        require_gid_match(attempt_id, expected=expected_gid, observed=attempt.gid)
+        if attempt.result_consumed_at_ms is not None:
+            return
+        if attempt.status not in (
+            AttemptStatus.COMPLETED,
+            AttemptStatus.FAILED,
+            AttemptStatus.CANCELLED,
+        ):
+            # 并发护栏：调用方（cleanup_terminal 等）在锁内重读时已复核终态；
+            # 单线程路径下 list_terminal_cleanup 查询只返回终态，不可达。
+            raise DomainError(ErrorCode.STALE_EVENT, "下载未终态，忽略清理请求")  # pragma: no cover -- 同上，第二道复核
         result = await self.connection.execute(
             update(download_attempts)
             .where(download_attempts.c.id == attempt_id)
@@ -1149,10 +1190,19 @@ class DownloadRepository:
                     (AttemptStatus.COMPLETED, AttemptStatus.FAILED, AttemptStatus.CANCELLED)
                 )
             )
+            .where(download_attempts.c.result_consumed_at_ms.is_(None))
             .values(result_consumed_at_ms=now_ms)
         )
-        if result.rowcount != 1:
+        if result.rowcount != 1:  # pragma: no cover -- 并发护栏：锁内条件 UPDATE 与上方复核同事务，单实例下不可达
             raise DomainError(ErrorCode.STALE_EVENT, "结果清理目标已变化")
+        if attempt.completed_content_id is not None:
+            await ContentRepository(self.connection).claim_orphan_delete(
+                attempt.completed_content_id,
+                now_ms=now_ms,
+                lease_owner=DELETE_LEASE_OWNER,
+                lease_ttl_ms=DELETE_LEASE_TTL_MS,
+                exclude_attempt_id=attempt_id,
+            )
 
     async def list_all_gids(self) -> list[str]:
         rows = (await self.connection.execute(select(download_attempts.c.gid))).scalars().all()

@@ -99,7 +99,7 @@ class LifecycleRepository(Protocol):
 
     async def list_terminal_cleanup(self) -> list[AttemptRecord]: ...
 
-    async def mark_result_consumed(
+    async def finish_terminal_cleanup(
         self, attempt_id: int, *, expected_gid: str, now_ms: int
     ) -> None: ...
 
@@ -517,6 +517,9 @@ class DownloadLifecycleService:
             if error.code is ErrorCode.INVALID_INPUT:
                 await self._fail(attempt, error.code.value, cleanup=True)
                 return
+            if error.code in {ErrorCode.STALE_EVENT, ErrorCode.NOT_FOUND}:
+                await self._abort_stale_ingest(attempt, error)
+                return
             raise
         await self.content_store.install(attempt.id, preparation)
         try:
@@ -526,11 +529,28 @@ class DownloadLifecycleService:
                 )
         except DomainError as error:
             if error.code in {ErrorCode.STALE_EVENT, ErrorCode.NOT_FOUND}:
-                raise
+                await self._abort_stale_ingest(attempt, error)
+                return
             await self._fail(attempt, error.code.value, cleanup=True)
             return
         self._missing_since.pop(attempt.id, None)
-        await self._cleanup_terminal(attempt)
+        await self._cleanup_terminal(attempt.id)
+
+    async def _abort_stale_ingest(
+        self, attempt: AttemptRecord, error: DomainError
+    ) -> None:
+        """建立意图或最终确认遇到 STALE/NOT_FOUND：锁内重读最新 attempt 后再决定处置。"""
+        async with self.uow_factory() as uow:
+            current = await self.repository_factory(uow).get_attempt(attempt.id)
+        if current.gid != attempt.gid or current.status not in {
+            AttemptStatus.COMPLETED,
+            AttemptStatus.FAILED,
+            AttemptStatus.CANCELLED,
+        }:
+            raise error  # GID 变化或仍 live：保留原异常，不按取消清理
+        if current.submission_state == "uncertain":
+            return  # 停止未确认：不清目录、不删结果、不标 consumed，交停止恢复链
+        await self._cleanup_terminal(attempt.id)
 
     async def _fail(self, attempt: AttemptRecord, error_code: str, *, cleanup: bool) -> None:
         self._missing_since.pop(attempt.id, None)
@@ -542,7 +562,7 @@ class DownloadLifecycleService:
                 expected_gid=attempt.gid,
             )
         if cleanup:
-            await self._cleanup_terminal(attempt)
+            await self._cleanup_terminal(attempt.id)
 
     async def _stop_failed(self, attempt: AttemptRecord, failure: DomainError) -> None:
         try:
@@ -553,14 +573,28 @@ class DownloadLifecycleService:
             self.observations.discard(attempt.gid)
             self.connectivity.record_failure()
             return
-        await self._cleanup_terminal(attempt)
+        await self._cleanup_terminal(attempt.id)
 
-    async def _cleanup_terminal(self, attempt: AttemptRecord) -> None:
+    async def _cleanup_terminal(self, attempt_id: int) -> None:
+        """终态清理：仅供已持有该 attempt _locks 锁的调用方使用（asyncio.Lock 不可重入）。"""
+        async with self.uow_factory() as uow:
+            attempt = await self.repository_factory(uow).get_attempt(attempt_id)
+        if attempt.status not in {
+            AttemptStatus.COMPLETED,
+            AttemptStatus.FAILED,
+            AttemptStatus.CANCELLED,
+        }:
+            return  # pragma: no cover -- 第二道复核：list_terminal_cleanup 查询只返回终态，锁内竞争单实例下不可达
+        if attempt.result_consumed_at_ms is not None:
+            return  # pragma: no cover -- 第二道复核：list_terminal_cleanup 查询已过滤 consumed，锁内竞争单实例下不可达
+        if attempt.submission_state == "uncertain":
+            # 停止未确认：不认领、不清目录、不删 aria2 结果、不标 consumed。
+            return  # pragma: no cover -- 第二道复核：list_terminal_cleanup 查询已排除 uncertain，锁内竞争单实例下不可达
         await self.content_store.cleanup_attempt(attempt.id)
         if attempt.submission_state != "planned":
             await self.backend.remove_result(gid=attempt.gid)
         async with self.uow_factory() as uow:
-            await self.repository_factory(uow).mark_result_consumed(
+            await self.repository_factory(uow).finish_terminal_cleanup(
                 attempt.id, expected_gid=attempt.gid, now_ms=self.clock_ms()
             )
 
@@ -665,12 +699,16 @@ class DownloadLifecycleService:
         async with self.uow_factory() as uow:
             attempts = await self.repository_factory(uow).list_terminal_cleanup()
         complete = True
-        for attempt in attempts:
+        for candidate in attempts:
+            # 与 reconcile/recover_ingestions 共用同一 attempt 锁：
+            # install 阻塞期间并发清理只能等待，不能提前认领或删目录。
+            lock = self._locks.setdefault(candidate.id, asyncio.Lock())
             try:
-                await self._cleanup_terminal(attempt)
+                async with lock:
+                    await self._cleanup_terminal(candidate.id)
             except Exception as error:  # noqa: BLE001  # 清理失败保留记录供下轮重试
                 complete = False
-                logger.warning("终态清理单项失败 error_type=%s", type(error).__name__)
+                logger.warning("终态清理单项失败 error_type=%s message=%s", type(error).__name__, error)
         return complete
 
     async def purge_orphans(self) -> None:

@@ -6,15 +6,36 @@ import { formatBytes } from "@/shared/lib/format";
 import type { TorrentFilePreviewResponse, TorrentPreviewResponse } from "@/shared/api/types";
 import type { CreateOutcome } from "./api";
 
+/** 同名策略复选框：创建与重试共用，默认勾选自动加后缀。 */
+export function AllowRenameOption({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <label className="allow-rename-option">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      同名时自动加后缀
+    </label>
+  );
+}
+
 /** URI 创建弹窗：textarea 多行 = 批量。 */
 export function UriCreateDialog({
   onClose,
   onCreate,
 }: {
   onClose: () => void;
-  onCreate: (text: string) => Promise<CreateOutcome | null>;
+  onCreate: (text: string, allowRename: boolean) => Promise<CreateOutcome | null>;
 }) {
   const [text, setText] = useState("");
+  const [allowRename, setAllowRename] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,7 +48,7 @@ export function UriCreateDialog({
     setSubmitting(true);
     setError(null);
     try {
-      await onCreate(text);
+      await onCreate(text, allowRename);
       // 成功或部分失败均由父组件管理弹窗切换（success → 关闭 / failures → 换弹窗）。
     } catch (caught) {
       setError(errorMessage(caught, "创建失败"));
@@ -70,6 +91,7 @@ export function UriCreateDialog({
           aria-label="下载链接列表"
         />
       </label>
+      <AllowRenameOption checked={allowRename} onChange={setAllowRename} />
     </Modal>
   );
 }
@@ -307,10 +329,11 @@ export function TorrentCreateWizard({
 }: {
   preview: TorrentPreviewResponse;
   onClose: () => void;
-  onCreate: (selected: number[]) => Promise<void>;
+  onCreate: (selected: number[], allowRename: boolean) => Promise<void>;
 }) {
   // 默认勾选保持服务端 default_selection（T9：不回退旧版全选语义）。
   const [selected, setSelected] = useState<Set<number>>(() => new Set(preview.default_selection));
+  const [allowRename, setAllowRename] = useState(true);
   const [stage, setStage] = useState<WizardStage>("select");
   const [searchQuery, setSearchQuery] = useState("");
   const [confirmingCancel, setConfirmingCancel] = useState(false);
@@ -362,8 +385,8 @@ export function TorrentCreateWizard({
     setSubmitting(true);
     setError(null);
     try {
-      // 成功或部分失败均由父组件管理弹窗切换（部分失败换 FailuresDialog，不能被关闭）。
-      await onCreate([...selected].sort((a, b) => a - b));
+      // 成功或业务拒绝均由父组件/本向导处理：业务拒绝抛错留在向导显示，不进 URI 重提链。
+      await onCreate([...selected].sort((a, b) => a - b), allowRename);
     } catch (caught) {
       setError(errorMessage(caught, "创建失败"));
       setSubmitting(false);
@@ -471,6 +494,7 @@ export function TorrentCreateWizard({
           <p>
             确认下载内容：{selected.size} 个文件 · {formatBytes(selectedSize)}
           </p>
+          <AllowRenameOption checked={allowRename} onChange={setAllowRename} />
           <TorrentTree
             nodes={tree}
             selected={selected}
@@ -485,14 +509,18 @@ export function TorrentCreateWizard({
   );
 }
 
-/** 批量结果弹窗：部分失败保留弹窗、仅重试失败项。 */
+/** 批量结果弹窗：部分失败保留弹窗、仅重试失败项（保留本轮命名策略）。 */
 export function FailureDialog({
   failedItems,
+  allowRename,
+  onAllowRenameChange,
   onRetryFailed,
   onClose,
 }: {
   failedItems: { uri: string; message: string }[];
-  onRetryFailed: () => void;
+  allowRename: boolean;
+  onAllowRenameChange: (value: boolean) => void;
+  onRetryFailed: (items: { uri: string; message: string }[], allowRename: boolean) => void;
   onClose: () => void;
 }) {
   return (
@@ -504,12 +532,17 @@ export function FailureDialog({
           <button type="button" className="secondary-button" onClick={onClose}>
             关闭
           </button>
-          <button type="button" className="primary-button" onClick={onRetryFailed}>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={() => onRetryFailed(failedItems, allowRename)}
+          >
             仅重试失败项
           </button>
         </>
       }
     >
+      <AllowRenameOption checked={allowRename} onChange={onAllowRenameChange} />
       <ul className="failure-list">
         {failedItems.map((item) => (
           <li key={item.uri}>
@@ -520,6 +553,41 @@ export function FailureDialog({
           </li>
         ))}
       </ul>
+    </Modal>
+  );
+}
+
+/** 单任务重试确认：默认勾选自动加后缀，可取消勾选严格重试。 */
+export function RetryTaskDialog({
+  taskName,
+  allowRename,
+  onAllowRenameChange,
+  onConfirm,
+  onClose,
+}: {
+  taskName: string;
+  allowRename: boolean;
+  onAllowRenameChange: (value: boolean) => void;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal
+      title="重试任务"
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="secondary-button" onClick={onClose}>
+            取消
+          </button>
+          <button type="button" className="primary-button" onClick={onConfirm}>
+            确认重试
+          </button>
+        </>
+      }
+    >
+      <p>确定要重试「{taskName}」吗？</p>
+      <AllowRenameOption checked={allowRename} onChange={onAllowRenameChange} />
     </Modal>
   );
 }

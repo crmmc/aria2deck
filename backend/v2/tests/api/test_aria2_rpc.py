@@ -962,3 +962,42 @@ def test_rpc_full_scan_includes_getfiles_and_geturis(rpc_client: TestClient, set
     assert "feedface" not in blob
     assert "capability" not in blob.lower() and "X-Mjiz" not in blob
     assert "objects/" not in blob
+
+
+# --- 回归（D7）：RPC allow_rename 按 aria2 习惯解析字符串布尔并按本次调用生效 ---
+def test_adduri_allow_rename_policy_string_booleans(rpc_client: TestClient, settings) -> None:
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    _seed_task(settings, user_id, name="occupied.bin")
+
+    strict = _rpc(
+        rpc_client,
+        "aria2.addUri",
+        [["https://example.com/rpc-strict.bin"], {"out": "occupied.bin", "allow_rename": "false"}],
+    )
+    body = strict.json()
+    assert "error" in body, body
+    assert "同名" in body["error"]["message"], body  # 修复前：错误原因是“下载选项包含未知字段”
+
+    auto = _rpc(
+        rpc_client,
+        "aria2.addUri",
+        [["https://example.com/rpc-auto.bin"], {"out": "occupied.bin", "allow_rename": "true"}],
+    )
+    assert "result" in auto.json(), auto.text
+
+    async def allocated_name() -> str:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                return (
+                    await uow.connection.execute(
+                        text(
+                            "SELECT display_name FROM task_subscriptions"
+                            " WHERE display_name LIKE 'occupied%' ORDER BY id DESC LIMIT 1"
+                        )
+                    )
+                ).scalar_one()
+        finally:
+            await database.close()
+
+    assert asyncio.run(allocated_name()) == "occupied (2).bin"

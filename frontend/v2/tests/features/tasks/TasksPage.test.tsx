@@ -206,7 +206,10 @@ describe("TasksPage", () => {
     const posts = () => mockFetch.mock.calls.filter(([url]) => url === "/api/v2/tasks");
     expect(posts()).toHaveLength(1);
     expect(JSON.parse(posts()[0][1].body as string)).toEqual({
-      tasks: [{ uri: "https://a" }, { uri: "https://b" }],
+      tasks: [
+        { uri: "https://a", options: { allow_rename: true } },
+        { uri: "https://b", options: { allow_rename: true } },
+      ],
     });
 
     mockFetch.mockResolvedValueOnce(
@@ -216,7 +219,7 @@ describe("TasksPage", () => {
     await waitFor(() => expect(posts()).toHaveLength(2));
     // 第二次载荷恰为失败 URI 集合，不含首次已受理项。
     expect(JSON.parse(posts()[1][1].body as string)).toEqual({
-      tasks: [{ uri: "https://b" }],
+      tasks: [{ uri: "https://b", options: { allow_rename: true } }],
     });
     expect(await screen.findByText("已添加 1 个任务")).toBeInTheDocument();
   });
@@ -260,7 +263,10 @@ describe("TasksPage", () => {
 
     const posts = mockFetch.mock.calls.filter(([url]) => url === "/api/v2/tasks");
     expect(JSON.parse(posts[posts.length - 1][1].body as string)).toEqual({
-      tasks: [{ uri: "https://b" }, { uri: "https://c" }],
+      tasks: [
+        { uri: "https://b", options: { allow_rename: true } },
+        { uri: "https://c", options: { allow_rename: true } },
+      ],
     });
 
     // 页脚「关闭」收起失败弹窗（与右上角 × 同一 onClose）。
@@ -651,10 +657,17 @@ describe("TasksPage", () => {
       json(200, { accepted: true, task: task(1, "queued") }),
     );
     fireEvent.click(screen.getAllByRole("button", { name: "重试" })[0]);
+    // 重试确认弹窗默认勾选自动加后缀；确认后才发出请求。
+    const retryDialog = await screen.findByRole("dialog", { name: "重试任务" });
+    expect(within(retryDialog).getByRole("checkbox")).toBeChecked();
+    fireEvent.click(within(retryDialog).getByRole("button", { name: "确认重试" }));
     await waitFor(() => {
       const call = mockFetch.mock.calls.find(([url]) => url === "/api/v2/tasks/1/retry");
       expect(call).toBeDefined();
     });
+    expect(JSON.parse(
+      mockFetch.mock.calls.find(([url]) => url === "/api/v2/tasks/1/retry")![1].body as string,
+    )).toEqual({ allow_rename: true });
     expect(await screen.findByText("重试已创建")).toBeInTheDocument();
 
     mockFetch.mockReset();
@@ -669,6 +682,8 @@ describe("TasksPage", () => {
     });
     await screen.findByTestId("task-row-1");
     fireEvent.click(screen.getAllByRole("button", { name: "重试" })[0]);
+    const secondRetryDialog = await screen.findByRole("dialog", { name: "重试任务" });
+    fireEvent.click(within(secondRetryDialog).getByRole("button", { name: "确认重试" }));
     expect(await screen.findByText("任务不存在")).toBeInTheDocument();
   });
 
@@ -821,7 +836,7 @@ describe("TasksPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "下一阶段" }));
     expect(screen.getByText(/确认下载内容：1 个文件 · 1\.00 KiB/)).toBeInTheDocument();
     mockFetch.mockResolvedValueOnce(
-      json(200, { items: [], accepted_count: 1, rejected_count: 0 }),
+      json(200, { accepted: true, task: task(7, "queued", { name: "ubuntu.iso" }) }),
     );
     fireEvent.click(screen.getByRole("button", { name: /确认创建（1 项）/ }));
     await waitFor(() => {
@@ -829,6 +844,7 @@ describe("TasksPage", () => {
       const body = JSON.parse(call![1].body as string);
       expect(body.torrent.length).toBeGreaterThan(0);
       expect(body.selected_file_indexes).toEqual([0]);
+      expect(body.allow_rename).toBe(true);
     });
     expect(await screen.findByText("种子任务已创建")).toBeInTheDocument();
   });
@@ -915,7 +931,7 @@ describe("TasksPage", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("torrent create partial failure opens the failures dialog", async () => {
+  it("torrent create business rejection stays in the wizard with the backend message", async () => {
     setup([]);
     await screen.findByText("暂无任务");
     const preview = {
@@ -934,16 +950,21 @@ describe("TasksPage", () => {
     }
     await screen.findByRole("dialog", { name: /p\.iso/ });
     fireEvent.click(screen.getByRole("button", { name: "下一阶段" }));
+    // 业务拒绝（含严格同名冲突）单项响应：错误留在原向导，不进 URI 失败重提链。
     mockFetch.mockResolvedValueOnce(
       json(200, {
-        items: [{ accepted: false, error: { code: "invalid_input", message: "选择无效" } }],
-        accepted_count: 0,
-        rejected_count: 1,
+        accepted: false,
+        task: null,
+        outcome: null,
+        error: { code: "duplicate_resource", message: "同名文件或活动任务已存在" },
+        stop_confirmed: null,
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: /确认创建（1 项）/ }));
-    expect(await screen.findByRole("dialog", { name: "1 条任务失败" })).toBeInTheDocument();
-    expect(screen.getByText("选择无效")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("同名文件或活动任务已存在");
+    // 业务拒绝不换弹窗：仍在原向导，可保留选择与策略重试。
+    expect(screen.getByRole("dialog", { name: /p\.iso/ })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: /条任务失败/ })).not.toBeInTheDocument();
   });
 
   it("discards stale load responses after filter changes", async () => {

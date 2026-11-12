@@ -19,6 +19,7 @@ from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepos
 from aria2deck.infrastructure.sqlite.repositories.quota import QuotaRepository
 from aria2deck.infrastructure.sqlite.schema import (
     download_attempts,
+    download_sources,
     user_files,
 )
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
@@ -423,3 +424,157 @@ def test_create_task_accepts_new_option_whitelist_without_echoing_credentials(
     submission = backend.submit_calls[-1][-1]
     call = submission  # Submission 数据类
     assert call.source.options["http-user"] == "alice"  # 来源侧保留用于网关
+
+
+# --- 回归（D1/D7）：批内同名分配用户级名称，共享 source 不保存最终名与策略 ---
+def test_same_name_batch_allocates_user_names_without_polluting_sources(
+    client: TestClient, settings: Settings
+) -> None:
+    import json as json_module
+
+    create_admin(client)
+    login(client)
+    backend = install_backend(client)
+
+    response = client.post(
+        "/api/v2/tasks",
+        json={
+            "tasks": [
+                {"uri": "https://example.com/one.bin", "options": {"out": "same.bin"}},
+                {
+                    "uri": "https://example.com/two.bin",
+                    "options": {"out": "same.bin", "allow_rename": True},
+                },
+            ]
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["accepted_count"], body["rejected_count"]) == (2, 0)
+    assert [item["task"]["name"] for item in body["items"]] == ["same.bin", "same (2).bin"]
+    assert len(backend.submit_calls[0]) == 2
+
+    async def check_sources() -> list[dict[str, object]]:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                rows = (
+                    await uow.connection.execute(select(download_sources.c.options_json))
+                ).scalars().all()
+        finally:
+            await database.close()
+        return [json_module.loads(row) for row in rows]
+
+    options_rows = asyncio.run(check_sources())
+    assert len(options_rows) == 2
+    for options in options_rows:
+        assert options["out"] == "same.bin"  # source 保留资源派生名/请求名
+        assert "allow_rename" not in options  # 策略不进入共享 source（D1）
+
+
+# --- 回归（D7）：REST 严格冲突逐项 duplicate_resource，且不提交 aria2 ---
+def test_strict_allow_rename_false_rejects_occupied_name_per_item(client: TestClient) -> None:
+    create_admin(client)
+    login(client)
+    backend = install_backend(client)
+
+    first = client.post(
+        "/api/v2/tasks",
+        json={"tasks": [{"uri": "https://example.com/a.bin", "options": {"out": "busy.bin"}}]},
+    )
+    assert first.status_code == 200
+
+    strict = client.post(
+        "/api/v2/tasks",
+        json={
+            "tasks": [
+                {
+                    "uri": "https://example.com/b.bin",
+                    "options": {"out": "busy.bin", "allow_rename": False},
+                }
+            ]
+        },
+    )
+    assert strict.status_code == 200
+    item = strict.json()["items"][0]
+    assert item["accepted"] is False
+    assert item["error"]["code"] == "duplicate_resource"
+    assert len(backend.submit_calls) == 1  # 严格冲突不提交 aria2
+
+    auto = client.post(
+        "/api/v2/tasks",
+        json={"tasks": [{"uri": "https://example.com/b.bin", "options": {"out": "busy.bin"}}]},
+    )
+    auto_item = auto.json()["items"][0]
+    assert auto_item["accepted"] is True
+    assert auto_item["task"]["name"] == "busy (2).bin"
+
+
+# --- 回归（D7）：单任务重试携带本次 allow_rename，严格冲突 409 ---
+def test_retry_carries_allow_rename_policy_with_strict_409(
+    client: TestClient, settings: Settings
+) -> None:
+    admin = create_admin(client)
+    login(client)
+    install_backend(client)
+    created = client.post(
+        "/api/v2/tasks",
+        json={"tasks": [{"uri": "https://example.com/retry.bin", "options": {"out": "busy.bin"}}]},
+    ).json()["items"][0]
+    task_id = created["task"]["id"]
+    cancelled = client.post("/api/v2/tasks/cancel", json={"task_ids": [task_id]})
+    assert cancelled.json()["items"][0]["accepted"] is True
+
+    async def seed_user_file() -> None:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                content = ContentRepository(uow.connection)
+                content_id = await content.create_object(
+                    kind="file", digest="cd" * 32, size=7, storage_path="objects/retry-keep", now_ms=1
+                )
+                await content.add_user_file(
+                    user_id=int(admin["id"]),
+                    content_id=content_id,
+                    display_name="busy.bin",
+                    now_ms=1,
+                )
+        finally:
+            await database.close()
+
+    asyncio.run(seed_user_file())
+
+    strict = client.post(f"/api/v2/tasks/{task_id}/retry", json={"allow_rename": False})
+    assert strict.status_code == 409
+    assert strict.json()["error"]["code"] == "duplicate_resource"
+
+    auto = client.post(f"/api/v2/tasks/{task_id}/retry")
+    assert auto.status_code == 200
+    assert auto.json()["task"]["name"] == "busy (2).bin"
+
+
+# --- 回归（D7）：Torrent 顶层 allow_rename 严格冲突 409 且不提交 aria2 ---
+def test_torrent_strict_conflict_returns_409_without_submission(client: TestClient) -> None:
+    create_admin(client)
+    login(client)
+    backend = install_backend(client)
+    occupied = client.post(
+        "/api/v2/tasks",
+        json={"tasks": [{"uri": "https://example.com/x.bin", "options": {"out": "busy.bin"}}]},
+    )
+    assert occupied.status_code == 200
+
+    strict = client.post(
+        "/api/v2/tasks/torrent",
+        json={"torrent": make_torrent([("busy.bin", 3)], name="busy.bin"), "allow_rename": False},
+    )
+    assert strict.status_code == 409
+    assert strict.json()["error"]["code"] == "duplicate_resource"
+    assert len(backend.submit_calls) == 1  # 只有占用名的 HTTP 任务提交过，种子未提交
+
+    auto = client.post(
+        "/api/v2/tasks/torrent",
+        json={"torrent": make_torrent([("busy.bin", 3)], name="busy.bin"), "allow_rename": True},
+    )
+    assert auto.status_code == 200
+    assert auto.json()["task"]["name"] == "busy (2).bin"

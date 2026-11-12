@@ -3,6 +3,7 @@ import type {
   TaskResponse,
   TaskListResponse,
   TaskBatchResponse,
+  TaskWriteResultResponse,
   TorrentPreviewResponse,
 } from "@/shared/api/types";
 
@@ -59,10 +60,13 @@ function splitUris(text: string): string[] {
   return result;
 }
 
-export async function createTasks(text: string): Promise<CreateOutcome> {
+export async function createTasks(
+  text: string,
+  allowRename = true,
+): Promise<CreateOutcome> {
   const uris = splitUris(text);
   const response = await api.post<TaskBatchResponse>("/api/v2/tasks", {
-    tasks: uris.map((uri) => ({ uri })),
+    tasks: uris.map((uri) => ({ uri, options: { allow_rename: allowRename } })),
   });
   return toOutcome(response, uris);
 }
@@ -93,22 +97,31 @@ export async function previewTorrent(base64: string): Promise<TorrentPreviewResp
 export async function createTorrent(
   base64: string,
   selectedIndexes: number[],
-): Promise<CreateOutcome> {
-  const response = await api.post<TaskBatchResponse>("/api/v2/tasks/torrent", {
+  allowRename = true,
+): Promise<TaskResponse> {
+  // 后端按单项 TaskWriteResultResponse 返回；业务拒绝留在原向导展示。
+  const response = await api.post<TaskWriteResultResponse>("/api/v2/tasks/torrent", {
     torrent: base64,
     selected_file_indexes: selectedIndexes.length > 0 ? selectedIndexes : null,
+    allow_rename: allowRename,
   });
-  return toOutcome(response, ["种子"]);
+  if (!response.accepted || response.task === null) {
+    throw new Error(response.error?.message ?? "创建种子任务失败");
+  }
+  return response.task;
 }
 
 export async function cancelTasks(taskIds: number[]): Promise<TaskBatchResponse> {
   return api.post<TaskBatchResponse>("/api/v2/tasks/cancel", { task_ids: taskIds });
 }
 
-export async function retryTask(taskId: number): Promise<TaskResponse> {
-  const response = await api.post<{ accepted: boolean; task: TaskResponse | null }>(
+export async function retryTask(taskId: number, allowRename = true): Promise<TaskResponse> {
+  const response = await api.post<TaskWriteResultResponse>(
     `/api/v2/tasks/${taskId}/retry`,
+    { allow_rename: allowRename },
   );
-  if (response.task === null) throw new Error("重试失败");
+  if (!response.accepted || response.task === null) {
+    throw new Error(response.error?.message ?? "重试失败");
+  }
   return response.task;
 }

@@ -148,6 +148,7 @@ class PreparedDownload:
     selected_file_indexes: tuple[int, ...] | None = None
     display_uri: str | None = None
     total_bytes: int | None = None
+    allow_rename: bool = True
 
 
 @dataclass(frozen=True, slots=True)

@@ -14,10 +14,12 @@ from ...domain.downloads import (
     METADATA_ADMISSION_PAUSED,
     RegistrationOutcome,
     SubscriptionStatus,
+    allocate_download_display_name,
     decide_registration,
     effective_task_status,
     normalize_download_options,
     normalize_resource,
+    parse_allow_rename_policy,
     require_retryable,
     resource_display_name,
 )
@@ -25,6 +27,7 @@ from ...domain.errors import DomainError, ErrorCode
 from ...domain.quota import PhysicalDownload, PhysicalPack, available_machine_bytes
 from ...domain.settings import SystemSettings
 from ...domain.torrents import TorrentMetadata, parse_torrent
+from ..library.models import UserFileRecord
 from ..ports import UnitOfWork
 from ..settings.rate_limit import RateLimiter
 from .models import (
@@ -58,6 +61,8 @@ class CommandRepository(Protocol):
     async def list_active_physical(self) -> list[PhysicalDownload]: ...
 
     async def find_completed_attempt(self, resource_key: str) -> AttemptRecord | None: ...
+
+    async def list_occupied_display_names(self, user_id: int) -> set[str]: ...
 
     async def find_source(self, resource_key: str) -> SourceRecord | None: ...
 
@@ -138,6 +143,8 @@ class CommandRepository(Protocol):
 class ContentCommands(Protocol):
     async def find_user_file(self, *, user_id: int, content_id: int) -> int | None: ...
 
+    async def get_user_file(self, *, user_id: int, file_id: int) -> UserFileRecord: ...
+
     async def add_user_file(
         self, *, user_id: int, content_id: int, display_name: str, now_ms: int
     ) -> int: ...
@@ -194,7 +201,11 @@ def prepare_uri_download(
     uri: str, options: Mapping[str, object]
 ) -> PreparedDownload:
     resource = normalize_resource(uri)
-    normalized_options, resource_key = normalize_download_options(resource, options)
+    allow_rename = parse_allow_rename_policy(options.get("allow_rename"))
+    # 策略只服务本次注册：不进入资源身份、不持久化到共享 source、不交给 aria2。
+    normalized_options, resource_key = normalize_download_options(
+        resource, {key: value for key, value in options.items() if key != "allow_rename"}
+    )
     payload: dict[str, object]
     if resource.kind == "http":
         payload = {
@@ -217,11 +228,14 @@ def prepare_uri_download(
         options=normalized_options,
         display_name=display_name,
         display_uri=resource.display_uri,
+        allow_rename=allow_rename,
     )
 
 
 def prepare_torrent_download(
     metadata: TorrentMetadata,
+    *,
+    allow_rename: bool = True,
 ) -> PreparedDownload:
     return PreparedDownload(
         kind="torrent",
@@ -231,6 +245,7 @@ def prepare_torrent_download(
         display_name=metadata.name,
         display_uri=f"torrent:{metadata.info_hash}",
         total_bytes=metadata.selected_size,
+        allow_rename=allow_rename,
     )
 
 
@@ -313,16 +328,25 @@ class DownloadCommandService:
                 return RegistrationResult(
                     existing_task.id, existing_task.attempt_id, existing_task.gid, decision.outcome, False
                 )
+            occupied_names = await repository.list_occupied_display_names(user_id)
             if decision.outcome is RegistrationOutcome.ATTACHED_COMPLETED:
                 completed_attempt = cast(AttemptRecord, completed)
                 content_id = cast(int, completed_attempt.completed_content_id)
                 content = self.content_repository_factory(uow)
                 existing_file = await content.find_user_file(user_id=user_id, content_id=content_id)
-                if existing_file is None:
+                if existing_file is not None:
+                    # 已拥有内容：订阅直接显示该文件实际名称，不分配新名、不加引用。
+                    attached_name = (
+                        await content.get_user_file(user_id=user_id, file_id=existing_file)
+                    ).display_name
+                else:
+                    attached_name = allocate_download_display_name(
+                        prepared.display_name, occupied_names, prepared.allow_rename
+                    )
                     await content.add_user_file(
                         user_id=user_id,
                         content_id=content_id,
-                        display_name=prepared.display_name,
+                        display_name=attached_name,
                         now_ms=now_ms,
                     )
                 content_view = await content.get_object(content_id)
@@ -336,7 +360,7 @@ class DownloadCommandService:
                     attempt_id=completed_attempt.id,
                     user_id=user_id,
                     reserved_bytes=0,
-                    display_name=prepared.display_name,
+                    display_name=attached_name,
                     display_uri=prepared.display_uri,
                     now_ms=now_ms,
                     status=SubscriptionStatus.COMPLETED,
@@ -346,6 +370,9 @@ class DownloadCommandService:
                 )
             if decision.outcome is RegistrationOutcome.JOINED_LIVE:
                 live_attempt = cast(AttemptRecord, live)
+                joined_name = allocate_download_display_name(
+                    prepared.display_name, occupied_names, prepared.allow_rename
+                )
                 reserved = live_attempt.total_length or 0
                 if reserved:
                     await self.quota_repository_factory(uow).reserve(user_id, reserved)
@@ -353,11 +380,15 @@ class DownloadCommandService:
                     attempt_id=live_attempt.id,
                     user_id=user_id,
                     reserved_bytes=reserved,
-                    display_name=prepared.display_name,
+                    display_name=joined_name,
                     display_uri=prepared.display_uri,
                     now_ms=now_ms,
                 )
                 return RegistrationResult(task_id, live_attempt.id, live_attempt.gid, decision.outcome, False)
+            # CREATED：在任何 source/attempt/配额写入前分配最终名（严格冲突整笔回滚）。
+            final_name = allocate_download_display_name(
+                prepared.display_name, occupied_names, prepared.allow_rename
+            )
             source = await repository.find_source(prepared.resource_key)
             if source is None:
                 source_id = await repository.create_source(
@@ -423,7 +454,7 @@ class DownloadCommandService:
                 attempt_id=attempt_id,
                 user_id=user_id,
                 reserved_bytes=reserved,
-                display_name=prepared.display_name,
+                display_name=final_name,
                 display_uri=prepared.display_uri,
                 now_ms=now_ms,
             )
@@ -536,12 +567,14 @@ class DownloadCommandService:
         user_id: int,
         payload_base64: str,
         selected_file_indexes: list[int] | None,
+        allow_rename: bool = True,
     ) -> DownloadWriteResult:
         self.rate_limiter.check_create_torrent(user_id=user_id)
         metadata = parse_torrent(payload_base64, selected_file_indexes)
         async with self.submission_lock:
             registered = await self._register(
-                user_id=user_id, prepared=prepare_torrent_download(metadata)
+                user_id=user_id,
+                prepared=prepare_torrent_download(metadata, allow_rename=allow_rename),
             )
             result = DownloadWriteResult(
                 accepted=True,
@@ -555,14 +588,22 @@ class DownloadCommandService:
                 return pending[registered.attempt_id]
             return result
 
-    async def retry(self, *, user_id: int, task_id: int) -> DownloadWriteResult:
+    async def retry(
+        self, *, user_id: int, task_id: int, allow_rename: bool = True
+    ) -> DownloadWriteResult:
         self.rate_limiter.check_create_task(user_id=user_id)
         async with self.uow_factory() as uow:
             repository = self.repository_factory(uow)
             record = await repository.get_task(user_id=user_id, task_id=task_id)
             require_retryable(effective_task_status(record.subscription_status, record.attempt_status))
             source = await repository.get_source_for_attempt(record.attempt_id)
-        prepared = replace(_from_source(source), total_bytes=record.total_bytes)
+        # 重试以当前任务名为本用户请求名，并注入本次调用策略（D1/D7）。
+        prepared = replace(
+            _from_source(source),
+            display_name=record.name,
+            total_bytes=record.total_bytes,
+            allow_rename=allow_rename,
+        )
         async with self.submission_lock:
             registered = await self._register(user_id=user_id, prepared=prepared)
             result = DownloadWriteResult(

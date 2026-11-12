@@ -1092,6 +1092,7 @@
     },
     "DownloadOptionsRequest": {
       "fields": [
+        "allow_rename",
         "headers",
         "http-passwd",
         "http-user",
@@ -1990,6 +1991,12 @@
         "uri"
       ]
     },
+    "TaskRetryRequest": {
+      "fields": [
+        "allow_rename"
+      ],
+      "required": []
+    },
     "TaskStatsResponse": {
       "fields": [
         "counts",
@@ -2044,6 +2051,7 @@
     },
     "TorrentCreateRequest": {
       "fields": [
+        "allow_rename",
         "selected_file_indexes",
         "torrent"
       ],

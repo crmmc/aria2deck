@@ -50,7 +50,9 @@ describe("UriCreateDialog", () => {
       target: { value: "https://a\nhttps://b" },
     });
     fireEvent.click(screen.getByRole("button", { name: /添加 2 任务/ }));
-    await waitFor(() => expect(onCreate).toHaveBeenCalledWith("https://a\nhttps://b"));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith("https://a\nhttps://b", true),
+    );
     expect(await screen.findByRole("alert")).toHaveTextContent("链接不被支持");
     // 失败后按钮恢复可点击。
     expect(screen.getByRole("button", { name: /添加/ })).not.toBeDisabled();
@@ -152,7 +154,16 @@ describe("TorrentCreateWizard（三阶段向导 T8）", () => {
     expect(screen.queryByText("选择文件 ubuntu.iso")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /确认创建（2 项）/ }));
-    await waitFor(() => expect(onCreate).toHaveBeenCalledWith([1, 2]));
+    await waitFor(() => expect(onCreate).toHaveBeenCalledWith([1, 2], true));
+  });
+
+  it("confirm stage carries an unchecked strict policy to onCreate", async () => {
+    const onCreate = jest.fn().mockResolvedValue(undefined);
+    renderWizard(onCreate);
+    fireEvent.click(screen.getByRole("button", { name: "下一阶段" }));
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: /确认创建（3 项）/ }));
+    await waitFor(() => expect(onCreate).toHaveBeenCalledWith([0, 1, 2], false));
   });
 
   it("back to select stage keeps selection and submit error shows inline", async () => {
@@ -202,6 +213,8 @@ describe("FailureDialog", () => {
           { uri: "https://bad.example/x", message: "不支持" },
           { uri: "https://bad.example/y", message: "空间不足" },
         ]}
+        allowRename={true}
+        onAllowRenameChange={jest.fn()}
         onRetryFailed={onRetryFailed}
         onClose={jest.fn()}
       />,
@@ -211,5 +224,22 @@ describe("FailureDialog", () => {
     expect(screen.getByText("空间不足")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "仅重试失败项" }));
     expect(onRetryFailed).toHaveBeenCalledTimes(1);
+    expect(onRetryFailed.mock.calls[0][1]).toBe(true); // 默认保留自动加后缀策略
+  });
+
+  it("keeps an unchecked strict policy when retrying failed items", () => {
+    const onRetryFailed = jest.fn();
+    render(
+      <FailureDialog
+        failedItems={[{ uri: "https://bad.example/x", message: "不支持" }]}
+        allowRename={false}
+        onAllowRenameChange={jest.fn()}
+        onRetryFailed={onRetryFailed}
+        onClose={jest.fn()}
+      />,
+    );
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "仅重试失败项" }));
+    expect(onRetryFailed.mock.calls[0][1]).toBe(false); // 严格策略随重提发送
   });
 });

@@ -379,3 +379,52 @@ def test_malformed_network_location_is_a_stable_error() -> None:
 def test_ipv6_display_keeps_address_brackets() -> None:
     assert normalize_resource("http://[::1]:8080/a").display_uri == "http://[::1]:8080/a"
     assert normalize_resource("http://[::1]/a").display_uri == "http://[::1]/a"
+
+
+# --- 回归（D1/D7）：用户级命名分配纯函数（修复前缺失，import 失败即为目标失败） ---
+
+
+def test_allocate_download_display_name_suffix_matrix() -> None:
+    from aria2deck.domain.downloads import allocate_download_display_name
+
+    cases = [
+        # (请求名, 已占用集合, 允许改名, 期望结果)
+        ("ubuntu.iso", {"ubuntu.iso"}, True, "ubuntu (2).iso"),
+        ("ubuntu.iso", {"ubuntu.iso", "ubuntu (2).iso"}, True, "ubuntu (3).iso"),
+        ("pack.tar.zst", {"pack.tar.zst"}, True, "pack (2).tar.zst"),
+        ("download", {"download"}, True, "download (2)"),
+        ("ubuntu (2).iso", {"ubuntu (2).iso"}, True, "ubuntu (3).iso"),
+        (".env", {".env"}, True, ".env (2)"),
+        ("data.2024.csv", {"data.2024.csv"}, True, "data (2).2024.csv"),
+        ("free.bin", set(), True, "free.bin"),
+        ("free.bin", {"other.bin"}, True, "free.bin"),
+    ]
+    for requested, occupied, allow_rename, expected in cases:
+        assert (
+            allocate_download_display_name(requested, occupied, allow_rename) == expected
+        ), f"requested={requested!r} occupied={occupied!r}"
+
+
+def test_allocate_download_display_name_strict_conflict_and_exhaustion() -> None:
+    from aria2deck.domain.downloads import allocate_download_display_name
+
+    with pytest.raises(DomainError) as caught:
+        allocate_download_display_name("busy.bin", {"busy.bin"}, False)
+    assert caught.value.code is ErrorCode.DUPLICATE_RESOURCE
+    assert "同名" in str(caught.value)
+
+    occupied = {"f.bin"} | {f"f ({index}).bin" for index in range(2, 10_002)}
+    with pytest.raises(DomainError) as caught:
+        allocate_download_display_name("f.bin", occupied, True, max_attempts=10_000)
+    assert caught.value.code is ErrorCode.DUPLICATE_RESOURCE
+
+
+def test_allocate_download_display_name_keeps_200_character_limit() -> None:
+    from aria2deck.domain.downloads import allocate_download_display_name
+
+    long_name = "长" * 100 + "a" * 96 + ".iso"
+    assert len(long_name) == 200
+    allocated = allocate_download_display_name(long_name, {long_name}, True)
+    assert allocated != long_name
+    assert len(allocated) <= 200
+    assert allocated.endswith(".iso")
