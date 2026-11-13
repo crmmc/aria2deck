@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import unquote
 
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -315,3 +316,85 @@ def test_info_and_entries_are_rate_limited_by_ip(client: TestClient, settings) -
     entries_client = TestClient(client.app, client=("198.51.100.9", 3334))
     assert entries_client.get(f"/api/s/{code}/entries").status_code == 200
     assert entries_client.get(f"/api/s/{code}/entries").status_code == 429
+
+
+def _filename_star(disposition: str) -> str:
+    marker = "filename*=UTF-8''"
+    assert marker in disposition, disposition
+    return unquote(disposition.split(marker, 1)[1].strip().strip('"'))
+
+
+def test_share_info_and_download_name_follow_rename(
+    client: TestClient, settings
+) -> None:
+    user_id = _setup(client)
+    payload = b"0123456789"
+    file_id = seed_file(settings, user_id=user_id, index=7, name="old-name.bin", payload=payload)[1]
+    code = _make_share(client, file_id)
+
+    anon = TestClient(client.app)
+    info_before = anon.get(f"/api/s/{code}/info")
+    assert info_before.status_code == 200
+    assert info_before.json()["file_name"] == "old-name.bin"
+
+    renamed = client.patch(f"/api/v2/files/{file_id}", json={"name": "mid-name.bin"})
+    assert renamed.status_code == 200
+    renamed_again = client.patch(f"/api/v2/files/{file_id}", json={"name": "new-name.bin"})
+    assert renamed_again.status_code == 200
+
+    info = anon.get(f"/api/s/{code}/info")
+    assert info.status_code == 200
+    # 修复前此处返回创建时快照 "old-name.bin"，与下载响应头的新名矛盾。
+    assert info.json()["file_name"] == "new-name.bin"
+
+    download = anon.get(f"/api/s/{code}/download")
+    assert download.status_code == 200
+    assert _filename_star(download.headers["content-disposition"]) == info.json()["file_name"]
+
+
+def test_directory_share_breadcrumb_root_follows_rename(
+    client: TestClient, settings
+) -> None:
+    user_id = _setup(client)
+    dir_file = _seed_directory(settings, user_id, 8)
+    code = _make_share(client, dir_file)
+    anon = TestClient(client.app)
+
+    response = client.patch(f"/api/v2/files/{dir_file}", json={"name": "bundle-v2"})
+    assert response.status_code == 200
+
+    info = anon.get(f"/api/s/{code}/info")
+    assert info.status_code == 200
+    assert info.json()["file_name"] == "bundle-v2"  # 修复前为 "dir-8"
+
+    entries = anon.get(f"/api/s/{code}/entries")
+    assert entries.status_code == 200
+    body = entries.json()
+    assert body["breadcrumbs"][0]["name"] == "bundle-v2"  # 修复前为 "dir-8"
+    # 目录条目名来自内容层，不受目录改名影响。
+    assert [item["name"] for item in body["items"]] == ["docs"]
+
+
+def test_deleted_file_share_keeps_snapshot_shell_and_blocks_access(
+    client: TestClient, settings
+) -> None:
+    user_id = _setup(client)
+    file_id = seed_file(settings, user_id=user_id, index=9, name="gone.bin", payload=b"x")[1]
+    code = _make_share(client, file_id)
+
+    deleted = client.delete(f"/api/v2/files/{file_id}")
+    assert deleted.status_code in (200, 202, 204)
+
+    anon = TestClient(client.app)
+    info = anon.get(f"/api/s/{code}/info")
+    assert info.status_code == 410
+    assert info.json()["error"]["code"] == "share_unavailable"
+    download = anon.get(f"/api/s/{code}/download")
+    assert download.status_code == 410
+
+    listing = client.get("/api/v2/shares")
+    assert listing.status_code == 200
+    item = next(share for share in listing.json()["items"] if share["code"] == code)
+    # 拥有者列表保留创建时快照外壳与失效状态。
+    assert item["file_name"] == "gone.bin"
+    assert item["status"] == "unavailable"

@@ -76,10 +76,18 @@ class PublicShareService:
 
     async def info(self, code: str) -> PublicShareInfoView:
         record = await self._active_share(code)
+        async with self.uow_factory() as uow:
+            file_record = await self._owned_file(self.content_repository_factory(uow), record)
+        if file_record is None:  # pragma: no cover
+            # DB 层不可达：user_file_id 为 NULL 时 _active_share 已按 UNAVAILABLE 410；
+            # 真正的删除竞态由 get_user_file 抛 NOT_FOUND 呈现（同样不回退快照）。
+            # 保留本分支防御仓储实现不一致，并与 download() 的既有判空写法对齐。
+            raise DomainError(ErrorCode.SHARE_UNAVAILABLE, "分享文件已删除")
+        # 有效期间展示与下载同源：一律读当前 user_file（download 同样如此）。
         return PublicShareInfoView(
-            file_name=record.file_name,
-            file_size=record.file_size,
-            file_kind=record.file_kind,
+            file_name=file_record.display_name,
+            file_size=file_record.size,
+            file_kind=file_record.kind.value,
             has_password=record.password_hash is not None,
             expires_at_ms=record.expires_at_ms,
             max_downloads=record.max_downloads,
@@ -111,7 +119,7 @@ class PublicShareService:
                 offset=(page - 1) * page_size,
                 limit=page_size,
             )
-        breadcrumbs = [ShareEntryBreadcrumb(record.file_name, "")]
+        breadcrumbs = [ShareEntryBreadcrumb(file_record.display_name, "")]
         cumulative = ""
         for segment in path.split("/") if path else []:
             cumulative = f"{cumulative}/{segment}" if cumulative else segment
