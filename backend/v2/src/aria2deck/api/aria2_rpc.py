@@ -112,6 +112,27 @@ def _is_notification(payload: dict[str, object]) -> bool:
     return "id" not in payload
 
 
+def _all_legal_notifications(body: object) -> bool:
+    """限流命中时，纯合法通知（单个或整批）按 JSON-RPC 语义不得产生响应。
+
+    批次须非空且不超过 MAX_BATCH：空批/超项批的协议错误优先级高于通知语义，
+    维持限流错误（与既有优先级一致）。
+    """
+    if isinstance(body, dict):
+        payload = _valid_envelope(body)
+        return payload is not None and _is_notification(payload)
+    if isinstance(body, list):
+        return (
+            bool(body)
+            and len(body) <= MAX_BATCH
+            and all(
+                (payload := _valid_envelope(item)) is not None and _is_notification(payload)
+                for item in body
+            )
+        )
+    return False
+
+
 @router.api_route("/aria2/jsonrpc", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
 async def aria2_jsonrpc(
     request: Request,
@@ -143,6 +164,8 @@ async def aria2_jsonrpc(
             limiter.check_rpc(client_ip(request))
     except DomainError as error:
         retry_after = error.retry_after_seconds or 1
+        if _all_legal_notifications(body):
+            return Response(status_code=204, headers=headers)
         return JSONResponse(
             status_code=200,
             content=_error(None, -32000, "请求过于频繁，请稍后重试"),

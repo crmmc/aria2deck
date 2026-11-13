@@ -463,6 +463,158 @@ def test_notification_without_id_returns_204(rpc_client: TestClient) -> None:
     assert broken_notification.status_code == 204
 
 
+def test_rate_limited_single_notification_returns_204(rpc_client: TestClient) -> None:
+    rpc_client.patch("/api/v2/settings", json={"rpc_rate_limit": 1})
+    token = f"token:{_secret()}"
+    payload = {"jsonrpc": "2.0", "method": "system.listMethods", "params": [token]}
+
+    first = rpc_client.post("/aria2/jsonrpc", json=payload)
+    assert first.status_code == 204  # 未限流：通知执行后无响应
+
+    limited = rpc_client.post("/aria2/jsonrpc", json=payload)
+    assert limited.status_code == 204  # 修复前此处为 200 + -32000 错误对象
+    assert limited.content == b""
+
+
+def test_rate_limited_pure_notification_batch_returns_204(rpc_client: TestClient) -> None:
+    rpc_client.patch("/api/v2/settings", json={"rpc_rate_limit": 1})
+    token = f"token:{_secret()}"
+
+    consume = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={"jsonrpc": "2.0", "id": "consume", "method": "system.listMethods", "params": [token]},
+    )
+    assert consume.status_code == 200  # 用带 id 请求消耗本窗口唯一配额
+
+    limited_batch = rpc_client.post(
+        "/aria2/jsonrpc",
+        json=[
+            {"jsonrpc": "2.0", "method": "system.listMethods", "params": [token]},
+            {"jsonrpc": "2.0", "method": "aria2.tellActive", "params": [token]},
+        ],
+    )
+    assert limited_batch.status_code == 204  # 修复前此处为 200 + -32000 错误对象
+    assert limited_batch.content == b""
+
+
+def test_rate_limited_mixed_batch_keeps_batch_error(rpc_client: TestClient) -> None:
+    rpc_client.patch("/api/v2/settings", json={"rpc_rate_limit": 1})
+    token = f"token:{_secret()}"
+
+    consume = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={"jsonrpc": "2.0", "id": "consume", "method": "system.listMethods", "params": [token]},
+    )
+    assert consume.status_code == 200
+
+    limited_mixed = rpc_client.post(
+        "/aria2/jsonrpc",
+        json=[
+            {"jsonrpc": "2.0", "id": "m1", "method": "system.listMethods", "params": [token]},
+            {"jsonrpc": "2.0", "method": "aria2.tellActive", "params": [token]},
+        ],
+    )
+    # 带 id 请求的批次维持批次级 -32000 错误结构（与修复前一致）。
+    assert limited_mixed.status_code == 200
+    assert limited_mixed.json()["error"]["code"] == -32000
+    assert "Retry-After" in limited_mixed.headers
+
+
+def test_rate_limited_invalid_envelope_without_id_keeps_error(rpc_client: TestClient) -> None:
+    rpc_client.patch("/api/v2/settings", json={"rpc_rate_limit": 1})
+    token = f"token:{_secret()}"
+
+    consume = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={"jsonrpc": "2.0", "id": "consume", "method": "system.listMethods", "params": [token]},
+    )
+    assert consume.status_code == 200
+
+    limited_invalid = rpc_client.post("/aria2/jsonrpc", json={"jsonrpc": "2.0"})
+    # 非法信封（无 method）不是合法通知：维持明确的 -32000 协议错误。
+    assert limited_invalid.status_code == 200
+    assert limited_invalid.json()["error"]["code"] == -32000
+
+
+def _consume_only_rpc_quota(rpc_client: TestClient) -> None:
+    """用带 id 请求消耗 rpc_rate_limit=1 的本窗口唯一配额。"""
+    consume = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "consume",
+            "method": "system.listMethods",
+            "params": [f"token:{_secret()}"],
+        },
+    )
+    assert consume.status_code == 200
+
+
+def test_rate_limited_multicall_notification_returns_204(rpc_client: TestClient) -> None:
+    rpc_client.patch("/api/v2/settings", json={"rpc_rate_limit": 1})
+    _consume_only_rpc_quota(rpc_client)
+
+    limited_multicall = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "method": "system.multicall",
+            "params": [[{"methodName": "system.listMethods", "params": []}]],
+        },
+    )
+    assert limited_multicall.status_code == 204
+    assert limited_multicall.content == b""
+
+
+def test_rate_limited_oversized_notification_batch_keeps_error(rpc_client: TestClient) -> None:
+    rpc_client.patch("/api/v2/settings", json={"rpc_rate_limit": 1})
+    _consume_only_rpc_quota(rpc_client)
+    token = f"token:{_secret()}"
+
+    oversized_notifications = [
+        {"jsonrpc": "2.0", "method": "system.listMethods", "params": [token]} for _ in range(21)
+    ]
+    limited_oversized = rpc_client.post("/aria2/jsonrpc", json=oversized_notifications)
+    # 超 20 项的批次维持限流错误：边界检查的既有优先级高于通知语义。
+    assert limited_oversized.status_code == 200
+    assert limited_oversized.json()["error"]["code"] == -32000
+
+
+def test_rate_limited_batch_with_invalid_item_keeps_error(rpc_client: TestClient) -> None:
+    rpc_client.patch("/api/v2/settings", json={"rpc_rate_limit": 1})
+    _consume_only_rpc_quota(rpc_client)
+    token = f"token:{_secret()}"
+
+    limited_batch = rpc_client.post(
+        "/aria2/jsonrpc",
+        json=[
+            {"jsonrpc": "2.0"},  # 非法信封项：批次不算纯合法通知
+            {"jsonrpc": "2.0", "method": "system.listMethods", "params": [token]},
+        ],
+    )
+    assert limited_batch.status_code == 200
+    assert limited_batch.json()["error"]["code"] == -32000
+
+
+def test_rate_limited_empty_batch_keeps_error(rpc_client: TestClient) -> None:
+    rpc_client.patch("/api/v2/settings", json={"rpc_rate_limit": 1})
+    _consume_only_rpc_quota(rpc_client)
+
+    limited_empty = rpc_client.post("/aria2/jsonrpc", json=[])
+    # 空批不是合法通知：维持限流错误（非限流路径仍由既有 -32600 处理）。
+    assert limited_empty.status_code == 200
+    assert limited_empty.json()["error"]["code"] == -32000
+
+
+def test_rate_limited_non_object_body_keeps_error(rpc_client: TestClient) -> None:
+    rpc_client.patch("/api/v2/settings", json={"rpc_rate_limit": 1})
+    _consume_only_rpc_quota(rpc_client)
+
+    limited_scalar = rpc_client.post("/aria2/jsonrpc", json=42)
+    assert limited_scalar.status_code == 200
+    assert limited_scalar.json()["error"]["code"] == -32000
+
+
 def test_batch_semantics(rpc_client: TestClient) -> None:
     token = f"token:{_secret()}"
     batch = rpc_client.post(
