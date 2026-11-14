@@ -250,6 +250,10 @@ class Aria2SubmissionClient:
             options["seed-time"] = "0"
         if trackers and source.kind in {"magnet", "torrent"}:
             options["bt-tracker"] = ",".join(trackers)
+        if source.kind == "torrent":
+            # 选择子集下载完成后由 aria2 移除未选中文件（沿用旧版生产配置验证过的行为），
+            # 否则未选中占位会被扫描计入入库内容。
+            options["bt-remove-unselected-file"] = "true"
         params: list[object]
         if source.kind == "http":
             raw_uris = source.payload.get("uris")

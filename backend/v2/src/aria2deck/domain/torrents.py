@@ -300,7 +300,9 @@ def rebuild_torrent_peer_payload(
             tracker = _peer_text(value)
             if tracker is None or tracker not in allowed_trackers:
                 continue
-            seen_trackers.add(tracker)
+            # announce 与其在 announce-list 第 0 层的副本并存是 BEP 12 常态，不得去重：
+            # aria2 等 BEP 12 客户端只认 announce-list，记入 seen_trackers 会把主 tracker
+            # 从 announce-list 丢掉，导致 aria2 侧整体跳过该 tracker。
         elif key == b"announce-list":
             if not isinstance(value, list):
                 continue

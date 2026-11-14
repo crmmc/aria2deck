@@ -263,7 +263,9 @@ async def test_torrent_peers_dedupe_in_order_and_drop_malformed_or_resolved_priv
     assert root[b"announce"] == first.encode()
     tiers = root[b"announce-list"]
     flattened = [item.decode() for tier in tiers for item in tier]
-    assert flattened == [second, third]
+    # announce 与 announce-list 第 0 层副本并存是 BEP 12 常态（aria2 只认 announce-list）；
+    # 层内去重仍生效：第一个 tier 里重复的 first 被丢弃一次。
+    assert flattened == [first, second, third]
     assert root[b"nodes"] == [
         [b"dht.example", 6881],
         [b"1.1.1.1", 6882],
@@ -487,6 +489,9 @@ async def test_bt_stop_timeout_is_a_string_for_bt_submissions_only(
     assert torrent_options["bt-stop-timeout"] == "17"
     assert magnet_options["seed-time"] == "0"
     assert torrent_options["seed-time"] == "0"
+    assert torrent_options["bt-remove-unselected-file"] == "true"
+    assert "bt-remove-unselected-file" not in http_options
+    assert "bt-remove-unselected-file" not in magnet_options
 
 
 async def test_empty_submission_does_not_call_network(tmp_path: Path) -> None:

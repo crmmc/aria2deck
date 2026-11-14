@@ -5,8 +5,58 @@ import base64
 import pytest
 
 from aria2deck.domain.errors import DomainError
-from aria2deck.domain.torrents import _encode, _Parser, parse_torrent
+from aria2deck.domain.torrents import _encode, _Parser, parse_torrent, rebuild_torrent_peer_payload
 from tests.download_fakes import bencode, make_torrent
+
+
+def test_rebuild_keeps_announce_tracker_in_announce_list_tier() -> None:
+    """回归：重建不得把 announce-list 第 0 层的主 tracker 去重丢掉。
+
+    announce 与其在 announce-list 的副本并存是 BEP 12 常态；aria2 等 BEP 12
+    客户端只认 announce-list，丢掉后主 tracker 在 aria2 侧整体不可见，曾导致
+    slackware 实测 swarm 只剩备用 tracker、下载因 bt-stop-timeout 失败。
+    """
+    original = bencode({
+        "info": {"length": 1, "name": "file"},
+        "announce": "udp://primary.example:1337/announce",
+        "announce-list": [
+            [
+                "udp://primary.example:1337/announce",
+                "udp://backup.example:6969/announce",
+            ]
+        ],
+    })
+    payload = base64.b64encode(original).decode()
+
+    rebuilt = base64.b64decode(
+        rebuild_torrent_peer_payload(
+            payload,
+            trackers=(
+                "udp://primary.example:1337/announce",
+                "udp://backup.example:6969/announce",
+            ),
+            nodes=(),
+        )
+    )
+    root = _Parser(rebuilt).parse()
+    assert root[b"announce"] == b"udp://primary.example:1337/announce"
+    assert root[b"announce-list"] == [
+        [
+            b"udp://primary.example:1337/announce",
+            b"udp://backup.example:6969/announce",
+        ]
+    ]
+
+    filtered = base64.b64decode(
+        rebuild_torrent_peer_payload(
+            payload,
+            trackers=("udp://backup.example:6969/announce",),
+            nodes=(),
+        )
+    )
+    root_filtered = _Parser(filtered).parse()
+    assert b"announce" not in root_filtered
+    assert root_filtered[b"announce-list"] == [[b"udp://backup.example:6969/announce"]]
 
 
 def test_multi_file_preview_selection_and_identity() -> None:

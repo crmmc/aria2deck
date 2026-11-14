@@ -33,7 +33,7 @@ from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepos
 from aria2deck.infrastructure.sqlite.repositories.quota import QuotaRepository
 from aria2deck.infrastructure.sqlite.schema import content_entries, content_objects, user_files
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
-from tests.download_fakes import FakeSubmissionBackend
+from tests.download_fakes import FakeSubmissionBackend, make_torrent
 
 GID = "0123456789abcdef"
 PAYLOAD_GID = "fedcba0987654321"
@@ -174,7 +174,11 @@ async def runtime(
         payload = (
             {"uri": "magnet:?xt=urn:btih:" + "ab" * 20}
             if kind == "magnet"
-            else {"uris": ["https://example.com/file.bin"]}
+            else (
+                {"torrent": make_torrent([("bundle/file.bin", 3)], name="bundle")}
+                if kind == "torrent"
+                else {"uris": ["https://example.com/file.bin"]}
+            )
         )
         import json
 
@@ -234,6 +238,30 @@ def put_download(runtime: Runtime, content: bytes = b"abc") -> Path:
     directory.mkdir()
     (directory / "file.bin").write_bytes(content)
     return directory
+
+
+class RecordingStore:
+    """记录 discard_control_files 调用的透明包装，用于钉住「仅 torrent 接线」这道门。"""
+
+    def __init__(self, inner: DownloadContentStore, calls: list[tuple[int, str]]) -> None:
+        self._inner = inner
+        self.calls = calls
+
+    def machine_free_bytes(self) -> int:
+        return self._inner.machine_free_bytes()
+
+    async def scan(self, attempt_id: int):
+        return await self._inner.scan(attempt_id)
+
+    async def install(self, attempt_id: int, expected) -> None:
+        await self._inner.install(attempt_id, expected)
+
+    async def cleanup_attempt(self, attempt_id: int) -> None:
+        await self._inner.cleanup_attempt(attempt_id)
+
+    async def discard_control_files(self, attempt_id: int, control_name: str) -> None:
+        self.calls.append((attempt_id, control_name))
+        await self._inner.discard_control_files(attempt_id, control_name)
 
 
 async def test_system_pause_resume_uses_shared_projection_and_monotonic_progress(
@@ -318,6 +346,75 @@ async def test_completion_installs_content_and_atomically_completes_quota_and_su
             assert await ContentRepository(uow.connection).find_user_file(
                 user_id=state.user_id, content_id=content.id
             ) is not None
+
+
+async def test_torrent_subset_completion_discards_control_file_before_scan(
+    tmp_path: Path,
+) -> None:
+    """回归（缺陷2接线点）：选择子集 torrent 完成后 aria2 按 <种子名>.aria2 保留控制文件，
+    入库前必须按精确路径移除，否则扫描因“下载控制文件尚未清理”持续拒绝。"""
+    async with runtime(tmp_path, kind="torrent", total=3) as state:
+        calls: list[tuple[int, str]] = []
+        state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
+        directory = state.root / str(state.attempt_id)
+        (directory / "bundle").mkdir(parents=True)
+        (directory / "bundle" / "file.bin").write_bytes(b"abc")
+        (directory / "bundle.aria2").write_bytes(b"aria2 control")
+        await state.lifecycle.reconcile(observation(status="complete", completed=3))
+
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert calls == [(state.attempt_id, "bundle")]  # 仅 torrent 接线且名字精确
+        assert not (directory / "bundle.aria2").exists()
+        assert not directory.exists()  # 已整体搬入内容存储
+        assert task.subscription_status is SubscriptionStatus.COMPLETED
+        assert quota.used_bytes == 3
+
+
+async def test_http_user_content_named_aria2_suffix_is_never_discarded(
+    tmp_path: Path,
+) -> None:
+    """回归（评审阻断项）：HTTP 用户内容真名以 .aria2 结尾时，入库不得删除它——
+    控制文件清理只对 torrent 源生效且按提交名精确匹配，HTTP 走显式失败保留数据。"""
+    async with runtime(tmp_path) as state:
+        calls: list[tuple[int, str]] = []
+        state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
+        directory = state.root / str(state.attempt_id)
+        directory.mkdir()
+        (directory / "user-data.aria2").write_bytes(b"user content")
+
+        with pytest.raises(DomainError) as caught:
+            await state.lifecycle.reconcile(observation(status="complete", completed=13))
+        assert caught.value.code is ErrorCode.DOWNLOAD_UNAVAILABLE
+        assert calls == []  # HTTP 源根本不触发控制文件清理
+        assert (directory / "user-data.aria2").read_bytes() == b"user content"
+        attempt, _, _ = await read(state)
+        # 未误判完成、数据原样保留（fixture 中 attempt 尚未推进过 active，保持 queued）
+        assert attempt.status is AttemptStatus.QUEUED
+        assert attempt.completed_content_id is None
+
+
+async def test_torrent_source_with_non_string_payload_skips_control_discard(
+    tmp_path: Path,
+) -> None:
+    """守卫分支：torrent 源的 torrent 载荷不是字符串时跳过清理直接扫描，
+    不把防御性检查变成新的致命错误来源。"""
+    async with runtime(tmp_path, kind="torrent", total=3) as state:
+        calls: list[tuple[int, str]] = []
+        state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await uow.connection.execute(
+                text("UPDATE download_sources SET payload_json = :payload WHERE id = 1"),
+                {"payload": '{"torrent": 123}'},
+            )
+        directory = state.root / str(state.attempt_id)
+        directory.mkdir()
+        (directory / "file.bin").write_bytes(b"abc")
+        await state.lifecycle.reconcile(observation(status="complete", completed=3))
+
+        attempt, _, _ = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert calls == []  # 非字符串载荷走守卫，不调用清理
 
 
 async def test_completion_failure_rolls_back_references_and_releases_reservation(

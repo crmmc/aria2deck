@@ -50,6 +50,47 @@ async def test_directory_scan_and_install_include_nested_and_empty_entries(tmp_p
     await store.cleanup_attempt(1)
 
 
+async def test_discard_control_files_hits_exact_name_and_never_suffix_matches(
+    tmp_path: Path,
+) -> None:
+    store = DownloadContentStore(tmp_path)
+    source = tmp_path / "1"
+    source.mkdir()
+    (source / "bundle.aria2").write_bytes(b"control")
+    (source / "user-data.aria2").write_bytes(b"user content")
+    (source / "bundle").mkdir()
+    (source / "bundle" / "file.bin").write_bytes(b"data")
+
+    await store.discard_control_files(1, "bundle")  # 精确命中 bundle.aria2
+    await store.discard_control_files(1, "bundle")  # 幂等
+    assert not (source / "bundle.aria2").exists()
+    assert (source / "user-data.aria2").read_bytes() == b"user content"  # 同名用户内容不动
+
+    with pytest.raises(DomainError) as caught:
+        await store.discard_control_files(1, "../escape")  # 路径穿越直接拒绝
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+
+    with pytest.raises(DomainError) as caught:
+        await store.discard_control_files(1, "")  # 空控制名直接拒绝
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+
+    (source / "link.aria2").write_bytes(b"x")
+    (source / "link.aria2").unlink()
+    (source / "link.aria2").symlink_to(source / "user-data.aria2")
+    with pytest.raises(DomainError) as caught:
+        await store.discard_control_files(1, "link")  # 控制文件是符号链接，拒绝
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "victim.aria2").write_bytes(b"do not touch")
+    (tmp_path / "2").symlink_to(external, target_is_directory=True)
+    with pytest.raises(DomainError) as caught:
+        await store.discard_control_files(2, "victim")  # attempt 根是符号链接，拒绝越界
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+    assert (external / "victim.aria2").exists()
+
+
 async def test_scan_rejects_symlinks_non_files_and_unfinished_control_files(tmp_path: Path) -> None:
     store = DownloadContentStore(tmp_path)
     source = tmp_path / "1"

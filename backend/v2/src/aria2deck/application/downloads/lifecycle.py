@@ -17,6 +17,7 @@ from ...domain.downloads import (
 )
 from ...domain.errors import DomainError, ErrorCode
 from ...domain.settings import SystemSettings
+from ...domain.torrents import parse_torrent
 from ..ports import UnitOfWork
 from .broadcast import BroadcastPort, task_message
 from .commands import SubmissionBackend
@@ -174,6 +175,8 @@ class ContentStore(Protocol):
     async def install(self, attempt_id: int, expected: ContentPreparation) -> None: ...
 
     async def cleanup_attempt(self, attempt_id: int) -> None: ...
+
+    async def discard_control_files(self, attempt_id: int, control_name: str) -> None: ...
 
 
 class TaskQueryPort(Protocol):
@@ -504,6 +507,21 @@ class DownloadLifecycleService:
             )
         return preparation
 
+    async def _discard_control_file(self, attempt: AttemptRecord) -> None:
+        """仅 torrent 源在提交时确定下载名：选择子集完成后 aria2 按 <种子名>.aria2
+        保留控制文件，入库前按精确路径移除。HTTP/Magnet 不处理——它们的控制文件
+        由 aria2 在完成时自行清理，残留的场合按 DOWNLOAD_UNAVAILABLE 在入库超时
+        窗口内显式失败并保留数据（到期清理与修复前一致）。"""
+        async with self.uow_factory() as uow:
+            source = await self.repository_factory(uow).get_source_for_attempt(attempt.id)
+        if source.kind != "torrent":
+            return
+        payload = source.payload.get("torrent")
+        if not isinstance(payload, str):
+            return
+        metadata = await asyncio.to_thread(parse_torrent, payload)
+        await self.content_store.discard_control_files(attempt.id, metadata.name)
+
     async def _ingest(
         self, attempt: AttemptRecord, snapshot: DownloadObservation | None
     ) -> None:
@@ -514,6 +532,7 @@ class DownloadLifecycleService:
         if snapshot is not None:
             self.observations.put(snapshot)
         try:
+            await self._discard_control_file(attempt)
             preparation = await self._prepare_content(attempt)
         except DomainError as error:
             if error.code is ErrorCode.INVALID_INPUT:

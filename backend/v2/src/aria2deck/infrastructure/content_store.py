@@ -104,6 +104,39 @@ class DownloadContentStore:
     async def scan(self, attempt_id: int) -> ContentPreparation:
         return await asyncio.to_thread(self._scan, self._attempt_path(attempt_id))
 
+    def _discard_control_files(self, attempt_id: int, control_name: str) -> None:
+        # 控制名来自 parse_torrent 的 info.name，其接受集与 validate_display_name 一致
+        # （长度/点/斜杠/NUL）；这里只挡路径穿越，不再额外收紧字符集，否则合法但含
+        # 控制字符的种子名会被误判成致命错误并触发清库。
+        if (
+            not control_name
+            or control_name in {".", ".."}
+            or "/" in control_name
+            or "\\" in control_name
+        ):
+            raise DomainError(ErrorCode.INVALID_INPUT, "下载控制文件名无效")
+        source = self._attempt_path(attempt_id)
+        if source.is_symlink():
+            raise DomainError(ErrorCode.INVALID_INPUT, "下载控制文件路径无效")
+        if not source.is_dir():
+            return
+        control = source / f"{control_name}.aria2"
+        if not control.exists():
+            return
+        if control.is_symlink() or not control.is_file():
+            raise DomainError(ErrorCode.INVALID_INPUT, "下载控制文件路径无效")
+        control.unlink()
+
+    async def discard_control_files(self, attempt_id: int, control_name: str) -> None:
+        """按提交时确定的下载名精确移除 aria2 控制文件（<下载名>.aria2）。
+
+        选择子集 torrent 完成后 aria2 会保留控制文件，但此时平台已视该 attempt 终态，
+        入库前必须移除，否则扫描会因“下载控制文件尚未清理”持续拒绝。只删精确路径，
+        绝不按后缀通配——用户内容里真名以 .aria2 结尾的文件不受影响；attempt 目录
+        本身是符号链接时拒绝（与 _scan/_cleanup_attempt 同一防线，防越界删除）。
+        """
+        await asyncio.to_thread(self._discard_control_files, attempt_id, control_name)
+
     def _destination(self, storage_path: str) -> Path:
         normalized = normalize_relative_path(storage_path)
         return self.download_directory.joinpath(*normalized.split("/"))
