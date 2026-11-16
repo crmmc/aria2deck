@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from aria2deck.api.files import download_file
+from aria2deck.application.accounts.models import Principal
+from aria2deck.application.library.models import DownloadTarget
+from aria2deck.domain.accounts import CredentialKind, User
 from aria2deck.domain.packs import PackSourceSnapshot
 from aria2deck.infrastructure.config import Settings
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
@@ -612,3 +617,142 @@ def test_batch_delete_files_validates_size_boundaries(client: TestClient) -> Non
 
     assert _delete({"file_ids": []}).status_code == 422
     assert _delete({"file_ids": list(range(1, 1002))}).status_code == 422
+
+
+# ---------- 读租约断开路径回归（并发浸泡实测发现的缺陷） ----------
+
+
+class _DisconnectLease:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    async def release(self) -> None:
+        self._calls.append("connection")
+
+
+class _DisconnectLimiter:
+    def __init__(self, lease: _DisconnectLease) -> None:
+        self._lease = lease
+
+    async def acquire_authenticated(self, *, user_id: int, file_key: str) -> _DisconnectLease:
+        return self._lease
+
+
+class _DisconnectService:
+    def __init__(self, calls: list[str], chunks: list[bytes]) -> None:
+        self._calls = calls
+        self._chunks = chunks
+
+    async def open_download(
+        self, *, user_id: int, file_id: int, path: str | None, range_header: str | None
+    ) -> DownloadTarget:
+        return DownloadTarget(
+            content_id=7,
+            storage_path="objects/disconnect.bin",
+            entry_relative_path=None,
+            physical_path=Path("/nonexistent/disconnect.bin"),
+            display_name="disconnect.bin",
+            total_size=sum(len(chunk) for chunk in self._chunks),
+            range_spec=None,
+        )
+
+    def iter_chunks(self, target: DownloadTarget):
+        async def _generate():
+            for chunk in self._chunks:
+                yield chunk
+
+        return _generate()
+
+    async def release(self, target: DownloadTarget) -> None:
+        self._calls.append("content")
+
+
+def _session_principal() -> Principal:
+    return Principal(
+        user=User(
+            id=1,
+            username="u",
+            username_key="u",
+            password_hash="x",  # noqa: S106  # 测试夹具占位，非真实凭据
+            is_admin=False,
+            quota_bytes=0,
+            is_initial_password=False,
+            pending_delete=False,
+            credential_generation=0,
+            created_at_ms=0,
+            updated_at_ms=0,
+        ),
+        kind=CredentialKind.SESSION,
+    )
+
+
+async def test_download_releases_read_lease_when_client_disconnects_mid_stream() -> None:
+    """回归：流中途断开时 Starlette 不执行 BackgroundTask，读租约必须经 ASGI finally 释放。
+
+    修复前读租约只挂 BackgroundTask：断开后 content_objects.read_leases 只增不减，
+    删除后的内容永久 pending_delete、物理文件不回收（并发浸泡实测发现）。
+    """
+    import pytest
+    from starlette.requests import ClientDisconnect
+
+    calls: list[str] = []
+    service = _DisconnectService(calls, [b"chunk-1", b"chunk-2", b"chunk-3"])
+    lease = _DisconnectLease(calls)
+    response = await download_file(
+        file_id=1,
+        path=None,
+        range_header=None,
+        principal=_session_principal(),
+        service=service,
+        connections=_DisconnectLimiter(lease),
+    )
+
+    bodies = 0
+
+    async def send(message: dict) -> None:
+        nonlocal bodies
+        if message["type"] == "http.response.body" and message.get("body"):
+            bodies += 1
+            if bodies == 2:
+                raise ClientDisconnect()
+
+    async def receive() -> dict:
+        return {"type": "http.disconnect"}
+
+    with pytest.raises(ClientDisconnect):
+        await response({"type": "http"}, receive, send)
+
+    assert set(calls) == {"content", "connection"}
+
+
+async def test_download_releases_read_lease_on_normal_completion() -> None:
+    calls: list[str] = []
+    service = _DisconnectService(calls, [b"chunk-1"])
+    lease = _DisconnectLease(calls)
+    response = await download_file(
+        file_id=1,
+        path=None,
+        range_header=None,
+        principal=_session_principal(),
+        service=service,
+        connections=_DisconnectLimiter(lease),
+    )
+    sent: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    receive_calls = 0
+
+    async def receive() -> dict:
+        nonlocal receive_calls
+        receive_calls += 1
+        if receive_calls >= 2:
+            return {"type": "http.disconnect"}  # 让断开监听协程收尾，模拟正常请求周期
+        return {"type": "http.request"}
+
+    await response({"type": "http"}, receive, send)
+
+    assert set(calls) == {"content", "connection"}
+    assert sent[-1]["type"] == "http.response.body"
+    assert not sent[-1].get("more_body")

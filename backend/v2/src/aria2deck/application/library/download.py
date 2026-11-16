@@ -127,11 +127,12 @@ class LibraryDownloadService:
         finally:
             if handle is not None:
                 await asyncio.to_thread(handle.close)
-            await self.release(target)
+            # 租约释放只走响应层 releases=（ASGI finally 覆盖正常/异常/断开）；
+            # 不在生成器 finally 里释放：生成器关闭上下文里的连接获取会悬挂，
+            # 且其先置 released 标志会让响应层释放被跳过（实测读租约只增不减）。
 
     async def release(self, target: DownloadTarget) -> None:
-        """Exactly-once release: the stream finally-block and the response background task
-        both funnel here; whichever runs first wins."""
+        """Exactly-once release：唯一调用方是响应层 releases=（ASGI finally）。"""
         if target.released:
             return
         target.released = True

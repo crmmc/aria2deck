@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from urllib.parse import unquote
 
 from fastapi.testclient import TestClient
 from sqlalchemy import text
+from starlette.requests import Request
 
+from aria2deck.application.library.models import DownloadTarget
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
 from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, login
@@ -398,3 +401,274 @@ def test_deleted_file_share_keeps_snapshot_shell_and_blocks_access(
     # 拥有者列表保留创建时快照外壳与失效状态。
     assert item["file_name"] == "gone.bin"
     assert item["status"] == "unavailable"
+
+
+class _ShareDisconnectLease:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    async def release(self) -> None:
+        self._calls.append("connection")
+
+
+class _ShareDisconnectLimiter:
+    def __init__(self, lease: _ShareDisconnectLease) -> None:
+        self._lease = lease
+
+    def check_public(self, ip: str) -> None:  # noqa: ARG002  # 假件不校验
+        return None
+
+    def check_share_access(self, ip: str) -> None:  # noqa: ARG002  # 假件不校验
+        return None
+
+    async def acquire_anonymous(self, *, client_ip: str, file_key: str) -> _ShareDisconnectLease:  # noqa: ARG002, E501
+        return self._lease
+
+
+class _ShareDisconnectService:
+    """直连 download_share 的假服务：download 返回真实 PublicShareDownload（携带 target）。"""
+
+    def __init__(self, calls: list[str], chunks: list[bytes]) -> None:
+        self._calls = calls
+        self._chunks = chunks
+
+    async def check_access(self, code: str, token: str | None):  # noqa: ARG002
+        from types import SimpleNamespace
+
+        return SimpleNamespace(content_key="content-key")
+
+    async def download(
+        self, code: str, token: str | None, path: str | None, range_header: str | None  # noqa: ARG002, E501
+    ):
+        from pathlib import Path
+
+        from aria2deck.application.shares.models import PublicShareDownload
+        from aria2deck.domain.shares import DownloadDecision
+
+        decision = DownloadDecision(start=0, end=sum(len(c) for c in self._chunks) - 1, status_code=200, count_download=True)
+        physical = Path("/nonexistent/share-disconnect.bin")
+        return PublicShareDownload(
+            decision=decision,
+            content_id=7,
+            storage_path="objects/share-disconnect.bin",
+            entry_relative_path=None,
+            physical_path=physical,
+            display_name="share-disconnect.bin",
+            total_size=decision.content_length,
+            target=DownloadTarget(
+                content_id=7,
+                storage_path="objects/share-disconnect.bin",
+                entry_relative_path=None,
+                physical_path=physical,
+                display_name="share-disconnect.bin",
+                total_size=decision.content_length,
+                range_spec=None,
+            ),
+        )
+
+    def iter_chunks(self, target):  # noqa: ARG002
+        async def _generate():
+            for chunk in self._chunks:
+                yield chunk
+
+        return _generate()
+
+    async def release(self, result) -> None:  # noqa: ARG002
+        self._calls.append("content")
+
+
+def _share_request() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/s/code/download",
+            "client": ("127.0.0.1", 50000),
+            "headers": [],
+        }
+    )
+
+
+async def test_share_download_releases_read_lease_when_client_disconnects_mid_stream() -> None:
+    """回归（变异测试发现）：分享下载路径的读租约释放此前零测试保护。
+
+    把 public_shares.py 的 releases= 改回只放连接租约，全量测试仍绿——
+    该断言锁住分享路径（GET 入口）与文件路径同级的释放契约。
+    """
+    import pytest
+    from starlette.requests import ClientDisconnect
+
+    from aria2deck.api.public_shares import download_share
+
+    calls: list[str] = []
+    service = _ShareDisconnectService(calls, [b"chunk-1", b"chunk-2", b"chunk-3"])
+    lease = _ShareDisconnectLease(calls)
+    response = await download_share(
+        request=_share_request(),
+        code="code",
+        path=None,
+        range_header=None,
+        authorization=None,
+        limiter=_ShareDisconnectLimiter(lease),
+        service=service,
+        connections=_ShareDisconnectLimiter(lease),
+    )
+
+    bodies = 0
+
+    async def send(message: dict) -> None:
+        nonlocal bodies
+        if message["type"] == "http.response.body" and message.get("body"):
+            bodies += 1
+            if bodies == 2:
+                raise ClientDisconnect()
+
+    async def receive() -> dict:
+        return {"type": "http.disconnect"}
+
+    with pytest.raises(ClientDisconnect):
+        await response({"type": "http"}, receive, send)
+
+    assert set(calls) == {"content", "connection"}
+
+
+async def test_share_download_releases_read_lease_on_normal_completion() -> None:
+    from aria2deck.api.public_shares import download_share
+
+    calls: list[str] = []
+    service = _ShareDisconnectService(calls, [b"chunk-1"])
+    lease = _ShareDisconnectLease(calls)
+    response = await download_share(
+        request=_share_request(),
+        code="code",
+        path=None,
+        range_header=None,
+        authorization=None,
+        limiter=_ShareDisconnectLimiter(lease),
+        service=service,
+        connections=_ShareDisconnectLimiter(lease),
+    )
+    sent: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    receive_calls = 0
+
+    async def receive() -> dict:
+        nonlocal receive_calls
+        receive_calls += 1
+        if receive_calls >= 2:
+            return {"type": "http.disconnect"}
+        return {"type": "http.request"}
+
+    await response({"type": "http"}, receive, send)
+
+    assert set(calls) == {"content", "connection"}
+
+
+async def test_share_form_download_releases_read_lease_when_client_disconnects_mid_stream() -> None:
+    """POST 表单入口（token 只经表单/头进入）与 GET 入口共用 _streaming，同样要锁住释放。"""
+    import pytest
+    from starlette.requests import ClientDisconnect
+
+    from aria2deck.api.public_shares import download_share_by_form
+
+    calls: list[str] = []
+    service = _ShareDisconnectService(calls, [b"chunk-1", b"chunk-2", b"chunk-3"])
+    lease = _ShareDisconnectLease(calls)
+    form_body = b"token="
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": form_body, "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/s/code/download",
+            "client": ("127.0.0.1", 50000),
+            "headers": [
+                (b"content-type", b"application/x-www-form-urlencoded"),
+                (b"content-length", str(len(form_body)).encode()),
+            ],
+        },
+        receive,
+    )
+    response = await download_share_by_form(
+        request=request,
+        code="code",
+        range_header=None,
+        limiter=_ShareDisconnectLimiter(lease),
+        service=service,
+        connections=_ShareDisconnectLimiter(lease),
+    )
+
+    bodies = 0
+
+    async def send(message: dict) -> None:
+        nonlocal bodies
+        if message["type"] == "http.response.body" and message.get("body"):
+            bodies += 1
+            if bodies == 2:
+                raise ClientDisconnect()
+
+    async def receive_disconnect() -> dict:
+        return {"type": "http.disconnect"}
+
+    with pytest.raises(ClientDisconnect):
+        await response({"type": "http"}, receive_disconnect, send)
+
+    assert set(calls) == {"content", "connection"}
+
+
+async def test_share_release_is_exactly_once_for_repeated_calls() -> None:
+    """评审发现：_as_target 每次新建 target 时 double-release 会吃掉他人租约。
+
+    PublicShareDownload 携带同一个 target，release 透传同一对象，
+    由 DownloadTarget.released（真实语义见 test_library_services 幂等用例）挡第二次。
+    """
+    from aria2deck.application.shares.access import PublicShareService
+    from aria2deck.application.shares.models import PublicShareDownload
+    from aria2deck.domain.shares import DownloadDecision
+
+    calls: list[str] = []
+    seen: list[DownloadTarget] = []
+
+    class _RecordingStreamer:
+        """按 LibraryDownloadService.release 的真实契约记账：released 标志恰好一次。"""
+
+        async def release(self, target: DownloadTarget) -> None:
+            seen.append(target)
+            if target.released:
+                return
+            target.released = True
+            calls.append("content")
+
+    service = PublicShareService.__new__(PublicShareService)  # 仅借用 release 方法
+    service.streamer = _RecordingStreamer()  # type: ignore[attr-defined]
+
+    decision = DownloadDecision(start=0, end=0, status_code=200, count_download=True)
+    result = PublicShareDownload(
+        decision=decision,
+        content_id=7,
+        storage_path="objects/share-once.bin",
+        entry_relative_path=None,
+        physical_path=Path("/nonexistent/share-once.bin"),
+        display_name="share-once.bin",
+        total_size=1,
+        target=DownloadTarget(
+            content_id=7,
+            storage_path="objects/share-once.bin",
+            entry_relative_path=None,
+            physical_path=Path("/nonexistent/share-once.bin"),
+            display_name="share-once.bin",
+            total_size=1,
+            range_spec=None,
+        ),
+    )
+
+    await service.release(result)
+    await service.release(result)
+    assert seen[0] is seen[1]  # 两次释放透传同一个 target，幂等标志才能生效
+    assert calls == ["content"]  # 第二次调用被 released 标志挡下，不重复扣租约

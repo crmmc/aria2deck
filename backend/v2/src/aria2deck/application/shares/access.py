@@ -186,39 +186,37 @@ class PublicShareService:
             # 租约后的任何准入异常（含协程取消）都必须释放读租约；原样抛出，不得吞掉取消。
             await self.leases.release(content_id)
             raise
+        physical_path = self.content_paths.physical_path(storage_path, entry_relative_path)
         return PublicShareDownload(
             decision=decision,
             content_id=content_id,
             storage_path=storage_path,
             entry_relative_path=entry_relative_path,
-            physical_path=self.content_paths.physical_path(storage_path, entry_relative_path),
+            physical_path=physical_path,
             display_name=display_name,
             total_size=total_size,
+            target=DownloadTarget(
+                content_id=content_id,
+                storage_path=storage_path,
+                entry_relative_path=entry_relative_path,
+                physical_path=physical_path,
+                display_name=display_name,
+                total_size=total_size,
+                range_spec=(
+                    None
+                    if decision.status_code == 200
+                    else RangeSpec(decision.start, decision.end)
+                ),
+            ),
         )
 
     async def iter_chunks(self, result: PublicShareDownload) -> AsyncIterator[bytes]:
-        async for chunk in self.streamer.iter_chunks(self._as_target(result)):
+        async for chunk in self.streamer.iter_chunks(result.target):
             yield chunk
 
     async def release(self, result: PublicShareDownload) -> None:
-        await self.streamer.release(self._as_target(result))
-
-    @staticmethod
-    def _as_target(result: PublicShareDownload) -> DownloadTarget:
-        range_spec = (
-            None
-            if result.decision.status_code == 200
-            else RangeSpec(result.decision.start, result.decision.end)
-        )
-        return DownloadTarget(
-            content_id=result.content_id,
-            storage_path=result.storage_path,
-            entry_relative_path=result.entry_relative_path,
-            physical_path=result.physical_path,
-            display_name=result.display_name,
-            total_size=result.total_size,
-            range_spec=range_spec,
-        )
+        # 结果携带同一个 target：DownloadTarget.released 保证多次调用只释放一次。
+        await self.streamer.release(result.target)
 
     async def _active_share(self, code: str) -> ShareRecord:
         async with self.uow_factory() as uow:

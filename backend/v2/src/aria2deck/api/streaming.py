@@ -1,9 +1,10 @@
 """下载流响应的限流连接租约兜底释放。
 
 Starlette 的 StreamingResponse 只在流正常结束后执行 BackgroundTask；
-流中途异常（如读盘 OSError）会让异常先于后台任务抛出，连接槽从此泄漏。
+流中途异常（如读盘 OSError）或客户端断开都会让 BackgroundTask 不执行，
+连接槽与内容读租约从此泄漏（实测回归：内容永久 pending_delete）。
 这里把释放挂到 ASGI 响应调用的 finally 上：正常结束、中途异常、客户端
-断开全部覆盖。释放幂等，与后台任务的正常路径释放任意次序互不冲突。
+断开全部覆盖；释放幂等，重复调用由各自 lease 的标志挡下。
 """
 
 from __future__ import annotations

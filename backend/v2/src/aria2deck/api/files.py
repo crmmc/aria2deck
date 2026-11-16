@@ -1,18 +1,18 @@
 from __future__ import annotations
 
+from functools import partial
 from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, Path, Query
-from starlette.background import BackgroundTask
 
 from ..application.accounts.models import Principal
 from ..application.downloads.queries import DownloadQueryService
 from ..application.library.commands import LibraryCommandService
 from ..application.library.download import LibraryDownloadService
-from ..application.library.models import DownloadTarget, UserFileView
+from ..application.library.models import UserFileView
 from ..application.library.queries import LibraryQueryService
-from ..application.settings.download_limit import DownloadConnectionLease, DownloadConnectionLimiter
+from ..application.settings.download_limit import DownloadConnectionLimiter
 from ..application.settings.rate_limit import RateLimiter
 from ..domain.accounts import require_session
 from ..domain.content import ContentKind
@@ -208,21 +208,15 @@ async def download_file(
     else:
         headers["Content-Length"] = str(target.total_size)
         status_code = 200
-    # 后台任务覆盖流正常结束；流中途异常时由 ASGI finally 兜底释放（幂等）。
+    # 连接租约与内容读租约都挂进 releases=：ASGI finally 覆盖正常结束、
+    # 中途异常与客户端断开；Starlette 的 BackgroundTask 在断开时不会执行，
+    # 曾导致读租约只增不减、删除后的内容永久 pending_delete（实测回归）。
     return LeaseStreamingResponse(
         service.iter_chunks(target),
-        releases=(lease.release,),
+        releases=(lease.release, partial(service.release, target)),
         status_code=status_code,
         headers=headers,
-        background=BackgroundTask(_release_download, lease, service, target),
     )
-
-
-async def _release_download(
-    lease: DownloadConnectionLease, service: LibraryDownloadService, target: DownloadTarget
-) -> None:
-    await lease.release()
-    await service.release(target)
 
 
 @router.patch(

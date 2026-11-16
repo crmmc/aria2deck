@@ -572,6 +572,10 @@ async def test_iter_chunks_streams_exact_bytes_and_releases_on_completion(
     assert target.range_spec is None
     body = b"".join([chunk async for chunk in download.iter_chunks(target)])
     assert body == payload
+    # 新契约：iter_chunks 不释放租约（释放只走响应层 releases= 的 ASGI finally）。
+    assert target.released is False
+    assert leases.in_flight(target.content_id) == 1
+    await download.release(target)
     assert target.released is True
     assert leases.in_flight(target.content_id) == 0
 
@@ -581,16 +585,19 @@ async def test_iter_chunks_streams_exact_bytes_and_releases_on_completion(
     assert ranged.range_spec is not None
     window = b"".join([chunk async for chunk in download.iter_chunks(ranged)])
     assert window == payload[2:8]
+    await download.release(ranged)
 
     early = await download.open_download(user_id=user_id, file_id=file_id)
     stream = download.iter_chunks(early)
     async for _chunk in stream:
-        pass  # 消费一个块后提前断开。
-        break
-    await stream.aclose()  # 断连等价于关闭生成器：finally 必须释放租约。
+        break  # 消费一个块后提前断开。
+    await stream.aclose()  # 关闭生成器只关句柄；租约由调用方（响应层）释放。
+    assert early.released is False
+    assert leases.in_flight(early.content_id) == 1
+    await download.release(early)  # 幂等：不重复释放。
     assert early.released is True
     assert leases.in_flight(early.content_id) == 0
-    await download.release(early)  # 幂等：不重复释放。
+    await download.release(early)  # 二次调用不再减计数。
     async with SQLiteUnitOfWork(database) as uow:
         assert (await ContentRepository(uow.connection).get_object(early.content_id)).read_leases == 0
 
@@ -605,12 +612,17 @@ async def test_iter_chunks_releases_lease_when_read_fails(tmp_path: Path) -> Non
     with pytest.raises(OSError):
         async for _chunk in download.iter_chunks(target):
             pass
+    # 读取失败不释放租约：调用方（响应层 ASGI finally）负责释放。
+    assert target.released is False
+    assert leases.in_flight(target.content_id) == 1
+    await download.release(target)
     assert target.released is True
     assert leases.in_flight(target.content_id) == 0
 
 
-async def test_iter_chunks_releases_lease_when_open_fails(tmp_path: Path) -> None:
-    """物理文件缺失（ACTIVE 内容）：打开句柄失败也必须释放租约，否则删除被永久阻塞。"""
+async def test_iter_chunks_keeps_lease_when_open_fails(tmp_path: Path) -> None:
+    """物理文件缺失（ACTIVE 内容）：打开句柄失败后租约仍持有，必须由调用方释放——
+    生产路径由响应层 releases= 的 ASGI finally 统一释放（断开/异常/正常全覆盖）。"""
     database, clock = await _setup(tmp_path)
     user_id = await _create_user(database, "admin")
     content_id, file_id = await _seed_file(database, user_id, 1)  # 不写物理文件。
@@ -622,6 +634,9 @@ async def test_iter_chunks_releases_lease_when_open_fails(tmp_path: Path) -> Non
     with pytest.raises(OSError):
         async for _chunk in download.iter_chunks(target):
             pass
+    assert target.released is False
+    assert leases.in_flight(content_id) == 1
+    await download.release(target)
     assert target.released is True
     assert leases.in_flight(content_id) == 0
     async with SQLiteUnitOfWork(database) as uow:
@@ -911,7 +926,9 @@ async def test_iter_chunks_stops_at_physical_short_read(tmp_path: Path) -> None:
     assert target.range_spec is not None
     body = b"".join([chunk async for chunk in download.iter_chunks(target)])
     assert body == b"abcd"
-    assert target.released is True
+    assert target.released is False
+    assert leases.in_flight(target.content_id) == 1
+    await download.release(target)
     assert leases.in_flight(target.content_id) == 0
 
 

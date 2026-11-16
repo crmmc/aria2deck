@@ -407,6 +407,7 @@ async def test_download_decision_matrix_and_lease(tmp_path: Path) -> None:
 
     whole = await world.public.download(shared.code, token, None, "bytes=0-")
     assert (whole.decision.status_code, whole.decision.count_download) == (206, True)
+    await world.public.release(whole)
     partial = await world.public.download(shared.code, token, None, "bytes=2-4")
     assert (partial.decision.status_code, partial.decision.count_download) == (206, False)
     window = b"".join([chunk async for chunk in world.public.iter_chunks(partial)])

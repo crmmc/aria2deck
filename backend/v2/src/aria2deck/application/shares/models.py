@@ -6,6 +6,7 @@ from pathlib import Path
 from ...domain.content import ContentKind
 from ...domain.packs import PreparedOutput
 from ...domain.shares import DownloadDecision, Share, ShareStatus
+from ..library.models import DownloadTarget
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +98,11 @@ class ShareEntryBreadcrumb:
 
 @dataclass(frozen=True, slots=True)
 class PublicShareDownload:
-    """Resolved public download: decision plus a leased target ready for streaming."""
+    """Resolved public download: decision plus a leased target ready for streaming.
+
+    target 在 download() 解析时构建一次并由结果携带：响应层与调用方
+    多次 release 同一结果时，DownloadTarget.released 标志保证恰好一次。
+    """
 
     decision: DownloadDecision
     content_id: int
@@ -106,3 +111,4 @@ class PublicShareDownload:
     physical_path: Path
     display_name: str
     total_size: int
+    target: DownloadTarget

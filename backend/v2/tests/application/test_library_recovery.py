@@ -297,6 +297,10 @@ async def test_concurrent_download_survives_reference_deletion(tmp_path: Path) -
     async for chunk in download.iter_chunks(target):
         received.extend(chunk)
     assert bytes(received) == payload, "下载必须完整读完且不抛错"
+    # 新契约：iter_chunks 不释放租约（响应层 releases= 负责）；调用方显式释放。
+    assert target.released is False
+    assert leases.in_flight(content_id) == 1
+    await download.release(target)
     assert target.released is True
     assert leases.in_flight(content_id) == 0
 

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from functools import partial
 from typing import Annotated
 from urllib.parse import parse_qs, quote
 
 from fastapi import APIRouter, Depends, Header, Path, Query, Request
-from starlette.background import BackgroundTask
 
 from ..application.settings.download_limit import DownloadConnectionLease, DownloadConnectionLimiter
 from ..application.settings.rate_limit import RateLimiter
@@ -21,7 +21,7 @@ from .contracts import (
 )
 from .dependencies import client_ip, download_connections, public_shares, rate_limiter
 from .errors import error_responses
-from .streaming import LeaseStreamingResponse
+from .streaming import LeaseStreamingResponse, Releaser
 
 router = APIRouter(prefix="/api/s", tags=["public-shares"])
 
@@ -78,26 +78,19 @@ def _streaming(
         )
     else:
         headers["Content-Length"] = str(result.total_size)
-    background: BackgroundTask
-    if connection is None:
-        background = BackgroundTask(service.release, result)
-    else:
-        background = BackgroundTask(_release_share_download, connection, service, result)
-    # 后台任务覆盖流正常结束；流中途异常时由 ASGI finally 兜底释放（幂等）。
+    # 连接租约与内容读租约都挂进 releases=：ASGI finally 覆盖正常结束、
+    # 中途异常与客户端断开；BackgroundTask 在断开时不会执行，曾导致读租约泄漏。
+    releases: tuple[Releaser, ...] = (
+        partial(service.release, result),
+    )
+    if connection is not None:
+        releases = (connection.release, partial(service.release, result))
     return LeaseStreamingResponse(
         service.iter_chunks(result),
-        releases=() if connection is None else (connection.release,),
+        releases=releases,
         status_code=result.decision.status_code,
         headers=headers,
-        background=background,
     )
-
-
-async def _release_share_download(
-    connection: DownloadConnectionLease, service: PublicShareService, result: PublicShareDownload
-) -> None:
-    await connection.release()
-    await service.release(result)
 
 
 @router.get(
