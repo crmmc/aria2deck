@@ -14,7 +14,11 @@ from aria2deck.application.downloads.models import (
 from aria2deck.application.downloads.projection import TaskProjector
 from aria2deck.application.downloads.queries import DownloadQueryService
 from aria2deck.bootstrap import create_app
-from aria2deck.domain.downloads import AttemptStatus, SubscriptionStatus
+from aria2deck.domain.downloads import (
+    AttemptStatus,
+    SubscriptionStatus,
+    effective_task_status,
+)
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.quota import (
     PhysicalDownload,
@@ -51,6 +55,7 @@ class ReadRepository:
     def __init__(self, records: list[DownloadRecord]) -> None:
         self.records = records
         self.sort_calls: list[tuple[str, str]] = []
+        self.page_calls: list[tuple[tuple[str, ...] | None, int, int]] = []
 
     async def list_tasks(
         self, *, user_id: int, sort: str = "updated_at", order: str = "desc"
@@ -58,6 +63,49 @@ class ReadRepository:
         assert user_id == 7
         self.sort_calls.append((sort, order))
         return self.records
+
+    async def page_tasks(
+        self,
+        *,
+        user_id: int,
+        statuses: tuple[SubscriptionStatus, ...] | None,
+        sort: str,
+        order: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[DownloadRecord], int]:
+        """假件内复刻仓储契约：按复合有效态过滤 + 排序 + 分页，语义同 SQL 版。"""
+        assert user_id == 7
+        self.sort_calls.append((sort, order))
+        names = {
+            "created_at": lambda r: r.created_at_ms,
+            "updated_at": lambda r: r.updated_at_ms,
+            "name": lambda r: r.name,
+            "size": lambda r: r.total_bytes or 0,
+        }
+        rows = sorted(
+            self.records,
+            key=lambda r: (names[sort](r), r.id),
+            reverse=order == "desc",
+        )
+        if statuses is not None:
+            wanted = set(statuses)
+            rows = [
+                r
+                for r in rows
+                if effective_task_status(r.subscription_status, r.attempt_status) in wanted
+            ]
+        start = (page - 1) * page_size
+        self.page_calls.append(
+            (
+                tuple(s.value for s in statuses) if statuses is not None else None,
+                sort,
+                order,
+                page,
+                page_size,
+            )
+        )
+        return rows[start : start + page_size], len(rows)
 
     async def get_task(self, *, user_id: int, task_id: int) -> DownloadRecord:
         assert user_id == 7
@@ -154,12 +202,13 @@ async def test_query_service_owns_filter_search_and_page_boundaries() -> None:
         user_id=7, status=None, search="", page=1, page_size=2
     )
     assert isinstance(first, TaskPage)
-    assert [task.id for task in first.items] == [1, 2]
+    # 默认排序 created_at desc：id 大者在前（生产语义，假件按真实契约排序）。
+    assert [task.id for task in first.items] == [3, 2]
     assert first.total == 3
     second = await queries.list_tasks(
         user_id=7, status=None, search="", page=2, page_size=2
     )
-    assert [task.id for task in second.items] == [3]
+    assert [task.id for task in second.items] == [1]
     paused = await queries.list_tasks(
         user_id=7, status=SubscriptionStatus.PAUSED, search="", page=1, page_size=20
     )
@@ -172,6 +221,19 @@ async def test_query_service_owns_filter_search_and_page_boundaries() -> None:
         user_id=7, status=None, search="archive", page=1, page_size=20
     )
     assert [task.id for task in by_uri.items] == [2]
+    # 搜索 + 状态组合：两路筛选都应用（评审指出的未覆盖行）。
+    searched_and_filtered = await queries.list_tasks(
+        user_id=7,
+        status=(SubscriptionStatus.PAUSED, SubscriptionStatus.CANCELLED),
+        search="alpha",
+        page=1,
+        page_size=20,
+    )
+    assert searched_and_filtered.items == []
+    searched_and_filtered_uri = await queries.list_tasks(
+        user_id=7, status=SubscriptionStatus.PAUSED, search="archive", page=1, page_size=20
+    )
+    assert [task.id for task in searched_and_filtered_uri.items] == [2]
     missing = await queries.list_tasks(
         user_id=7, status=None, search="missing", page=1, page_size=20
     )
@@ -199,6 +261,44 @@ async def test_query_service_passes_sort_order_and_defaults_to_repository() -> N
     await queries.list_tasks(user_id=7, status=None, search="", page=1, page_size=20)
 
     assert repository.sort_calls == [("name", "asc"), ("created_at", "desc")]
+    # 下推委托契约：状态展开、sort/order 透传、页参数原样转发（评审要求的真断言）。
+    assert repository.page_calls == [
+        (None, "name", "asc", 1, 20),
+        (None, "created_at", "desc", 1, 20),
+    ]
+
+
+async def test_query_service_expands_status_collection_for_page_tasks() -> None:
+    repository = ReadRepository(
+        [
+            record(1, "Alpha", SubscriptionStatus.ACTIVE),
+            record(3, "Gamma", SubscriptionStatus.CANCELLED),
+        ]
+    )
+    queries = DownloadQueryService(
+        uow_factory=FakeUoW,
+        repository_factory=lambda _uow: repository,
+        content_repository_factory=lambda uow: ContentRepository(uow.connection),
+        pack_repository_factory=lambda _uow: EmptyPackRepository(),
+        account_repository_factory=lambda _uow: QuotaRepository(),
+        projector=TaskProjector(
+            observations=InMemoryDownloadObservations(), clock_ms=lambda: 100_000
+        ),
+        machine_space=MachineSpace(),
+        settings=lambda: SystemSettings(min_free_disk=0),
+    )
+
+    page = await queries.list_tasks(
+        user_id=7,
+        status=(SubscriptionStatus.ACTIVE, SubscriptionStatus.CANCELLED),
+        search="",
+        page=1,
+        page_size=20,
+    )
+
+    assert repository.page_calls[0][0] == ("active", "cancelled")
+    # 默认 created_at desc：id 大者在前。
+    assert [task.id for task in page.items] == [3, 1]
 
 
 async def test_query_service_detail_and_stats_use_the_same_projection() -> None:

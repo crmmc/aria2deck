@@ -9,7 +9,7 @@ from aria2deck.application.downloads.history import HistoryService
 from aria2deck.application.downloads.models import DownloadRecord, HistoryExpiration
 from aria2deck.application.downloads.projection import TaskProjector
 from aria2deck.domain.accounts import CredentialKind, User
-from aria2deck.domain.downloads import SubscriptionStatus
+from aria2deck.domain.downloads import SubscriptionStatus, effective_task_status
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.infrastructure.observations import InMemoryDownloadObservations
 from tests.application.test_download_queries import record
@@ -34,6 +34,29 @@ class Repository:
 
     async def list_tasks(self, *, user_id: int) -> list[DownloadRecord]:
         return self.records
+
+    async def page_tasks(
+        self,
+        *,
+        user_id: int,
+        statuses: tuple[SubscriptionStatus, ...] | None,
+        sort: str,
+        order: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[DownloadRecord], int]:
+        """假件内复刻仓储契约：复合有效态过滤 + updated_at 排序 + 分页。"""
+        assert sort == "updated_at" and order == "desc"
+        rows = sorted(self.records, key=lambda r: (r.updated_at_ms, r.id), reverse=True)
+        if statuses is not None:
+            wanted = set(statuses)
+            rows = [
+                r
+                for r in rows
+                if effective_task_status(r.subscription_status, r.attempt_status) in wanted
+            ]
+        start = (page - 1) * page_size
+        return rows[start : start + page_size], len(rows)
 
     async def delete_history(self, *, user_id: int, task_id: int, now_ms: int) -> bool:
         for item in self.records:
@@ -76,9 +99,10 @@ async def test_history_query_filters_searches_and_pages_terminal_records() -> No
     ])
     page = await service.list_history(user_id=1, status=None, search="", page=1, page_size=1)
     assert page.total == 2
-    assert [item.id for item in page.items] == [1]
+    # 历史默认 updated_at desc：record(2) 的 updated_at_ms 更靠后。
+    assert [item.id for item in page.items] == [2]
     second = await service.list_history(user_id=1, status=None, search="", page=2, page_size=1)
-    assert [item.id for item in second.items] == [2]
+    assert [item.id for item in second.items] == [1]
     failed = await service.list_history(user_id=1, status=SubscriptionStatus.FAILED, search="", page=1, page_size=20)
     assert [item.id for item in failed.items] == [2]
     by_uri = await service.list_history(user_id=1, status=None, search="archive", page=1, page_size=20)

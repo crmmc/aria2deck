@@ -703,3 +703,146 @@ async def test_finish_terminal_cleanup_is_idempotent_on_repeat_call(database: SQ
         content = await ContentRepository(uow.connection).get_object(content_id)
         assert content.deletion_state is ContentDeletionState.PENDING_DELETE
         assert content.delete_lease_owner == DELETE_LEASE_OWNER
+
+
+async def _seed_page_task(
+    database: SQLiteDatabase,
+    user_id: int,
+    index: int,
+    *,
+    subscription_status: SubscriptionStatus,
+    attempt_status: AttemptStatus,
+    name: str | None = None,
+    uri: str | None = None,
+) -> int:
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = DownloadRepository(uow.connection)
+        key = f"http:page:{index}"
+        source_id = await repo.create_source(
+            kind="http", resource_key=key, payload_json="{}", options_json="{}",
+            selected_file_indexes_json=None,
+            display_name=name or f"task-{index:02d}", display_uri=uri, now_ms=index,
+        )
+        attempt_id = await repo.create_attempt(
+            source_id=source_id, resource_key=key, gid=f"{index:016x}", now_ms=index,
+        )
+        await uow.connection.execute(
+            update(download_attempts).where(download_attempts.c.id == attempt_id).values(
+                status=attempt_status.value
+            )
+        )
+        return await repo.create_subscription(
+            attempt_id=attempt_id, user_id=user_id, reserved_bytes=0,
+            display_name=name or f"task-{index:02d}", display_uri=uri, now_ms=index,
+            status=subscription_status,
+        )
+
+
+async def test_page_tasks_matches_effective_status_semantics(database: SQLiteDatabase) -> None:
+    """SQL CASE 与 effective_task_status 纯函数逐情形一致（含订阅终态优先）。"""
+    user_id = await create_user(database)
+    expired = await _seed_page_task(
+        database, user_id, 1,
+        subscription_status=SubscriptionStatus.EXPIRED, attempt_status=AttemptStatus.COMPLETED,
+    )
+    attempt_failed = await _seed_page_task(
+        database, user_id, 2,
+        subscription_status=SubscriptionStatus.ACTIVE, attempt_status=AttemptStatus.FAILED,
+    )
+    completed = await _seed_page_task(
+        database, user_id, 3,
+        subscription_status=SubscriptionStatus.COMPLETED, attempt_status=AttemptStatus.ACTIVE,
+    )
+    live = await _seed_page_task(
+        database, user_id, 4,
+        subscription_status=SubscriptionStatus.ACTIVE, attempt_status=AttemptStatus.ACTIVE,
+    )
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = DownloadRepository(uow.connection)
+        failed_page, failed_total = await repo.page_tasks(
+            user_id=user_id, statuses=(SubscriptionStatus.FAILED,),
+            sort="created_at", order="desc", page=1, page_size=10,
+        )
+        assert failed_total == 1
+        assert [r.id for r in failed_page] == [attempt_failed]
+        expired_page, expired_total = await repo.page_tasks(
+            user_id=user_id, statuses=(SubscriptionStatus.EXPIRED,),
+            sort="created_at", order="desc", page=1, page_size=10,
+        )
+        assert expired_total == 1
+        assert [r.id for r in expired_page] == [expired]
+        multi, multi_total = await repo.page_tasks(
+            user_id=user_id,
+            statuses=(SubscriptionStatus.COMPLETED, SubscriptionStatus.FAILED, SubscriptionStatus.EXPIRED),
+            sort="created_at", order="desc", page=1, page_size=10,
+        )
+        assert multi_total == 3
+        assert [r.id for r in multi] == [completed, attempt_failed, expired]
+        everything, everything_total = await repo.page_tasks(
+            user_id=user_id, statuses=None,
+            sort="created_at", order="asc", page=1, page_size=10,
+        )
+        assert everything_total == 4
+        assert [r.id for r in everything] == [expired, attempt_failed, completed, live]
+
+
+async def test_page_tasks_sort_ties_and_page_boundaries(database: SQLiteDatabase) -> None:
+    user_id = await create_user(database)
+    for index in range(1, 6):
+        await _seed_page_task(
+            database, user_id, index,
+            subscription_status=SubscriptionStatus.ACTIVE, attempt_status=AttemptStatus.ACTIVE,
+            name="same-name",
+        )
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = DownloadRepository(uow.connection)
+        first, total = await repo.page_tasks(
+            user_id=user_id, statuses=None,
+            sort="created_at", order="desc", page=1, page_size=2,
+        )
+        assert total == 5
+        assert [r.id for r in first] == [5, 4]
+        second, _ = await repo.page_tasks(
+            user_id=user_id, statuses=None,
+            sort="created_at", order="desc", page=2, page_size=2,
+        )
+        assert [r.id for r in second] == [3, 2]
+        last, _ = await repo.page_tasks(
+            user_id=user_id, statuses=None,
+            sort="created_at", order="desc", page=3, page_size=2,
+        )
+        assert [r.id for r in last] == [1]
+        beyond, beyond_total = await repo.page_tasks(
+            user_id=user_id, statuses=None,
+            sort="created_at", order="desc", page=4, page_size=2,
+        )
+        assert beyond == [] and beyond_total == 5
+        # 同名排序 ties 以 id 同向收尾；asc 时整体升序。
+        tied, _ = await repo.page_tasks(
+            user_id=user_id, statuses=None,
+            sort="name", order="asc", page=1, page_size=10,
+        )
+        assert [r.id for r in tied] == [1, 2, 3, 4, 5]
+        tied_desc, _ = await repo.page_tasks(
+            user_id=user_id, statuses=None,
+            sort="name", order="desc", page=1, page_size=10,
+        )
+        assert [r.id for r in tied_desc] == [5, 4, 3, 2, 1]
+
+
+async def test_page_tasks_huge_page_returns_empty_with_total(database: SQLiteDatabase) -> None:
+    """回归：超大页码的 OFFSET 曾超 SQLite int64 直接 500；钳到 total 后返回空页。"""
+    user_id = await create_user(database)
+    for index in range(1, 4):
+        await _seed_page_task(
+            database, user_id, index,
+            subscription_status=SubscriptionStatus.ACTIVE, attempt_status=AttemptStatus.ACTIVE,
+        )
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = DownloadRepository(uow.connection)
+        page, total = await repo.page_tasks(
+            user_id=user_id, statuses=None,
+            sort="created_at", order="desc", page=2**62, page_size=100,
+        )
+        assert page == []
+        assert total == 3

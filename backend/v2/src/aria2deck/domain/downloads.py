@@ -180,7 +180,7 @@ TERMINAL_SUBSCRIPTION_STATUSES = frozenset(
     }
 )
 
-_ATTEMPT_TERMINAL_TO_SUBSCRIPTION = {
+ATTEMPT_TERMINAL_TO_SUBSCRIPTION = {
     AttemptStatus.COMPLETED: SubscriptionStatus.COMPLETED,
     AttemptStatus.FAILED: SubscriptionStatus.FAILED,
     AttemptStatus.CANCELLED: SubscriptionStatus.CANCELLED,
@@ -203,7 +203,7 @@ def effective_task_status(
 ) -> SubscriptionStatus:
     if subscription in TERMINAL_SUBSCRIPTION_STATUSES:
         return subscription
-    return _ATTEMPT_TERMINAL_TO_SUBSCRIPTION.get(attempt, subscription)
+    return ATTEMPT_TERMINAL_TO_SUBSCRIPTION.get(attempt, subscription)
 
 
 def task_status_label(

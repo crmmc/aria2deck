@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.engine import Row, RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -20,6 +20,7 @@ from ....application.downloads.models import (
 from ....domain.content import ContentDeletionState
 from ....domain.downloads import (
     ADMISSION_PAUSED,
+    ATTEMPT_TERMINAL_TO_SUBSCRIPTION,
     EXTERNAL_PAUSED,
     LIVE_ATTEMPT_STATUSES,
     LIVE_SUBSCRIPTION_STATUSES,
@@ -54,6 +55,22 @@ _TASK_SORT_COLUMNS: dict[str, ColumnElement[Any]] = {
     "name": task_subscriptions.c.display_name,
     "size": download_attempts.c.total_length,
 }
+
+# effective_task_status 的 SQL 同构（domain/downloads.py 是唯一规则所有者，
+# 这里只把同一映射翻译成 CASE；终态订阅优先，其次 attempt 终态映射，否则订阅态）。
+_EFFECTIVE_TASK_STATUS = case(
+    (
+        task_subscriptions.c.status.in_(
+            [status.value for status in TERMINAL_SUBSCRIPTION_STATUSES]
+        ),
+        task_subscriptions.c.status,
+    ),
+    *[
+        (download_attempts.c.status == attempt.value, subscription.value)
+        for attempt, subscription in ATTEMPT_TERMINAL_TO_SUBSCRIPTION.items()
+    ],
+    else_=task_subscriptions.c.status,
+)
 
 
 class DownloadRepository:
@@ -362,6 +379,51 @@ class DownloadRepository:
             )
         )
         return [self._task(row) for row in result.mappings().all()]
+
+    async def page_tasks(
+        self,
+        *,
+        user_id: int,
+        statuses: tuple[SubscriptionStatus, ...] | None,
+        sort: str,
+        order: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[DownloadRecord], int]:
+        """无搜索条件的单页查询：复合状态筛选、排序、分页与 COUNT 全部下推到 SQL。
+
+        语义与全量投影后过滤一致（_EFFECTIVE_TASK_STATUS 即 effective_task_status
+        的同构 CASE）。搜索不走这里：Unicode casefold 无法下推到 SQLite LIKE，
+        搜索路径保持服务层精确语义。
+        """
+        column = _TASK_SORT_COLUMNS[sort]
+        ascending = order == "asc"
+        tie = task_subscriptions.c.id.asc() if ascending else task_subscriptions.c.id.desc()
+        where = [task_subscriptions.c.user_id == user_id]
+        if statuses is not None:
+            where.append(
+                _EFFECTIVE_TASK_STATUS.in_([status.value for status in statuses])
+            )
+        join = task_subscriptions.join(
+            download_attempts,
+            download_attempts.c.id == task_subscriptions.c.attempt_id,
+        )
+        total = int(
+            (
+                await self.connection.execute(
+                    select(func.count()).select_from(join).where(*where)
+                )
+            ).scalar_one()
+        )
+        start = (page - 1) * page_size
+        result = await self.connection.execute(
+            self._task_query()
+            .where(*where)
+            .order_by(column.asc() if ascending else column.desc(), tie)
+            .limit(page_size)
+            .offset(min(start, total))
+        )
+        return [self._task(row) for row in result.mappings().all()], total
 
     async def get_task(self, *, user_id: int, task_id: int) -> DownloadRecord:
         row = (

@@ -23,6 +23,17 @@ UowFactory = Callable[[], AbstractAsyncContextManager[UnitOfWork]]
 class HistoryRepository(Protocol):
     async def list_tasks(self, *, user_id: int) -> list[DownloadRecord]: ...
 
+    async def page_tasks(
+        self,
+        *,
+        user_id: int,
+        statuses: tuple[SubscriptionStatus, ...] | None,
+        sort: str,
+        order: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[DownloadRecord], int]: ...
+
     async def delete_history(self, *, user_id: int, task_id: int, now_ms: int) -> bool: ...
 
     async def clear_history(self, *, user_id: int, now_ms: int) -> int: ...
@@ -60,6 +71,28 @@ class HistoryService:
     ) -> TaskPage:
         if status is not None and status not in TERMINAL_SUBSCRIPTION_STATUSES:
             raise DomainError(ErrorCode.INVALID_INPUT, "历史状态筛选无效")
+        statuses = (
+            (status,)
+            if status is not None
+            else tuple(TERMINAL_SUBSCRIPTION_STATUSES)
+        )
+        if not search.strip().casefold():
+            async with self.uow_factory() as uow:
+                records, total = await self.repository_factory(uow).page_tasks(
+                    user_id=user_id,
+                    statuses=statuses,
+                    sort="updated_at",
+                    order="desc",
+                    page=page,
+                    page_size=page_size,
+                )
+            return TaskPage(
+                [self.projector.project(record) for record in records],
+                total,
+                page,
+                page_size,
+            )
+        # 搜索保持服务层精确语义（Unicode casefold 无法下推到 SQLite LIKE）。
         async with self.uow_factory() as uow:
             records = await self.repository_factory(uow).list_tasks(user_id=user_id)
         tasks = [
@@ -71,13 +104,12 @@ class HistoryService:
         if status is not None:
             tasks = [task for task in tasks if task.status is status]
         keyword = search.strip().casefold()
-        if keyword:
-            tasks = [
-                task
-                for task in tasks
-                if keyword in task.name.casefold()
-                or (task.display_uri is not None and keyword in task.display_uri.casefold())
-            ]
+        tasks = [
+            task
+            for task in tasks
+            if keyword in task.name.casefold()
+            or (task.display_uri is not None and keyword in task.display_uri.casefold())
+        ]
         start = (page - 1) * page_size
         return TaskPage(tasks[start : start + page_size], len(tasks), page, page_size)
 

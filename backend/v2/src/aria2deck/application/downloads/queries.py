@@ -30,6 +30,17 @@ class DownloadReadRepository(Protocol):
         order: str = "desc",
     ) -> list[DownloadRecord]: ...
 
+    async def page_tasks(
+        self,
+        *,
+        user_id: int,
+        statuses: tuple[SubscriptionStatus, ...] | None,
+        sort: str,
+        order: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[DownloadRecord], int]: ...
+
     async def get_task(self, *, user_id: int, task_id: int) -> DownloadRecord: ...
 
     async def list_active_physical(self) -> list[PhysicalDownload]: ...
@@ -89,31 +100,47 @@ class DownloadQueryService:
         sort: str = "created_at",
         order: str = "desc",
     ) -> TaskPage:
-        async with self.uow_factory() as uow:
-            records = await self.repository_factory(uow).list_tasks(
-                user_id=user_id, sort=sort, order=order
-            )
-        tasks = [self.projector.project(record) for record in records]
-        statuses: Collection[SubscriptionStatus] | None
+        statuses: tuple[SubscriptionStatus, ...] | None
         if status is None:
             statuses = None
         elif isinstance(status, SubscriptionStatus):
             statuses = (status,)
         else:
-            statuses = status
+            statuses = tuple(status)
+        if not search.strip().casefold():
+            async with self.uow_factory() as uow:
+                records, total = await self.repository_factory(uow).page_tasks(
+                    user_id=user_id,
+                    statuses=statuses,
+                    sort=sort,
+                    order=order,
+                    page=page,
+                    page_size=page_size,
+                )
+            return TaskPage(
+                items=[self.projector.project(record) for record in records],
+                total=total,
+                page=page,
+                page_size=page_size,
+            )
+        # 搜索保持服务层精确语义（Unicode casefold 无法下推到 SQLite LIKE）。
+        async with self.uow_factory() as uow:
+            records = await self.repository_factory(uow).list_tasks(
+                user_id=user_id, sort=sort, order=order
+            )
+        tasks = [self.projector.project(record) for record in records]
         if statuses is not None:
             tasks = [task for task in tasks if task.status in statuses]
-        normalized_search = search.strip().casefold()
-        if normalized_search:
-            tasks = [
-                task
-                for task in tasks
-                if normalized_search in task.name.casefold()
-                or (
-                    task.display_uri is not None
-                    and normalized_search in task.display_uri.casefold()
-                )
-            ]
+        keyword = search.strip().casefold()
+        tasks = [
+            task
+            for task in tasks
+            if keyword in task.name.casefold()
+            or (
+                task.display_uri is not None
+                and keyword in task.display_uri.casefold()
+            )
+        ]
         start = (page - 1) * page_size
         return TaskPage(
             items=tasks[start : start + page_size],
