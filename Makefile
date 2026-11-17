@@ -1,6 +1,6 @@
 .PHONY: install build run dev-front dev-back dev-aria2 clean docker-build docker-up docker-down docker-logs \
         lint lint-back lint-front typecheck typecheck-back typecheck-front \
-        test test-back test-front dup security check verify-v2-standalone
+        test test-back test-front dup security mutation check verify-v2-standalone
 
 # Variables
 PYTHON = python3
@@ -67,7 +67,7 @@ dev-aria2:
 
 lint-back:
 	@echo "Linting backend (ruff)..."
-	cd $(BACKEND_DIR) && uv run ruff check src tests
+	cd $(BACKEND_DIR) && uv run ruff check src tests tools
 
 lint-front:
 	@echo "Linting frontend (eslint)..."
@@ -104,6 +104,11 @@ dup:
 # 深度安全扫描（首次运行需联网拉取规则集）
 security:
 	uvx semgrep scan --config auto --error $(BACKEND_DIR)/src $(FRONTEND_DIR)/src
+
+# 变异测试：验证测试自身能否发现行为缺陷（人工触发，全量约 15-20 分钟）
+# 需要 src/ 无未提交改动；不进入 check 与 CI
+mutation:
+	cd $(BACKEND_DIR) && uv run python -m tools.mutation.runner
 
 # 在不含 V1 的临时目录重新安装、测试、构建并启动 V2
 verify-v2-standalone:

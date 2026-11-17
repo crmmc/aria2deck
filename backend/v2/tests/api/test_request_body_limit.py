@@ -1,4 +1,16 @@
-"""A5：全局请求体上限中间件契约（16 MiB，413 中文错误，双保险）。"""
+"""A5：全局请求体上限中间件契约（16 MiB，413 中文错误，双保险）。
+
+覆盖率豁免：
+
+- 分支位置：`src/aria2deck/api/request_body_limit.py:84` 的 `if response_started: raise`。
+- 不可稳定触发的原因：现有所有端点都在读完请求体之后才开始写响应，
+  超限异常必然先于 `http.response.start` 抛出，因此 `response_started` 恒为 False。
+  该分支只防御未来「边流式读体边写响应」的端点（那种情况下已无法补发 413）。
+- 相邻可观测边界的替代测试：本文件的
+  `test_chunked_body_without_content_length_is_rejected_after_read`（分块传输无 content-length，
+  读完才发现超限 → 413）与 `test_oversized_body_with_content_length_is_rejected_413`
+  （预检拦截 → 413）共同锁定未开始响应时的超限行为。
+"""
 
 from __future__ import annotations
 

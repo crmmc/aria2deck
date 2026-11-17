@@ -38,7 +38,7 @@ jobs:
         run: uv sync
 
       - name: Ruff
-        run: cd backend/v2 && uv run ruff check src tests
+        run: cd backend/v2 && uv run ruff check src tests tools
 
       - name: Mypy
         run: cd backend/v2 && uv run mypy src

@@ -224,6 +224,16 @@ def test_root_files_list_contract(
     assert beyond.json()["items"] == []
     assert beyond.json()["total"] == 2
 
+    # 分页参数上下界：与 /storage/files（le=100）、/files/{id}/entries（le=200）同一约定。
+    for params in (
+        {"page_size": 101},
+        {"page_size": 0},
+        {"page": 0},
+    ):
+        invalid = client.get("/api/v2/files", params=params)
+        assert invalid.status_code == 422, params
+        assert invalid.json()["error"]["code"] == "invalid_input", params
+
     anonymous = TestClient(app).get("/api/v2/files")
     assert anonymous.status_code == 401
 

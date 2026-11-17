@@ -41,6 +41,9 @@ timeout = 60
 [tool.coverage.run]
 branch = true
 source = ["aria2deck"]
+# TestClient 在 anyio portal 线程里执行端点，SQLAlchemy async 用 greenlet 切栈，
+# 两条路径都不在主线程；不声明并发会让这两处执行既漏记又错记。
+concurrency = ["thread", "greenlet"]
 
 [tool.coverage.report]
 fail_under = 95
