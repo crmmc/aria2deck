@@ -141,6 +141,18 @@ MUTANTS: tuple[Mutant, ...] = (
         ),
     ),
     Mutant(
+        name="端点漏挂认证依赖",
+        path="src/aria2deck/api/files.py",
+        old="    principal: Principal = Depends(required_principal),\n    service: LibraryQueryService = Depends(library_queries),",
+        new="    principal: Principal | None = None,\n    service: LibraryQueryService = Depends(library_queries),",
+        tests=("tests/api/test_endpoint_auth_matrix.py",),
+        rationale=(
+            "认证是逐端点手写的，漏挂不会有任何现有测试变红（这正是冒烟门禁存在的理由）。"
+            "变异后静态判定与动态未认证请求都必须变红，否则门禁形同虚设。"
+        ),
+        line=101,
+    ),
+    Mutant(
         name="分页total多算一条",
         path="src/aria2deck/infrastructure/sqlite/repositories/downloads.py",
         old="        return [self._task(row) for row in result.mappings().all()], total",

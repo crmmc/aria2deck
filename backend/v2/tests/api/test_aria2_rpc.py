@@ -1153,3 +1153,201 @@ def test_adduri_allow_rename_policy_string_booleans(rpc_client: TestClient, sett
             await database.close()
 
     assert asyncio.run(allocated_name()) == "occupied (2).bin"
+
+
+def test_envelope_rejects_non_object_payload(rpc_client: TestClient) -> None:
+    """非对象信封按 JSON-RPC 规范回 -32600，传输层仍是 200（不改成 HTTP 4xx）。"""
+    for payload in ([], "not-an-object", 42):
+        response = rpc_client.post("/aria2/jsonrpc", json=payload)
+        assert response.status_code == 200, payload
+        assert response.json()["error"]["code"] == -32600, payload
+    # 空数组是「批量请求为空」，语义区别于非法信封。
+    empty = rpc_client.post("/aria2/jsonrpc", json=[])
+    assert empty.json()["error"]["code"] == -32600
+
+
+def test_envelope_rejects_non_container_params(rpc_client: TestClient) -> None:
+    """params 只接受 list 或 dict；标量必须被拒而不是静默丢弃。"""
+    for invalid in ("string", 123, True):
+        response = rpc_client.post(
+            "/aria2/jsonrpc",
+            json={"jsonrpc": "2.0", "id": 1, "method": "aria2.getVersion", "params": invalid},
+        )
+        assert response.status_code == 200, invalid
+        assert response.json()["error"]["code"] == -32600, invalid
+
+
+def test_params_dict_form_is_accepted(rpc_client: TestClient) -> None:
+    """params 允许写成对象形式（JSON-RPC 规范允许），会被包成单元素列表。"""
+    token = f"token:{_secret()}"
+    response = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "aria2.changeGlobalOption",
+            "params": {token: ""},
+        },
+    )
+    # 具体业务结果不重要，关键是不能因信封形态报 -32600。
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] != -32600
+
+
+def test_multicall_rejects_invalid_and_empty_param_shapes(rpc_client: TestClient) -> None:
+    """system.multicall 的第一参数必须是子调用数组，且不能为空。"""
+    token = f"token:{_secret()}"
+    for params, expected in (
+        ([token, "not-a-list"], "multicall 参数无效"),
+        ([token, []], "multicall 不能为空"),
+    ):
+        response = rpc_client.post(
+            "/aria2/jsonrpc",
+            json={"jsonrpc": "2.0", "id": 1, "method": "system.multicall", "params": params},
+        )
+        assert response.status_code == 200
+        error = response.json()["error"]
+        assert error["code"] == -32602, params
+        assert error["message"] == expected, params
+
+
+def test_multicall_child_without_method_name_reports_fault(rpc_client: TestClient) -> None:
+    """子调用缺少合法 methodName 时返回该子项 fault，不影响其它子调用。"""
+    token = f"token:{_secret()}"
+    response = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "system.multicall",
+            "params": [
+                token,
+                [
+                    {"params": []},
+                    {"methodName": 123},
+                    {"methodName": "aria2.getVersion", "params": []},
+                ],
+            ],
+        },
+    )
+    assert response.status_code == 200
+    results = response.json()["result"]
+    assert results[0] == {"faultCode": -32602, "faultString": "子调用信封无效"}
+    assert results[1] == {"faultCode": -32602, "faultString": "子调用信封无效"}
+    # 第三个子调用正常执行，说明单个坏信封不会带崩整批。
+    assert isinstance(results[2], list)
+
+
+def test_multicall_child_domain_error_maps_to_fault_code_one(rpc_client: TestClient) -> None:
+    """子调用抛 DomainError 时映射为 faultCode=1，且保留中文消息。"""
+    token = f"token:{_secret()}"
+    response = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "system.multicall",
+            "params": [
+                token,
+                [{"methodName": "aria2.pause", "params": ["nonexistent-gid"]}],
+            ],
+        },
+    )
+    assert response.status_code == 200
+    fault = response.json()["result"][0]
+    assert fault["faultCode"] == 1
+    assert fault["faultString"]
+
+
+def test_multicall_child_unexpected_exception_is_masked(
+    rpc_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """子调用抛非预期异常时不得泄漏内部细节，统一 -32603。"""
+
+    async def boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("内部实现细节不应外泄")
+
+    monkeypatch.setattr(rpc_client.app.state.aria2_rpc_service, "dispatch", boom)
+    token = f"token:{_secret()}"
+    response = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "system.multicall",
+            "params": [token, [{"methodName": "aria2.getVersion", "params": []}]],
+        },
+    )
+    assert response.status_code == 200
+    fault = response.json()["result"][0]
+    assert fault == {"faultCode": -32603, "faultString": "服务器内部错误"}
+    assert "内部实现细节" not in response.text
+
+
+def test_params_list_normalizes_all_container_shapes() -> None:
+    """`_params_list` 是内部归一化函数：list 原样、dict 包成单元素、其它给空列表。
+
+    这三条分支在 HTTP 层被 `_valid_envelope` 提前拦住，只能直接测函数。
+    它们是「信封合法但 params 形态多样」时的统一入口，回归价值在于保证
+    下游 dispatch 永远拿到 list。
+    """
+    from aria2deck.api.aria2_rpc import _params_list
+
+    assert _params_list([1, 2]) == [1, 2]
+    assert _params_list({"a": 1}) == [{"a": 1}]
+    assert _params_list("scalar") == []
+    assert _params_list(None) == []
+
+
+def test_extract_secret_handles_degenerate_multicall_shapes() -> None:
+    """`_extract_secret` 在 multicall 形态异常时不得抛错，退回「无密钥」。
+
+    HTTP 层正常请求走不到这些分支；它们防御的是畸形/半截请求，
+    一旦抛异常会让整个 RPC 端点 500 而不是回 -32600。
+    """
+    from aria2deck.api.aria2_rpc import _extract_secret
+
+    # 外层 params 不是 list（不是合法 multicall 形态）
+    assert _extract_secret({"method": "system.multicall", "params": "x"}) == ("x", None)
+    # 外层 params 为空 list
+    assert _extract_secret({"method": "system.multicall", "params": []}) == ([], None)
+    # 第一个参数不是子调用数组
+    assert _extract_secret({"method": "system.multicall", "params": ["x"]}) == (["x"], None)
+    # 子调用不是 dict，或 dict 里没有 token
+    params = [[{"params": "no-token"}, "not-a-dict", {"x": 1}]]
+    assert _extract_secret({"method": "system.multicall", "params": params}) == (params, None)
+    # 非 multicall 方法直接返回外层解析结果
+    assert _extract_secret({"method": "aria2.getVersion", "params": ["token:abc"]}) == (
+        [],
+        "abc",
+    )
+
+
+def test_multicall_child_domain_error_is_masked_to_fault_code_one(
+    rpc_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """子调用抛 DomainError 时映射 faultCode=1，不得当成内部错误（-32603）。
+
+    与 -32603 的区别在于：DomainError 是业务可预期失败（参数不合法、资源不存在等），
+    外部客户端需要据此提示用户；-32603 只用于真正的意外。
+    """
+    from aria2deck.domain.errors import DomainError, ErrorCode
+
+    async def reject(*_args: object, **_kwargs: object) -> object:
+        raise DomainError(ErrorCode.INVALID_INPUT, "URI 不能为空")
+
+    monkeypatch.setattr(rpc_client.app.state.aria2_rpc_service, "dispatch", reject)
+    token = f"token:{_secret()}"
+    response = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "system.multicall",
+            "params": [token, [{"methodName": "aria2.addUri", "params": [[]]}]],
+        },
+    )
+    assert response.status_code == 200
+    flag = response.json()["result"][0]
+    assert flag["faultCode"] == 1
+    assert flag["faultString"] == "URI 不能为空"

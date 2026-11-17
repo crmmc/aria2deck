@@ -81,11 +81,16 @@ def _apply(mutant: Mutant) -> tuple[bool, str]:
         return False, "原文未匹配"
     if mutant.line is not None:
         lines = original.splitlines(keepends=True)
-        index = mutant.line - 1
-        if index >= len(lines) or mutant.old not in lines[index]:
-            return False, f"第 {mutant.line} 行不含目标原文"
-        lines[index] = lines[index].replace(mutant.old, mutant.new, 1)
-        mutated = "".join(lines)
+        start = mutant.line - 1
+        span = mutant.old.count("\n") + 1
+        end = start + span
+        if start < 0 or end > len(lines):
+            return False, f"第 {mutant.line} 行起的 {span} 行超出文件范围"
+        block = "".join(lines[start:end])
+        if mutant.old not in block:
+            return False, f"第 {mutant.line} 行起的 {span} 行不含目标原文"
+        replacement = block.replace(mutant.old, mutant.new, 1)
+        mutated = "".join(lines[:start]) + replacement + "".join(lines[end:])
     elif occurrences == 1:
         mutated = original.replace(mutant.old, mutant.new, 1)
     else:

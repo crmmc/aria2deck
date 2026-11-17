@@ -672,3 +672,97 @@ async def test_share_release_is_exactly_once_for_repeated_calls() -> None:
     await service.release(result)
     assert seen[0] is seen[1]  # 两次释放透传同一个 target，幂等标志才能生效
     assert calls == ["content"]  # 第二次调用被 released 标志挡下，不重复扣租约
+
+
+def test_bearer_header_with_non_bearer_scheme_is_ignored(client: TestClient, settings) -> None:
+    """非 Bearer 认证方案一律视为「无令牌」，不得被当作 token 解析。
+
+    覆盖 `_bearer_token` 的两个空返回分支：`authorization is None` 与
+    scheme 不是 bearer（或缺少分隔空格）。查询参数里的 token 同样从不读取。
+    """
+    user_id = _setup(client)
+    file_id = seed_file(settings, user_id=user_id, index=90, payload=b"x")[1]
+    guarded = _make_share(client, file_id, password=PASSWORD)
+    anon = TestClient(client.app)
+    token = anon.post(f"/api/s/{guarded}/verify", json={"password": PASSWORD}).json()[
+        "access_token"
+    ]
+
+    # 无 Authorization 头：视为无令牌。
+    assert anon.get(f"/api/s/{guarded}/entries").status_code == 401
+
+    for header in (
+        f"Basic {token}",  # 方案不对
+        token,  # 缺方案前缀与空格
+        "",  # 空串
+    ):
+        response = anon.get(
+            f"/api/s/{guarded}/entries", headers={"Authorization": header}
+        )
+        assert response.status_code == 401, header
+
+    # 同一 token 用正确的 Bearer 形式则通过（证明上面的拒绝确实来自方案判定）。
+    ok = anon.get(
+        f"/api/s/{guarded}/entries", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert ok.status_code != 401
+
+
+def test_form_download_failure_releases_anonymous_connection(
+    client: TestClient, settings
+) -> None:
+    """表单下载在业务阶段失败时必须释放匿名连接租约。
+
+    覆盖 `download_share_by_form` 的 `except BaseException: connection.release()`。
+    若不释放，失败的下载会永久占用匿名并发额度，后续请求被误判为超限。
+    """
+    user_id = _setup(client)
+    directory = _seed_directory(settings, user_id, 91)
+    code = _make_share(client, directory)
+    anon = TestClient(client.app)
+
+    # 目录分享缺 path 时业务层拒绝；此时连接必须先释放，再验证后续请求不受影响。
+    rejected = anon.post(f"/api/s/{code}/download", data={"token": ""})
+    assert rejected.status_code in {400, 404, 422}, rejected.text
+
+    # 若连接泄漏，这里会因匿名额度耗尽而 429；断言能反复成功。
+    for _ in range(5):
+        again = anon.post(f"/api/s/{code}/download", data={"token": ""})
+        assert again.status_code == rejected.status_code
+
+
+async def test_share_form_without_content_length_skips_precheck_and_reads_body() -> None:
+    """表单请求没有 content-length 时跳过预检，改由实际读取计数兜底。
+
+    覆盖 `_require_form_size` 的 `if declared.isdigit()` 为假分支（chunked 或无长度头）。
+    预检只是第一道闸，不能因为缺头部就放行超大请求——读取计数的防线仍然生效。
+    """
+    from aria2deck.api.public_shares import download_share_by_form
+
+    calls: list[str] = []
+    service = _ShareDisconnectService(calls, [b"x"])
+    lease = _ShareDisconnectLease(calls)
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"token=", "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/s/code/download",
+            "client": ("127.0.0.1", 50000),
+            "headers": [(b"content-type", b"application/x-www-form-urlencoded")],
+        },
+        receive,
+    )
+    response = await download_share_by_form(
+        request=request,
+        code="code",
+        range_header=None,
+        limiter=_ShareDisconnectLimiter(lease),
+        service=service,
+        connections=_ShareDisconnectLimiter(lease),
+    )
+    # 缺 content-length 不改变正常路径的结果；关键是没有因预检缺失而报错。
+    assert response.status_code in {200, 206}
