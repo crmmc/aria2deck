@@ -1,9 +1,8 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
 import { SharesPage } from "@/features/shares/SharesPage";
-import { shareCopyText } from "@/features/shares/api";
 import type { ShareItemResponse, UserResponse } from "@/shared/api/types";
 
 const mockFetch = jest.fn();
@@ -19,6 +18,13 @@ const ME: UserResponse = {
   used_bytes: 0,
   reserved_bytes: 0,
   available_bytes: 1,
+};
+
+const SITE_INFO = {
+  site_title: "Aria2Deck",
+  ws_reconnect_max_delay_seconds: 30,
+  ws_reconnect_jitter_seconds: 1,
+  ws_reconnect_factor: 2,
 };
 
 function share(id: number, overrides: Partial<ShareItemResponse> = {}): ShareItemResponse {
@@ -38,19 +44,38 @@ function share(id: number, overrides: Partial<ShareItemResponse> = {}): ShareIte
   };
 }
 
-function list(items: ShareItemResponse[], total = items.length): unknown {
-  return { items, total, page: 1, page_size: 20 };
-}
-
 function json(status: number, body: unknown): unknown {
   return { status, ok: status >= 200 && status < 300, json: () => Promise.resolve(body) };
 }
 
+function list(items: ShareItemResponse[], total = items.length): unknown {
+  return { items, total, page: 1, page_size: 100 };
+}
+
+function batchResponse(
+  entries: Array<[number, boolean, string | null]>,
+): unknown {
+  const results = entries.map(([shareId, ok, message]) => ({
+    share_id: shareId,
+    ok,
+    already_revoked: false,
+    error: message === null ? null : { code: "bad_request", message },
+  }));
+  return {
+    results,
+    accepted_count: results.filter((r) => r.ok).length,
+    rejected_count: results.filter((r) => !r.ok).length,
+  };
+}
+
 function setup(handler: (url: string, init?: { method?: string; body?: string }) => unknown) {
   mockFetch.mockReset();
+  window.localStorage.clear();
   mockFetch.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
     if (url === "/api/v2/auth/me") return json(200, ME);
+    if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
     const result = handler(url, init);
+    // handler 已构造完整 response 时直接透传，不被二次包装。
     if (
       typeof result === "object" &&
       result !== null &&
@@ -69,287 +94,148 @@ function setup(handler: (url: string, init?: { method?: string; body?: string })
   );
 }
 
-describe("SharesPage", () => {
-  it("renders share rows with status, download counter and password badge", async () => {
+function listCalls(): Array<[string, { method?: string; body?: string } | undefined]> {
+  return mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v2/shares?"));
+}
+
+let originalShowModal: HTMLDialogElement["showModal"] | undefined;
+let originalClose: HTMLDialogElement["close"] | undefined;
+
+beforeEach(() => {
+  originalShowModal = HTMLDialogElement.prototype.showModal;
+  originalClose = HTMLDialogElement.prototype.close;
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+    configurable: true,
+    value: jest.fn(function showModal(this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    }),
+  });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", {
+    configurable: true,
+    value: jest.fn(function close(this: HTMLDialogElement) {
+      this.removeAttribute("open");
+    }),
+  });
+});
+
+afterEach(() => {
+  document.querySelectorAll("dialog").forEach((d) => d.removeAttribute("open"));
+  if (originalShowModal) {
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: originalShowModal });
+  } else {
+    Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
+  }
+  if (originalClose) {
+    Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: originalClose });
+  } else {
+    Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
+  }
+});
+
+describe("SharesPage（V1 分享管理页）", () => {
+  it("按 V1 DOM 渲染卡片并聚合全部分页", async () => {
+    setup((url) => {
+      const page = Number(new URL(String(url), "http://localhost").searchParams.get("page"));
+      if (page === 1) return list([share(1), share(2)], 3);
+      return list([share(3)], 3);
+    });
+    // C21：第 1 页未收满 total 时继续顺序读第 2 页。
+    expect(await screen.findByText("share-file-3.zip")).toBeInTheDocument();
+    expect(screen.getByText("share-file-1.zip")).toBeInTheDocument();
+    const card = screen.getByText("share-file-1.zip").closest(".share-card-item");
+    expect(card).not.toBeNull();
+    expect(card!.textContent).toContain("提取码: code-1");
+    expect(card!.textContent).toContain("下载次数: 2 / 10");
+    expect(card!.textContent).toContain("活跃");
+    expect(card!.textContent).toContain("创建于");
+    const calls = listCalls();
+    expect(calls).toHaveLength(2);
+    expect(String(calls[0][0])).toContain("page=1&page_size=100");
+    expect(String(calls[1][0])).toContain("page=2&page_size=100");
+  });
+
+  it("按 V1 id 降序展示（V2 分页为升序，功能边界翻转）", async () => {
+    setup(() => list([share(1), share(2), share(3)]));
+    await screen.findByText("share-file-1.zip");
+    const names = Array.from(document.querySelectorAll(".share-card-title")).map((el) =>
+      el.textContent?.trim(),
+    );
+    expect(names).toEqual(["share-file-3.zip", "share-file-2.zip", "share-file-1.zip"]);
+  });
+
+  it("空页提前终止聚合，不静默截断已收数据", async () => {
+    setup((url) => {
+      const page = Number(new URL(String(url), "http://localhost").searchParams.get("page"));
+      if (page === 1) return list([share(1)], 5); // total 夸大，但第 2 页为空即停。
+      return list([], 5);
+    });
+    expect(await screen.findByText("share-file-1.zip")).toBeInTheDocument();
+    expect(listCalls()).toHaveLength(2);
+  });
+
+  it("active 叠加本地过期时间或下载次数后显示已过期", async () => {
     setup(() =>
       list([
-        share(1),
-        share(2, { status: "exhausted", has_password: true, max_downloads: null }),
+        share(1, { expires_at_ms: 1600000000000 }), // 已到期
+        share(2, { download_count: 10, max_downloads: 10 }), // 次数达标
       ]),
     );
-    expect(await screen.findByTestId("share-row-1")).toBeInTheDocument();
+    expect(await screen.findByText("share-file-1.zip")).toBeInTheDocument();
+    const card1 = screen.getByText("share-file-1.zip").closest(".share-card-item");
+    const card2 = screen.getByText("share-file-2.zip").closest(".share-card-item");
+    expect(card1!.textContent).toContain("已过期");
+    expect(card2!.textContent).toContain("已过期");
+    // 非 active 不显示「失效」按钮。
+    expect(card1!.querySelector("button[title='失效']")).toBeNull();
+    expect(card2!.querySelector("button[title='失效']")).toBeNull();
+  });
+
+  it("C14：V2 新增状态集中映射到 V1 既有失效/过期展示", async () => {
+    setup(() =>
+      list([
+        share(1, { status: "exhausted" }), // 下载次数用尽：V1 归「已过期」
+        share(2, { status: "unavailable" }), // 文件待删除：V1 只能表达为「已失效」
+        share(3, { status: "revoked" }),
+      ]),
+    );
+    expect(await screen.findByText("share-file-1.zip")).toBeInTheDocument();
+    const card = (id: number) =>
+      screen.getByText(`share-file-${id}.zip`).closest(".share-card-item")!;
+    expect(card(1).textContent).toContain("已过期");
+    expect(card(2).textContent).toContain("已失效");
+    expect(card(3).textContent).toContain("已失效");
+    for (const id of [1, 2, 3]) {
+      expect(card(id).querySelector("button[title='失效']")).toBeNull();
+      expect(card(id).querySelector("button[title='删除']")).not.toBeNull();
+    }
+
+    // 筛选按 V1 口径：exhausted 落在「已过期」
+    fireEvent.change(screen.getByLabelText("分享状态筛选"), { target: { value: "expired" } });
     expect(screen.getByText("share-file-1.zip")).toBeInTheDocument();
-    expect(screen.getByText("2 / 10")).toBeInTheDocument();
-    expect(screen.getByTestId("share-row-1").textContent).toContain("有效");
-    expect(screen.getByTestId("share-row-2").textContent).toContain("已耗尽");
-    expect(screen.getByTitle("需要提取密码")).toHaveTextContent("密码");
-    expect(screen.getByTestId("share-row-2").textContent).toContain("2 / 不限"); // 无限次分享
+    expect(screen.queryByText("share-file-2.zip")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("分享状态筛选"), { target: { value: "revoked" } });
+    expect(screen.getByText("share-file-2.zip")).toBeInTheDocument();
+    expect(screen.getByText("share-file-3.zip")).toBeInTheDocument();
+    expect(screen.queryByText("share-file-1.zip")).not.toBeInTheDocument();
   });
 
-  it("filters by status query parameter", async () => {
-    setup((url) => {
-      if (url.includes("status=revoked")) return list([]);
-      return list([share(1)]);
-    });
-    await screen.findByTestId("share-row-1");
-    fireEvent.change(screen.getByLabelText("状态筛选"), { target: { value: "revoked" } });
-    await waitFor(() => {
-      const url = mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0] as string;
-      expect(url).toContain("status=revoked");
-    });
-    expect(await screen.findByText("暂无分享")).toBeInTheDocument();
+  it("有密码分享按 V1 显示 🔒 标识", async () => {
+    setup(() => list([share(1, { has_password: true })]));
+    expect(await screen.findByTitle("有密码")).toBeInTheDocument();
   });
 
-  it("condition change resets page and issues exactly one list request", async () => {
-    setup((url) => {
-      if (url.includes("status=revoked")) return list([]);
-      return list([share(1)], 45);
-    });
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getByLabelText("下一页"));
-    await waitFor(() => {
-      const url = mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0] as string;
-      expect(url).toContain("page=2");
-    });
-    const listCalls = () =>
-      mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v2/shares")).length;
-    const before = listCalls();
-
-    fireEvent.change(screen.getByLabelText("状态筛选"), { target: { value: "revoked" } });
-
-    await waitFor(() => {
-      const url = mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0] as string;
-      expect(url).toContain("status=revoked");
-    });
-    await waitFor(() => expect(listCalls()).toBe(before + 1)); // 旧页码请求不再发出。
-    const url = mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0] as string;
-    expect(url).toContain("page=1");
-    expect(await screen.findByText("暂无分享")).toBeInTheDocument();
+  it("空列表显示 V1 空状态", async () => {
+    setup(() => list([]));
+    expect(await screen.findByText("暂无分享记录")).toBeInTheDocument();
+    expect(screen.getByText("你创建的文件分享链接将显示在这里")).toBeInTheDocument();
   });
 
-  it("server-side search sends q parameter after debounce and renders server-filtered rows", async () => {
-    jest.useFakeTimers();
-    try {
-      setup((url) => {
-        if (url.includes("q=bbb222")) return list([share(9, { code: "bbb222" })]);
-        return list([share(1, { code: "aaa111" }), share(2, { code: "bbb222" })]);
-      });
-      await screen.findByTestId("share-row-1");
-      fireEvent.change(screen.getByLabelText("搜索分享"), { target: { value: "bbb222" } });
-      await jest.advanceTimersByTimeAsync(350);
-      await waitFor(() => {
-        const url = mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0] as string;
-        expect(url).toContain("q=bbb222");
-      });
-      // 服务器筛选结果（唯一行 9）替换整页旧数据。
-      expect(await screen.findByTestId("share-row-9")).toBeInTheDocument();
-      expect(screen.queryByTestId("share-row-1")).not.toBeInTheDocument();
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  it("search change while on page 2 resets to page 1 with q parameter", async () => {
-    jest.useFakeTimers();
-    try {
-      setup((url) => {
-        if (url.includes("page=2")) return list([share(2)], 21);
-        if (url.includes("q=zip")) return list([share(9)], 1);
-        return list([share(1)], 21);
-      });
-      await screen.findByTestId("share-row-1");
-      fireEvent.click(screen.getByLabelText("下一页"));
-      await screen.findByTestId("share-row-2");
-      fireEvent.change(screen.getByLabelText("搜索分享"), { target: { value: "zip" } });
-      await jest.advanceTimersByTimeAsync(350);
-      await waitFor(() => {
-        const url = mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0] as string;
-        expect(url).toContain("q=zip");
-        expect(url).toContain("page=1");
-      });
-      expect(await screen.findByTestId("share-row-9")).toBeInTheDocument();
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  it("copies plain link for passwordless share via clipboard", async () => {
-    const writeText = jest.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, { clipboard: { writeText } });
-    setup(() => list([share(1)]));
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getByRole("button", { name: "复制" }));
-    await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/s/code-1`),
-    );
-    expect(await screen.findByText("已复制分享内容")).toBeInTheDocument();
-  });
-
-  it("copies password placeholder format for protected shares and degrades on failure", async () => {
-    const writeText = jest.fn()
-      .mockRejectedValueOnce(new Error("denied"))
-      .mockResolvedValueOnce(undefined);
-    Object.assign(navigator, { clipboard: { writeText } });
-    setup(() => list([share(1, { has_password: true, code: "pw9" })]));
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getByRole("button", { name: "复制" }));
-    expect(await screen.findByText("复制失败，请手动复制")).toBeInTheDocument(); // 降级提示。
-    expect(writeText).toHaveBeenLastCalledWith(
-      `${window.location.origin}/s/pw9\n密码：（请向分享者索取）`,
-    );
-  });
-
-  it("revokes a single share through confirm dialog", async () => {
-    setup((url, init) => {
-      if (init?.method === "POST" && url === "/api/v2/shares/revoke") {
-        return {
-          results: [{ share_id: 1, ok: true, already_revoked: false, error: null }],
-          accepted_count: 1,
-          rejected_count: 0,
-        };
-      }
-      return list([share(1)]);
-    });
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
-    const dialog = await screen.findByRole("dialog", { name: "撤销分享" });
-    expect(dialog.textContent).toContain("撤销后访问者将无法继续下载");
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
-    await screen.findByRole("dialog", { name: "撤销分享" });
-    fireEvent.click(screen.getAllByRole("button", { name: "撤销" }).at(-1)!);
-    await waitFor(() => {
-      const call = mockFetch.mock.calls.find(
-        ([url, init2]) => init2?.method === "POST" && url === "/api/v2/shares/revoke",
-      );
-      expect(JSON.parse(call![1].body as string)).toEqual({ share_ids: [1] });
-    });
-    expect(await screen.findByText(/撤销完成：1 个/)).toBeInTheDocument();
-  });
-
-  it("bulk delete reports partial failure", async () => {
-    setup((url, init) => {
-      if (init?.method === "DELETE" && url === "/api/v2/shares") {
-        return {
-          results: [
-            { share_id: 1, ok: true, already_revoked: false, error: null },
-            { share_id: 2, ok: false, already_revoked: false, error: { code: "not_found", message: "不存在" } },
-          ],
-          accepted_count: 1,
-          rejected_count: 1,
-        };
-      }
-      return list([share(1), share(2)]);
-    });
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getByLabelText("选择 share-file-1.zip"));
-    fireEvent.click(screen.getByLabelText("选择 share-file-2.zip"));
-    fireEvent.click(screen.getByRole("button", { name: /批量删除/ }));
-    await screen.findByRole("dialog", { name: "删除分享记录" });
-    fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
-    expect(await screen.findByText(/删除完成：成功 1 个，失败 1 个/)).toBeInTheDocument();
-  });
-
-  it("revoke API failure surfaces Chinese toast", async () => {
-    setup((url, init) => {
-      if (init?.method === "POST" && url === "/api/v2/shares/revoke") {
-        return json(500, { error: { code: "internal", message: "后端错误" } });
-      }
-      return list([share(1)]);
-    });
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
-    await screen.findByRole("dialog", { name: "撤销分享" });
-    fireEvent.click(screen.getAllByRole("button", { name: "撤销" }).at(-1)!);
-    expect(await screen.findByText("后端错误")).toBeInTheDocument();
-  });
-
-  it("select-all then clear selection works", async () => {
-    setup(() => list([share(1), share(2)]));
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getByLabelText("全选分享"));
-    expect(screen.getByLabelText("选择 share-file-1.zip")).toBeChecked();
-    expect(screen.getByRole("button", { name: /批量撤销/ })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "清除选择" }));
-    expect(screen.getByLabelText("选择 share-file-1.zip")).not.toBeChecked();
-  });
-
-  it("unchecking select-all clears every row", async () => {
-    setup(() => list([share(1), share(2)]));
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getByLabelText("全选分享"));
-    expect(screen.getByLabelText("选择 share-file-1.zip")).toBeChecked();
-    fireEvent.click(screen.getByLabelText("全选分享")); // 再点一次取消全选。
-    expect(screen.getByLabelText("选择 share-file-1.zip")).not.toBeChecked();
-    expect(screen.getByLabelText("选择 share-file-2.zip")).not.toBeChecked();
-  });
-
-  it("empty result with a keyword suggests changing terms", async () => {
-    setup((url) => {
-      if (url.includes("q=nothing")) return list([]);
-      return list([share(1)]);
-    });
-    await screen.findByTestId("share-row-1");
-    fireEvent.change(screen.getByLabelText("搜索分享"), { target: { value: "nothing" } });
-    await waitFor(() => {
-      const url = mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0] as string;
-      expect(url).toContain("q=nothing");
-    });
-    expect(await screen.findByText("换个关键词试试")).toBeInTheDocument();
-  });
-
-  it("row delete goes through its own confirm dialog and cancel path", async () => {
-    setup((url, init) => {
-      if (init?.method === "DELETE" && url === "/api/v2/shares") {
-        return { results: [{ share_id: 1, ok: true, already_revoked: false, error: null }], accepted_count: 1, rejected_count: 0 };
-      }
-      return list([share(1)]);
-    });
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
-    await screen.findByRole("dialog", { name: "删除分享记录" });
-    fireEvent.click(screen.getByRole("button", { name: "取消" })); // 删除弹窗取消。
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
-    await screen.findByRole("dialog", { name: "删除分享记录" });
-    fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
-    expect(await screen.findByText(/删除完成：1 个/)).toBeInTheDocument();
-  });
-
-  it("deleting the last row of the last page falls back to previous page", async () => {
-    setup((url, init) => {
-      if (init?.method === "DELETE" && url === "/api/v2/shares") {
-        return { results: [{ share_id: 2, ok: true, already_revoked: false, error: null }], accepted_count: 1, rejected_count: 0 };
-      }
-      return url.includes("page=2")
-        ? list([share(2)], 21)
-        : list([share(1)], 21);
-    });
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getByLabelText("下一页"));
-    await screen.findByTestId("share-row-2");
-    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
-    await screen.findByRole("dialog", { name: "删除分享记录" });
-    fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
-    await waitFor(() => {
-      const url = mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0] as string;
-      expect(url).toContain("page=1");
-    });
-  });
-
-  it("renders expiry timestamp for timed shares", async () => {
-    setup(() => list([share(3, { expires_at_ms: new Date(2027, 0, 2, 3, 4, 5).getTime() })]));
-    await screen.findByTestId("share-row-3");
-    expect(screen.getByTestId("share-row-3").textContent).toContain("2027-01-02 03:04:05");
-  });
-
-  it("error state offers a working retry", async () => {
+  it("加载失败提示「加载分享记录失败」", async () => {
     mockFetch.mockReset();
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
-      return json(500, { error: { code: "internal", message: "后端炸了" } });
+      if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
+      return json(500, { error: { code: "internal", message: "后端错误" } });
     });
     render(
       <MemoryRouter initialEntries={["/shares"]}>
@@ -358,26 +244,384 @@ describe("SharesPage", () => {
         </AppProviders>
       </MemoryRouter>,
     );
-    expect(await screen.findByText("后端炸了")).toBeInTheDocument();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      return json(200, list([share(8)]));
-    });
-    fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    expect(await screen.findByTestId("share-row-8")).toBeInTheDocument();
+    expect(await screen.findByText("加载分享记录失败")).toBeInTheDocument();
   });
 
-  it("discards stale list responses after filter changes", async () => {
-    let calls = 0;
-    let releaseFirst: (value: unknown) => void = () => undefined;
-    const firstCall = new Promise((resolve) => {
-      releaseFirst = resolve;
+  it("丢弃过期的聚合响应", async () => {
+    let listCallCount = 0;
+    let releaseSecond: (value: unknown) => void = () => undefined;
+    const secondCall = new Promise((resolve) => {
+      releaseSecond = resolve;
     });
     mockFetch.mockReset();
-    mockFetch.mockImplementation(async (url: string) => {
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
-      calls += 1;
-      if (calls === 1) return firstCall as never;
+      if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
+      if (init?.method === "POST" && url === "/api/v2/shares/revoke") {
+        return json(200, batchResponse([[1, true, null]]));
+      }
+      if (init?.method === "DELETE" && url === "/api/v2/shares/all") {
+        return json(200, { revoked_count: 1 });
+      }
+      if (String(url).startsWith("/api/v2/shares?")) {
+        listCallCount += 1;
+        if (listCallCount === 2) return secondCall as never;
+        if (listCallCount === 1) return json(200, list([share(1)]));
+        return json(200, list([share(9)]));
+      }
+      return json(200, {});
+    });
+    render(
+      <MemoryRouter initialEntries={["/shares"]}>
+        <AppProviders>
+          <SharesPage />
+        </AppProviders>
+      </MemoryRouter>,
+    );
+    await screen.findByText("share-file-1.zip");
+    // 失效成功后触发第 2 次聚合（悬而未决），再用一键失效触发第 3 次并落地新数据。
+    fireEvent.click(screen.getByRole("button", { name: "失效" }));
+    await waitFor(() => expect(listCallCount).toBe(2));
+    fireEvent.click(screen.getByRole("button", { name: "一键失效全部" }));
+    await screen.findByRole("dialog", { name: "一键失效全部" });
+    fireEvent.click(screen.getAllByRole("button", { name: "确定失效" }).at(-1)!);
+    expect(await screen.findByText("share-file-9.zip")).toBeInTheDocument();
+    // 迟到的第 2 次响应不得覆盖更新的数据。
+    releaseSecond(json(200, list([share(42)])));
+    await waitFor(() => expect(screen.queryByText("share-file-42.zip")).not.toBeInTheDocument());
+    expect(screen.getByText("share-file-9.zip")).toBeInTheDocument();
+  });
+
+  it("本地搜索按文件名与提取码过滤，不发新请求", async () => {
+    setup(() => list([share(1), share(2, { code: "bbb222" })]));
+    await screen.findByText("share-file-1.zip");
+    const callsBefore = listCalls().length;
+    fireEvent.change(screen.getByLabelText("搜索分享"), { target: { value: "bbb222" } });
+    await waitFor(() => {
+      expect(screen.queryByText("share-file-1.zip")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("share-file-2.zip")).toBeInTheDocument();
+    expect(listCalls()).toHaveLength(callsBefore);
+  });
+
+  it("状态筛选在本地过滤", async () => {
+    setup(() =>
+      list([share(1), share(2, { status: "expired", expires_at_ms: 1600000000000 })]),
+    );
+    await screen.findByText("share-file-1.zip");
+    fireEvent.change(screen.getByLabelText("分享状态筛选"), { target: { value: "expired" } });
+    await waitFor(() => {
+      expect(screen.queryByText("share-file-1.zip")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("share-file-2.zip")).toBeInTheDocument();
+    expect(listCalls()).toHaveLength(1); // 本地筛选，不重新请求。
+  });
+
+  it("单个删除走 V1 确认框，取消保留、确认删除", async () => {
+    setup((url, init) => {
+      if (init?.method === "DELETE" && url === "/api/v2/shares") {
+        return batchResponse([[1, true, null]]);
+      }
+      return list([share(1)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+    const dialog = await screen.findByRole("dialog", { name: "删除分享" });
+    expect(dialog.textContent).toContain("确定要删除这条分享记录吗？");
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+    await screen.findByRole("dialog", { name: "删除分享" });
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
+    await waitFor(() => {
+      const call = mockFetch.mock.calls.find(
+        ([url, i]) => url === "/api/v2/shares" && i?.method === "DELETE",
+      );
+      expect(JSON.parse(call![1]!.body as string)).toEqual({ share_ids: [1] });
+    });
+    expect(await screen.findByText("分享已删除")).toBeInTheDocument();
+  });
+
+  it("单个删除逐项失败按 V1 反馈", async () => {
+    setup((url, init) => {
+      if (init?.method === "DELETE" && url === "/api/v2/shares") {
+        return batchResponse([[1, false, "不存在"]]);
+      }
+      return list([share(1)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+    await screen.findByRole("dialog", { name: "删除分享" });
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
+    expect(await screen.findByText("删除失败：不存在")).toBeInTheDocument();
+  });
+
+  it("单个失效成功重载，逐项失败反馈操作失败", async () => {
+    setup((url, init) => {
+      if (init?.method === "POST" && url === "/api/v2/shares/revoke") {
+        return batchResponse([[1, true, null]]);
+      }
+      return list([share(1)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "失效" }));
+    await waitFor(() => {
+      const call = mockFetch.mock.calls.find(
+        ([url, i]) => url === "/api/v2/shares/revoke" && i?.method === "POST",
+      );
+      expect(JSON.parse(call![1]!.body as string)).toEqual({ share_ids: [1] });
+    });
+    expect(await screen.findByText("分享已失效")).toBeInTheDocument();
+    expect(listCalls().length).toBeGreaterThanOrEqual(2); // 失效后重新聚合。
+
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url === "/api/v2/auth/me") return json(200, ME);
+      if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
+      if (init?.method === "POST" && url === "/api/v2/shares/revoke") {
+        return json(200, {
+          results: [{ share_id: 1, ok: false, already_revoked: true, error: null }],
+          accepted_count: 0,
+          rejected_count: 1,
+        });
+      }
+      return json(200, list([share(1)]));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "失效" }));
+    expect(await screen.findByText("操作失败：未知错误")).toBeInTheDocument();
+  });
+
+  it("一键失效全部使用 V1 确认文案并成功", async () => {
+    setup((url, init) => {
+      if (init?.method === "DELETE" && url === "/api/v2/shares/all") {
+        return { revoked_count: 2 };
+      }
+      return list([share(1), share(2)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "一键失效全部" }));
+    const dialog = await screen.findByRole("dialog", { name: "一键失效全部" });
+    expect(dialog.textContent).toContain("确定要让所有活跃的分享链接失效吗？此操作不可恢复。");
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(mockFetch.mock.calls.find(([, i]) => i?.method === "DELETE")).toBeUndefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "一键失效全部" }));
+    await screen.findByRole("dialog", { name: "一键失效全部" });
+    fireEvent.click(screen.getAllByRole("button", { name: "确定失效" }).at(-1)!);
+    await waitFor(() => {
+      const call = mockFetch.mock.calls.find(([, i]) => i?.method === "DELETE");
+      expect(call![0]).toBe("/api/v2/shares/all");
+    });
+    expect(await screen.findByText("已让所有分享失效")).toBeInTheDocument();
+  });
+
+  it("批量删除成功与部分失败分别按 V1 文案反馈", async () => {
+    setup((url, init) => {
+      if (init?.method === "DELETE" && url === "/api/v2/shares") {
+        return batchResponse([
+          [1, true, null],
+          [2, false, "不存在"],
+        ]);
+      }
+      return list([share(1), share(2)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
+    const dialog = await screen.findByRole("dialog", { name: "删除分享" });
+    expect(dialog.textContent).toContain("确定要删除选中的 2 条分享记录吗？");
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
+    expect(
+      await screen.findByText("已删除 1 条分享记录，1 条删除失败"),
+    ).toBeInTheDocument();
+  });
+
+  it("批量删除全部成功提示已删除数量", async () => {
+    setup((url, init) => {
+      if (init?.method === "DELETE" && url === "/api/v2/shares") {
+        return batchResponse([
+          [1, true, null],
+          [2, true, null],
+        ]);
+      }
+      return list([share(1), share(2)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByLabelText("选择分享 share-file-1.zip"));
+    fireEvent.click(screen.getByLabelText("选择分享 share-file-2.zip"));
+    fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
+    await screen.findByRole("dialog", { name: "删除分享" });
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
+    expect(await screen.findByText("已删除 2 条分享记录")).toBeInTheDocument();
+  });
+
+  it("筛选下全选只选中可见记录，切回全部仍保持原选择", async () => {
+    setup(() => list([share(1), share(2), share(3, { status: "revoked" })]));
+    await screen.findByText("share-file-1.zip");
+    fireEvent.change(screen.getByLabelText("分享状态筛选"), { target: { value: "active" } });
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    expect(screen.getByText("已选 2 项")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择分享 share-file-1.zip")).toBeChecked();
+    expect(screen.getByLabelText("选择分享 share-file-2.zip")).toBeChecked();
+
+    fireEvent.change(screen.getByLabelText("分享状态筛选"), { target: { value: "all" } });
+    expect(screen.getByLabelText("选择分享 share-file-3.zip")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "全选" })).toBeInTheDocument(); // 2 !== 3 仍可全选。
+
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    expect(screen.getByText("已选 3 项")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消全选" }));
+    expect(screen.getByLabelText("选择分享 share-file-1.zip")).not.toBeChecked();
+  });
+
+  it("选中记录消失后批量删除提示请先选择", async () => {
+    setup((url, init) => {
+      if (init?.method === "DELETE" && url === "/api/v2/shares/all") {
+        return { revoked_count: 1 };
+      }
+      return list([share(1)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    // 一键失效后重新聚合返回空列表，但选中集合保留原 id（V1 语义）。
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url === "/api/v2/auth/me") return json(200, ME);
+      if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
+      if (init?.method === "DELETE" && url === "/api/v2/shares/all") {
+        return json(200, { revoked_count: 1 });
+      }
+      return json(200, list([]));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "一键失效全部" }));
+    await screen.findByRole("dialog", { name: "一键失效全部" });
+    fireEvent.click(screen.getAllByRole("button", { name: "确定失效" }).at(-1)!);
+    expect(await screen.findByText("暂无分享记录")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
+    expect(await screen.findByText("请先选择要删除的记录")).toBeInTheDocument();
+  });
+
+  it("复制链接：无密码为纯链接，有密码走 V2 安全格式", async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    setup(() => list([share(1), share(2, { has_password: true, code: "pw9" })]));
+    const card1 = (await screen.findByText("share-file-1.zip")).closest(".share-card-item") as HTMLElement;
+    fireEvent.click(within(card1).getByRole("button", { name: "复制链接" }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/s/code-1`),
+    );
+    // C01：点击卡片复制区同样走安全复制格式。
+    fireEvent.click(screen.getByRole("button", { name: "打开分享 share-file-2.zip" }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenLastCalledWith(
+        `${window.location.origin}/s/pw9\n密码：（请向分享者索取）`,
+      ),
+    );
+    expect(await screen.findAllByText("链接已复制")).not.toHaveLength(0);
+  });
+
+  it("剪贴板失败提示复制失败", async () => {
+    const writeText = jest.fn().mockRejectedValue(new Error("denied"));
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    setup(() => list([share(1)]));
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "复制链接" }));
+    expect(await screen.findByText("复制失败")).toBeInTheDocument();
+  });
+
+  it("一键失效整请求失败提示中文错误", async () => {
+    setup((url, init) => {
+      if (init?.method === "DELETE" && url === "/api/v2/shares/all") {
+        return json(500, { error: { code: "internal", message: "后端错误" } });
+      }
+      return list([share(1)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "一键失效全部" }));
+    await screen.findByRole("dialog", { name: "一键失效全部" });
+    fireEvent.click(screen.getAllByRole("button", { name: "确定失效" }).at(-1)!);
+    expect(await screen.findByText("操作失败：后端错误")).toBeInTheDocument();
+  });
+
+  it("批量删除整请求失败提示部分删除失败", async () => {
+    setup((url, init) => {
+      if (init?.method === "DELETE" && url === "/api/v2/shares") {
+        return json(500, { error: { code: "internal", message: "后端错误" } });
+      }
+      return list([share(1)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
+    await screen.findByRole("dialog", { name: "删除分享" });
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
+    expect(await screen.findByText("部分删除失败：后端错误")).toBeInTheDocument();
+  });
+
+  it("页面头部与工具栏按 V1 呈现", async () => {
+    setup(() => list([share(1)]));
+    await screen.findByText("share-file-1.zip");
+    expect(screen.getByRole("heading", { name: "分享管理" })).toBeInTheDocument();
+    expect(screen.getByText("管理你的文件分享链接")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "全选" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "一键失效全部" })).toBeInTheDocument();
+    expect(screen.getByLabelText("搜索分享")).toHaveAttribute("placeholder", "搜索分享...");
+  });
+});
+
+describe("SharesPage 操作失败与展示边界", () => {
+  it("单个失效整请求失败提示操作失败", async () => {
+    setup((url, init) => {
+      if (init?.method === "POST" && url === "/api/v2/shares/revoke") {
+        return json(500, { error: { code: "internal", message: "后端错误" } });
+      }
+      return list([share(1)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "失效" }));
+    expect(await screen.findByText("操作失败：后端错误")).toBeInTheDocument();
+  });
+
+  it("单个删除整请求失败提示删除失败", async () => {
+    setup((url, init) => {
+      if (init?.method === "DELETE" && url === "/api/v2/shares") {
+        return json(500, { error: { code: "internal", message: "后端错误" } });
+      }
+      return list([share(1)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+    await screen.findByRole("dialog", { name: "删除分享" });
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
+    expect(await screen.findByText("删除失败：后端错误")).toBeInTheDocument();
+  });
+
+  it("max_downloads 为 0 时只显示下载次数不显示上限", async () => {
+    setup(() => list([share(1, { max_downloads: 0 })]));
+    expect(await screen.findByText("share-file-1.zip")).toBeInTheDocument();
+    const card = screen.getByText("share-file-1.zip").closest(".share-card-item");
+    expect(card!.textContent).toContain("下载次数: 2");
+    expect(card!.textContent).not.toContain("/ 0");
+  });
+
+  it("点两次复选框可取消单条选中", async () => {
+    setup(() => list([share(1)]));
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByLabelText("选择分享 share-file-1.zip"));
+    expect(screen.getByText("已选 1 项")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("选择分享 share-file-1.zip"));
+    expect(screen.queryByText("已选 1 项")).not.toBeInTheDocument();
+  });
+
+  it("批量删除进行中工具栏按钮置灰禁用", async () => {
+    let releaseDelete: (value: unknown) => void = () => undefined;
+    const pendingDelete = new Promise((resolve) => {
+      releaseDelete = resolve;
+    });
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url === "/api/v2/auth/me") return json(200, ME);
+      if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
+      if (init?.method === "DELETE" && url === "/api/v2/shares") return pendingDelete as never;
       return json(200, list([share(1)]));
     });
     render(
@@ -387,96 +631,118 @@ describe("SharesPage", () => {
         </AppProviders>
       </MemoryRouter>,
     );
-    await screen.findByLabelText("状态筛选");
-    fireEvent.change(screen.getByLabelText("状态筛选"), { target: { value: "revoked" } });
-    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
-    releaseFirst(json(200, list([share(42)])));
-    await screen.findByTestId("share-row-1");
-    expect(screen.queryByTestId("share-row-42")).not.toBeInTheDocument();
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
+    await screen.findByRole("dialog", { name: "删除分享" });
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
+
+    const deleteSelected = screen.getByRole("button", { name: "删除选中" });
+    const revokeAll = screen.getByRole("button", { name: "一键失效全部" });
+    await waitFor(() => expect(deleteSelected).toBeDisabled());
+    expect(deleteSelected.className).toContain("opacity-60");
+    expect(revokeAll).toBeDisabled();
+    expect(revokeAll.className).toContain("opacity-60");
+
+    releaseDelete(json(200, batchResponse([[1, true, null]])));
+    await waitFor(() => expect(revokeAll).not.toBeDisabled());
+  });
+});
+
+describe("SharesPage 逐项结果与竞态守卫", () => {
+  it("单个失效逐项失败带错误文案", async () => {
+    setup((url, init) => {
+      if (init?.method === "POST" && url === "/api/v2/shares/revoke") {
+        return batchResponse([[1, false, "分享不存在"]]);
+      }
+      return list([share(1)]);
+    });
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "失效" }));
+    expect(await screen.findByText("操作失败：分享不存在")).toBeInTheDocument();
   });
 
-  it("delete API whole-request failure surfaces Chinese toast", async () => {
+  it("单个删除逐项失败且无错误文案时回退未知错误", async () => {
     setup((url, init) => {
       if (init?.method === "DELETE" && url === "/api/v2/shares") {
-        return json(500, { error: { code: "internal", message: "后端错误" } });
+        return {
+          results: [{ share_id: 1, ok: false, already_revoked: false, error: null }],
+          accepted_count: 0,
+          rejected_count: 1,
+        };
       }
       return list([share(1)]);
     });
-    await screen.findByTestId("share-row-1");
+    await screen.findByText("share-file-1.zip");
     fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
-    await screen.findByRole("dialog", { name: "删除分享记录" });
+    await screen.findByRole("dialog", { name: "删除分享" });
     fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
-    expect(await screen.findByText("后端错误")).toBeInTheDocument();
+    expect(await screen.findByText("删除失败：未知错误")).toBeInTheDocument();
   });
 
-  it("revoke-all API failure surfaces Chinese toast", async () => {
-    setup((_url, init) => {
-      if (init?.method === "DELETE" && _url === "/api/v2/shares/all") {
-        return json(500, { error: { code: "internal", message: "后端错误" } });
-      }
-      return list([share(1)]);
-    });
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getByRole("button", { name: "全部撤销" }));
-    await screen.findByRole("dialog", { name: "撤销全部分享" });
-    fireEvent.click(screen.getAllByRole("button", { name: "全部撤销" }).at(-1)!);
-    expect(await screen.findByText("后端错误")).toBeInTheDocument();
-  });
-
-  it("revoke-all requires danger confirmation", async () => {
-    setup((_url, init) => {
-      if (init?.method === "DELETE" && _url === "/api/v2/shares/all") {
-        return { revoked_count: 3 };
-      }
-      return list([share(1)]);
-    });
-    await screen.findByTestId("share-row-1");
-    fireEvent.click(screen.getByRole("button", { name: "全部撤销" }));
-    const dialog = await screen.findByRole("dialog", { name: "撤销全部分享" });
-    expect(dialog.textContent).toContain("不可恢复");
+  it("批量删除确认框取消后不发送请求", async () => {
+    setup(() => list([share(1)]));
+    await screen.findByText("share-file-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
+    await screen.findByRole("dialog", { name: "删除分享" });
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(mockFetch.mock.calls.find(([, i]) => i?.method === "DELETE")).toBeUndefined();
-
-    fireEvent.click(screen.getByRole("button", { name: "全部撤销" }));
-    await screen.findByRole("dialog", { name: "撤销全部分享" });
-    fireEvent.click(screen.getAllByRole("button", { name: "全部撤销" }).at(-1)!);
-    await waitFor(() => {
-      const call = mockFetch.mock.calls.find(([, i]) => i?.method === "DELETE");
-      expect(call![0]).toBe("/api/v2/shares/all");
-    });
-    expect(await screen.findByText("已撤销 3 个分享")).toBeInTheDocument();
+    expect(screen.getByText("已选 1 项")).toBeInTheDocument();
   });
 
-  it("shows error state with retry on load failure", async () => {
+  it("卸载后到达的响应不再更新状态也不再提示", async () => {
+    let releaseList: (value: unknown) => void = () => undefined;
+    const pending = new Promise((resolve) => {
+      releaseList = resolve;
+    });
     mockFetch.mockReset();
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
-      return json(500, { error: { code: "internal", message: "后端异常" } });
+      if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
+      return pending as never;
     });
-    render(
+    const view = render(
       <MemoryRouter initialEntries={["/shares"]}>
         <AppProviders>
           <SharesPage />
         </AppProviders>
       </MemoryRouter>,
     );
-    expect(await screen.findByText("后端异常")).toBeInTheDocument();
+    await screen.findByText("加载中...");
+    view.unmount();
+    releaseList(json(200, list([share(1)])));
+    // 卸载后既不能渲染旧数据，也不应出现加载失败提示。
+    await waitFor(() => {
+      expect(screen.queryByText("share-file-1.zip")).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText("加载分享记录失败")).not.toBeInTheDocument();
   });
-});
 
-describe("shareCopyText", () => {
-  it("plain link without password", () => {
-    expect(shareCopyText({ code: "ab", has_password: false })).toBe(
-      `${window.location.origin}/s/ab`,
+  it("卸载后到达的失败响应不再提示", async () => {
+    let rejectList: (reason: unknown) => void = () => undefined;
+    const pending = new Promise((_resolve, reject) => {
+      rejectList = reject;
+    });
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/v2/auth/me") return json(200, ME);
+      if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
+      return pending as never;
+    });
+    const view = render(
+      <MemoryRouter initialEntries={["/shares"]}>
+        <AppProviders>
+          <SharesPage />
+        </AppProviders>
+      </MemoryRouter>,
     );
-  });
-
-  it("password line uses provided secret or placeholder", () => {
-    expect(shareCopyText({ code: "ab", has_password: true }, "pw")).toBe(
-      `${window.location.origin}/s/ab\n密码：pw`,
-    );
-    expect(shareCopyText({ code: "ab", has_password: true })).toBe(
-      `${window.location.origin}/s/ab\n密码：（请向分享者索取）`,
-    );
+    await screen.findByText("加载中...");
+    view.unmount();
+    rejectList(new Error("网络中断"));
+    await waitFor(() => {
+      expect(screen.queryByText("加载分享记录失败")).not.toBeInTheDocument();
+    });
   });
 });

@@ -1,4 +1,5 @@
 import { api } from "@/shared/api/client";
+import { fetchAllPages } from "@/shared/api/pagination";
 import type {
   TaskResponse,
   TaskListResponse,
@@ -18,6 +19,39 @@ const FILTER_PARAMS: Record<string, string[]> = {
   complete: ["completed"],
   error: ["failed", "cancelled", "expired"],
 };
+
+/**
+ * C21/T1 全量聚合：归档参考 当前任务视图需要 queued/active/waiting/paused + failed，
+ * V2 服务端 `current` 会漏 failed，必须显式多状态参数顺序读全部分页。
+ */
+export async function fetchTasksAll(
+  filter: "all" | "active",
+  search: string,
+): Promise<TaskResponse[]> {
+  const statuses =
+    filter === "active"
+      ? ["queued", "active", "waiting", "paused"]
+      : ["queued", "active", "waiting", "paused", "failed"];
+  return fetchAllPages((page) =>
+    fetchTasksList(statuses, page, 100, search),
+  );
+}
+
+async function fetchTasksList(
+  statuses: string[],
+  page: number,
+  pageSize: number,
+  search: string,
+): Promise<TaskListResponse> {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  for (const status of statuses) params.append("status", status);
+  const term = search.trim();
+  if (term !== "") params.set("q", term);
+  return api.get<TaskListResponse>(`/api/v2/tasks?${params.toString()}`);
+}
 
 export async function fetchTasks(
   filter: TaskFilter,

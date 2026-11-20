@@ -84,7 +84,7 @@ function renderAt(path: string, me: UserResponse = ME) {
     if (url === "/api/v2/credentials/rpc") {
       return json(200, { enabled: false, secret_prefix: null, secret: null });
     }
-    if (url === "/api/v2/users") return json(200, { items: [ME], total: 1, page: 1, page_size: 20 });
+    if (url.startsWith("/api/v2/users")) return json(200, { items: [ME], total: 1, page: 1, page_size: 100 });
     if (url === "/api/v2/settings") return json(200, settingsBody());
     if (url === "/api/v2/trackers") {
       return json(200, {
@@ -170,7 +170,7 @@ describe("batch-3 routes", () => {
   it("renders the profile page for authenticated users", async () => {
     renderAt("/profile");
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "个人资料" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "用户设置" })).toBeInTheDocument();
     });
   });
 
@@ -184,14 +184,14 @@ describe("batch-3 routes", () => {
   it("renders the settings page for admins", async () => {
     renderAt("/settings");
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "设置" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "系统设置" })).toBeInTheDocument();
     });
   });
 
   it("renders the storage page for admins", async () => {
     renderAt("/storage");
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "存储" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "存储管理" })).toBeInTheDocument();
     });
   });
 

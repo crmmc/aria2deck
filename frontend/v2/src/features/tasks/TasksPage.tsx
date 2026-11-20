@@ -1,525 +1,589 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+"use client";
 
-import { useAuth, useToast } from "@/app/hooks";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+
+import { ApiRequestError } from "@/shared/api/client";
 import type { TaskResponse, TorrentPreviewResponse } from "@/shared/api/types";
-import { ConfirmDialog, EmptyState, ErrorState, LoadingState, Pagination } from "@/shared/components/ui";
-import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
+import { useMounted } from "@/shared/hooks/useMounted";
+import { useToast } from "@/shared/components/toast-context";
+import { useClipboard } from "@/shared/hooks/useClipboard";
+import { useSelection } from "@/shared/hooks/useSelection";
+import { useLocalState } from "@/shared/hooks/useLocalState";
 import { useTaskWebSocket } from "@/shared/hooks/useTaskWebSocket";
-import { ApiRequestError, errorMessage } from "@/shared/api/client";
-import { copyText } from "@/shared/lib/clipboard";
-import { emitTaskActivity } from "@/shared/lib/taskEvents";
 import { sendTaskNotification } from "@/shared/notifications";
+
 import {
   cancelTasks,
   createTasks,
-  createTorrent,
-  fetchTasks,
+  fetchTasksAll,
   previewTorrent,
   retryTask,
-  type CreateOutcome,
-  type TaskFilter,
-  type TaskSortKey,
-  type TaskSort,
 } from "./api";
-import { FailureDialog, RetryTaskDialog, TorrentCreateWizard, UriCreateDialog } from "./CreateDialogs";
-import { TaskTable } from "./TaskTable";
+import {
+  filterCurrentTasks,
+  filterInFlightTasks,
+  isCurrentVisibleStatus,
+  isInFlightStatus,
+  searchTasks,
+  sortTasks,
+  type LegacySortKey,
+} from "./model";
+import { StatsWidget } from "./components/StatsWidget";
+import { AddTaskForm } from "./components/AddTaskForm";
+import { BatchAddTasksDialog, type BatchFeedback } from "./components/BatchAddTasksDialog";
+import { TaskToolbar } from "./components/TaskToolbar";
+import { TaskList } from "./components/TaskList";
+import { TorrentCreateWizard } from "./components/TorrentCreateWizard";
 
-const PAGE_SIZE = 20;
+function upsertTaskById(tasks: TaskResponse[], task: TaskResponse): TaskResponse[] {
+  const existingIndex = tasks.findIndex((item) => item.id === task.id);
+  if (existingIndex === -1) {
+    return [task, ...tasks];
+  }
+  const next = [...tasks];
+  next[existingIndex] = task;
+  return next;
+}
+
+function getTaskDisplayName(task: TaskResponse): string {
+  return task.name || "未知文件";
+}
+
 const MAX_TORRENT_FILE_SIZE = 10 * 1024 * 1024;
-const FILTERS: { key: TaskFilter; label: string }[] = [
-  { key: "current", label: "进行中" },
-  { key: "active", label: "下载中" },
-  { key: "complete", label: "已完成" },
-  { key: "error", label: "异常" },
-];
+const MAX_BATCH_TASKS = 30;
 
-const IN_FLIGHT_STATUSES = ["queued", "active", "waiting", "paused"];
-const REMOVABLE_STATUSES = ["failed", "cancelled", "expired"];
+function parseBatchUris(value: string): string[] {
+  return [...new Set(value.split("\n").map((line) => line.trim()).filter(Boolean))];
+}
 
-type ConfirmState =
-  | { kind: "cancel"; task: TaskResponse }
-  | { kind: "delete"; task: TaskResponse }
-  | { kind: "retry"; task: TaskResponse }
-  | { kind: "batch-cancel"; ids: number[] }
-  | null;
+const NO_BATCH_FAILURES: { uri: string; reason: string }[] = [];
 
 export function TasksPage() {
-  const { user, logout } = useAuth();
-  const { push } = useToast();
+  const { showToast, showConfirm } = useToast();
   const [tasks, setTasks] = useState<TaskResponse[]>([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [filter, setFilter] = useState<TaskFilter>("current");
-  const [sort, setSort] = useState<TaskSort | null>(null);
-  const [searchInput, setSearchInput] = useState("");
-  const search = useDebouncedValue(searchInput, 300);
-  const [loading, setLoading] = useState(true);
+  const [uri, setUri] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [dialog, setDialog] = useState<
-    | { kind: "uri" }
-    | { kind: "torrent"; preview: TorrentPreviewResponse }
-    | { kind: "failures"; items: { uri: string; message: string }[] }
-    | null
-  >(null);
-  const [confirm, setConfirm] = useState<ConfirmState>(null);
-  // 命名策略贯穿创建、失败重提与单任务重试：默认自动加后缀。
-  const [allowRename, setAllowRename] = useState(true);
-  const requestSeq = useRef(0);
-  const tasksRef = useRef<TaskResponse[]>([]);
-  tasksRef.current = tasks;
-
-  const load = useCallback(async (): Promise<boolean> => {
-    const seq = ++requestSeq.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await fetchTasks(filter, page, PAGE_SIZE, sort, search);
-      if (seq !== requestSeq.current) return false; // 丢弃过期响应。
-      setTasks(response.items);
-      setTotal(response.total);
-      return true;
-    } catch (caught) {
-      if (seq !== requestSeq.current) return false;
-      setError(errorMessage(caught, "加载失败"));
-      return false;
-    } finally {
-      if (seq === requestSeq.current) setLoading(false);
-    }
-  }, [filter, page, sort, search]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  // WS 实时更新：只写服务端副本（带过期丢弃），不改筛选/页码；完成/失败迁移触发 Toast+桌面通知（T15）。
-  const handleFrame = useCallback(
-    (frame: { task: TaskResponse }) => {
-      const previous = tasksRef.current.find((item) => item.id === frame.task.id);
-      if (previous !== undefined && previous.status !== frame.task.status) {
-        emitTaskActivity(); // 布局统计立即刷新（G11）。
-        const name = frame.task.name || "下载任务";
-        if (frame.task.status === "completed") {
-          push("success", `${name} 下载完成`);
-          sendTaskNotification("completed", name, frame.task.id, push);
-        } else if (frame.task.status === "failed") {
-          push("error", `${name} 下载失败`);
-          sendTaskNotification("failed", name, frame.task.id, push);
-        }
-      }
-      setTasks((current) => {
-        const next = [...current];
-        const index = next.findIndex((item) => item.id === frame.task.id);
-        if (index >= 0 && frame.task.status !== next[index].status) {
-          // 当前页内的状态变化：直接刷新整页以保持筛选与分页一致。
-          void load();
-          return current;
-        }
-        if (index >= 0) next[index] = frame.task;
-        return next;
-      });
-    },
-    [load, push],
+  const { selected: selectedTasks, toggle: toggleTaskSelection, setItemSelected, clear: clearSelection, toggleAll } = useSelection<number>();
+  const copyUri = useClipboard();
+  // C33：归档参考 老键名不回读，直接用 V2 白名单键（JSON 编码）。
+  const filterState = useLocalState<string>("tasks.filter", "all");
+  const filterStatus = filterState.value;
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const [sortBy, setSortBy] = useState<LegacySortKey>("speed");
+  const [showBatchAddModal, setShowBatchAddModal] = useState(false);
+  const [isBatchAdding, setIsBatchAdding] = useState(false);
+  const [batchUris, setBatchUris] = useState("");
+  const [batchFeedback, setBatchFeedback] = useState<BatchFeedback | null>(null);
+  const [torrentWizard, setTorrentWizard] = useState<{
+    torrentBase64: string;
+    preview: TorrentPreviewResponse;
+  } | null>(null);
+  const mounted = useMounted();
+  const torrentInputRef = useRef<HTMLInputElement>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isBatchOperating, setIsBatchOperating] = useState(false);
+  const [operatingTaskIds, setOperatingTaskIds] = useState<Set<number>>(
+    new Set(),
   );
 
-  const { connected } = useTaskWebSocket(handleFrame, {
-    enabled: user !== null,
-    pollFallback: load,
-    onUnauthorized: () => {
-      void logout();
-    },
-  });
+  useEffect(() => {
+    if (showBatchAddModal) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [showBatchAddModal]);
 
-  const toggle = (id: number) => {
-    setSelected((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+  const deletedTaskIdsRef = useRef<Set<number> | null>(null);
+  if (deletedTaskIdsRef.current === null) {
+    deletedTaskIdsRef.current = new Set();
+  }
+  const deletedTaskIds = deletedTaskIdsRef.current;
+  const tasksRef = useRef<TaskResponse[]>([]);
+
+  useEffect(() => {
+    tasksRef.current = tasks;
+  }, [tasks]);
+
+  useEffect(() => {
+    fetchTasksAll("all", "")
+      .then((currentTasks) => {
+        setTasks(currentTasks);
+      })
+      .catch((err) => {
+        showToast("加载任务失败: " + (err as Error).message, "error");
+      });
+  }, [showToast]);
+
+  const handleTaskUpdate = useCallback((newTask: TaskResponse) => {
+    const taskId = newTask.id;
+
+    if (deletedTaskIds.has(taskId)) {
+      return;
+    }
+
+    const oldTask = tasksRef.current.find((task) => task.id === taskId);
+    if (oldTask) {
+      const taskName = newTask.name || "下载任务";
+      if (oldTask.status !== "completed" && newTask.status === "completed") {
+        sendTaskNotification("completed", taskName, newTask.id, (_kind, text) => showToast(text, "error"));
+        showToast(`${taskName} 下载完成`, "success");
+      } else if (oldTask.status !== "failed" && newTask.status === "failed") {
+        sendTaskNotification("failed", taskName, newTask.id, (_kind, text) => showToast(text, "error"));
+        showToast(`${taskName} 下载失败`, "error");
+      }
+    }
+
+    const isVisibleStatus = isCurrentVisibleStatus(newTask.status);
+
+    setTasks((prev) => {
+      const idx = prev.findIndex((task) => task.id === taskId);
+
+      if (!isVisibleStatus) {
+        if (idx === -1) return prev;
+        const next = [...prev];
+        next.splice(idx, 1);
+        return next;
+      }
+
+      if (idx === -1) return [newTask, ...prev];
+      const next = [...prev];
+      next[idx] = newTask;
       return next;
     });
-  };
+  }, [deletedTaskIds, showToast]);
 
-  // 表头排序循环：默认 → 升序 → 降序 → 还原默认；条件变化同步回第 1 页。
-  const handleSort = (key: TaskSortKey) => {
-    setPage(1);
-    setSort((current) => {
-      if (current?.key !== key) return { key, order: "asc" };
-      if (current.order === "asc") return { key, order: "desc" };
-      return null;
-    });
-  };
+  const refreshTasks = useCallback(async () => {
+    const currentTasks = await fetchTasksAll("all", "");
+    setTasks(() => currentTasks.filter((t) => !deletedTaskIds.has(t.id)));
+  }, [deletedTaskIds]);
 
-  const toggleAll = (checked: boolean) => {
-    setSelected(checked ? new Set(tasks.map((task) => task.id)) : new Set());
-  };
-
-  const handleCreate = async (
-    text: string,
-    keepAllowRename: boolean,
-  ): Promise<CreateOutcome | null> => {
-    setAllowRename(keepAllowRename);
+  // C28：断线补偿轮询由 V2 hook 内置（5s/隐藏态同频）；页面只提供权威重读。
+  const pollFallback = useCallback(async () => {
     try {
-      const outcome = await createTasks(text, keepAllowRename);
-      if (outcome.rejectedCount > 0) {
-        setDialog({ kind: "failures", items: outcome.failedItems });
-      } else {
-        push("success", `已添加 ${outcome.acceptedCount} 个任务`);
-        setDialog(null);
-      }
-      setPage(1);
-      await load();
-      return outcome;
-    } catch (caught) {
-      if (caught instanceof ApiRequestError && caught.status === 502) {
-        push("error", "下载结果暂无法确认，请稍后在任务列表核对");
-        return null;
-      }
-      throw caught;
+      await refreshTasks();
+      return true;
+    } catch {
+      return false;
     }
-  };
+  }, [refreshTasks]);
 
-  // 仅重试失败项：载荷来自弹窗持有的本轮失败 URI，不重放原始全文。
-  const handleRetryFailed = async (
-    items: { uri: string; message: string }[],
-    keepAllowRename: boolean,
-  ) => {
-    setAllowRename(keepAllowRename);
-    setDialog(null);
-    if (items.length === 0) return;
+  const { connected } = useTaskWebSocket(
+    useCallback(
+      (frame) => {
+        if (frame.type === "task_update") handleTaskUpdate(frame.task);
+      },
+      [handleTaskUpdate],
+    ),
+    { pollFallback },
+  );
+
+  useEffect(() => {
+    if (!connected) return;
+    // 连上即权威重读一次（对齐 归档参考 onConnected 语义）。
+    fetchTasksAll("all", "")
+      .then((currentTasks) => {
+        setTasks(() => {
+          const deletedIds = deletedTaskIds;
+          return currentTasks.filter((t) => !deletedIds.has(t.id));
+        });
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : "未知错误";
+        showToast(`同步任务状态失败: ${message}`, "warning");
+      });
+  }, [connected, showToast, deletedTaskIds]);
+
+  const refreshAfterSubmit = useCallback(async () => {
     try {
-      const outcome = await createTasks(
-        items.map((item) => item.uri).join("\n"),
-        keepAllowRename,
-      );
-      if (outcome.rejectedCount > 0) {
-        // 新弹窗只包含本轮失败项，避免失败集合跨轮累积。
-        setDialog({ kind: "failures", items: outcome.failedItems });
-      } else {
-        push("success", `已添加 ${outcome.acceptedCount} 个任务`);
-      }
-      setPage(1);
-      await load();
-    } catch (caught) {
-      if (caught instanceof ApiRequestError && caught.status === 502) {
-        push("error", "下载结果暂无法确认，请稍后在任务列表核对");
-      } else {
-        push("error", errorMessage(caught, "重试失败"));
-      }
+      await refreshTasks();
+    } catch {
+      showToast("任务已提交，但列表刷新失败，请手动刷新", "warning");
     }
-  };
+  }, [refreshTasks, showToast]);
 
-  const handleTorrentSelect = async () => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".torrent";
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (file === undefined) return;
-      // 种子上传前端校验（T7）：后缀 + 大小，错误信息与旧版一致。
+  const createTask = useCallback(
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (isSubmitting) return;
+      setError(null);
+      setIsSubmitting(true);
+      let accepted = false;
+      try {
+        const outcome = await createTasks(uri);
+        if (outcome.acceptedCount > 0) {
+          accepted = true;
+          setUri("");
+          showToast("任务已提交", "success");
+        } else {
+          setError(outcome.failedItems[0]?.message ?? "提交失败");
+        }
+      } catch (err) {
+        if (err instanceof ApiRequestError && err.status === 502) {
+          setError("提交结果暂无法确认，请刷新任务列表");
+        } else {
+          setError((err as Error).message);
+        }
+      } finally {
+        setIsSubmitting(false);
+      }
+      if (accepted) {
+        await refreshAfterSubmit();
+      }
+    },
+    [uri, isSubmitting, showToast, refreshAfterSubmit],
+  );
+
+  const handleTorrentUpload = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+
+      setError(null);
+
       if (!file.name.endsWith(".torrent")) {
-        push("error", "请选择 .torrent 文件");
+        setError("请选择 .torrent 文件");
         return;
       }
       if (file.size > MAX_TORRENT_FILE_SIZE) {
-        push("error", "种子文件过大，最大支持 10 MB");
+        setError("种子文件过大，最大支持 10 MB");
+        event.target.value = "";
         return;
       }
-      const base64 = await readFileBase64(file);
+
       try {
-        const preview = await previewTorrent(base64);
-        (window as unknown as { __torrentBase64?: string }).__torrentBase64 = base64;
-        setDialog({ kind: "torrent", preview });
-      } catch (caught) {
-        push("error", errorMessage(caught, "种子解析失败"));
-      }
-    };
-    input.click();
-  };
+        const base64Content = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const result = reader.result;
+            if (typeof result !== "string") {
+              reject(new Error("文件读取结果无效"));
+              return;
+            }
+            const splitIndex = result.indexOf(",");
+            if (splitIndex < 0 || splitIndex === result.length - 1) {
+              reject(new Error("文件编码格式无效"));
+              return;
+            }
+            const base64 = result.slice(splitIndex + 1);
+            resolve(base64);
+          };
+          reader.onerror = () => reject(new Error("文件读取失败"));
+          reader.readAsDataURL(file);
+        });
 
-  const handleTorrentCreate = async (
-    selectedIndexes: number[],
-    keepAllowRename: boolean,
-  ) => {
-    const base64 = (window as unknown as { __torrentBase64?: string }).__torrentBase64;
-    if (base64 === undefined) throw new Error("种子数据丢失，请重新选择");
-    // 成功才关闭向导；业务拒绝由 createTorrent 抛错，向导内显示并保留原选择与策略。
-    await createTorrent(base64, selectedIndexes, keepAllowRename);
-    push("success", "种子任务已创建");
-    setDialog(null);
-    setPage(1);
-    await load();
-  };
-
-  const handleTorrentClose = () => {
-    delete (window as unknown as { __torrentBase64?: string }).__torrentBase64;
-    setDialog(null);
-  };
-
-  const reportCancelOutcome = useCallback(
-    (accepted: number, rejected: number, action: string) => {
-      if (rejected > 0) {
-        push("error", `已${action} ${accepted} 个任务，${rejected} 个${action}失败`);
-      } else {
-        push("success", `已${action} ${accepted} 个任务`);
+        const previewResponse = await previewTorrent(base64Content);
+        setTorrentWizard({ torrentBase64: base64Content, preview: previewResponse });
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        if (torrentInputRef.current) {
+          torrentInputRef.current.value = "";
+        }
       }
     },
-    [push],
+    [],
   );
 
-  // 取消进行中任务（T10：danger 确认）。
-  const performCancel = useCallback(
-    async (ids: number[], action: string) => {
-      try {
-        const response = await cancelTasks(ids);
-        reportCancelOutcome(
-          response.accepted_count,
-          response.rejected_count,
-          action,
-        );
-        setSelected(new Set());
-        await load();
-      } catch (caught) {
-        push("error", errorMessage(caught, `${action}失败`));
-      }
-    },
-    [load, push, reportCancelOutcome],
-  );
-
-  const handleConfirm = () => {
-    if (confirm === null) return;
-    if (confirm.kind === "cancel") {
-      void performCancel([confirm.task.id], "取消");
-    } else if (confirm.kind === "delete") {
-      void performCancel([confirm.task.id], "删除");
-    } else if (confirm.kind === "batch-cancel") {
-      void performCancel(confirm.ids, "取消");
+  const handleTorrentCreated = useCallback((task: TaskResponse) => {
+    if (isCurrentVisibleStatus(task.status)) {
+      setTasks((prev) => upsertTaskById(prev, task));
     }
-    setConfirm(null);
-  };
+    setTorrentWizard(null);
+    if (torrentInputRef.current) {
+      torrentInputRef.current.value = "";
+    }
+  }, []);
 
-  // 批量取消（T11）：仅取消选中的进行中任务，先经确认弹窗。
-  const requestBatchCancel = () => {
-    const ids = tasks
-      .filter((task) => selected.has(task.id) && IN_FLIGHT_STATUSES.includes(task.status))
-      .map((task) => task.id);
-    if (ids.length === 0) {
-      push("info", "没有可取消的任务");
+  const handleTorrentWizardCancel = useCallback(() => {
+    setTorrentWizard(null);
+    if (torrentInputRef.current) {
+      torrentInputRef.current.value = "";
+    }
+  }, []);
+
+  const cancelTask = useCallback(
+    async (id: number) => {
+      const task = tasksRef.current.find((t) => t.id === id);
+      if (!task) return;
+
+      const isFailedTask = task.status === "failed";
+      const confirmed = await showConfirm({
+        title: isFailedTask ? "删除任务" : "取消下载",
+        message: isFailedTask
+          ? `确定要删除失败任务 "${getTaskDisplayName(task)}" 吗？`
+          : `确定要取消下载 "${getTaskDisplayName(task)}" 吗？`,
+        confirmText: isFailedTask ? "删除" : "取消下载",
+        danger: true,
+      });
+      if (!confirmed) return;
+
+      setOperatingTaskIds((prev) => {
+        if (prev.has(id)) return prev;
+        return new Set(prev).add(id);
+      });
+
+      try {
+        const response = await cancelTasks([id]);
+        const item = response.items[0];
+        if (!item?.accepted) {
+          showToast(
+            (isFailedTask ? "删除" : "取消") + "失败：" + (item?.error?.message ?? "未知错误"),
+            "error",
+          );
+          return;
+        }
+        deletedTaskIds.add(id);
+        setTasks((prev) => prev.filter((t) => t.id !== id));
+        setItemSelected(id, false);
+      } catch (err) {
+        showToast((isFailedTask ? "删除" : "取消") + "失败：" + (err as Error).message, "error");
+      } finally {
+        setOperatingTaskIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+    },
+    [showConfirm, showToast, setItemSelected, deletedTaskIds],
+  );
+
+  const handleRetryTask = useCallback(
+    async (task: TaskResponse) => {
+      // C10：V2 无 retry_blocked_reason，不编造原因；不可重试时仅提示。
+      if (task.retryable === false) {
+        showToast("不可重试", "warning");
+        return;
+      }
+
+      try {
+        const newTask = await retryTask(task.id);
+        if (isCurrentVisibleStatus(newTask.status)) {
+          setTasks((prev) => upsertTaskById(prev, newTask));
+        }
+        showToast("已重新添加下载任务", "success");
+      } catch (err) {
+        showToast("重试失败：" + (err as Error).message, "error");
+      }
+    },
+    [showToast],
+  );
+
+  const batchCancelTasks = useCallback(async () => {
+    if (selectedTasks.size === 0 || isBatchOperating) return;
+
+    const activeTasks = tasksRef.current.filter(
+      (t) => selectedTasks.has(t.id) && isInFlightStatus(t.status),
+    );
+    if (activeTasks.length === 0) {
+      showToast("没有可取消的任务", "warning");
       return;
     }
-    setConfirm({ kind: "batch-cancel", ids });
-  };
 
-  const handleRetry = (task: TaskResponse) => {
-    setAllowRename(true); // 每次重试弹窗重新默认勾选自动加后缀。
-    setConfirm({ kind: "retry", task });
-  };
+    const confirmed = await showConfirm({
+      title: "批量取消",
+      message: `确定要取消选中的 ${activeTasks.length} 个任务吗？`,
+      confirmText: "取消",
+      danger: true,
+    });
+    if (!confirmed) return;
 
-  const performRetry = async (keepAllowRename: boolean) => {
-    if (confirm === null || confirm.kind !== "retry") return;
-    const id = confirm.task.id;
-    setAllowRename(keepAllowRename);
-    setConfirm(null);
+    setIsBatchOperating(true);
     try {
-      await retryTask(id, keepAllowRename);
-      push("success", "重试已创建");
-      await load();
-    } catch (caught) {
-      push("error", errorMessage(caught, "重试失败"));
+      const ids = activeTasks.map((t) => t.id);
+      const response = await cancelTasks(ids);
+      // items 按请求顺序回位；accepted 项以 task.id 为准，缺 task 时按序号配对。
+      const cancelledIds = new Set(
+        response.items
+          .map((item, index) => (item.accepted ? (item.task?.id ?? ids[index]) : null))
+          .filter((value): value is number => value !== null),
+      );
+      cancelledIds.forEach((cancelledId) => deletedTaskIds.add(cancelledId));
+      setTasks((prev) => prev.filter((t) => !cancelledIds.has(t.id)));
+      clearSelection();
+      if (response.rejected_count > 0) {
+        showToast(
+          `已取消 ${response.accepted_count} 个任务，${response.rejected_count} 个取消失败`,
+          "warning",
+        );
+      } else {
+        showToast(`已取消 ${response.accepted_count} 个任务`, "success");
+      }
+    } catch (err) {
+      showToast("批量取消失败：" + (err as Error).message, "error");
+    } finally {
+      setIsBatchOperating(false);
     }
-  };
+  }, [selectedTasks, isBatchOperating, showConfirm, showToast, clearSelection, deletedTaskIds]);
 
-  // 复制链接（T12）：clipboard API + 旧环境降级，结果以 Toast 反馈。
-  const handleCopyUri = useCallback(
-    async (uri: string) => {
-      const copied = await copyText(uri);
-      if (copied) push("success", "链接已复制");
-      else push("error", "复制失败，请手动复制");
-    },
-    [push],
+  const batchAddTasks = useCallback(async () => {
+    if (isBatchAdding) return;
+    const submittedUris = parseBatchUris(batchUris);
+
+    if (submittedUris.length === 0) {
+      showToast("请输入至少一个链接", "warning");
+      return;
+    }
+    if (submittedUris.length > MAX_BATCH_TASKS) {
+      showToast(`一次最多添加 ${MAX_BATCH_TASKS} 个任务`, "warning");
+      return;
+    }
+
+    setIsBatchAdding(true);
+    setBatchFeedback(null);
+    let acceptedCount = 0;
+    try {
+      const outcome = await createTasks(submittedUris.join("\n"));
+      acceptedCount = outcome.acceptedCount;
+
+      if (outcome.rejectedCount === 0) {
+        showToast(`已提交 ${outcome.acceptedCount} 个任务`, "success");
+        setBatchUris("");
+        setShowBatchAddModal(false);
+      } else {
+        setBatchFeedback({
+          kind: "result",
+          acceptedCount: outcome.acceptedCount,
+          failures: outcome.failedItems.map((item) => ({ uri: item.uri, reason: item.message })),
+        });
+      }
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 502) {
+        setBatchFeedback({
+          kind: "error",
+          message: "提交结果暂无法确认，请刷新任务列表",
+        });
+      } else {
+        setBatchFeedback({ kind: "error", message: (err as Error).message });
+      }
+    } finally {
+      setIsBatchAdding(false);
+    }
+    if (acceptedCount > 0) {
+      await refreshAfterSubmit();
+    }
+  }, [batchUris, showToast, isBatchAdding, refreshAfterSubmit]);
+
+  const batchFailures =
+    batchFeedback?.kind === "result" ? batchFeedback.failures : NO_BATCH_FAILURES;
+
+  const retryFailedBatch = useCallback(() => {
+    setBatchUris(batchFailures.map((failure) => failure.uri).join("\n"));
+    setBatchFeedback(null);
+  }, [batchFailures]);
+
+  const closeBatchAdd = useCallback(() => {
+    if (isBatchAdding) return;
+    setShowBatchAddModal(false);
+    setBatchUris("");
+    setBatchFeedback(null);
+  }, [isBatchAdding]);
+
+  const filteredTasks = useMemo(() => {
+    let filtered = searchTasks(tasks, searchKeyword);
+    if (filterStatus === "active") {
+      filtered = filterInFlightTasks(filtered);
+    } else {
+      // 当前任务：只含在下载管线的任务；失败任务属终态，只在历史页展示（与归档参考后端 current 口径一致）。
+      filtered = filterCurrentTasks(filtered);
+    }
+    return sortTasks(filtered, sortBy);
+  }, [tasks, searchKeyword, filterStatus, sortBy]);
+
+  const toggleSelectAll = useCallback(() => {
+    toggleAll(filteredTasks.map((t) => t.id));
+  }, [toggleAll, filteredTasks]);
+
+  const hasActiveTasks = useMemo(
+    () =>
+      tasks.some(
+        (t) => selectedTasks.has(t.id) && isInFlightStatus(t.status),
+      ),
+    [tasks, selectedTasks],
   );
-
-  const liveIds = useMemo(
-    () => tasks.filter((task) => task.status === "active").length,
-    [tasks],
-  );
-
-  const allSelected = tasks.length > 0 && tasks.every((task) => selected.has(task.id));
-  const removableIds = useMemo(
-    () => new Set(tasks.filter((task) => REMOVABLE_STATUSES.includes(task.status)).map((t) => t.id)),
-    [tasks],
-  );
-
-  const confirmDialog =
-    confirm === null ? null : confirm.kind === "cancel" ? (
-      <ConfirmDialog
-        title="取消下载"
-        message={`确定要取消下载「${confirm.task.name}」吗？`}
-        confirmLabel="取消下载"
-        danger
-        onConfirm={handleConfirm}
-        onCancel={() => setConfirm(null)}
-      />
-    ) : confirm.kind === "delete" ? (
-      <ConfirmDialog
-        title="删除任务"
-        message={`确定要删除任务「${confirm.task.name}」吗？`}
-        confirmLabel="删除"
-        danger
-        onConfirm={handleConfirm}
-        onCancel={() => setConfirm(null)}
-      />
-    ) : confirm.kind === "retry" ? (
-      <RetryTaskDialog
-        taskName={confirm.task.name}
-        allowRename={allowRename}
-        onAllowRenameChange={setAllowRename}
-        onConfirm={() => void performRetry(allowRename)}
-        onClose={() => setConfirm(null)}
-      />
-    ) : (
-      <ConfirmDialog
-        title="批量取消"
-        message={`确定要取消选中的 ${confirm.ids.length} 个任务吗？`}
-        confirmLabel="确认取消"
-        danger
-        onConfirm={handleConfirm}
-        onCancel={() => setConfirm(null)}
-      />
-    );
 
   return (
-    <section className="page" aria-label="任务列表">
-      <header className="page-header">
-        <h1>任务</h1>
-        <span className="header-meta" aria-live="polite">
-          {connected ? "实时连接中" : "离线轮询"} · 下载中 {liveIds}
-        </span>
-        <div className="header-actions">
-          <input
-            type="search"
-            className="task-search"
-            placeholder="搜索任务名称"
-            aria-label="搜索任务"
-            value={searchInput}
-            onChange={(event) => {
-              setSearchInput(event.target.value);
-              setPage(1); // 搜索条件变化同步回第 1 页。
-            }}
-          />
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={() => void handleTorrentSelect()}
-          >
-            种子下载
-          </button>
-          <button
-            type="button"
-            className="primary-button"
-            onClick={() => setDialog({ kind: "uri" })}
-          >
-            新建任务
-          </button>
+    <>
+      <div
+        className="glass-frame full-height animate-in"
+        aria-hidden={torrentWizard ? "true" : undefined}
+      >
+        <div className="space-between mb-7">
+          <div>
+            <h1 className="text-2xl">任务</h1>
+            <p className="muted">管理您的下载</p>
+          </div>
         </div>
-      </header>
 
-      <div className="filter-bar" role="tablist" aria-label="状态筛选">
-        {FILTERS.map((item) => (
-          <button
-            key={item.key}
-            type="button"
-            role="tab"
-            aria-selected={filter === item.key}
-            className={`filter-chip${filter === item.key ? " active" : ""}`}
-            onClick={() => {
-              setFilter(item.key);
-              setPage(1);
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
+        <StatsWidget />
+
+        <AddTaskForm
+          uri={uri}
+          error={error}
+          isSubmitting={isSubmitting}
+          torrentInputRef={torrentInputRef}
+          onUriChange={setUri}
+          onSubmit={createTask}
+          onTorrentUpload={handleTorrentUpload}
+          onBatchAdd={() => setShowBatchAddModal(true)}
+        />
+
+        <TaskToolbar
+          selectedCount={selectedTasks.size}
+          filteredCount={filteredTasks.length}
+          filterStatus={filterStatus}
+          sortBy={sortBy}
+          searchKeyword={searchKeyword}
+          hasActiveTasks={hasActiveTasks}
+          isBatchOperating={isBatchOperating}
+          onToggleSelectAll={toggleSelectAll}
+          onBatchCancel={batchCancelTasks}
+          onFilterStatusChange={filterState.setValue}
+          onSortByChange={(value) => setSortBy(value as LegacySortKey)}
+          onSearchKeywordChange={setSearchKeyword}
+        />
+
+        <div className="task-list">
+          <TaskList
+            filteredTasks={filteredTasks}
+            selectedTasks={selectedTasks}
+            operatingTaskIds={operatingTaskIds}
+            onToggleSelection={toggleTaskSelection}
+            onCancel={cancelTask}
+            onCopyUri={copyUri}
+            onRetry={handleRetryTask}
+          />
+        </div>
       </div>
 
-      {selected.size > 0 && (
-        <div className="bulk-bar">
-          <span>已选 {selected.size} 项</span>
-          <button type="button" className="secondary-button" onClick={requestBatchCancel}>
-            批量取消
-          </button>
-          <button
-            type="button"
-            className="link-button"
-            onClick={() => setSelected(new Set())}
-          >
-            清除选择
-          </button>
-        </div>
-      )}
-
-      {loading ? (
-        <LoadingState />
-      ) : error !== null ? (
-        <ErrorState message={error} onRetry={() => void load()} />
-      ) : tasks.length === 0 ? (
-        <EmptyState
-          title="暂无任务"
-          hint="点击右上角「新建任务」添加 HTTP(S) 或 Magnet 链接，或选择种子文件。"
-        />
-      ) : (
-        <>
-          <TaskTable
-            tasks={tasks}
-            selected={selected}
-            allSelected={allSelected}
-            removableIds={removableIds}
-            sort={sort}
-            onToggle={toggle}
-            onToggleAll={toggleAll}
-            onRequestCancel={(task) => setConfirm({ kind: "cancel", task })}
-            onRequestDelete={(task) => setConfirm({ kind: "delete", task })}
-            onCopy={(uri) => void handleCopyUri(uri)}
-            onRetry={(id) => {
-              const task = tasksRef.current.find((item) => item.id === id);
-              if (task !== undefined) handleRetry(task);
-            }}
-            onSort={handleSort}
+      {showBatchAddModal && (
+          <BatchAddTasksDialog
+            batchUris={batchUris}
+            isBatchAdding={isBatchAdding}
+            feedback={batchFeedback}
+            onBatchUrisChange={setBatchUris}
+            onSubmit={batchAddTasks}
+            onCancel={closeBatchAdd}
+            onRetryFailed={retryFailedBatch}
           />
-          <Pagination page={page} pageSize={PAGE_SIZE} total={total} onChange={setPage} />
-        </>
       )}
-
-      {dialog?.kind === "uri" && (
-        <UriCreateDialog onClose={() => setDialog(null)} onCreate={handleCreate} />
-      )}
-      {dialog?.kind === "torrent" && (
-        <TorrentCreateWizard
-          preview={dialog.preview}
-          onClose={handleTorrentClose}
-          onCreate={handleTorrentCreate}
-        />
-      )}
-      {dialog?.kind === "failures" && (
-        <FailureDialog
-          failedItems={dialog.items}
-          allowRename={allowRename}
-          onAllowRenameChange={setAllowRename}
-          onRetryFailed={(items, keepAllowRename) => void handleRetryFailed(items, keepAllowRename)}
-          onClose={() => setDialog(null)}
-        />
-      )}
-      {confirmDialog}
-    </section>
+      {mounted && torrentWizard
+        ? createPortal(
+            <TorrentCreateWizard
+              torrentBase64={torrentWizard.torrentBase64}
+              preview={torrentWizard.preview}
+              onCancel={handleTorrentWizardCancel}
+              onCreated={handleTorrentCreated}
+              onError={setError}
+            />,
+            document.body,
+          )
+        : null}
+    </>
   );
-}
-
-async function readFileBase64(file: File): Promise<string> {
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  const chunk = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
-  }
-  return btoa(binary);
 }

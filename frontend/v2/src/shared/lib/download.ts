@@ -32,7 +32,8 @@ export async function triggerBatchDownloads(
   }
 }
 
-/** 公开分享页：POST 表单提交（有密码分享令牌放隐藏域，绝不进 URL；无密码直连可省略）。 */
+/** 公开分享页：POST 表单提交（有密码分享令牌放隐藏域，绝不进 URL；无密码直连可省略）。
+ * `_blank` 沿用 归档参考：下载失败时不改变当前标签页。 */
 export function triggerFormDownload(
   action: string,
   fields: { token?: string; path?: string },
@@ -40,6 +41,7 @@ export function triggerFormDownload(
   const form = document.createElement("form");
   form.method = "POST";
   form.action = action;
+  form.target = "_blank";
   form.style.display = "none";
   if (fields.token !== undefined) {
     const tokenInput = document.createElement("input");

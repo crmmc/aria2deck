@@ -1,11 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
 import { AppLayout } from "@/app/layouts/AppLayout";
-import { emitTaskActivity } from "@/shared/lib/taskEvents";
 import { DEFAULT_SITE_TITLE, setSiteTitle } from "@/shared/lib/siteTitle";
-import type { TaskStatsResponse, UserResponse } from "@/shared/api/types";
+import type { UserResponse } from "@/shared/api/types";
 
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
@@ -39,260 +38,117 @@ function siteInfo(title = "Aria2Deck"): unknown {
   };
 }
 
-function stats(overrides: Partial<TaskStatsResponse> = {}): TaskStatsResponse {
-  return {
-    counts: {
-      queued: 0, active: 1, waiting: 0, paused: 0,
-      completed: 0, failed: 0, cancelled: 0, expired: 0,
-    },
-    total: 1,
-    download_speed: 4096,
-    upload_speed: 1024,
-    quota: { quota_bytes: 200, used_bytes: 80, reserved_bytes: 20, available_bytes: 100, limited: false },
-    ...overrides,
-  };
-}
+const defaultHandler = (url: string): unknown => {
+  if (url === "/api/v2/auth/me") return ME;
+  if (url === "/api/v2/public/site-info") return siteInfo();
+  return statusEnvelope("ok");
+};
 
-function setup(handler: (url: string) => unknown) {
+function setup(handler: (url: string) => unknown = defaultHandler) {
   mockFetch.mockReset();
-  mockFetch.mockImplementation(async (url: string) => json(200, handler(url)));
+  mockFetch.mockImplementation(async (url: string) => {
+    const result = handler(url);
+    if (
+      typeof result === "object" &&
+      result !== null &&
+      typeof (result as { then?: unknown }).then === "function"
+    ) {
+      return result;
+    }
+    return json(200, result);
+  });
   return render(
     <MemoryRouter initialEntries={["/tasks"]}>
       <AppProviders>
-        <AppLayout />
+        <Routes>
+          <Route path="/tasks" element={<AppLayout />} />
+          <Route path="/profile" element={<div>个人资料页占位</div>} />
+          <Route path="/settings" element={<div>系统设置占位</div>} />
+        </Routes>
       </AppProviders>
     </MemoryRouter>,
   );
 }
 
-const defaultHandler = (url: string): unknown => {
-  if (url === "/api/v2/auth/me") return ME;
-  if (url === "/api/v2/tasks/stats") return stats();
-  if (url === "/api/v2/public/site-info") return siteInfo();
-  return statusEnvelope("ok");
-};
-
-describe("AppLayout", () => {
-  // client 的网络健康信号与站点标题是模块级状态：每个用例前复位，避免跨用例泄漏。
-  beforeEach(async () => {
+describe("AppLayout（V1 应用壳）", () => {
+  beforeEach(() => {
     setSiteTitle(DEFAULT_SITE_TITLE);
-    mockFetch.mockReset();
-    mockFetch.mockResolvedValue(json(200, {}) as never);
-    const { api } = await import("@/shared/api/client");
-    await api.get("/api/v2/__health_probe__");
-  });
-  it("renders nav entries, username, site title and stats summary", async () => {
-    setup((url) => {
-      if (url === "/api/v2/public/site-info") return siteInfo("团队下载站");
-      return defaultHandler(url);
-    });
-    const nav = await screen.findByLabelText("主导航");
-    expect(nav.textContent).toContain("任务");
-    expect(nav.textContent).toContain("历史");
-    expect(nav.textContent).toContain("文件");
-    expect(nav.textContent).toContain("分享");
-    await screen.findByText("admin");
-    // G1 侧栏品牌使用站点标题。
-    expect(document.querySelector(".app-brand-title")?.textContent).toBe("团队下载站");
-    // G11 统计：速度/活跃/可用空间/冻结。
-    const statsBox = await screen.findByLabelText("任务统计");
-    expect(statsBox.textContent).toContain("↓ 4.00 KiB/s");
-    expect(statsBox.textContent).toContain("↑ 1.00 KiB/s");
-    expect(statsBox.textContent).toContain("活跃任务：1");
-    expect(statsBox.textContent).toContain("可用空间：100 B / 200 B");
-    expect(statsBox.textContent).toContain("已冻结 20 B（下载中）");
-    expect(screen.getByLabelText("空间用量")).toHaveAttribute("aria-valuenow", "40");
   });
 
-  it("falls back to the default brand when site info fails", async () => {
-    setup((url) => {
-      if (url === "/api/v2/public/site-info") {
-        return { status: 500, ok: false, json: () => Promise.resolve({}) };
-      }
-      return defaultHandler(url);
-    });
-    await screen.findByLabelText("主导航");
+  it("renders V1 sidebar nav entries with admin items", async () => {
+    setup();
+    await waitFor(() => expect(document.querySelector(".sidebar-nav")).toBeTruthy());
+    // V1 桌面侧栏：展开后显示文字（折叠态仅图标）。
+    fireEvent.mouseEnter(document.querySelector(".sidebar")!);
+    const sidebarNav = document.querySelector(".sidebar-nav");
+    expect(sidebarNav?.textContent).toContain("任务");
+    expect(sidebarNav?.textContent).toContain("任务历史");
+    expect(sidebarNav?.textContent).toContain("文件");
+    expect(sidebarNav?.textContent).toContain("分享");
+    expect(sidebarNav?.textContent).toContain("设置");
+    expect(sidebarNav?.textContent).toContain("多用户管理");
+    expect(sidebarNav?.textContent).toContain("存储管理");
+    expect(sidebarNav?.textContent).toContain("系统设置");
+    // 退出登录按钮
+    expect(document.querySelector(".logout-btn")).toBeTruthy();
+  });
+
+  it("shows site title in sidebar header only when expanded", async () => {
+    setup((url) => (url === "/api/v2/public/site-info" ? siteInfo("团队下载站") : defaultHandler(url)));
+    await waitFor(() => expect(document.querySelector(".sidebar")).toBeTruthy());
+    // 默认折叠：不渲染标题文本。
+    expect(document.querySelector(".sidebar-title")).toBeNull();
+    fireEvent.mouseEnter(document.querySelector(".sidebar")!);
     await waitFor(() =>
-      expect(document.querySelector(".app-brand-title")?.textContent).toBe("Aria2Deck"),
+      expect(document.querySelector(".sidebar-title")?.textContent).toBe("团队下载站"),
     );
+    fireEvent.mouseLeave(document.querySelector(".sidebar")!);
+    await waitFor(() => expect(document.querySelector(".sidebar-title")).toBeNull());
   });
 
-  it("shows the degraded banner when backend reports degraded", async () => {
-    setup((url) => {
-      if (url === "/api/v2/auth/me") return ME;
-      if (url === "/api/v2/tasks/stats") return stats();
-      if (url === "/api/v2/public/site-info") return siteInfo();
-      return statusEnvelope("degraded", "下载后端连接异常");
-    });
-    expect(await screen.findByRole("alert")).toHaveTextContent("下载后端连接异常");
+  it("omits admin entries for regular users", async () => {
+    setup((url) =>
+      url === "/api/v2/auth/me" ? { ...ME, is_admin: false } : defaultHandler(url),
+    );
+    await waitFor(() => expect(document.querySelector(".sidebar-nav")).toBeTruthy());
+    fireEvent.mouseEnter(document.querySelector(".sidebar")!);
+    const nav = document.querySelector(".sidebar-nav");
+    expect(nav?.textContent).not.toContain("多用户管理");
+    expect(nav?.textContent).not.toContain("系统设置");
   });
 
-  it("renders zero quota without divide-by-zero progress", async () => {
-    setup((url) => {
-      if (url === "/api/v2/tasks/stats") {
-        return stats({
-          quota: { quota_bytes: 0, used_bytes: 0, reserved_bytes: 0, available_bytes: 0, limited: false },
-        });
-      }
-      return defaultHandler(url);
-    });
-    await screen.findByLabelText("任务统计");
-    expect(screen.getByLabelText("空间用量")).toHaveAttribute("aria-valuenow", "0");
+  it("renders mobile bottom nav with more entry", async () => {
+    setup();
+    await waitFor(() => expect(document.querySelector(".bottom-nav")).toBeTruthy());
+    const bottom = document.querySelector(".bottom-nav");
+    expect(bottom?.textContent).toContain("任务");
+    expect(bottom?.textContent).toContain("更多");
   });
 
-  // ============ G4 初始密码横幅 ============
-
-  it("shows the initial-password warning banner and navigates to profile", async () => {
-    const initialUser = { ...ME, is_initial_password: true };
+  it("shows loading skeleton while initializing", () => {
     mockFetch.mockReset();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(200, initialUser);
-      return json(200, defaultHandler(url));
-    });
+    let release: (value: unknown) => void = () => undefined;
+    mockFetch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
     render(
       <MemoryRouter initialEntries={["/tasks"]}>
         <AppProviders>
-          <Routes>
-            <Route path="/tasks" element={<AppLayout />} />
-            <Route path="/profile" element={<div>个人资料页占位</div>} />
-          </Routes>
+          <AppLayout />
         </AppProviders>
       </MemoryRouter>,
     );
-    const banner = await screen.findByRole("alert");
-    expect(banner).toHaveTextContent("正在使用初始密码");
-    fireEvent.click(screen.getByRole("button", { name: "前往修改" }));
-    expect(await screen.findByText("个人资料页占位")).toBeInTheDocument();
+    expect(document.querySelector(".skeleton-header")).toBeTruthy();
+    release(json(200, ME));
   });
 
-  it("hides the initial-password banner after a successful password change refresh", async () => {
-    setup((url) => {
-      if (url === "/api/v2/auth/me") return { ...ME, is_initial_password: true };
-      return defaultHandler(url);
-    });
-    expect(await screen.findByText(/正在使用初始密码/)).toBeInTheDocument();
-    // 网络瞬断触发连接横幅，其重试按钮驱动 refresh；恢复后 me 已改密 → 两条横幅都消失。
-    const { api } = await import("@/shared/api/client");
-    mockFetch.mockImplementation(async () => {
-      throw new TypeError("fetch failed");
-    });
-    await expect(api.get("/api/v2/__probe__")).rejects.toMatchObject({ status: 0 });
-    expect(await screen.findByText(/连接失败/)).toBeInTheDocument();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") {
-        return json(200, { ...ME, is_initial_password: false });
-      }
-      return json(200, defaultHandler(url));
-    });
-    fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    await waitFor(() =>
-      expect(screen.queryByText(/正在使用初始密码/)).not.toBeInTheDocument(),
-    );
-    expect(screen.queryByText(/连接失败/)).not.toBeInTheDocument();
-  });
-
-  // ============ G9 连接失败横幅 ============
-
-  it("shows the connection banner on network errors and recovers via retry", async () => {
-    setup((url) => defaultHandler(url));
-    await screen.findByText("admin");
-    expect(screen.queryByText(/连接失败/)).not.toBeInTheDocument();
-
-    // 任意请求网络异常（经 client 真实路径）→ 连接失败横幅，且不触发登出。
-    const { api } = await import("@/shared/api/client");
-    mockFetch.mockImplementation(async () => {
-      throw new TypeError("fetch failed");
-    });
-    await expect(api.get("/api/v2/tasks/stats")).rejects.toMatchObject({ status: 0 });
-    expect(await screen.findByText(/连接失败，请检查网络后重试/)).toBeInTheDocument();
-    expect(screen.getByText("admin")).toBeInTheDocument(); // 未被登出。
-
-    // 网络恢复：重试触发 refresh 成功 → 横幅消失。
+  it("shows connection-failure screen with retry on network error", async () => {
     mockFetch.mockReset();
     mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      return json(200, defaultHandler(url));
-    });
-    fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    await waitFor(() =>
-      expect(screen.queryByText(/连接失败/)).not.toBeInTheDocument(),
-    );
-    expect(await screen.findByText("admin")).toBeInTheDocument();
-  });
-
-  // ============ G11 统计轮询与活动触发 ============
-
-  it("polls stats every 5 seconds while visible", async () => {
-    jest.useFakeTimers();
-    try {
-      setup((url) => defaultHandler(url));
-      // 等待初始挂载（含 auth/site/stats 首轮）。
-      await screen.findByLabelText("任务统计", {}, {});
-      const callsAfterMount = () =>
-        mockFetch.mock.calls.filter(([url]) => url === "/api/v2/tasks/stats").length;
-      const initial = callsAfterMount();
-      act(() => jest.advanceTimersByTime(5000));
-      await waitFor(() => expect(callsAfterMount()).toBe(initial + 1));
-      act(() => jest.advanceTimersByTime(5000));
-      await waitFor(() => expect(callsAfterMount()).toBe(initial + 2));
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  it("refreshes stats promptly on task activity events (debounced)", async () => {
-    jest.useFakeTimers();
-    try {
-      setup((url) => defaultHandler(url));
-      await screen.findByLabelText("任务统计");
-      const callsAfterMount = () =>
-        mockFetch.mock.calls.filter(([url]) => url === "/api/v2/tasks/stats").length;
-      const initial = callsAfterMount();
-      act(() => {
-        emitTaskActivity();
-        emitTaskActivity();
-      });
-      // 防抖窗口内只发一笔。
-      act(() => jest.advanceTimersByTime(1000));
-      await waitFor(() => expect(callsAfterMount()).toBe(initial + 1));
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  it("keeps last status when polling fails", async () => {
-    setup((url) => {
-      if (url === "/api/v2/auth/me") return ME;
-      if (url === "/api/v2/tasks/stats") return stats();
-      if (url === "/api/v2/public/site-info") return siteInfo();
-      return statusEnvelope("degraded", "下载后端连接异常");
-    });
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/system/status") throw new TypeError("fetch failed");
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      return json(200, defaultHandler(url));
-    });
-    fireEvent.click(screen.getAllByRole("button", { name: "登出" })[0]);
-    await waitFor(() => expect(mockFetch).toHaveBeenCalled());
-    expect(screen.getByRole("alert")).toHaveTextContent("下载后端连接异常");
-  });
-
-  it("logs out from the sidebar and clears the session user", async () => {
-    const { container } = setup((url) => defaultHandler(url));
-    await screen.findByText("admin");
-    fireEvent.click(container.querySelector(".app-logout")!);
-    await waitFor(() => {
-      const call = mockFetch.mock.calls.find(([url]) => url === "/api/v2/auth/logout");
-      expect(call).toBeDefined();
-    });
-    await waitFor(() => expect(screen.queryByText("admin")).not.toBeInTheDocument());
-  });
-
-  it("keeps layout functional when status and stats both fail", async () => {
-    mockFetch.mockReset();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
       throw new TypeError("fetch failed");
     });
     render(
@@ -302,24 +158,81 @@ describe("AppLayout", () => {
         </AppProviders>
       </MemoryRouter>,
     );
-    await screen.findByText("admin");
-    // 轮询失败无降级横幅（网络失败保持上次读数，不误报 degraded）。
-    expect(
-      screen.queryByText(/下载后端连接异常/),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("任务统计")).not.toBeInTheDocument(); // 统计失败不显示。
+    expect(await screen.findByText("连接失败")).toBeInTheDocument();
+    expect(screen.getByText("无法连接服务器，请检查网络连接")).toBeInTheDocument();
+
+    // 重试成功后进入应用壳。
+    mockFetch.mockImplementation(async (url: string) => json(200, defaultHandler(url)));
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(document.querySelector(".sidebar-nav")).toBeTruthy());
   });
 
-  it("logout from bottom nav toasts trigger then logs out", async () => {
-    setup((url) => defaultHandler(url));
-    await screen.findByLabelText("底部导航");
-    fireEvent.click(screen.getByLabelText("底部导航").querySelector("button")!);
-    expect(await screen.findByText("已触发登出")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "关闭提示" }));
-    await waitFor(() => expect(screen.queryByText("已触发登出")).not.toBeInTheDocument());
+  it("shows server error message on 5xx", async () => {
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
+      return json(500, { error: { code: "internal", message: "数据库不可用" } });
+    });
+    render(
+      <MemoryRouter initialEntries={["/tasks"]}>
+        <AppProviders>
+          <AppLayout />
+        </AppProviders>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("服务器错误: 数据库不可用")).toBeInTheDocument();
+  });
+
+  it("shows the initial-password warning banner and navigates to profile", async () => {
+    setup((url) =>
+      url === "/api/v2/auth/me" ? { ...ME, is_initial_password: true } : defaultHandler(url),
+    );
+    expect(await screen.findByText(/正在使用默认密码/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "前往修改" }));
+    expect(await screen.findByText("个人资料页占位")).toBeInTheDocument();
+  });
+
+  it("dismisses the initial-password banner via close button", async () => {
+    setup((url) =>
+      url === "/api/v2/auth/me" ? { ...ME, is_initial_password: true } : defaultHandler(url),
+    );
+    expect(await screen.findByText(/正在使用默认密码/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭安全提醒" }));
+    await waitFor(() =>
+      expect(screen.queryByText(/正在使用默认密码/)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("shows the degraded backend banner with message and dismiss control", async () => {
+    setup((url) => {
+      if (url === "/api/v2/system/status") return statusEnvelope("degraded", "下载后端连接异常");
+      return defaultHandler(url);
+    });
+    expect(await screen.findByText("下载后端连接异常")).toBeInTheDocument();
+    expect(screen.getByText("下载后端异常")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭服务状态提醒" }));
+    await waitFor(() =>
+      expect(screen.queryByText("下载后端连接异常")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("admin degraded banner navigates to settings", async () => {
+    setup((url) => {
+      if (url === "/api/v2/system/status") return statusEnvelope("degraded", "下载后端连接异常");
+      return defaultHandler(url);
+    });
+    expect(await screen.findByText("下载后端连接异常")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看系统设置" }));
+    expect(await screen.findByText("系统设置占位")).toBeInTheDocument();
+  });
+
+  it("logout button in sidebar footer logs out", async () => {
+    setup();
+    await waitFor(() => expect(document.querySelector(".logout-btn")).toBeTruthy());
+    fireEvent.click(document.querySelector(".logout-btn")!);
     await waitFor(() => {
-      const call = mockFetch.mock.calls.find(([url]) => url === "/api/v2/auth/logout");
-      expect(call).toBeDefined();
+      const calls = mockFetch.mock.calls.filter(([url]) => url === "/api/v2/auth/logout");
+      expect(calls).toHaveLength(1);
     });
   });
 });

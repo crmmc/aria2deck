@@ -195,7 +195,10 @@ describe("AppProviders auth", () => {
   });
 
   it("login sets user and logout clears", async () => {
-    mockFetch.mockResolvedValueOnce(json(200, ME));
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/v2/public/site-info") return json(200, { site_title: "Aria2Deck" });
+      return json(200, ME);
+    });
     let auth: ReturnType<typeof useAuth> | null = null;
     function LoginProbe() {
       auth = useAuth();
@@ -219,7 +222,10 @@ describe("AppProviders auth", () => {
   });
 
   it("401 from any client call clears the user (unified handler)", async () => {
-    mockFetch.mockResolvedValueOnce(json(200, ME));
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/v2/public/site-info") return json(200, { site_title: "Aria2Deck" });
+      return json(200, ME);
+    });
     let auth: ReturnType<typeof useAuth> | null = null;
     function Both() {
       auth = useAuth();

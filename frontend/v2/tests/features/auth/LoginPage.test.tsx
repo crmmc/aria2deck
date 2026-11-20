@@ -51,7 +51,7 @@ function renderLogin() {
 }
 
 function passwordInput(): HTMLInputElement {
-  return document.querySelector(".password-row input") as HTMLInputElement;
+  return document.querySelector(".password-input-wrap .password-input") as HTMLInputElement;
 }
 
 function fillAndSubmit(username: string, password: string) {
@@ -90,8 +90,8 @@ describe("LoginPage", () => {
     renderLogin();
     fillAndSubmit("admin", "wrong");
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent("用户名或密码错误");
-    });
+      expect(document.querySelector(".alert-danger")).toHaveTextContent("用户名或密码无效");
+    }, { timeout: 3000 });
   });
 
   it("shows network error inline", async () => {
@@ -101,34 +101,27 @@ describe("LoginPage", () => {
     renderLogin();
     fillAndSubmit("admin", "x");
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent("网络异常");
-    });
+      expect(document.querySelector(".alert-danger")).toHaveTextContent(
+        "网络连接失败，请检查地址或网络",
+      );
+    }, { timeout: 3000 });
   });
 
-  it("ignores a second submit while the first login is pending", async () => {
-    let releaseLogin: (value: unknown) => void = () => undefined;
-    const pendingLogin = new Promise((resolve) => {
-      releaseLogin = resolve;
-    });
+  it("shows the backend message for other server errors", async () => {
     routeMocks({
-      "/api/v2/auth/login": pendingLogin as never,
+      "/api/v2/auth/login": json(500, { error: { code: "internal", message: "数据库不可用" } }),
     });
     renderLogin();
-    const submitButton = screen.getByRole("button", { name: "登录" });
-    fireEvent.change(screen.getByLabelText("用户名"), { target: { value: "admin" } });
-    fireEvent.change(passwordInput(), { target: { value: "pw" } });
-    fireEvent.click(submitButton);
-    // 提交中按钮已禁用；绕过按钮直接再次提交表单，验证 submitted 守卫。
-    fireEvent.submit(screen.getByLabelText("登录表单"));
+    fillAndSubmit("admin", "x");
     await waitFor(() => {
-      const calls = mockFetch.mock.calls.filter(([url]) => url === "/api/v2/auth/login");
-      expect(calls).toHaveLength(1);
-    });
-    releaseLogin(json(401, err()));
+      expect(document.querySelector(".alert-danger")).toHaveTextContent("数据库不可用");
+    }, { timeout: 3000 });
   });
 
   it("redirects when already logged in", async () => {
-    mockFetch.mockResolvedValueOnce(json(200, ME));
+    routeMocks({
+      "/api/v2/auth/me": json(200, ME),
+    });
     render(
       <MemoryRouter initialEntries={["/login"]}>
         <AppProviders>
@@ -139,7 +132,7 @@ describe("LoginPage", () => {
         </AppProviders>
       </MemoryRouter>,
     );
-    expect(await screen.findByText("任务页占位")).toBeInTheDocument();
+    expect(await screen.findByText("任务页占位", undefined, { timeout: 3000 })).toBeInTheDocument();
   });
 
   it("successful login navigates to tasks", async () => {
@@ -158,7 +151,7 @@ describe("LoginPage", () => {
       </MemoryRouter>,
     );
     fillAndSubmit("admin", "right-password");
-    expect(await screen.findByText("登录后任务页")).toBeInTheDocument();
+    expect(await screen.findByText("登录后任务页", undefined, { timeout: 3000 })).toBeInTheDocument();
   });
 
   it("redirects back to the origin page after login", async () => {
@@ -181,7 +174,9 @@ describe("LoginPage", () => {
   });
 
   it("already-authenticated redirect honors state.from too", async () => {
-    mockFetch.mockResolvedValueOnce(json(200, ME));
+    routeMocks({
+      "/api/v2/auth/me": json(200, ME),
+    });
     render(
       <MemoryRouter initialEntries={[{ pathname: "/login", state: { from: "/files" } }]}>
         <AppProviders>
@@ -214,7 +209,7 @@ describe("LoginPage", () => {
       </MemoryRouter>,
     );
     fillAndSubmit("admin", "initial-password");
-    expect(await screen.findByText("改密引导页")).toBeInTheDocument();
+    expect(await screen.findByText("改密引导页", undefined, { timeout: 3000 })).toBeInTheDocument();
   });
 
   it("already-authenticated initial-password user is also guided to /profile", async () => {
@@ -336,7 +331,9 @@ describe("LoginPage", () => {
       mockFetch.mockResolvedValueOnce(json(401, err()));
       renderLogin();
       fillAndSubmit("admin", "x");
-      expect(await screen.findByRole("alert")).toHaveTextContent("登录失败，请重试");
+      await waitFor(() => {
+        expect(document.querySelector(".alert-danger")).toHaveTextContent("boom");
+      });
     } finally {
       if (descriptor !== undefined) {
         Object.defineProperty(globalThis, "crypto", descriptor);

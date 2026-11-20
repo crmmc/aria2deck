@@ -1,296 +1,318 @@
+"use client";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { useToast } from "@/app/hooks";
-import { errorMessage } from "@/shared/api/client";
-import type { HistoryStatus, TaskResponse } from "@/shared/api/types";
-import {
-  ConfirmDialog,
-  EmptyState,
-  ErrorState,
-  LoadingState,
-  Pagination,
-  StatusBadge,
-} from "@/shared/components/ui";
-import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
-import { formatBytes, formatDateTime } from "@/shared/lib/format";
+import { useToast } from "@/shared/components/toast-context";
+import { EmptyState } from "@/shared/components/EmptyState";
+import { PaginationControls } from "@/shared/components/PaginationControls";
+import { ToolbarGroup, ToolbarSearchInput, ToolbarShell } from "@/shared/components/Toolbar";
+import { useClipboard } from "@/shared/hooks/useClipboard";
+import { useSelection } from "@/shared/hooks/useSelection";
+
 import { deleteHistory, fetchHistory, retryFromHistory } from "./api";
+import { sortHistoryRecords, toHistoryRecordView, type HistoryRecordView } from "./model";
+import { HistoryCard } from "./components/HistoryCard";
 
-function CopyUriButton({ uri, onCopy }: { uri: string; onCopy: (uri: string) => Promise<void> }) {
-  return (
-    <button type="button" className="link-button" onClick={() => void onCopy(uri)}>
-      复制链接
-    </button>
-  );
-}
-
-/** H4 失败原因：下载侧已知 error_code 的中文口径，未知码原样展示。 */
-const ERROR_CODE_LABEL: Record<string, string> = {
-  upstream_failure: "上游下载失败",
-  download_unavailable: "下载不可用",
-  rpc_unavailable: "aria2 连接不可用",
-  aria2_rejected: "aria2 拒绝了操作",
-  task_too_large: "任务超出大小限制",
-  quota_exceeded: "存储配额不足",
-  physical_space_exceeded: "机器空间不足",
-  submission_uncertain: "提交结果不可确认",
-  recovery_unsafe: "恢复不安全",
-  invalid_input: "输入无效",
-  invalid_state: "状态无效",
-  content_busy: "内容被占用",
-};
-
-function failureReason(item: TaskResponse): string | null {
-  if (item.status !== "failed" && item.status !== "cancelled" && item.status !== "expired") {
-    return null;
-  }
-  if (item.error_code === null) return null;
-  return ERROR_CODE_LABEL[item.error_code] ?? item.error_code;
-}
-
-const PAGE_SIZE = 20;
-const STATUS_OPTIONS: { value: HistoryStatus | ""; label: string }[] = [
-  { value: "", label: "全部状态" },
-  { value: "completed", label: "已完成" },
-  { value: "failed", label: "失败" },
-  { value: "cancelled", label: "已取消" },
-  { value: "expired", label: "已过期" },
-];
+const DEFAULT_PAGE_SIZE = 20;
+const SEARCH_DEBOUNCE_MS = 300;
 
 export function HistoryPage() {
-  const { push } = useToast();
-  const [items, setItems] = useState<TaskResponse[]>([]);
+  const { showToast, showConfirm } = useToast();
+  const copyToClipboard = useClipboard();
+  const [records, setRecords] = useState<HistoryRecordView[]>([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [status, setStatus] = useState<HistoryStatus | "">("");
-  const [search, setSearch] = useState("");
-  const debouncedSearch = useDebouncedValue(search, 300);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [confirm, setConfirm] = useState<number[] | null>(null);
-  const requestSeq = useRef(0);
+  const {
+    selected: selectedRecords,
+    selectedCount,
+    setSelected: setSelectedRecords,
+    toggle: toggleRecordSelection,
+    toggleAll: toggleAllRecords,
+  } = useSelection<number>();
+  const [filterStatus, setFilterStatus] = useState<string>("all");
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [isBatchOperating, setIsBatchOperating] = useState(false);
+  const mountedRef = useRef(true);
+  const requestIdRef = useRef(0);
 
-  const load = useCallback(async () => {
-    const seq = ++requestSeq.current;
+  const loadHistory = useCallback(async () => {
+    if (!mountedRef.current) return;
+    const requestId = ++requestIdRef.current;
     setLoading(true);
-    setError(null);
     try {
-      const response = await fetchHistory(
-        status === "" ? null : status,
-        debouncedSearch,
-        page,
-        PAGE_SIZE,
+      const result = await fetchHistory(
+        filterStatus === "all" ? null : (filterStatus as "completed" | "cancelled" | "failed"),
+        debouncedKeyword,
+        currentPage,
+        pageSize,
       );
-      if (seq !== requestSeq.current) return; // 丢弃过期响应。
-      setItems(response.items);
-      setTotal(response.total);
-    } catch (caught) {
-      if (seq !== requestSeq.current) return;
-      setError(errorMessage(caught, "加载失败"));
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      setRecords(sortHistoryRecords(result.items.map(toHistoryRecordView)));
+      // 新一页/新条件的结果成为当前数据时，清空残留选中，避免工具栏显示旧页计数、批量操作命中空列表
+      setSelectedRecords(new Set());
+      setTotal(result.total);
+    } catch (err) {
+      // 归档参考语义：401 等加载失败即使随后守卫跳转卸载本页也要提示（ToastHost 在路由外）。
+      showToast("加载历史失败: " + ((err as Error)?.message ?? ""), "error");
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
     } finally {
-      if (seq === requestSeq.current) setLoading(false);
+      if (mountedRef.current && requestId === requestIdRef.current) setLoading(false);
     }
-  }, [status, debouncedSearch, page]);
+  }, [currentPage, pageSize, filterStatus, debouncedKeyword, showToast, setSelectedRecords]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    const mounted = mountedRef;
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
-  const copyUri = async (uri: string) => {
-    try {
-      await navigator.clipboard.writeText(uri);
-      push("success", "已复制链接");
-    } catch {
-      push("error", "复制失败，请手动复制");
-    }
-  };
+  useEffect(() => {
+    loadHistory();
+  }, [loadHistory]);
 
-  const handleDelete = async (ids: number[]) => {
-    setConfirm(null);
-    try {
-      const response = await deleteHistory(ids);
-      if (response.rejected_count > 0) {
-        push("error", `${response.rejected_count} 条删除失败`);
-      } else {
-        push("success", "已删除");
+  // 搜索防抖：输入停止 300ms 后才触发后端查询；关键词真正变化时同步回到第 1 页，
+  // 保证条件变化只发一笔"第 1 页 + 新条件"的请求（归档参考 原逻辑）
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const next = searchKeyword.trim();
+      setDebouncedKeyword((prev) => {
+        if (prev === next) return prev;
+        setCurrentPage(1);
+        return next;
+      });
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchKeyword]);
+
+  const copyUri = useCallback(
+    (uri: string) => {
+      void copyToClipboard(uri);
+    },
+    [copyToClipboard],
+  );
+
+  const deleteRecord = useCallback(
+    async (record: HistoryRecordView) => {
+      try {
+        const result = await deleteHistory([record.id]);
+        const first = result.items[0];
+        if (result.rejected_count > 0 || !first?.accepted) {
+          showToast("删除失败：" + (first?.error?.message ?? "未知错误"), "error");
+          if (mountedRef.current) loadHistory();
+          return;
+        }
+        if (!mountedRef.current) return;
+        setSelectedRecords((prev) => {
+          const next = new Set(prev);
+          next.delete(record.id);
+          return next;
+        });
+        showToast("已删除该条历史记录", "success");
+        // 当前页删空且非第 1 页时回退到上一页（页码变化会触发重新拉取）
+        if (records.length === 1 && currentPage > 1) {
+          setCurrentPage((page) => page - 1);
+        } else {
+          loadHistory();
+        }
+      } catch (err) {
+        showToast("删除失败：" + (err as Error).message, "error");
+        if (mountedRef.current) loadHistory();
       }
-      // 删空末页回退：当前页只剩被删项时回上一页。
-      const remaining = total - response.accepted_count;
-      const maxPage = Math.max(1, Math.ceil(remaining / PAGE_SIZE));
-      if (page > maxPage) setPage(maxPage);
-      else await load();
-      setSelected(new Set());
-    } catch (caught) {
-      push("error", errorMessage(caught, "删除失败"));
-    }
-  };
+    },
+    [showToast, loadHistory, setSelectedRecords, records.length, currentPage],
+  );
 
-  const handleRetry = async (id: number) => {
-    try {
-      await retryFromHistory(id);
-      push("success", "重试任务已创建");
-    } catch (caught) {
-      push("error", errorMessage(caught, "重试失败"));
-    }
-  };
+  const retryRecord = useCallback(
+    async (record: HistoryRecordView) => {
+      // C10：V2 无 retry_blocked_reason，不编造原因；不可重试时仅提示。
+      if (record.retryable === false) {
+        showToast("不可重试", "warning");
+        return;
+      }
 
-  const toggle = (id: number) => {
-    setSelected((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
+      try {
+        await retryFromHistory(record.id);
+        showToast("已重新添加下载任务", "success");
+      } catch (err) {
+        showToast("重试失败：" + (err as Error).message, "error");
+      }
+    },
+    [showToast],
+  );
+
+  async function batchDeleteHistory() {
+    const selectedList = records.filter((r) => selectedRecords.has(r.id));
+    if (selectedList.length === 0) {
+      showToast("请先选择要删除的记录", "warning");
+      return;
+    }
+
+    const confirmed = await showConfirm({
+      title: "删除历史",
+      message: `确定要删除选中的 ${selectedList.length} 条历史记录吗？`,
+      confirmText: "删除",
+      danger: true,
     });
-  };
+    if (!confirmed) return;
+    if (!mountedRef.current) return;
+
+    setIsBatchOperating(true);
+    try {
+      const ids = selectedList.map((r) => r.id);
+      const result = await deleteHistory(ids);
+      // items 按请求顺序回位；accepted 项以 task.id 为准，缺 task 时按序号配对。
+      const deletedIds = new Set(
+        result.items
+          .map((item, index) => (item.accepted ? (item.task?.id ?? ids[index]) : null))
+          .filter((value): value is number => value !== null),
+      );
+      setSelectedRecords(new Set());
+      if (result.rejected_count > 0) {
+        showToast(
+          `已删除 ${result.accepted_count} 条，${result.rejected_count} 条删除失败`,
+          "warning",
+        );
+      } else {
+        showToast(`已删除 ${result.accepted_count} 条历史记录`, "success");
+      }
+      // 当前页被删空且非第 1 页时回退到上一页（页码变化会触发重新拉取）
+      const remaining = records.filter((r) => !deletedIds.has(r.id));
+      if (remaining.length === 0 && currentPage > 1) {
+        setCurrentPage((page) => page - 1);
+      } else {
+        loadHistory();
+      }
+    } catch (err) {
+      showToast("删除失败：" + (err as Error).message, "error");
+      if (mountedRef.current) loadHistory();
+    } finally {
+      if (mountedRef.current) setIsBatchOperating(false);
+    }
+  }
+
+  const toggleSelectAll = useCallback(() => {
+    toggleAllRecords(records.map((r) => r.id));
+  }, [toggleAllRecords, records]);
 
   return (
-    <section className="page" aria-label="历史记录">
-      <header className="page-header">
-        <h1>历史</h1>
-        <div className="header-actions">
-          <label className="search-field">
-            <span className="visually-hidden">搜索历史</span>
-            <input
-              type="search"
-              value={search}
-              onChange={(event) => {
-                // 条件变化与页码重置在同一事件内，避免旧页码双请求。
-                setSearch(event.target.value);
-                setPage(1);
-              }}
-              placeholder="搜索名称或链接…"
-              aria-label="搜索历史"
-            />
-          </label>
-          <label className="status-select">
-            <span className="visually-hidden">状态筛选</span>
-            <select
-              value={status}
-              onChange={(event) => {
-                setStatus(event.target.value as HistoryStatus | "");
-                setPage(1);
-              }}
-              aria-label="状态筛选"
-            >
-              {STATUS_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          {selected.size > 0 && (
-            <button
-              type="button"
-              className="danger-button"
-              onClick={() => setConfirm([...selected])}
-            >
-              删除选中（{selected.size}）
-            </button>
-          )}
+    <div className="glass-frame full-height animate-in">
+      <div className="space-between mb-7">
+        <div>
+          <h1 className="text-2xl">任务历史</h1>
+          <p className="muted">查看已完成、取消和失败的下载任务</p>
         </div>
-      </header>
+      </div>
 
-      {loading ? (
-        <LoadingState />
-      ) : error !== null ? (
-        <ErrorState message={error} onRetry={() => void load()} />
-      ) : items.length === 0 ? (
-        <EmptyState
-          title="暂无历史记录"
-          hint={debouncedSearch !== "" ? "换个关键词试试" : "完成的任务会出现在这里"}
-        />
-      ) : (
-        <>
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th scope="col" className="select-col">
-                  <input
-                    type="checkbox"
-                    aria-label="全选历史"
-                    checked={items.length > 0 && items.every((item) => selected.has(item.id))}
-                    onChange={(event) =>
-                      setSelected(
-                        event.target.checked
-                          ? new Set(items.map((item) => item.id))
-                          : new Set(),
-                      )
-                    }
-                  />
-                </th>
-                <th scope="col">名称</th>
-                <th scope="col">状态</th>
-                <th scope="col">大小</th>
-                <th scope="col">失败原因</th>
-                <th scope="col">完成时间</th>
-                <th scope="col">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item) => (
-                <tr key={item.id} data-testid={`history-row-${item.id}`}>
-                  <td className="select-col">
-                    <input
-                      type="checkbox"
-                      aria-label={`选择 ${item.name}`}
-                      checked={selected.has(item.id)}
-                      onChange={() => toggle(item.id)}
-                    />
-                  </td>
-                  <td className="name-cell" title={item.name}>
-                    {item.name}
-                  </td>
-                  <td>
-                    <StatusBadge status={item.status} label={item.status_label} />
-                  </td>
-                  <td>{item.total_bytes === null ? "—" : formatBytes(item.total_bytes)}</td>
-                  <td className="name-cell">
-                    {(() => {
-                      const reason = failureReason(item);
-                      return reason === null ? "—" : <span title={reason}>{reason}</span>;
-                    })()}
-                  </td>
-                  <td>{formatDateTime(item.finished_at_ms ?? item.updated_at_ms)}</td>
-                  <td className="actions-cell">
-                    {item.uri !== null && (
-                      <CopyUriButton uri={item.uri} onCopy={copyUri} />
-                    )}
-                    {item.retryable && (
-                      <button
-                        type="button"
-                        className="link-button"
-                        onClick={() => void handleRetry(item.id)}
-                      >
-                        重试
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="link-button"
-                      onClick={() => setConfirm([item.id])}
-                    >
-                      删除
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <Pagination page={page} pageSize={PAGE_SIZE} total={total} onChange={setPage} />
-        </>
-      )}
+      <ToolbarShell>
+        <ToolbarGroup className="toolbar-actions-group">
+          <button type="button"
+            className="button secondary btn-sm"
+            onClick={toggleSelectAll}
+          >
+            {selectedCount === records.length && records.length > 0
+              ? "取消全选"
+              : "全选"}
+          </button>
+          {selectedCount > 0 && (
+            <>
+              <span className="muted text-sm">
+                已选 {selectedCount} 项
+              </span>
+              <button type="button"
+                className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
+                onClick={batchDeleteHistory}
+                disabled={isBatchOperating}
+              >
+                删除
+              </button>
+            </>
+          )}
+        </ToolbarGroup>
 
-      {confirm !== null && (
-        <ConfirmDialog
-          title="删除历史记录"
-          message={`确定删除选中的 ${confirm.length} 条历史记录？删除后不可恢复。`}
-          confirmLabel="删除"
-          danger
-          onConfirm={() => void handleDelete(confirm)}
-          onCancel={() => setConfirm(null)}
+        <ToolbarGroup className="toolbar-select-group">
+          <span className="muted text-sm">筛选:</span>
+          <select
+            value={filterStatus}
+            onChange={(e) => {
+              setFilterStatus(e.target.value);
+              setCurrentPage(1);
+            }}
+            className="select"
+            aria-label="筛选历史"
+          >
+            <option value="all">全部</option>
+            <option value="completed">已完成</option>
+            <option value="cancelled">已取消</option>
+            <option value="failed">失败</option>
+          </select>
+        </ToolbarGroup>
+
+        <ToolbarGroup className="toolbar-search-group">
+          <ToolbarSearchInput
+            ariaLabel="搜索历史"
+            placeholder="搜索任务..."
+            value={searchKeyword}
+            onChange={setSearchKeyword}
+          />
+        </ToolbarGroup>
+      </ToolbarShell>
+
+      <div className="task-list">
+        {loading ? (
+          <div className="empty-state">
+            <p className="muted">加载中...</p>
+          </div>
+        ) : records.length === 0 ? (
+          <EmptyState
+            icon={
+              <svg
+                width="48"
+                height="48"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
+            }
+            title="暂无历史记录"
+            description="完成的下载任务将显示在这里"
+          />
+        ) : (
+          <div className="card task-card-container">
+            {records.map((record) => (
+              <HistoryCard
+                key={record.id}
+                record={record}
+                isSelected={selectedRecords.has(record.id)}
+                onToggleSelection={toggleRecordSelection}
+                onCopyUri={copyUri}
+                onRetry={retryRecord}
+                onDelete={deleteRecord}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {total > 0 && (
+        <PaginationControls
+          currentPage={currentPage}
+          pageSize={pageSize}
+          totalFiles={total}
+          onPageChange={setCurrentPage}
+          onPageSizeChange={setPageSize}
         />
       )}
-    </section>
+    </div>
   );
 }

@@ -1,9 +1,14 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
 import { SettingsPage } from "@/features/settings/SettingsPage";
-import type { SettingsResponse, TrackerStatusResponse, UserResponse } from "@/shared/api/types";
+import type {
+  MachineStatsResponse,
+  SettingsResponse,
+  TrackerStatusResponse,
+  UserResponse,
+} from "@/shared/api/types";
 
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
@@ -36,10 +41,10 @@ function settings(overrides: Partial<SettingsResponse> = {}): SettingsResponse {
     ws_reconnect_jitter_seconds: 3,
     ws_reconnect_factor: 2,
     history_retention_days: 90,
-    tracker_fixed_list: [],
+    tracker_fixed_list: ["udp://a/announce"],
     tracker_remote_urls: ["https://t.example/list.txt"],
     tracker_refresh_interval_minutes: 60,
-    download_connection_limits: {},
+    download_connection_limits: { total_connections: 100 },
     account_security_rate_limit: 10,
     authenticated_api_rate_limit: 600,
     public_api_rate_limit: 300,
@@ -69,31 +74,47 @@ function tracker(overrides: Partial<TrackerStatusResponse> = {}): TrackerStatusR
   };
 }
 
+function machine(overrides: Partial<MachineStatsResponse> = {}): MachineStatsResponse {
+  return {
+    total_bytes: 1000,
+    used_bytes: 500,
+    free_bytes: 500,
+    download_used_bytes: 200,
+    system_used_bytes: 300,
+    ...overrides,
+  };
+}
+
 function json(status: number, body: unknown): unknown {
   return { status, ok: status >= 200 && status < 300, json: () => Promise.resolve(body) };
 }
 
-function setup(
-  handler: (url: string, init?: { method?: string; body?: string }) => unknown,
-  me: UserResponse = ME,
-) {
+type Handler = (
+  url: string,
+  init?: { method?: string; body?: string },
+) => unknown | Promise<unknown>;
+
+function setup(handler: Handler = () => null, me: UserResponse = ME) {
   mockFetch.mockReset();
   mockFetch.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
     if (url === "/api/v2/auth/me") return json(200, me);
-    const result = handler(url, init);
-    if (
-      typeof result === "object" &&
-      result !== null &&
-      typeof (result as { json?: unknown }).json === "function"
-    ) {
-      return result;
+    if (url === "/api/v2/public/site-info") {
+      return json(200, {
+        site_title: "Aria2Deck",
+        ws_reconnect_max_delay_seconds: 30,
+        ws_reconnect_jitter_seconds: 1,
+        ws_reconnect_factor: 2,
+      });
     }
-    // 处理器未命中（null）时的默认读取响应。
-    if (result === null) {
-      if (url === "/api/v2/settings" && init?.method === "GET") return json(200, settings());
-      if (url === "/api/v2/trackers" && init?.method === "GET") return json(200, tracker());
+    const result = await handler(url, init);
+    if (result !== null) return result;
+    if (url === "/api/v2/settings") return json(200, settings());
+    if (url === "/api/v2/trackers") return json(200, tracker());
+    if (url === "/api/v2/stats/machine") return json(200, machine());
+    if (url === "/api/v2/settings/aria2/version") {
+      return json(200, { connected: true, version: "1.37.0", features: ["BitTorrent"] });
     }
-    return json(200, result);
+    return json(200, {});
   });
   return render(
     <MemoryRouter initialEntries={["/settings"]}>
@@ -104,114 +125,166 @@ function setup(
   );
 }
 
-function openAdvanced() {
-  fireEvent.click(screen.getByText("高级（打包 / 历史保留 / 凭证作废）"));
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
-describe("SettingsPage load and layout", () => {
-  it("renders all sections with field values from the server", async () => {
-    setup(() => null);
+function openAdvanced() {
+  fireEvent.click(screen.getByRole("button", { name: /系统高级设置/ }));
+}
+
+let originalShowModal: HTMLDialogElement["showModal"] | undefined;
+let originalClose: HTMLDialogElement["close"] | undefined;
+
+beforeEach(() => {
+  originalShowModal = HTMLDialogElement.prototype.showModal;
+  originalClose = HTMLDialogElement.prototype.close;
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+    configurable: true,
+    value: jest.fn(function showModal(this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    }),
+  });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", {
+    configurable: true,
+    value: jest.fn(function close(this: HTMLDialogElement) {
+      this.removeAttribute("open");
+    }),
+  });
+});
+
+afterEach(() => {
+  document.querySelectorAll("dialog").forEach((d) => d.removeAttribute("open"));
+  if (originalShowModal) {
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: originalShowModal });
+  } else {
+    Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
+  }
+  if (originalClose) {
+    Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: originalClose });
+  } else {
+    Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
+  }
+});
+
+describe("SettingsPage（V1 系统设置迁移）", () => {
+  it("renders the V1 page shell and every supported section", async () => {
+    setup();
+    expect(await screen.findByText("系统设置")).toBeInTheDocument();
+    expect(screen.getByText("系统配置（仅管理员）")).toBeInTheDocument();
+    expect(screen.getByText("系统配置")).toBeInTheDocument();
+    expect(screen.getByText("aria2 后端配置")).toBeInTheDocument();
+    expect(screen.getByText("打包设置")).toBeInTheDocument();
+    expect(screen.getByText("WebSocket 重连设置")).toBeInTheDocument();
+    expect(screen.getByText("Tracker 列表")).toBeInTheDocument();
+    expect(screen.getByText("凭证安全")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存配置" })).toBeInTheDocument();
+  });
+
+  it("binds every field to the values from the server", async () => {
+    setup();
     expect(await screen.findByLabelText("网站标题")).toHaveValue("Aria2Deck");
-    expect(screen.getByLabelText("RPC 地址")).toHaveValue("http://127.0.0.1:6800/rpc");
-    expect(screen.queryByLabelText(/隐藏文件后缀/)).not.toBeInTheDocument();
-    const connectionLimits = screen.getByLabelText(
-      "下载连接数限制（每行一条：配置键=连接数，0-1000）",
+    expect(screen.getByLabelText("最大任务大小 (GB)")).toHaveValue(10);
+    expect(screen.getByLabelText("最小剩余磁盘空间 (GB)")).toHaveValue(5);
+    expect(screen.getByLabelText("历史保留天数")).toHaveValue(90);
+    expect(screen.getByLabelText("aria2 RPC URL")).toHaveValue("http://127.0.0.1:6800/rpc");
+    expect(screen.getByLabelText("aria2 RPC Secret")).toHaveValue("********");
+    expect(screen.getByLabelText("BT 停止超时")).toHaveValue(60);
+    expect(screen.getByLabelText("ZIP（Deflate64）")).toBeChecked();
+    expect(screen.getByLabelText("压缩等级")).toHaveValue("5");
+    expect(screen.getByLabelText("最大重连延迟")).toHaveValue("30");
+    expect(screen.getByLabelText("固定 tracker 列表")).toHaveValue("udp://a/announce");
+    expect(screen.getByLabelText("远程 tracker 列表 URL")).toHaveValue(
+      "https://t.example/list.txt",
     );
-    expect(connectionLimits).toBeInTheDocument();
-    expect(connectionLimits).toHaveAttribute(
-      "placeholder",
-      [
-        "total_connections=100",
-        "authenticated_per_user_connections=16",
-        "authenticated_per_file_connections=8",
-        "anonymous_total_connections=40",
-        "anonymous_per_ip_connections=4",
-        "anonymous_per_file_connections=2",
-      ].join("\n"),
+    expect(screen.getByLabelText("tracker 刷新间隔（分钟）")).toHaveValue(60);
+  });
+
+  it("shows the aria2 connection banner and version", async () => {
+    setup();
+    expect(await screen.findByText("已连接")).toBeInTheDocument();
+    expect(screen.getByText(/aria2 1\.37\.0/)).toBeInTheDocument();
+  });
+
+  it("shows the disconnected banner when the saved config cannot reach aria2", async () => {
+    setup((url) =>
+      url === "/api/v2/settings/aria2/version"
+        ? json(200, { connected: false, version: null, features: [] })
+        : null,
     );
-    expect(screen.getByText("RPC 连接参数；Secret 掩码显示，留空保持不变。")).toBeInTheDocument();
-    expect(screen.getByLabelText("账户安全限流")).toHaveValue("10");
-    expect(screen.getByLabelText("打包格式")).toHaveValue("zip");
-    expect(screen.getByText(/共 1 条/)).toBeInTheDocument();
-    expect(screen.getByText("刷新成功")).toBeInTheDocument();
+    expect(await screen.findByText("未连接")).toBeInTheDocument();
+    expect(
+      screen.getByText("无法连接 aria2，请检查 RPC 地址与 Secret。"),
+    ).toBeInTheDocument();
   });
 
-  it("keeps the advanced section collapsed by default and expands on click", async () => {
-    const { container } = setup(() => null);
+  it("keeps the sections V2 cannot support out of the DOM entirely (C02-C06)", async () => {
+    setup();
     await screen.findByLabelText("网站标题");
-    const details = container.querySelector("details.advanced-section") as HTMLDetailsElement;
-    expect(details.open).toBe(false);
-    openAdvanced();
-    expect(details.open).toBe(true);
-    expect(screen.getByText("作废全部凭证…")).toBeInTheDocument();
+    expect(screen.queryByText("文件管理配置")).not.toBeInTheDocument();
+    expect(screen.queryByText("隐藏文件后缀名")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("输入后缀名，按回车添加")).not.toBeInTheDocument();
+    expect(screen.queryByText("已登录保底连接数")).not.toBeInTheDocument();
+    expect(screen.queryByText("匿名基础连接数")).not.toBeInTheDocument();
+    expect(screen.queryByText("匿名可借用连接数")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("抖动系数")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("指数因子")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("清空 aria2 RPC Secret")).not.toBeInTheDocument();
   });
 
-  it("exercises every field control once without breaking the form", async () => {
-    const { container } = setup(() => null);
-    await screen.findByLabelText("网站标题");
-    openAdvanced();
-    // 遍历全部 input/textarea/select：先改为临时值再改回，触发每个内联处理器。
-    const controls = Array.from(
-      container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
-        "input:not([type='checkbox']), textarea, select",
-      ),
+  it("renders the machine disk card from the download/system split", async () => {
+    setup();
+    expect(await screen.findByText("机器磁盘空间")).toBeInTheDocument();
+    expect(screen.getByText(/下载占用：200\.0 B/)).toBeInTheDocument();
+    expect(screen.getByText(/系统占用：300\.0 B/)).toBeInTheDocument();
+    expect(screen.getByText(/总占用：500\.0 B/)).toBeInTheDocument();
+  });
+
+  it("falls back to the V1 未连接 banner when the version probe fails", async () => {
+    setup((url) =>
+      url === "/api/v2/settings/aria2/version"
+        ? json(500, { error: { code: "internal", message: "探测失败" } })
+        : null,
     );
-    expect(controls.length).toBeGreaterThan(20);
-    for (const control of controls) {
-      const original = control.value;
-      const temp =
-        control.tagName === "SELECT" ? (original === "zip" ? "tar.zst" : "zip") : `${original}0`;
-      fireEvent.change(control, { target: { value: temp } });
-      fireEvent.change(control, { target: { value: original } });
-    }
-    // 保存仍应成功：值已还原，payload 与服务器一致。
-    fireEvent.click(screen.getByRole("button", { name: "保存全部" }));
-    await waitFor(() => {
-      expect(mockFetch.mock.calls.find(([, init2]) => init2?.method === "PATCH")).toBeDefined();
-    });
-    expect(await screen.findByText("设置已保存")).toBeInTheDocument();
-  });
-
-  it("shows an unloaded hint when tracker status fails but settings load", async () => {
-    setup((url) => {
-      if (url === "/api/v2/trackers") {
-        return json(500, { error: { code: "internal", message: "Tracker 状态失败" } });
-      }
-      return null;
-    });
     await screen.findByLabelText("网站标题");
-    expect(screen.getByText("Tracker 状态未加载。")).toBeInTheDocument();
+    expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+    expect(screen.getByText("未连接")).toBeInTheDocument();
+    // 探测未返回结果时不渲染原因段（V1 只在后端给出错误文本时显示）。
+    expect(
+      screen.queryByText("无法连接 aria2，请检查 RPC 地址与 Secret。"),
+    ).not.toBeInTheDocument();
   });
 
-  it("shows the error state with working retry when the initial load fails", async () => {
+  it("hides the machine card and keeps the form usable when stats fail", async () => {
+    setup((url) =>
+      url === "/api/v2/stats/machine"
+        ? json(500, { error: { code: "internal", message: "服务器错误" } })
+        : null,
+    );
+    await screen.findByLabelText("网站标题");
+    expect(screen.queryByText("机器磁盘空间")).not.toBeInTheDocument();
+  });
+
+  it("shows the page error when the settings read fails", async () => {
+    setup((url) =>
+      url === "/api/v2/settings"
+        ? json(500, { error: { code: "internal", message: "配置读取失败" } })
+        : null,
+    );
+    expect(await screen.findByText("加载配置失败")).toBeInTheDocument();
+    expect(screen.queryByText("系统配置（仅管理员）")).not.toBeInTheDocument();
+  });
+
+  it("redirects non admin users and sends no settings request", async () => {
     mockFetch.mockReset();
     mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      return json(500, { error: { code: "internal", message: "后端错误" } });
-    });
-    render(
-      <MemoryRouter initialEntries={["/settings"]}>
-        <AppProviders>
-          <SettingsPage />
-        </AppProviders>
-      </MemoryRouter>,
-    );
-    expect(await screen.findByText("后端错误")).toBeInTheDocument();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      if (url === "/api/v2/trackers") return json(200, tracker());
-      return json(200, settings());
-    });
-    fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    expect(await screen.findByLabelText("网站标题")).toBeInTheDocument();
-  });
-
-  it("redirects non-admin users away from settings", async () => {
-    mockFetch.mockReset();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") {
-        return json(200, { ...ME, is_admin: false });
-      }
+      if (url === "/api/v2/auth/me") return json(200, { ...ME, is_admin: false });
       return json(200, settings());
     });
     render(
@@ -225,86 +298,114 @@ describe("SettingsPage load and layout", () => {
       </MemoryRouter>,
     );
     expect(await screen.findByText("任务页占位")).toBeInTheDocument();
-    expect(mockFetch.mock.calls.find(([url]) => url.includes("/api/v2/settings"))).toBeUndefined();
+    expect(mockFetch.mock.calls.find(([url]) => url === "/api/v2/settings")).toBeUndefined();
   });
 });
 
-describe("SettingsPage save", () => {
-  it("patches then re-reads and only then toasts success", async () => {
-    let patched = 0;
-    setup((_url, init) => {
-      if (init?.method === "PATCH") {
-        patched += 1;
-        return settings({ site_title: "新标题" });
+describe("SettingsPage 高级设置折叠区", () => {
+  it("stays collapsed by default and reveals rate limits plus connection limits", async () => {
+    setup();
+    await screen.findByLabelText("网站标题");
+    const toggle = screen.getByRole("button", { name: /系统高级设置/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("接口频率限制")).not.toBeInTheDocument();
+
+    openAdvanced();
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("接口频率限制")).toBeInTheDocument();
+    expect(screen.getByText("下载并发限制")).toBeInTheDocument();
+    expect(screen.getByLabelText("账户安全限流")).toHaveValue(10);
+    expect(screen.getByLabelText("系统总下载连接上限")).toHaveValue(100);
+    expect(screen.getByLabelText("匿名总连接数")).toHaveValue(null);
+  });
+
+  it("clamps numeric inputs to their range like V1 did", async () => {
+    setup();
+    await screen.findByLabelText("网站标题");
+    openAdvanced();
+    const createShare = screen.getByLabelText("创建分享限流");
+    fireEvent.change(createShare, { target: { value: "1000001" } });
+    expect(createShare).toHaveValue(1000000);
+    const connections = screen.getByLabelText("系统总下载连接上限");
+    fireEvent.change(connections, { target: { value: "1001" } });
+    expect(connections).toHaveValue(1000);
+  });
+});
+
+describe("SettingsPage 保存", () => {
+  it("patches, re-reads and only then toasts success", async () => {
+    const bodies: unknown[] = [];
+    setup(async (url, init) => {
+      if (url === "/api/v2/settings" && init?.method === "PATCH") {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return json(200, settings({ site_title: "新标题" }));
       }
       return null;
     });
     await screen.findByLabelText("网站标题");
     fireEvent.change(screen.getByLabelText("网站标题"), { target: { value: "新标题" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存全部" }));
-    await waitFor(() => expect(patched).toBe(1));
-    const patchCall = mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH")!;
-    const body = JSON.parse(patchCall[1].body as string);
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    await screen.findByText("配置已保存");
+    expect(bodies).toHaveLength(1);
+    const body = bodies[0] as Record<string, unknown>;
     expect(body.site_title).toBe("新标题");
-    expect(body.aria2_rpc_secret).toBeUndefined(); // 掩码不覆盖真值。
     expect(body.max_task_size).toBe(10 * GIB);
     expect(body.account_security_rate_limit).toBe(10);
-    expect(body.hidden_file_extensions).toBeUndefined();
-    // 保存成功后重读一次。
-    await waitFor(() => {
-      const reads = mockFetch.mock.calls.filter(
-        ([url, init]) => url === "/api/v2/settings" && init?.method === "GET",
-      );
-      expect(reads.length).toBeGreaterThanOrEqual(2);
-    });
-    expect(await screen.findByText("设置已保存")).toBeInTheDocument();
-  });
-
-  it("includes the typed secret but never the mask", async () => {
-    setup((_url, init) => {
-      if (init?.method === "PATCH") return settings();
-      return null;
-    });
-    await screen.findByLabelText("RPC Secret");
-    fireEvent.change(screen.getByLabelText("RPC Secret"), { target: { value: " typed-secret " } });
-    fireEvent.click(screen.getByRole("button", { name: "保存全部" }));
-    await waitFor(() => {
-      const patchCall = mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH");
-      expect(patchCall).toBeDefined();
-    });
-    const body = JSON.parse(
-      mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH")![1].body as string,
+    expect(body.aria2_rpc_secret).toBeUndefined();
+    expect(body).not.toHaveProperty("hidden_file_extensions");
+    const reads = mockFetch.mock.calls.filter(
+      ([url, init]) => url === "/api/v2/settings" && (init?.method ?? "GET") === "GET",
     );
-    expect(body.aria2_rpc_secret).toBe("typed-secret");
+    expect(reads.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("shows an inline validation error and skips the PATCH", async () => {
-    setup(() => null);
-    await screen.findByLabelText("账户安全限流");
-    fireEvent.change(screen.getByLabelText("账户安全限流"), { target: { value: "0" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存全部" }));
-    expect(await screen.findByText(/账户安全限流必须在 1 到 1000000 之间/)).toBeInTheDocument();
-    expect(mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH")).toBeUndefined();
-    expect(screen.queryByText("设置已保存")).not.toBeInTheDocument();
-  });
-
-  it("surfaces PATCH failure inline without success toast", async () => {
-    setup((_url, init) => {
-      if (init?.method === "PATCH") {
-        return json(422, { error: { code: "invalid_input", message: "Tracker 地址无效" } });
+  it("submits a typed secret but never the mask", async () => {
+    const bodies: unknown[] = [];
+    setup((url, init) => {
+      if (url === "/api/v2/settings" && init?.method === "PATCH") {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return json(200, settings());
       }
       return null;
     });
-    await screen.findByLabelText("网站标题");
-    fireEvent.click(screen.getByRole("button", { name: "保存全部" }));
-    expect(await screen.findByText("Tracker 地址无效")).toBeInTheDocument();
-    expect(screen.queryByText("设置已保存")).not.toBeInTheDocument();
+    await screen.findByLabelText("aria2 RPC Secret");
+    fireEvent.change(screen.getByLabelText("aria2 RPC Secret"), {
+      target: { value: " typed-secret " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    await screen.findByText("配置已保存");
+    expect((bodies[0] as Record<string, unknown>).aria2_rpc_secret).toBe("typed-secret");
   });
 
-  it("reports saved-but-reread-failed without success toast", async () => {
+  it("shows a V1 style inline error and skips the PATCH on invalid input", async () => {
+    setup();
+    await screen.findByLabelText("网站标题");
+    fireEvent.change(screen.getByLabelText("最大任务大小 (GB)"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    const inline = await screen.findByText("最大任务大小必须是不小于 0 的数字");
+    expect(inline).toHaveClass("save-error-inline");
+    expect(
+      mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH"),
+    ).toBeUndefined();
+    expect(screen.queryByText("配置已保存")).not.toBeInTheDocument();
+  });
+
+  it("keeps the backend message inline when the PATCH is rejected", async () => {
+    setup((url, init) =>
+      url === "/api/v2/settings" && init?.method === "PATCH"
+        ? json(422, { error: { code: "invalid_input", message: "Tracker 地址无效" } })
+        : null,
+    );
+    await screen.findByLabelText("网站标题");
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    expect(await screen.findByText("Tracker 地址无效")).toBeInTheDocument();
+    expect(screen.queryByText("配置已保存")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the V1 page error when the re-read after saving fails", async () => {
     let reads = 0;
     setup((url, init) => {
-      if (init?.method === "PATCH") return settings();
+      if (url === "/api/v2/settings" && init?.method === "PATCH") return json(200, settings());
       if (url === "/api/v2/settings") {
         reads += 1;
         if (reads >= 2) return json(500, { error: { code: "internal", message: "后端错误" } });
@@ -312,217 +413,328 @@ describe("SettingsPage save", () => {
       return null;
     });
     await screen.findByLabelText("网站标题");
-    fireEvent.click(screen.getByRole("button", { name: "保存全部" }));
-    expect(await screen.findByText("已保存，但重新读取失败，请刷新页面查看最新配置")).toBeInTheDocument();
-    expect(screen.queryByText("设置已保存")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    expect(await screen.findByText("加载配置失败")).toBeInTheDocument();
+    expect(screen.queryByText("配置已保存")).not.toBeInTheDocument();
   });
 });
 
-describe("SettingsPage aria2 connection test", () => {
-  it("shows version and feature tags on success", async () => {
-    setup((_url, init) => {
-      if (init?.method === "POST" && _url === "/api/v2/settings/aria2/test") {
-        return { connected: true, version: "1.37.0", features: ["GZip", "BitTorrent"] };
+describe("SettingsPage aria2 连接测试", () => {
+  it("tests the unsaved URL without posting a masked secret", async () => {
+    const bodies: unknown[] = [];
+    setup((url, init) => {
+      if (url === "/api/v2/settings/aria2/test" && init?.method === "POST") {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return json(200, { connected: true, version: "1.38.0", features: [] });
       }
       return null;
     });
-    await screen.findByLabelText("RPC 地址");
+    await screen.findByLabelText("aria2 RPC URL");
+    fireEvent.change(screen.getByLabelText("aria2 RPC URL"), {
+      target: { value: "http://127.0.0.1:6900/rpc" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
-    expect(await screen.findByText("连接成功")).toBeInTheDocument();
-    expect(screen.getByText(/1\.37\.0/)).toBeInTheDocument();
-    expect(screen.getByText("GZip")).toBeInTheDocument();
-    expect(screen.getByText("BitTorrent")).toBeInTheDocument();
+    expect(await screen.findByText("测试结果：连接成功")).toBeInTheDocument();
+    expect(screen.getByText(/aria2 版本: 1\.38\.0/)).toBeInTheDocument();
+    expect(bodies[0]).toEqual({ aria2_rpc_url: "http://127.0.0.1:6900/rpc" });
   });
 
-  it("shows failure without leaking URL or version details", async () => {
-    setup((_url, init) => {
-      if (init?.method === "POST" && _url === "/api/v2/settings/aria2/test") {
-        return { connected: false, version: null, features: [] };
+  it("sends a typed secret with the test request", async () => {
+    const bodies: unknown[] = [];
+    setup((url, init) => {
+      if (url === "/api/v2/settings/aria2/test" && init?.method === "POST") {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return json(200, { connected: true, version: "1.38.0", features: [] });
       }
       return null;
     });
-    await screen.findByLabelText("RPC 地址");
+    await screen.findByLabelText("aria2 RPC Secret");
+    fireEvent.change(screen.getByLabelText("aria2 RPC Secret"), { target: { value: "s3cret" } });
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
-    const alert = await screen.findByText("连接失败");
-    expect(alert).toBeInTheDocument();
-    expect(screen.queryByText(/127\.0\.0\.1/)).not.toBeInTheDocument();
+    await screen.findByText("测试结果：连接成功");
+    expect(bodies[0]).toEqual({ aria2_rpc_url: "http://127.0.0.1:6800/rpc", aria2_rpc_secret: "s3cret" });
   });
 
-  it("surfaces 429 with Chinese message and keeps the button usable", async () => {
-    setup((_url, init) => {
-      if (init?.method === "POST" && _url === "/api/v2/settings/aria2/test") {
-        return json(429, { error: { code: "rate_limited", message: "请求过于频繁，请稍后重试" } });
-      }
-      return null;
-    });
-    await screen.findByLabelText("RPC 地址");
+  it("requires an RPC URL before testing", async () => {
+    setup((url) => (url === "/api/v2/settings" ? json(200, settings({ aria2_rpc_url: "" })) : null));
+    await screen.findByLabelText("aria2 RPC URL");
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
-    expect(await screen.findByText("请求过于频繁，请稍后重试")).toBeInTheDocument();
-    expect(screen.queryByText("连接成功")).not.toBeInTheDocument();
-    expect(screen.queryByText("连接失败")).not.toBeInTheDocument(); // 未得到测试结果。
+    expect(await screen.findByText("测试结果：连接失败")).toBeInTheDocument();
     expect(
-      (screen.getByRole("button", { name: "测试连接" }) as HTMLButtonElement).disabled,
-    ).toBe(false);
+      mockFetch.mock.calls.find(([url]) => url === "/api/v2/settings/aria2/test"),
+    ).toBeUndefined();
+  });
+
+  it("surfaces a transport failure as a failed card plus toast", async () => {
+    setup((url, init) =>
+      url === "/api/v2/settings/aria2/test" && init?.method === "POST"
+        ? json(429, { error: { code: "rate_limited", message: "请求过于频繁，请稍后重试" } })
+        : null,
+    );
+    await screen.findByLabelText("aria2 RPC URL");
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    expect(await screen.findByText("测试结果：连接失败")).toBeInTheDocument();
+    expect(screen.getByText("请求过于频繁，请稍后重试")).toBeInTheDocument();
   });
 });
 
-describe("SettingsPage tracker refresh", () => {
-  it("lists failed URLs after a partial refresh", async () => {
-    setup((_url, init) => {
-      if (init?.method === "POST" && _url === "/api/v2/trackers/refresh") {
-        return tracker({
-          refresh_status: "partial",
-          failed_urls: ["https://bad.example/list", "https://worse.example/list"],
-        });
-      }
-      return null;
-    });
-    await screen.findByText("刷新成功");
-    fireEvent.click(screen.getByRole("button", { name: "刷新 Tracker" }));
-    expect(await screen.findByText(/部分源刷新失败（2 个）/)).toBeInTheDocument();
-    expect(screen.getByText("https://bad.example/list")).toBeInTheDocument();
-    expect(screen.getByText("https://worse.example/list")).toBeInTheDocument();
-    expect(screen.getByText("部分源失败")).toBeInTheDocument();
+describe("SettingsPage Tracker 区块", () => {
+  it("shows entry count, status and refresh time", async () => {
+    setup();
+    expect(await screen.findByText(/当前条目数：1/)).toBeInTheDocument();
+    expect(screen.getByText(/上次刷新结果：成功/)).toBeInTheDocument();
   });
 
-  it("toasts kept-old-list on full failure", async () => {
-    setup((_url, init) => {
-      if (init?.method === "POST" && _url === "/api/v2/trackers/refresh") {
-        return tracker({ refresh_status: "failed", failed_urls: ["https://bad.example"] });
-      }
-      return null;
-    });
-    await screen.findByText("刷新成功");
-    fireEvent.click(screen.getByRole("button", { name: "刷新 Tracker" }));
-    expect(await screen.findByText("Tracker 刷新失败，已保留旧列表")).toBeInTheDocument();
-  });
-
-  it("toasts entry count on success", async () => {
-    setup((_url, init) => {
-      if (init?.method === "POST" && _url === "/api/v2/trackers/refresh") {
-        return tracker({ entry_count: 42 });
-      }
-      return null;
-    });
-    await screen.findByText("刷新成功");
-    fireEvent.click(screen.getByRole("button", { name: "刷新 Tracker" }));
-    expect(await screen.findByText("Tracker 已刷新，共 42 条")).toBeInTheDocument();
-  });
-
-  it("toasts network failure without changing the status card", async () => {
-    setup((_url, init) => {
-      if (init?.method === "POST" && _url === "/api/v2/trackers/refresh") {
-        return json(429, { error: { code: "rate_limited", message: "请求过于频繁，请稍后重试" } });
-      }
-      return null;
-    });
-    await screen.findByText("刷新成功");
-    fireEvent.click(screen.getByRole("button", { name: "刷新 Tracker" }));
-    expect(await screen.findByText("请求过于频繁，请稍后重试")).toBeInTheDocument();
-  });
-});
-
-describe("SettingsPage credential invalidation", () => {
-  it("requires the exact confirmation string and reports counts", async () => {
-    setup((_url, init) => {
-      if (init?.method === "POST" && _url === "/api/v2/credentials/invalidate") {
-        return { ok: true, api_token_count: 2, rpc_secret_count: 3 };
-      }
-      return null;
-    });
-    await screen.findByLabelText("网站标题");
-    openAdvanced();
-    fireEvent.click(screen.getByRole("button", { name: "作废全部凭证…" }));
-    const dialog = await screen.findByRole("dialog", { name: "作废全部凭证" });
-    expect(dialog.textContent).toContain("INVALIDATE_ALL_CREDENTIALS");
-    // 先取消：对话框关闭且不提交。
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByRole("button", { name: "作废全部凭证…" }));
-    await screen.findByRole("dialog", { name: "作废全部凭证" });
-    // 输入不匹配时确认不可用。
-    fireEvent.change(screen.getByLabelText("凭证作废确认串"), {
-      target: { value: "wrong-string" },
-    });
-    expect(
-      (screen.getByRole("button", { name: "确认作废" }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-    fireEvent.change(screen.getByLabelText("凭证作废确认串"), {
-      target: { value: "INVALIDATE_ALL_CREDENTIALS" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "确认作废" }));
-    await waitFor(() => {
-      const call = mockFetch.mock.calls.find(
-        ([url, init2]) => init2?.method === "POST" && url === "/api/v2/credentials/invalidate",
+  it("maps every V2 refresh status to V1 wording", async () => {
+    const cases: { status: string; expected: RegExp }[] = [
+      { status: "never", expected: /上次刷新结果：从未刷新/ },
+      { status: "success", expected: /上次刷新结果：成功/ },
+      { status: "partial", expected: /部分失败（失败源 0 个）/ },
+      { status: "failed", expected: /上次刷新结果：全部失败/ },
+      { status: "refreshing", expected: /上次刷新结果：刷新中/ },
+    ];
+    for (const { status, expected } of cases) {
+      const view = setup((url) =>
+        url === "/api/v2/trackers" ? json(200, tracker({ refresh_status: status })) : null,
       );
-      expect(JSON.parse(call![1].body as string)).toEqual({
-        confirmation: "INVALIDATE_ALL_CREDENTIALS",
-      });
-    });
-    expect(await screen.findByText("已作废 2 个 API Token、3 个 RPC Secret")).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(await screen.findByText(expected)).toBeInTheDocument();
+      view.unmount();
+      mockFetch.mockReset();
+    }
+  });
+
+  it("lists failed urls when the last refresh was partial", async () => {
+    setup((url) =>
+      url === "/api/v2/trackers"
+        ? json(
+            200,
+            tracker({ refresh_status: "partial", failed_urls: ["https://bad.example/list"] }),
+          )
+        : null,
+    );
+    expect(await screen.findByText("失败源：https://bad.example/list")).toBeInTheDocument();
+  });
+
+  it("shows zero entries and never refreshed when the status cannot load", async () => {
+    setup((url) =>
+      url === "/api/v2/trackers"
+        ? json(500, { error: { code: "internal", message: "Tracker 状态失败" } })
+        : null,
+    );
+    expect(await screen.findByText("当前条目数：0")).toBeInTheDocument();
+    expect(screen.getByText(/上次刷新结果：从未刷新/)).toBeInTheDocument();
+  });
+
+  it("refreshes the list and toasts success", async () => {
+    setup((url, init) =>
+      url === "/api/v2/trackers/refresh" && init?.method === "POST"
+        ? json(200, tracker({ entry_count: 42, refresh_status: "success" }))
+        : null,
+    );
+    await screen.findByText(/当前条目数：1/);
+    const button = screen.getByRole("button", { name: "立即刷新" });
+    fireEvent.click(button);
+    expect(await screen.findByText("tracker 列表已刷新")).toBeInTheDocument();
+    expect(screen.getByText("当前条目数：42")).toBeInTheDocument();
+  });
+
+  it("toasts an error when the refresh fails entirely", async () => {
+    setup((url, init) =>
+      url === "/api/v2/trackers/refresh" && init?.method === "POST"
+        ? json(200, tracker({ refresh_status: "failed", failed_urls: ["https://bad.example"] }))
+        : null,
+    );
+    await screen.findByText(/当前条目数：1/);
+    fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    expect(
+      await screen.findByText("刷新 tracker 列表失败：全部远程源不可用"),
+    ).toBeInTheDocument();
+  });
+
+  it("toasts the backend message when the refresh request is rejected", async () => {
+    setup((url, init) =>
+      url === "/api/v2/trackers/refresh" && init?.method === "POST"
+        ? json(429, { error: { code: "rate_limited", message: "请求过于频繁，请稍后重试" } })
+        : null,
+    );
+    await screen.findByText(/当前条目数：1/);
+    fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    expect(
+      await screen.findByText("刷新 tracker 列表失败：请求过于频繁，请稍后重试"),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("SettingsPage 凭证作废", () => {
+  it("confirms first, then reports the invalidated counts", async () => {
+    setup((url, init) =>
+      url === "/api/v2/credentials/invalidate" && init?.method === "POST"
+        ? json(200, { ok: true, api_token_count: 2, rpc_secret_count: 1 })
+        : null,
+    );
+    await screen.findByLabelText("网站标题");
+    fireEvent.click(screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }));
+    const dialog = await screen.findByRole("dialog", { name: "作废全部凭证" });
+    expect(within(dialog).getByText(/此操作不可恢复/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认作废" }));
+    expect(
+      await screen.findByText("已作废 2 个 API Token、1 个 RPC Secret"),
+    ).toBeInTheDocument();
+    const call = mockFetch.mock.calls.find(
+      ([url, init]) => url === "/api/v2/credentials/invalidate" && init?.method === "POST",
+    );
+    expect(JSON.parse(call![1].body as string)).toEqual({
+      confirmation: "INVALIDATE_ALL_CREDENTIALS",
     });
   });
 
-  it("keeps the dialog open with an inline error on 422", async () => {
-    setup((_url, init) => {
-      if (init?.method === "POST" && _url === "/api/v2/credentials/invalidate") {
-        return json(422, { error: { code: "invalid_input", message: "凭证作废确认字符串不正确" } });
+  it("does nothing when the confirmation is cancelled", async () => {
+    setup(() => null);
+    await screen.findByLabelText("网站标题");
+    fireEvent.click(screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }));
+    const dialog = await screen.findByRole("dialog", { name: "作废全部凭证" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(
+      mockFetch.mock.calls.find(([url]) => url === "/api/v2/credentials/invalidate"),
+    ).toBeUndefined();
+  });
+
+  it("toasts the backend message on failure", async () => {
+    setup((url, init) =>
+      url === "/api/v2/credentials/invalidate" && init?.method === "POST"
+        ? json(422, { error: { code: "invalid_input", message: "凭证作废确认字符串不正确" } })
+        : null,
+    );
+    await screen.findByLabelText("网站标题");
+    fireEvent.click(screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }));
+    const dialog = await screen.findByRole("dialog", { name: "作废全部凭证" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认作废" }));
+    expect(
+      await screen.findByText("作废失败：凭证作废确认字符串不正确"),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("SettingsPage 卸载保护（V1 语义：卸载后不再 setState / 弹 Toast）", () => {
+
+
+  it("ignores successful write responses that land after unmount", async () => {
+    const patch = deferred<unknown>();
+    const test = deferred<unknown>();
+    const invalidate = deferred<unknown>();
+    const refresh = deferred<unknown>();
+    const view = setup((url, init) => {
+      if (url === "/api/v2/settings" && init?.method === "PATCH") return patch.promise;
+      if (url === "/api/v2/settings/aria2/test") return test.promise;
+      if (url === "/api/v2/credentials/invalidate") return invalidate.promise;
+      if (url === "/api/v2/trackers/refresh") return refresh.promise;
+      return null;
+    });
+    await screen.findByLabelText("网站标题");
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    fireEvent.click(screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }));
+    const dialog = await screen.findByRole("dialog", { name: "作废全部凭证" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认作废" }));
+    await waitFor(() =>
+      expect(mockFetch.mock.calls.some(([url]) => url === "/api/v2/credentials/invalidate")).toBe(true),
+    );
+
+    view.unmount();
+    patch.resolve(json(200, settings()));
+    test.resolve(json(200, { connected: true, version: "1.37.0", features: [] }));
+    invalidate.resolve(json(200, { ok: true, api_token_count: 1, rpc_secret_count: 1 }));
+    refresh.resolve(json(200, tracker()));
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    expect(screen.queryByText("配置已保存")).not.toBeInTheDocument();
+    expect(screen.queryByText("tracker 列表已刷新")).not.toBeInTheDocument();
+  });
+
+  it("ignores write failures that land after unmount", async () => {
+    const patch = deferred<unknown>();
+    const test = deferred<unknown>();
+    const invalidate = deferred<unknown>();
+    const refresh = deferred<unknown>();
+    const view = setup((url, init) => {
+      if (url === "/api/v2/settings" && init?.method === "PATCH") return patch.promise;
+      if (url === "/api/v2/settings/aria2/test") return test.promise;
+      if (url === "/api/v2/credentials/invalidate") return invalidate.promise;
+      if (url === "/api/v2/trackers/refresh") return refresh.promise;
+      return null;
+    });
+    await screen.findByLabelText("网站标题");
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    fireEvent.click(screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }));
+    const dialog = await screen.findByRole("dialog", { name: "作废全部凭证" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认作废" }));
+    await waitFor(() =>
+      expect(mockFetch.mock.calls.some(([url]) => url === "/api/v2/credentials/invalidate")).toBe(true),
+    );
+
+    view.unmount();
+    patch.reject(new Error("晚到的保存失败"));
+    test.reject(new Error("晚到的测试失败"));
+    invalidate.reject(new Error("晚到的作废失败"));
+    refresh.reject(new Error("晚到的刷新失败"));
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    expect(screen.queryByText(/晚到的/)).not.toBeInTheDocument();
+  });
+
+  it("ignores an initial settings read that resolves after unmount", async () => {
+    const pending = deferred<unknown>();
+    const view = setup((url) => (url === "/api/v2/settings" ? pending.promise : null));
+    await waitFor(() =>
+      expect(mockFetch.mock.calls.some(([url]) => url === "/api/v2/settings")).toBe(true),
+    );
+    view.unmount();
+    pending.resolve(json(200, settings()));
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    expect(screen.queryByLabelText("网站标题")).not.toBeInTheDocument();
+  });
+
+  it("ignores an initial settings failure that lands after unmount", async () => {
+    const pending = deferred<unknown>();
+    const view = setup((url) => (url === "/api/v2/settings" ? pending.promise : null));
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledWith("/api/v2/settings", expect.anything()));
+    view.unmount();
+    pending.reject(new Error("晚到的读取失败"));
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    expect(screen.queryByText("加载配置失败")).not.toBeInTheDocument();
+  });
+});
+
+describe("SettingsPage 保存后的重读边界", () => {
+  it("drops the success path when the post-save re-read lands after unmount", async () => {
+    const reread = deferred<unknown>();
+    let reads = 0;
+    const view = setup((url, init) => {
+      if (url === "/api/v2/settings" && init?.method === "PATCH") return json(200, settings());
+      if (url === "/api/v2/settings") {
+        reads += 1;
+        if (reads >= 2) return reread.promise;
       }
       return null;
     });
     await screen.findByLabelText("网站标题");
-    openAdvanced();
-    fireEvent.click(screen.getByRole("button", { name: "作废全部凭证…" }));
-    await screen.findByRole("dialog", { name: "作废全部凭证" });
-    fireEvent.change(screen.getByLabelText("凭证作废确认串"), {
-      target: { value: "INVALIDATE_ALL_CREDENTIALS" },
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(2));
+    view.unmount();
+    reread.resolve(json(200, settings()));
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 0));
     });
-    fireEvent.click(screen.getByRole("button", { name: "确认作废" }));
-    expect(await screen.findByText("凭证作废确认字符串不正确")).toBeInTheDocument();
-    expect(screen.getByRole("dialog", { name: "作废全部凭证" })).toBeInTheDocument();
-    // Escape 也能关闭对话框。
-    fireEvent.keyDown(document, { key: "Escape" });
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    });
-  });
-});
-
-describe("SettingsPage 机器磁盘卡（E1）", () => {
-  it("renders the machine disk card with download/system split", async () => {
-    setup((url) => {
-      if (url === "/api/v2/stats/machine") {
-        return {
-          total_bytes: 1000,
-          used_bytes: 500,
-          free_bytes: 500,
-          download_used_bytes: 200,
-          system_used_bytes: 300,
-        };
-      }
-      return null;
-    });
-    const card = await screen.findByRole("region", { name: undefined });
-    void card;
-    expect(await screen.findByText("机器磁盘空间")).toBeInTheDocument();
-    expect(screen.getByLabelText("机器磁盘占用")).toHaveAttribute("aria-valuenow", "50");
-    expect(screen.getByText(/下载占用：200 B/)).toBeInTheDocument();
-    expect(screen.getByText(/系统占用：300 B/)).toBeInTheDocument();
-    expect(screen.getByText(/总占用：500 B/)).toBeInTheDocument();
-  });
-
-  it("hides the card when machine stats fail to load", async () => {
-    setup((url) => {
-      if (url === "/api/v2/stats/machine") {
-        return json(500, { error: { code: "internal", message: "服务器错误" } });
-      }
-      return null;
-    });
-    await screen.findByText("基本");
-    expect(screen.queryByText("机器磁盘空间")).not.toBeInTheDocument();
+    expect(screen.queryByText("配置已保存")).not.toBeInTheDocument();
   });
 });

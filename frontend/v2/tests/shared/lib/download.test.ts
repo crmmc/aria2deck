@@ -91,6 +91,7 @@ describe("triggerFormDownload", () => {
     try {
       triggerFormDownload("/api/s/abc/download", { token: "t0k", path: "docs/a.txt" });
       expect(form.method.toLowerCase()).toBe("post");
+      expect(form.target).toBe("_blank"); // C20：保持 V1 新窗口行为。
       expect(form.action).toContain("/api/s/abc/download");
       expect(submit).toHaveBeenCalledTimes(1);
       expect(remove).toHaveBeenCalledTimes(1);

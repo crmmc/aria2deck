@@ -4,6 +4,7 @@ import {
   errorMessage,
   getNetworkOffline,
   setUnauthorizedHandler,
+  subscribeNetworkHealth,
 } from "@/shared/api/client";
 
 const mockFetch = jest.fn();
@@ -126,7 +127,7 @@ describe("api client", () => {
     } as unknown as Response);
     await expect(api.get("/api/v2/x")).rejects.toMatchObject({
       code: "unauthenticated",
-      message: "请先登录",
+      message: "会话已过期，请重新登录",
     });
   });
 
@@ -149,6 +150,51 @@ describe("api client", () => {
     expect(handler).not.toHaveBeenCalled(); // 公开页 401 不触发全局登出。
     const [, init] = mockFetch.mock.calls[0];
     expect(init.headers).toEqual({ Authorization: "Bearer tok" });
+  });
+
+  it("Bearer 401 without an error body falls back to the login prompt", async () => {
+    mockFetch.mockResolvedValueOnce({
+      status: 401,
+      ok: false,
+      json: () => Promise.reject(new Error("not json")),
+    } as unknown as Response);
+    await expect(
+      api.get("/api/s/abc/entries", { headers: { Authorization: "Bearer tok" } }),
+    ).rejects.toMatchObject({
+      status: 401,
+      code: "unauthenticated",
+      message: "请先登录",
+    });
+  });
+
+  it("notifies health subscribers on every offline/online transition", async () => {
+    const listener = jest.fn();
+    const unsubscribe = subscribeNetworkHealth(listener);
+    expect(getNetworkOffline()).toBe(false);
+
+    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed"));
+    await expect(api.get("/api/v2/offline")).rejects.toBeInstanceOf(ApiRequestError);
+    expect(listener).toHaveBeenCalledTimes(1); // 断网置位时通知一次。
+
+    // 已经离线时再失败不重复通知。
+    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed"));
+    await expect(api.get("/api/v2/offline-again")).rejects.toBeInstanceOf(ApiRequestError);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    mockFetch.mockResolvedValueOnce(jsonResponse(200, {}));
+    await api.get("/api/v2/back");
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    // 退订后不再收到后续信号。
+    unsubscribe();
+    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed"));
+    await expect(api.get("/api/v2/offline-final")).rejects.toBeInstanceOf(ApiRequestError);
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    // 复位全局离线标记，避免污染其他用例。
+    mockFetch.mockResolvedValueOnce(jsonResponse(200, {}));
+    await api.get("/api/v2/reset");
+    expect(getNetworkOffline()).toBe(false);
   });
 });
 

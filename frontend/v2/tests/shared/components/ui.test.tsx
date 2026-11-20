@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 
 import {
@@ -86,6 +87,84 @@ describe("Modal", () => {
       outside.remove();
     }
   });
+
+  it("ignores non-Tab keys and steps backwards with Shift+Tab inside the panel", () => {
+    render(
+      <Modal title="按键处理" onClose={jest.fn()} footer={<button type="button">确认</button>}>
+        <input aria-label="输入" />
+      </Modal>,
+    );
+
+    // 非 Tab 键不拦截（否则对话框里的输入框无法正常输入）。
+    fireEvent.keyDown(document, { key: "a" });
+    expect(screen.getByRole("dialog", { name: "按键处理" })).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true }); // 面板在列表外 → 末尾元素。
+    expect(screen.getByRole("button", { name: "确认" })).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true }); // 末尾 → 前一个元素。
+    expect(screen.getByLabelText("输入")).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true }); // 中间元素 → 前一个。
+    expect(screen.getByRole("button", { name: "关闭" })).toHaveFocus();
+  });
+
+  it("ignores a Tab keydown that arrives while the panel is being torn down", () => {
+    const outside = document.createElement("button");
+    outside.textContent = "外部按钮";
+    document.body.appendChild(outside);
+    outside.focus();
+
+    function DispatchDuringTeardown() {
+      // 同级节点先于 Modal 卸载：模拟同一次提交里弹出的迟到按键事件。
+      useEffect(() => {
+        return () => {
+          document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+        };
+      }, []);
+      return null;
+    }
+
+    try {
+      const { unmount } = render(
+        <>
+          <DispatchDuringTeardown />
+          <Modal title="卸载中" onClose={jest.fn()}>
+            <p>内容</p>
+          </Modal>
+        </>,
+      );
+      expect(screen.getByRole("dialog", { name: "卸载中" })).toBeInTheDocument();
+
+      expect(() => unmount()).not.toThrow();
+      // 面板已拆下：迟到的 Tab 既不报错也不把焦点拉回已卸载的弹窗。
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(outside).toHaveFocus();
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it("pulls focus back into the panel when it has escaped to the page", () => {
+    render(
+      <Modal title="焦点回转" onClose={jest.fn()} footer={<button type="button">确认</button>}>
+        <p>纯文本内容</p>
+      </Modal>,
+    );
+    const dialog = screen.getByRole("dialog", { name: "焦点回转" });
+    const outside = document.createElement("button");
+    outside.textContent = "外部按钮";
+    document.body.appendChild(outside);
+    try {
+      outside.focus();
+      expect(outside).toHaveFocus();
+
+      fireEvent.keyDown(document, { key: "Tab" });
+      // 焦点在面板外时从第一个可聚焦元素重新开始。
+      expect(screen.getByRole("button", { name: "关闭" })).toHaveFocus();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    } finally {
+      outside.remove();
+    }
+  });
 });
 
 describe("ConfirmDialog", () => {
@@ -102,10 +181,24 @@ describe("ConfirmDialog", () => {
         onCancel={onCancel}
       />,
     );
+    expect(screen.getByRole("button", { name: "执行" })).toHaveClass("danger-button");
     fireEvent.click(screen.getByRole("button", { name: "执行" }));
     expect(onConfirm).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the primary button style when not dangerous", () => {
+    render(
+      <ConfirmDialog
+        title="普通确认"
+        message="继续？"
+        confirmLabel="继续"
+        onConfirm={jest.fn()}
+        onCancel={jest.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "继续" })).toHaveClass("primary-button");
   });
 });
 

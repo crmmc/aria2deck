@@ -1,10 +1,12 @@
 import { api } from "@/shared/api/client";
 import { fileDownloadUrl } from "@/shared/api/urls";
 import type {
+  FileBatchDeleteResponse,
   FileEntryListResponse,
   FileItemResponse,
   FileListResponse,
   FileSearchResponse,
+  PackClearRecordsResponse,
   PackListResponse,
   PackPrecomputeResponse,
   PackViewResponse,
@@ -54,6 +56,11 @@ export async function deleteFile(fileId: number): Promise<void> {
   await api.del(`/api/v2/files/${fileId}`);
 }
 
+/** F1 批量删除走真正的批量端点（FILE-06），不在页面循环单删。 */
+export async function batchDeleteFiles(fileIds: number[]): Promise<FileBatchDeleteResponse> {
+  return api.del<FileBatchDeleteResponse>("/api/v2/files", { file_ids: fileIds });
+}
+
 export async function createShare(
   userFileId: number,
   options: ShareCreateOptions,
@@ -99,6 +106,11 @@ export async function cancelPack(packId: number): Promise<void> {
 
 export async function deletePackRecord(packId: number): Promise<void> {
   await api.del(`/api/v2/packs/${packId}/record`);
+}
+
+/** P1 批量清空终态打包记录（保留输出文件，PACK A3）。 */
+export async function clearPackRecords(): Promise<PackClearRecordsResponse> {
+  return api.del<PackClearRecordsResponse>("/api/v2/packs/records");
 }
 
 export { fileDownloadUrl };

@@ -1,350 +1,261 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useLocation, useParams } from "react-router-dom";
+"use client";
 
-import { api, ApiRequestError, errorMessage } from "@/shared/api/client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
+
+import { errorMessage } from "@/shared/api/client";
 import { publicShareDownloadUrl } from "@/shared/api/urls";
-import {
-  EmptyState,
-  LoadingState,
-  Pagination,
-} from "@/shared/components/ui";
-import { formatBytes, formatDateTime } from "@/shared/lib/format";
+import { PaginationControls } from "@/shared/components/PaginationControls";
 import { triggerFormDownload } from "@/shared/lib/download";
 import { useSiteTitle } from "@/shared/lib/siteTitle";
-import type {
-  DirectoryBreadcrumbResponse,
-  FileEntryItemResponse,
-  PublicEntryListResponse,
-  PublicShareInfoResponse,
-} from "@/shared/api/types";
 
-/** WEB-10 公开分享页：独立布局、内存 token（不写 URL/localStorage）、失效态完整。 */
-
-const ENTRY_PAGE_SIZE = 200;
-
-interface InvalidState {
-  title: string;
-  hint: string;
-}
-
-const INVALID_BY_CODE: Record<string, InvalidState> = {
-  share_revoked: { title: "分享已撤销", hint: "分享者已撤销该链接，请联系对方重新分享" },
-  share_expired: { title: "分享已过期", hint: "该分享链接已过期，请联系分享者重新分享" },
-  share_exhausted: { title: "下载次数已用完", hint: "该分享的下载次数已达上限" },
-  share_unavailable: { title: "分享文件已删除", hint: "分享者已删除该文件，链接不再可用" },
-};
-
-function invalidState(error: ApiRequestError): InvalidState {
-  if (error.status === 404) return { title: "分享不存在", hint: "链接无效或已被删除" };
-  return INVALID_BY_CODE[error.code] ?? { title: "访问出错", hint: error.message };
-}
+import { BROWSE_PAGE_SIZE, browseShare, fetchShareInfo, verifyShare } from "./api";
+import {
+  goneCardFor,
+  toShareEntryView,
+  toShareInfoView,
+  type ShareEntryView,
+  type ShareGoneCard,
+  type ShareInfoView,
+} from "./model";
+import { ShareDirectoryView } from "./components/ShareDirectoryView";
+import { ShareDownloadActions } from "./components/ShareDownloadActions";
+import { ShareHeader } from "./components/ShareHeader";
+import { SharePasswordForm } from "./components/SharePasswordForm";
 
 export function PublicSharePage() {
   const { code = "" } = useParams<{ code: string }>();
-  const location = useLocation();
   const siteTitle = useSiteTitle();
-  const [info, setInfo] = useState<PublicShareInfoResponse | null>(null);
+  const [shareInfo, setShareInfo] = useState<ShareInfoView | null>(null);
   const [loading, setLoading] = useState(true);
-  const [invalid, setInvalid] = useState<InvalidState | null>(null);
-  // 访问令牌只存组件内存（WEB-13：绝不写 URL/localStorage）。
-  const [token, setToken] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  // 410 失效分支：V2 用错误码表达 归档参考实现的 is_expired/is_exhausted 标志。
+  const [goneCard, setGoneCard] = useState<ShareGoneCard | null>(null);
+  // 访问令牌只存组件内存：不写 URL、localStorage 或控制台。
+  const [accessToken, setAccessToken] = useState("");
   const [password, setPassword] = useState("");
-  const [passwordError, setPasswordError] = useState<string | null>(null);
-  const [verifying, setVerifying] = useState(false);
-  // 目录浏览
-  const [path, setPath] = useState("");
-  const [entries, setEntries] = useState<FileEntryItemResponse[]>([]);
-  const [breadcrumbs, setBreadcrumbs] = useState<DirectoryBreadcrumbResponse[]>([]);
-  const [entryTotal, setEntryTotal] = useState(0);
-  const [entryPage, setEntryPage] = useState(1);
-  const [entryLoading, setEntryLoading] = useState(false);
-  const [entryError, setEntryError] = useState<string | null>(null);
-  const browseSeq = useRef(0);
-  const tokenRef = useRef<string | null>(null);
-  tokenRef.current = token;
-  const isDirectory = info?.file_kind === "directory";
+  const [passwordError, setPasswordError] = useState("");
+  const [downloading, setDownloading] = useState(false);
+  const [currentPath, setCurrentPath] = useState("");
+  const [dirItems, setDirItems] = useState<ShareEntryView[]>([]);
+  const [dirPage, setDirPage] = useState(1);
+  const [dirTotal, setDirTotal] = useState(0);
+  const [loadingDir, setLoadingDir] = useState(false);
+  const [dirError, setDirError] = useState("");
+  const browseRequestIdRef = useRef(0);
+  const codeRef = useRef("");
+  const mountedRef = useRef(true);
+  const downloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    api
-      .get<PublicShareInfoResponse>(`/api/s/${encodeURIComponent(code)}/info`)
-      .then((value) => {
-        if (!cancelled) setInfo(value);
-      })
-      .catch((caught: unknown) => {
-        if (!cancelled) {
-          setInvalid(
-            caught instanceof ApiRequestError
-              ? invalidState(caught)
-              : { title: "访问出错", hint: "网络异常，请稍后重试" },
-          );
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [code]);
-
-  // K3 标签页标题：文件名 - 站点标题。
-  useEffect(() => {
-    document.title = info === null ? siteTitle : `${info.file_name} - ${siteTitle}`;
-  }, [info, siteTitle]);
-
-  // S1+K1 双轨：旧版链接 ?password= 挂载时自动验密一次（仅内存，不回显表单）。
-  // 成功后 history.replaceState 清掉地址栏参数；失败展示验密表单并内联提示。
-  const legacyPasswordRef = useRef<string | null>(null);
-  if (legacyPasswordRef.current === null) {
-    const fromUrl = new URLSearchParams(location.search).get("password");
-    legacyPasswordRef.current = fromUrl === null || fromUrl === "" ? null : fromUrl;
-  }
-  const autoVerifiedRef = useRef(false);
-  useEffect(() => {
-    const legacy = legacyPasswordRef.current;
-    if (
-      info === null ||
-      autoVerifiedRef.current ||
-      legacy === null ||
-      !info.has_password ||
-      token !== null
-    ) {
-      return;
-    }
-    autoVerifiedRef.current = true;
-    api
-      .post<{ access_token: string; expires_in: number }>(
-        `/api/s/${encodeURIComponent(code)}/verify`,
-        { password: legacy },
-      )
-      .then((response) => {
-        setToken(response.access_token);
-        const url = new URL(window.location.href);
-        url.searchParams.delete("password");
-        window.history.replaceState(null, "", url);
-      })
-      .catch(() => {
-        setPasswordError("链接携带的密码无效，请手动输入");
-      });
-  }, [info, code, token]);
-
-  const bearer = () =>
-    tokenRef.current === null ? undefined : { Authorization: `Bearer ${tokenRef.current}` };
-
-  const loadEntries = useCallback(
-    async (targetPath: string, page: number) => {
-      const seq = ++browseSeq.current;
-      setEntryLoading(true);
-      setEntryError(null);
+  // requestId 守卫丢弃过期响应：并发导航/翻页时旧响应不得覆盖新数据
+  const loadDirectory = useCallback(
+    async (shareCode: string, token: string, path: string, page: number) => {
+      const requestId = ++browseRequestIdRef.current;
+      setLoadingDir(true);
+      setDirError("");
       try {
-        const response = await api.get<PublicEntryListResponse>(
-          `/api/s/${encodeURIComponent(code)}/entries?${new URLSearchParams({
-            path: targetPath,
-            page: String(page),
-            page_size: String(ENTRY_PAGE_SIZE),
-          }).toString()}`,
-          { headers: bearer() },
-        );
-        if (seq !== browseSeq.current) return; // 丢弃过期响应。
-        setEntries(response.items);
-        setBreadcrumbs(response.breadcrumbs);
-        setEntryTotal(response.total);
-        setEntryPage(page);
-        setPath(targetPath);
-      } catch (caught) {
-        if (seq !== browseSeq.current) return;
-        setEntryError(errorMessage(caught, "加载目录失败"));
+        const result = await browseShare(shareCode, token, path, page);
+        if (!mountedRef.current || requestId !== browseRequestIdRef.current) return;
+        setDirItems(result.items.map(toShareEntryView));
+        setDirTotal(result.total);
+        setDirPage(page);
+        setCurrentPath(path);
+      } catch (err: unknown) {
+        if (!mountedRef.current || requestId !== browseRequestIdRef.current) return;
+        setDirError(errorMessage(err, "加载目录失败"));
       } finally {
-        if (seq === browseSeq.current) setEntryLoading(false);
+        if (mountedRef.current && requestId === browseRequestIdRef.current) {
+          setLoadingDir(false);
+        }
       }
     },
-    [code],
+    [],
   );
 
-  const handleVerify = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (verifying || password === "") return;
-    setVerifying(true);
-    setPasswordError(null);
-    try {
-      const response = await api.post<{ access_token: string; expires_in: number }>(
-        `/api/s/${encodeURIComponent(code)}/verify`,
-        { password },
-      );
-      setToken(response.access_token); // 仅组件内存，刷新后需重新验证。
-      setPassword("");
-    } catch (caught) {
-      setPasswordError(errorMessage(caught, "验证失败，请重试"));
-    } finally {
-      setVerifying(false);
-    }
-  };
-
-  // 目录浏览时机：无密码分享凭分享码直连；有密码分享等验密通过（token 进内存）。
   useEffect(() => {
-    if (info === null || !isDirectory) return;
-    if (info.has_password && token === null) return; // 验密表单负责获取令牌。
-    void loadEntries("", 1);
-  }, [info, isDirectory, token, loadEntries]);
-
-  // 下载：POST 表单提交（有密码分享令牌放隐藏域；无密码直连省略 token；绝不进 URL）。
-  const handleDownload = (targetPath?: string) => {
-    const fields: { token?: string; path?: string } = {};
-    if (info?.has_password === true) {
-      if (tokenRef.current === null) return; // 有密码时内容视图仅在验密后出现。
-      fields.token = tokenRef.current;
+    mountedRef.current = true;
+    const urlCode = code;
+    // 分享码变化时清掉上一份分享的展示状态，避免残留内容与旧令牌串页。
+    setShareInfo(null);
+    setGoneCard(null);
+    setError("");
+    setAccessToken("");
+    setPasswordError("");
+    setDirItems([]);
+    setDirTotal(0);
+    setCurrentPath("");
+    // 若 URL 带 password 参数，只预填密码框，仍由用户手动提交（归档参考语义，C19）。
+    setPassword(new URLSearchParams(window.location.search).get("password") ?? "");
+    if (!urlCode || urlCode === "_") {
+      setError("无效的分享链接");
+      setLoading(false);
+      return;
     }
-    if (targetPath !== undefined) fields.path = targetPath;
-    triggerFormDownload(publicShareDownloadUrl(code), fields);
+    setLoading(true);
+    codeRef.current = urlCode;
+    fetchShareInfo(urlCode)
+      .then((info) => {
+        if (!mountedRef.current) return;
+        const view = toShareInfoView(info);
+        setShareInfo(view);
+        if (view.is_directory && !view.has_password) {
+          void loadDirectory(urlCode, "", "", 1);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return;
+        const card = goneCardFor(err);
+        if (card !== null) {
+          setGoneCard(card);
+          return;
+        }
+        setError(errorMessage(err, "获取分享信息失败"));
+      })
+      .finally(() => {
+        if (mountedRef.current) setLoading(false);
+      });
+    return () => {
+      mountedRef.current = false;
+      if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
+    };
+  }, [code, loadDirectory]);
+
+  // 标签页标题「文件名 - 站点标题」：站点标题晚到时随 store 更新重算。
+  useEffect(() => {
+    if (shareInfo === null) return;
+    document.title = `${shareInfo.file_name} - ${siteTitle}`;
+  }, [shareInfo, siteTitle]);
+
+  const handlePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!password) return;
+    setPasswordError("");
+    try {
+      const res = await verifyShare(codeRef.current, password);
+      if (!mountedRef.current) return;
+      setAccessToken(res.access_token);
+      // 验密成功后才摘掉地址栏里的旧密码参数；token 始终只留在内存。
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("password")) {
+        url.searchParams.delete("password");
+        window.history.replaceState(null, "", url);
+      }
+      if (shareInfo?.is_directory) {
+        void loadDirectory(codeRef.current, res.access_token, "", 1);
+      }
+    } catch (err: unknown) {
+      if (!mountedRef.current) return;
+      setPasswordError(errorMessage(err, "密码错误"));
+    }
   };
 
-  if (loading) return <LoadingState label="正在加载分享…" />;
+  const handleDownload = () => {
+    setDownloading(true);
+    if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
+    downloadTimerRef.current = setTimeout(() => setDownloading(false), 2000);
+    triggerFormDownload(publicShareDownloadUrl(codeRef.current), {
+      token: accessToken || undefined,
+    });
+  };
 
-  if (invalid !== null) {
+  const handleItemDownload = (itemPath: string) => {
+    triggerFormDownload(publicShareDownloadUrl(codeRef.current), {
+      token: accessToken || undefined,
+      path: itemPath,
+    });
+  };
+
+  // 进入子目录/返回上级在事件处理器内同步重置页码，只发一笔「第 1 页」请求
+  const handleDirClick = (itemPath: string) => {
+    void loadDirectory(codeRef.current, accessToken, itemPath, 1);
+  };
+
+  const handleGoBack = () => {
+    if (!currentPath) return;
+    const parts = currentPath.split("/").filter(Boolean);
+    parts.pop();
+    void loadDirectory(codeRef.current, accessToken, parts.join("/"), 1);
+  };
+
+  const handleDirPageChange = (page: number) => {
+    void loadDirectory(codeRef.current, accessToken, currentPath, page);
+  };
+
+  if (loading) {
     return (
-      <div className="public-share-page">
-        <div className="public-share-card">
-          <h1>{invalid.title}</h1>
-          <p className="hint-text">{invalid.hint}</p>
+      <div className="fixed inset-0 flex-center p-4">
+        <div className="glass-frame animate-in max-w-400 w-full text-center py-12">
+          <p className="muted">加载中...</p>
         </div>
       </div>
     );
   }
 
-  if (info === null) return null;
-
-  if (info.has_password && token === null) {
+  if (error) {
     return (
-      <div className="public-share-page">
-        <form className="public-share-card" onSubmit={handleVerify} aria-label="提取密码验证">
-          <h1>{info.file_name}</h1>
-          <p className="hint-text">
-            该分享需要提取密码（{formatBytes(info.file_size)}）
-          </p>
-          {passwordError !== null && (
-            <div className="form-error" role="alert">
-              {passwordError}
-            </div>
-          )}
-          <label className="form-field">
-            <span>提取密码</span>
-            <input
-              type="password"
-              value={password}
-              maxLength={100}
-              autoComplete="off"
-              onChange={(event) => setPassword(event.target.value)}
-              aria-label="提取密码"
-            />
-          </label>
-          <button type="submit" className="primary-button" disabled={verifying || password === ""}>
-            {verifying ? "验证中…" : "验证并查看"}
-          </button>
-        </form>
+      <div className="fixed inset-0 flex-center p-4">
+        <div className="glass-frame animate-in max-w-400 w-full text-center py-12">
+          <div className="text-4xl mb-4">😕</div>
+          <h2 className="text-lg mb-2" style={{ color: "var(--danger)" }}>访问出错</h2>
+          <p className="muted">{error}</p>
+        </div>
       </div>
     );
   }
 
+  if (goneCard !== null) {
+    return (
+      <div className="fixed inset-0 flex-center p-4">
+        <div className="glass-frame animate-in max-w-400 w-full text-center py-12">
+          <div className="text-4xl mb-4">{goneCard.icon}</div>
+          <h2 className="text-lg mb-2">{goneCard.title}</h2>
+          <p className="muted">{goneCard.hint}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!shareInfo) return null;
+
+  if (shareInfo.has_password && !accessToken) {
+    return (
+      <SharePasswordForm
+        shareInfo={shareInfo}
+        password={password}
+        passwordError={passwordError}
+        onPasswordChange={setPassword}
+        onSubmit={handlePasswordSubmit}
+      />
+    );
+  }
+
   return (
-    <div className="public-share-page">
-      <div className="public-share-card">
-        <h1 title={info.file_name}>{info.file_name}</h1>
-        <p className="share-meta">
-          {isDirectory ? "文件夹" : "文件"} · {formatBytes(info.file_size)} · 下载{" "}
-          {info.download_count}
-          {info.max_downloads === null ? " 次（不限）" : ` / ${info.max_downloads} 次`}
-          {info.expires_at_ms !== null && ` · ${formatDateTime(info.expires_at_ms)} 过期`}
-        </p>
+    <div className="fixed inset-0 flex-center p-4">
+      <div className="glass-frame animate-in w-full" style={{ maxWidth: 520 }}>
+        <ShareHeader shareInfo={shareInfo} />
 
-        {!isDirectory && (
-          <button
-            type="button"
-            className="primary-button"
-            onClick={() => handleDownload()}
-          >
-            下载文件
-          </button>
+        {!shareInfo.is_directory && (
+          <ShareDownloadActions downloading={downloading} onDownload={handleDownload} />
         )}
 
-        {entryError !== null && (
-          <p className="form-error" role="alert">
-            {entryError}
-          </p>
-        )}
-
-        {isDirectory && (
+        {shareInfo.is_directory && (
           <>
-            <nav className="breadcrumbs" aria-label="目录路径">
-              {breadcrumbs.map((crumb, index) => (
-                <span key={crumb.path} className="breadcrumb-item">
-                  {index > 0 && <span aria-hidden="true">/</span>}
-                  <button
-                    type="button"
-                    className="link-button"
-                    onClick={() => void loadEntries(crumb.path, 1)}
-                    aria-current={index === breadcrumbs.length - 1 ? "page" : undefined}
-                  >
-                    {crumb.name}
-                  </button>
-                </span>
-              ))}
-            </nav>
-            {entryLoading ? (
-              <LoadingState label="正在加载目录…" />
-            ) : entries.length === 0 ? (
-              <EmptyState title="空目录" hint="该目录下没有内容。" />
-            ) : (
-              <>
-                <table className="data-table" aria-label="分享目录内容">
-                  <thead>
-                    <tr>
-                      <th scope="col">名称</th>
-                      <th scope="col">大小</th>
-                      <th scope="col">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {entries.map((entry) => (
-                      <tr key={entry.path}>
-                        <td className="name-cell">
-                          {entry.kind === "directory" ? (
-                            <button
-                              type="button"
-                              className="link-button"
-                              onClick={() => void loadEntries(entry.path, 1)}
-                              aria-label={`进入子目录 ${entry.name}`}
-                            >
-                              {entry.name}
-                            </button>
-                          ) : (
-                            <span title={entry.path}>{entry.name}</span>
-                          )}
-                        </td>
-                        <td>{formatBytes(entry.size)}</td>
-                        <td className="actions-cell">
-                          {entry.kind === "file" && (
-                            <button
-                              type="button"
-                              className="link-button"
-                              onClick={() => handleDownload(entry.path)}
-                            >
-                              下载
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <Pagination
-                  page={entryPage}
-                  pageSize={ENTRY_PAGE_SIZE}
-                  total={entryTotal}
-                  onChange={(next) => void loadEntries(path, next)}
-                />
-              </>
+            <ShareDirectoryView
+              currentPath={currentPath}
+              dirItems={dirItems}
+              loadingDir={loadingDir}
+              dirError={dirError}
+              onGoBack={handleGoBack}
+              onDirClick={handleDirClick}
+              onItemDownload={handleItemDownload}
+            />
+            {!loadingDir && dirTotal > BROWSE_PAGE_SIZE && (
+              <PaginationControls
+                currentPage={dirPage}
+                pageSize={BROWSE_PAGE_SIZE}
+                totalFiles={dirTotal}
+                onPageChange={handleDirPageChange}
+              />
             )}
           </>
         )}

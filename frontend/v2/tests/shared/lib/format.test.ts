@@ -7,19 +7,19 @@ import {
 } from "@/shared/lib/format";
 
 describe("format", () => {
-  it("formats bytes with units", () => {
+  it("formats bytes with units (V1 口径)", () => {
     expect(formatBytes(0)).toBe("0 B");
-    expect(formatBytes(1023)).toBe("1023 B");
-    expect(formatBytes(1024)).toBe("1.00 KiB");
-    expect(formatBytes(1536)).toBe("1.50 KiB");
-    expect(formatBytes(1024 * 1024)).toBe("1.00 MiB");
-    expect(formatBytes(null)).toBe("—");
-    expect(formatBytes(undefined)).toBe("—");
-    expect(formatBytes(-1)).toBe("—");
+    expect(formatBytes(1023)).toBe("1023.0 B");
+    expect(formatBytes(1024)).toBe("1.0 KB");
+    expect(formatBytes(1536)).toBe("1.5 KB");
+    expect(formatBytes(1024 * 1024)).toBe("1.0 MB");
+    expect(formatBytes(5 * 1024 * 1024 * 1024)).toBe("5.0 GB");
+    expect(formatBytes(null)).toBe("0 B");
+    expect(formatBytes(undefined)).toBe("0 B");
   });
 
   it("formats speed with /s suffix", () => {
-    expect(formatSpeed(2048)).toBe("2.00 KiB/s");
+    expect(formatSpeed(2048)).toBe("2.0 KB/s");
   });
 
   it("formats datetime with padding", () => {

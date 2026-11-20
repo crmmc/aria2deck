@@ -1,25 +1,19 @@
 import { api } from "@/shared/api/client";
+import { fetchAllPages } from "@/shared/api/pagination";
 import type {
   ShareBatchResponse,
   ShareItemResponse,
-  ShareItemStatus,
   ShareListResponse,
   ShareRevokeAllResponse,
 } from "@/shared/api/types";
 
-export async function fetchShares(
-  status: ShareItemStatus | null,
-  page: number,
-  pageSize: number,
-  search: string,
-): Promise<ShareListResponse> {
-  const params = new URLSearchParams({
-    page: String(page),
-    page_size: String(pageSize),
-  });
-  if (status !== null) params.set("status", status);
-  const term = search.trim();
-  if (term !== "") params.set("q", term);
+/** C21：归档参考 无分页界面，数据层顺序聚合全部 V2 页，由页面本地筛选/选择。 */
+export async function fetchSharesAll(): Promise<ShareItemResponse[]> {
+  return fetchAllPages((page) => fetchSharesList(page, 100));
+}
+
+async function fetchSharesList(page: number, pageSize: number): Promise<ShareListResponse> {
+  const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
   return api.get<ShareListResponse>(`/api/v2/shares?${params.toString()}`);
 }
 
@@ -35,7 +29,7 @@ export async function revokeAllShares(): Promise<ShareRevokeAllResponse> {
   return api.del<ShareRevokeAllResponse>("/api/v2/shares/all");
 }
 
-/** 复制文本：无密码 = 链接；有密码 = 链接 + 密码行（V2 后端不回传密码，用占位提示）。 */
+/** C01 复制文本：无密码 = 链接；有密码 = 链接 + 密码行（V2 后端不回传密码，用占位提示）。 */
 export function shareCopyText(
   share: Pick<ShareItemResponse, "code" | "has_password">,
   password?: string | null,

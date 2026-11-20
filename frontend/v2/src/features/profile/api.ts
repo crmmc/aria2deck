@@ -18,7 +18,7 @@ export function fetchRpcAccess(): Promise<RpcAccessResponse> {
   return api.get<RpcAccessResponse>("/api/v2/credentials/rpc");
 }
 
-export function setRpcAccess(enabled: boolean): Promise<RpcAccessResponse> {
+export function updateRpcAccess(enabled: boolean): Promise<RpcAccessResponse> {
   return api.put<RpcAccessResponse>("/api/v2/credentials/rpc", { enabled });
 }
 

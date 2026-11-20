@@ -76,9 +76,12 @@ async function request<T>(
 
   if (response.status === 401) {
     // 带 Bearer 令牌的是公开分享访问，401 属于页面内业务结果，不触发会话登出。
-    if (options?.headers?.Authorization === undefined) onUnauthorized?.();
+    const bearer = options?.headers?.Authorization !== undefined;
+    if (!bearer) onUnauthorized?.();
     const error = await parseError(response);
-    throw new ApiRequestError(401, error?.code ?? "unauthenticated", error?.message ?? "请先登录");
+    // 会话 401 沿用 归档参考 固定文案（登录页自行覆盖为“用户名或密码无效”）。
+    const message = bearer ? (error?.message ?? "请先登录") : "会话已过期，请重新登录";
+    throw new ApiRequestError(401, error?.code ?? "unauthenticated", message);
   }
 
   if (!response.ok) {

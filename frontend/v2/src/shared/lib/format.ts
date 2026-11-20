@@ -1,18 +1,15 @@
-/** 字节 / 速度 / 时间格式化（中文单位）。 */
+/** 字节 / 速度 / 时间格式化（沿用 归档参考口径：B/KB/MB/GB/TB，固定 1 位小数）。 */
 
-const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
-
-export function formatBytes(bytes: number | null | undefined): string {
-  if (bytes === null || bytes === undefined) return "—";
-  if (bytes < 0) return "—";
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < UNITS.length - 1) {
-    value /= 1024;
-    unit += 1;
+export function formatBytes(value?: number | null): string {
+  if (value === 0 || value == null || Number.isNaN(value)) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let idx = 0;
+  let val = value;
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024;
+    idx += 1;
   }
-  const digits = unit === 0 || value >= 100 ? 0 : value >= 10 ? 1 : 2;
-  return `${value.toFixed(digits)} ${UNITS[unit]}`;
+  return `${val.toFixed(1)} ${units[idx]}`;
 }
 
 export function formatSpeed(bytesPerSecond: number): string {

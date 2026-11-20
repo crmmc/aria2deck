@@ -1,0 +1,898 @@
+/* ==================== TASK PAGE SPECIFIC ==================== */
+
+/* Task Card Inner Container */
+.task-card-inner {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.task-card-container {
+  padding: 0;
+  overflow: hidden;
+}
+
+.task-card-container .task-card-inner {
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.task-card-container .task-card-inner:last-child {
+  border-bottom: none;
+}
+
+.task-card-container .task-card-inner:hover {
+  transform: none;
+  box-shadow: none;
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.task-card-inner:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.task-card-inner.selected {
+  border: 2px solid var(--primary);
+}
+
+.share-card-item {
+  cursor: default;
+}
+
+.share-card-main-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.share-card-copy-area {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.share-card-copy-area:focus-visible {
+  outline: none;
+  border-radius: 8px;
+  box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.12);
+}
+
+.share-card-copy-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.share-card-title {
+  display: block;
+}
+
+.share-card-line,
+.share-card-details {
+  display: block;
+}
+
+.share-card-details > span {
+  display: block;
+}
+
+.share-directory-path-card {
+  padding: 10px 16px;
+}
+
+.share-directory-path {
+  font-size: 13px;
+}
+
+.share-directory-back-button {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.share-directory-list-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.share-directory-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.share-directory-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.share-directory-row:last-child {
+  border-bottom: none;
+}
+
+.share-directory-item-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.share-directory-dir-button {
+  cursor: pointer;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.share-directory-icon {
+  font-size: 16px;
+}
+
+.share-directory-item-name {
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-directory-dir-name {
+  font-weight: 500;
+}
+
+.share-directory-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.share-directory-size {
+  font-size: 12px;
+  min-width: 60px;
+  text-align: right;
+}
+
+.share-directory-download-button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.share-directory-chevron {
+  font-size: 12px;
+}
+
+/* Task Card Header */
+.task-card-header {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  overflow: hidden;
+  flex: 1;
+}
+
+.task-card-copy-target {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-card-copy-target.non-interactive {
+  cursor: default;
+}
+
+.task-card-copy-target:focus-visible {
+  outline: none;
+  border-radius: 8px;
+  box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.12);
+}
+
+/* Task Name */
+.task-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+
+.task-card-title-row,
+.task-card-meta,
+.task-progress-row {
+  display: flex;
+  align-items: center;
+}
+
+.task-card-title-row {
+  gap: 12px;
+}
+
+.task-card-title-row .task-name {
+  flex: 1;
+}
+
+.task-card-meta {
+  gap: 12px;
+}
+
+.task-speed {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.task-progress-row {
+  gap: 12px;
+}
+
+.task-progress-row .progress-container {
+  flex: 1;
+}
+
+.task-progress-text {
+  color: var(--foreground);
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Task Card Footer */
+.task-card-footer {
+  display: flex;
+  align-items: center;
+  margin-top: auto;
+}
+
+/* Task Footer Left (status + progress) */
+.task-footer-left {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 16px;
+}
+
+.task-footer-left:empty {
+  display: none;
+}
+
+/* Task Footer Right (buttons) */
+.task-footer-right {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* Task Progress (in footer-right) */
+.task-progress {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Task Speed (in footer-right) */
+.task-speed {
+  font-size: 12px;
+  color: var(--success);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Task Error Text */
+.task-error-text {
+  font-size: 13px;
+  color: var(--danger);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Link Button (for task detail) */
+.btn-link {
+  padding: 8px 16px;
+  text-align: center;
+  font-size: 13px;
+  min-width: 64px;
+  text-decoration: none;
+}
+
+/* Add Task Form */
+.add-task-card {
+  margin-bottom: 16px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.add-task-form {
+  display: flex;
+  gap: 8px;
+}
+
+.add-task-input {
+  border: none;
+  background: transparent;
+  padding: 12px 16px;
+}
+
+/* Form Error */
+.form-error {
+  padding: 0 16px 12px;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+/* Torrent selection wizard */
+.torrent-wizard-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(17, 24, 39, 0.46);
+}
+
+.torrent-wizard {
+  position: relative;
+  width: min(1180px, 100%);
+  height: min(820px, calc(100vh - 48px));
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.16);
+}
+
+.torrent-wizard-header {
+  min-height: 72px;
+  padding: 18px 22px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.torrent-wizard-header h2,
+.torrent-review-head h3 {
+  margin: 0;
+}
+
+.torrent-wizard-header p,
+.torrent-review-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.torrent-wizard-shell {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+}
+
+.torrent-stage-tabs {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 14px 10px;
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.torrent-stage-tab {
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.torrent-stage-tab span {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.torrent-stage-tab-active {
+  border-color: rgba(0, 0, 0, 0.12);
+  background: white;
+  color: var(--foreground);
+}
+
+.torrent-stage-tab-active span {
+  background: var(--primary);
+  color: white;
+}
+
+.torrent-stage-tab-done span {
+  background: rgba(17, 132, 91, 0.16);
+  color: var(--success);
+}
+
+.torrent-wizard-panel {
+  min-height: 0;
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px 16px;
+}
+
+.torrent-wizard-panel-select {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
+.torrent-wizard-panel-confirm {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.torrent-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.torrent-summary-card {
+  min-height: 58px;
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.torrent-summary-card span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.torrent-toolbar {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.torrent-toolbar-actions,
+.torrent-wizard-actions,
+.torrent-cancel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.torrent-wizard-actions,
+.torrent-cancel-actions {
+  justify-content: flex-start;
+}
+
+.torrent-wizard-panel-select .torrent-wizard-actions {
+  justify-content: flex-end;
+}
+
+.torrent-wizard-panel-confirm .torrent-wizard-actions {
+  justify-content: flex-start;
+}
+
+.torrent-tree-frame {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  background: white;
+}
+
+.torrent-tree-head,
+.torrent-tree-row {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 28px 28px minmax(0, 1fr) 110px;
+  align-items: center;
+  gap: 8px;
+  padding-right: 12px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  font-size: 0.875rem;
+}
+
+.torrent-tree-head {
+  padding-left: 12px;
+  background: rgba(0, 0, 0, 0.03);
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.torrent-tree-head span:last-child,
+.torrent-tree-size {
+  text-align: right;
+}
+
+.torrent-tree-scroll {
+  min-height: 0;
+  overflow: auto;
+}
+
+.torrent-tree-row-folder {
+  background: rgba(0, 0, 0, 0.025);
+  font-weight: 700;
+}
+
+.torrent-tree-toggle {
+  color: var(--muted);
+  text-align: center;
+}
+
+.torrent-check-button {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.torrent-check {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(0, 0, 0, 0.22);
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+
+.torrent-check-checked {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: white;
+}
+
+.torrent-check-partial {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.torrent-tree-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.torrent-tree-size {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.torrent-tree-empty {
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.torrent-cancel-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(17, 24, 39, 0.48);
+}
+
+.torrent-cancel-dialog {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  background: white;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.16);
+}
+
+.torrent-cancel-dialog h3,
+.torrent-cancel-dialog p {
+  margin: 0;
+}
+
+.torrent-cancel-dialog p {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+@media (max-width: 820px) {
+  .torrent-wizard-backdrop {
+    padding: 12px;
+  }
+
+  .torrent-wizard {
+    height: calc(100vh - 24px);
+  }
+
+  .torrent-wizard-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .torrent-stage-tabs {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-right: 0;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  }
+
+  .torrent-summary-grid,
+  .torrent-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .torrent-tree-head,
+  .torrent-tree-row {
+    grid-template-columns: 24px 24px minmax(0, 1fr) 86px;
+  }
+}
+
+/* Filter Toolbar */
+.filter-toolbar {
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Desktop: keep the toolbar visible while the page scrolls */
+@media (min-width: 768px) {
+  .filter-toolbar {
+    position: sticky;
+    top: 16px;
+    z-index: 10;
+    /* 半透明 + 模糊玻璃质感，吸附时与面板风格一致 */
+    background: rgba(255, 255, 255, 0.6);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+  }
+}
+
+.filter-toolbar .path-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.filter-toolbar .search-sort-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filter-toolbar .search-sort-row .sort-group {
+  flex-shrink: 0;
+}
+
+.filter-toolbar .search-sort-row .search-input-group {
+  flex: 1;
+  min-width: 180px;
+}
+
+.filter-toolbar .search-sort-row .batch-actions {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.filter-group {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.inline-filter-toolbar {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.inline-filter-toolbar .toolbar-actions-group {
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.inline-filter-toolbar .toolbar-select-group {
+  flex-shrink: 0;
+}
+
+.inline-filter-toolbar .toolbar-search-group {
+  margin-left: auto;
+  flex: 1 1 240px;
+  min-width: 220px;
+  justify-content: flex-end;
+}
+
+.inline-filter-toolbar .toolbar-search-group .search-input {
+  width: 100%;
+  max-width: 320px;
+}
+
+/* Sort Button */
+.sort-btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+}
+
+/* Task List */
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Batch Add Modal */
+.batch-modal-content {
+  width: 90%;
+  max-width: 600px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: white;
+  padding: 24px;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.modal-close-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.06);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  color: #666;
+  transition: background 0.2s, color 0.2s;
+  flex-shrink: 0;
+}
+
+.modal-close-btn:hover {
+  background: rgba(0, 0, 0, 0.12);
+  color: #333;
+}
+
+.batch-textarea {
+  flex: 1;
+  min-height: 300px;
+  padding: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: monospace;
+  resize: vertical;
+  margin-bottom: 16px;
+}
+
+.modal-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* Delete Confirm Modal */
+.delete-modal-content {
+  width: 90%;
+  max-width: 500px;
+  background: white;
+  padding: 24px;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+/* Delete Checkbox Option */
+.delete-checkbox-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 6px;
+  background: transparent;
+  transition: background 0.2s ease;
+}
+
+.delete-checkbox-option.checked {
+  background: rgba(0, 113, 227, 0.05);
+}
+
+/* Warning Box */
+.warning-box {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: rgba(255, 59, 48, 0.1);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 59, 48, 0.3);
+}
+
+.warning-box p {
+  margin: 0;
+  color: var(--danger);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* Danger Button */
+.btn-danger {
+  padding: 8px 16px;
+  background: var(--danger);
+  color: white;
+}
+
+.btn-task {
+  padding: 8px 16px;
+  font-size: 13px;
+  min-width: 64px;
+}
+

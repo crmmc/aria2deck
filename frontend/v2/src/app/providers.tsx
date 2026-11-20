@@ -18,6 +18,8 @@ import {
 import { ToastHost } from "@/app/ToastHost";
 import { api, ApiRequestError, setUnauthorizedHandler } from "@/shared/api/client";
 import { setSiteTitle } from "@/shared/lib/siteTitle";
+import { ToastProvider } from "@/shared/components/Toast";
+import { emitToast } from "@/shared/components/toast-context";
 import type { PublicSiteInfoResponse, UserResponse } from "@/shared/api/types";
 
 let nextToastId = 1;
@@ -25,43 +27,97 @@ let nextToastId = 1;
 export function AppProviders({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const userRef = useRef<UserResponse | null>(null);
   userRef.current = user;
+  const initSeq = useRef(0);
+  const mountedRef = useRef(false);
 
-  const refresh = useCallback(async () => {
-    try {
-      const me = await api.get<UserResponse>("/api/v2/auth/me");
-      setUser(me);
-    } catch (caught) {
-      // 网络瞬断不误登出（G9）：保留当前会话，横幅由 client 的网络健康信号驱动。
-      if (caught instanceof ApiRequestError && caught.status === 0) return;
-      setUser(null);
-    } finally {
-      setLoading(false);
-    }
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  // 站点标题（G1）：公开站点信息拉取一次，失败回退默认标题。
-  useEffect(() => {
-    let cancelled = false;
-    api
+  // 归档参考语义（§5.1）：初始化并行拉站点信息与 me；401 交给路由守卫跳登录，
+  // 网络/服务器错误进入 error + 重试界面。
+  const initialize = useCallback(async () => {
+    const seq = ++initSeq.current;
+    setLoading(true);
+    setError(null);
+    // 站点信息不阻塞登录就绪（归档参考语义：标题后至，认证就绪独立判定）。
+    void api
       .get<PublicSiteInfoResponse>("/api/v2/public/site-info")
       .then((info) => {
-        if (cancelled) return;
+        if (!mountedRef.current) return;
         setSiteTitle(info.site_title);
         document.title = info.site_title.trim() === "" ? "Aria2Deck" : info.site_title;
       })
       .catch(() => {
         /* 失败保持默认标题 */
       });
-    return () => {
-      cancelled = true;
-    };
+    const userPromise = api
+      .get<UserResponse>("/api/v2/auth/me")
+      .then(
+        (me) => ({ ok: true as const, me }),
+        (caught: unknown) => ({ ok: false as const, caught }),
+      );
+    const userResult = await userPromise;
+    if (seq !== initSeq.current || !mountedRef.current) return;
+    if (userResult.ok) {
+      setUser(userResult.me);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    const caught = userResult.caught;
+    if (caught instanceof ApiRequestError && caught.status === 401) {
+      // 未登录/会话过期：清用户，由 RequireAuth 守卫跳转。
+      // 归档参考语义：从受保护路由启动时会话过期，登录页仍看到任务加载失败提示；
+      // 直接打开 /login 或公开分享页则静默（归档参考 登录页基线无提示）。
+      const path = window.location.pathname;
+      if (path !== "/login" && !path.startsWith("/s/")) {
+        emitToast("加载任务失败: 会话已过期，请重新登录", "error");
+      }
+      setUser(null);
+      setError(null);
+    } else if (caught instanceof ApiRequestError && caught.status === 0) {
+      setUser(null);
+      setError("无法连接服务器，请检查网络连接");
+    } else if (caught instanceof ApiRequestError) {
+      setUser(null);
+      setError(`服务器错误: ${caught.message}`);
+    } else {
+      setUser(null);
+      setError("未知错误");
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    void initialize();
+  }, [initialize]);
+
+  const retryAuth = useCallback(() => {
+    void initialize();
+  }, [initialize]);
+
+  /** 供已登录期间的会话刷新（如横幅重试）：网络瞬断不清用户。 */
+  const refresh = useCallback(async () => {
+    try {
+      const me = await api.get<UserResponse>("/api/v2/auth/me");
+      setUser(me);
+      setError(null);
+    } catch (caught) {
+      if (caught instanceof ApiRequestError && caught.status === 0) return;
+      if (caught instanceof ApiRequestError && caught.status === 401) {
+        setUser(null);
+        return;
+      }
+      setUser(null);
+    }
   }, []);
 
   const logout = useCallback(async () => {
@@ -79,6 +135,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
       password,
     });
     setUser(me);
+    setError(null);
     return me;
   }, []);
 
@@ -91,8 +148,8 @@ export function AppProviders({ children }: { children: ReactNode }) {
   }, []);
 
   const authValue = useMemo<AuthState>(
-    () => ({ user, loading, login, logout, refresh }),
-    [user, loading, login, logout, refresh],
+    () => ({ user, loading, error, login, logout, refresh, retryAuth }),
+    [user, loading, error, login, logout, refresh, retryAuth],
   );
 
   const dismiss = useCallback((id: number) => {
@@ -114,11 +171,13 @@ export function AppProviders({ children }: { children: ReactNode }) {
   );
 
   return (
-    <AuthContext.Provider value={authValue}>
-      <ToastContext.Provider value={toastValue}>
-        {children}
-        <ToastHost />
-      </ToastContext.Provider>
-    </AuthContext.Provider>
+    <ToastProvider>
+      <AuthContext.Provider value={authValue}>
+        <ToastContext.Provider value={toastValue}>
+          {children}
+          <ToastHost />
+        </ToastContext.Provider>
+      </AuthContext.Provider>
+    </ToastProvider>
   );
 }

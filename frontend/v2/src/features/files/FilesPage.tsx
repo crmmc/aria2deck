@@ -1,620 +1,784 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+"use client";
 
-import { useToast } from "@/app/hooks";
-import { errorMessage } from "@/shared/api/client";
-import {
-  ConfirmDialog,
-  EmptyState,
-  ErrorState,
-  LoadingState,
-  Pagination,
-} from "@/shared/components/ui";
-import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
+
+import { useToast } from "@/shared/components/toast-context";
+import { PaginationControls } from "@/shared/components/PaginationControls";
+import { useIsMobile } from "@/shared/hooks/useIsMobile";
+import { useMounted } from "@/shared/hooks/useMounted";
+import { fileDownloadUrl } from "@/shared/api/urls";
 import { triggerBatchDownloads, triggerFileDownload } from "@/shared/lib/download";
-import type {
-  DirectoryBreadcrumbResponse,
-  FileEntryItemResponse,
-  FileItemResponse,
-  FileSearchHitResponse,
-  TaskQuotaResponse,
-} from "@/shared/api/types";
+import { batchDeleteFiles, createPack, fetchEntries, fetchFiles, precomputePack, renameFile, searchFiles } from "./api";
 import {
-  ENTRY_PAGE_SIZE,
-  ROOT_PAGE_SIZE,
-  createShare,
-  deleteFile,
-  fetchEntries,
-  fetchFiles,
-  fileDownloadUrl,
-  precomputePack,
-  renameFile,
-  searchFiles,
-} from "./api";
-import {
-  Breadcrumbs,
-  EntryTable,
-  RootFileTable,
-  SearchResults,
-  SpaceUsageCard,
-  type FileSort,
-  type FileSortKey,
-} from "./FileViews";
-import { PackDialog, RenameDialog, ShareCreateDialog } from "./FilesDialogs";
-import { PackTasksCard } from "./PackTasksCard";
+  formatFileDate,
+  locateFilePage,
+  sortBrowseItems,
+  sortFiles,
+  toBrowseItemView,
+  toFileView,
+  toSearchHitView,
+  type BrowseItemView,
+  type FileView,
+  type SearchHitView,
+} from "./model";
+import { BrowseFolderView } from "./components/BrowseFolderView";
+import { SearchModal } from "./components/SearchModal";
+import { FileToolbar, type BrowseContext, type SortField, type SortOrder } from "./components/FileToolbar";
+import { PackDialog } from "./components/PackDialog";
+import { RootFileTable } from "./components/RootFileTable";
+import { SpaceUsageCard } from "./components/SpaceUsageCard";
+import { PackTaskCard } from "./components/PackTaskCard";
+import { CreateShareDialog } from "./components/CreateShareDialog";
 
-interface BrowseContext {
-  fileId: number;
-  fileName: string;
-  path: string;
-}
-
-const HIGHLIGHT_MS = 2500;
-const SEARCH_DEBOUNCE_MS = 500;
+const LOCATE_HIGHLIGHT_MS = 1800;
+const BROWSE_PAGE_SIZE = 200;
+const ROOT_PAGE_SIZE = 10;
+const BATCH_DOWNLOAD_INTERVAL_MS = 1200;
 
 export function FilesPage() {
-  const { push } = useToast();
-  // 根列表（服务端副本）
-  const [files, setFiles] = useState<FileItemResponse[]>([]);
-  const [total, setTotal] = useState(0);
-  const [space, setSpace] = useState<TaskQuotaResponse | null>(null);
-  const [rootLoading, setRootLoading] = useState(true);
-  const [rootError, setRootError] = useState<string | null>(null);
-  const [rootPage, setRootPage] = useState(1);
-  // 排序（F3：当前页客户端排序）
-  const [rootSort, setRootSort] = useState<FileSort>(null);
-  const [entrySort, setEntrySort] = useState<FileSort>(null);
-  // 目录浏览（服务端副本 + 浏览上下文）
-  const [browse, setBrowse] = useState<BrowseContext | null>(null);
-  const [entries, setEntries] = useState<FileEntryItemResponse[]>([]);
-  const [breadcrumbs, setBreadcrumbs] = useState<DirectoryBreadcrumbResponse[]>([]);
-  const [entryTotal, setEntryTotal] = useState(0);
-  const [entryPage, setEntryPage] = useState(1);
-  const [entryLoading, setEntryLoading] = useState(false);
-  const [entryError, setEntryError] = useState<string | null>(null);
-  // 搜索（F4：查询按钮/回车立即触发；输入 500ms 防抖自动触发；全局/当前目录范围开关）
-  const [keyword, setKeyword] = useState("");
-  const debouncedKeyword = useDebouncedValue(keyword, SEARCH_DEBOUNCE_MS);
-  const [searchScope, setSearchScope] = useState<"global" | "current">("global");
+  const { showToast, showConfirm } = useToast();
+  const [files, setFiles] = useState<FileView[]>([]);
+  const [space, setSpace] = useState<{ used: number; frozen: number; available: number } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<number | null>(null);
+  const [newName, setNewName] = useState("");
+
+  // Sort state
+  const [sortField, setSortField] = useState<SortField>("created_at");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
+
+  // Search state（toolbar 是唯一输入源；弹窗只展示结果）
+  const [toolbarSearchKeyword, setToolbarSearchKeyword] = useState("");
+  const [showSearchModal, setShowSearchModal] = useState(false);
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchHitView[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [hits, setHits] = useState<FileSearchHitResponse[]>([]);
-  const [truncated, setTruncated] = useState(false);
-  // 选择与高亮
-  const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [entrySelected, setEntrySelected] = useState<Set<string>>(new Set());
-  const [highlightId, setHighlightId] = useState<number | null>(null);
+  const [searchTruncated, setSearchTruncated] = useState(false);
+  const [searchGlobal, setSearchGlobal] = useState(false);
+  const [highlightUserFileId, setHighlightUserFileId] = useState<number | null>(null);
   const [highlightName, setHighlightName] = useState<string | null>(null);
-  // 弹窗与批量删除
-  const [renameTarget, setRenameTarget] = useState<FileItemResponse | null>(null);
-  const [shareTarget, setShareTarget] = useState<FileItemResponse | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<FileItemResponse | null>(null);
-  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
-  const [packOpen, setPackOpen] = useState(false);
-  const [packRefreshKey, setPackRefreshKey] = useState(0);
-  const rootSeq = useRef(0);
-  const entrySeq = useRef(0);
-  const browseRef = useRef<BrowseContext | null>(null);
-  browseRef.current = browse;
-  const searchSeq = useRef(0);
+  const pendingRootLocateRef = useRef<number | null>(null);
+  const toolbarSearchInputRef = useRef<HTMLInputElement>(null);
 
-  const loadRoot = useCallback(async () => {
-    const seq = ++rootSeq.current;
-    setRootLoading(true);
-    setRootError(null);
+  // Batch selection state
+  const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
+  const [isBatchOperating, setIsBatchOperating] = useState(false);
+
+  // Folder browsing state（in-page navigation）
+  const [browseContext, setBrowseContext] = useState<BrowseContext | null>(null);
+  const [browseContents, setBrowseContents] = useState<BrowseItemView[]>([]);
+  const [browseLoading, setBrowseLoading] = useState(false);
+  const [browsePage, setBrowsePage] = useState(1);
+  const [browseTotal, setBrowseTotal] = useState(0);
+  const browseRequestIdRef = useRef(0);
+  const [selectedBrowseFiles, setSelectedBrowseFiles] = useState<Set<string>>(new Set());
+  const isInsideFolder = browseContext !== null;
+
+  const [packTasksKey, setPackTasksKey] = useState(0);
+  const [downloadingFile, setDownloadingFile] = useState<number | null>(null);
+
+  // Share dialog state
+  const [shareDialogFile, setShareDialogFile] = useState<{ id: number; name: string } | null>(null);
+  // Pack dialog state
+  const [packDialogOpen, setPackDialogOpen] = useState(false);
+  const [packSize, setPackSize] = useState<number | null>(null);
+  const [availableSpace, setAvailableSpace] = useState<number | null>(null);
+  const [packOutputName, setPackOutputName] = useState("");
+  const [packDeleteSource, setPackDeleteSource] = useState(false);
+  const [packing, setPacking] = useState(false);
+  const [packLoading, setPackLoading] = useState(false);
+
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(ROOT_PAGE_SIZE);
+  const [totalFiles, setTotalFiles] = useState(0);
+
+  const closeSearchModal = useCallback(() => {
+    setShowSearchModal(false);
+  }, []);
+
+  const isMobile = useIsMobile();
+  const mounted = useMounted();
+
+  useEffect(() => {
+    if (showSearchModal) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [showSearchModal]);
+
+  // 搜索定位：高亮行渲染后滚动到可视区域中央
+  useEffect(() => {
+    if (highlightUserFileId == null) return;
+    const frame = requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-file-id="${highlightUserFileId}"]`)
+        ?.scrollIntoView({ block: "center" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [highlightUserFileId]);
+
+  const loadFiles = useCallback(async (page: number, size: number) => {
+    setLoading(true);
+    setError(null);
     try {
-      const response = await fetchFiles(rootPage, ROOT_PAGE_SIZE);
-      if (seq !== rootSeq.current) return; // 丢弃过期响应。
-      setFiles(response.items);
-      setTotal(response.total);
-      setSpace(response.space);
-    } catch (caught) {
-      if (seq !== rootSeq.current) return;
-      setRootError(errorMessage(caught, "加载失败"));
+      const response = await fetchFiles(page, size);
+      const views = response.items.map(toFileView);
+      setFiles(views);
+      setSpace({
+        used: response.space.used_bytes,
+        frozen: response.space.reserved_bytes,
+        available: response.space.available_bytes,
+      });
+      setTotalFiles(response.total);
+      setSelectedFiles(new Set());
+      const pendingLocateId = pendingRootLocateRef.current;
+      if (pendingLocateId !== null) {
+        pendingRootLocateRef.current = null;
+        if (views.some((f) => f.id === pendingLocateId)) {
+          setHighlightUserFileId(pendingLocateId);
+          window.setTimeout(() => setHighlightUserFileId(null), LOCATE_HIGHLIGHT_MS);
+          setShowSearchModal(false);
+        } else {
+          showToast("定位失败：未在当前列表找到该文件", "error");
+        }
+      }
+    } catch (err) {
+      setError((err as Error).message);
     } finally {
-      if (seq === rootSeq.current) setRootLoading(false);
+      setLoading(false);
     }
-  }, [rootPage]);
+  }, [showToast]);
 
   useEffect(() => {
-    if (browse === null) void loadRoot();
-  }, [browse, loadRoot]);
+    loadFiles(currentPage, pageSize);
+  }, [currentPage, pageSize, loadFiles]);
 
-  const loadEntries = useCallback(
-    async (context: BrowseContext, page: number) => {
-      const seq = ++entrySeq.current;
-      setEntryLoading(true);
-      setEntryError(null);
-      try {
-        const response = await fetchEntries(context.fileId, context.path, page, ENTRY_PAGE_SIZE);
-        if (seq !== entrySeq.current) return;
-        setEntries(response.items);
-        setBreadcrumbs(response.breadcrumbs);
-        setEntryTotal(response.total);
-        setEntryPage(page);
-      } catch (caught) {
-        if (seq !== entrySeq.current) return;
-        setEntryError(errorMessage(caught, "加载目录失败"));
-      } finally {
-        if (seq === entrySeq.current) setEntryLoading(false);
+  // Keyboard shortcut for search (Cmd/Ctrl + F)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+        e.preventDefault();
+        toolbarSearchInputRef.current?.focus();
       }
-    },
-    [],
+      if (e.key === "Escape" && showSearchModal) {
+        closeSearchModal();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showSearchModal, closeSearchModal]);
+
+  const sortedFiles = useMemo(
+    () => sortFiles(files, sortField, sortOrder),
+    [files, sortField, sortOrder],
   );
 
-  useEffect(() => {
-    if (browse !== null) void loadEntries(browse, entryPage);
-  }, [browse, entryPage, loadEntries]);
-
-  // F4 搜索执行器：范围=当前目录时限定在该目录内容（含子目录路径过滤）。
-  // 连续相同的（关键词, 范围）直接跳过：查询按钮/回车/防抖三路触发不重复消耗限流额度。
-  const lastSearchRef = useRef<{ term: string; scope: string }>({ term: "", scope: "global" });
-  const runSearch = useCallback(
-    async (term: string, scope: "global" | "current") => {
-      const normalized = term.trim();
-      const context = browseRef.current;
-      const scopeKey = scope === "current" && context !== null ? "current" : "global";
-      if (normalized === "") {
-        searchSeq.current += 1;
-        lastSearchRef.current = { term: "", scope: scopeKey };
-        setHits([]);
-        setTruncated(false);
-        setSearchError(null);
-        setSearchLoading(false);
-        return;
-      }
-      if (
-        lastSearchRef.current.term === normalized &&
-        lastSearchRef.current.scope === scopeKey
-      ) {
-        return;
-      }
-      lastSearchRef.current = { term: normalized, scope: scopeKey };
-      const scoped = scopeKey === "current" && context !== null;
-      const seq = ++searchSeq.current;
-      setSearchLoading(true);
-      setSearchError(null);
-      try {
-        const response = await searchFiles(normalized, scoped ? context.fileId : null);
-        if (seq !== searchSeq.current) return;
-        const prefix = scoped && context.path !== "" ? `${context.path}/` : null;
-        const scopedHits =
-          prefix === null ? response.hits : response.hits.filter((hit) => hit.path.startsWith(prefix));
-        setHits(scopedHits);
-        setTruncated(response.truncated);
-      } catch (caught) {
-        if (seq !== searchSeq.current) return;
-        setHits([]);
-        setTruncated(false);
-        setSearchError(errorMessage(caught, "搜索失败"));
-      } finally {
-        if (seq === searchSeq.current) setSearchLoading(false);
-      }
-    },
-    [],
+  const sortedBrowseContents = useMemo(
+    () => sortBrowseItems(browseContents, sortField, sortOrder),
+    [browseContents, sortField, sortOrder],
   );
 
-  // 输入防抖自动搜索；按钮/回车立即触发同一执行器。
-  useEffect(() => {
-    void runSearch(debouncedKeyword, searchScope);
-  }, [debouncedKeyword, searchScope, runSearch]);
-
-  const flashHighlight = (apply: () => void, clear: () => void) => {
-    apply();
-    window.setTimeout(clear, HIGHLIGHT_MS);
-  };
-
-  const openBrowse = (fileId: number, fileName: string, path: string, highlight: string | null) => {
-    setBrowse({ fileId, fileName, path });
-    setEntryPage(1);
-    setSelected(new Set());
-    setEntrySelected(new Set());
-    if (highlight !== null) {
-      flashHighlight(() => setHighlightName(highlight), () => setHighlightName(null));
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortOrder(sortOrder === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortOrder(field === "name" ? "asc" : "desc");
     }
   };
 
-  // F5 定位：根文件不在当前页时逐页找到目标页再跳转（服务端命中不含页索引）。
-  const locateRootFile = useCallback(
-    async (hit: FileSearchHitResponse) => {
-      const seq = ++rootSeq.current;
-      const maxPage = Math.max(1, Math.ceil(total / ROOT_PAGE_SIZE));
-      for (let page = 1; page <= maxPage; page += 1) {
-        let response;
-        try {
-          response = await fetchFiles(page, ROOT_PAGE_SIZE);
-        } catch (caught) {
-          push("error", errorMessage(caught, "定位失败"));
-          return;
-        }
-        if (seq !== rootSeq.current) return; // 用户已另行操作，放弃定位。
-        if (response.items.some((file) => file.id === hit.user_file_id)) {
-          if (page === rootPage) {
-            flashHighlight(
-              () => setHighlightId(hit.user_file_id),
-              () => setHighlightId(null),
-            );
-          } else {
-            setHighlightId(hit.user_file_id);
-            window.setTimeout(() => setHighlightId(null), HIGHLIGHT_MS);
-            setRootPage(page);
-          }
-          setBrowse(null);
-          return;
-        }
-      }
-      push("error", "定位失败：未在当前列表找到该文件");
-    },
-    [push, rootPage, total],
-  );
+  const getSortIcon = (field: SortField) => {
+    if (sortField !== field) return "↕";
+    return sortOrder === "asc" ? "↑" : "↓";
+  };
 
-  const handleLocate = (hit: FileSearchHitResponse) => {
-    if (hit.path === "") {
-      if (hit.kind === "directory") {
-        openBrowse(hit.user_file_id, hit.display_name, "", null);
-        return;
-      }
-      void locateRootFile(hit);
+  const runSearch = useCallback(async () => {
+    const keyword = toolbarSearchKeyword.trim();
+    if (!keyword) {
+      showToast("请输入关键词", "warning");
       return;
     }
-    const segments = hit.path.split("/").filter(Boolean);
-    const parent = segments.slice(0, -1).join("/");
-    openBrowse(hit.user_file_id, hit.display_name, parent, segments[segments.length - 1] ?? null);
+    setSearchKeyword(keyword);
+    setShowSearchModal(true);
+    setSearchLoading(true);
+    setSearchError(null);
+    try {
+      // C08：V2 作用域参数只支持整个目录（file_id），不支持目录内子路径；
+      // 非全局且在目录中时，按目录 id 作为作用域。
+      const scopeFileId = !searchGlobal && browseContext ? browseContext.fileId : null;
+      const response = await searchFiles(keyword, scopeFileId);
+      setSearchResults(response.hits.map(toSearchHitView));
+      setSearchTruncated(response.truncated);
+    } catch (err) {
+      setSearchResults([]);
+      setSearchTruncated(false);
+      setSearchError((err as Error).message);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [toolbarSearchKeyword, searchGlobal, browseContext, showToast]);
+
+  // 目录浏览分页加载：requestId 守卫丢弃过期响应
+  const loadBrowsePage = useCallback(
+    async (fileId: number, path: string | undefined, page: number) => {
+      const requestId = ++browseRequestIdRef.current;
+      setBrowseLoading(true);
+      try {
+        const result = await fetchEntries(fileId, path ?? "", page, BROWSE_PAGE_SIZE);
+        if (requestId !== browseRequestIdRef.current) return null;
+        setBrowseContents(result.items.map(toBrowseItemView));
+        setBrowseTotal(result.total);
+        setBrowsePage(page);
+        return result;
+      } catch (err) {
+        if (requestId !== browseRequestIdRef.current) return null;
+        throw err;
+      } finally {
+        if (requestId === browseRequestIdRef.current) setBrowseLoading(false);
+      }
+    },
+    [],
+  );
+
+  // 退出目录视图：作废在途目录请求并清空分页状态
+  const clearBrowseState = useCallback(() => {
+    browseRequestIdRef.current += 1;
+    setBrowseContext(null);
+    setBrowseContents([]);
+    setSelectedBrowseFiles(new Set());
+    setBrowseTotal(0);
+    setBrowsePage(1);
+  }, []);
+
+  const locateInsideFolder = useCallback(async (item: SearchHitView) => {
+    const segments = item.entryPath?.split("/").filter(Boolean) ?? [];
+    const name = segments[segments.length - 1];
+    const parentSegments = segments.slice(0, -1);
+    const keepName = browseContext?.fileId === item.userFileId
+      ? browseContext.fileName
+      : item.path.split("/").filter(Boolean)[0] || item.name;
+    setBrowsePage(1);
+    try {
+      const result = await loadBrowsePage(
+        item.userFileId,
+        parentSegments.length > 0 ? parentSegments.join("/") : undefined,
+        1,
+      );
+      if (!result) return;
+      setBrowseContext({ fileId: item.userFileId, fileName: keepName, path: parentSegments });
+      setSelectedBrowseFiles(new Set());
+      if (!name || !result.items.some((c) => c.name === name)) {
+        showToast("定位失败：未在文件夹中找到该文件", "error");
+        return;
+      }
+      setHighlightName(name);
+      window.setTimeout(() => setHighlightName(null), LOCATE_HIGHLIGHT_MS);
+      setShowSearchModal(false);
+    } catch (err) {
+      showToast(`定位失败: ${(err as Error).message}`, "error");
+    }
+  }, [browseContext, showToast, loadBrowsePage]);
+
+  const handleLocate = useCallback((item: SearchHitView) => {
+    if (item.entryPath === null) {
+      // C31：V2 无 root_index，逐页扫描定位目标页。
+      const locate = async () => {
+        const targetPage = await locateFilePage(
+          (page) => fetchFiles(page, pageSize),
+          item.userFileId,
+          pageSize,
+        );
+        if (targetPage === null) {
+          showToast("定位失败：未在当前列表找到该文件", "error");
+          return;
+        }
+        if (browseContext) {
+          clearBrowseState();
+        }
+        if (targetPage !== currentPage) {
+          pendingRootLocateRef.current = item.userFileId;
+          setCurrentPage(targetPage);
+          return;
+        }
+        setHighlightUserFileId(item.userFileId);
+        window.setTimeout(() => setHighlightUserFileId(null), LOCATE_HIGHLIGHT_MS);
+        setShowSearchModal(false);
+      };
+      void locate();
+      return;
+    }
+    void locateInsideFolder(item);
+  }, [browseContext, pageSize, currentPage, showToast, locateInsideFolder, clearBrowseState]);
+
+  const handleToolbarSearchKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      void runSearch();
+    }
   };
 
-  const handleRootDownload = (file: FileItemResponse) => {
-    triggerFileDownload(fileDownloadUrl(file.id), file.display_name);
-    push("info", "已触发下载");
+  const handleDelete = async (file: FileView) => {
+    const confirmMsg = file.isDirectory
+      ? `确定要删除文件夹 "${file.name}" 吗？`
+      : `确定要删除文件 "${file.name}" 吗？`;
+
+    const confirmed = await showConfirm({
+      title: "删除确认",
+      message: confirmMsg,
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    try {
+      const result = await batchDeleteFiles([file.id]);
+      const item = result.results[0];
+      if (!item?.accepted) {
+        showToast(`删除失败：${item?.error?.message ?? "未知错误"}`, "error");
+        return;
+      }
+      loadFiles(currentPage, pageSize);
+    } catch (err) {
+      showToast(`删除失败: ${(err as Error).message}`, "error");
+    }
   };
 
-  const handleEntryDownload = (entry: FileEntryItemResponse) => {
-    if (browse === null) return; // 目录行仅在浏览视图渲染，防御性保留。
-    triggerFileDownload(fileDownloadUrl(browse.fileId, entry.path), entry.name);
-    push("info", "已触发下载");
+  const handleBatchDelete = async () => {
+    if (selectedFiles.size === 0) {
+      showToast("请先选择要删除的文件", "warning");
+      return;
+    }
+
+    const selectedList = files.filter((f) => selectedFiles.has(f.id));
+    const confirmed = await showConfirm({
+      title: "批量删除",
+      message: `确定要删除选中的 ${selectedList.length} 个文件吗？`,
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    setIsBatchOperating(true);
+    try {
+      const result = await batchDeleteFiles(selectedList.map((f) => f.id));
+      if (result.rejected_count > 0) {
+        showToast(
+          `已受理 ${result.accepted_count} 个文件，${result.rejected_count} 个删除失败`,
+          "warning",
+        );
+      } else {
+        showToast(`已删除 ${result.accepted_count} 个文件`, "success");
+      }
+      // 删除后当前页可能已空，计算应回到哪一页
+      const remainingTotal = totalFiles - result.accepted_count;
+      const maxPage = Math.max(1, Math.ceil(remainingTotal / pageSize));
+      const targetPage = Math.min(currentPage, maxPage);
+      if (targetPage !== currentPage) {
+        setCurrentPage(targetPage);
+      }
+      loadFiles(targetPage, pageSize);
+    } catch (err) {
+      showToast(`删除失败: ${(err as Error).message}`, "error");
+    } finally {
+      setIsBatchOperating(false);
+    }
   };
 
   const handleBatchDownload = async () => {
-    const selectedFiles = files.filter((file) => selected.has(file.id));
-    if (selectedFiles.some((file) => file.kind === "directory")) {
-      push("error", "选择包含文件夹，无法批量下载，请先打包后下载");
+    if (selectedFiles.size === 0) return;
+    const hasFolder = files.some((f) => selectedFiles.has(f.id) && f.isDirectory);
+    if (hasFolder) {
+      showToast("当前选择包含文件夹，无法批量下载，请先打包后下载", "warning");
       return;
     }
-    push("info", `已触发 ${selectedFiles.length} 个下载`);
+
+    const selectedList = files.filter((f) => selectedFiles.has(f.id));
+    showToast(`正在发送已选 ${selectedList.length} 个文件的下载请求，请稍候...`, "info");
+
+    // C24：归档参考 节奏 1200ms，显式传入。
     await triggerBatchDownloads(
-      selectedFiles.map((file) => fileDownloadUrl(file.id)),
+      selectedList.map((file) => fileDownloadUrl(file.id)),
+      BATCH_DOWNLOAD_INTERVAL_MS,
     );
+    showToast(`已完成 ${selectedList.length} 个文件的下载触发`, "success");
   };
 
-  // F7 目录内批量下载：仅文件条目可选中，iframe 间隔逐个触发。
-  const handleEntryBatchDownload = async () => {
-    if (browse === null || entrySelected.size === 0) return;
-    push("info", `已触发 ${entrySelected.size} 个下载`);
-    await triggerBatchDownloads(
-      [...entrySelected].map((path) => fileDownloadUrl(browse.fileId, path)),
-    );
-  };
-
-  // F6 批量删除：逐项删除 + 部分失败反馈 + 删空回页。
-  const handleBatchDelete = async () => {
-    setConfirmBatchDelete(false);
-    const ids = [...selected];
-    let deleted = 0;
-    let failed = 0;
-    for (const id of ids) {
-      try {
-        await deleteFile(id);
-        deleted += 1;
-      } catch {
-        failed += 1;
-      }
+  const openPackDialog = async () => {
+    if (selectedFiles.size === 0) {
+      showToast("请先选择要打包的文件", "warning");
+      return;
     }
-    if (failed > 0) push("error", `已删除 ${deleted} 个文件，${failed} 个删除失败`);
-    else push("success", `已删除 ${deleted} 个文件`);
-    if (deleted > 0) setPackRefreshKey((current) => current + 1); // 整轮只重读一次打包卡。
-    setSelected(new Set());
-    const remaining = Math.max(0, total - deleted);
-    const maxPage = Math.max(1, Math.ceil(remaining / ROOT_PAGE_SIZE));
-    if (rootPage > maxPage) setRootPage(maxPage);
-    else await loadRoot();
-  };
-
-  const handleRename = async (name: string) => {
-    if (renameTarget === null) return;
-    await renameFile(renameTarget.id, name);
-    push("success", "已重命名");
-    if (browse === null) await loadRoot();
-  };
-
-  const handleDelete = async () => {
-    const target = deleteTarget;
-    setDeleteTarget(null);
-    if (target === null) return;
+    setPackDialogOpen(true);
+    setPackLoading(true);
+    setPackSize(null);
+    setAvailableSpace(null);
+    setPackOutputName("");
     try {
-      await deleteFile(target.id);
-      push("success", "已删除");
-      setPackRefreshKey((current) => current + 1); // 删除后打包产物可能已不可用，重读常驻卡。
-      // 删空末页回退：当前页只剩被删项时回上一页。
-      const remaining = total - 1;
-      const maxPage = Math.max(1, Math.ceil(remaining / ROOT_PAGE_SIZE));
-      if (rootPage > maxPage) setRootPage(maxPage);
-      else await loadRoot();
-    } catch (caught) {
-      push("error", errorMessage(caught, "删除失败"));
+      const fileIds = Array.from(selectedFiles);
+      const result = await precomputePack(fileIds);
+      setPackSize(result.total_size);
+      setAvailableSpace(result.available_bytes);
+    } catch (err) {
+      showToast(`获取信息失败: ${(err as Error).message}`, "error");
+      setPackDialogOpen(false);
+    } finally {
+      setPackLoading(false);
     }
   };
 
-  const toggle = (id: number) => {
-    setSelected((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+  const handlePackConfirm = async () => {
+    setPacking(true);
+    try {
+      const fileIds = Array.from(selectedFiles);
+      // P1：归档参考实现的默认输出名由后端生成（base="archive" + "." + pack_format，默认 zip）。
+      // V2 必填 output_name，前端按 归档参考规则复刻默认值。
+      await createPack(fileIds, packOutputName || "archive.zip", packDeleteSource);
+      showToast("打包任务已创建", "success");
+      setPackDialogOpen(false);
+      setSelectedFiles(new Set());
+      setPackOutputName("");
+      setPackDeleteSource(false);
+      setPackTasksKey((k) => k + 1);
+    } catch (err) {
+      showToast(`创建打包任务失败: ${(err as Error).message}`, "error");
+    } finally {
+      setPacking(false);
+    }
+  };
+
+  const toggleFileSelection = useCallback((id: number) => {
+    setSelectedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    if (selectedFiles.size === sortedFiles.length) {
+      setSelectedFiles(new Set());
+    } else {
+      setSelectedFiles(new Set(sortedFiles.map((f) => f.id)));
+    }
+  }, [selectedFiles.size, sortedFiles]);
+
+  const selectedSize = useMemo(() => {
+    return files
+      .filter((f) => selectedFiles.has(f.id))
+      .reduce((sum, f) => sum + f.size, 0);
+  }, [files, selectedFiles]);
+
+  const handleRename = async (file: FileView) => {
+    if (!newName.trim()) {
+      showToast("请输入新名称", "warning");
+      return;
+    }
+
+    try {
+      await renameFile(file.id, newName.trim());
+      setRenaming(null);
+      setNewName("");
+      loadFiles(currentPage, pageSize);
+    } catch (err) {
+      showToast(`重命名失败: ${(err as Error).message}`, "error");
+    }
+  };
+
+  const startRename = (file: FileView) => {
+    setRenaming(file.id);
+    setNewName(file.name);
+  };
+
+  const cancelRename = () => {
+    setRenaming(null);
+    setNewName("");
+  };
+
+  const handleDownload = async (file: FileView, subpath?: string) => {
+    setDownloadingFile(file.id);
+    try {
+      const downloadName = subpath ? subpath.split("/").pop() || file.name : file.name;
+      triggerFileDownload(fileDownloadUrl(file.id, subpath), downloadName);
+    } finally {
+      setDownloadingFile(null);
+    }
+  };
+
+  // Folder in-page navigation（导航事件内同步重置页码，保证只发一笔「第 1 页」请求）
+  const enterFolder = async (file: FileView) => {
+    setBrowseContext({ fileId: file.id, fileName: file.name, path: [] });
+    setSelectedBrowseFiles(new Set());
+    setBrowsePage(1);
+    setBrowseTotal(0);
+    try {
+      const result = await loadBrowsePage(file.id, undefined, 1);
+      if (!result) return;
+    } catch (err) {
+      showToast(`打开文件夹失败: ${(err as Error).message}`, "error");
+      setBrowseContext(null);
+    }
+  };
+
+  const navigateIntoSubfolder = async (name: string) => {
+    if (!browseContext) return;
+    const newPath = [...browseContext.path, name];
+    setBrowsePage(1);
+    try {
+      const result = await loadBrowsePage(browseContext.fileId, newPath.join("/"), 1);
+      if (!result) return;
+      setBrowseContext((prev) => (prev ? { ...prev, path: newPath } : prev));
+      setSelectedBrowseFiles(new Set());
+    } catch (err) {
+      showToast(`打开文件夹失败: ${(err as Error).message}`, "error");
+    }
+  };
+
+  const navigateToBreadcrumb = async (index: number) => {
+    if (!browseContext) return;
+    const newPath = index < 0 ? [] : browseContext.path.slice(0, index + 1);
+    setBrowsePage(1);
+    try {
+      const result = await loadBrowsePage(
+        browseContext.fileId,
+        newPath.length > 0 ? newPath.join("/") : undefined,
+        1,
+      );
+      if (!result) return;
+      setBrowseContext((prev) => (prev ? { ...prev, path: newPath } : prev));
+      setSelectedBrowseFiles(new Set());
+    } catch (err) {
+      showToast(`导航失败: ${(err as Error).message}`, "error");
+    }
+  };
+
+  // 目录内翻页：换页后旧页选中项不可见，清空避免批量操作命中隐藏项
+  const handleBrowsePageChange = useCallback(
+    (page: number) => {
+      if (!browseContext) return;
+      const path = browseContext.path.length > 0 ? browseContext.path.join("/") : undefined;
+      setSelectedBrowseFiles(new Set());
+      loadBrowsePage(browseContext.fileId, path, page).catch((err) => {
+        showToast(`翻页失败: ${(err as Error).message}`, "error");
+      });
+    },
+    [browseContext, loadBrowsePage, showToast],
+  );
+
+  const returnToRoot = () => {
+    clearBrowseState();
+  };
+
+  // Browse file selection helpers
+  const toggleBrowseFileSelection = (item: BrowseItemView) => {
+    const key = [...(browseContext?.path ?? []), item.name].join("/");
+    setSelectedBrowseFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
       return next;
     });
   };
 
-  const toggleEntry = (path: string) => {
-    setEntrySelected((current) => {
-      const next = new Set(current);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
+  const toggleAllBrowseFiles = () => {
+    const keys = browseContents.map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
+    const allSelected = keys.length > 0 && keys.every((k) => selectedBrowseFiles.has(k));
+    if (allSelected) {
+      setSelectedBrowseFiles(new Set());
+    } else {
+      setSelectedBrowseFiles(new Set(keys));
+    }
   };
 
-  const toggleAllEntries = (checked: boolean) => {
-    setEntrySelected(
-      checked
-        ? new Set(entries.filter((entry) => entry.kind === "file").map((entry) => entry.path))
-        : new Set(),
+  const handleBrowseBatchDownload = async () => {
+    if (!browseContext || selectedBrowseFiles.size === 0) return;
+    const hasFolder = browseContents.some((item) => {
+      const key = [...(browseContext.path ?? []), item.name].join("/");
+      return item.isDirectory && selectedBrowseFiles.has(key);
+    });
+    if (hasFolder) {
+      showToast("当前选择包含文件夹，无法批量下载，请仅选择文件", "warning");
+      return;
+    }
+
+    const selectedPaths = Array.from(selectedBrowseFiles);
+    showToast(`正在发送已选 ${selectedPaths.length} 个文件的下载请求...`, "info");
+
+    await triggerBatchDownloads(
+      selectedPaths.map((path) => fileDownloadUrl(browseContext.fileId, path)),
+      BATCH_DOWNLOAD_INTERVAL_MS,
     );
+    showToast(`已完成 ${selectedPaths.length} 个文件的下载触发`, "success");
   };
 
-  const breadcrumbNavigate = (path: string) => {
-    if (browse === null) return;
-    openBrowse(browse.fileId, browse.fileName, path, null);
-  };
-
-  const closePackDialog = () => {
-    setPackOpen(false);
-    setPackRefreshKey((current) => current + 1); // 弹窗关闭后由常驻卡接管进度。
-  };
+  const handlePackTaskComplete = useCallback(() => {
+    loadFiles(currentPage, pageSize);
+  }, [loadFiles, currentPage, pageSize]);
 
   return (
-    <section className="page" aria-label="文件管理">
-      <header className="page-header">
-        <h1>文件</h1>
-        {browse === null ? (
-          <span className="header-meta">管理您下载的文件</span>
-        ) : (
-          <span className="header-meta">{browse.fileName}</span>
-        )}
-        <div className="header-actions">
-          {browse !== null && (
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => setBrowse(null)}
-            >
-              返回上级
-            </button>
-          )}
-          {browse === null && selected.size > 0 && (
-            <>
-              <button type="button" className="secondary-button" onClick={() => setPackOpen(true)}>
-                打包（{selected.size}）
-              </button>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => void handleBatchDownload()}
-              >
-                批量下载
-              </button>
-              <button
-                type="button"
-                className="danger-button"
-                onClick={() => setConfirmBatchDelete(true)}
-              >
-                批量删除（{selected.size}）
-              </button>
-              <button
-                type="button"
-                className="link-button"
-                onClick={() => setSelected(new Set())}
-              >
-                清除选择
-              </button>
-            </>
-          )}
-          {browse !== null && entrySelected.size > 0 && (
-            <>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => void handleEntryBatchDownload()}
-              >
-                批量下载（{entrySelected.size}）
-              </button>
-              <button
-                type="button"
-                className="link-button"
-                onClick={() => setEntrySelected(new Set())}
-              >
-                清除选择
-              </button>
-            </>
-          )}
-          <label className="search-scope" title="范围开关：全局搜根列表与所有目录；当前目录仅搜正在浏览的目录">
-            <input
-              type="checkbox"
-              checked={searchScope === "current"}
-              disabled={browse === null}
-              onChange={(event) =>
-                setSearchScope(event.target.checked ? "current" : "global")
-              }
-              aria-label="仅搜索当前目录"
-            />
-            <span>当前目录</span>
-          </label>
-          <input
-            type="search"
-            className="files-search"
-            value={keyword}
-            onChange={(event) => setKeyword(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void runSearch(keyword, searchScope);
-            }}
-            placeholder="搜索文件名…"
-            aria-label="搜索文件"
-          />
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={() => void runSearch(keyword, searchScope)}
-          >
-            查询
-          </button>
+    <div className="glass-frame full-height animate-in">
+      <div className="flex-between mb-7">
+        <div>
+          <h1 className="text-2xl">文件</h1>
+          <p className="muted">管理您下载的文件</p>
         </div>
-      </header>
+        <PackTaskCard key={packTasksKey} onTaskComplete={handlePackTaskComplete} />
+      </div>
 
-      {browse === null && <PackTasksCard refreshKey={packRefreshKey} onTaskComplete={() => void loadRoot()} />}
-      {browse === null && space !== null && <SpaceUsageCard space={space} />}
+      {space && <SpaceUsageCard space={space} />}
 
-      {keyword.trim() !== "" && (
-        <div className="search-panel" aria-label="搜索结果">
-          {searchLoading ? (
-            <LoadingState label="搜索中…" />
-          ) : searchError !== null ? (
-            <ErrorState message={searchError} />
-          ) : (
-            <SearchResults hits={hits} truncated={truncated} onLocate={handleLocate} />
-          )}
-        </div>
-      )}
+      {/* Toolbar - Always visible */}
+      <FileToolbar
+        isInsideFolder={isInsideFolder}
+        browseContext={browseContext}
+        browseContents={browseContents}
+        selectedBrowseFiles={selectedBrowseFiles}
+        selectedFiles={selectedFiles}
+        selectedSize={selectedSize}
+        sortedFilesLength={sortedFiles.length}
+        sortField={sortField}
+        sortOrder={sortOrder}
+        toolbarSearchKeyword={toolbarSearchKeyword}
+        searchGlobal={searchGlobal}
+        searchLoading={searchLoading}
+        searchInputRef={toolbarSearchInputRef}
+        isBatchOperating={isBatchOperating}
+        onReturnToRoot={returnToRoot}
+        onNavigateToBreadcrumb={navigateToBreadcrumb}
+        onSortFieldChange={setSortField}
+        onSortOrderChange={setSortOrder}
+        onToolbarSearchKeywordChange={setToolbarSearchKeyword}
+        onToolbarSearchKeyDown={handleToolbarSearchKeyDown}
+        onSearchGlobalChange={setSearchGlobal}
+        onSearchSubmit={() => { void runSearch(); }}
+        onToggleAllBrowseFiles={toggleAllBrowseFiles}
+        onBrowseBatchDownload={handleBrowseBatchDownload}
+        onToggleSelectAll={toggleSelectAll}
+        onBatchDownload={handleBatchDownload}
+        onBatchDelete={handleBatchDelete}
+        onOpenPackDialog={openPackDialog}
+      />
 
-      {browse === null ? (
+      {/* Folder contents table (inside folder) */}
+      {isInsideFolder ? (
         <>
-          {rootLoading ? (
-            <LoadingState />
-          ) : rootError !== null ? (
-            <ErrorState message={rootError} onRetry={() => void loadRoot()} />
-          ) : files.length === 0 ? (
-            <EmptyState title="暂无文件" hint="完成的下载会自动入库到文件列表。" />
-          ) : (
-            <>
-              <RootFileTable
-                files={files}
-                selected={selected}
-                highlightId={highlightId}
-                sort={rootSort}
-                onToggle={toggle}
-                onToggleAll={(checked) =>
-                  setSelected(checked ? new Set(files.map((file) => file.id)) : new Set())
-                }
-                onOpen={(file) => openBrowse(file.id, file.display_name, "", null)}
-                onDownload={handleRootDownload}
-                onRename={setRenameTarget}
-                onShare={setShareTarget}
-                onDelete={setDeleteTarget}
-                onSort={(key: FileSortKey) =>
-                  setRootSort((current) => {
-                    if (current?.key !== key) return { key, order: "asc" };
-                    if (current.order === "asc") return { key, order: "desc" };
-                    return null;
-                  })
-                }
-              />
-              <Pagination
-                page={rootPage}
-                pageSize={ROOT_PAGE_SIZE}
-                total={total}
-                onChange={setRootPage}
-              />
-            </>
+          <BrowseFolderView
+            isMobile={isMobile}
+            browseLoading={browseLoading}
+            browseContext={browseContext}
+            browseContents={browseContents}
+            sortedBrowseContents={sortedBrowseContents}
+            selectedBrowseFiles={selectedBrowseFiles}
+            highlightName={highlightName}
+            onSort={handleSort}
+            getSortIcon={getSortIcon}
+            onToggleAllBrowseFiles={toggleAllBrowseFiles}
+            onToggleBrowseFileSelection={toggleBrowseFileSelection}
+            onNavigateIntoSubfolder={navigateIntoSubfolder}
+            onDownload={(subpath) => {
+              void handleDownload({ id: browseContext.fileId, name: browseContext.fileName, size: 0, isDirectory: true, createdAtMs: 0 }, subpath);
+            }}
+            onUnavailableDelete={() => {
+              showToast("文件夹内暂不支持在此页面单文件直接删除", "warning");
+            }}
+          />
+          {!browseLoading && browseTotal > BROWSE_PAGE_SIZE && (
+            <PaginationControls
+              currentPage={browsePage}
+              pageSize={BROWSE_PAGE_SIZE}
+              totalFiles={browseTotal}
+              onPageChange={handleBrowsePageChange}
+            />
           )}
         </>
       ) : (
-        <>
-          <Breadcrumbs items={breadcrumbs} onNavigate={breadcrumbNavigate} />
-          {entryLoading ? (
-            <LoadingState />
-          ) : entryError !== null ? (
-            <ErrorState message={entryError} onRetry={() => void loadEntries(browse, entryPage)} />
-          ) : entries.length === 0 ? (
-            <EmptyState title="空目录" hint="该目录下没有内容。" />
-          ) : (
-            <>
-              <EntryTable
-                entries={entries}
-                selected={entrySelected}
-                highlightName={highlightName}
-                sort={entrySort}
-                onToggle={toggleEntry}
-                onToggleAll={toggleAllEntries}
-                onNavigate={(entry) =>
-                  openBrowse(browse.fileId, browse.fileName, entry.path, null)
-                }
-                onDownload={handleEntryDownload}
-                onSort={(key: FileSortKey) =>
-                  setEntrySort((current) => {
-                    if (current?.key !== key) return { key, order: "asc" };
-                    if (current.order === "asc") return { key, order: "desc" };
-                    return null;
-                  })
-                }
-              />
-              <Pagination
-                page={entryPage}
-                pageSize={ENTRY_PAGE_SIZE}
-                total={entryTotal}
-                onChange={setEntryPage}
-              />
-            </>
-          )}
-        </>
+          <>
+          <RootFileTable
+            isMobile={isMobile}
+            loading={loading}
+            error={error}
+            sortedFiles={sortedFiles}
+            selectedFiles={selectedFiles}
+            renaming={renaming}
+            newName={newName}
+            downloadingFile={downloadingFile}
+            highlightUserFileId={highlightUserFileId}
+            onSort={handleSort}
+            getSortIcon={getSortIcon}
+            onToggleSelectAll={toggleSelectAll}
+            onToggleFileSelection={toggleFileSelection}
+            onNewNameChange={setNewName}
+            onRename={handleRename}
+            onCancelRename={cancelRename}
+            onStartRename={startRename}
+            onEnterFolder={(file) => { void enterFolder(file); }}
+            onDownload={(file) => { void handleDownload(file); }}
+            onShare={(file) => setShareDialogFile({ id: file.id, name: file.name })}
+            onDelete={(file) => { void handleDelete(file); }}
+            formatDate={formatFileDate}
+          />
+          <PaginationControls
+            currentPage={currentPage}
+            pageSize={pageSize}
+            totalFiles={totalFiles}
+            onPageChange={setCurrentPage}
+            onPageSizeChange={setPageSize}
+          />
+          </>
       )}
 
-      {renameTarget !== null && (
-        <RenameDialog
-          initialName={renameTarget.display_name}
-          onClose={() => setRenameTarget(null)}
-          onConfirm={handleRename}
-        />
+      {/* Search result modal */}
+      {showSearchModal && mounted && createPortal(
+        <SearchModal
+          keyword={searchKeyword}
+          results={searchResults}
+          loading={searchLoading}
+          error={searchError}
+          truncated={searchTruncated}
+          onLocate={handleLocate}
+          onClose={closeSearchModal}
+        />,
+        document.body,
       )}
-      {shareTarget !== null && (
-        <ShareCreateDialog
-          fileName={shareTarget.display_name}
-          onClose={() => setShareTarget(null)}
-          onCreate={(options) => createShare(shareTarget.id, options)}
-        />
-      )}
-      {deleteTarget !== null && (
-        <ConfirmDialog
-          title="删除文件"
-          message={`确定删除「${deleteTarget.display_name}」？删除后不可恢复，正在使用的分享会一并撤销。`}
-          confirmLabel="删除"
-          danger
-          onConfirm={() => void handleDelete()}
-          onCancel={() => setDeleteTarget(null)}
-        />
-      )}
-      {confirmBatchDelete && (
-        <ConfirmDialog
-          title="批量删除"
-          message={`确定要删除选中的 ${selected.size} 个文件吗？删除后不可恢复，相关分享会一并撤销。`}
-          confirmLabel="删除"
-          danger
-          onConfirm={() => void handleBatchDelete()}
-          onCancel={() => setConfirmBatchDelete(false)}
-        />
-      )}
-      {packOpen && (
+
+      {/* Pack Dialog */}
+      {packDialogOpen && mounted && createPortal(
         <PackDialog
-          selectedIds={[...selected]}
-          onClose={closePackDialog}
-          onPrecompute={precomputePack}
-          onCreated={() => void loadRoot()}
+          selectedCount={selectedFiles.size}
+          packSize={packSize}
+          availableSpace={availableSpace}
+          packOutputName={packOutputName}
+          packDeleteSource={packDeleteSource}
+          packLoading={packLoading}
+          packing={packing}
+          onClose={() => setPackDialogOpen(false)}
+          onOutputNameChange={setPackOutputName}
+          onDeleteSourceChange={setPackDeleteSource}
+          onConfirm={() => { void handlePackConfirm(); }}
+        />,
+        document.body,
+      )}
+      {/* Share Dialog */}
+      {shareDialogFile && (
+        <CreateShareDialog
+          userFileId={shareDialogFile.id}
+          fileName={shareDialogFile.name}
+          onClose={() => setShareDialogFile(null)}
         />
       )}
-    </section>
+    </div>
   );
 }

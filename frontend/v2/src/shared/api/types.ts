@@ -94,6 +94,16 @@ export interface TaskStatsResponse {
   download_speed: number;
   upload_speed: number;
   quota: TaskQuotaResponse;
+  disk: DiskSpaceResponse;
+}
+
+/** 用户可见磁盘口径（STAT-01）：与后端 DiskSpaceResponse 逐字段一致。 */
+export interface DiskSpaceResponse {
+  total_bytes: number;
+  used_bytes: number;
+  reserved_bytes: number;
+  available_bytes: number;
+  limited: boolean;
 }
 
 export interface TaskWriteResultResponse {
@@ -195,6 +205,19 @@ export interface FileSearchResponse {
   truncated: boolean;
 }
 
+/** FILE-06：真正的批量删除端点（DELETE /api/v2/files，body 为 file_ids）。 */
+export interface FileBatchDeleteResultResponse {
+  file_id: number;
+  accepted: boolean;
+  error: ApiError | null;
+}
+
+export interface FileBatchDeleteResponse {
+  accepted_count: number;
+  rejected_count: number;
+  results: FileBatchDeleteResultResponse[];
+}
+
 /* ============ 打包（PACK-01~04） ============ */
 
 export interface PackPrecomputeItemResponse {
@@ -230,6 +253,11 @@ export interface PackViewResponse {
 
 export interface PackListResponse {
   items: PackViewResponse[];
+}
+
+/** PACK A3：清空本人全部终态打包记录（保留输出文件）。 */
+export interface PackClearRecordsResponse {
+  cleared_count: number;
 }
 
 export interface MachineStatsResponse {

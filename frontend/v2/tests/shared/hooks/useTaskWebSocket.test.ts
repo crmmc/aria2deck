@@ -471,3 +471,148 @@ describe("useTaskWebSocket", () => {
     }
   });
 });
+
+describe("useTaskWebSocket 边界分支", () => {
+  beforeEach(() => {
+    sockets = [];
+    Object.defineProperty(document, "hidden", { value: false, configurable: true });
+    jest.useFakeTimers();
+    (global as Record<string, unknown>).WebSocket = FakeWebSocket;
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    delete (global as Record<string, unknown>).WebSocket;
+  });
+
+  async function settle() {
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  function connect() {
+    const socket = sockets[sockets.length - 1];
+    socket.readyState = FakeWebSocket.OPEN;
+    act(() => socket.onopen?.());
+    return socket;
+  }
+
+  it("既不取站点信息也不建连当 enabled=false", async () => {
+    const siteInfoFetch = jest.fn(async () => ({
+      status: 200,
+      ok: true,
+      json: async () => ({}),
+    }));
+    (global as Record<string, unknown>).fetch = siteInfoFetch;
+    try {
+      const { result, rerender } = renderHook(
+        ({ enabled }: { enabled: boolean }) => useTaskWebSocket(() => undefined, { enabled }),
+        { initialProps: { enabled: false } },
+      );
+      await settle();
+      expect(result.current.connected).toBe(false);
+      expect(sockets).toHaveLength(0);
+      expect(siteInfoFetch).not.toHaveBeenCalled();
+
+      // 重新启用后才建连。
+      rerender({ enabled: true });
+      await settle();
+      expect(sockets).toHaveLength(1);
+      expect(connect());
+      expect(result.current.connected).toBe(true);
+    } finally {
+      delete (global as Record<string, unknown>).fetch;
+    }
+  });
+
+  it("使用 wss 协议当页面以 https 打开", async () => {
+    const original = window.location;
+    const host = original.host;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: { ...original, protocol: "https:", host },
+    });
+    try {
+      renderHook(() => useTaskWebSocket(() => undefined));
+      await settle();
+      expect(sockets).toHaveLength(1);
+    } finally {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        writable: true,
+        value: original,
+      });
+    }
+  });
+
+  it("心跳在连接已非 OPEN 时跳过发送", async () => {
+    renderHook(() => useTaskWebSocket(() => undefined));
+    await settle();
+    const socket = connect();
+    act(() => jest.advanceTimersByTime(15000));
+    expect(socket.send).toHaveBeenCalledTimes(1);
+
+    socket.readyState = 3; // CLOSED
+    act(() => jest.advanceTimersByTime(15000));
+    expect(socket.send).toHaveBeenCalledTimes(1); // 不再发送、也不触发 close。
+    expect(socket.close).not.toHaveBeenCalled();
+  });
+
+  it("关闭后到达的关闭事件不再排重连", async () => {
+    const { unmount } = renderHook(() => useTaskWebSocket(() => undefined));
+    await settle();
+    const socket = connect();
+    unmount();
+    // 卸载时 close 已回调过一次；再次触发迟到事件不得新建连接。
+    act(() => socket.onclose?.({ code: 1006 }));
+    act(() => jest.advanceTimersByTime(60000));
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("卸载时已取消的重连定时器不会再建连", async () => {
+    const { unmount } = renderHook(() => useTaskWebSocket(() => undefined));
+    await settle();
+    connect();
+    act(() => sockets[0].onclose?.({ code: 1006 })); // 排入重连定时器。
+    unmount();
+    act(() => jest.advanceTimersByTime(60000));
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("终止于建连前（站点信息返回时已卸载）时不再建连", async () => {
+    let releaseSiteInfo: (value: unknown) => void = () => undefined;
+    const pendingSiteInfo = new Promise((resolve) => {
+      releaseSiteInfo = resolve;
+    });
+    (global as Record<string, unknown>).fetch = jest.fn(() => pendingSiteInfo);
+    try {
+      const { unmount } = renderHook(() => useTaskWebSocket(() => undefined));
+      await settle();
+      expect(sockets).toHaveLength(0); // 站点信息尚未返回。
+
+      unmount();
+      releaseSiteInfo({
+        status: 200,
+        ok: true,
+        json: async () => ({}),
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(sockets).toHaveLength(0);
+    } finally {
+      delete (global as Record<string, unknown>).fetch;
+    }
+  });
+
+  it("socket 报错时主动关闭以走统一的重连路径", async () => {
+    renderHook(() => useTaskWebSocket(() => undefined));
+    await settle();
+    const socket = connect();
+    act(() => socket.onerror?.());
+    expect(socket.close).toHaveBeenCalledTimes(1);
+  });
+});
