@@ -4,8 +4,14 @@ import base64
 
 import pytest
 
-from aria2deck.domain.errors import DomainError
-from aria2deck.domain.torrents import _encode, _Parser, parse_torrent, rebuild_torrent_peer_payload
+from aria2deck.domain.errors import DomainError, ErrorCode
+from aria2deck.domain.torrents import (
+    _encode,
+    _Parser,
+    parse_torrent,
+    rebuild_torrent_peer_payload,
+    torrent_peer_candidates,
+)
 from tests.download_fakes import bencode, make_torrent
 
 
@@ -35,6 +41,7 @@ def test_rebuild_keeps_announce_tracker_in_announce_list_tier() -> None:
                 "udp://primary.example:1337/announce",
                 "udp://backup.example:6969/announce",
             ),
+            webseeds=(),
             nodes=(),
         )
     )
@@ -51,6 +58,7 @@ def test_rebuild_keeps_announce_tracker_in_announce_list_tier() -> None:
         rebuild_torrent_peer_payload(
             payload,
             trackers=("udp://backup.example:6969/announce",),
+            webseeds=(),
             nodes=(),
         )
     )
@@ -83,10 +91,6 @@ def test_multi_file_preview_selection_and_identity() -> None:
         base64.b64encode(b"not-bencode").decode(),
         base64.b64encode(bencode({"info": {"name": "x"}}) + b"trailing").decode(),
         base64.b64encode(bencode({"name": "missing-info"})).decode(),
-        make_torrent(webseed=True),
-        base64.b64encode(
-            bencode({"info": {"length": 1, "name": "x"}, "httpseeds": ["https://example.com"]})
-        ).decode(),
         make_torrent([("a", -1)]),
         make_torrent([("a", 1)], name="bad/name"),
         make_torrent([("a", 1), ("../b", 2)]),
@@ -150,14 +154,28 @@ def test_excessive_nesting_is_rejected() -> None:
         {"files": [{"length": 1, "path": []}], "name": "bad"},
         {"files": [{"length": 1, "path": [".."]}], "name": "bad"},
         {"files": [{"length": "1", "path": ["a"]}], "name": "bad"},
-        {"length": 1, "name": "x", "url-list": ["https://example.com"]},
-        {"length": 1, "name": "x", "httpseeds": ["https://example.com"]},
     ],
 )
 def test_invalid_info_shapes_are_rejected(info: dict[str, object]) -> None:
     payload = base64.b64encode(bencode({"info": info})).decode()
     with pytest.raises(DomainError):
         parse_torrent(payload)
+
+
+@pytest.mark.parametrize(
+    "inside",
+    [
+        {"url-list": ["https://example.com"]},
+        {"url-list": "https://example.com"},
+        {"httpseeds": ["https://example.com"]},
+    ],
+)
+def test_webseeds_inside_info_do_not_block_parsing(inside: dict[str, object]) -> None:
+    """info 内同名键不阻碍解析：它们逐字节参与 info hash，剔除会改变内容身份。"""
+    payload = base64.b64encode(bencode({"info": {"length": 1, "name": "x", **inside}})).decode()
+    metadata = parse_torrent(payload)
+    preserved = _Parser(base64.b64decode(metadata.payload_base64)).parse()
+    assert preserved[b"info"] == _Parser(base64.b64decode(payload)).parse()[b"info"]
 
 
 def test_decoded_torrent_size_limit_is_enforced_before_parsing() -> None:
@@ -207,3 +225,158 @@ def test_torrent_shell_encoder_retains_safe_metadata_types() -> None:
     assert b"extra-map" in sanitized
     with pytest.raises(DomainError):
         _encode(object())
+
+
+@pytest.mark.parametrize(
+    "root_extra,expected",
+    [
+        ({"url-list": "https://seed.example/a"}, ("https://seed.example/a",)),
+        ({"url-list": ["https://seed.example/a", "https://seed.example/b"]}, ("https://seed.example/a", "https://seed.example/b")),
+        ({"httpseeds": ["https://seed.example/c"]}, ("https://seed.example/c",)),
+        ({"url-list": [], "httpseeds": []}, ()),
+        ({"url-list": [1, b"https://seed.example/d"]}, ("https://seed.example/d",)),
+        ({"url-list": 42}, ()),
+        ({}, ()),
+    ],
+)
+def test_peer_candidates_extract_root_webseeds(
+    root_extra: dict[str, object], expected: tuple[str, ...]
+) -> None:
+    payload = base64.b64encode(
+        bencode({"info": {"length": 1, "name": "x"}, **root_extra})
+    ).decode()
+    trackers, webseeds, nodes = torrent_peer_candidates(payload)
+    assert trackers == ()
+    assert webseeds == expected
+    assert nodes == ()
+
+
+def test_peer_candidates_extract_webseeds_inside_info_for_validation() -> None:
+    """info 内同名键 aria2 不读取，但仍纳入白名单校验范围。"""
+    payload = base64.b64encode(
+        bencode({
+            "info": {
+                "length": 1,
+                "name": "x",
+                "url-list": ["https://seed.example/inside"],
+                "httpseeds": ["https://seed.example/info-httpseeds"],
+            },
+        })
+    ).decode()
+    _trackers, webseeds, _nodes = torrent_peer_candidates(payload)
+    assert webseeds == (
+        "https://seed.example/inside",
+        "https://seed.example/info-httpseeds",
+    )
+
+
+def test_rebuild_keeps_only_whitelisted_root_webseeds() -> None:
+    payload = base64.b64encode(
+        bencode({
+            "info": {"length": 1, "name": "x"},
+            "url-list": ["https://good.example/a", "http://127.0.0.1/b"],
+            "httpseeds": ["ftp://bad.example/c", "https://good.example/d"],
+        })
+    ).decode()
+    root = _Parser(
+        base64.b64decode(
+            rebuild_torrent_peer_payload(
+                payload,
+                trackers=(),
+                webseeds=("https://good.example/a", "https://good.example/d"),
+                nodes=(),
+            )
+        )
+    ).parse()
+    assert root[b"url-list"] == [b"https://good.example/a"]
+    assert root[b"httpseeds"] == [b"https://good.example/d"]
+
+
+def test_rebuild_preserves_single_string_url_list_shape() -> None:
+    payload = base64.b64encode(
+        bencode({"info": {"length": 1, "name": "x"}, "url-list": "https://good.example/a"})
+    ).decode()
+    root = _Parser(
+        base64.b64decode(
+            rebuild_torrent_peer_payload(
+                payload, trackers=(), webseeds=("https://good.example/a",), nodes=()
+            )
+        )
+    ).parse()
+    assert root[b"url-list"] == b"https://good.example/a"
+
+
+def test_rebuild_drops_webseed_keys_when_nothing_survives() -> None:
+    payload = base64.b64encode(
+        bencode({
+            "info": {"length": 1, "name": "x"},
+            "url-list": ["http://127.0.0.1/a"],
+            "httpseeds": ["ftp://bad.example/b"],
+        })
+    ).decode()
+    metadata = parse_torrent(payload)
+    root = _Parser(
+        base64.b64decode(
+            rebuild_torrent_peer_payload(
+                metadata.payload_base64, trackers=(), webseeds=(), nodes=()
+            )
+        )
+    ).parse()
+    assert b"url-list" not in root
+    assert b"httpseeds" not in root
+    assert b"info" in root
+
+
+def test_rebuild_rejects_torrent_when_info_webseed_fails_validation() -> None:
+    """info 内非法 webseed 无法剔除（会改 info hash），只能整种子拒绝。"""
+    payload = base64.b64encode(
+        bencode({
+            "info": {"length": 1, "name": "x", "url-list": ["http://127.0.0.1/a"]},
+        })
+    ).decode()
+    with pytest.raises(DomainError) as caught:
+        rebuild_torrent_peer_payload(payload, trackers=(), webseeds=(), nodes=())
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+
+
+def test_rebuild_accepts_torrent_when_info_webseed_is_validated() -> None:
+    payload = base64.b64encode(
+        bencode({
+            "info": {"length": 1, "name": "x", "url-list": ["https://good.example/a"]},
+        })
+    ).decode()
+    root = _Parser(
+        base64.b64decode(
+            rebuild_torrent_peer_payload(
+                payload, trackers=(), webseeds=("https://good.example/a",), nodes=()
+            )
+        )
+    ).parse()
+    assert root[b"info"][b"url-list"] == [b"https://good.example/a"]
+
+
+def test_rebuild_drops_single_string_webseed_when_not_whitelisted() -> None:
+    """单字符串形态的 url-list 未通过校验时整键去除（不留下空字符串占位）。"""
+    payload = base64.b64encode(
+        bencode({"info": {"length": 1, "name": "x"}, "url-list": "http://127.0.0.1/a"})
+    ).decode()
+    root = _Parser(
+        base64.b64decode(
+            rebuild_torrent_peer_payload(payload, trackers=(), webseeds=(), nodes=())
+        )
+    ).parse()
+    assert b"url-list" not in root
+
+
+@pytest.mark.parametrize("value", [1, {"nested": "x"}])
+def test_rebuild_ignores_non_string_non_list_webseed_values(value: object) -> None:
+    """非字符串、非列表形态的 url-list 无法解释，直接去掉该键而不是崩溃。"""
+    payload = base64.b64encode(
+        bencode({"info": {"length": 1, "name": "x"}, "url-list": value})
+    ).decode()
+    root = _Parser(
+        base64.b64decode(
+            rebuild_torrent_peer_payload(payload, trackers=(), webseeds=(), nodes=())
+        )
+    ).parse()
+    assert b"url-list" not in root

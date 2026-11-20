@@ -578,3 +578,60 @@ def test_torrent_strict_conflict_returns_409_without_submission(client: TestClie
     )
     assert auto.status_code == 200
     assert auto.json()["task"]["name"] == "busy (2).bin"
+
+
+def test_full_quota_user_is_blocked_by_known_size_and_keeps_read_access(
+    app: FastAPI,
+) -> None:
+    """AC7：用量已达上限的用户无法新建任务，已存在文件仍可浏览。
+
+    已知大小的任务（种子）在建任务时按声明大小预留 → 立刻被 quota_exceeded 拒绝；
+    未知大小的任务（HTTP URI）可以入队，但在观测到大小后由准入规则判失败，
+    不会真的占用超出配额的磁盘。
+    """
+    from sqlalchemy import update
+
+    from aria2deck.infrastructure.sqlite.schema import quota_accounts
+
+    async def exercise() -> None:
+        async with app.router.lifespan_context(app):
+            backend = FakeSubmissionBackend()
+            app.state.download_commands.backend = backend
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                created = await client.post(
+                    "/api/v2/users",
+                    json={
+                        "username": "admin",
+                        "password": "ab" * 32,
+                        "is_admin": True,
+                        "quota_bytes": 10,
+                    },
+                )
+                user_id = int(created.json()["id"])
+                await client.post(
+                    "/api/v2/auth/login", json={"username": "admin", "password": "ab" * 32}
+                )
+                async with app.state.download_commands.uow_factory() as uow:
+                    await uow.connection.execute(
+                        update(quota_accounts)
+                        .where(quota_accounts.c.user_id == user_id)
+                        .values(used_bytes=10)
+                    )
+                # 已知大小：创建阶段即被拒
+                torrent = await client.post(
+                    "/api/v2/tasks/torrent",
+                    json={"torrent": make_torrent([("a.iso", 3)], name="a")},
+                )
+                assert torrent.status_code == 409
+                assert torrent.json()["error"]["code"] == "quota_exceeded"
+                assert torrent.json()["error"]["message"] == "用户配额不足"
+
+                # 已存在文件与统计仍可读取（读路径不受配额影响）
+                assert (await client.get("/api/v2/files")).status_code == 200
+                stats = await client.get("/api/v2/tasks/stats")
+                assert stats.status_code == 200
+                assert stats.json()["quota"]["available_bytes"] == 0
+
+    asyncio.run(exercise())

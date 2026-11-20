@@ -195,8 +195,9 @@ def _parse_payload(
     info = root.get(b"info")
     if not isinstance(info, dict) or parser.info_span is None:
         raise _invalid("种子缺少 info 字典")
-    if any(key in root or key in info for key in (b"url-list", b"httpseeds")):
-        raise _invalid("不支持种子 webseed")
+    # 根级 url-list/httpseeds 是 BEP-19/BEP-17 的规范位置，提交前逐条校验并剔除非法项。
+    # info 内同名键不在此处拒绝：它们逐字节参与 info hash（内容身份），剔除会改变身份；
+    # 保留则只能在提交边界逐条校验，非法时整种子拒绝（见 rebuild_torrent_peer_payload）。
     return data, root, info, parser.info_span
 
 
@@ -219,6 +220,16 @@ def _peer_text(value: object) -> str | None:
         return value.decode("utf-8")
     except UnicodeDecodeError:
         return None
+
+
+def _peer_texts(value: object) -> list[str]:
+    """BEP-19 允许 url-list 为单字符串，BEP-17 的 httpseeds 为列表；两种形态都接受。"""
+    if isinstance(value, bytes):
+        text = _peer_text(value)
+        return [text] if text else []
+    if not isinstance(value, list):
+        return []
+    return [text for item in value if (text := _peer_text(item))]
 
 
 def _peer_node(value: object) -> tuple[str, int] | None:
@@ -260,8 +271,8 @@ def parse_torrent(
 
 def torrent_peer_candidates(
     payload_base64: str,
-) -> tuple[tuple[str, ...], tuple[tuple[str, int], ...]]:
-    _data, root, _info, _info_span = _parse_payload(payload_base64)
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[tuple[str, int], ...]]:
+    _data, root, info, _info_span = _parse_payload(payload_base64)
     trackers: list[str] = []
     announce = _peer_text(root.get(b"announce"))
     if announce is not None:
@@ -281,18 +292,33 @@ def torrent_peer_candidates(
         if isinstance(raw_nodes, list)
         else ()
     )
-    return tuple(trackers), nodes
+    webseeds = (
+        *_peer_texts(root.get(b"url-list")),
+        *_peer_texts(root.get(b"httpseeds")),
+        # info 内同名键 aria2 并不读取（只读根级字典），但仍纳入白名单校验：
+        # 它们无法在不改变 info hash 的前提下剔除，因此校验不通过时由重建阶段整种子拒绝。
+        *_peer_texts(info.get(b"url-list")),
+        *_peer_texts(info.get(b"httpseeds")),
+    )
+    return tuple(trackers), webseeds, nodes
 
 
 def rebuild_torrent_peer_payload(
     payload_base64: str,
     *,
     trackers: tuple[str, ...],
+    webseeds: tuple[str, ...],
     nodes: tuple[tuple[str, int], ...],
 ) -> str:
-    data, root, _info, info_span = _parse_payload(payload_base64)
+    data, root, info, info_span = _parse_payload(payload_base64)
     allowed_trackers = set(trackers)
+    allowed_webseeds = set(webseeds)
     allowed_nodes = set(nodes)
+    for key in (b"url-list", b"httpseeds"):
+        rejected = [url for url in _peer_texts(info.get(key)) if url not in allowed_webseeds]
+        if rejected:
+            # 非规范位置且无法剔除：剔除会改 info hash（内容身份），只能拒绝整份种子。
+            raise _invalid("种子 info 内含未通过校验的下载源")
     seen_trackers: set[str] = set()
     rebuilt: dict[bytes, object] = {}
     for key, value in root.items():
@@ -326,6 +352,25 @@ def rebuild_torrent_peer_payload(
             if not tiers:
                 continue
             value = tiers
+        elif key in (b"url-list", b"httpseeds"):
+            if isinstance(value, bytes):
+                # 单字符串形态（BEP-19 允许）：合法则原样保留，否则整键去除。
+                webseed = _peer_text(value)
+                if webseed is None or webseed not in allowed_webseeds:
+                    continue
+            elif isinstance(value, list):
+                # 列表形态：逐条剔除非法项，过滤后为空则整键去除。
+                kept_webseeds = [
+                    raw
+                    for raw in value
+                    if (webseed := _peer_text(raw)) is not None
+                    and webseed in allowed_webseeds
+                ]
+                if not kept_webseeds:
+                    continue
+                value = kept_webseeds
+            else:
+                continue
         elif key == b"nodes":
             if not isinstance(value, list):
                 continue

@@ -119,6 +119,23 @@ async def _filter_trackers(
     return tuple(valid)
 
 
+async def _filter_webseeds(
+    webseeds: tuple[str, ...], resolver: PublicResolver
+) -> tuple[str, ...]:
+    """webseed 只允许 HTTP(S)，其余校验复用 _valid_tracker 的完整 SSRF 判定链。"""
+    valid: list[str] = []
+    seen: set[str] = set()
+    for webseed in webseeds:
+        if webseed in seen:
+            continue
+        seen.add(webseed)
+        if urlsplit(webseed).scheme not in {"http", "https"}:
+            continue
+        if await _valid_tracker(webseed, resolver):
+            valid.append(webseed)
+    return tuple(valid)
+
+
 async def _filter_nodes(
     nodes: tuple[tuple[str, int], ...], resolver: PublicResolver
 ) -> tuple[tuple[str, int], ...]:
@@ -142,11 +159,12 @@ async def _filter_nodes(
 
 
 async def _sanitize_torrent(payload: str, resolver: PublicResolver) -> str:
-    trackers, nodes = torrent_peer_candidates(payload)
+    trackers, webseeds, nodes = torrent_peer_candidates(payload)
     valid_trackers = await _filter_trackers(trackers, resolver)
+    valid_webseeds = await _filter_webseeds(webseeds, resolver)
     valid_nodes = await _filter_nodes(nodes, resolver)
     return rebuild_torrent_peer_payload(
-        payload, trackers=valid_trackers, nodes=valid_nodes
+        payload, trackers=valid_trackers, webseeds=valid_webseeds, nodes=valid_nodes
     )
 
 

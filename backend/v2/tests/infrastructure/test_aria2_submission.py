@@ -371,25 +371,123 @@ async def test_resolution_failure_aborts_before_any_rpc(
 
 
 @pytest.mark.parametrize(
-    "key,inside_info",
+    "webseed,kept",
     [
-        ("url-list", False),
-        ("url-list", True),
-        ("httpseeds", False),
-        ("httpseeds", True),
+        ("https://good.example/file.iso", True),
+        ("http://good.example/file.iso", True),
+        ("http://127.0.0.1/file.iso", False),
+        ("http://10.0.0.5/file.iso", False),
+        ("http://localhost/file.iso", False),
+        ("https://user:pass@good.example/file.iso", False),
+        ("ftp://good.example/file.iso", False),
+        ("https://good.example/file.iso#frag", False),
+        ("https://good.example/a,https://evil.example/b", False),
+        ("https://good.example/file.iso", True),  # 重复项只保留一份（下方断言去重）
     ],
 )
-async def test_webseeds_are_rejected_before_any_rpc(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    key: str,
-    inside_info: bool,
+async def test_torrent_webseeds_are_validated_individually(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, webseed: str, kept: bool
 ) -> None:
-    info: dict[str, object] = {"length": 3, "name": "file"}
-    root: dict[str, object] = {"info": info}
-    target = info if inside_info else root
-    target[key] = ["https://webseed.example/file"]
-    item = torrent_submission(root)
+    """表驱动：协议白名单 + 拒 userinfo/fragment/localhost + 公网 IP，逐条剔除而非整体拒绝。"""
+    item = torrent_submission({
+        "info": {"length": 3, "name": "file"},
+        "url-list": [webseed],
+    })
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object,
+        method: str,
+        params: list[object],
+        *,
+        authenticate: bool = True,
+    ) -> object:
+        calls.append({"method": method, "params": params, "authenticate": authenticate})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    replies = await client.submit_many([item], trackers=())
+
+    assert replies[0].accepted
+    root, _payload = decoded_torrent_call(calls)
+    if kept:
+        assert root[b"url-list"] == [webseed.encode()]
+    else:
+        assert b"url-list" not in root
+        assert webseed.split("?")[0] not in repr(calls)
+
+
+async def test_one_bad_webseed_does_not_drop_the_good_ones_or_trackers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = torrent_submission({
+        "info": {"length": 3, "name": "file"},
+        "announce": "https://tracker.example/announce",
+        "url-list": ["http://127.0.0.1/evil", "https://good.example/file.iso"],
+        "httpseeds": ["https://good.example/httpseed.iso"],
+    })
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object,
+        method: str,
+        params: list[object],
+        *,
+        authenticate: bool = True,
+    ) -> object:
+        calls.append({"method": method, "params": params, "authenticate": authenticate})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    replies = await client.submit_many([item], trackers=())
+
+    assert replies[0].accepted
+    root, _payload = decoded_torrent_call(calls)
+    assert root[b"url-list"] == [b"https://good.example/file.iso"]
+    assert root[b"httpseeds"] == [b"https://good.example/httpseed.iso"]
+    assert root[b"announce"] == b"https://tracker.example/announce"
+
+
+async def test_torrent_with_only_invalid_webseeds_degrades_to_plain_bt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全部 webseed 非法时静默退化为纯 BT，不报错（用户已确认的用户可见行为）。"""
+    item = torrent_submission({
+        "info": {"length": 3, "name": "file"},
+        "announce": "https://tracker.example/announce",
+        "url-list": ["http://127.0.0.1/a", "ftp://bad.example/b"],
+    })
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object,
+        method: str,
+        params: list[object],
+        *,
+        authenticate: bool = True,
+    ) -> object:
+        calls.append({"method": method, "params": params, "authenticate": authenticate})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    replies = await client.submit_many([item], trackers=())
+
+    assert replies[0].accepted
+    root, _payload = decoded_torrent_call(calls)
+    assert b"url-list" not in root
+    assert root[b"announce"] == b"https://tracker.example/announce"
+
+
+async def test_info_scoped_webseed_that_fails_validation_rejects_the_torrent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """info 内非法 webseed 不能被剔除（会改 info hash），只能拒绝整份种子且不发起 RPC。"""
+    item = torrent_submission({
+        "info": {"length": 3, "name": "file", "url-list": ["http://127.0.0.1/a"]},
+    })
     client = make_client(tmp_path)
     calls: list[dict[str, object]] = []
 
@@ -402,7 +500,63 @@ async def test_webseeds_are_rejected_before_any_rpc(
         await client.submit_many([item], trackers=())
 
     assert caught.value.code is ErrorCode.INVALID_INPUT
-    assert "webseed.example" not in str(caught.value)
+    assert "127.0.0.1" not in str(caught.value)
+    assert calls == []
+
+
+async def test_info_scoped_valid_webseed_keeps_info_hash_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = torrent_submission({
+        "info": {"length": 3, "name": "file", "url-list": ["https://good.example/a"]},
+    })
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object,
+        method: str,
+        params: list[object],
+        *,
+        authenticate: bool = True,
+    ) -> object:
+        calls.append({"method": method, "params": params, "authenticate": authenticate})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    original = parse_torrent(item.source.payload["torrent"], [1])
+    replies = await client.submit_many([item], trackers=())
+
+    assert replies[0].accepted
+    _root, cleaned_payload = decoded_torrent_call(calls)
+    assert parse_torrent(cleaned_payload, [1]).info_hash == original.info_hash
+
+
+async def test_webseed_resolution_failure_aborts_before_any_rpc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """运行期 DNS 故障沿用 _require_public_host 语义，抛上游故障而不是静默放行。"""
+    def resolve(host: str, port: int, *, family: int, type: int) -> list[tuple[object, ...]]:
+        raise OSError("offline")
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    item = torrent_submission({
+        "info": {"length": 3, "name": "file"},
+        "url-list": ["https://dns-failure.example/file.iso"],
+    })
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(*args: object, **kwargs: object) -> object:
+        calls.append({"args": args, "kwargs": kwargs})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    with pytest.raises(DomainError) as caught:
+        await client.submit_many([item], trackers=())
+
+    assert caught.value.code is ErrorCode.UPSTREAM_FAILURE
+    assert "-failure.example" not in str(caught.value)
     assert calls == []
 
 
@@ -889,3 +1043,30 @@ async def test_version_failures_raise_domain_error(
     with pytest.raises(DomainError) as caught:
         await client.version()
     assert caught.value.code is ErrorCode.SUBMISSION_UNCERTAIN
+
+
+async def test_duplicate_webseeds_are_deduplicated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = torrent_submission({
+        "info": {"length": 3, "name": "file"},
+        "url-list": ["https://good.example/a", "https://good.example/a"],
+    })
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object,
+        method: str,
+        params: list[object],
+        *,
+        authenticate: bool = True,
+    ) -> object:
+        calls.append({"method": method, "params": params, "authenticate": authenticate})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    assert (await client.submit_many([item], trackers=()))[0].accepted
+    root, _payload = decoded_torrent_call(calls)
+    # 重建按白名单过滤，重复项不会重复出现在提交的种子里
+    assert root[b"url-list"] == [b"https://good.example/a"] * 2

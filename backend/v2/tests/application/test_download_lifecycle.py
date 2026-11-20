@@ -1471,3 +1471,70 @@ async def test_stale_ingest_abort_reraises_when_attempt_still_live(tmp_path: Pat
         attempt, _, _ = await read(state)
         assert attempt.result_consumed_at_ms is None
         assert state.backend.remove_calls == []
+
+
+async def test_actual_size_settlement_uses_content_size_not_declared_total(
+    tmp_path: Path,
+) -> None:
+    """R4 回归锁定：声明 3 字节但实际入库 5 字节时，按实际大小记账。"""
+
+    async with runtime(tmp_path, total=3, quota=100) as state:
+        put_download(state, b"abcde")
+        complete = DownloadObservation(
+            gid=GID,
+            observed_at_ms=100,
+            status="complete",
+            download_speed=0,
+            upload_speed=0,
+            peer_count=0,
+            connection_count=0,
+            total_length=3,
+            completed_length=3,
+            followed_by=(),
+        )
+        await state.lifecycle.reconcile(complete)
+
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert quota.used_bytes == 5
+        assert quota.reserved_bytes == 0
+        assert task.subscription_status is SubscriptionStatus.COMPLETED
+
+
+async def test_actual_size_over_quota_fails_cleans_and_keeps_accounting_legal(
+    tmp_path: Path,
+) -> None:
+    """R4/R5：实测超出剩余配额 → 任务失败、预留释放、用量不增、磁盘不残留。"""
+
+    async with runtime(tmp_path, total=3, quota=4) as state:
+        source = put_download(state, b"abcde")
+        complete = DownloadObservation(
+            gid=GID,
+            observed_at_ms=100,
+            status="complete",
+            download_speed=0,
+            upload_speed=0,
+            peer_count=0,
+            connection_count=0,
+            total_length=3,
+            completed_length=3,
+            followed_by=(),
+        )
+        await state.lifecycle.reconcile(complete)
+
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_code == ErrorCode.QUOTA_EXCEEDED.value
+        assert task.subscription_status is SubscriptionStatus.FAILED
+        assert task.reserved_bytes == 0
+        assert quota.used_bytes == 0
+        assert quota.reserved_bytes == 0
+        assert not source.exists()
+        # 超额失败不留下任何用户文件引用
+        async with SQLiteUnitOfWork(state.database) as uow:
+            owned = (
+                await uow.connection.execute(
+                    select(user_files.c.id).where(user_files.c.user_id == state.user_id)
+                )
+            ).all()
+        assert owned == []

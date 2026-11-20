@@ -19,6 +19,7 @@ from aria2deck.infrastructure.sqlite.repositories.quota import QuotaRepository
 from aria2deck.infrastructure.sqlite.schema import (
     content_objects,
     download_attempts,
+    quota_accounts,
     task_subscriptions,
 )
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
@@ -846,3 +847,125 @@ async def test_page_tasks_huge_page_returns_empty_with_total(database: SQLiteDat
         )
         assert page == []
         assert total == 3
+
+
+# --- R4/R5：完成结算按实测大小对账，超额在终态迁移前判失败 ---
+async def _prepare_completion(
+    database: SQLiteDatabase,
+    *,
+    quota: int,
+    used: int,
+    reserved: int,
+    content_size: int,
+    already_owned: bool = False,
+) -> tuple[int, int, int]:
+    user_id = await create_user(database, quota=quota)
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        content = ContentRepository(uow.connection)
+        content_id = await content.create_object(
+            kind="file",
+            digest="ef" * 32,
+            size=content_size,
+            storage_path="objects/actual",
+            now_ms=1,
+        )
+        if already_owned:
+            await content.add_user_file(
+                user_id=user_id, content_id=content_id, display_name="owned.bin", now_ms=1
+            )
+        if used:
+            await uow.connection.execute(
+                update(quota_accounts).where(quota_accounts.c.user_id == user_id).values(used_bytes=used)
+            )
+        if reserved:
+            await QuotaRepository(uow.connection).reserve(user_id, reserved)
+        attempt_id = await repository.create_attempt(
+            source_id=source_id,
+            resource_key="http:key",
+            gid=GID,
+            total_length=reserved,
+            physical_reserved_bytes=reserved,
+            now_ms=1,
+        )
+        await repository.create_subscription(
+            attempt_id=attempt_id,
+            user_id=user_id,
+            reserved_bytes=reserved,
+            display_name="file.bin",
+            display_uri=None,
+            now_ms=1,
+        )
+        await repository.begin_completion(
+            attempt_id, expected_gid=GID, content_id=content_id, now_ms=2
+        )
+    return user_id, attempt_id, content_id
+
+
+async def test_finalize_completion_settles_by_actual_content_size(
+    database: SQLiteDatabase,
+) -> None:
+    """声明 10 字节、实际 15 字节：按 15 记账，attempt 的 total_length 落实测值。"""
+    user_id, attempt_id, _ = await _prepare_completion(
+        database, quota=100, used=0, reserved=10, content_size=15
+    )
+    async with SQLiteUnitOfWork(database) as uow:
+        assert await DownloadRepository(uow.connection).finalize_completion(
+            attempt_id, expected_gid=GID, now_ms=3
+        )
+        attempt = await DownloadRepository(uow.connection).get_attempt(attempt_id)
+        quota = await QuotaRepository(uow.connection).get(user_id)
+    assert attempt.status is AttemptStatus.COMPLETED
+    assert attempt.total_length == 15
+    assert quota.used_bytes == 15
+    assert quota.reserved_bytes == 0
+
+
+async def test_finalize_completion_allows_already_owned_content_over_free_bytes(
+    database: SQLiteDatabase,
+) -> None:
+    """已拥有同内容的用户不再占配额，即使实测大小超过当前剩余也放行。"""
+    user_id, attempt_id, content_id = await _prepare_completion(
+        database, quota=20, used=10, reserved=10, content_size=15, already_owned=True
+    )
+    async with SQLiteUnitOfWork(database) as uow:
+        assert await DownloadRepository(uow.connection).finalize_completion(
+            attempt_id, expected_gid=GID, now_ms=3
+        )
+        attempt = await DownloadRepository(uow.connection).get_attempt(attempt_id)
+        quota = await QuotaRepository(uow.connection).get(user_id)
+        owned = await ContentRepository(uow.connection).find_user_file(
+            user_id=user_id, content_id=content_id
+        )
+    assert attempt.status is AttemptStatus.COMPLETED
+    assert quota.used_bytes == 10
+    assert quota.reserved_bytes == 0
+    assert isinstance(owned, int)
+
+
+async def test_finalize_completion_rejects_over_quota_without_partial_writes(
+    database: SQLiteDatabase,
+) -> None:
+    """实测超出剩余配额：抛 quota_exceeded，且不留下用户文件、账目与终态的半截写入。"""
+    user_id, attempt_id, content_id = await _prepare_completion(
+        database, quota=20, used=10, reserved=10, content_size=15
+    )
+    async with SQLiteUnitOfWork(database) as uow:
+        with pytest.raises(DomainError) as caught:
+            await DownloadRepository(uow.connection).finalize_completion(
+                attempt_id, expected_gid=GID, now_ms=3
+            )
+        assert caught.value.code is ErrorCode.QUOTA_EXCEEDED
+    async with SQLiteUnitOfWork(database) as uow:
+        attempt = await DownloadRepository(uow.connection).get_attempt(attempt_id)
+        quota = await QuotaRepository(uow.connection).get(user_id)
+        owned = await ContentRepository(uow.connection).find_user_file(
+            user_id=user_id, content_id=content_id
+        )
+    # attempt 保持 live，交给调用方 _fail(cleanup=True) 走失败清理
+    assert attempt.status is AttemptStatus.QUEUED
+    assert attempt.completed_content_id == content_id
+    assert quota.used_bytes == 10
+    assert quota.reserved_bytes == 10
+    assert owned is None

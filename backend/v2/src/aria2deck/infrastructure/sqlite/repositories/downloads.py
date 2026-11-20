@@ -1154,6 +1154,19 @@ class DownloadRepository:
             )
         ).all()
         quota = QuotaRepository(self.connection)
+        # 完成结算按入库实测大小对账（不是下载开始时声明的 total_length）。
+        # 实测大小超出任一用户的剩余配额时，账目写入会撞 Quota 的 used+reserved<=quota
+        # 不变量，使整个事务回滚、attempt 永远停在 queued。所以在迁移终态之前先判超额，
+        # 让超额成为一次可预期的失败（调用方 _fail(cleanup=True) 删半成品），而不是卡死。
+        for row in rows:
+            user_id = int(row.user_id)
+            existing = await content_repository.find_user_file(
+                user_id=user_id, content_id=content_id
+            )
+            account = await quota.get(user_id)
+            need = 0 if existing is not None else content.size
+            if need > account.quota_bytes - account.used_bytes:
+                raise DomainError(ErrorCode.QUOTA_EXCEEDED, "用户配额不足")
         for row in rows:
             user_id = int(row.user_id)
             current = SubscriptionStatus(row.status)
