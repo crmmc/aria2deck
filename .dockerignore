@@ -7,11 +7,11 @@ __pycache__
 *.py[cod]
 *.egg-info
 .pytest_cache
-.venv
+**/.venv
 venv
 
 # Node
-node_modules
+**/node_modules
 .next
 
 # IDE
@@ -24,8 +24,10 @@ backend/static
 frontend/out
 
 # Data (mounted as volumes)
+/data/
 backend/data
 backend/downloads
+backend/v2/aria2/runtime
 
 # Docs
 *.md
@@ -37,4 +39,28 @@ backend/tests
 
 # Misc
 .DS_Store
-*.log
+**/*.log
+
+# aria2 runtime files
+backend/aria2/*.session*
+backend/aria2/*.aria2
+backend/aria2/DHT*.dat
+
+# V2 isolation: archives and legacy source trees are never build inputs
+backend/v1
+frontend/v1
+backend/app
+backend/tests
+frontend/app
+frontend/components
+frontend/__tests__
+frontend/hooks
+frontend/lib
+frontend/v2/tests
+backend/v2/tests
+frontend/v2/dist
+backend/v2/static
+**/.env
+**/.env.*
+**/*.key
+**/*.pem

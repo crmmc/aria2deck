@@ -1,0 +1,13 @@
+/* 样式分区，按归档参考实现的 globals.css 原有连续顺序导入。
+ * 拆分经脚本逐字节校验拼接一致；新增样式禁止另起文件，进对应分区文件。
+ */
+@import "./legacy/01-sidebar.css";
+@import "./legacy/02-tokens.css";
+@import "./legacy/03-frame.css";
+@import "./legacy/04-base.css";
+@import "./legacy/05-utilities.css";
+@import "./legacy/06-components.css";
+@import "./legacy/07-tasks.css";
+@import "./legacy/08-task-detail.css";
+@import "./legacy/09-search-breadcrumb.css";
+@import "./legacy/10-responsive.css";

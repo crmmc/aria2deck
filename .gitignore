@@ -30,6 +30,10 @@ backend/downloads/*
 !backend/downloads/.gitkeep
 backend/static/*
 !backend/static/.gitkeep
+backend/v2/static/*
+!backend/v2/static/.gitkeep
+backend/v2/.coverage
+backend/v2/data/
 backend/aria2/aria2.log
 backend/aria2/aria2.session
 backend/aria2/aria2.session.lock
@@ -45,6 +49,9 @@ frontend/out/
 frontend/.env.local
 frontend/.env*.local
 frontend/coverage/
+frontend/v2/node_modules/
+frontend/v2/dist/
+frontend/v2/coverage/
 *.tsbuildinfo
 
 # IDE
@@ -68,6 +75,9 @@ Thumbs.db
 .claude/
 .trellis/
 AGENTS.md
+
+# 本地 e2e 验收设施（真 aria2 + 真 Chrome，人工触发，不进仓库）
+scripts/e2e/
 
 # Development docs (not for repo)
 docs/*

@@ -6,7 +6,7 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
-      - "RPC_SECRET=${ARIA2_RPC_SECRET:?ARIA2_RPC_SECRET is required}"
+      - "RPC_SECRET=${ARIA2DECK_ARIA2_RPC_SECRET:?ARIA2DECK_ARIA2_RPC_SECRET is required}"
       - RPC_PORT=6800
       - LISTEN_PORT=6888
     volumes:
@@ -27,17 +27,19 @@ services:
     depends_on:
       - aria2
     environment:
-      - ARIA2C_ARIA2_RPC_URL=http://aria2:6800/jsonrpc
-      - "ARIA2C_ARIA2_RPC_SECRET=${ARIA2_RPC_SECRET:?ARIA2_RPC_SECRET is required}"
+      - ARIA2DECK_ARIA2_RPC_URL=http://aria2:6800/jsonrpc
+      - "ARIA2DECK_ARIA2_RPC_SECRET=${ARIA2DECK_ARIA2_RPC_SECRET:?ARIA2DECK_ARIA2_RPC_SECRET is required}"
       - "ARIA2DECK_SHARE_JWT_SECRET=${ARIA2DECK_SHARE_JWT_SECRET:?ARIA2DECK_SHARE_JWT_SECRET is required}"
       - "ARIA2DECK_CREDENTIAL_PEPPER=${ARIA2DECK_CREDENTIAL_PEPPER:?ARIA2DECK_CREDENTIAL_PEPPER is required}"
       - ARIA2DECK_INTERNAL_BASE_URL=http://app:8001
       - "ARIA2DECK_INITIAL_ADMIN_PASSWORD=${ARIA2DECK_INITIAL_ADMIN_PASSWORD:-}"
-      - ARIA2C_DOWNLOAD_DIR=/app/backend/downloads
-      - ARIA2C_DATABASE_PATH=/app/backend/data/app.db
-      - ARIA2C_DEBUG=false
-      - "ARIA2C_CORS_ORIGINS=${ARIA2C_CORS_ORIGINS:-}"
-      - "ARIA2C_RPC_ALLOW_ALL_ORIGINS=${ARIA2C_RPC_ALLOW_ALL_ORIGINS:-false}"
+      - ARIA2DECK_DOWNLOAD_DIR=/app/backend/downloads
+      - ARIA2DECK_DATABASE_PATH=/app/backend/data/v2.db
+      - ARIA2DECK_DEBUG=false
+      # 容器内变量名必须与 infrastructure/config.py 的读取名一致（ARIA2C_RPC_*）；
+      # 宿主侧沿用 ARIA2DECK_* 命名保持 .env 兼容。
+      - "ARIA2C_RPC_ALLOWED_ORIGINS=${ARIA2DECK_CORS_ORIGINS:-}"
+      - "ARIA2C_RPC_ALLOW_ALL_ORIGINS=${ARIA2DECK_RPC_ALLOW_ALL_ORIGINS:-false}"
     volumes:
       - ./data/app:/app/backend/data
       - ./data/downloads:/app/backend/downloads

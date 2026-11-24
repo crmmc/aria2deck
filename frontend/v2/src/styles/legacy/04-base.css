@@ -1,0 +1,310 @@
+/* Typography */
+h1 {
+  font-weight: 600;
+  font-size: 32px;
+  letter-spacing: -0.025em;
+  margin: 0 0 8px 0;
+  color: #1d1d1f;
+}
+
+h2 {
+  font-weight: 600;
+  font-size: 24px;
+  letter-spacing: -0.01em;
+  margin: 0 0 16px 0;
+}
+
+h3 {
+  font-weight: 600;
+  font-size: 18px;
+  margin: 0 0 4px 0;
+  color: #1d1d1f;
+}
+
+p {
+  line-height: 1.5;
+  margin: 0;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+/* Inputs */
+.input {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border-radius: var(--r-control);
+  border: 1px solid rgba(0, 0, 0, 0.055);
+  background: rgba(255, 255, 255, 0.46);
+  color: var(--foreground);
+  font-size: 14px;
+  transition: border-color 140ms, box-shadow 140ms, background 140ms;
+  outline: none;
+}
+
+.input:hover {
+  border-color: rgba(0, 0, 0, 0.1);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.input:focus {
+  border-color: rgba(0, 113, 227, 0.4);
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.1);
+}
+
+.input[aria-invalid="true"] {
+  box-shadow: 0 0 0 2px rgba(215, 0, 21, 0.25);
+}
+
+textarea.input {
+  padding: 11px 12px;
+  line-height: 1.6;
+}
+
+.password-input-wrap {
+  position: relative;
+}
+
+.password-input {
+  padding-right: 48px;
+}
+
+.password-visibility-button {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-inner);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+  transform: translateY(-50%);
+}
+
+.password-visibility-button:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--foreground);
+}
+
+.password-visibility-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.15);
+}
+
+/* Buttons */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: none;
+  background: var(--primary);
+  color: #fff;
+  font-weight: 500;
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    transform 150ms var(--ease),
+    background 150ms,
+    color 150ms;
+  text-align: center;
+  box-shadow: 0 4px 12px rgba(0, 113, 227, 0.18);
+}
+
+.button:hover {
+  background: var(--primary-hover);
+  transform: none;
+}
+
+.button:active {
+  transform: scale(0.97);
+}
+
+.button.secondary {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--foreground);
+  box-shadow: none;
+}
+
+.button.secondary:hover {
+  background: rgba(0, 0, 0, 0.075);
+  transform: none;
+}
+
+.button.danger {
+  background: rgba(255, 59, 48, 0.08);
+  color: var(--danger);
+  box-shadow: none;
+}
+
+.button.danger:hover {
+  background: rgba(255, 59, 48, 0.12);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/* Grid layout for tasks */
+.task-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 20px;
+}
+
+/* Status Badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: rgba(0, 0, 0, 0.045);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.badge.active {
+  background: rgba(0, 113, 227, 0.08);
+  color: var(--primary);
+}
+
+.badge.complete {
+  background: rgba(52, 199, 89, 0.1);
+  color: #20883b;
+}
+
+.badge.error,
+.badge.danger {
+  background: rgba(255, 59, 48, 0.08);
+  color: var(--danger);
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-in {
+  animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Utilities */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+/* Animated Progress Bar */
+@keyframes progress-stripes {
+  from {
+    background-position: 40px 0;
+  }
+
+  to {
+    background-position: 0 0;
+  }
+}
+
+.progress-bar-active {
+  background-image: linear-gradient(45deg,
+      rgba(255, 255, 255, 0.15) 25%,
+      transparent 25%,
+      transparent 50%,
+      rgba(255, 255, 255, 0.15) 50%,
+      rgba(255, 255, 255, 0.15) 75%,
+      transparent 75%,
+      transparent);
+  background-size: 40px 40px;
+  animation: progress-stripes 2s linear infinite;
+}
+
+/* Empty State */
+.empty-state {
+  display: grid;
+  justify-items: center;
+  padding: 58px 24px;
+  color: var(--foreground);
+  text-align: center;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.empty-state-icon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  margin-bottom: 16px;
+  border: 0;
+  border-radius: 14px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.035);
+}
+
+.empty-state-title {
+  margin: 0 0 6px;
+  color: var(--foreground);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: normal;
+}
+
+.empty-state-description {
+  max-width: 380px;
+  margin: 0 0 18px;
+  color: var(--muted);
+}
+
+/* ==================== UTILITY CLASSES ==================== */
+

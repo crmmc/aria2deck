@@ -1,0 +1,2182 @@
+{
+  "paths": {
+    "/api/health": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "LiveResponse"
+        }
+      }
+    },
+    "/api/health/live": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "LiveResponse"
+        }
+      }
+    },
+    "/api/health/ready": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "ReadyResponse",
+          "503": "ReadyFailureResponse"
+        }
+      }
+    },
+    "/api/s/{code}/download": {
+      "get": {
+        "parameters": [
+          "Range",
+          "authorization",
+          "code",
+          "path"
+        ],
+        "responses": {
+          "200": "none",
+          "400": "ErrorResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "404": "ErrorResponse",
+          "410": "ErrorResponse",
+          "416": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "post": {
+        "parameters": [
+          "Range",
+          "code"
+        ],
+        "responses": {
+          "200": "none",
+          "400": "ErrorResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "404": "ErrorResponse",
+          "410": "ErrorResponse",
+          "413": "ErrorResponse",
+          "416": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/s/{code}/entries": {
+      "get": {
+        "parameters": [
+          "authorization",
+          "code",
+          "page",
+          "page_size",
+          "path"
+        ],
+        "responses": {
+          "200": "PublicEntryListResponse",
+          "400": "ErrorResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "410": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/s/{code}/info": {
+      "get": {
+        "parameters": [
+          "code"
+        ],
+        "responses": {
+          "200": "PublicShareInfoResponse",
+          "404": "ErrorResponse",
+          "410": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/s/{code}/verify": {
+      "post": {
+        "parameters": [
+          "code"
+        ],
+        "responses": {
+          "200": "ShareVerifyResponse",
+          "400": "ErrorResponse",
+          "403": "ErrorResponse",
+          "404": "ErrorResponse",
+          "410": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/auth/login": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "UserResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/auth/logout": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "OkResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/auth/me": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "UserResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/auth/password": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "OkResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/credentials/invalidate": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "CredentialInvalidateResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/credentials/rpc": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "RpcAccessResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "409": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "put": {
+        "parameters": [],
+        "responses": {
+          "200": "RpcAccessResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "404": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/credentials/rpc/refresh": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "RpcAccessResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/credentials/tokens": {
+      "get": {
+        "parameters": [
+          "page",
+          "page_size"
+        ],
+        "responses": {
+          "200": "ApiTokenListResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "CreatedApiTokenResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/credentials/tokens/{token_id}": {
+      "delete": {
+        "parameters": [
+          "token_id"
+        ],
+        "responses": {
+          "200": "OkResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "404": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/files": {
+      "delete": {
+        "parameters": [],
+        "responses": {
+          "200": "FileBatchDeleteResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "get": {
+        "parameters": [
+          "page",
+          "page_size",
+          "scope",
+          "search"
+        ],
+        "responses": {
+          "200": "none",
+          "400": "ErrorResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/files/{file_id}": {
+      "delete": {
+        "parameters": [
+          "file_id"
+        ],
+        "responses": {
+          "200": "OkResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "patch": {
+        "parameters": [
+          "file_id"
+        ],
+        "responses": {
+          "200": "FileItemResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/files/{file_id}/download": {
+      "get": {
+        "parameters": [
+          "Range",
+          "file_id",
+          "path"
+        ],
+        "responses": {
+          "200": "none",
+          "400": "ErrorResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "416": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/files/{file_id}/entries": {
+      "get": {
+        "parameters": [
+          "file_id",
+          "page",
+          "page_size",
+          "path"
+        ],
+        "responses": {
+          "200": "FileEntryListResponse",
+          "400": "ErrorResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/history": {
+      "delete": {
+        "parameters": [],
+        "responses": {
+          "200": "TaskBatchResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "get": {
+        "parameters": [
+          "page",
+          "page_size",
+          "q",
+          "status"
+        ],
+        "responses": {
+          "200": "TaskListResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/history/all": {
+      "delete": {
+        "parameters": [],
+        "responses": {
+          "200": "HistoryClearAllResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/history/purge": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "HistoryPurgeResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/packs": {
+      "get": {
+        "parameters": [
+          "limit"
+        ],
+        "responses": {
+          "200": "PackListResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "post": {
+        "parameters": [],
+        "responses": {
+          "201": "PackViewResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/packs/precompute": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "PackPrecomputeResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/packs/records": {
+      "delete": {
+        "parameters": [],
+        "responses": {
+          "200": "PackClearRecordsResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/packs/{pack_id}": {
+      "delete": {
+        "parameters": [
+          "pack_id"
+        ],
+        "responses": {
+          "200": "OkResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "get": {
+        "parameters": [
+          "pack_id"
+        ],
+        "responses": {
+          "200": "PackViewResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/packs/{pack_id}/cancel": {
+      "post": {
+        "parameters": [
+          "pack_id"
+        ],
+        "responses": {
+          "200": "OkResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/packs/{pack_id}/record": {
+      "delete": {
+        "parameters": [
+          "pack_id"
+        ],
+        "responses": {
+          "200": "OkResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/public/site-info": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "PublicSiteInfoResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/settings": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "SettingsResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "patch": {
+        "parameters": [],
+        "responses": {
+          "200": "SettingsResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/settings/aria2/test": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "Aria2TestResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/settings/aria2/version": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "Aria2TestResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/shares": {
+      "delete": {
+        "parameters": [],
+        "responses": {
+          "200": "ShareBatchResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "get": {
+        "parameters": [
+          "page",
+          "page_size",
+          "q",
+          "status"
+        ],
+        "responses": {
+          "200": "ShareListResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "post": {
+        "parameters": [],
+        "responses": {
+          "201": "ShareCreatedResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/shares/all": {
+      "delete": {
+        "parameters": [],
+        "responses": {
+          "200": "ShareRevokeAllResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/shares/revoke": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "ShareBatchResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/stats/machine": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "MachineStatsResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/storage/files": {
+      "get": {
+        "parameters": [
+          "orphans_only",
+          "page",
+          "page_size",
+          "search"
+        ],
+        "responses": {
+          "200": "StorageFileListResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/storage/files/delete": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "202": "StorageDeleteResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/storage/files/{content_id}/users": {
+      "get": {
+        "parameters": [
+          "content_id"
+        ],
+        "responses": {
+          "200": "StorageReferencingUserListResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "404": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/storage/repair": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "null",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse",
+          "501": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/storage/scan": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "null",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse",
+          "501": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/system/status": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "SystemStatusResponse",
+          "401": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/tasks": {
+      "get": {
+        "parameters": [
+          "order",
+          "page",
+          "page_size",
+          "q",
+          "sort",
+          "status"
+        ],
+        "responses": {
+          "200": "TaskListResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "TaskBatchResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse",
+          "502": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/tasks/cancel": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "TaskBatchResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/tasks/stats": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "TaskStatsResponse",
+          "401": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/tasks/torrent": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "TaskWriteResultResponse",
+          "401": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse",
+          "502": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/tasks/torrent/preview": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "TorrentPreviewResponse",
+          "401": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/tasks/{task_id}": {
+      "get": {
+        "parameters": [
+          "task_id"
+        ],
+        "responses": {
+          "200": "TaskResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/tasks/{task_id}/retry": {
+      "post": {
+        "parameters": [
+          "task_id"
+        ],
+        "responses": {
+          "200": "TaskWriteResultResponse",
+          "401": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse",
+          "502": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/trackers": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "TrackerStatusResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/trackers/refresh": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "TrackerStatusResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/users": {
+      "get": {
+        "parameters": [
+          "page",
+          "page_size"
+        ],
+        "responses": {
+          "200": "UserListResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "post": {
+        "parameters": [],
+        "responses": {
+          "201": "UserResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/users/{user_id}": {
+      "delete": {
+        "parameters": [
+          "user_id"
+        ],
+        "responses": {
+          "202": "DeleteUserResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "get": {
+        "parameters": [
+          "user_id"
+        ],
+        "responses": {
+          "200": "UserResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "404": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "patch": {
+        "parameters": [
+          "user_id"
+        ],
+        "responses": {
+          "200": "UserResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    }
+  },
+  "schemas": {
+    "ApiTokenCreateRequest": {
+      "fields": [
+        "name"
+      ],
+      "required": []
+    },
+    "ApiTokenListResponse": {
+      "fields": [
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ],
+      "required": [
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ]
+    },
+    "ApiTokenResponse": {
+      "fields": [
+        "created_at_ms",
+        "id",
+        "last_used_at_ms",
+        "name",
+        "prefix"
+      ],
+      "required": [
+        "created_at_ms",
+        "id",
+        "last_used_at_ms",
+        "name",
+        "prefix"
+      ]
+    },
+    "Aria2TestRequest": {
+      "fields": [
+        "aria2_rpc_secret",
+        "aria2_rpc_url"
+      ],
+      "required": []
+    },
+    "Aria2TestResponse": {
+      "fields": [
+        "connected",
+        "features",
+        "version"
+      ],
+      "required": [
+        "connected"
+      ]
+    },
+    "BackendStatusResponse": {
+      "fields": [
+        "message",
+        "status"
+      ],
+      "required": [
+        "message",
+        "status"
+      ]
+    },
+    "CreatedApiTokenResponse": {
+      "fields": [
+        "created_at_ms",
+        "id",
+        "last_used_at_ms",
+        "name",
+        "prefix",
+        "token"
+      ],
+      "required": [
+        "created_at_ms",
+        "id",
+        "last_used_at_ms",
+        "name",
+        "prefix",
+        "token"
+      ]
+    },
+    "CredentialInvalidateRequest": {
+      "fields": [
+        "confirmation"
+      ],
+      "required": [
+        "confirmation"
+      ]
+    },
+    "CredentialInvalidateResponse": {
+      "fields": [
+        "api_token_count",
+        "ok",
+        "rpc_secret_count"
+      ],
+      "required": [
+        "api_token_count",
+        "rpc_secret_count"
+      ]
+    },
+    "DeleteUserResponse": {
+      "fields": [
+        "accepted",
+        "ok",
+        "state"
+      ],
+      "required": []
+    },
+    "DirectoryBreadcrumbResponse": {
+      "fields": [
+        "name",
+        "path"
+      ],
+      "required": [
+        "name",
+        "path"
+      ]
+    },
+    "DiskSpaceResponse": {
+      "fields": [
+        "available_bytes",
+        "limited",
+        "reserved_bytes",
+        "total_bytes",
+        "used_bytes"
+      ],
+      "required": [
+        "available_bytes",
+        "limited",
+        "reserved_bytes",
+        "total_bytes",
+        "used_bytes"
+      ]
+    },
+    "DownloadOptionsRequest": {
+      "fields": [
+        "allow_rename",
+        "headers",
+        "http-passwd",
+        "http-user",
+        "max-connection-per-server",
+        "mirrors",
+        "out"
+      ],
+      "required": []
+    },
+    "ErrorBody": {
+      "fields": [
+        "code",
+        "message"
+      ],
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "ErrorResponse": {
+      "fields": [
+        "error"
+      ],
+      "required": [
+        "error"
+      ]
+    },
+    "FileBatchDeleteRequest": {
+      "fields": [
+        "file_ids"
+      ],
+      "required": [
+        "file_ids"
+      ]
+    },
+    "FileBatchDeleteResponse": {
+      "fields": [
+        "accepted_count",
+        "rejected_count",
+        "results"
+      ],
+      "required": [
+        "accepted_count",
+        "rejected_count",
+        "results"
+      ]
+    },
+    "FileBatchDeleteResultResponse": {
+      "fields": [
+        "accepted",
+        "error",
+        "file_id"
+      ],
+      "required": [
+        "accepted",
+        "file_id"
+      ]
+    },
+    "FileEntryItemResponse": {
+      "fields": [
+        "kind",
+        "name",
+        "path",
+        "size"
+      ],
+      "required": [
+        "kind",
+        "name",
+        "path",
+        "size"
+      ]
+    },
+    "FileEntryListResponse": {
+      "fields": [
+        "breadcrumbs",
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ],
+      "required": [
+        "breadcrumbs",
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ]
+    },
+    "FileItemResponse": {
+      "fields": [
+        "created_at_ms",
+        "display_name",
+        "id",
+        "kind",
+        "size"
+      ],
+      "required": [
+        "created_at_ms",
+        "display_name",
+        "id",
+        "kind",
+        "size"
+      ]
+    },
+    "FileListResponse": {
+      "fields": [
+        "items",
+        "page",
+        "page_size",
+        "space",
+        "total"
+      ],
+      "required": [
+        "items",
+        "page",
+        "page_size",
+        "space",
+        "total"
+      ]
+    },
+    "FileRenameRequest": {
+      "fields": [
+        "name"
+      ],
+      "required": [
+        "name"
+      ]
+    },
+    "FileSearchHitResponse": {
+      "fields": [
+        "display_name",
+        "kind",
+        "path",
+        "size",
+        "user_file_id"
+      ],
+      "required": [
+        "display_name",
+        "kind",
+        "path",
+        "size",
+        "user_file_id"
+      ]
+    },
+    "FileSearchResponse": {
+      "fields": [
+        "hits",
+        "truncated"
+      ],
+      "required": [
+        "hits",
+        "truncated"
+      ]
+    },
+    "HistoryClearAllResponse": {
+      "fields": [
+        "cleared_count"
+      ],
+      "required": [
+        "cleared_count"
+      ]
+    },
+    "HistoryPurgeRequest": {
+      "fields": [
+        "before_ms",
+        "older_than_days"
+      ],
+      "required": []
+    },
+    "HistoryPurgeResponse": {
+      "fields": [
+        "detached_sources",
+        "expired_tasks"
+      ],
+      "required": [
+        "detached_sources",
+        "expired_tasks"
+      ]
+    },
+    "LiveResponse": {
+      "fields": [
+        "ok"
+      ],
+      "required": []
+    },
+    "LoginRequest": {
+      "fields": [
+        "password",
+        "username"
+      ],
+      "required": [
+        "password",
+        "username"
+      ]
+    },
+    "MachineStatsResponse": {
+      "fields": [
+        "download_used_bytes",
+        "free_bytes",
+        "system_used_bytes",
+        "total_bytes",
+        "used_bytes"
+      ],
+      "required": [
+        "download_used_bytes",
+        "free_bytes",
+        "system_used_bytes",
+        "total_bytes",
+        "used_bytes"
+      ]
+    },
+    "OkResponse": {
+      "fields": [
+        "ok"
+      ],
+      "required": []
+    },
+    "PackClearRecordsResponse": {
+      "fields": [
+        "cleared_count"
+      ],
+      "required": [
+        "cleared_count"
+      ]
+    },
+    "PackCreateRequest": {
+      "fields": [
+        "delete_source",
+        "items",
+        "output_name"
+      ],
+      "required": [
+        "items",
+        "output_name"
+      ]
+    },
+    "PackListResponse": {
+      "fields": [
+        "items"
+      ],
+      "required": [
+        "items"
+      ]
+    },
+    "PackOutputResponse": {
+      "fields": [
+        "display_name",
+        "size",
+        "user_file_id"
+      ],
+      "required": [
+        "display_name",
+        "size",
+        "user_file_id"
+      ]
+    },
+    "PackPrecomputeItemResponse": {
+      "fields": [
+        "accepted",
+        "display_name",
+        "error",
+        "size",
+        "user_file_id"
+      ],
+      "required": [
+        "accepted",
+        "user_file_id"
+      ]
+    },
+    "PackPrecomputeRequest": {
+      "fields": [
+        "items"
+      ],
+      "required": [
+        "items"
+      ]
+    },
+    "PackPrecomputeResponse": {
+      "fields": [
+        "available_bytes",
+        "items",
+        "total_size"
+      ],
+      "required": [
+        "available_bytes",
+        "items",
+        "total_size"
+      ]
+    },
+    "PackViewResponse": {
+      "fields": [
+        "created_at_ms",
+        "delete_source",
+        "error_code",
+        "finished_at_ms",
+        "id",
+        "output",
+        "output_name",
+        "status",
+        "step",
+        "step_progress",
+        "step_started_at_ms",
+        "updated_at_ms"
+      ],
+      "required": [
+        "created_at_ms",
+        "delete_source",
+        "error_code",
+        "finished_at_ms",
+        "id",
+        "status",
+        "step",
+        "step_progress",
+        "step_started_at_ms",
+        "updated_at_ms"
+      ]
+    },
+    "PasswordChangeRequest": {
+      "fields": [
+        "new_password",
+        "old_password"
+      ],
+      "required": [
+        "new_password"
+      ]
+    },
+    "PublicBreadcrumbResponse": {
+      "fields": [
+        "name",
+        "path"
+      ],
+      "required": [
+        "name",
+        "path"
+      ]
+    },
+    "PublicEntryItemResponse": {
+      "fields": [
+        "kind",
+        "name",
+        "path",
+        "size"
+      ],
+      "required": [
+        "kind",
+        "name",
+        "path",
+        "size"
+      ]
+    },
+    "PublicEntryListResponse": {
+      "fields": [
+        "breadcrumbs",
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ],
+      "required": [
+        "breadcrumbs",
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ]
+    },
+    "PublicShareInfoResponse": {
+      "fields": [
+        "download_count",
+        "expires_at_ms",
+        "file_kind",
+        "file_name",
+        "file_size",
+        "has_password",
+        "max_downloads"
+      ],
+      "required": [
+        "download_count",
+        "expires_at_ms",
+        "file_kind",
+        "file_name",
+        "file_size",
+        "has_password",
+        "max_downloads"
+      ]
+    },
+    "PublicSiteInfoResponse": {
+      "fields": [
+        "site_title",
+        "ws_reconnect_factor",
+        "ws_reconnect_jitter_seconds",
+        "ws_reconnect_max_delay_seconds"
+      ],
+      "required": [
+        "site_title",
+        "ws_reconnect_factor",
+        "ws_reconnect_jitter_seconds",
+        "ws_reconnect_max_delay_seconds"
+      ]
+    },
+    "ReadyFailureResponse": {
+      "fields": [
+        "errors",
+        "ok"
+      ],
+      "required": [
+        "errors"
+      ]
+    },
+    "ReadyResponse": {
+      "fields": [
+        "ok"
+      ],
+      "required": []
+    },
+    "RpcAccessResponse": {
+      "fields": [
+        "enabled",
+        "secret",
+        "secret_prefix"
+      ],
+      "required": [
+        "enabled",
+        "secret",
+        "secret_prefix"
+      ]
+    },
+    "RpcAccessUpdateRequest": {
+      "fields": [
+        "enabled"
+      ],
+      "required": [
+        "enabled"
+      ]
+    },
+    "SettingsResponse": {
+      "fields": [
+        "account_security_rate_limit",
+        "aria2_bt_stop_timeout_seconds",
+        "aria2_rpc_secret",
+        "aria2_rpc_url",
+        "aria2_test_rate_limit",
+        "authenticated_api_rate_limit",
+        "create_pack_rate_limit",
+        "create_share_rate_limit",
+        "create_task_rate_limit",
+        "create_torrent_rate_limit",
+        "download_connection_limits",
+        "file_search_rate_limit",
+        "history_retention_days",
+        "max_task_size",
+        "min_free_disk",
+        "pack_compression_level",
+        "pack_format",
+        "public_api_rate_limit",
+        "rpc_rate_limit",
+        "share_access_rate_limit",
+        "site_title",
+        "tracker_fixed_list",
+        "tracker_refresh_interval_minutes",
+        "tracker_remote_urls",
+        "updated_at_ms",
+        "ws_reconnect_factor",
+        "ws_reconnect_jitter_seconds",
+        "ws_reconnect_max_delay_seconds"
+      ],
+      "required": [
+        "account_security_rate_limit",
+        "aria2_bt_stop_timeout_seconds",
+        "aria2_rpc_secret",
+        "aria2_rpc_url",
+        "aria2_test_rate_limit",
+        "authenticated_api_rate_limit",
+        "create_pack_rate_limit",
+        "create_share_rate_limit",
+        "create_task_rate_limit",
+        "create_torrent_rate_limit",
+        "download_connection_limits",
+        "file_search_rate_limit",
+        "history_retention_days",
+        "max_task_size",
+        "min_free_disk",
+        "pack_compression_level",
+        "pack_format",
+        "public_api_rate_limit",
+        "rpc_rate_limit",
+        "share_access_rate_limit",
+        "site_title",
+        "tracker_fixed_list",
+        "tracker_refresh_interval_minutes",
+        "tracker_remote_urls",
+        "updated_at_ms",
+        "ws_reconnect_factor",
+        "ws_reconnect_jitter_seconds",
+        "ws_reconnect_max_delay_seconds"
+      ]
+    },
+    "SettingsUpdateRequest": {
+      "fields": [
+        "account_security_rate_limit",
+        "aria2_bt_stop_timeout_seconds",
+        "aria2_rpc_secret",
+        "aria2_rpc_url",
+        "aria2_test_rate_limit",
+        "authenticated_api_rate_limit",
+        "create_pack_rate_limit",
+        "create_share_rate_limit",
+        "create_task_rate_limit",
+        "create_torrent_rate_limit",
+        "download_connection_limits",
+        "file_search_rate_limit",
+        "history_retention_days",
+        "max_task_size",
+        "min_free_disk",
+        "pack_compression_level",
+        "pack_format",
+        "public_api_rate_limit",
+        "rpc_rate_limit",
+        "share_access_rate_limit",
+        "site_title",
+        "tracker_fixed_list",
+        "tracker_refresh_interval_minutes",
+        "tracker_remote_urls",
+        "ws_reconnect_factor",
+        "ws_reconnect_jitter_seconds",
+        "ws_reconnect_max_delay_seconds"
+      ],
+      "required": []
+    },
+    "ShareBatchItemResponse": {
+      "fields": [
+        "already_revoked",
+        "error",
+        "ok",
+        "share_id"
+      ],
+      "required": [
+        "ok",
+        "share_id"
+      ]
+    },
+    "ShareBatchRequest": {
+      "fields": [
+        "share_ids"
+      ],
+      "required": [
+        "share_ids"
+      ]
+    },
+    "ShareBatchResponse": {
+      "fields": [
+        "accepted_count",
+        "rejected_count",
+        "results"
+      ],
+      "required": [
+        "accepted_count",
+        "rejected_count",
+        "results"
+      ]
+    },
+    "ShareCreateRequest": {
+      "fields": [
+        "expires_in_seconds",
+        "max_downloads",
+        "password",
+        "user_file_id"
+      ],
+      "required": [
+        "user_file_id"
+      ]
+    },
+    "ShareCreatedResponse": {
+      "fields": [
+        "code",
+        "created_at_ms",
+        "download_count",
+        "expires_at_ms",
+        "file_kind",
+        "file_name",
+        "file_size",
+        "has_password",
+        "id",
+        "max_downloads",
+        "status"
+      ],
+      "required": [
+        "code",
+        "created_at_ms",
+        "download_count",
+        "expires_at_ms",
+        "file_kind",
+        "file_name",
+        "file_size",
+        "has_password",
+        "id",
+        "max_downloads",
+        "status"
+      ]
+    },
+    "ShareItemResponse": {
+      "fields": [
+        "code",
+        "created_at_ms",
+        "download_count",
+        "expires_at_ms",
+        "file_kind",
+        "file_name",
+        "file_size",
+        "has_password",
+        "id",
+        "max_downloads",
+        "status"
+      ],
+      "required": [
+        "code",
+        "created_at_ms",
+        "download_count",
+        "expires_at_ms",
+        "file_kind",
+        "file_name",
+        "file_size",
+        "has_password",
+        "id",
+        "max_downloads",
+        "status"
+      ]
+    },
+    "ShareListResponse": {
+      "fields": [
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ],
+      "required": [
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ]
+    },
+    "ShareRevokeAllResponse": {
+      "fields": [
+        "revoked_count"
+      ],
+      "required": [
+        "revoked_count"
+      ]
+    },
+    "ShareStatus": {
+      "fields": [],
+      "required": []
+    },
+    "ShareVerifyRequest": {
+      "fields": [
+        "password"
+      ],
+      "required": [
+        "password"
+      ]
+    },
+    "ShareVerifyResponse": {
+      "fields": [
+        "access_token",
+        "expires_in"
+      ],
+      "required": [
+        "access_token",
+        "expires_in"
+      ]
+    },
+    "StorageDeleteRequest": {
+      "fields": [
+        "content_ids"
+      ],
+      "required": [
+        "content_ids"
+      ]
+    },
+    "StorageDeleteResponse": {
+      "fields": [
+        "accepted_count",
+        "rejected_count",
+        "results"
+      ],
+      "required": [
+        "accepted_count",
+        "rejected_count",
+        "results"
+      ]
+    },
+    "StorageDeleteResultResponse": {
+      "fields": [
+        "accepted",
+        "content_id",
+        "error"
+      ],
+      "required": [
+        "accepted",
+        "content_id"
+      ]
+    },
+    "StorageFileListResponse": {
+      "fields": [
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ],
+      "required": [
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ]
+    },
+    "StorageFileResponse": {
+      "fields": [
+        "content_id",
+        "content_key",
+        "created_at_ms",
+        "deletion_state",
+        "file_names",
+        "kind",
+        "on_disk",
+        "reference_count",
+        "size",
+        "storage_path"
+      ],
+      "required": [
+        "content_id",
+        "content_key",
+        "deletion_state",
+        "kind",
+        "on_disk",
+        "reference_count",
+        "size",
+        "storage_path"
+      ]
+    },
+    "StorageReferencingUserListResponse": {
+      "fields": [
+        "items"
+      ],
+      "required": [
+        "items"
+      ]
+    },
+    "StorageReferencingUserResponse": {
+      "fields": [
+        "display_name",
+        "referenced_at_ms",
+        "user_id",
+        "username"
+      ],
+      "required": [
+        "display_name",
+        "referenced_at_ms",
+        "user_id",
+        "username"
+      ]
+    },
+    "SubscriptionStatus": {
+      "fields": [],
+      "required": []
+    },
+    "SystemStatusResponse": {
+      "fields": [
+        "download_backend"
+      ],
+      "required": [
+        "download_backend"
+      ]
+    },
+    "TaskActionRequest": {
+      "fields": [
+        "task_ids"
+      ],
+      "required": [
+        "task_ids"
+      ]
+    },
+    "TaskBatchCreateRequest": {
+      "fields": [
+        "tasks"
+      ],
+      "required": [
+        "tasks"
+      ]
+    },
+    "TaskBatchResponse": {
+      "fields": [
+        "accepted_count",
+        "items",
+        "rejected_count"
+      ],
+      "required": [
+        "accepted_count",
+        "items",
+        "rejected_count"
+      ]
+    },
+    "TaskCreateRequest": {
+      "fields": [
+        "options",
+        "uri"
+      ],
+      "required": [
+        "uri"
+      ]
+    },
+    "TaskFileResponse": {
+      "fields": [
+        "completed_bytes",
+        "name",
+        "selected",
+        "total_bytes"
+      ],
+      "required": [
+        "completed_bytes",
+        "name",
+        "selected",
+        "total_bytes"
+      ]
+    },
+    "TaskListResponse": {
+      "fields": [
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ],
+      "required": [
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ]
+    },
+    "TaskQuotaResponse": {
+      "fields": [
+        "available_bytes",
+        "limited",
+        "quota_bytes",
+        "reserved_bytes",
+        "used_bytes"
+      ],
+      "required": [
+        "available_bytes",
+        "limited",
+        "quota_bytes",
+        "reserved_bytes",
+        "used_bytes"
+      ]
+    },
+    "TaskResponse": {
+      "fields": [
+        "completed_bytes",
+        "connection_count",
+        "created_at_ms",
+        "download_speed",
+        "error_code",
+        "files",
+        "finished_at_ms",
+        "id",
+        "name",
+        "observation_fresh",
+        "peer_count",
+        "reserved_bytes",
+        "retryable",
+        "status",
+        "status_label",
+        "total_bytes",
+        "updated_at_ms",
+        "upload_speed",
+        "uri"
+      ],
+      "required": [
+        "completed_bytes",
+        "connection_count",
+        "created_at_ms",
+        "download_speed",
+        "error_code",
+        "files",
+        "finished_at_ms",
+        "id",
+        "name",
+        "observation_fresh",
+        "peer_count",
+        "reserved_bytes",
+        "retryable",
+        "status",
+        "status_label",
+        "total_bytes",
+        "updated_at_ms",
+        "upload_speed",
+        "uri"
+      ]
+    },
+    "TaskRetryRequest": {
+      "fields": [
+        "allow_rename"
+      ],
+      "required": []
+    },
+    "TaskStatsResponse": {
+      "fields": [
+        "counts",
+        "disk",
+        "download_speed",
+        "quota",
+        "total",
+        "upload_speed"
+      ],
+      "required": [
+        "counts",
+        "disk",
+        "download_speed",
+        "quota",
+        "total",
+        "upload_speed"
+      ]
+    },
+    "TaskStatusCountsResponse": {
+      "fields": [
+        "active",
+        "cancelled",
+        "completed",
+        "expired",
+        "failed",
+        "paused",
+        "queued",
+        "waiting"
+      ],
+      "required": [
+        "active",
+        "cancelled",
+        "completed",
+        "expired",
+        "failed",
+        "paused",
+        "queued",
+        "waiting"
+      ]
+    },
+    "TaskWriteResultResponse": {
+      "fields": [
+        "accepted",
+        "error",
+        "outcome",
+        "stop_confirmed",
+        "task"
+      ],
+      "required": [
+        "accepted"
+      ]
+    },
+    "TorrentCreateRequest": {
+      "fields": [
+        "allow_rename",
+        "selected_file_indexes",
+        "torrent"
+      ],
+      "required": [
+        "torrent"
+      ]
+    },
+    "TorrentFilePreviewResponse": {
+      "fields": [
+        "index",
+        "path",
+        "size"
+      ],
+      "required": [
+        "index",
+        "path",
+        "size"
+      ]
+    },
+    "TorrentPreviewRequest": {
+      "fields": [
+        "torrent"
+      ],
+      "required": [
+        "torrent"
+      ]
+    },
+    "TorrentPreviewResponse": {
+      "fields": [
+        "default_selection",
+        "files",
+        "info_hash",
+        "name",
+        "total_size"
+      ],
+      "required": [
+        "default_selection",
+        "files",
+        "info_hash",
+        "name",
+        "total_size"
+      ]
+    },
+    "TrackerStatusResponse": {
+      "fields": [
+        "entry_count",
+        "failed_urls",
+        "items",
+        "last_refresh_at_ms",
+        "refresh_status",
+        "remote_items",
+        "updated_at_ms"
+      ],
+      "required": [
+        "entry_count",
+        "failed_urls",
+        "items",
+        "last_refresh_at_ms",
+        "refresh_status",
+        "remote_items",
+        "updated_at_ms"
+      ]
+    },
+    "UserCreateRequest": {
+      "fields": [
+        "is_admin",
+        "is_initial_password",
+        "password",
+        "quota_bytes",
+        "username"
+      ],
+      "required": [
+        "password",
+        "username"
+      ]
+    },
+    "UserListResponse": {
+      "fields": [
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ],
+      "required": [
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ]
+    },
+    "UserResponse": {
+      "fields": [
+        "available_bytes",
+        "id",
+        "is_admin",
+        "is_initial_password",
+        "pending_delete",
+        "quota_bytes",
+        "reserved_bytes",
+        "used_bytes",
+        "username"
+      ],
+      "required": [
+        "available_bytes",
+        "id",
+        "is_admin",
+        "is_initial_password",
+        "pending_delete",
+        "quota_bytes",
+        "reserved_bytes",
+        "used_bytes",
+        "username"
+      ]
+    },
+    "UserUpdateRequest": {
+      "fields": [
+        "is_admin",
+        "is_initial_password",
+        "password",
+        "quota_bytes",
+        "username"
+      ],
+      "required": []
+    }
+  }
+}
