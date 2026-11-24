@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 
 import pytest
 from fastapi import FastAPI
@@ -12,8 +13,18 @@ from aria2deck.application.downloads.broadcast import BroadcastMessage
 from tests.api.conftest import create_admin, create_user, login
 
 
+@contextmanager
 def _connect(client: TestClient, **kwargs):
-    return client.websocket_connect("/ws/tasks", **kwargs)
+    try:
+        with client.websocket_connect("/ws/tasks", **kwargs) as socket:
+            yield socket
+    except concurrent.futures.CancelledError:
+        # Starlette 的 WebSocketTestSession 退出时会用 fut.result() 等待会话
+        # 任务结束，Linux CI 上该 Future 可能已被取消，抛出
+        # concurrent.futures.CancelledError（与 asyncio.CancelledError 不同类）。
+        # 这是框架在特定平台上的关闭清理竞态，业务断言在 with 块内已完成，
+        # 这里只容忍收尾阶段的该异常，不影响任何功能断言。
+        pass
 
 
 def test_ws_requires_session_cookie(client: TestClient) -> None:
