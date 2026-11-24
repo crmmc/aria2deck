@@ -76,6 +76,9 @@ Thumbs.db
 .trellis/
 AGENTS.md
 
+# 本地 e2e 验收设施（真 aria2 + 真 Chrome，人工触发，不进仓库）
+scripts/e2e/
+
 # Development docs (not for repo)
 docs/*
 !docs/screenshots/
