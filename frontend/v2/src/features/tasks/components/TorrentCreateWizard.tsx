@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { ModalOverlay } from "@/shared/components/ModalOverlay";
 import { DialogShell } from "@/shared/components/DialogShell";
+import { requestModalClose } from "@/shared/ui/modalClose";
 import { createTorrent } from "../api";
 import type { TaskResponse, TorrentPreviewResponse } from "@/shared/api/types";
 import { buildTorrentTree, fillDirectorySizes, type TorrentTreeNode } from "../model";
@@ -33,6 +34,8 @@ export function TorrentCreateWizard({
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const wizardRef = useRef<HTMLDivElement>(null);
+  const confirmOuterCloseRef = useRef(false);
   // 归档参考 交互：初始全选；树按插入顺序构建（种子树顺序是视觉基线）。
   const [selectedIndexes, setSelectedIndexes] = useState<Set<number>>(
     () => new Set(preview.files.map((file) => file.index)),
@@ -79,7 +82,7 @@ export function TorrentCreateWizard({
     setSelectedIndexes(new Set());
   };
 
-  const create = async () => {
+  const create = async (trigger: Element) => {
     if (isCreating || selectedIndexes.size === 0) return;
     setIsCreating(true);
     setSubmitError(null);
@@ -89,6 +92,7 @@ export function TorrentCreateWizard({
         Array.from(selectedIndexes).sort((a, b) => a - b),
       );
       onCreated(task);
+      requestModalClose(trigger);
     } catch (err) {
       // 向导是全屏遮罩：错误必须显示在向导内，页面级 error 会被挡住。
       const message = err instanceof Error ? err.message : "创建失败";
@@ -98,9 +102,18 @@ export function TorrentCreateWizard({
     }
   };
 
+  const closeCancelConfirm = () => {
+    setShowCancelConfirm(false);
+    if (!confirmOuterCloseRef.current) return;
+    confirmOuterCloseRef.current = false;
+    requestModalClose(wizardRef.current);
+  };
+
   return (
     <ModalOverlay
-      onClose={() => setShowCancelConfirm(true)}
+      onClose={onCancel}
+      onRequestClose={() => setShowCancelConfirm(true)}
+      closeDisabled={isCreating}
       ariaLabel="添加 BT 下载任务"
       className="modal-overlay torrent-wizard-backdrop"
       contentClassName="torrent-wizard"
@@ -110,7 +123,7 @@ export function TorrentCreateWizard({
             <h2>添加 BT 下载任务</h2>
           </div>
         </header>
-        <div className="torrent-wizard-shell">
+        <div ref={wizardRef} className="torrent-wizard-shell">
           <aside className="torrent-stage-tabs">
             <button type="button" className="torrent-stage-tab torrent-stage-tab-done">
               <span>1</span>
@@ -220,7 +233,7 @@ export function TorrentCreateWizard({
                   type="button"
                   className="button shadow-none"
                   disabled={isCreating}
-                  onClick={create}
+                  onClick={(event) => void create(event.currentTarget)}
                 >
                   {isCreating ? "提交中" : "确认"}
                 </button>
@@ -231,7 +244,7 @@ export function TorrentCreateWizard({
 
       {showCancelConfirm ? (
         <DialogShell
-          onClose={() => setShowCancelConfirm(false)}
+          onClose={closeCancelConfirm}
           ariaLabel="取消添加任务"
           className="modal-overlay torrent-cancel-layer"
           contentClassName="torrent-cancel-dialog"
@@ -242,11 +255,18 @@ export function TorrentCreateWizard({
             <button
               type="button"
               className="button secondary shadow-none"
-              onClick={() => setShowCancelConfirm(false)}
+              onClick={(event) => requestModalClose(event.currentTarget)}
             >
               继续选择
             </button>
-            <button type="button" className="button shadow-none" onClick={onCancel}>
+            <button
+              type="button"
+              className="button shadow-none"
+              onClick={(event) => {
+                confirmOuterCloseRef.current = true;
+                requestModalClose(event.currentTarget);
+              }}
+            >
               确认取消
             </button>
           </div>

@@ -7,11 +7,14 @@ import { ApiRequestError } from "@/shared/api/client";
 import type { TaskResponse, TorrentPreviewResponse } from "@/shared/api/types";
 import { useMounted } from "@/shared/hooks/useMounted";
 import { useToast } from "@/shared/components/toast-context";
+import { PageHeader } from "@/shared/components/PageHeader";
+import { taskCommands } from "@/shared/lib/commands";
 import { useClipboard } from "@/shared/hooks/useClipboard";
 import { useSelection } from "@/shared/hooks/useSelection";
 import { useLocalState } from "@/shared/hooks/useLocalState";
 import { useTaskWebSocket } from "@/shared/hooks/useTaskWebSocket";
 import { sendTaskNotification } from "@/shared/notifications";
+import { requestModalClose } from "@/shared/ui/modalClose";
 
 import {
   cancelTasks,
@@ -21,7 +24,6 @@ import {
   retryTask,
 } from "./api";
 import {
-  filterCurrentTasks,
   filterInFlightTasks,
   isCurrentVisibleStatus,
   isInFlightStatus,
@@ -80,12 +82,25 @@ export function TasksPage() {
     preview: TorrentPreviewResponse;
   } | null>(null);
   const mounted = useMounted();
+  const uriInputRef = useRef<HTMLInputElement>(null);
   const torrentInputRef = useRef<HTMLInputElement>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isBatchOperating, setIsBatchOperating] = useState(false);
   const [operatingTaskIds, setOperatingTaskIds] = useState<Set<number>>(
     new Set(),
   );
+
+  useEffect(() => taskCommands.subscribe((command) => {
+    if (command === "add") {
+      uriInputRef.current?.focus();
+      return;
+    }
+    if (command === "batch") {
+      setShowBatchAddModal(true);
+      return;
+    }
+    torrentInputRef.current?.click();
+  }), []);
 
   useEffect(() => {
     if (showBatchAddModal) {
@@ -110,7 +125,7 @@ export function TasksPage() {
   }, [tasks]);
 
   useEffect(() => {
-    fetchTasksAll("all", "")
+    fetchTasksAll()
       .then((currentTasks) => {
         setTasks(currentTasks);
       })
@@ -158,7 +173,7 @@ export function TasksPage() {
   }, [deletedTaskIds, showToast]);
 
   const refreshTasks = useCallback(async () => {
-    const currentTasks = await fetchTasksAll("all", "");
+    const currentTasks = await fetchTasksAll();
     setTasks(() => currentTasks.filter((t) => !deletedTaskIds.has(t.id)));
   }, [deletedTaskIds]);
 
@@ -185,7 +200,7 @@ export function TasksPage() {
   useEffect(() => {
     if (!connected) return;
     // 连上即权威重读一次（对齐 归档参考 onConnected 语义）。
-    fetchTasksAll("all", "")
+    fetchTasksAll()
       .then((currentTasks) => {
         setTasks(() => {
           const deletedIds = deletedTaskIds;
@@ -279,21 +294,27 @@ export function TasksPage() {
         const previewResponse = await previewTorrent(base64Content);
         setTorrentWizard({ torrentBase64: base64Content, preview: previewResponse });
       } catch (err) {
-        setError((err as Error).message);
+        const message = (err as Error).message;
+        // 归档参考：重复种子的提示走 warning Toast，不占表单错误区。
+        if (message.includes("您已拥有此文件")) {
+          showToast("您已拥有此文件", "warning");
+          setError(null);
+        } else {
+          setError(message);
+        }
       } finally {
         if (torrentInputRef.current) {
           torrentInputRef.current.value = "";
         }
       }
     },
-    [],
+    [showToast],
   );
 
   const handleTorrentCreated = useCallback((task: TaskResponse) => {
     if (isCurrentVisibleStatus(task.status)) {
       setTasks((prev) => upsertTaskById(prev, task));
     }
-    setTorrentWizard(null);
     if (torrentInputRef.current) {
       torrentInputRef.current.value = "";
     }
@@ -421,7 +442,7 @@ export function TasksPage() {
     }
   }, [selectedTasks, isBatchOperating, showConfirm, showToast, clearSelection, deletedTaskIds]);
 
-  const batchAddTasks = useCallback(async () => {
+  const batchAddTasks = useCallback(async (trigger: Element) => {
     if (isBatchAdding) return;
     const submittedUris = parseBatchUris(batchUris);
 
@@ -444,7 +465,7 @@ export function TasksPage() {
       if (outcome.rejectedCount === 0) {
         showToast(`已提交 ${outcome.acceptedCount} 个任务`, "success");
         setBatchUris("");
-        setShowBatchAddModal(false);
+        requestModalClose(trigger);
       } else {
         setBatchFeedback({
           kind: "result",
@@ -478,20 +499,17 @@ export function TasksPage() {
   }, [batchFailures]);
 
   const closeBatchAdd = useCallback(() => {
-    if (isBatchAdding) return;
     setShowBatchAddModal(false);
     setBatchUris("");
     setBatchFeedback(null);
-  }, [isBatchAdding]);
+  }, []);
 
   const filteredTasks = useMemo(() => {
     let filtered = searchTasks(tasks, searchKeyword);
     if (filterStatus === "active") {
       filtered = filterInFlightTasks(filtered);
-    } else {
-      // 当前任务：只含在下载管线的任务；失败任务属终态，只在历史页展示（与归档参考后端 current 口径一致）。
-      filtered = filterCurrentTasks(filtered);
     }
+    // 「当前任务」不再二次按状态过滤：失败任务由 WebSocket 单帧保留，刷新后才消失。
     return sortTasks(filtered, sortBy);
   }, [tasks, searchKeyword, filterStatus, sortBy]);
 
@@ -506,6 +524,7 @@ export function TasksPage() {
       ),
     [tasks, selectedTasks],
   );
+  const activeTaskCount = useMemo(() => filterInFlightTasks(tasks).length, [tasks]);
 
   return (
     <>
@@ -513,12 +532,7 @@ export function TasksPage() {
         className="glass-frame full-height animate-in"
         aria-hidden={torrentWizard ? "true" : undefined}
       >
-        <div className="space-between mb-7">
-          <div>
-            <h1 className="text-2xl">任务</h1>
-            <p className="muted">管理您的下载</p>
-          </div>
-        </div>
+        <PageHeader title="任务" description="管理您的下载" />
 
         <StatsWidget />
 
@@ -526,6 +540,7 @@ export function TasksPage() {
           uri={uri}
           error={error}
           isSubmitting={isSubmitting}
+          uriInputRef={uriInputRef}
           torrentInputRef={torrentInputRef}
           onUriChange={setUri}
           onSubmit={createTask}
@@ -533,32 +548,34 @@ export function TasksPage() {
           onBatchAdd={() => setShowBatchAddModal(true)}
         />
 
-        <TaskToolbar
-          selectedCount={selectedTasks.size}
-          filteredCount={filteredTasks.length}
-          filterStatus={filterStatus}
-          sortBy={sortBy}
-          searchKeyword={searchKeyword}
-          hasActiveTasks={hasActiveTasks}
-          isBatchOperating={isBatchOperating}
-          onToggleSelectAll={toggleSelectAll}
-          onBatchCancel={batchCancelTasks}
-          onFilterStatusChange={filterState.setValue}
-          onSortByChange={(value) => setSortBy(value as LegacySortKey)}
-          onSearchKeywordChange={setSearchKeyword}
-        />
-
-        <div className="task-list">
+        <section className="panel list-panel" aria-label="任务列表">
+          <TaskToolbar
+            selectedCount={selectedTasks.size}
+            filteredCount={filteredTasks.length}
+            currentCount={tasks.length}
+            activeCount={activeTaskCount}
+            filterStatus={filterStatus}
+            sortBy={sortBy}
+            searchKeyword={searchKeyword}
+            hasActiveTasks={hasActiveTasks}
+            isBatchOperating={isBatchOperating}
+            onToggleSelectAll={toggleSelectAll}
+            onBatchCancel={batchCancelTasks}
+            onFilterStatusChange={filterState.setValue}
+            onSortByChange={(value) => setSortBy(value as LegacySortKey)}
+            onSearchKeywordChange={setSearchKeyword}
+          />
           <TaskList
             filteredTasks={filteredTasks}
             selectedTasks={selectedTasks}
             operatingTaskIds={operatingTaskIds}
             onToggleSelection={toggleTaskSelection}
+            onToggleSelectAll={toggleSelectAll}
             onCancel={cancelTask}
             onCopyUri={copyUri}
             onRetry={handleRetryTask}
           />
-        </div>
+        </section>
       </div>
 
       {showBatchAddModal && (

@@ -80,19 +80,13 @@ export function parseQuotaBytes(value: string, unit: string): number | null {
   return Number.isFinite(bytes) && bytes > 0 ? Math.round(bytes) : null;
 }
 
-/** 归档参考表单回填口径（userState.ts:14-22 原文）：按最大可用单位保留两位小数。 */
+/** 管理员编辑表单固定使用 GB，保留原始换算字符串，避免小配额被精度截断。 */
 export function formatQuotaForForm(bytes: number): { quotaValue: string; quotaUnit: string } {
-  if (bytes >= GIB) return { quotaValue: (bytes / GIB).toFixed(2), quotaUnit: "GB" };
-  if (bytes >= MIB) return { quotaValue: (bytes / MIB).toFixed(2), quotaUnit: "MB" };
-  return { quotaValue: (bytes / KIB).toFixed(2), quotaUnit: "KB" };
+  return { quotaValue: String(bytes / GIB), quotaUnit: "GB" };
 }
 
 /** 配额 GiB ↔ bytes 换算：输入 GiB 值四舍五入到整 bytes；负值/NaN 返回 null。 */
 export function gibToBytes(gib: number): number | null {
   if (!Number.isFinite(gib) || gib < 0) return null;
   return Math.round(gib * GIB);
-}
-
-export function bytesToGib(bytes: number): number {
-  return Math.round((bytes / GIB) * 100) / 100;
 }

@@ -14,7 +14,7 @@ import {
   type ToastKind,
   type ToastMessage,
   type ToastState,
-} from "@/app/contexts";
+} from "@/shared/auth/contexts";
 import { ToastHost } from "@/app/ToastHost";
 import { api, ApiRequestError, setUnauthorizedHandler } from "@/shared/api/client";
 import { setSiteTitle } from "@/shared/lib/siteTitle";
@@ -156,14 +156,10 @@ export function AppProviders({ children }: { children: ReactNode }) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
   }, []);
 
-  const push = useCallback(
-    (kind: ToastKind, text: string) => {
-      const id = nextToastId++;
-      setToasts((current) => [...current, { id, kind, text }]);
-      window.setTimeout(() => dismiss(id), 5000);
-    },
-    [dismiss],
-  );
+  const push = useCallback((kind: ToastKind, text: string) => {
+    const id = nextToastId++;
+    setToasts((current) => [...current, { id, kind, text }]);
+  }, []);
 
   const toastValue = useMemo<ToastState>(
     () => ({ toasts, push, dismiss }),

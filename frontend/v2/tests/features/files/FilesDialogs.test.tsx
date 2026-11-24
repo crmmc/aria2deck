@@ -1,9 +1,7 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { CreateShareDialog } from "@/features/files/components/CreateShareDialog";
 import { PackDialog } from "@/features/files/components/PackDialog";
 import { SearchModal } from "@/features/files/components/SearchModal";
-import { SpaceUsageCard } from "@/features/files/components/SpaceUsageCard";
-import { PackTaskCard } from "@/features/files/components/PackTaskCard";
 import { createShare } from "@/features/files/api";
 import {
   formatFileDate,
@@ -17,16 +15,10 @@ import type { SearchHitView } from "@/features/files/model";
 
 import { ToastProvider } from "@/shared/components/Toast";
 
-const mockFetch = jest.fn();
-global.fetch = mockFetch as unknown as typeof fetch;
-
 function withProviders(node: React.ReactElement) {
   return render(<ToastProvider>{node}</ToastProvider>);
 }
 
-function json(status: number, body: unknown): unknown {
-  return { status, ok: status >= 200 && status < 300, json: () => Promise.resolve(body) };
-}
 
 jest.mock("@/features/files/api", () => ({
   ...jest.requireActual("@/features/files/api"),
@@ -38,7 +30,6 @@ let originalShowModal: HTMLDialogElement["showModal"] | undefined;
 let originalClose: HTMLDialogElement["close"] | undefined;
 
 beforeEach(() => {
-  mockFetch.mockReset();
   originalShowModal = HTMLDialogElement.prototype.showModal;
   originalClose = HTMLDialogElement.prototype.close;
   Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
@@ -133,42 +124,6 @@ describe("model", () => {
   });
 });
 
-describe("SpaceUsageCard", () => {
-  it("展示可用/总量与冻结条纹", () => {
-    render(<SpaceUsageCard space={{ used: 100, frozen: 50, available: 850 }} />);
-    expect(screen.getByText("850.0 B")).toBeInTheDocument();
-    expect(screen.getByText("已冻结: 50.0 B (下载中)")).toBeInTheDocument();
-  });
-
-  it("总量为 0 时进度条为 0%，且不渲染冻结区段", () => {
-    const { container } = render(<SpaceUsageCard space={{ used: 0, frozen: 0, available: 0 }} />);
-    const bar = container.querySelector(".progress-bar") as HTMLElement;
-    expect(bar.style.width).toBe("0%");
-    expect(screen.queryByText(/已冻结/)).not.toBeInTheDocument();
-    // 进度容器里只有一条进度条，没有冻结斜纹层。
-    expect(container.querySelectorAll(".progress-container > div")).toHaveLength(1);
-  });
-
-  it.each([
-    ["高占用用危险色", 90, 0, 10],
-    ["中占用用警告色", 60, 0, 40],
-    ["低占用用成功色", 10, 0, 90],
-  ])("%s（原色样式属性被 jsdom 丢弃，仅断言宽度）", (_label, used, frozen, available) => {
-    const { container } = render(<SpaceUsageCard space={{ used, frozen, available }} />);
-    const bar = container.querySelector(".progress-bar") as HTMLElement;
-    expect(bar.style.width).toBe(`${used}%`);
-  });
-
-  it("有冻结时多渲染一条斜纹层，宽度按占比分配", () => {
-    const { container } = render(<SpaceUsageCard space={{ used: 30, frozen: 20, available: 50 }} />);
-    const bars = container.querySelectorAll(".progress-container > div");
-    expect(bars).toHaveLength(2);
-    expect((bars[0] as HTMLElement).style.width).toBe("50%");
-    expect((bars[1] as HTMLElement).style.left).toBe("30%");
-    expect((bars[1] as HTMLElement).style.width).toBe("20%");
-  });
-});
-
 describe("SearchModal", () => {
   const hit: SearchHitView = {
     userFileId: 1, name: "a.txt", path: "素材/a.txt", size: 10, isDirectory: false, entryPath: "素材/a.txt",
@@ -179,6 +134,7 @@ describe("SearchModal", () => {
       <SearchModal keyword="k" results={[]} loading error={null} truncated={false} onLocate={jest.fn()} onClose={jest.fn()} />,
     );
     expect(screen.getByText("搜索中...")).toBeInTheDocument();
+    expect(document.querySelector(".search-modal-icon")).toHaveAttribute("data-icon", "search");
     rerender(<SearchModal keyword="k" results={[]} loading={false} error="网络错误" truncated={false} onLocate={jest.fn()} onClose={jest.fn()} />);
     expect(screen.getByText("网络错误")).toBeInTheDocument();
     rerender(<SearchModal keyword="k" results={[]} loading={false} error={null} truncated={false} onLocate={jest.fn()} onClose={jest.fn()} />);
@@ -192,17 +148,18 @@ describe("SearchModal", () => {
     render(
       <SearchModal keyword="k" results={[dirHit]} loading={false} error={null} truncated={false} onLocate={jest.fn()} onClose={jest.fn()} />,
     );
-    expect(screen.getByText("📁")).toBeInTheDocument();
+    expect(document.querySelector(".search-result-item [data-icon=folder]")).toBeInTheDocument();
+    expect(screen.queryByText("📁")).not.toBeInTheDocument();
     expect(screen.queryByText("📄")).not.toBeInTheDocument();
   });
 
-  it("关闭按钮与遮罩都能关闭弹窗", () => {
+  it("关闭按钮与遮罩都能关闭弹窗", async () => {
     const onClose = jest.fn();
     render(
       <SearchModal keyword="k" results={[]} loading={false} error={null} truncated={false} onLocate={jest.fn()} onClose={onClose} />,
     );
     fireEvent.click(document.querySelector(".modal-backdrop-button")!);
-    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it("结果列表与定位按钮", () => {
@@ -211,8 +168,10 @@ describe("SearchModal", () => {
       <SearchModal keyword="k" results={[hit]} loading={false} error={null} truncated onLocate={onLocate} onClose={jest.fn()} />,
     );
     expect(screen.getByText(/仅显示前 1 项/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "定位" }));
-    expect(onLocate).toHaveBeenCalledWith(hit);
+    expect(document.querySelector(".search-result-item [data-icon=file]")).toBeInTheDocument();
+    const trigger = screen.getByRole("button", { name: "定位" });
+    fireEvent.click(trigger);
+    expect(onLocate).toHaveBeenCalledWith(hit, trigger);
   });
 });
 
@@ -237,39 +196,42 @@ describe("PackDialog", () => {
     expect(screen.getByRole("button", { name: "确认打包" })).toBeDisabled();
   });
 
-  it("输入输出名、勾选删除源文件、关闭与确认都回调", () => {
+  it("输入输出名、勾选删除源文件、关闭与确认都回调", async () => {
     const onClose = jest.fn();
     const onOutputNameChange = jest.fn();
     const onDeleteSourceChange = jest.fn();
     const onConfirm = jest.fn();
-    render(
-      <PackDialog
-        selectedCount={2}
-        packSize={100}
-        availableSpace={1000}
-        packOutputName=""
-        packDeleteSource={false}
-        packLoading={false}
-        packing={false}
-        onClose={onClose}
-        onOutputNameChange={onOutputNameChange}
-        onDeleteSourceChange={onDeleteSourceChange}
-        onConfirm={onConfirm}
-      />,
-    );
+    const props = {
+      selectedCount: 2,
+      packSize: 100,
+      availableSpace: 1000,
+      packOutputName: "",
+      packDeleteSource: false,
+      packLoading: false,
+      packing: false,
+      onClose,
+      onOutputNameChange,
+      onDeleteSourceChange,
+      onConfirm,
+    };
+    const view = render(<PackDialog {...props} />);
     fireEvent.change(screen.getByLabelText("输出文件名"), { target: { value: "备份.zip" } });
     expect(onOutputNameChange).toHaveBeenCalledWith("备份.zip");
     fireEvent.click(screen.getByLabelText("打包后删除源文件"));
     expect(onDeleteSourceChange).toHaveBeenCalledWith(true);
-    fireEvent.click(screen.getByRole("button", { name: "确认打包" }));
-    expect(onConfirm).toHaveBeenCalled();
+    const confirm = screen.getByRole("button", { name: "确认打包" });
+    fireEvent.click(confirm);
+    expect(onConfirm).toHaveBeenCalledWith(confirm);
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+
+    // onClose 后真实页面会卸载；每个入口都用新实例验证，不复用 closing 状态的弹窗。
+    view.rerender(<PackDialog key="title-close" {...props} />);
     fireEvent.click(screen.getByRole("button", { name: "关闭打包弹窗" }));
     expect(onClose).toHaveBeenCalledTimes(2);
-    // 点遮罩也走同一条关闭路径。
+    view.rerender(<PackDialog key="backdrop-close" {...props} />);
     fireEvent.click(document.querySelector(".modal-backdrop-button")!);
-    expect(onClose).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(3));
   });
 
   it("打包中禁用所有操作并显示创建中", () => {
@@ -423,10 +385,15 @@ describe("CreateShareDialog", () => {
   it("关闭按钮与关闭链接按钮都通知关闭", async () => {
     createShareMock.mockResolvedValue({ id: 6, code: "Cls", has_password: false });
     const onClose = jest.fn();
-    withProviders(<CreateShareDialog userFileId={3} fileName="f.txt" onClose={onClose} />);
+    const view = withProviders(<CreateShareDialog userFileId={3} fileName="f.txt" onClose={onClose} />);
     fireEvent.click(screen.getByRole("button", { name: "关闭创建分享" }));
     expect(onClose).toHaveBeenCalledTimes(1);
 
+    view.rerender(
+      <ToastProvider>
+        <CreateShareDialog key="created-result" userFileId={3} fileName="f.txt" onClose={onClose} />
+      </ToastProvider>,
+    );
     fireEvent.click(screen.getByRole("button", { name: "创建分享" }));
     await screen.findByLabelText("分享链接");
     fireEvent.click(screen.getByRole("button", { name: "关闭" }));
@@ -444,45 +411,5 @@ describe("CreateShareDialog", () => {
     await screen.findByLabelText("分享链接");
     expect(onCreated).toHaveBeenCalledWith(share);
     expect(await screen.findByText("分享创建成功")).toBeInTheDocument();
-  });
-});
-
-describe("PackTaskCard", () => {
-  it("读取最近打包任务并渲染", async () => {
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/packs?limit=50") {
-        return json(200, {
-          items: [{
-            id: 1, status: "done", step: null, step_progress: 100, step_started_at_ms: null,
-            created_at_ms: 1, updated_at_ms: 1, finished_at_ms: 2, error_code: null,
-            delete_source: false, output_name: "archive.zip", output: { user_file_id: 9, display_name: "archive.zip", size: 2048 },
-          }],
-        });
-      }
-      return json(200, {});
-    });
-    withProviders(<PackTaskCard />);
-    await screen.findByText("打包任务");
-    fireEvent.click(screen.getByRole("button", { name: /打包任务/ }));
-    await screen.findByText("输出: 2.0 KB");
-  });
-
-  it("done 但产物为空显示产物已删除", async () => {
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/packs?limit=50") {
-        return json(200, {
-          items: [{
-            id: 2, status: "done", step: null, step_progress: 100, step_started_at_ms: null,
-            created_at_ms: 1, updated_at_ms: 1, finished_at_ms: 2, error_code: null,
-            delete_source: false, output_name: "archive.zip", output: null,
-          }],
-        });
-      }
-      return json(200, {});
-    });
-    withProviders(<PackTaskCard />);
-    await screen.findByText("打包任务");
-    fireEvent.click(screen.getByRole("button", { name: /打包任务/ }));
-    await screen.findByText("产物已删除");
   });
 });

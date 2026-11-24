@@ -1,5 +1,6 @@
 import { ModalOverlay } from "@/shared/components/ModalOverlay";
 import { formatBytes } from "@/shared/lib/format";
+import { requestModalClose } from "@/shared/ui/modalClose";
 
 type PackDialogProps = {
   selectedCount: number;
@@ -12,7 +13,7 @@ type PackDialogProps = {
   onClose: () => void;
   onOutputNameChange: (value: string) => void;
   onDeleteSourceChange: (value: boolean) => void;
-  onConfirm: () => void;
+  onConfirm: (trigger: Element) => void;
 };
 
 export function PackDialog({
@@ -33,8 +34,9 @@ export function PackDialog({
 
   return (
     <ModalOverlay
-      onClose={() => !packing && onClose()}
+      onClose={onClose}
       ariaLabel="创建打包任务"
+      closeDisabled={packing}
       contentClassName="batch-modal-content"
       contentStyle={{ maxWidth: "500px", width: "90%" }}
     >
@@ -42,7 +44,7 @@ export function PackDialog({
         <h2 className="m-0">打包</h2>
         <button
           type="button"
-          onClick={() => !packing && onClose()}
+          onClick={(event) => requestModalClose(event.currentTarget)}
           className="modal-close-btn"
           aria-label="关闭打包弹窗"
           disabled={packing}
@@ -110,7 +112,7 @@ export function PackDialog({
             <button
               type="button"
               className="button secondary"
-              onClick={onClose}
+              onClick={(event) => requestModalClose(event.currentTarget)}
               disabled={packing}
             >
               取消
@@ -118,7 +120,7 @@ export function PackDialog({
             <button
               type="button"
               className="button primary"
-              onClick={onConfirm}
+              onClick={(event) => onConfirm(event.currentTarget)}
               disabled={packing || hasInsufficientSpace}
             >
               {packing ? "创建中..." : "确认打包"}

@@ -1,4 +1,9 @@
 /* Sidebar */
+.app-shell,
+.workspace {
+  min-height: 100vh;
+}
+
 .sidebar {
   position: fixed;
   top: 16px;
@@ -21,7 +26,7 @@
 }
 
 .sidebar.expanded {
-  width: 260px;
+  width: 220px;
 }
 
 .sidebar-header {
@@ -132,13 +137,13 @@
 }
 
 .main-content.sidebar-expanded {
-  margin-left: 292px;
+  margin-left: 244px;
 }
 
 /* Override container for auth layout */
 .auth-container {
   width: 100%;
-  max-width: 1200px;
+  max-width: none;
   margin: 0 auto;
 }
 

@@ -1,6 +1,7 @@
-import { formatBytes } from "@/shared/lib/format";
+import { Icon } from "@/shared/components/Icon";
+import { formatAdminBytes } from "@/shared/lib/format";
 import type { UserView } from "../model";
-import { storageBarSegments, usageColor } from "../model";
+import { storageBarSegments } from "../model";
 
 type UsersTableProps = {
   users: UserView[];
@@ -11,96 +12,102 @@ type UsersTableProps = {
 
 function StorageCell({ user }: { user: UserView }) {
   const { usedPct, reservedPct } = storageBarSegments(user);
-  const usagePercent = user.usage_percent;
-  const reserved = user.reserved_bytes;
 
   return (
-    <div className="user-storage-cell">
-      <div className="user-storage-meta">
-        <span className="font-medium">
-          {formatBytes(user.used_bytes)} / {formatBytes(user.quota_bytes)}
-        </span>
-        <span className="muted text-xs">{usagePercent.toFixed(1)}%</span>
+    <>
+      <div className="admin-quota-top">
+        <strong>{formatAdminBytes(user.used_bytes)} / {formatAdminBytes(user.quota_bytes)}</strong>
+        <span>全站 {user.machine_share_percent.toFixed(1)}%</span>
       </div>
-      <div className="progress-container user-storage-bar" aria-label={`存储占用 ${usagePercent}%`}>
-        <div
-          className="progress-bar"
-          style={{
-            width: `${usedPct + reservedPct}%`,
-            background: usageColor(usagePercent),
-          }}
-        />
-        {reserved > 0 && (
-          <div
-            className="user-storage-reserved"
-            style={{
-              left: `${usedPct}%`,
-              width: `${reservedPct}%`,
-            }}
-          />
-        )}
+      <div className="admin-quota-meta">
+        <span>可用 {formatAdminBytes(user.available_bytes)}</span>
+        <span>预留 {formatAdminBytes(user.reserved_bytes)}</span>
       </div>
-      <div className="user-storage-sub muted text-xs">
-        可用 {formatBytes(user.available_bytes)}
-        {reserved > 0 ? ` · 冻结 ${formatBytes(reserved)}` : ""}
-        {` · 全站 ${user.machine_share_percent.toFixed(1)}%`}
+      <div
+        className="admin-quota-meter"
+        role="meter"
+        aria-label={`${user.username} 配额使用 ${user.usage_percent.toFixed(1)}%`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={user.usage_percent}
+      >
+        <span className="admin-quota-used" style={{ width: `${usedPct}%` }} />
+        <span className="admin-quota-reserved" style={{ width: `${reservedPct}%` }} />
       </div>
-    </div>
+    </>
   );
 }
 
 export function UsersTable({ users, currentUserId, onEdit, onDelete }: UsersTableProps) {
+  const totalUsed = users.reduce((sum, user) => sum + user.used_bytes, 0);
+  const totalQuota = users.reduce((sum, user) => sum + user.quota_bytes, 0);
+
   return (
-    <div className="card p-0 overflow-hidden users-table-wrapper">
-      <table className="table text-left">
-        <thead className="table-header">
-          <tr>
-            <th className="table-cell">ID</th>
-            <th className="table-cell">用户名</th>
-            <th className="table-cell">角色</th>
-            <th className="table-cell">存储</th>
-            <th className="table-cell text-right">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          {users.map((u) => (
-            <tr key={u.id} className="table-row">
-              <td className="table-cell" data-label="ID">{u.id}</td>
-              <td className="table-cell font-medium" data-label="用户名">{u.username}</td>
-              <td className="table-cell" data-label="角色">
-                {u.is_admin ? (
-                  <span className="badge active">管理员</span>
-                ) : (
-                  <span className="badge">用户</span>
-                )}
-              </td>
-              <td className="table-cell" data-label="存储">
-                <StorageCell user={u} />
-              </td>
-              <td className="table-cell text-right">
-                <div className="flex gap-2 flex-end">
-                  <button
-                    type="button"
-                    onClick={() => onEdit(u)}
-                    className="button secondary btn-sm"
-                  >
-                    编辑
-                  </button>
-                  {u.id !== currentUserId && (
-                    <button
-                      type="button"
-                      onClick={() => onDelete(u)}
-                      className="button secondary danger btn-sm"
-                    >
-                      删除
-                    </button>
-                  )}
-                </div>
-              </td>
+    <section className="panel admin-table-panel" aria-label="用户列表">
+      <div className="admin-table-scroll">
+        <table className="admin-table admin-user-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>用户名</th>
+              <th>角色</th>
+              <th>存储用量 / 配额 / 可用 / 全站占比</th>
+              <th>操作</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody>
+            {users.map((user) => {
+              const current = user.id === currentUserId;
+              return (
+                <tr key={user.id}>
+                  <td>{user.id}</td>
+                  <td>
+                    <div className="admin-user-name">
+                      <strong>{user.username}</strong>
+                      {current && <span className="admin-self-label">当前账号</span>}
+                    </div>
+                  </td>
+                  <td>
+                    <span className={`status-badge${user.is_admin ? " status-active" : ""}`}>
+                      <Icon name={user.is_admin ? "shield" : "user"} className="icon-sm" />
+                      {user.is_admin ? "管理员" : "普通用户"}
+                    </span>
+                  </td>
+                  <td className="admin-quota-cell"><StorageCell user={user} /></td>
+                  <td>
+                    <div className="row-actions">
+                      <button
+                        className="icon-btn"
+                        type="button"
+                        onClick={() => onEdit(user)}
+                        aria-label={`编辑用户 ${user.username}`}
+                        title="编辑"
+                      >
+                        <Icon name="edit" className="icon-sm" />
+                      </button>
+                      {!current && (
+                        <button
+                          className="icon-btn danger"
+                          type="button"
+                          onClick={() => onDelete(user)}
+                          aria-label={`删除用户 ${user.username}`}
+                          title="删除"
+                        >
+                          <Icon name="trash" className="icon-sm" />
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="admin-table-footer">
+        <span>共 {users.length} 个用户</span>
+        <span>已使用 {formatAdminBytes(totalUsed)} · 配额合计 {formatAdminBytes(totalQuota)}</span>
+      </div>
+    </section>
   );
 }

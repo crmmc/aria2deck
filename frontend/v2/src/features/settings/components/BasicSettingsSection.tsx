@@ -1,78 +1,79 @@
+import type { MachineStatsResponse } from "@/shared/api/types";
+
 import type { SettingsForm, SettingsFormSetter } from "../settingsForm";
+import { MachineDiskCard } from "./MachineDiskCard";
+import { NumberSettingField } from "./NumberSettingField";
 
 type BasicSettingsSectionProps = {
   form: Pick<
     SettingsForm,
     "siteTitle" | "maxTaskSizeGib" | "minFreeDiskGib" | "historyRetentionDays"
   >;
+  machineStats?: MachineStatsResponse | null;
   onFieldChange: SettingsFormSetter;
 };
 
-export function BasicSettingsSection({ form, onFieldChange }: BasicSettingsSectionProps) {
+export function BasicSettingsSection({
+  form,
+  machineStats,
+  onFieldChange,
+}: BasicSettingsSectionProps) {
   return (
-    <>
-      <h2 className="section-title">系统配置</h2>
-
-      <div className="mb-6">
-        <label className="form-label-lg" htmlFor="settings-site-title">网站标题</label>
-        <p className="muted text-sm mb-2">自定义网站标题，显示在侧边栏和页面标题中。留空使用默认值。</p>
-        <input
-          id="settings-site-title"
-          className="input"
-          type="text"
-          value={form.siteTitle}
-          onChange={(e) => onFieldChange("siteTitle", e.target.value)}
-          placeholder="Aria2 控制器"
-          maxLength={100}
-          aria-label="网站标题"
-        />
+    <section id="settings-basic" tabIndex={-1} className="admin-settings-section" aria-label="基础设置">
+      <div className="settings-section-head">
+        <h2>基础设置</h2>
+        <p>站点名称、任务限制和历史记录保留策略。</p>
       </div>
 
-      <div className="mb-6">
-        <label className="form-label-lg" htmlFor="settings-max-task-size">最大任务大小 (GB)</label>
-        <p className="muted text-sm mb-2">超过此大小的任务将被拒绝。</p>
-        <input
+      {machineStats && <MachineDiskCard stats={machineStats} />}
+
+      <div className="form-grid">
+        <div className="field span-2">
+          <label className="field-label" htmlFor="settings-site-title">网站标题</label>
+          <p className="field-hint">显示在导航和浏览器标题中。留空使用默认值。</p>
+          <input
+            id="settings-site-title"
+            className="input"
+            type="text"
+            value={form.siteTitle}
+            onChange={(event) => onFieldChange("siteTitle", event.target.value)}
+            placeholder="Aria2 控制器"
+            maxLength={100}
+            aria-label="网站标题"
+          />
+          <p className="field-error" data-error-for="siteTitle" />
+        </div>
+        <NumberSettingField
           id="settings-max-task-size"
-          className="input"
-          type="number"
-          step="any"
-          min="0"
+          label="最大任务大小"
+          description="超过此大小的任务将被拒绝。"
           value={form.maxTaskSizeGib}
-          onChange={(e) => onFieldChange("maxTaskSizeGib", e.target.value)}
-          aria-label="最大任务大小 (GB)"
-        />
-      </div>
-
-      <div className="mb-6">
-        <label className="form-label-lg" htmlFor="settings-min-disk-space">最小剩余磁盘空间 (GB)</label>
-        <p className="muted text-sm mb-2">如果剩余空间低于此值，将停止接受新任务。</p>
-        <input
-          id="settings-min-disk-space"
-          className="input"
-          type="number"
+          min={0}
           step="any"
-          min="0"
+          unit="GB"
+          onChange={(value) => onFieldChange("maxTaskSizeGib", value)}
+        />
+        <NumberSettingField
+          id="settings-min-disk-space"
+          label="最小剩余磁盘空间"
+          description="剩余空间低于此值时停止接受新任务。"
           value={form.minFreeDiskGib}
-          onChange={(e) => onFieldChange("minFreeDiskGib", e.target.value)}
-          aria-label="最小剩余磁盘空间 (GB)"
+          min={0}
+          step="any"
+          unit="GB"
+          onChange={(value) => onFieldChange("minFreeDiskGib", value)}
         />
-      </div>
-
-      <div className="mb-7">
-        <label className="form-label-lg" htmlFor="settings-history-retention-days">历史保留天数</label>
-        <p className="muted text-sm mb-2">超过保留期的失败/取消历史将软过期，不可再重试。最小 1 天。</p>
-        <input
+        <NumberSettingField
           id="settings-history-retention-days"
-          className="input"
-          type="number"
-          step="1"
-          min="1"
-          max="3650"
+          label="历史保留天数"
+          description="超过保留期的失败/取消历史将软过期，不可再重试。"
           value={form.historyRetentionDays}
-          onChange={(e) => onFieldChange("historyRetentionDays", e.target.value)}
-          aria-label="历史保留天数"
+          min={1}
+          max={3650}
+          unit="天"
+          onChange={(value) => onFieldChange("historyRetentionDays", value)}
         />
       </div>
-    </>
+    </section>
   );
 }

@@ -1,10 +1,20 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { gsap } from "gsap";
 import { MemoryRouter } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
 import { FilesPage } from "@/features/files/FilesPage";
 import type { UserResponse } from "@/shared/api/types";
 
+jest.mock("gsap", () => ({
+  gsap: {
+    killTweensOf: jest.fn(),
+    set: jest.fn(),
+    to: jest.fn(),
+  },
+}));
+
+const toMock = jest.mocked(gsap.to);
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
@@ -64,7 +74,7 @@ function renderPage() {
   );
 }
 
-const toolbar = () => document.querySelector(".filter-toolbar") as HTMLElement;
+const bulkBar = () => document.querySelector(".bulk-bar") as HTMLElement;
 
 let originalShowModal: HTMLDialogElement["showModal"] | undefined;
 let originalClose: HTMLDialogElement["close"] | undefined;
@@ -115,18 +125,18 @@ describe("FilesPage 排序", () => {
     await screen.findByText("b.txt");
 
     const headers = () => Array.from(document.querySelectorAll(".sortable-header"));
-    const icons = () => headers().map((el) => el.querySelector(".sort-icon")?.textContent);
-    expect(icons()).toEqual(["↕", "↕", "↓"]);
+    const icons = () => headers().map((el) => el.querySelector(".sort-icon")?.getAttribute("data-icon"));
+    expect(icons()).toEqual(["sort", "sort", "chevron-down"]);
 
     // 点名称表头：切到 name-asc。
     fireEvent.click(headers()[0]);
     await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("name-asc"));
-    expect(icons()).toEqual(["↑", "↕", "↕"]);
+    expect(icons()).toEqual(["chevron-up", "sort", "sort"]);
 
     // 再点同一个：方向翻转。
     fireEvent.click(headers()[0]);
     await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("name-desc"));
-    expect(icons()).toEqual(["↓", "↕", "↕"]);
+    expect(icons()).toEqual(["chevron-down", "sort", "sort"]);
 
     // 点大小表头：字段切换，非名称字段默认降序。
     fireEvent.click(headers()[1]);
@@ -174,8 +184,53 @@ describe("FilesPage 搜索", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     await screen.findByText("搜索 “abc”");
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent(screen.getByRole("dialog", { name: "搜索结果" }), new Event("cancel", { cancelable: true }));
     await waitFor(() => expect(screen.queryByText("搜索 “abc”")).not.toBeInTheDocument());
+  });
+
+  it("Escape 只由 ModalOverlay 退出，完成前不卸载且不重复关闭", async () => {
+    setup((url) => {
+      if (url.includes("search=")) return { hits: [], truncated: false };
+      return filesEnvelope([fileItem(1, "a.txt")]);
+    });
+    renderPage();
+    await screen.findByText("a.txt");
+    fireEvent.change(screen.getByLabelText("搜索文件"), { target: { value: "abc" } });
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
+    const dialog = await screen.findByRole("dialog", { name: "搜索结果" });
+    const reducedMotion = window.matchMedia;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: jest.fn(() => ({ matches: false })),
+    });
+    toMock.mockClear();
+    try {
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(screen.getByRole("dialog", { name: "搜索结果" })).toBe(dialog);
+      expect(toMock).not.toHaveBeenCalled();
+
+      fireEvent(dialog, new Event("cancel", { cancelable: true }));
+      expect(screen.getByRole("dialog", { name: "搜索结果" })).toBe(dialog);
+      expect(toMock).toHaveBeenCalledTimes(1);
+      fireEvent(dialog, new Event("cancel", { cancelable: true }));
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(toMock).toHaveBeenCalledTimes(1);
+
+      const exitCall: unknown = toMock.mock.calls[0];
+      const exitValue: unknown = Array.isArray(exitCall) ? exitCall[1] : undefined;
+      if (typeof exitValue !== "object" || exitValue === null) throw new Error("未捕获退出动画");
+      const exitVars = exitValue as gsap.TweenVars;
+      act(() => exitVars.onComplete?.());
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "搜索结果" })).not.toBeInTheDocument());
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        writable: true,
+        value: reducedMotion,
+      });
+      toMock.mockClear();
+    }
   });
 
   it("Ctrl/Cmd+F 把焦点移到搜索框", async () => {
@@ -217,7 +272,7 @@ describe("FilesPage 搜索", () => {
     expect(searchUrls[0]).toContain("scope=2");
 
     // 关闭弹窗后开启全局搜索。
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent(screen.getByRole("dialog", { name: "搜索结果" }), new Event("cancel", { cancelable: true }));
     await waitFor(() => expect(screen.queryByText("搜索 “x”")).not.toBeInTheDocument());
     fireEvent.click(screen.getByLabelText("全局"));
     fireEvent.click(screen.getByRole("button", { name: "查询" }));
@@ -547,9 +602,9 @@ describe("FilesPage 批量操作", () => {
     setup(() => filesEnvelope([fileItem(1, "a.txt"), fileItem(2, "b.txt")]));
     renderPage();
     await screen.findByText("a.txt");
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "全选" }));
-    await waitFor(() => expect(within(toolbar()).getByText(/已选 2 项/)).toBeInTheDocument());
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "取消全选" }));
+    fireEvent.click(screen.getByLabelText("全选"));
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 2 项"));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "取消选择" }));
     await waitFor(() => expect(screen.queryByText(/已选 /)).not.toBeInTheDocument());
   });
 
@@ -559,9 +614,22 @@ describe("FilesPage 批量操作", () => {
     await screen.findByText("a.txt");
     const checkbox = screen.getAllByLabelText("选择文件")[0];
     fireEvent.click(checkbox);
-    await waitFor(() => expect(within(toolbar()).getByText("已选 1 项 (100.0 B)")).toBeInTheDocument());
+    await waitFor(() => {
+      expect(bulkBar()).toHaveTextContent("已选 1 项");
+      expect(bulkBar()).toHaveTextContent("100.0 B");
+    });
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
     await waitFor(() => expect(screen.queryByText(/已选 /)).not.toBeInTheDocument());
+  });
+
+  it("页面卸载时清理 body 中的悬浮条 portal", async () => {
+    setup(() => filesEnvelope([fileItem(1, "a.txt")]));
+    const { unmount } = renderPage();
+    await screen.findByText("a.txt");
+    fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
+    expect(document.querySelector(".file-bulk-layer")).not.toBeNull();
+    unmount();
+    expect(document.querySelector(".file-bulk-layer")).toBeNull();
   });
 
   it("批量删除实际删除整页后回退页码", async () => {
@@ -584,10 +652,11 @@ describe("FilesPage 批量操作", () => {
     fireEvent.click(screen.getByRole("button", { name: "上一页" }));
     await screen.findByText("a.txt");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "批量删除" }));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
     expect(await screen.findByText("已删除 1 个文件")).toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector(".bulk-bar")).toBeNull());
   });
 
   it("批量删除部分失败给出警告", async () => {
@@ -608,7 +677,7 @@ describe("FilesPage 批量操作", () => {
     await screen.findByText("a.txt");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
     fireEvent.click(screen.getAllByLabelText("选择文件")[1]);
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "批量删除" }));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
     expect(await screen.findByText("已受理 1 个文件，1 个删除失败")).toBeInTheDocument();
@@ -624,10 +693,35 @@ describe("FilesPage 批量操作", () => {
     renderPage();
     await screen.findByText("a.txt");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "批量删除" }));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
     expect(await screen.findByText("删除失败: 服务器错误")).toBeInTheDocument();
+  });
+
+  it("批量删除忙碌时禁用悬浮条操作，完成后恢复", async () => {
+    let resolveDelete: ((value: unknown) => void) | undefined;
+    setup((url, init) => {
+      if (url === "/api/v2/files" && init?.method === "DELETE") {
+        return new Promise((resolve) => { resolveDelete = resolve; });
+      }
+      return filesEnvelope([fileItem(1, "a.txt")]);
+    });
+    renderPage();
+    await screen.findByText("a.txt");
+    fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "删除" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
+    expect(await screen.findByRole("button", { name: "删除中..." })).toBeDisabled();
+    expect(within(bulkBar()).getByRole("button", { name: "批量下载" })).toBeDisabled();
+    expect(within(bulkBar()).getByRole("button", { name: "打包" })).toBeDisabled();
+    await act(async () => {
+      resolveDelete?.({ accepted_count: 1, rejected_count: 0, results: [{ file_id: 1, accepted: true, error: null }] });
+      await Promise.resolve();
+    });
+    expect(await screen.findByText("已删除 1 个文件")).toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector(".bulk-bar")).toBeNull());
   });
 
   it("批量下载通知开始与完成", async () => {
@@ -635,7 +729,7 @@ describe("FilesPage 批量操作", () => {
     renderPage();
     await screen.findByText("a.txt");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "批量下载" }));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "批量下载" }));
     expect(await screen.findByText("已完成 1 个文件的下载触发")).toBeInTheDocument();
   });
 
@@ -644,7 +738,7 @@ describe("FilesPage 批量操作", () => {
     renderPage();
     await screen.findByText("素材");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "批量下载" }));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "批量下载" }));
     expect(
       await screen.findByText("当前选择包含文件夹，无法批量下载，请先打包后下载"),
     ).toBeInTheDocument();
@@ -660,7 +754,7 @@ describe("FilesPage 批量操作", () => {
     renderPage();
     await screen.findByText("a.txt");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "打包" }));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "打包" }));
     expect(await screen.findByText("获取信息失败: 预计算失败")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "创建打包任务" })).not.toBeInTheDocument());
   });
@@ -678,7 +772,7 @@ describe("FilesPage 批量操作", () => {
     renderPage();
     await screen.findByText("a.txt");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "打包" }));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "打包" }));
     await screen.findByRole("dialog", { name: "创建打包任务" });
     // 预计算返回后确认按钮才可用（加载态只有「计算中...」）。
     fireEvent.click(await screen.findByRole("button", { name: "确认打包" }));
@@ -696,7 +790,7 @@ describe("FilesPage 批量操作", () => {
     renderPage();
     await screen.findByText("a.txt");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "打包" }));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "打包" }));
     await screen.findByRole("dialog", { name: "创建打包任务" });
     fireEvent.click(screen.getByRole("button", { name: "关闭打包弹窗" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "创建打包任务" })).not.toBeInTheDocument());
@@ -834,16 +928,34 @@ describe("FilesPage 目录浏览", () => {
     fireEvent.click(screen.getByRole("button", { name: "浏览" }));
     await screen.findByText("a.png");
 
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "全选" }));
-    await waitFor(() => expect(within(toolbar()).getByText("已选 2 项")).toBeInTheDocument());
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "取消全选" }));
+    fireEvent.click(screen.getByLabelText("全选"));
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 2 项"));
+    expect(bulkBar()).toHaveTextContent("2.0 KB");
+    expect(within(bulkBar()).queryByRole("button", { name: "打包" })).not.toBeInTheDocument();
+    expect(within(bulkBar()).queryByRole("button", { name: "删除" })).not.toBeInTheDocument();
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "取消选择" }));
     await waitFor(() => expect(screen.queryByText(/已选 /)).not.toBeInTheDocument());
 
     // 只选文件后批量下载。
     fireEvent.click(screen.getAllByLabelText("选择文件")[1]);
-    await waitFor(() => expect(within(toolbar()).getByText("已选 1 项")).toBeInTheDocument());
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "批量下载" }));
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 1 项"));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "批量下载" }));
     expect(await screen.findByText("已完成 1 个文件的下载触发")).toBeInTheDocument();
+  });
+
+  it("根目录选择在进入文件夹后清理，不跨选择域残留", async () => {
+    setup(dirListing);
+    renderPage();
+    await screen.findByText("素材");
+    fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
+    expect(document.querySelector(".bulk-bar")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "浏览" }));
+    await screen.findByText("a.png");
+    expect(document.querySelector(".bulk-bar")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /根目录/ }));
+    await screen.findByText("素材");
+    expect(document.querySelector(".bulk-bar")).toBeNull();
+    expect(screen.getByLabelText("选择文件")).not.toBeChecked();
   });
 
   it("目录内选中文件夹时批量下载被拒绝", async () => {
@@ -854,7 +966,7 @@ describe("FilesPage 目录浏览", () => {
     await screen.findByText("a.png");
     // 第一个复选框对应目录项。
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "批量下载" }));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "批量下载" }));
     expect(
       await screen.findByText("当前选择包含文件夹，无法批量下载，请仅选择文件"),
     ).toBeInTheDocument();
@@ -926,7 +1038,7 @@ describe("FilesPage 目录浏览", () => {
 
 describe("FilesPage 打包任务完成回调", () => {
   it("打包任务完成后重新拉取根列表", async () => {
-    // PackTaskCard 内部的完成回调会触发 FilesPage 的 loadFiles。
+    // PackEntryButton 内部的完成回调会触发 FilesPage 的 loadFiles。
     setup((url) => {
       if (url === "/api/v2/packs?limit=50") {
         return { items: [{ id: 1, status: "packing", step: "compressing", step_progress: 10, step_started_at_ms: null, created_at_ms: 1, updated_at_ms: 1, finished_at_ms: null, error_code: null, delete_source: false, output_name: "a.zip", output: null }] };
@@ -1041,7 +1153,7 @@ describe("FilesPage 竞态与边界", () => {
     fireEvent.click(screen.getByRole("button", { name: "下一页" }));
     await screen.findByText("末页.txt");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "批量删除" }));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
     await screen.findByText("已删除 1 个文件");
@@ -1054,7 +1166,7 @@ describe("FilesPage 竞态与边界", () => {
     renderPage();
     await screen.findByText("a.txt");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    fireEvent.click(within(toolbar()).getByRole("button", { name: "批量删除" }));
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
@@ -1132,7 +1244,7 @@ describe("FilesPage 目录内翻页与选中切换", () => {
     await screen.findByText("第1页.txt");
 
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    await waitFor(() => expect(within(toolbar()).getByText(/已选 1 项/)).toBeInTheDocument());
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 1 项"));
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
     await waitFor(() => expect(screen.queryByText(/已选 /)).not.toBeInTheDocument());
   });
@@ -1387,7 +1499,7 @@ describe("FilesPage 跨文件夹定位", () => {
     expect(crumb).toContain("根目录");
     expect(crumb.split("别的素材")).toHaveLength(3);
     // 面包屑第一段不再是原来进入的「素材」文件夹名。
-    expect(crumb.startsWith("📁根目录/别的素材")).toBe(true);
+    expect(crumb.startsWith("根目录/别的素材")).toBe(true);
   });
 });
 
@@ -1430,7 +1542,7 @@ describe("FilesPage 打包任务完成后的刷新", () => {
         mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v2/files?")).length;
       const before = listCalls();
 
-      // PackTaskCard 每 2s 轮询；第二轮返回 done 后触发 FilesPage 重新拉列表。
+      // PackEntryButton 每 2s 轮询；第二轮返回 done 后触发 FilesPage 重新拉列表。
       await act(async () => {
         jest.advanceTimersByTime(2000);
         await Promise.resolve();

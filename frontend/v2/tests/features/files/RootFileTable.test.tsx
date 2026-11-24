@@ -28,7 +28,7 @@ function baseProps() {
     downloadingFile: null as number | null,
     highlightUserFileId: null as number | null,
     onSort: jest.fn(),
-    getSortIcon: jest.fn(() => "↕"),
+    getSortIcon: jest.fn(() => "none" as const),
     onToggleSelectAll: jest.fn(),
     onToggleFileSelection: jest.fn(),
     onNewNameChange: jest.fn(),
@@ -68,6 +68,8 @@ describe("RootFileTable 桌面表格", () => {
     expect(screen.getByText("a.txt")).toBeInTheDocument();
     expect(screen.getByText("2.0 KB")).toBeInTheDocument();
     expect(screen.getAllByText("2026/11/19 09:05")).toHaveLength(2);
+    expect(document.querySelector(".file-table-head")?.textContent).toContain("操作");
+    expect(document.querySelectorAll(".file-row")).toHaveLength(2);
 
     fireEvent.click(screen.getByRole("button", { name: /名称/ }));
     expect(props.onSort).toHaveBeenCalledWith("name");
@@ -168,10 +170,10 @@ describe("RootFileTable 桌面表格", () => {
 
   it("高亮命中行带 data-file-id 与 aria-current", () => {
     render(<RootFileTable {...baseProps()} highlightUserFileId={2} />);
-    const highlighted = document.querySelector('[data-file-id="2"] .table-row');
+    const highlighted = document.querySelector('[data-file-id="2"]');
     expect(highlighted?.className).toContain("file-locate-highlight");
     expect(highlighted?.getAttribute("aria-current")).toBe("true");
-    expect(document.querySelector('[data-file-id="1"] .table-row')?.getAttribute("aria-current")).toBeNull();
+    expect(document.querySelector('[data-file-id="1"]')?.getAttribute("aria-current")).toBeNull();
   });
 });
 

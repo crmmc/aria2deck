@@ -1,9 +1,10 @@
 /* Keep original globals */
 :root {
+  color-scheme: light;
   --background: #fbfbfd;
   --foreground: #1d1d1f;
-  --card-bg: rgba(255, 255, 255, 0.65);
-  --card-border: rgba(255, 255, 255, 0.8);
+  --card-bg: rgba(255, 255, 255, 0.5);
+  --card-border: rgba(255, 255, 255, 0.4);
   --primary: #0071e3;
   --primary-hover: #0077ed;
   --danger: #ff3b30;
@@ -11,8 +12,15 @@
   --warning: #ff9500;
   --info: #0a84ff;
   --gray: #8e8e93;
-  --muted: #86868b;
+  --muted: #67676c;
+  --faint: #737379;
+  --border: rgba(0, 0, 0, 0.075);
   --glass-blur: blur(25px) saturate(180%);
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --r-shell: 28px;
+  --r-panel: 20px;
+  --r-control: 14px;
+  --r-inner: 12px;
 
   /* Spacing scale */
   --space-1: 4px;
@@ -44,8 +52,10 @@
 body {
   margin: 0;
   font-family:
-    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
-    Helvetica, Arial, sans-serif;
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
   background: var(--background);
   color: var(--foreground);
   /* Vibrant fluid gradient background */
@@ -59,6 +69,18 @@ body {
   background-attachment: fixed;
   background-size: cover;
   min-height: 100vh;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--faint);
 }
 
 a {

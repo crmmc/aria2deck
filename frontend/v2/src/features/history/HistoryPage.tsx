@@ -1,11 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useToast } from "@/shared/components/toast-context";
 import { EmptyState } from "@/shared/components/EmptyState";
+import { Icon } from "@/shared/components/Icon";
 import { PaginationControls } from "@/shared/components/PaginationControls";
-import { ToolbarGroup, ToolbarSearchInput, ToolbarShell } from "@/shared/components/Toolbar";
+import { SegmentedControl, type SegmentedOption } from "@/shared/components/SegmentedControl";
+import { ToolbarSearchInput, ToolbarShell } from "@/shared/components/Toolbar";
+import { PageHeader } from "@/shared/components/PageHeader";
 import { useClipboard } from "@/shared/hooks/useClipboard";
 import { useSelection } from "@/shared/hooks/useSelection";
 
@@ -15,6 +18,14 @@ import { HistoryCard } from "./components/HistoryCard";
 
 const DEFAULT_PAGE_SIZE = 20;
 const SEARCH_DEBOUNCE_MS = 300;
+type HistoryFilterStatus = "all" | "completed" | "cancelled" | "failed";
+type HistoryCounts = Record<HistoryFilterStatus, number | null>;
+const INITIAL_HISTORY_COUNTS: HistoryCounts = {
+  all: null,
+  completed: null,
+  cancelled: null,
+  failed: null,
+};
 
 export function HistoryPage() {
   const { showToast, showConfirm } = useToast();
@@ -31,12 +42,14 @@ export function HistoryPage() {
     toggle: toggleRecordSelection,
     toggleAll: toggleAllRecords,
   } = useSelection<number>();
-  const [filterStatus, setFilterStatus] = useState<string>("all");
+  const [filterStatus, setFilterStatus] = useState<HistoryFilterStatus>("all");
+  const [filterCounts, setFilterCounts] = useState<HistoryCounts>(INITIAL_HISTORY_COUNTS);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [isBatchOperating, setIsBatchOperating] = useState(false);
   const mountedRef = useRef(true);
   const requestIdRef = useRef(0);
+  const countRequestIdRef = useRef(0);
 
   const loadHistory = useCallback(async () => {
     if (!mountedRef.current) return;
@@ -44,7 +57,7 @@ export function HistoryPage() {
     setLoading(true);
     try {
       const result = await fetchHistory(
-        filterStatus === "all" ? null : (filterStatus as "completed" | "cancelled" | "failed"),
+        filterStatus === "all" ? null : filterStatus,
         debouncedKeyword,
         currentPage,
         pageSize,
@@ -63,6 +76,27 @@ export function HistoryPage() {
     }
   }, [currentPage, pageSize, filterStatus, debouncedKeyword, showToast, setSelectedRecords]);
 
+  const loadHistoryCounts = useCallback(async () => {
+    const requestId = ++countRequestIdRef.current;
+    try {
+      const [all, completed, cancelled, failed] = await Promise.all([
+        fetchHistory(null, "", 1, 1),
+        fetchHistory("completed", "", 1, 1),
+        fetchHistory("cancelled", "", 1, 1),
+        fetchHistory("failed", "", 1, 1),
+      ]);
+      if (!mountedRef.current || requestId !== countRequestIdRef.current) return;
+      setFilterCounts({
+        all: all.total,
+        completed: completed.total,
+        cancelled: cancelled.total,
+        failed: failed.total,
+      });
+    } catch {
+      // 保留已有真实数量；首次失败继续显示未知标记，不伪造为 0。
+    }
+  }, []);
+
   useEffect(() => {
     const mounted = mountedRef;
     mounted.current = true;
@@ -74,6 +108,10 @@ export function HistoryPage() {
   useEffect(() => {
     loadHistory();
   }, [loadHistory]);
+
+  useEffect(() => {
+    void loadHistoryCounts();
+  }, [loadHistoryCounts]);
 
   // 搜索防抖：输入停止 300ms 后才触发后端查询；关键词真正变化时同步回到第 1 页，
   // 保证条件变化只发一笔"第 1 页 + 新条件"的请求（归档参考 原逻辑）
@@ -113,6 +151,7 @@ export function HistoryPage() {
           return next;
         });
         showToast("已删除该条历史记录", "success");
+        void loadHistoryCounts();
         // 当前页删空且非第 1 页时回退到上一页（页码变化会触发重新拉取）
         if (records.length === 1 && currentPage > 1) {
           setCurrentPage((page) => page - 1);
@@ -124,7 +163,7 @@ export function HistoryPage() {
         if (mountedRef.current) loadHistory();
       }
     },
-    [showToast, loadHistory, setSelectedRecords, records.length, currentPage],
+    [showToast, loadHistory, loadHistoryCounts, setSelectedRecords, records.length, currentPage],
   );
 
   const retryRecord = useCallback(
@@ -172,6 +211,7 @@ export function HistoryPage() {
           .filter((value): value is number => value !== null),
       );
       setSelectedRecords(new Set());
+      if (result.accepted_count > 0) void loadHistoryCounts();
       if (result.rejected_count > 0) {
         showToast(
           `已删除 ${result.accepted_count} 条，${result.rejected_count} 条删除失败`,
@@ -199,96 +239,79 @@ export function HistoryPage() {
     toggleAllRecords(records.map((r) => r.id));
   }, [toggleAllRecords, records]);
 
+  const filterOptions = useMemo<SegmentedOption<HistoryFilterStatus>[]>(
+    () => [
+      { value: "all", label: "全部", count: filterCounts.all },
+      { value: "completed", label: "已完成", count: filterCounts.completed },
+      { value: "cancelled", label: "已取消", count: filterCounts.cancelled },
+      { value: "failed", label: "失败", count: filterCounts.failed },
+    ],
+    [filterCounts],
+  );
+
   return (
     <div className="glass-frame full-height animate-in">
-      <div className="space-between mb-7">
-        <div>
-          <h1 className="text-2xl">任务历史</h1>
-          <p className="muted">查看已完成、取消和失败的下载任务</p>
-        </div>
-      </div>
+      <PageHeader title="任务历史" description="查看已完成、取消和失败的下载任务" />
 
-      <ToolbarShell>
-        <ToolbarGroup className="toolbar-actions-group">
-          <button type="button"
-            className="button secondary btn-sm"
-            onClick={toggleSelectAll}
-          >
-            {selectedCount === records.length && records.length > 0
-              ? "取消全选"
-              : "全选"}
-          </button>
-          {selectedCount > 0 && (
-            <>
-              <span className="muted text-sm">
-                已选 {selectedCount} 项
-              </span>
-              <button type="button"
+      <section className="panel list-panel" aria-label="任务历史列表">
+        <ToolbarShell className={selectedCount > 0 ? "is-bulk" : ""}>
+          <div className="toolbar-default" hidden={selectedCount > 0}>
+            <SegmentedControl
+              ariaLabel="历史筛选"
+              options={filterOptions}
+              value={filterStatus}
+              onChange={(status) => {
+                setFilterStatus(status);
+                setCurrentPage(1);
+              }}
+            />
+            <div className="toolbar-spacer" />
+            <label className="toolbar-label" htmlFor="history-search">搜索</label>
+            <ToolbarSearchInput
+              id="history-search"
+              ariaLabel="搜索历史"
+              placeholder="搜索任务"
+              value={searchKeyword}
+              onChange={setSearchKeyword}
+            />
+          </div>
+          <div className="toolbar-bulk" hidden={selectedCount === 0}>
+            <span className="bulk-count">已选 <strong>{selectedCount}</strong> 条记录</span>
+            <div className="bulk-actions">
+              <button type="button" className="button secondary btn-sm" onClick={toggleSelectAll}>
+                {selectedCount === records.length && records.length > 0 ? "取消全选" : "全选"}
+              </button>
+              <button
+                type="button"
                 className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
                 onClick={batchDeleteHistory}
                 disabled={isBatchOperating}
               >
+                <Icon name="trash" className="icon-sm" />
                 删除
               </button>
-            </>
-          )}
-        </ToolbarGroup>
-
-        <ToolbarGroup className="toolbar-select-group">
-          <span className="muted text-sm">筛选:</span>
-          <select
-            value={filterStatus}
-            onChange={(e) => {
-              setFilterStatus(e.target.value);
-              setCurrentPage(1);
-            }}
-            className="select"
-            aria-label="筛选历史"
-          >
-            <option value="all">全部</option>
-            <option value="completed">已完成</option>
-            <option value="cancelled">已取消</option>
-            <option value="failed">失败</option>
-          </select>
-        </ToolbarGroup>
-
-        <ToolbarGroup className="toolbar-search-group">
-          <ToolbarSearchInput
-            ariaLabel="搜索历史"
-            placeholder="搜索任务..."
-            value={searchKeyword}
-            onChange={setSearchKeyword}
-          />
-        </ToolbarGroup>
-      </ToolbarShell>
-
-      <div className="task-list">
-        {loading ? (
-          <div className="empty-state">
-            <p className="muted">加载中...</p>
+            </div>
           </div>
+        </ToolbarShell>
+        <div className="record-head">
+          <input
+            type="checkbox"
+            aria-label="选择全部历史记录"
+            checked={records.length > 0 && selectedCount === records.length}
+            onChange={toggleSelectAll}
+          />
+          <span>任务名称</span><span>状态</span><span>完成时间</span><span className="text-right">操作</span>
+        </div>
+        {loading ? (
+          <div className="empty-state"><p className="muted">加载中...</p></div>
         ) : records.length === 0 ? (
           <EmptyState
-            icon={
-              <svg
-                width="48"
-                height="48"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="12" cy="12" r="10" />
-                <polyline points="12 6 12 12 16 14" />
-              </svg>
-            }
+            icon={<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>}
             title="暂无历史记录"
             description="完成的下载任务将显示在这里"
           />
         ) : (
-          <div className="card task-card-container">
+          <div className="task-card-container task-list">
             {records.map((record) => (
               <HistoryCard
                 key={record.id}
@@ -302,7 +325,7 @@ export function HistoryPage() {
             ))}
           </div>
         )}
-      </div>
+      </section>
 
       {total > 0 && (
         <PaginationControls

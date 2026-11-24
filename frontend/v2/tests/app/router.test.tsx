@@ -74,6 +74,12 @@ function renderAt(path: string, me: UserResponse = ME) {
   mockFetch.mockReset();
   mockFetch.mockImplementation(async (url: string) => {
     if (url === "/api/v2/auth/me") return json(200, me);
+    if (url === "/api/v2/public/site-info") {
+      return json(200, {
+        site_title: "Aria2Deck", ws_reconnect_max_delay_seconds: 30,
+        ws_reconnect_jitter_seconds: 1, ws_reconnect_factor: 2,
+      });
+    }
     if (url === "/api/v2/system/status") {
       return json(200, { download_backend: { status: "ok", message: "" } });
     }
@@ -86,6 +92,15 @@ function renderAt(path: string, me: UserResponse = ME) {
     }
     if (url.startsWith("/api/v2/users")) return json(200, { items: [ME], total: 1, page: 1, page_size: 100 });
     if (url === "/api/v2/settings") return json(200, settingsBody());
+    if (url === "/api/v2/stats/machine") {
+      return json(200, {
+        total_bytes: 1000, used_bytes: 500, free_bytes: 500,
+        download_used_bytes: 200, system_used_bytes: 300,
+      });
+    }
+    if (url === "/api/v2/settings/aria2/version") {
+      return json(200, { connected: true, version: "1.37.0", features: [] });
+    }
     if (url === "/api/v2/trackers") {
       return json(200, {
         items: [], entry_count: 0, remote_items: [], refresh_status: "success",
@@ -177,7 +192,7 @@ describe("batch-3 routes", () => {
   it("renders admin pages for admins", async () => {
     renderAt("/users");
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "用户" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "用户管理" })).toBeInTheDocument();
     });
   });
 
@@ -188,11 +203,36 @@ describe("batch-3 routes", () => {
     });
   });
 
+  it.each([
+    ["/settings/basic", "基础设置"],
+    ["/settings/aria2", "aria2 后端"],
+    ["/settings/pack", "打包设置"],
+    ["/settings/realtime", "实时连接"],
+    ["/settings/tracker", "Tracker 列表"],
+    ["/settings/security", "安全与限流"],
+  ])("renders settings deep link %s", async (path, heading) => {
+    renderAt(path);
+    expect(await screen.findByRole("heading", { name: heading, level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: heading })).toHaveAttribute("aria-current", "page");
+  });
+
   it("renders the storage page for admins", async () => {
     renderAt("/storage");
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "存储管理" })).toBeInTheDocument();
     });
+  });
+
+  it("redirects non-admin users from settings without administrator data requests", async () => {
+    renderAt("/settings/security", { ...ME, is_admin: false });
+    expect(await screen.findByRole("heading", { name: "任务" })).toBeInTheDocument();
+    const adminRequests = mockFetch.mock.calls.map(([url]) => String(url)).filter((url) =>
+      url.startsWith("/api/v2/settings")
+      || url.startsWith("/api/v2/trackers")
+      || url === "/api/v2/stats/machine"
+      || url === "/api/v2/credentials/invalidate"
+    );
+    expect(adminRequests).toEqual([]);
   });
 
   it("redirects non-admin users from /users to /tasks", async () => {

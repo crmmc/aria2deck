@@ -140,18 +140,6 @@ export interface BackendStatusResponse {
 }
 
 /** 统一分页参数（§3.1：页码从 1 开始）。 */
-export interface PageQuery {
-  page: number;
-  page_size: number;
-}
-
-/** 统一批量响应（§3.1）。 */
-export interface BatchResult<T = unknown> {
-  accepted_count: number;
-  rejected_count: number;
-  results: T[];
-}
-
 /* ============ 文件库（FILE-02~08） ============ */
 
 export type FileKind = "file" | "directory";

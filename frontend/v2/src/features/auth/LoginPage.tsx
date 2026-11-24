@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 
-import { useAuth } from "@/app/hooks";
+import { useAuth } from "@/shared/auth/hooks";
 import { ApiRequestError } from "@/shared/api/client";
 import { passwordClientHash } from "@/shared/lib/crypto";
 import { useSiteTitle } from "@/shared/lib/siteTitle";

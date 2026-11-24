@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
-import { useAuth } from "@/app/hooks";
+import { useAuth } from "@/shared/auth/hooks";
 import { AppLayout } from "@/app/layouts/AppLayout";
 import { LoginPage } from "@/features/auth/LoginPage";
 import { TasksPage } from "@/features/tasks/TasksPage";
@@ -54,7 +54,7 @@ export function AppRouter() {
         <Route path="shares" element={<SharesPage />} />
         <Route path="profile" element={<ProfilePage />} />
         <Route path="users" element={<UsersPage />} />
-        <Route path="settings" element={<SettingsPage />} />
+        <Route path="settings/:section?" element={<SettingsPage />} />
         <Route path="storage" element={<StoragePage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>

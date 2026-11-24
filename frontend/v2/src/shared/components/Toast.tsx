@@ -3,7 +3,10 @@
 import { useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useMounted } from "@/shared/hooks/useMounted";
+import { AnimatedToast } from "@/shared/components/AnimatedToast";
 import { ModalOverlay } from "@/shared/components/ModalOverlay";
+import { ToastPortal } from "@/shared/components/ToastPortal";
+import { requestModalClose } from "@/shared/ui/modalClose";
 import {
   ToastContext,
   bindToastEmitter,
@@ -29,25 +32,12 @@ function getToastClass(type: ToastType): string {
   }
 }
 
-function getToastIcon(type: ToastType): string {
-  switch (type) {
-    case "success": return "✓";
-    case "error": return "✕";
-    case "warning": return "⚠";
-    default: return "ℹ";
-  }
-}
-
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const mounted = useMounted();
-  const toastTimersRef = useRef<Set<ReturnType<typeof setTimeout>> | null>(null);
-  if (toastTimersRef.current === null) {
-    toastTimersRef.current = new Set();
-  }
-  const toastTimers = toastTimersRef.current;
   const confirmRef = useRef<ConfirmState | null>(null);
+  const confirmResultRef = useRef(false);
   const confirmResolversRef = useRef<Set<ConfirmState["resolve"]> | null>(null);
   if (confirmResolversRef.current === null) {
     confirmResolversRef.current = new Set();
@@ -55,21 +45,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const confirmResolvers = confirmResolversRef.current;
 
   useEffect(() => {
-    return () => {
-      toastTimers.forEach(clearTimeout);
-      confirmResolvers.forEach((resolve) => resolve(false));
-    };
-  }, [toastTimers, confirmResolvers]);
+    return () => confirmResolvers.forEach((resolve) => resolve(false));
+  }, [confirmResolvers]);
 
   const showToast = useCallback((message: string, type: ToastType = "info") => {
     const id = ++toastId;
     setToasts((prev) => [...prev, { id, message, type }]);
-    const timer = setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-      toastTimers.delete(timer);
-    }, 3000);
-    toastTimers.add(timer);
-  }, [toastTimers]);
+  }, []);
 
   // 绑定模块级发射桥，供 providers 初始化等非 React 上下文弹 归档参考 样式 toast。
   useEffect(() => {
@@ -81,6 +63,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     return new Promise((resolve) => {
       const state = { ...options, resolve };
       confirmRef.current = state;
+      confirmResultRef.current = false;
       confirmResolvers.add(resolve);
       setConfirm(state);
     });
@@ -88,92 +71,75 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const handleConfirm = useCallback((result: boolean) => {
     const current = confirmRef.current;
-    current?.resolve(result);
-    if (current) {
-      confirmResolvers.delete(current.resolve);
-    }
+    if (!current) return;
     confirmRef.current = null;
+    confirmResolvers.delete(current.resolve);
     setConfirm(null);
+    current.resolve(result);
   }, [confirmResolvers]);
 
   const contextValue = useMemo(
     () => ({ showToast, showConfirm }),
-    [showToast, showConfirm]
+    [showToast, showConfirm],
   );
 
   return (
     <ToastContext.Provider value={contextValue}>
       {children}
       {typeof window !== "undefined" &&
-        mounted &&
-        createPortal(
+        mounted && (
           <>
-            <div className="toast-container">
+            <ToastPortal className="toast-container">
               {toasts.map((toast) => (
-                <div key={toast.id} className={`toast-item ${getToastClass(toast.type)}`}>
-                  <span className="toast-icon">{getToastIcon(toast.type)}</span>
-                  <span>{toast.message}</span>
-                </div>
+                <AnimatedToast
+                  key={toast.id}
+                  className={`toast-item ${getToastClass(toast.type)}`}
+                  message={toast.message}
+                  type={toast.type}
+                  duration={3000}
+                  onDismiss={() => setToasts((current) => current.filter((item) => item.id !== toast.id))}
+                />
               ))}
-            </div>
+            </ToastPortal>
 
-            {confirm && (
+            {confirm && createPortal(
               <ModalOverlay
-                onClose={() => handleConfirm(false)}
+                onClose={() => handleConfirm(confirmResultRef.current)}
                 ariaLabel={confirm.title || "确认操作"}
                 className="confirm-overlay"
                 contentClassName="confirm-content"
               >
-                  {confirm.title && (
-                    <h3 className="confirm-title">{confirm.title}</h3>
-                  )}
-                  <p className="confirm-message">{confirm.message}</p>
-                  <div className="flex gap-3 flex-end">
-                    <button type="button"
-                      className="button secondary"
-                      onClick={() => handleConfirm(false)}
-                    >
-                      {confirm.cancelText || "取消"}
-                    </button>
-                    <button type="button"
-                      className="button"
-                      style={confirm.danger ? { background: "var(--danger)" } : undefined}
-                      onClick={() => handleConfirm(true)}
-                    >
-                      {confirm.confirmText || "确定"}
-                    </button>
-                  </div>
-              </ModalOverlay>
+                {confirm.title && (
+                  <h3 className="confirm-title">{confirm.title}</h3>
+                )}
+                <p className="confirm-message">{confirm.message}</p>
+                <div className="flex gap-3 flex-end">
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={(event) => {
+                      confirmResultRef.current = false;
+                      requestModalClose(event.currentTarget);
+                    }}
+                  >
+                    {confirm.cancelText || "取消"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button"
+                    style={confirm.danger ? { background: "var(--danger)" } : undefined}
+                    onClick={(event) => {
+                      confirmResultRef.current = true;
+                      requestModalClose(event.currentTarget);
+                    }}
+                  >
+                    {confirm.confirmText || "确定"}
+                  </button>
+                </div>
+              </ModalOverlay>,
+              document.body,
             )}
-
-            <style>{`
-              @keyframes slideIn {
-                from {
-                  opacity: 0;
-                  transform: translateX(20px);
-                }
-                to {
-                  opacity: 1;
-                  transform: translateX(0);
-                }
-              }
-              @keyframes fadeIn {
-                from { opacity: 0; }
-                to { opacity: 1; }
-              }
-              @keyframes scaleIn {
-                from {
-                  opacity: 0;
-                  transform: scale(0.95);
-                }
-                to {
-                  opacity: 1;
-                  transform: scale(1);
-                }
-              }
-            `}</style>
-          </>,
-          document.body
+          </>
         )}
     </ToastContext.Provider>
   );

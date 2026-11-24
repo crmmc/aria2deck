@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import { DialogShell } from "@/shared/components/DialogShell";
+import { requestModalClose } from "@/shared/ui/modalClose";
 
 export type BatchFailure = { uri: string; reason: string };
 export type BatchFeedback =
@@ -12,7 +13,7 @@ type BatchAddTasksDialogProps = {
   isBatchAdding: boolean;
   feedback: BatchFeedback | null;
   onBatchUrisChange: (value: string) => void;
-  onSubmit: () => void;
+  onSubmit: (trigger: Element) => void;
   onCancel: () => void;
   onRetryFailed: () => void;
 };
@@ -48,12 +49,13 @@ export function BatchAddTasksDialog({
       onClose={onCancel}
       ariaLabel="批量添加任务"
       contentClassName="batch-modal-content"
+      closeDisabled={isBatchAdding}
     >
       <div className="modal-header">
         <h2 className="m-0">批量添加任务</h2>
         <button
           type="button"
-          onClick={onCancel}
+          onClick={(event) => requestModalClose(event.currentTarget)}
           className="modal-close-btn"
           aria-label="关闭批量添加任务"
           disabled={isBatchAdding}
@@ -97,7 +99,7 @@ export function BatchAddTasksDialog({
             >
               重试失败项
             </button>
-            <button type="button" className="button btn-task" onClick={onCancel}>
+            <button type="button" className="button btn-task" onClick={(event) => requestModalClose(event.currentTarget)}>
               完成
             </button>
           </div>
@@ -121,7 +123,7 @@ export function BatchAddTasksDialog({
             <button
               type="button"
               className="button secondary btn-task"
-              onClick={onCancel}
+              onClick={(event) => requestModalClose(event.currentTarget)}
               disabled={isBatchAdding}
             >
               取消
@@ -129,7 +131,7 @@ export function BatchAddTasksDialog({
             <button
               type="button"
               className="button btn-task"
-              onClick={onSubmit}
+              onClick={(event) => onSubmit(event.currentTarget)}
               disabled={isBatchAdding}
             >
               {isBatchAdding ? "添加中..." : "添加任务"}

@@ -1,6 +1,6 @@
 import { renderHook } from "@testing-library/react";
 
-import { useAuth, useToast } from "@/app/hooks";
+import { useAuth, useToast } from "@/shared/auth/hooks";
 
 describe("context hooks guard", () => {
   it("useAuth throws outside provider", () => {

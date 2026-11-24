@@ -43,7 +43,15 @@ function setup(handler: (url: string, init?: { method?: string; body?: string })
     if (url === "/api/v2/public/site-info") {
       return json(200, { site_title: "Aria2Deck", ws_reconnect_max_delay_seconds: 30, ws_reconnect_jitter_seconds: 1, ws_reconnect_factor: 2 });
     }
-    return json(200, handler(url, init));
+    const result = handler(url, init);
+    if (
+      typeof result === "object" &&
+      result !== null &&
+      typeof (result as { json?: unknown }).json === "function"
+    ) {
+      return result;
+    }
+    return json(200, result);
   });
 }
 
@@ -120,6 +128,11 @@ describe("HistoryPage（V1 历史页）", () => {
       });
       fireEvent.change(screen.getByLabelText("搜索历史"), { target: { value: "ubuntu" } });
       const callsBefore = mockFetch.mock.calls.length;
+      const countCallsBefore = mockFetch.mock.calls.filter(([url]) =>
+        String(url).startsWith("/api/v2/history?") && String(url).includes("page_size=1"),
+      ).length;
+      const header = document.querySelector(".page-header");
+      const section = document.querySelector("section[aria-label='任务历史列表']");
       act(() => jest.advanceTimersByTime(100));
       expect(mockFetch.mock.calls.length).toBe(callsBefore);
       await act(async () => {
@@ -128,6 +141,12 @@ describe("HistoryPage（V1 历史页）", () => {
       });
       const historyCalls = mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v2/history"));
       expect(historyCalls.some(([url]) => String(url).includes("q=ubuntu"))).toBe(true);
+      const countCallsAfter = mockFetch.mock.calls.filter(([url]) =>
+        String(url).startsWith("/api/v2/history?") && String(url).includes("page_size=1"),
+      ).length;
+      expect(countCallsAfter).toBe(countCallsBefore);
+      expect(document.querySelector(".page-header")).toBe(header);
+      expect(document.querySelector("section[aria-label='任务历史列表']")).toBe(section);
     } finally {
       jest.useRealTimers();
     }
@@ -137,7 +156,7 @@ describe("HistoryPage（V1 历史页）", () => {
     setup(() => listEnvelope([historyItem(1)]));
     renderPage();
     await screen.findByText("item-1.zip");
-    fireEvent.change(screen.getByLabelText("筛选历史"), { target: { value: "failed" } });
+    fireEvent.click(screen.getByRole("tab", { name: /^失败/ }));
     await waitFor(() => {
       const urls = mockFetch.mock.calls.map(([url]) => String(url));
       expect(urls.some((u) => u.includes("status=failed") && u.includes("page=1"))).toBe(true);
@@ -219,7 +238,7 @@ describe("HistoryPage（V1 历史页）", () => {
     setup(() => listEnvelope([historyItem(1), historyItem(2)]));
     renderPage();
     await screen.findByText("item-1.zip");
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByLabelText("选择全部历史记录"));
     expect(screen.getByLabelText("选择 item-1.zip")).toBeChecked();
     expect(screen.getByLabelText("选择 item-2.zip")).toBeChecked();
     fireEvent.click(screen.getByRole("button", { name: "取消全选" }));
@@ -280,12 +299,154 @@ describe("HistoryPage（V1 历史页）", () => {
       return listEnvelope([historyItem(77)]);
     });
     renderPage();
-    await screen.findByLabelText("筛选历史");
-    fireEvent.change(screen.getByLabelText("筛选历史"), { target: { value: "failed" } });
+    await screen.findByRole("tablist", { name: "历史筛选" });
+    fireEvent.click(screen.getByRole("tab", { name: /^失败/ }));
     await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
     holder.resolve?.(json(200, listEnvelope([historyItem(1)])));
     await screen.findByText("item-77.zip");
     expect(screen.queryByText("item-1.zip")).not.toBeInTheDocument();
+  });
+  it("用四个独立 page_size=1 请求读取真实总数，筛选不刷新数量或重建 section", async () => {
+    const totals = { all: 12, completed: 5, cancelled: 4, failed: 3 };
+    setup((url) => {
+      const parsed = new URL(String(url), "http://localhost");
+      const status = parsed.searchParams.get("status") ?? "all";
+      if (parsed.searchParams.get("page_size") === "1") {
+        return listEnvelope([], totals[status as keyof typeof totals]);
+      }
+      return status === "failed"
+        ? listEnvelope([historyItem(2, "failed")], 3)
+        : listEnvelope([historyItem(1)], 12);
+    });
+    renderPage();
+    await screen.findByText("item-1.zip");
+
+    expect(await screen.findByRole("tab", { name: "全部 12" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "已完成 5" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "已取消 4" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "失败 3" })).toBeInTheDocument();
+    const countCalls = mockFetch.mock.calls.filter(([url]) =>
+      String(url).startsWith("/api/v2/history?") && String(url).includes("page_size=1"),
+    );
+    expect(countCalls).toHaveLength(4);
+    expect(countCalls.map(([url]) => {
+      const parsed = new URL(String(url), "http://localhost");
+      return [parsed.searchParams.get("status"), parsed.searchParams.get("page"), parsed.searchParams.get("q")];
+    })).toEqual([[null, "1", null], ["completed", "1", null], ["cancelled", "1", null], ["failed", "1", null]]);
+
+    const header = document.querySelector(".page-header");
+    const section = document.querySelector("section[aria-label='任务历史列表']");
+    const listRoot = document.querySelector(".task-card-container");
+    fireEvent.click(screen.getByRole("tab", { name: "失败 3" }));
+    await screen.findByText("item-2.zip");
+    expect(mockFetch.mock.calls.filter(([url]) =>
+      String(url).startsWith("/api/v2/history?") && String(url).includes("page_size=1"),
+    )).toHaveLength(4);
+    expect(document.querySelector(".page-header")).toBe(header);
+    expect(document.querySelector("section[aria-label='任务历史列表']")).toBe(section);
+    expect(document.querySelector(".task-card-container")).toBe(listRoot);
+  });
+
+  it("四个分段分别读取并展示对应历史结果", async () => {
+    const allRecords = [
+      historyItem(1, "completed"),
+      historyItem(2, "cancelled"),
+      historyItem(3, "failed"),
+    ];
+    setup((url) => {
+      const parsed = new URL(String(url), "http://localhost");
+      const status = parsed.searchParams.get("status");
+      if (parsed.searchParams.get("page_size") === "1") {
+        return listEnvelope([], status === null ? 3 : 1);
+      }
+      const selected = status === null
+        ? allRecords
+        : allRecords.filter((record) => record.status === status);
+      return listEnvelope(selected, selected.length);
+    });
+    renderPage();
+    await screen.findByText("item-1.zip");
+
+    for (const [label, id] of [["已完成", 1], ["已取消", 2], ["失败", 3]] as const) {
+      fireEvent.click(screen.getByRole("tab", { name: `${label} 1` }));
+      await waitFor(() => {
+        expect(screen.getByText(`item-${id}.zip`)).toBeInTheDocument();
+        for (const otherId of [1, 2, 3]) {
+          if (otherId !== id) {
+            expect(screen.queryByText(`item-${otherId}.zip`)).not.toBeInTheDocument();
+          }
+        }
+      });
+    }
+    fireEvent.click(screen.getByRole("tab", { name: "全部 3" }));
+    await waitFor(() => {
+      expect(screen.getByText("item-1.zip")).toBeInTheDocument();
+      expect(screen.getByText("item-2.zip")).toBeInTheDocument();
+      expect(screen.getByText("item-3.zip")).toBeInTheDocument();
+    });
+  });
+
+  it("任一分类总数失败时保留未知标记，不伪造为 0", async () => {
+    setup((url) => {
+      const parsed = new URL(String(url), "http://localhost");
+      if (parsed.searchParams.get("page_size") === "1" && parsed.searchParams.get("status") === "completed") {
+        return json(500, { error: { code: "internal", message: "数量读取失败" } });
+      }
+      return listEnvelope([historyItem(1)], 8);
+    });
+    renderPage();
+    await screen.findByText("item-1.zip");
+
+    expect(await screen.findByRole("tab", { name: "全部 —" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "已完成 —" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "已取消 —" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "失败 —" })).toBeInTheDocument();
+  });
+
+  it("删除后刷新四个总数并丢弃上一轮过期响应", async () => {
+    const pendingCounts: Array<{ resolve: (value: unknown) => void }> = [];
+    setup((url, init) => {
+      if (url === "/api/v2/history" && init?.method === "DELETE") {
+        return {
+          items: [{ accepted: true, task: historyItem(1), outcome: null, error: null, stop_confirmed: null }],
+          accepted_count: 1,
+          rejected_count: 0,
+        };
+      }
+      const parsed = new URL(String(url), "http://localhost");
+      if (parsed.searchParams.get("page_size") === "1") {
+        return new Promise((resolve) => {
+          pendingCounts.push({ resolve });
+        });
+      }
+      return listEnvelope([historyItem(1)]);
+    });
+    renderPage();
+    await screen.findByText("item-1.zip");
+    await waitFor(() => expect(pendingCounts).toHaveLength(4));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+    await screen.findByText("已删除该条历史记录");
+    await waitFor(() => expect(pendingCounts).toHaveLength(8));
+    act(() => {
+      [9, 5, 2, 2].forEach((total, index) => {
+        pendingCounts[index + 4].resolve(listEnvelope([], total));
+      });
+    });
+    expect(await screen.findByRole("tab", { name: "全部 9" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "已完成 5" })).toBeInTheDocument();
+
+    act(() => {
+      [90, 50, 20, 20].forEach((total, index) => {
+        pendingCounts[index].resolve(listEnvelope([], total));
+      });
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("tab", { name: "全部 9" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "已完成 5" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "全部 90" })).not.toBeInTheDocument();
   });
 });
 
@@ -490,7 +651,7 @@ describe("HistoryPage 补齐分支", () => {
     await waitFor(() => {
       expect((screen.getByLabelText("选择 item-1.zip") as HTMLInputElement).checked).toBe(false);
     });
-    expect(screen.queryByText("已选 2 项")).not.toBeInTheDocument();
+    expect(document.querySelector(".bulk-count")?.textContent).not.toBe("已选 2 条记录");
   });
 
   it("批量删除请求抛错时提示并重新加载", async () => {
@@ -511,8 +672,11 @@ describe("HistoryPage 补齐分支", () => {
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
     expect(await screen.findByText("删除失败：服务器错误")).toBeInTheDocument();
-    // 失败后重新拉取列表并清空选中，批量删除按钮随之消失（不再是删除中）。
-    await waitFor(() => expect(within(toolbar).queryByText("删除")).not.toBeInTheDocument());
+    // 失败后重新拉取列表并清空选中，批量层隐藏且不再是删除中。
+    await waitFor(() => {
+      expect(toolbar).not.toHaveClass("is-bulk");
+      expect(toolbar.querySelector(".toolbar-bulk")).toHaveAttribute("hidden");
+    });
   });
 
   it("当前页被删空且非第 1 页时回退上一页（批量）", async () => {
@@ -616,8 +780,8 @@ describe("HistoryPage 补齐分支", () => {
       return json(200, {});
     });
     renderPage();
-    await screen.findByLabelText("筛选历史");
-    fireEvent.change(screen.getByLabelText("筛选历史"), { target: { value: "failed" } });
+    await screen.findByRole("tablist", { name: "历史筛选" });
+    fireEvent.click(screen.getByRole("tab", { name: /^失败/ }));
     await screen.findByText("item-77.zip");
     // 第一笔（已过期）请求随后失败：不得再覆盖界面或额外提示。
     holder.reject?.(new TypeError("late failure"));
@@ -641,7 +805,7 @@ describe("HistoryPage 补齐分支", () => {
       return json(200, {});
     });
     const { unmount } = renderPage();
-    await screen.findByLabelText("筛选历史");
+    await screen.findByRole("tablist", { name: "历史筛选" });
     unmount();
     holder.resolve?.(json(200, listEnvelope([historyItem(1)])));
     await act(async () => {

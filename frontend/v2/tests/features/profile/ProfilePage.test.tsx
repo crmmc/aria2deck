@@ -313,7 +313,7 @@ describe("ProfilePage 浏览器通知", () => {
     });
     expect(screen.getByRole("button", { name: "启用通知" }).className).toContain("toggle-switch-on");
     // 子开关出现且默认开启。
-    expect(screen.getByText("选择何时发送通知：")).toBeInTheDocument();
+    expect(screen.getByText("下载完成时")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "下载完成时通知" }).className).toContain(
       "toggle-switch-on",
     );
@@ -363,7 +363,7 @@ describe("ProfilePage 浏览器通知", () => {
       expect(window.localStorage.getItem("notifications.enabled")).toBe("false");
     });
     expect(requestPermission).not.toHaveBeenCalled();
-    expect(screen.queryByText("选择何时发送通知：")).not.toBeInTheDocument();
+    expect(screen.queryByText("下载完成时")).not.toBeInTheDocument();
   });
 
   it("失败子开关可单独关闭并持久化", async () => {
@@ -374,7 +374,7 @@ describe("ProfilePage 浏览器通知", () => {
     };
     setup(() => RPC_ON);
     renderPage();
-    await screen.findByText("选择何时发送通知：");
+    await screen.findByText("下载完成时");
     fireEvent.click(screen.getByRole("button", { name: "下载失败时通知" }));
     await waitFor(() => {
       expect(window.localStorage.getItem("notifications.on_failed")).toBe("false");
@@ -647,7 +647,7 @@ describe("ProfilePage 卸载保护", () => {
 
     jest.useFakeTimers();
     try {
-      fireEvent.click(screen.getAllByRole("button", { name: "复制" })[0]);
+      fireEvent.click(screen.getByRole("button", { name: "复制 RPC 密钥" }));
       await act(async () => {
         await Promise.resolve();
       });
@@ -674,7 +674,7 @@ describe("ProfilePage 卸载保护", () => {
 
     jest.useFakeTimers();
     try {
-      fireEvent.click(screen.getAllByRole("button", { name: "复制" })[1]);
+      fireEvent.click(screen.getByRole("button", { name: "复制 RPC 地址" }));
       await act(async () => {
         await Promise.resolve();
       });
@@ -699,7 +699,7 @@ describe("ProfilePage 卸载保护", () => {
     };
     setup(() => RPC_ON);
     renderPageWithToggle();
-    await screen.findByText("选择何时发送通知：");
+    await screen.findByText("下载完成时");
 
     const completeToggle = screen.getByRole("button", { name: "下载完成时通知" });
     fireEvent.click(screen.getByRole("button", { name: "卸载页面" }));
@@ -718,7 +718,7 @@ describe("ProfilePage 卸载保护", () => {
     };
     setup(() => RPC_ON);
     renderPage();
-    await screen.findByText("选择何时发送通知：");
+    await screen.findByText("下载完成时");
 
     fireEvent.click(screen.getByRole("button", { name: "下载完成时通知" }));
     await waitFor(() => {
@@ -735,7 +735,7 @@ describe("ProfilePage 卸载保护", () => {
       renderPageWithToggle();
       await screen.findByText("raw-secret-value");
 
-      fireEvent.click(screen.getAllByRole("button", { name: "复制" })[0]);
+      fireEvent.click(screen.getByRole("button", { name: "复制 RPC 密钥" }));
       expect(clipboard.writeText).toHaveBeenCalledWith("raw-secret-value");
 
       fireEvent.click(screen.getByRole("button", { name: "卸载页面" }));
@@ -759,7 +759,7 @@ describe("ProfilePage 卸载保护", () => {
       await screen.findByText("raw-secret-value");
 
       // 第二个「复制」按钮对应 RPC 地址。
-      fireEvent.click(screen.getAllByRole("button", { name: "复制" })[1]);
+      fireEvent.click(screen.getByRole("button", { name: "复制 RPC 地址" }));
       expect(clipboard.writeText).toHaveBeenCalledWith(RPC_URL);
 
       fireEvent.click(screen.getByRole("button", { name: "卸载页面" }));
@@ -780,7 +780,7 @@ describe("ProfilePage 卸载保护", () => {
     await screen.findByText("raw-secret-value");
     jest.useFakeTimers();
     try {
-      fireEvent.click(screen.getAllByRole("button", { name: "复制" })[0]);
+      fireEvent.click(screen.getByRole("button", { name: "复制 RPC 密钥" }));
       await act(async () => {
         await Promise.resolve();
       });
@@ -802,7 +802,7 @@ describe("ProfilePage 外部访问", () => {
     renderPage();
     await screen.findByRole("heading", { name: "用户设置" });
     expect(screen.getByText("允许外部 aria2 客户端连接")).toBeInTheDocument();
-    expect(screen.getByText("开启后可使用 AriaNg、Motrix 等客户端管理下载任务")).toBeInTheDocument();
+    expect(screen.getByText("开启后可使用 AriaNg、Motrix 等客户端管理当前用户的下载任务。")).toBeInTheDocument();
     expect(screen.getByText("raw-secret-value")).toBeInTheDocument();
     expect(screen.getByText(RPC_URL)).toBeInTheDocument();
   });
@@ -918,15 +918,17 @@ describe("ProfilePage 外部访问", () => {
     setup(() => RPC_ON);
     renderPage();
     await screen.findByText("raw-secret-value");
-    expect(screen.getAllByRole("button", { name: "复制" })).toHaveLength(2);
-    fireEvent.click(screen.getAllByRole("button", { name: "复制" })[0]);
+    expect(screen.getByRole("button", { name: "复制 RPC 密钥" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制 RPC 地址" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "复制 RPC 密钥" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("raw-secret-value"));
     // 密钥按钮文案切为「已复制」；只剩地址的「复制」按钮。
     await waitFor(() =>
       expect(screen.getAllByRole("button", { name: "已复制" })).toHaveLength(1),
     );
-    expect(screen.getAllByRole("button", { name: "复制" })).toHaveLength(1);
-    fireEvent.click(screen.getAllByRole("button", { name: "复制" })[0]);
+    expect(screen.queryByRole("button", { name: "复制 RPC 密钥" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制 RPC 地址" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "复制 RPC 地址" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(RPC_URL));
     await waitFor(() =>
       expect(screen.getAllByRole("button", { name: "已复制" })).toHaveLength(2),
@@ -942,7 +944,7 @@ describe("ProfilePage 外部访问", () => {
     jest.useFakeTimers();
     try {
       // 密钥复制：按钮短暂变「已复制」后复位。
-      fireEvent.click(screen.getAllByRole("button", { name: "复制" })[0]);
+      fireEvent.click(screen.getByRole("button", { name: "复制 RPC 密钥" }));
       await act(async () => {
         await Promise.resolve();
       });
@@ -951,10 +953,11 @@ describe("ProfilePage 外部访问", () => {
         jest.advanceTimersByTime(2000);
       });
       expect(screen.queryAllByRole("button", { name: "已复制" })).toHaveLength(0);
-      expect(screen.getAllByRole("button", { name: "复制" })).toHaveLength(2);
+      expect(screen.getByRole("button", { name: "复制 RPC 密钥" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制 RPC 地址" })).toBeInTheDocument();
 
       // 地址复制：同样 2 秒后复位。
-      fireEvent.click(screen.getAllByRole("button", { name: "复制" })[1]);
+      fireEvent.click(screen.getByRole("button", { name: "复制 RPC 地址" }));
       await act(async () => {
         await Promise.resolve();
       });

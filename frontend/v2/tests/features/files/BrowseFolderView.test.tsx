@@ -22,7 +22,7 @@ function baseProps() {
     selectedBrowseFiles: new Set<string>(),
     highlightName: null as string | null,
     onSort: jest.fn(),
-    getSortIcon: jest.fn(() => "↕"),
+    getSortIcon: jest.fn(() => "none" as const),
     onToggleAllBrowseFiles: jest.fn(),
     onToggleBrowseFileSelection: jest.fn(),
     onNavigateIntoSubfolder: jest.fn(),

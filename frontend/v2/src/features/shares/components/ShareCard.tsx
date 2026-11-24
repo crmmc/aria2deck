@@ -1,6 +1,7 @@
 import { memo, useCallback } from "react";
 
 import { formatBytes } from "@/shared/lib/format";
+import { Icon } from "@/shared/components/Icon";
 import { getEffectiveStatus, type ShareRecordView } from "../model";
 
 interface ShareCardProps {
@@ -20,105 +21,67 @@ export const ShareCard = memo(function ShareCard({
   onRevoke,
   onDelete,
 }: ShareCardProps) {
-  const handleCardClick = useCallback(() => {
-    onCopyLink(record);
-  }, [record, onCopyLink]);
-
-  const handleCheckboxChange = useCallback(() => {
-    onToggleSelection(record.id);
-  }, [record.id, onToggleSelection]);
-
-  const handleCopyClick = useCallback(() => {
-    onCopyLink(record);
-  }, [record, onCopyLink]);
-
-  const handleRevokeClick = useCallback(() => {
-    onRevoke(record.id);
-  }, [record.id, onRevoke]);
-
-  const handleDeleteClick = useCallback(() => {
-    onDelete(record.id);
-  }, [record.id, onDelete]);
+  const handleCardClick = useCallback(() => onCopyLink(record), [record, onCopyLink]);
+  const handleCheckboxChange = useCallback(() => onToggleSelection(record.id), [record.id, onToggleSelection]);
+  const handleCopyClick = useCallback(() => onCopyLink(record), [record, onCopyLink]);
+  const handleRevokeClick = useCallback(() => onRevoke(record.id), [record.id, onRevoke]);
+  const handleDeleteClick = useCallback(() => onDelete(record.id), [record.id, onDelete]);
 
   const currentStatus = getEffectiveStatus(record);
-
-  const statusText =
-    currentStatus === "active"
-      ? "活跃"
-      : currentStatus === "expired"
-        ? "已过期"
-        : "已失效";
-
-  const statusClass =
-    currentStatus === "active"
-      ? "task-status-complete"
-      : currentStatus === "expired"
-        ? "task-status-cancelled"
-        : "task-status-error";
+  const statusText = currentStatus === "active" ? "活跃" : currentStatus === "expired" ? "已过期" : "已失效";
+  const statusClass = currentStatus === "active" ? "task-status-complete" : currentStatus === "expired" ? "task-status-cancelled" : "task-status-error";
 
   return (
-    <div className={`task-card-inner share-card-item${isSelected ? " selected" : ""}`}>
-      <div className="share-card-main-row">
-        <input
-          type="checkbox"
-          aria-label={`选择分享 ${record.fileName}`}
-          checked={isSelected}
-          onChange={handleCheckboxChange}
-          className="checkbox-sm mt-2 cursor-pointer"
-        />
-        <button
-          type="button"
-          className="share-card-copy-area"
-          onClick={handleCardClick}
-          aria-label={`打开分享 ${record.fileName}`}
-        >
-          <span className="share-card-copy-header">
-            <span className="overflow-hidden flex-1">
-              <span className="task-name share-card-title" title={record.fileName}>
-                {record.fileName} {record.hasPassword && <span className="muted text-sm ml-1" title="有密码">🔒</span>}
-              </span>
-              <span className="muted tabular-nums text-sm share-card-line">
-                {formatBytes(record.fileSize)}
-              </span>
+    <article className={`task-card-inner record-row share-card-item${isSelected ? " selected" : ""}`}>
+      <input
+        type="checkbox"
+        aria-label={`选择分享 ${record.fileName}`}
+        checked={isSelected}
+        onChange={handleCheckboxChange}
+        className="checkbox-sm cursor-pointer"
+      />
+      <button
+        type="button"
+        className="share-card-copy-area task-main"
+        onClick={handleCardClick}
+        aria-label={`打开分享 ${record.fileName}`}
+      >
+        <span className="file-mark"><Icon name="file" /></span>
+        <span className="task-name">
+          <strong className="share-card-title" title={record.fileName}>{record.fileName}</strong>
+          <span className="task-meta muted tabular-nums text-sm share-card-details">
+            <span>{formatBytes(record.fileSize)}</span>
+            <span className="share-code" title={record.hasPassword ? "有密码" : undefined}>
+              <Icon name={record.hasPassword ? "lock" : "link"} className="icon-sm" />
+              {record.shareCode}
             </span>
-            <span className={`task-status ${statusClass}`} style={{ marginLeft: "auto" }}>
-              {statusText}
-            </span>
-          </span>
-          <span className="text-sm mb-3 muted share-card-details">
-            <span>提取码: {record.shareCode}</span>
             <span>
-              下载次数: {record.downloadCount}
-              {record.maxDownloads != null && record.maxDownloads > 0 ? ` / ${record.maxDownloads}` : ""}
+              下载 {record.downloadCount}{record.maxDownloads != null && record.maxDownloads > 0 ? ` / ${record.maxDownloads}` : ""} 次
             </span>
-            {record.expiresAtMs !== null && (
-              <span suppressHydrationWarning>
-                过期时间: {new Date(record.expiresAtMs).toLocaleString()}
-              </span>
-            )}
+            <span suppressHydrationWarning>创建于 {new Date(record.createdAtMs).toLocaleString()}</span>
           </span>
+        </span>
+      </button>
+      <span className={`task-status status-badge ${statusClass}`}>
+        <Icon name={currentStatus === "active" ? "check" : currentStatus === "expired" ? "clock" : "x"} className="icon-sm" />
+        {statusText}
+      </span>
+      <span className="record-time" suppressHydrationWarning>
+        {record.expiresAtMs !== null ? `至 ${new Date(record.expiresAtMs).toLocaleString()}` : "永久有效"}
+      </span>
+      <div className="task-footer-right record-actions">
+        <button type="button" className="icon-btn" onClick={handleCopyClick} title="复制链接" aria-label="复制链接">
+          <Icon name="copy" className="icon-sm" />
+        </button>
+        {currentStatus === "active" && (
+          <button type="button" className="icon-btn" onClick={handleRevokeClick} title="失效" aria-label="失效">
+            <Icon name="x" className="icon-sm" />
+          </button>
+        )}
+        <button type="button" className="icon-btn danger" onClick={handleDeleteClick} title="删除" aria-label="删除">
+          <Icon name="trash" className="icon-sm" />
         </button>
       </div>
-      <div className="task-card-footer">
-        <div className="task-footer-left">
-          <span className="muted text-sm" suppressHydrationWarning>
-            创建于 {new Date(record.createdAtMs).toLocaleString()}
-          </span>
-        </div>
-        <div className="task-footer-right">
-          <button type="button" className="button secondary btn-sm" onClick={handleCopyClick} title="复制链接">
-            复制链接
-          </button>
-          {currentStatus === "active" && (
-            <button type="button" className="button secondary btn-sm" onClick={handleRevokeClick} title="失效">
-              失效
-            </button>
-          )}
-          <button type="button" className="button secondary danger btn-sm" onClick={handleDeleteClick} title="删除">
-            删除
-          </button>
-        </div>
-      </div>
-    </div>
+    </article>
   );
 });

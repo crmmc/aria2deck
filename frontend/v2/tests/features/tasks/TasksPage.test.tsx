@@ -75,7 +75,10 @@ function setup(tasks: TaskResponse[] = [task(1), task(2, "failed")]): void {
     }
     if (url === "/api/v2/tasks/stats") return json(200, STATS);
     if (url.startsWith("/api/v2/tasks") && (!init?.method || init.method === "GET")) {
-      return json(200, tasksEnvelope(tasks));
+      // 真实后端按 status 参数过滤：mock 也必须遵守，否则测不出「初始只取管线任务」。
+      const requested = new URLSearchParams(String(url).split("?")[1] ?? "").getAll("status");
+      const selected = requested.length ? tasks.filter((item) => requested.includes(item.status)) : tasks;
+      return json(200, tasksEnvelope(selected));
     }
     return json(404, { error: { code: "not_found", message: "未找到" } });
   });
@@ -138,12 +141,13 @@ describe("TasksPage（V1 任务页）", () => {
     }
   });
 
-  it("加载当前视图任务并渲染卡片（失败任务属终态，不在当前视图）", async () => {
+  it("加载当前视图任务并渲染卡片（初始加载只取管线任务）", async () => {
     await renderWithTasks();
     expect(screen.getByText("task-1.bin")).toBeInTheDocument();
+    // 初始加载不取终态；失败任务只会在会话内经 WS 保留。
     expect(screen.queryByText("task-2.bin")).not.toBeInTheDocument();
     // 统计：disk 口径（C26）。
-    expect(screen.getByText("可用空间").parentElement?.textContent).toContain("850.0 B");
+    expect(screen.getByText("存储空间").parentElement?.textContent).toContain("850.0 B");
   });
 
   
@@ -159,7 +163,7 @@ describe("TasksPage（V1 任务页）", () => {
 
   it("筛选「进行中」隐藏失败任务", async () => {
     await renderWithTasks();
-    fireEvent.change(screen.getByLabelText("筛选任务"), { target: { value: "active" } });
+    fireEvent.click(screen.getByRole("tab", { name: /^进行中/ }));
     await waitFor(() => {
       expect(screen.getByText("task-1.bin")).toBeInTheDocument();
       expect(screen.queryByText("task-2.bin")).not.toBeInTheDocument();
@@ -171,7 +175,7 @@ describe("TasksPage（V1 任务页）", () => {
       task(1, "active", { completed_bytes: 10 }),
       task(2, "active", { completed_bytes: 90, name: "bbb.bin" }),
     ]);
-    fireEvent.change(screen.getByLabelText("排序方式"), { target: { value: "progress" } });
+    fireEvent.change(screen.getByLabelText("任务排序"), { target: { value: "progress" } });
     await waitFor(() => {
       const cards = document.querySelectorAll(".task-card-inner .task-name");
       expect(cards[0].textContent).toContain("bbb.bin");
@@ -191,7 +195,7 @@ describe("TasksPage（V1 任务页）", () => {
       }
       return json(200, tasksEnvelope([task(1), task(2)]));
     });
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByLabelText("选择全部可见任务"));
     fireEvent.click(screen.getByRole("button", { name: "取消下载" }));
     const dialog = await screen.findByRole("dialog", undefined, { timeout: 3000 });
     expect(dialog).toHaveTextContent("确定要取消选中的 2 个任务吗？");
@@ -278,4 +282,52 @@ describe("TasksPage（V1 任务页）", () => {
     fireEvent.change(fileInput, { target: { files: [new File(["x"], "x.txt")] } });
     await screen.findByText("请选择 .torrent 文件");
   });
+
+  it("分段数量来自完整会话数据，筛选搜索排序不重建无关节点", async () => {
+    await renderWithTasks([task(1, "active")]);
+    const socket = pageSockets[pageSockets.length - 1];
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({ type: "task_update", task: task(2, "failed") }),
+      });
+    });
+
+    expect(await screen.findByRole("tab", { name: "当前任务 2" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "进行中 1" })).toBeInTheDocument();
+    const header = document.querySelector(".page-header");
+    const stats = document.querySelector(".transmission-card");
+    const section = document.querySelector("section[aria-label='任务列表']");
+
+    fireEvent.change(screen.getByLabelText("任务排序"), { target: { value: "progress" } });
+    fireEvent.click(screen.getByRole("tab", { name: "进行中 1" }));
+    expect(screen.getByText("task-1.bin")).toBeInTheDocument();
+    expect(screen.queryByText("task-2.bin")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("搜索任务"), { target: { value: "无命中" } });
+    await screen.findByText("暂无活动任务");
+
+    expect(screen.getByRole("tab", { name: "当前任务 2" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "进行中 1" })).toBeInTheDocument();
+    expect(document.querySelector(".page-header")).toBe(header);
+    expect(document.querySelector(".transmission-card")).toBe(stats);
+    expect(document.querySelector("section[aria-label='任务列表']")).toBe(section);
+  });
+
+  it("清除任务搜索保留焦点且不重新请求列表", async () => {
+    await renderWithTasks([task(1), task(2)]);
+    const listCalls = () => mockFetch.mock.calls.filter(([url, init]) =>
+      String(url).startsWith("/api/v2/tasks?") && (!init?.method || init.method === "GET"),
+    ).length;
+    const before = listCalls();
+    const input = screen.getByLabelText("搜索任务");
+
+    fireEvent.change(input, { target: { value: "task-1" } });
+    expect(screen.queryByText("task-2.bin")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "清空任务搜索" }));
+
+    expect(input).toHaveValue("");
+    expect(input).toHaveFocus();
+    expect(screen.getByText("task-2.bin")).toBeInTheDocument();
+    expect(listCalls()).toBe(before);
+  });
+
 });

@@ -7,33 +7,16 @@ import type {
   TaskWriteResultResponse,
   TorrentPreviewResponse,
 } from "@/shared/api/types";
-
-export type TaskFilter = "active" | "current" | "complete" | "error" | null;
-export type TaskSortKey = "created_at" | "name" | "size";
-export type TaskSortOrder = "asc" | "desc";
-export type TaskSort = { key: TaskSortKey; order: TaskSortOrder };
-
-const FILTER_PARAMS: Record<string, string[]> = {
-  active: ["active"],
-  current: ["queued", "active", "waiting", "paused"],
-  complete: ["completed"],
-  error: ["failed", "cancelled", "expired"],
-};
+import { CURRENT_LOAD_STATUSES } from "./model";
 
 /**
- * C21/T1 全量聚合：归档参考 当前任务视图需要 queued/active/waiting/paused + failed，
- * V2 服务端 `current` 会漏 failed，必须显式多状态参数顺序读全部分页。
+ * C21/T1 全量聚合：为保持归档参考的无分页界面，顺序读取全部页。
+ * 初始加载只取在下载管线的状态（与归档参考 `status_filter=current` 同口径）。
+ * 失败任务由 WebSocket 单帧保留在当前视图，刷新后才消失。
  */
-export async function fetchTasksAll(
-  filter: "all" | "active",
-  search: string,
-): Promise<TaskResponse[]> {
-  const statuses =
-    filter === "active"
-      ? ["queued", "active", "waiting", "paused"]
-      : ["queued", "active", "waiting", "paused", "failed"];
+export async function fetchTasksAll(): Promise<TaskResponse[]> {
   return fetchAllPages((page) =>
-    fetchTasksList(statuses, page, 100, search),
+    fetchTasksList([...CURRENT_LOAD_STATUSES], page, 100),
   );
 }
 
@@ -41,38 +24,12 @@ async function fetchTasksList(
   statuses: string[],
   page: number,
   pageSize: number,
-  search: string,
 ): Promise<TaskListResponse> {
   const params = new URLSearchParams({
     page: String(page),
     page_size: String(pageSize),
   });
   for (const status of statuses) params.append("status", status);
-  const term = search.trim();
-  if (term !== "") params.set("q", term);
-  return api.get<TaskListResponse>(`/api/v2/tasks?${params.toString()}`);
-}
-
-export async function fetchTasks(
-  filter: TaskFilter,
-  page: number,
-  pageSize: number,
-  sort: TaskSort | null,
-  search: string,
-): Promise<TaskListResponse> {
-  const params = new URLSearchParams({
-    page: String(page),
-    page_size: String(pageSize),
-  });
-  if (filter !== null) {
-    for (const status of FILTER_PARAMS[filter]) params.append("status", status);
-  }
-  const term = search.trim();
-  if (term !== "") params.set("q", term);
-  if (sort !== null) {
-    params.set("sort", sort.key);
-    params.set("order", sort.order);
-  }
   return api.get<TaskListResponse>(`/api/v2/tasks?${params.toString()}`);
 }
 

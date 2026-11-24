@@ -3,10 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { useAuth } from "@/app/hooks";
+import { useAuth } from "@/shared/auth/hooks";
 import { errorMessage } from "@/shared/api/client";
 import type { RpcAccessResponse } from "@/shared/api/types";
 import { useToast } from "@/shared/components/toast-context";
+import { PageHeader } from "@/shared/components/PageHeader";
 import { useClipboard } from "@/shared/hooks/useClipboard";
 import { useLocalState } from "@/shared/hooks/useLocalState";
 import { useMounted } from "@/shared/hooks/useMounted";
@@ -239,45 +240,42 @@ export function ProfilePage() {
       )}
 
       <div className="glass-frame full-height animate-in">
-        <div className="page-header">
-          <h1 className="page-title">用户设置</h1>
-          <p className="muted">个人偏好与外部访问</p>
-        </div>
+        <PageHeader title="用户设置" description="个人偏好与外部访问" />
 
         {error && (
           <div className="card text-danger mb-6">{error}</div>
         )}
 
-        <PasswordSection
-          isInitialPassword={user?.is_initial_password === true}
-          oldPassword={oldPassword}
-          newPassword={newPassword}
-          confirmPassword={confirmPassword}
-          changing={passwordChanging}
-          onOldPasswordChange={setOldPassword}
-          onNewPasswordChange={setNewPassword}
-          onConfirmPasswordChange={setConfirmPassword}
-          onSubmit={handleChangePassword}
-        />
-
-        <NotificationSection
-          supported={notificationSupported}
-          settings={notificationSettings}
-          onEnabledChange={handleNotificationToggle}
-          onOptionChange={handleNotificationOptionChange}
-        />
-
-        <RpcAccessSection
-          rpcAccess={rpcAccess}
-          rpcLoading={rpcLoading}
-          copiedSecret={copiedSecret}
-          copiedUrl={copiedUrl}
-          rpcUrl={rpcEndpointUrl()}
-          onToggle={handleRpcToggle}
-          onRefreshSecret={handleRefreshSecret}
-          onCopySecret={copySecret}
-          onCopyRpcUrl={copyRpcUrl}
-        />
+        <div className="profile-grid">
+          <PasswordSection
+            isInitialPassword={user?.is_initial_password === true}
+            oldPassword={oldPassword}
+            newPassword={newPassword}
+            confirmPassword={confirmPassword}
+            changing={passwordChanging}
+            onOldPasswordChange={setOldPassword}
+            onNewPasswordChange={setNewPassword}
+            onConfirmPasswordChange={setConfirmPassword}
+            onSubmit={handleChangePassword}
+          />
+          <NotificationSection
+            supported={notificationSupported}
+            settings={notificationSettings}
+            onEnabledChange={handleNotificationToggle}
+            onOptionChange={handleNotificationOptionChange}
+          />
+          <RpcAccessSection
+            rpcAccess={rpcAccess}
+            rpcLoading={rpcLoading}
+            copiedSecret={copiedSecret}
+            copiedUrl={copiedUrl}
+            rpcUrl={rpcEndpointUrl()}
+            onToggle={handleRpcToggle}
+            onRefreshSecret={handleRefreshSecret}
+            onCopySecret={copySecret}
+            onCopyRpcUrl={copyRpcUrl}
+          />
+        </div>
       </div>
     </>
   );

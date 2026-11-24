@@ -9,18 +9,31 @@ import type {
 } from "@/shared/api/types";
 
 /**
- * 当前任务页展示集合：只含在下载管线的任务。
+ * 初始加载时向服务端索取的状态集合：只含在下载管线的任务。
  *
  * 依据归档参考后端 `status_filter=current` 的定义
- * （`(~user_terminal) & (~global_terminal) & active`）——终态一律不在当前视图，失败任务只在历史页。
- * 归档参考前端的 isCurrentVisibleStatus 虽含 error，但仅用于 WebSocket 单帧增删判断，
- * 初始列表拿到的是已由后端过滤过的集合。
+ * （`(~user_terminal) & (~global_terminal) & active`）——首次加载不取终态。
  */
-export const CURRENT_VIEW_STATUSES: readonly TaskStatus[] = [
+export const CURRENT_LOAD_STATUSES: readonly TaskStatus[] = [
   "queued",
   "active",
   "waiting",
   "paused",
+];
+
+/**
+ * 会话内的可见性判定：在管线状态 + 失败。
+ *
+ * 归档参考前端 `isCurrentVisibleStatus` 含 `error`，用于 WebSocket 单帧增删：
+ * 任务在会话内失败时卡片**保留**在当前视图（可重试/删除），刷新后才消失。
+ * 归档参考用 `keeps error task in list after websocket update` 回归测试锁定该行为。
+ */
+export const CURRENT_VISIBLE_STATUSES: readonly TaskStatus[] = [
+  "queued",
+  "active",
+  "waiting",
+  "paused",
+  "failed",
 ];
 
 /** 「进行中」筛选：active/queued/waiting/paused（不含失败）。 */
@@ -34,16 +47,11 @@ export const IN_FLIGHT_STATUSES: readonly TaskStatus[] = [
 export type LegacySortKey = "default" | "speed" | "progress";
 
 export function isCurrentVisibleStatus(status: TaskStatus): boolean {
-  return (CURRENT_VIEW_STATUSES as readonly TaskStatus[]).includes(status);
+  return (CURRENT_VISIBLE_STATUSES as readonly TaskStatus[]).includes(status);
 }
 
 export function isInFlightStatus(status: TaskStatus): boolean {
   return (IN_FLIGHT_STATUSES as readonly TaskStatus[]).includes(status);
-}
-
-/** 当前任务视图过滤：只保留在下载管线的任务（失败项不进当前视图，只进历史页）。 */
-export function filterCurrentTasks(tasks: readonly TaskResponse[]): TaskResponse[] {
-  return tasks.filter((task) => isCurrentVisibleStatus(task.status));
 }
 
 /** 「进行中」过滤（与当前视图同口径，均不含终态）。 */

@@ -194,14 +194,17 @@ describe("Sidebar（V1 侧栏与移动底栏）", () => {
     expect(dialog).toHaveTextContent("退出登录");
   });
 
-  it("更多菜单：关闭按钮与标题栏关闭按钮都能收起", async () => {
+  it("更多菜单：关闭按钮与遮罩都能收起并恢复触发按钮焦点", async () => {
     await renderSidebar({ user: ADMIN });
-    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+    const trigger = screen.getByRole("button", { name: "更多" });
+    trigger.focus();
+    fireEvent.click(trigger);
     await screen.findByRole("dialog");
     fireEvent.click(screen.getByRole("button", { name: "关闭更多菜单" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
 
-    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+    fireEvent.click(trigger);
     await screen.findByRole("dialog");
     // 点击遮罩关闭。
     fireEvent.click(document.querySelector(".modal-backdrop-button")!);

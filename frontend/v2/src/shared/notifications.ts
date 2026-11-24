@@ -19,12 +19,6 @@ function notificationApi(): NotificationConstructor | null {
   return (globalThis as { Notification?: NotificationConstructor }).Notification ?? null;
 }
 
-/** 当前权限态；不支持时返回 "unsupported"。 */
-export function notificationPermission(): PermissionState | "unsupported" {
-  const impl = notificationApi();
-  return impl === null ? "unsupported" : impl.permission;
-}
-
 /** 申请通知权限：返回申请后的权限态（不支持返回 "unsupported"，申请失败按 "denied"）。 */
 export async function requestNotificationPermission(): Promise<PermissionState | "unsupported"> {
   const impl = notificationApi();

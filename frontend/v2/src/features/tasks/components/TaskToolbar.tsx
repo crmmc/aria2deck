@@ -1,8 +1,14 @@
-import { ToolbarGroup, ToolbarSearchInput, ToolbarShell } from "@/shared/components/Toolbar";
+import { useMemo } from "react";
+
+import { Icon } from "@/shared/components/Icon";
+import { SegmentedControl } from "@/shared/components/SegmentedControl";
+import { ToolbarSearchInput, ToolbarShell } from "@/shared/components/Toolbar";
 
 type TaskToolbarProps = {
   selectedCount: number;
   filteredCount: number;
+  currentCount: number;
+  activeCount: number;
   filterStatus: string;
   sortBy: string;
   searchKeyword: string;
@@ -18,6 +24,8 @@ type TaskToolbarProps = {
 export function TaskToolbar({
   selectedCount,
   filteredCount,
+  currentCount,
+  activeCount,
   filterStatus,
   sortBy,
   searchKeyword,
@@ -29,72 +37,73 @@ export function TaskToolbar({
   onSortByChange,
   onSearchKeywordChange,
 }: TaskToolbarProps) {
+  const isBulk = selectedCount > 0;
+  const options = useMemo(
+    () => [
+      { value: "all", label: "当前任务", count: currentCount },
+      { value: "active", label: "进行中", count: activeCount },
+    ],
+    [activeCount, currentCount],
+  );
+
   return (
-    <ToolbarShell>
-      <ToolbarGroup className="toolbar-actions-group">
-        <button
-          type="button"
-          className="button secondary btn-sm"
-          onClick={onToggleSelectAll}
-        >
-          {selectedCount === filteredCount && filteredCount > 0
-            ? "取消全选"
-            : "全选"}
-        </button>
-        {selectedCount > 0 && (
-          <>
-            <span className="muted text-sm">
-              已选 {selectedCount} 项
-            </span>
-            {hasActiveTasks && (
-              <button
-                type="button"
-                className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
-                onClick={onBatchCancel}
-                disabled={isBatchOperating}
-              >
-                取消下载
-              </button>
-            )}
-          </>
-        )}
-      </ToolbarGroup>
-
-      <ToolbarGroup className="toolbar-select-group">
-        <span className="muted text-sm">筛选:</span>
-        <select
+    <ToolbarShell className={isBulk ? "is-bulk" : ""}>
+      <div className="toolbar-default" hidden={isBulk}>
+        <SegmentedControl
+          ariaLabel="任务筛选"
+          options={options}
           value={filterStatus}
-          onChange={(e) => onFilterStatusChange(e.target.value)}
-          className="select"
-          aria-label="筛选任务"
-        >
-          <option value="all">当前任务</option>
-          <option value="active">进行中</option>
-        </select>
-      </ToolbarGroup>
-
-      <ToolbarGroup className="toolbar-select-group">
-        <span className="muted text-sm">排序:</span>
-        <select
-          value={sortBy}
-          onChange={(e) => onSortByChange(e.target.value)}
-          className="select"
-          aria-label="排序方式"
-        >
-          <option value="default">最近更新</option>
-          <option value="speed">下载速度</option>
-          <option value="progress">下载进度</option>
-        </select>
-      </ToolbarGroup>
-
-      <ToolbarGroup className="toolbar-search-group">
+          onChange={onFilterStatusChange}
+        />
+        <div className="toolbar-spacer" />
+        <label className="toolbar-label" htmlFor="task-search">搜索</label>
         <ToolbarSearchInput
-          placeholder="搜索任务..."
+          id="task-search"
+          placeholder="搜索任务"
           value={searchKeyword}
           onChange={onSearchKeywordChange}
           ariaLabel="搜索任务"
+          clearAriaLabel="清空任务搜索"
         />
-      </ToolbarGroup>
+        <label className="toolbar-label" htmlFor="task-sort">排序</label>
+        <div className="select-wrap">
+          <select
+            id="task-sort"
+            value={sortBy}
+            onChange={(event) => onSortByChange(event.target.value)}
+            className="select"
+            aria-label="任务排序"
+          >
+            <option value="default">最近更新</option>
+            <option value="speed">下载速度</option>
+            <option value="progress">下载进度</option>
+          </select>
+          <Icon name="chevron-down" />
+        </div>
+      </div>
+      <div className="toolbar-bulk" hidden={!isBulk}>
+        <span className="bulk-count">已选 <strong>{selectedCount}</strong> 个任务</span>
+        <div className="bulk-actions">
+          <button
+            type="button"
+            className="button secondary btn-sm"
+            onClick={onToggleSelectAll}
+          >
+            {selectedCount === filteredCount && filteredCount > 0 ? "取消全选" : "全选"}
+          </button>
+          {hasActiveTasks && (
+            <button
+              type="button"
+              className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
+              onClick={onBatchCancel}
+              disabled={isBatchOperating}
+            >
+              <Icon name="trash" className="icon-sm" />
+              取消下载
+            </button>
+          )}
+        </div>
+      </div>
     </ToolbarShell>
   );
 }

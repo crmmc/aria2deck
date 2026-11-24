@@ -31,13 +31,6 @@ export function toUserViews(users: UserResponse[]): UserView[] {
   }));
 }
 
-/** 归档参考 UsersTable 原文阈值：≥90% 危险，≥70% 警告，其余成功。 */
-export function usageColor(percent: number): string {
-  if (percent >= 90) return "var(--danger)";
-  if (percent >= 70) return "var(--warning)";
-  return "var(--success)";
-}
-
 /** 进度条分段宽度（归档参考 UsersTable 原文）：已用与冻结各自占配额的比例，合计不超过 100%。 */
 export function storageBarSegments(user: UserResponse): { usedPct: number; reservedPct: number } {
   if (user.quota_bytes <= 0) return { usedPct: 0, reservedPct: 0 };

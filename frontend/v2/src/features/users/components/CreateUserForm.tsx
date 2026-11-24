@@ -1,5 +1,7 @@
 import type { FormEvent } from "react";
 
+import { Icon } from "@/shared/components/Icon";
+
 type CreateUserFormProps = {
   username: string;
   password: string;
@@ -30,80 +32,85 @@ export function CreateUserForm({
   onSubmit,
 }: CreateUserFormProps) {
   return (
-    <div className="card mb-7">
-      <h3 className="mb-4">创建新用户</h3>
-      <form onSubmit={onSubmit} className="create-user-form">
-        <div className="create-user-fields">
-          <div className="create-user-field">
-            <label className="form-label" htmlFor="user-create-username">用户名</label>
+    <section className="panel quick-add admin-create-panel" aria-label="创建用户">
+      <div className="settings-section-head">
+        <h2>创建新用户</h2>
+        <p>设置账号、角色与初始存储配额。</p>
+      </div>
+      <form id="admin-user-create-form" onSubmit={onSubmit} noValidate>
+        <div className="admin-user-create-grid">
+          <div className="field">
+            <label className="form-label field-label" htmlFor="create-user-name">用户名</label>
             <input
-              id="user-create-username"
+              id="create-user-name"
               className="input"
               value={username}
               onChange={(e) => onUsernameChange(e.target.value)}
               required
-              aria-label="用户名"
+              autoComplete="off"
             />
           </div>
-          <div className="create-user-field">
-            <label className="form-label" htmlFor="user-create-password">密码</label>
+          <div className="field">
+            <label className="form-label field-label" htmlFor="create-user-password">密码</label>
             <input
-              id="user-create-password"
+              id="create-user-password"
               className="input"
               type="password"
               value={password}
               onChange={(e) => onPasswordChange(e.target.value)}
               required
               autoComplete="new-password"
-              aria-label="密码"
             />
           </div>
-          <div className="create-user-field">
-            <label className="form-label" htmlFor="user-create-quota">存储配额</label>
-            <div className="flex gap-2">
+          <div className="field">
+            <label className="form-label field-label" htmlFor="create-user-quota">存储配额</label>
+            <div className="number-unit">
               <input
-                id="user-create-quota"
-                className="input flex-1"
+                id="create-user-quota"
+                className="input"
                 type="number"
-                step="0.01"
-                min="0.01"
+                inputMode="decimal"
+                step="any"
+                min="0"
                 value={quotaValue}
                 onChange={(e) => onQuotaValueChange(e.target.value)}
                 required
-                aria-label="存储配额"
               />
-              <select
-                className="input"
-                value={quotaUnit}
-                onChange={(e) => onQuotaUnitChange(e.target.value)}
-                style={{ width: 80 }}
-                aria-label="配额单位"
-              >
-                <option value="KB">KB</option>
-                <option value="MB">MB</option>
-                <option value="GB">GB</option>
-              </select>
+              <div className="select-wrap">
+                <select
+                  id="create-user-quota-unit"
+                  className="select"
+                  value={quotaUnit}
+                  onChange={(e) => onQuotaUnitChange(e.target.value)}
+                  aria-label="存储配额单位"
+                >
+                  <option value="KB">KB</option>
+                  <option value="MB">MB</option>
+                  <option value="GB">GB</option>
+                </select>
+                <Icon name="chevron-down" />
+              </div>
             </div>
           </div>
-        </div>
-        <div className="create-user-actions">
-          <label className="checkbox-label">
+          <label className="admin-checkbox" htmlFor="create-user-admin">
             <input
+              id="create-user-admin"
               type="checkbox"
               checked={isAdmin}
               onChange={(e) => onAdminChange(e.target.checked)}
-              aria-label="管理员"
             />
-            <span className="text-base">管理员</span>
+            管理员
           </label>
-          <button className="button" type="submit">
-            创建用户
+          <button className="button admin-create-submit" type="submit">
+            <Icon name="plus" />创建用户
           </button>
+          {error && (
+            <p className="field-error admin-create-error" id="admin-user-create-error" role="alert">
+              {error}
+            </p>
+          )}
         </div>
       </form>
-      {error && (
-        <p className="text-danger mt-3 text-base">{error}</p>
-      )}
-    </div>
+    </section>
   );
 }

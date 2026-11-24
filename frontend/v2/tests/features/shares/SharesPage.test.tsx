@@ -144,8 +144,8 @@ describe("SharesPage（V1 分享管理页）", () => {
     expect(screen.getByText("share-file-1.zip")).toBeInTheDocument();
     const card = screen.getByText("share-file-1.zip").closest(".share-card-item");
     expect(card).not.toBeNull();
-    expect(card!.textContent).toContain("提取码: code-1");
-    expect(card!.textContent).toContain("下载次数: 2 / 10");
+    expect(card!.querySelector(".share-code")?.textContent).toBe("code-1");
+    expect(card!.textContent).toContain("下载 2 / 10 次");
     expect(card!.textContent).toContain("活跃");
     expect(card!.textContent).toContain("创建于");
     const calls = listCalls();
@@ -210,16 +210,16 @@ describe("SharesPage（V1 分享管理页）", () => {
     }
 
     // 筛选按 V1 口径：exhausted 落在「已过期」
-    fireEvent.change(screen.getByLabelText("分享状态筛选"), { target: { value: "expired" } });
+    fireEvent.click(screen.getByRole("tab", { name: /^已过期/ }));
     expect(screen.getByText("share-file-1.zip")).toBeInTheDocument();
     expect(screen.queryByText("share-file-2.zip")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("分享状态筛选"), { target: { value: "revoked" } });
+    fireEvent.click(screen.getByRole("tab", { name: /^已失效/ }));
     expect(screen.getByText("share-file-2.zip")).toBeInTheDocument();
     expect(screen.getByText("share-file-3.zip")).toBeInTheDocument();
     expect(screen.queryByText("share-file-1.zip")).not.toBeInTheDocument();
   });
 
-  it("有密码分享按 V1 显示 🔒 标识", async () => {
+  it("有密码分享显示锁定图标提示", async () => {
     setup(() => list([share(1, { has_password: true })]));
     expect(await screen.findByTitle("有密码")).toBeInTheDocument();
   });
@@ -309,7 +309,7 @@ describe("SharesPage（V1 分享管理页）", () => {
       list([share(1), share(2, { status: "expired", expires_at_ms: 1600000000000 })]),
     );
     await screen.findByText("share-file-1.zip");
-    fireEvent.change(screen.getByLabelText("分享状态筛选"), { target: { value: "expired" } });
+    fireEvent.click(screen.getByRole("tab", { name: /^已过期/ }));
     await waitFor(() => {
       expect(screen.queryByText("share-file-1.zip")).not.toBeInTheDocument();
     });
@@ -426,7 +426,7 @@ describe("SharesPage（V1 分享管理页）", () => {
       return list([share(1), share(2)]);
     });
     await screen.findByText("share-file-1.zip");
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByLabelText("选择全部分享"));
     fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
     const dialog = await screen.findByRole("dialog", { name: "删除分享" });
     expect(dialog.textContent).toContain("确定要删除选中的 2 条分享记录吗？");
@@ -455,21 +455,22 @@ describe("SharesPage（V1 分享管理页）", () => {
     expect(await screen.findByText("已删除 2 条分享记录")).toBeInTheDocument();
   });
 
-  it("筛选下全选只选中可见记录，切回全部仍保持原选择", async () => {
+  it("筛选下全选只选中可见记录，批量态隐藏筛选且取消后可切回全部", async () => {
     setup(() => list([share(1), share(2), share(3, { status: "revoked" })]));
     await screen.findByText("share-file-1.zip");
-    fireEvent.change(screen.getByLabelText("分享状态筛选"), { target: { value: "active" } });
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
-    expect(screen.getByText("已选 2 项")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: /^活跃/ }));
+    fireEvent.click(screen.getByLabelText("选择全部分享"));
+    expect(document.querySelector(".bulk-count")?.textContent).toBe("已选 2 个分享");
     expect(screen.getByLabelText("选择分享 share-file-1.zip")).toBeChecked();
     expect(screen.getByLabelText("选择分享 share-file-2.zip")).toBeChecked();
+    expect(document.querySelector(".toolbar-default")).toHaveAttribute("hidden");
 
-    fireEvent.change(screen.getByLabelText("分享状态筛选"), { target: { value: "all" } });
+    fireEvent.click(screen.getByRole("button", { name: "取消全选" }));
+    fireEvent.click(screen.getByRole("tab", { name: /^全部/ }));
     expect(screen.getByLabelText("选择分享 share-file-3.zip")).not.toBeChecked();
-    expect(screen.getByRole("button", { name: "全选" })).toBeInTheDocument(); // 2 !== 3 仍可全选。
 
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
-    expect(screen.getByText("已选 3 项")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("选择全部分享"));
+    expect(document.querySelector(".bulk-count")?.textContent).toBe("已选 3 个分享");
     fireEvent.click(screen.getByRole("button", { name: "取消全选" }));
     expect(screen.getByLabelText("选择分享 share-file-1.zip")).not.toBeChecked();
   });
@@ -482,7 +483,7 @@ describe("SharesPage（V1 分享管理页）", () => {
       return list([share(1)]);
     });
     await screen.findByText("share-file-1.zip");
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByLabelText("选择全部分享"));
     // 一键失效后重新聚合返回空列表，但选中集合保留原 id（V1 语义）。
     mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
       if (url === "/api/v2/auth/me") return json(200, ME);
@@ -550,7 +551,7 @@ describe("SharesPage（V1 分享管理页）", () => {
       return list([share(1)]);
     });
     await screen.findByText("share-file-1.zip");
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByLabelText("选择全部分享"));
     fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
     await screen.findByRole("dialog", { name: "删除分享" });
     fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
@@ -562,9 +563,55 @@ describe("SharesPage（V1 分享管理页）", () => {
     await screen.findByText("share-file-1.zip");
     expect(screen.getByRole("heading", { name: "分享管理" })).toBeInTheDocument();
     expect(screen.getByText("管理你的文件分享链接")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "全选" })).toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "分享筛选" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "一键失效全部" })).toBeInTheDocument();
-    expect(screen.getByLabelText("搜索分享")).toHaveAttribute("placeholder", "搜索分享...");
+    expect(screen.getByLabelText("搜索分享")).toHaveAttribute("placeholder", "搜索文件或提取码");
+    expect(screen.getByText("文件与提取码")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择全部分享")).toBeInTheDocument();
+  });
+
+  it("分段使用全量真实状态数量，搜索筛选与批量切换保持节点身份", async () => {
+    setup(() => list([
+      share(1),
+      share(2, { status: "expired" }),
+      share(3, { status: "revoked" }),
+      share(4, { expires_at_ms: 1600000000000 }),
+    ]));
+    await screen.findByText("share-file-1.zip");
+
+    expect(screen.getByRole("tab", { name: "全部 4" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "活跃 1" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "已过期 2" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "已失效 1" })).toBeInTheDocument();
+    const header = document.querySelector(".page-header");
+    const section = document.querySelector("section[aria-label='分享列表']");
+    const listRoot = document.querySelector(".share-card-item")?.parentElement;
+    const indicator = document.querySelector(".segment-indicator");
+    const before = listCalls().length;
+
+    fireEvent.change(screen.getByLabelText("搜索分享"), { target: { value: "code-3" } });
+    expect(screen.queryByText("share-file-1.zip")).not.toBeInTheDocument();
+    expect(screen.getByText("share-file-3.zip")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "全部 4" })).toBeInTheDocument();
+    expect(listCalls()).toHaveLength(before);
+
+    fireEvent.change(screen.getByLabelText("搜索分享"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("tab", { name: "已过期 2" }));
+    expect(screen.getByText("share-file-2.zip")).toBeInTheDocument();
+    expect(screen.getByText("share-file-4.zip")).toBeInTheDocument();
+    expect(screen.queryByText("share-file-3.zip")).not.toBeInTheDocument();
+    expect(document.querySelector(".page-header")).toBe(header);
+    expect(document.querySelector("section[aria-label='分享列表']")).toBe(section);
+    expect(document.querySelector(".share-card-item")?.parentElement).toBe(listRoot);
+
+    fireEvent.click(screen.getByLabelText("选择全部分享"));
+    expect(document.querySelector(".bulk-count")?.textContent).toBe("已选 2 个分享");
+    expect(document.querySelector(".toolbar-default")).toHaveAttribute("hidden");
+    expect(document.querySelector(".toolbar-bulk")).not.toHaveAttribute("hidden");
+    expect(document.querySelector(".segment-indicator")).toBe(indicator);
+    fireEvent.click(screen.getByRole("button", { name: "取消全选" }));
+    expect(document.querySelector(".toolbar-default")).not.toHaveAttribute("hidden");
+    expect(document.querySelector(".toolbar-bulk")).toHaveAttribute("hidden");
   });
 });
 
@@ -599,7 +646,7 @@ describe("SharesPage 操作失败与展示边界", () => {
     setup(() => list([share(1, { max_downloads: 0 })]));
     expect(await screen.findByText("share-file-1.zip")).toBeInTheDocument();
     const card = screen.getByText("share-file-1.zip").closest(".share-card-item");
-    expect(card!.textContent).toContain("下载次数: 2");
+    expect(card!.textContent).toContain("下载 2 次");
     expect(card!.textContent).not.toContain("/ 0");
   });
 
@@ -607,9 +654,9 @@ describe("SharesPage 操作失败与展示边界", () => {
     setup(() => list([share(1)]));
     await screen.findByText("share-file-1.zip");
     fireEvent.click(screen.getByLabelText("选择分享 share-file-1.zip"));
-    expect(screen.getByText("已选 1 项")).toBeInTheDocument();
+    expect(document.querySelector(".bulk-count")?.textContent).toBe("已选 1 个分享");
     fireEvent.click(screen.getByLabelText("选择分享 share-file-1.zip"));
-    expect(screen.queryByText("已选 1 项")).not.toBeInTheDocument();
+    expect(document.querySelector(".bulk-count")?.textContent).not.toBe("已选 1 个分享");
   });
 
   it("批量删除进行中工具栏按钮置灰禁用", async () => {
@@ -632,7 +679,7 @@ describe("SharesPage 操作失败与展示边界", () => {
       </MemoryRouter>,
     );
     await screen.findByText("share-file-1.zip");
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByLabelText("选择全部分享"));
     fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
     await screen.findByRole("dialog", { name: "删除分享" });
     fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
@@ -683,13 +730,13 @@ describe("SharesPage 逐项结果与竞态守卫", () => {
   it("批量删除确认框取消后不发送请求", async () => {
     setup(() => list([share(1)]));
     await screen.findByText("share-file-1.zip");
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByLabelText("选择全部分享"));
     fireEvent.click(screen.getByRole("button", { name: "删除选中" }));
     await screen.findByRole("dialog", { name: "删除分享" });
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(mockFetch.mock.calls.find(([, i]) => i?.method === "DELETE")).toBeUndefined();
-    expect(screen.getByText("已选 1 项")).toBeInTheDocument();
+    expect(document.querySelector(".bulk-count")?.textContent).toBe("已选 1 个分享");
   });
 
   it("卸载后到达的响应不再更新状态也不再提示", async () => {

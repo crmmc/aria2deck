@@ -1,4 +1,4 @@
-import { fileDownloadUrl, publicShareDownloadUrl, apiPath } from "@/shared/api/urls";
+import { fileDownloadUrl, publicShareDownloadUrl } from "@/shared/api/urls";
 
 describe("urls", () => {
   it("builds cookie-session file download URL", () => {
@@ -10,10 +10,5 @@ describe("urls", () => {
 
   it("builds public share download URL with encoding", () => {
     expect(publicShareDownloadUrl("ab/cd")).toBe("/api/s/ab%2Fcd/download");
-  });
-
-  it("normalizes apiPath", () => {
-    expect(apiPath("/x")).toBe("/x");
-    expect(apiPath("x")).toBe("/x");
   });
 });

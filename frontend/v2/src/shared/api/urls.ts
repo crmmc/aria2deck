@@ -8,7 +8,3 @@ export function fileDownloadUrl(fileId: number, path?: string): string {
 export function publicShareDownloadUrl(code: string): string {
   return `/api/s/${encodeURIComponent(code)}/download`;
 }
-
-export function apiPath(path: string): string {
-  return path.startsWith("/") ? path : `/${path}`;
-}

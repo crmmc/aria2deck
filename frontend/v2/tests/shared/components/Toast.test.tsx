@@ -1,7 +1,9 @@
-import React from "react";
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import React, { useState } from "react";
+import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
+import { ModalOverlay } from "@/shared/components/ModalOverlay";
 import { ToastProvider } from "@/shared/components/Toast";
 import { useToast } from "@/shared/components/toast-context";
+import { requestModalClose } from "@/shared/ui/modalClose";
 
 function TestComponent() {
   const { showToast, showConfirm } = useToast();
@@ -34,6 +36,25 @@ function TestComponent() {
         Show Custom Confirm
       </button>
     </div>
+  );
+}
+
+function LayeredToastComponent() {
+  const { showToast, showConfirm } = useToast();
+  const [outerOpen, setOuterOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOuterOpen(true)}>打开外层</button>
+      <button onClick={() => showToast("层级提示", "warning")}>显示层级提示</button>
+      {outerOpen ? (
+        <ModalOverlay onClose={() => setOuterOpen(false)} ariaLabel="外层弹窗">
+          <button onClick={() => void showConfirm({ title: "内层确认", message: "继续？" })}>
+            打开内层
+          </button>
+          <button onClick={(event) => requestModalClose(event.currentTarget)}>关闭外层</button>
+        </ModalOverlay>
+      ) : null}
+    </>
   );
 }
 
@@ -118,6 +139,7 @@ describe("ToastProvider", () => {
     fireEvent.click(screen.getByText("Show Info"));
     expect(screen.getByText("Test message")).toBeInTheDocument();
     expect(document.querySelector(".toast-info")).toBeTruthy();
+    expect(document.querySelector(".toast-container")?.parentElement).toBe(document.body);
   });
 
   it("shows success toast with check icon", () => {
@@ -130,7 +152,7 @@ describe("ToastProvider", () => {
     fireEvent.click(screen.getByText("Show Success"));
     const toast = document.querySelector(".toast-success");
     expect(toast).toBeTruthy();
-    expect(toast?.querySelector(".toast-icon")?.textContent).toBe("✓");
+    expect(toast?.querySelector('[data-icon="check"]')).toBeInTheDocument();
   });
 
   it("shows error toast with cross icon", () => {
@@ -143,7 +165,7 @@ describe("ToastProvider", () => {
     fireEvent.click(screen.getByText("Show Error"));
     const toast = document.querySelector(".toast-error");
     expect(toast).toBeTruthy();
-    expect(toast?.querySelector(".toast-icon")?.textContent).toBe("✕");
+    expect(toast?.querySelector('[data-icon="x"]')).toBeInTheDocument();
   });
 
   it("shows warning toast with warning icon", () => {
@@ -156,7 +178,7 @@ describe("ToastProvider", () => {
     fireEvent.click(screen.getByText("Show Warning"));
     const toast = document.querySelector(".toast-warning");
     expect(toast).toBeTruthy();
-    expect(toast?.querySelector(".toast-icon")?.textContent).toBe("⚠");
+    expect(toast?.querySelector('[data-icon="alert"]')).toBeInTheDocument();
   });
 
   it("auto-dismisses toasts after 3 seconds", () => {
@@ -174,6 +196,45 @@ describe("ToastProvider", () => {
     });
 
     expect(screen.queryByText("Test message")).not.toBeInTheDocument();
+  });
+
+  it("follows the top modal through nested confirmation without resetting the 3 second lifetime", () => {
+    render(
+      <ToastProvider>
+        <LayeredToastComponent />
+      </ToastProvider>,
+    );
+    const openOuter = screen.getByRole("button", { name: "打开外层" });
+    openOuter.focus();
+    fireEvent.click(openOuter);
+    fireEvent.click(screen.getByRole("button", { name: "显示层级提示" }));
+
+    const outer = screen.getByRole("dialog", { name: "外层弹窗" });
+    const getToastContainer = () => document.querySelector(".toast-container");
+    expect(getToastContainer()?.parentElement).toBe(outer);
+
+    act(() => jest.advanceTimersByTime(1000));
+    const openInner = screen.getByRole("button", { name: "打开内层" });
+    fireEvent.click(openInner);
+    const inner = screen.getByRole("dialog", { name: "内层确认" });
+    expect(inner.parentElement).toBe(document.body);
+    expect(getToastContainer()?.parentElement).toBe(inner);
+
+    act(() => jest.advanceTimersByTime(1000));
+    fireEvent.click(screen.getByRole("button", { name: "确定" }));
+    expect(screen.queryByRole("dialog", { name: "内层确认" })).not.toBeInTheDocument();
+    expect(getToastContainer()?.parentElement).toBe(outer);
+    expect(openInner).toHaveFocus();
+
+    act(() => jest.advanceTimersByTime(500));
+    fireEvent.click(screen.getByRole("button", { name: "关闭外层" }));
+    expect(screen.queryByRole("dialog", { name: "外层弹窗" })).not.toBeInTheDocument();
+    expect(getToastContainer()?.parentElement).toBe(document.body);
+    expect(openOuter).toHaveFocus();
+    expect(screen.getByText("层级提示")).toBeInTheDocument();
+
+    act(() => jest.advanceTimersByTime(500));
+    expect(screen.queryByText("层级提示")).not.toBeInTheDocument();
   });
 
   it("confirm resolves true when confirmed", async () => {
@@ -277,7 +338,7 @@ describe("ToastProvider 确认框关闭途径", () => {
     fireEvent.click(document.querySelector(".modal-backdrop-button")!);
 
     await screen.findByText("Show Confirm");
-    expect(document.body.getAttribute("data-confirm-result")).toBe("false");
+    await waitFor(() => expect(document.body.getAttribute("data-confirm-result")).toBe("false"));
     expect(screen.queryByText("Confirm?")).not.toBeInTheDocument();
   });
 
@@ -292,7 +353,7 @@ describe("ToastProvider 确认框关闭途径", () => {
     fireEvent(dialog, new Event("cancel", { bubbles: false, cancelable: true }));
 
     await screen.findByText("Show Confirm");
-    expect(document.body.getAttribute("data-confirm-result")).toBe("false");
+    await waitFor(() => expect(document.body.getAttribute("data-confirm-result")).toBe("false"));
   });
 
   it("确认框无标题时使用兜底 aria-label", () => {

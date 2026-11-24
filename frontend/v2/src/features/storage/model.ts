@@ -1,13 +1,12 @@
 /**
  * ST1 存储视图模型：V2 StorageFileResponse → 归档参考 存储表格视图。
- * C12：内容键按 归档参考 哈希列口径截断展示（悬停全文）；file_names 多名称「、」连接，不冒充唯一原名。
+ * 内容键按管理员 Demo 口径截断展示（悬停全文）；file_names 多名称「、」连接，不冒充唯一原名。
  */
 import type { StorageDeleteResponse, StorageFileResponse } from "@/shared/api/types";
 
 export interface StorageFileView {
   id: number;
   namesText: string;
-  isDirectory: boolean;
   size: number;
   hashShort: string;
   hashFull: string;
@@ -22,16 +21,16 @@ export function digestOf(contentKey: string): string {
   return separator >= 0 ? contentKey.slice(separator + 1) : contentKey;
 }
 
-/** 归档参考 哈希列：摘要截断 8 位 + "..."，完整值放 title。 */
+/** 管理员哈希列：摘要前 10 位 + 省略号 + 后 6 位，完整值放 title。 */
 export function shortHash(contentKey: string): string {
-  return `${digestOf(contentKey).slice(0, 8)}...`;
+  const digest = digestOf(contentKey);
+  return `${digest.slice(0, 10)}…${digest.slice(-6)}`;
 }
 
 export function toStorageFileView(item: StorageFileResponse): StorageFileView {
   return {
     id: item.content_id,
     namesText: item.file_names.join("、"),
-    isDirectory: item.kind === "directory",
     size: item.size,
     hashShort: shortHash(item.content_key),
     hashFull: digestOf(item.content_key),

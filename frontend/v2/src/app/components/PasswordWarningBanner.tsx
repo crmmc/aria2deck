@@ -47,7 +47,7 @@ export function PasswordWarningBanner({ user }: Props) {
       <style>{`
         .password-warning-banner {
           position: fixed;
-          top: 16px;
+          bottom: 16px;
           right: 16px;
           z-index: 1000;
           animation: slideIn 0.3s ease-out;
@@ -133,10 +133,14 @@ export function PasswordWarningBanner({ user }: Props) {
           background: #f5f5f5;
         }
 
+        @media (max-width: 767px) {
+          .password-warning-banner { bottom: 88px; }
+        }
+
         @keyframes slideIn {
           from {
             opacity: 0;
-            transform: translateY(-10px);
+            transform: translateY(10px);
           }
           to {
             opacity: 1;

@@ -379,3 +379,42 @@ export function buildUpdatePayload(form: SettingsForm): PayloadResult {
 
   return { ok: true, payload };
 }
+
+type SettingsPayloadKey = keyof SettingsUpdateRequest;
+
+function payloadValuesEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function changedPayloadKeys(
+  current: SettingsUpdateRequest,
+  saved: SettingsUpdateRequest,
+): SettingsPayloadKey[] {
+  const keys = new Set<SettingsPayloadKey>([
+    ...(Object.keys(current) as SettingsPayloadKey[]),
+    ...(Object.keys(saved) as SettingsPayloadKey[]),
+  ]);
+  return [...keys].filter((key) => !payloadValuesEqual(current[key], saved[key]));
+}
+
+export function isSettingsFormDirty(form: SettingsForm, savedForm: SettingsForm): boolean {
+  const current = buildUpdatePayload(form);
+  if (!current.ok) return true;
+  const saved = buildUpdatePayload(savedForm);
+  if (!saved.ok) return true;
+  return changedPayloadKeys(current.payload, saved.payload).length > 0;
+}
+
+export function buildChangedUpdatePayload(
+  form: SettingsForm,
+  savedForm: SettingsForm,
+): PayloadResult {
+  const current = buildUpdatePayload(form);
+  if (!current.ok) return current;
+  const saved = buildUpdatePayload(savedForm);
+  if (!saved.ok) return saved;
+  const payload = Object.fromEntries(
+    changedPayloadKeys(current.payload, saved.payload).map((key) => [key, current.payload[key]]),
+  ) as SettingsUpdateRequest;
+  return { ok: true, payload };
+}

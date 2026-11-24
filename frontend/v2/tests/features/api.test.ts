@@ -4,11 +4,9 @@ import {
   createPack,
   createShare,
   cancelPack,
-  deleteFile,
   deletePackRecord,
   fetchEntries,
   fetchFiles,
-  fetchPack,
   fetchPacks,
   fileDownloadUrl,
   precomputePack,
@@ -19,7 +17,6 @@ import {
   cancelTasks,
   createTasks,
   createTorrent,
-  fetchTasks,
   fetchTasksAll,
   previewTorrent,
   retryTask,
@@ -63,19 +60,7 @@ describe("tasks api input normalization", () => {
     expect(body.tasks[0].options.allow_rename).toBe(false);
   });
 
-  it("fetchTasks appends sort params only when a sort is active", async () => {
-    await fetchTasks(null, 2, 20, null, "");
-    expect(mockFetch.mock.calls[0][0]).toBe("/api/v2/tasks?page=2&page_size=20");
-    await fetchTasks("current", 1, 20, { key: "size", order: "asc" }, "");
-    const url = new URL(String(mockFetch.mock.calls[1][0]), "http://localhost");
-    expect(url.pathname).toBe("/api/v2/tasks");
-    expect(url.searchParams.getAll("status")).toEqual(["queued", "active", "waiting", "paused"]);
-    expect(url.searchParams.get("sort")).toBe("size");
-    expect(url.searchParams.get("order")).toBe("asc");
-    expect(url.searchParams.get("page")).toBe("1");
-  });
-
-  it("fetchTasksAll aggregates every page for the V1 current view (failed included)", async () => {
+  it("fetchTasksAll aggregates every page for the current view (pipeline statuses only)", async () => {
     const requested: string[] = [];
     mockFetch.mockImplementation(async (url: string) => {
       const page = Number(new URL(String(url), "http://localhost").searchParams.get("page"));
@@ -90,41 +75,22 @@ describe("tasks api input normalization", () => {
       }
       return json(200, { items: [{ id: 3 }], total: 3, page: 2, page_size: 2 });
     });
-    const result = await fetchTasksAll("all", "");
+    const result = await fetchTasksAll();
     expect(result.map((t) => (t as { id: number }).id)).toEqual([1, 2, 3]);
     expect(requested).toHaveLength(2);
     const statuses = new URL(requested[0], "http://localhost").searchParams.getAll("status");
-    expect(statuses).toEqual(["queued", "active", "waiting", "paused", "failed"]);
+    // 初始加载只取管线状态；失败任务由 WebSocket 单帧保留，刷新后才消失。
+    expect(statuses).toEqual(["queued", "active", "waiting", "paused"]);
   });
 
-  it("fetchTasksAll active filter omits failed", async () => {
-    mockFetch.mockImplementation(async () =>
-      json(200, { items: [], total: 0, page: 1, page_size: 100 }),
-    );
-    await fetchTasksAll("active", "netinst");
-    const url = String(mockFetch.mock.calls[0][0]);
-    const parsed = new URL(url, "http://localhost");
-    expect(parsed.searchParams.getAll("status")).toEqual(["queued", "active", "waiting", "paused"]);
-    expect(parsed.searchParams.get("q")).toBe("netinst");
-  });
-
-  it("fetchTasksList omits q when the search term is blank (all-filter path)", async () => {
+  it("fetchTasksAll 不发送搜索参数（搜索在聚合后本地完成）", async () => {
     mockFetch.mockResolvedValueOnce(json(200, { items: [], total: 0, page: 1, page_size: 100 }));
-    await fetchTasksAll("all", "   ");
+    await fetchTasksAll();
     const url = new URL(String(mockFetch.mock.calls[0][0]), "http://localhost");
     expect(url.searchParams.has("q")).toBe(false);
     expect(url.searchParams.getAll("status")).toEqual([
-      "queued", "active", "waiting", "paused", "failed",
+      "queued", "active", "waiting", "paused",
     ]);
-  });
-
-  it("fetchTasks sends trimmed search term as q and skips blank terms", async () => {
-    await fetchTasks(null, 1, 20, null, "  ubuntu  ");
-    expect(mockFetch.mock.calls[0][0]).toBe(
-      "/api/v2/tasks?page=1&page_size=20&q=ubuntu",
-    );
-    await fetchTasks(null, 1, 20, null, "   ");
-    expect(mockFetch.mock.calls[1][0]).toBe("/api/v2/tasks?page=1&page_size=20");
   });
 
   it("createTorrent sends null selection when no files selected", async () => {
@@ -197,13 +163,6 @@ describe("files api request shapes", () => {
     expect(JSON.parse(mockFetch.mock.calls[0][1].body as string)).toEqual({ name: "新名字.txt" });
   });
 
-  it("deleteFile calls the per-file endpoint with DELETE and tolerates 204", async () => {
-    mockFetch.mockResolvedValueOnce({ status: 204, ok: true, json: () => Promise.resolve(null) });
-    await deleteFile(4);
-    expect(mockFetch.mock.calls[0][0]).toBe("/api/v2/files/4");
-    expect(mockFetch.mock.calls[0][1].method).toBe("DELETE");
-  });
-
   it("precomputePack posts the selected file ids", async () => {
     await precomputePack([1, 2]);
     expect(mockFetch.mock.calls[0][0]).toBe("/api/v2/packs/precompute");
@@ -222,11 +181,6 @@ describe("files api request shapes", () => {
     await deletePackRecord(6);
     expect(mockFetch.mock.calls[0][0]).toBe("/api/v2/packs/6/record");
     expect(mockFetch.mock.calls[0][1].method).toBe("DELETE");
-  });
-
-  it("fetchPack reads a single pack by id", async () => {
-    await fetchPack(12);
-    expect(mockFetch.mock.calls[0][0]).toBe("/api/v2/packs/12");
   });
 
   it("fetchPacks forwards the limit query", async () => {

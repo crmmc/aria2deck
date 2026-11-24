@@ -1,7 +1,7 @@
 import type { ReactNode, CSSProperties } from "react";
 import { createPortal } from "react-dom";
 
-import { ModalOverlay } from "@/shared/components/ModalOverlay";
+import { ModalOverlay, type OverlayMotionVariant } from "@/shared/components/ModalOverlay";
 import { useMounted } from "@/shared/hooks/useMounted";
 
 type DialogShellProps = {
@@ -12,6 +12,8 @@ type DialogShellProps = {
   contentStyle?: CSSProperties;
   className?: string;
   portal?: boolean;
+  motionVariant?: OverlayMotionVariant;
+  closeDisabled?: boolean;
 };
 
 export function DialogShell({
@@ -22,6 +24,8 @@ export function DialogShell({
   contentStyle,
   className,
   portal = true,
+  motionVariant,
+  closeDisabled = false,
 }: DialogShellProps) {
   const mounted = useMounted();
   const dialog = (
@@ -31,6 +35,8 @@ export function DialogShell({
       className={className}
       contentClassName={contentClassName}
       contentStyle={contentStyle}
+      motionVariant={motionVariant}
+      closeDisabled={closeDisabled}
     >
       {children}
     </ModalOverlay>

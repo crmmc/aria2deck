@@ -1,5 +1,5 @@
 import type { RefObject } from "react";
-import { formatBytes } from "@/shared/lib/format";
+import { Icon } from "@/shared/components/Icon";
 import type { BrowseItemView } from "../model";
 
 export type SortField = "name" | "size" | "created_at";
@@ -15,17 +15,12 @@ type FileToolbarProps = {
   isInsideFolder: boolean;
   browseContext: BrowseContext | null;
   browseContents: BrowseItemView[];
-  selectedBrowseFiles: Set<string>;
-  selectedFiles: Set<number>;
-  selectedSize: number;
-  sortedFilesLength: number;
   sortField: SortField;
   sortOrder: SortOrder;
   toolbarSearchKeyword: string;
   searchGlobal: boolean;
   searchLoading: boolean;
   searchInputRef?: RefObject<HTMLInputElement>;
-  isBatchOperating: boolean;
   onReturnToRoot: () => void;
   onNavigateToBreadcrumb: (index: number) => void;
   onSortFieldChange: (field: SortField) => void;
@@ -34,29 +29,18 @@ type FileToolbarProps = {
   onToolbarSearchKeyDown: (e: React.KeyboardEvent) => void;
   onSearchGlobalChange: (value: boolean) => void;
   onSearchSubmit: () => void;
-  onToggleAllBrowseFiles: () => void;
-  onBrowseBatchDownload: () => void;
-  onToggleSelectAll: () => void;
-  onBatchDownload: () => void;
-  onBatchDelete: () => void;
-  onOpenPackDialog: () => void;
 };
 
 export function FileToolbar({
   isInsideFolder,
   browseContext,
   browseContents,
-  selectedBrowseFiles,
-  selectedFiles,
-  selectedSize,
-  sortedFilesLength,
   sortField,
   sortOrder,
   toolbarSearchKeyword,
   searchGlobal,
   searchLoading,
   searchInputRef,
-  isBatchOperating,
   onReturnToRoot,
   onNavigateToBreadcrumb,
   onSortFieldChange,
@@ -65,15 +49,9 @@ export function FileToolbar({
   onToolbarSearchKeyDown,
   onSearchGlobalChange,
   onSearchSubmit,
-  onToggleAllBrowseFiles,
-  onBrowseBatchDownload,
-  onToggleSelectAll,
-  onBatchDownload,
-  onBatchDelete,
-  onOpenPackDialog,
 }: FileToolbarProps) {
   return (
-    <div className="card filter-toolbar mb-4">
+    <div className="card filter-toolbar file-toolbar mb-4">
       <div className="filter-group path-breadcrumb">
         {isInsideFolder ? (
           <>
@@ -82,7 +60,7 @@ export function FileToolbar({
               className="path-segment"
               onClick={onReturnToRoot}
             >
-              <span className="file-icon">📁</span>
+              <span className="file-icon"><Icon name="folder" /></span>
               <span className="text-sm font-medium">根目录</span>
             </button>
             <span className="path-separator">/</span>
@@ -109,7 +87,7 @@ export function FileToolbar({
           </>
         ) : (
           <>
-            <span className="file-icon">📁</span>
+            <span className="file-icon"><Icon name="folder" /></span>
             <span className="text-sm font-medium">根目录</span>
           </>
         )}
@@ -137,20 +115,7 @@ export function FileToolbar({
         </div>
 
         <div className="filter-group search-input-group">
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="search-input-icon"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <path d="m21 21-4.35-4.35" />
-          </svg>
+          <Icon name="search" className="search-input-icon" />
           <input
             ref={searchInputRef}
             type="text"
@@ -168,7 +133,7 @@ export function FileToolbar({
               onClick={() => onToolbarSearchKeywordChange("")}
               aria-label="清除搜索"
             >
-              ✕
+              <Icon name="x" className="icon-sm" />
             </button>
           )}
           <label className="search-global-toggle">
@@ -188,87 +153,6 @@ export function FileToolbar({
           >
             {searchLoading ? "查询中..." : "查询"}
           </button>
-        </div>
-
-        <div className="filter-group batch-actions">
-          {isInsideFolder ? (
-            <>
-              {selectedBrowseFiles.size > 0 && (
-                <>
-                  <span className="muted text-sm">
-                    已选 {selectedBrowseFiles.size} 项
-                  </span>
-                  <button
-                    type="button"
-                    className="button secondary btn-sm"
-                    onClick={onBrowseBatchDownload}
-                  >
-                    批量下载
-                  </button>
-                </>
-              )}
-              {browseContents.length > 0 && (
-                <button
-                  type="button"
-                  className="button secondary btn-sm"
-                  onClick={onToggleAllBrowseFiles}
-                >
-                  {(() => {
-                    const allKeys = browseContents
-                      .map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
-                    return allKeys.length > 0 && allKeys.every((k) => selectedBrowseFiles.has(k))
-                      ? "取消全选"
-                      : "全选";
-                  })()}
-                </button>
-              )}
-            </>
-          ) : (
-            <>
-              {selectedFiles.size > 0 && (
-                <>
-                  <span className="muted text-sm">
-                    已选 {selectedFiles.size} 项 ({formatBytes(selectedSize)})
-                  </span>
-                  <button
-                    type="button"
-                    className="button secondary btn-sm"
-                    onClick={onBatchDownload}
-                    disabled={isBatchOperating}
-                  >
-                    批量下载
-                  </button>
-                  <button
-                    type="button"
-                    className={`button secondary danger btn-sm${isBatchOperating ? " opacity-60" : ""}`}
-                    onClick={onBatchDelete}
-                    disabled={isBatchOperating}
-                  >
-                    {isBatchOperating ? "删除中..." : "批量删除"}
-                  </button>
-                  <button
-                    type="button"
-                    className="button secondary btn-sm"
-                    onClick={onOpenPackDialog}
-                    disabled={isBatchOperating}
-                  >
-                    打包
-                  </button>
-                </>
-              )}
-              {sortedFilesLength > 0 && (
-                <button
-                  type="button"
-                  className="button secondary btn-sm"
-                  onClick={onToggleSelectAll}
-                >
-                  {selectedFiles.size === sortedFilesLength && sortedFilesLength > 0
-                    ? "取消全选"
-                    : "全选"}
-                </button>
-              )}
-            </>
-          )}
         </div>
       </div>
     </div>

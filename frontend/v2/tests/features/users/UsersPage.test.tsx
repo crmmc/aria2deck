@@ -4,7 +4,6 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { AppProviders } from "@/app/providers";
 import { UsersPage } from "@/features/users/UsersPage";
 import {
-  bytesToGib,
   formatQuotaForForm,
   gibToBytes,
   parseQuotaBytes,
@@ -13,7 +12,6 @@ import {
   machineSharePercent,
   storageBarSegments,
   toUserViews,
-  usageColor,
   usagePercent,
 } from "@/features/users/model";
 import type { UserResponse } from "@/shared/api/types";
@@ -67,10 +65,15 @@ type Init = { method?: string; body?: string };
 function setup(
   handler: (url: string, init?: Init) => unknown,
   me: UserResponse = ME,
+  refreshedMe?: UserResponse,
 ) {
+  let authRequests = 0;
   mockFetch.mockReset();
   mockFetch.mockImplementation(async (url: string, init?: Init) => {
-    if (url === "/api/v2/auth/me") return json(200, me);
+    if (url === "/api/v2/auth/me") {
+      authRequests += 1;
+      return json(200, authRequests === 1 ? me : (refreshedMe ?? me));
+    }
     if (url === "/api/v2/public/site-info") {
       return json(200, {
         site_title: "Aria2Deck",
@@ -100,11 +103,11 @@ function setup(
 
 /** 按 V1 表格「用户名」单元格定位行：弹窗文案里也会出现用户名，不能直接用 getByText。 */
 function rowOf(username: string): HTMLElement {
-  const cell = Array.from(document.querySelectorAll("td[data-label='用户名']")).find(
+  const name = Array.from(document.querySelectorAll(".admin-user-name strong")).find(
     (candidate) => candidate.textContent === username,
   );
-  if (cell === undefined) throw new Error(`未找到用户名 ${username} 的行`);
-  return cell.closest("tr") as HTMLElement;
+  if (name === undefined) throw new Error(`未找到用户名 ${username} 的行`);
+  return name.closest("tr") as HTMLElement;
 }
 
 function userListCalls(): Init[] {
@@ -154,8 +157,8 @@ afterEach(() => {
   }
 });
 
-describe("UsersPage 列表（V1 表格）", () => {
-  it("renders the V1 table with badges, storage bar and machine share", async () => {
+describe("UsersPage 列表（Demo 表格）", () => {
+  it("renders the Demo table, current-account marker, storage meter and totals", async () => {
     setup(() =>
       list([
         ME,
@@ -168,61 +171,65 @@ describe("UsersPage 列表（V1 表格）", () => {
       ]),
     );
     expect(await screen.findByText("alice")).toBeInTheDocument();
+    expect(screen.getByText("用户管理")).toBeInTheDocument();
+    expect(screen.getByText("管理账号、角色与存储配额")).toBeInTheDocument();
 
-    // V1 表格类名与五列表头。
-    const table = document.querySelector("table.table.text-left") as HTMLTableElement;
+    const table = document.querySelector("table.admin-table.admin-user-table") as HTMLTableElement;
     expect(table).not.toBeNull();
-    expect(document.querySelector(".users-table-wrapper")).not.toBeNull();
-    const headers = Array.from(table.querySelectorAll("thead .table-cell")).map(
-      (cell) => cell.textContent,
-    );
-    expect(headers).toEqual(["ID", "用户名", "角色", "存储", "操作"]);
+    expect(document.querySelector(".admin-table-panel")).not.toBeNull();
+    const headers = Array.from(table.querySelectorAll("thead th")).map((cell) => cell.textContent);
+    expect(headers).toEqual(["ID", "用户名", "角色", "存储用量 / 配额 / 可用 / 全站占比", "操作"]);
 
-    // V1 徽标：管理员 active，普通用户无修饰。
-    expect(within(rowOf("admin")).getByText("管理员").className).toBe("badge active");
-    expect(within(rowOf("alice")).getByText("用户").className).toBe("badge");
+    expect(within(rowOf("admin")).getByText("当前账号")).toBeInTheDocument();
+    expect(within(rowOf("admin")).getByText("管理员").className).toBe("status-badge status-active");
+    expect(within(rowOf("alice")).getByText("普通用户").className).toBe("status-badge");
 
-    // V1 存储列文本：已用 / 配额、百分比、可用与全站占比（分母 = 51 GiB）。
     const aliceRow = rowOf("alice");
-    expect(aliceRow.textContent).toContain("50.0 GB / 100.0 GB");
-    expect(aliceRow.textContent).toContain("50.0%");
+    expect(aliceRow.textContent).toContain("50.0 GB / 100 GB");
     expect(aliceRow.textContent).toContain("可用 40.0 GB");
-    expect(aliceRow.textContent).toContain("冻结 10.0 GB");
+    expect(aliceRow.textContent).toContain("预留 10.0 GB");
     expect(aliceRow.textContent).toContain("全站 98.0%");
-    expect(aliceRow.querySelector(".user-storage-cell")).not.toBeNull();
-    expect(aliceRow.querySelector(".user-storage-bar")).not.toBeNull();
-    expect(aliceRow.querySelector(".user-storage-reserved")).not.toBeNull();
-    expect(aliceRow.querySelector(".user-storage-sub")?.textContent).toContain("全站");
+    expect(within(aliceRow).getByRole("meter", { name: "alice 配额使用 50.0%" })).toHaveAttribute("aria-valuenow", "50");
+    expect(aliceRow.querySelector(".admin-quota-used")).not.toBeNull();
+    expect(aliceRow.querySelector(".admin-quota-reserved")).not.toBeNull();
+
+    const footer = document.querySelector(".admin-table-footer") as HTMLElement;
+    expect(footer.textContent).toContain("共 2 个用户");
+    expect(footer.textContent).toContain("已使用 51.0 GB · 配额合计 300 GB");
   });
 
-  it("renders the storage bar widths and survives a zero quota", async () => {
+  it("renders separate used and reserved widths and survives a zero quota", async () => {
     setup(() =>
       list([
         ME,
-        // page_points: 85% 触发 warning 色，95% 触发 danger 色（V1 getUsageColor）。
         user(2, { username: "warn", used_bytes: 85, quota_bytes: 100, available_bytes: 15 }),
         user(3, { username: "danger", used_bytes: 95, quota_bytes: 100, available_bytes: 5 }),
-        // quota 为 0：分段宽度按 V1 兜底为 0，不产生 NaN。
         user(4, { username: "noquota", used_bytes: 0, quota_bytes: 0, available_bytes: 0 }),
       ]),
     );
     await screen.findByText("warn");
-    // jsdom 丢弃 var() 形式的 inline 背景色，颜色阈值由 usageColor 纯规则断言。
     const styleOf = (username: string) =>
-      (rowOf(username).querySelector(".progress-bar") as HTMLElement).getAttribute("style") ?? "";
+      (rowOf(username).querySelector(".admin-quota-used") as HTMLElement).getAttribute("style") ?? "";
     expect(styleOf("warn")).toContain("width: 85%");
     expect(styleOf("danger")).toContain("width: 95%");
     expect(styleOf("noquota")).toContain("width: 0%");
-    expect(rowOf("noquota").textContent).toContain("0.0%");
+    expect(within(rowOf("noquota")).getByRole("meter", { name: "noquota 配额使用 0.0%" })).toHaveAttribute("aria-valuenow", "0");
   });
 
   it("hides the delete button on the current admin row and keeps edit", async () => {
     setup(() => list([ME, user(2)]));
     await screen.findByText("admin");
     const selfRow = rowOf("admin");
-    expect(within(selfRow).getByRole("button", { name: "编辑" })).toBeInTheDocument();
-    expect(within(selfRow).queryByRole("button", { name: "删除" })).toBeNull();
-    expect(within(rowOf("user-2")).getByRole("button", { name: "删除" })).toBeInTheDocument();
+    expect(within(selfRow).getByRole("button", { name: "编辑用户 admin" })).toBeInTheDocument();
+    expect(within(selfRow).queryByRole("button", { name: "删除用户 admin" })).toBeNull();
+    expect(within(rowOf("user-2")).getByRole("button", { name: "删除用户 user-2" })).toBeInTheDocument();
+  });
+
+  it("renders an empty table with real zero totals", async () => {
+    setup(() => list([]));
+    expect(await screen.findByText("共 0 个用户")).toBeInTheDocument();
+    expect(document.querySelectorAll(".admin-user-table tbody tr")).toHaveLength(0);
+    expect(document.querySelector(".admin-table-footer")?.textContent).toContain("已使用 0 B · 配额合计 0 B");
   });
 
   it("aggregates every V2 page in order and drops pending-delete users", async () => {
@@ -276,7 +283,7 @@ describe("UsersPage 列表（V1 表格）", () => {
   });
 });
 
-describe("UsersPage 创建用户（V1 表单）", () => {
+describe("UsersPage 创建用户（Demo 表单）", () => {
   it("creates a user with hashed password, initial-password marker and quota bytes", async () => {
     setup((url, init) => {
       if (init?.method === "POST" && url === "/api/v2/users") {
@@ -286,12 +293,14 @@ describe("UsersPage 创建用户（V1 表单）", () => {
     });
     await screen.findByText("admin");
 
-    const form = document.querySelector("form.create-user-form") as HTMLFormElement;
-    expect(document.querySelector(".create-user-fields")).not.toBeNull();
+    const form = document.querySelector("#admin-user-create-form") as HTMLFormElement;
+    expect(document.querySelector(".admin-user-create-grid")).not.toBeNull();
+    expect(within(form).getByLabelText("存储配额")).toHaveValue(10);
+    expect(within(form).queryByRole("alert")).toBeNull();
     fireEvent.change(within(form).getByLabelText("用户名"), { target: { value: "bob" } });
     fireEvent.change(within(form).getByLabelText("密码"), { target: { value: "secret123" } });
     fireEvent.change(within(form).getByLabelText("存储配额"), { target: { value: "2" } });
-    fireEvent.change(within(form).getByLabelText("配额单位"), { target: { value: "MB" } });
+    fireEvent.change(within(form).getByLabelText("存储配额单位"), { target: { value: "MB" } });
     fireEvent.click(within(form).getByLabelText("管理员"));
     fireEvent.submit(form);
 
@@ -310,19 +319,28 @@ describe("UsersPage 创建用户（V1 表单）", () => {
       });
     }, SLOW);
 
-    // 成功后表单回到初始值。
     expect(within(form).getByLabelText("用户名")).toHaveValue("");
     expect(within(form).getByLabelText("密码")).toHaveValue("");
-    expect(within(form).getByLabelText("存储配额")).toHaveValue(100);
-    expect(within(form).getByLabelText("配额单位")).toHaveValue("GB");
+    expect(within(form).getByLabelText("存储配额")).toHaveValue(10);
+    expect(within(form).getByLabelText("存储配额单位")).toHaveValue("GB");
     expect(within(form).getByLabelText("管理员")).not.toBeChecked();
     expect(await screen.findByText("bob")).toBeInTheDocument();
+    expect(await screen.findByText("用户已创建")).toBeInTheDocument();
+  });
+
+  it("rejects missing credentials before sending anything", async () => {
+    setup(() => list([ME]));
+    await screen.findByText("admin");
+    const form = document.querySelector("#admin-user-create-form") as HTMLFormElement;
+    fireEvent.submit(form);
+    expect(await within(form).findByRole("alert")).toHaveTextContent("请填写用户名和密码");
+    expect(userListCalls().find((init) => init.method === "POST")).toBeUndefined();
   });
 
   it("rejects a non-positive quota before sending anything", async () => {
     setup(() => list([ME]));
     await screen.findByText("admin");
-    const form = document.querySelector("form.create-user-form") as HTMLFormElement;
+    const form = document.querySelector("#admin-user-create-form") as HTMLFormElement;
     fireEvent.change(within(form).getByLabelText("用户名"), { target: { value: "bob" } });
     fireEvent.change(within(form).getByLabelText("密码"), { target: { value: "secret123" } });
     fireEvent.change(within(form).getByLabelText("存储配额"), { target: { value: "0" } });
@@ -339,39 +357,55 @@ describe("UsersPage 创建用户（V1 表单）", () => {
       return list([ME]);
     });
     await screen.findByText("admin");
-    const form = document.querySelector("form.create-user-form") as HTMLFormElement;
+    const form = document.querySelector("#admin-user-create-form") as HTMLFormElement;
     fireEvent.change(within(form).getByLabelText("用户名"), { target: { value: "bob" } });
     fireEvent.change(within(form).getByLabelText("密码"), { target: { value: "secret123" } });
     fireEvent.submit(form);
     expect(await screen.findByText("用户名已存在", undefined, SLOW)).toBeInTheDocument();
-    expect(document.querySelector(".text-danger.mt-3")).not.toBeNull();
+    expect(document.querySelector(".admin-create-error")).not.toBeNull();
   });
 });
 
-describe("UsersPage 编辑用户（V1 弹窗 + V2 局部更新）", () => {
+describe("UsersPage 编辑用户（Demo 弹窗 + V2 局部更新）", () => {
   function openEdit(username: string) {
-    fireEvent.click(within(rowOf(username)).getByRole("button", { name: "编辑" }));
-    return screen.getByLabelText("编辑用户");
+    fireEvent.click(within(rowOf(username)).getByRole("button", { name: `编辑用户 ${username}` }));
+    return screen.getByRole("dialog", { name: `编辑用户 ${username}` });
   }
 
-  it("shows the V1 occupancy summary and disables self role edit", async () => {
+  it("shows the Demo occupancy summary and disables self role edit", async () => {
     setup(() => list([ME, user(2, { username: "alice", used_bytes: 50 * GIB, reserved_bytes: 10 * GIB, available_bytes: 40 * GIB })]));
     await screen.findByText("alice");
     const dialog = openEdit("alice");
-    expect(dialog.textContent).toContain("当前占用：50.0 GB 已用");
-    expect(dialog.textContent).toContain("· 10.0 GB 冻结");
-    expect(dialog.textContent).toContain("· 可用 40.0 GB");
-    expect(dialog.textContent).toContain("· 全站 98.0%");
-    // V1 原文：编辑中另一个用户时角色复选框可改。
-    expect(within(dialog).getByLabelText("管理员用户")).not.toBeDisabled();
+    expect(dialog.textContent).toContain("编辑用户 alice");
+    expect(dialog.textContent).toContain("当前已使用 50.0 GB，预留 10.0 GB，可用 40.0 GB。");
+    const role = within(dialog).getByLabelText("角色") as HTMLSelectElement;
+    expect(role).not.toBeDisabled();
+    expect(role).toHaveValue("user");
+    expect(within(dialog).getByLabelText("存储配额单位")).toHaveValue("GB");
+    expect(within(dialog).getByLabelText("存储配额单位")).toHaveAttribute("readonly");
+    expect(within(dialog).getByLabelText("存储配额")).toHaveAttribute("step", "any");
+    expect(document.querySelectorAll("#admin-user-edit-form .field-note")).toHaveLength(4);
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
-    expect(screen.queryByLabelText("编辑用户")).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
 
     const selfDialog = openEdit("admin");
-    const selfToggle = within(selfDialog).getByLabelText("管理员用户") as HTMLInputElement;
-    expect(selfToggle.disabled).toBe(true);
-    expect(selfDialog.textContent).toContain("(不能修改自己的角色)");
+    expect(within(selfDialog).getByLabelText("角色")).toBeDisabled();
+    expect(selfDialog.textContent).toContain("当前账号的角色不可修改。");
     fireEvent.click(within(selfDialog).getByRole("button", { name: "取消" }));
+  });
+
+  it("focuses the username and restores the row action focus after closing", async () => {
+    setup(() => list([ME, user(2, { username: "alice" })]));
+    await screen.findByText("alice");
+    const trigger = within(rowOf("alice")).getByRole("button", { name: "编辑用户 alice" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "编辑用户 alice" });
+    expect(within(dialog).getByLabelText("用户名")).toHaveFocus();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(trigger).toHaveFocus();
   });
 
   it("sends only the changed quota and never the initial-password field", async () => {
@@ -381,43 +415,53 @@ describe("UsersPage 编辑用户（V1 弹窗 + V2 局部更新）", () => {
     });
     await screen.findByText("alice");
     const dialog = openEdit("alice");
-    // V1 回填口径：1 GiB 显示为 1.00 GB。
     expect(within(dialog).getByLabelText("存储配额")).toHaveValue(1);
     fireEvent.change(within(dialog).getByLabelText("存储配额"), { target: { value: "3" } });
-    // 单位切换回 GB（V1 原控件），验证换算走的是当前单位。
-    fireEvent.change(within(dialog).getByLabelText("配额单位"), { target: { value: "GB" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存更改" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
 
     await waitFor(() => {
       const patch = mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH");
       expect(patch).toBeDefined();
-      // 未改密码时绝不能带 is_initial_password（V2 会拒绝）。
       expect(JSON.parse(patch![1].body as string)).toEqual({ quota_bytes: 3 * GIB });
     });
-    await waitFor(() => expect(screen.queryByLabelText("编辑用户")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(await screen.findByText("用户信息已更新")).toBeInTheDocument();
   });
 
-  it("toggles the role without a password and keeps is_initial_password out", async () => {
+  it("changes the role without submitting an untouched fractional quota", async () => {
+    const originalQuota = GIB + 1;
     setup((url, init) => {
-      if (init?.method === "PATCH") return user(2, { username: "alice", is_admin: true });
-      return list([ME, user(2, { username: "alice" })]);
+      if (init?.method === "PATCH") return user(2, { username: "alice", is_admin: true, quota_bytes: originalQuota });
+      return list([ME, user(2, { username: "alice", quota_bytes: originalQuota })]);
     });
     await screen.findByText("alice");
     const dialog = openEdit("alice");
-    fireEvent.click(within(dialog).getByLabelText("管理员用户"));
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存更改" }));
+    expect((within(dialog).getByLabelText("存储配额") as HTMLInputElement).value).toBe(String(originalQuota / GIB));
+    fireEvent.change(within(dialog).getByLabelText("角色"), { target: { value: "admin" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
     await waitFor(() => {
       const patch = mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH");
       expect(JSON.parse(patch![1].body as string)).toEqual({ is_admin: true });
     });
   });
 
-  it("closes without any request when nothing changed", async () => {
+  it.each([1, GIB + 1])("closes an untouched %i-byte quota without any PATCH", async (quotaBytes) => {
+    setup(() => list([ME, user(2, { username: "alice", quota_bytes: quotaBytes })]));
+    await screen.findByText("alice");
+    const dialog = openEdit("alice");
+    expect((within(dialog).getByLabelText("存储配额") as HTMLInputElement).value).toBe(String(quotaBytes / GIB));
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH")).toBeUndefined();
+  });
+
+  it("rejects an empty username before sending anything", async () => {
     setup(() => list([ME, user(2, { username: "alice" })]));
     await screen.findByText("alice");
     const dialog = openEdit("alice");
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存更改" }));
-    await waitFor(() => expect(screen.queryByLabelText("编辑用户")).toBeNull());
+    fireEvent.change(within(dialog).getByLabelText("用户名"), { target: { value: "" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
+    expect(await screen.findByText("请输入用户名")).toBeInTheDocument();
     expect(mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH")).toBeUndefined();
   });
 
@@ -426,10 +470,10 @@ describe("UsersPage 编辑用户（V1 弹窗 + V2 局部更新）", () => {
     await screen.findByText("alice");
     const dialog = openEdit("alice");
     fireEvent.change(within(dialog).getByLabelText("用户名"), { target: { value: "alice-neu" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存更改" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
     expect(await screen.findByText("修改用户名时必须同时提供新密码")).toBeInTheDocument();
     expect(mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH")).toBeUndefined();
-    expect(screen.getByLabelText("编辑用户")).toBeInTheDocument();
+    expect(dialog).toBeInTheDocument();
   });
 
   it("renames with a new password derived from the new username and marks it initial", async () => {
@@ -441,7 +485,7 @@ describe("UsersPage 编辑用户（V1 弹窗 + V2 局部更新）", () => {
     const dialog = openEdit("alice");
     fireEvent.change(within(dialog).getByLabelText("用户名"), { target: { value: "alice-neu" } });
     fireEvent.change(within(dialog).getByLabelText("新密码"), { target: { value: "newpass123" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存更改" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
 
     await waitFor(() => {
       const patch = mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH");
@@ -455,6 +499,33 @@ describe("UsersPage 编辑用户（V1 弹窗 + V2 局部更新）", () => {
       });
     }, SLOW);
     expect(await screen.findByText("alice-neu")).toBeInTheDocument();
+    expect(mockFetch.mock.calls.filter(([url]) => url === "/api/v2/auth/me")).toHaveLength(1);
+  });
+
+  it("refreshes auth after the current admin renames themselves", async () => {
+    const renamed = { ...ME, username: "admin-new" };
+    setup((url, init) => {
+      if (init?.method === "PATCH") return renamed;
+      return list([ME, user(2)]);
+    }, ME, renamed);
+    await screen.findByText("admin");
+    const dialog = openEdit("admin");
+    fireEvent.change(within(dialog).getByLabelText("用户名"), { target: { value: "admin-new" } });
+    fireEvent.change(within(dialog).getByLabelText("新密码"), { target: { value: "adminpass" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => {
+      expect(mockFetch.mock.calls.filter(([url]) => url === "/api/v2/auth/me")).toHaveLength(2);
+      expect(screen.queryByRole("dialog")).toBeNull();
+    }, SLOW);
+    const patch = mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH");
+    expect(JSON.parse(patch![1].body as string)).toEqual({
+      username: "admin-new",
+      password: expect.any(String),
+      is_initial_password: false,
+    });
+    expect(await screen.findByText("admin-new")).toBeInTheDocument();
+    expect(await screen.findByText("用户信息已更新")).toBeInTheDocument();
   });
 
   it("does not mark the initial password when an admin resets their own password", async () => {
@@ -465,7 +536,7 @@ describe("UsersPage 编辑用户（V1 弹窗 + V2 局部更新）", () => {
     await screen.findByText("admin");
     const dialog = openEdit("admin");
     fireEvent.change(within(dialog).getByLabelText("新密码"), { target: { value: "adminpass" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存更改" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
     await waitFor(() => {
       const patch = mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH");
       expect(JSON.parse(patch![1].body as string)).toEqual({
@@ -486,22 +557,25 @@ describe("UsersPage 编辑用户（V1 弹窗 + V2 局部更新）", () => {
     const dialog = openEdit("alice");
     fireEvent.change(within(dialog).getByLabelText("用户名"), { target: { value: "bob" } });
     fireEvent.change(within(dialog).getByLabelText("新密码"), { target: { value: "newpass123" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存更改" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
     expect(await screen.findByText("用户名已被占用", undefined, SLOW)).toBeInTheDocument();
-    expect(screen.getByLabelText("编辑用户")).toBeInTheDocument();
+    expect(dialog).toBeInTheDocument();
   });
 
   it("reports a vanished user instead of PATCHing", async () => {
-    setup(() => list([ME, user(2, { username: "alice" })]));
+    setup((url, init) => {
+      if (init?.method === "DELETE") return json(202, { ok: true, state: "pending", accepted: true });
+      return list([ME, user(2, { username: "alice" })]);
+    });
     await screen.findByText("alice");
     const dialog = openEdit("alice");
     // 打开编辑后该用户被别处删除：列表里已无此人。
-    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "删除" }));
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "删除用户 alice" }));
     const deleteDialog = await screen.findByLabelText("删除用户");
-    fireEvent.click(within(deleteDialog).getByRole("button", { name: "删除" }));
+    fireEvent.click(within(deleteDialog).getByRole("button", { name: "删除用户" }));
     await waitFor(() => expect(screen.queryByLabelText("删除用户")).toBeNull());
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存更改" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
     expect(await screen.findByText("用户不存在或已被删除")).toBeInTheDocument();
     expect(mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH")).toBeUndefined();
   });
@@ -517,20 +591,43 @@ describe("UsersPage 编辑用户（V1 弹窗 + V2 局部更新）", () => {
   });
 });
 
-describe("UsersPage 删除用户（V1 弹窗 + V2 202 受理）", () => {
+describe("UsersPage 删除用户（Demo 弹窗 + V2 202 受理）", () => {
   it("confirms then reports acceptance, not physical deletion", async () => {
     setup((url, init) => {
-      if (init?.method === "DELETE") return { ok: true, state: "pending", accepted: true };
+      if (init?.method === "DELETE") return json(202, { ok: true, state: "pending", accepted: true });
       return list([ME, user(2, { username: "alice" })]);
     });
     await screen.findByText("alice");
-    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "删除" }));
-    const dialog = screen.getByLabelText("删除用户");
-    expect(dialog.textContent).toContain("确定要删除用户 alice 吗？");
-    expect(dialog.textContent).toContain("将删除该用户的所有下载任务记录");
-    fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "删除用户 alice" }));
+    const dialog = screen.getByRole("dialog", { name: "删除用户" });
+    expect(dialog.textContent).toContain("确定删除“alice”吗？其文件会在后台继续清理。");
+    expect(within(dialog).getByRole("button", { name: "返回" })).toHaveFocus();
+    fireEvent.click(within(dialog).getByRole("button", { name: "删除用户" }));
     expect(await screen.findByText("删除已受理，后台清理进行中")).toBeInTheDocument();
     expect(screen.queryByText("alice")).toBeNull();
+  });
+
+  it("keeps the busy delete modal open and prevents duplicate requests", async () => {
+    let resolveDelete!: (value: unknown) => void;
+    const pendingDelete = new Promise((resolve) => { resolveDelete = resolve; });
+    setup((url, init) => {
+      if (init?.method === "DELETE") return pendingDelete;
+      return list([ME, user(2, { username: "alice" })]);
+    });
+    await screen.findByText("alice");
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "删除用户 alice" }));
+    const dialog = screen.getByRole("dialog", { name: "删除用户" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "删除用户" }));
+
+    const busyButton = await within(dialog).findByRole("button", { name: "删除中..." });
+    expect(busyButton).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "返回" })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "关闭对话框" })).toBeDisabled();
+    fireEvent.click(busyButton);
+    expect(mockFetch.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
+
+    resolveDelete(json(202, { ok: true, state: "pending", accepted: true }));
+    expect(await screen.findByText("删除已受理，后台清理进行中")).toBeInTheDocument();
   });
 
   it("keeps the dialog and surfaces the failure toast", async () => {
@@ -541,9 +638,9 @@ describe("UsersPage 删除用户（V1 弹窗 + V2 202 受理）", () => {
       return list([ME, user(2, { username: "alice" })]);
     });
     await screen.findByText("alice");
-    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "删除" }));
-    const dialog = screen.getByLabelText("删除用户");
-    fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "删除用户 alice" }));
+    const dialog = screen.getByRole("dialog", { name: "删除用户" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "删除用户" }));
     expect(
       await screen.findByText("用户仍有未清理的任务、文件或打包"),
     ).toBeInTheDocument();
@@ -554,8 +651,8 @@ describe("UsersPage 删除用户（V1 弹窗 + V2 202 受理）", () => {
   it("does not request a delete when cancelled", async () => {
     setup(() => list([ME, user(2, { username: "alice" })]));
     await screen.findByText("alice");
-    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "删除" }));
-    fireEvent.click(within(screen.getByLabelText("删除用户")).getByRole("button", { name: "取消" }));
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "删除用户 alice" }));
+    fireEvent.click(within(screen.getByLabelText("删除用户")).getByRole("button", { name: "返回" }));
     await waitFor(() => expect(screen.queryByLabelText("删除用户")).toBeNull());
     expect(mockFetch.mock.calls.find(([, init]) => init?.method === "DELETE")).toBeUndefined();
   });
@@ -581,11 +678,12 @@ describe("users 配额与占比口径", () => {
   });
 
   it.each([
-    { bytes: 2 * GIB, value: "2.00", unit: "GB" },
-    { bytes: 3 * MIB, value: "3.00", unit: "MB" },
-    { bytes: 2048, value: "2.00", unit: "KB" },
-  ])("formatQuotaForForm($bytes) = $value $unit", ({ bytes, value, unit }) => {
-    expect(formatQuotaForForm(bytes)).toEqual({ quotaValue: value, quotaUnit: unit });
+    { bytes: 2 * GIB, value: "2" },
+    { bytes: 3 * MIB, value: "0.0029296875" },
+    { bytes: 2048, value: "0.0000019073486328125" },
+    { bytes: 1, value: "9.313225746154785e-10" },
+  ])("formatQuotaForForm($bytes) keeps the exact GB string", ({ bytes, value }) => {
+    expect(formatQuotaForForm(bytes)).toEqual({ quotaValue: value, quotaUnit: "GB" });
   });
 
   it("converts GiB to bytes and rejects invalid input", () => {
@@ -596,11 +694,6 @@ describe("users 配额与占比口径", () => {
     expect(gibToBytes(Number.POSITIVE_INFINITY)).toBeNull();
   });
 
-  it("rounds bytes to two-decimal GiB", () => {
-    expect(bytesToGib(GIB)).toBe(1);
-    expect(bytesToGib(1.5 * GIB)).toBe(1.5);
-  });
-
   it("computes usage and machine share with the V1 formula, clamped to 0..100", () => {
     expect(usagePercent(50, 200)).toBe(25);
     expect(usagePercent(1, 0)).toBe(0);
@@ -609,17 +702,6 @@ describe("users 配额与占比口径", () => {
     expect(machineSharePercent(1, 0)).toBe(0);
     expect(machineSharePercent(1, 3)).toBe(33.3);
     expect(machineSharePercent(9, 3)).toBe(100);
-  });
-
-  it.each([
-    { percent: 0, color: "var(--success)" },
-    { percent: 69.9, color: "var(--success)" },
-    { percent: 70, color: "var(--warning)" },
-    { percent: 89.9, color: "var(--warning)" },
-    { percent: 90, color: "var(--danger)" },
-    { percent: 100, color: "var(--danger)" },
-  ])("usageColor($percent) = $color", ({ percent, color }) => {
-    expect(usageColor(percent)).toBe(color);
   });
 
   it("clamps the storage bar segments to the quota", () => {

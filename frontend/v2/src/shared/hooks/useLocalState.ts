@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from "react";
 
 export type LocalStateKey =
   | "tasks.filter"
-  | "history.filter"
   | "notifications.enabled"
   | "notifications.on_completed"
   | "notifications.on_failed";

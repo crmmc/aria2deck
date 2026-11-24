@@ -16,8 +16,8 @@ describe("useLocalState", () => {
   });
 
   it("reads persisted value on mount", () => {
-    window.localStorage.setItem("history.filter", '"completed"');
-    const { result } = renderHook(() => useLocalState("history.filter", "all"));
+    window.localStorage.setItem("tasks.filter", '"completed"');
+    const { result } = renderHook(() => useLocalState("tasks.filter", "all"));
     expect(result.current.value).toBe("completed");
   });
 
@@ -48,7 +48,7 @@ describe("useLocalState", () => {
     const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
       const first = renderHook(() => useLocalState("tasks.filter", "a"));
-      const second = renderHook(() => useLocalState("history.filter", "b"));
+      const second = renderHook(() => useLocalState("notifications.enabled", false));
       const firstResult = first.result;
       const secondResult = second.result;
       expect(firstResult.current.persistent).toBe(false);
@@ -65,7 +65,7 @@ describe("useLocalState", () => {
     const store = {
       getItem: () => null,
       setItem: (key: string) => {
-        if (key === "history.filter") throw new Error("quota exceeded"); // 仅真实键写入失败。
+        if (key === "tasks.filter") throw new Error("quota exceeded"); // 仅真实键写入失败。
       },
       removeItem: () => undefined,
       clear: () => undefined,
@@ -73,7 +73,7 @@ describe("useLocalState", () => {
     const spy = jest
       .spyOn(window, "localStorage", "get")
       .mockImplementation(() => store);
-    const { result } = renderHook(() => useLocalState("history.filter", "all"));
+    const { result } = renderHook(() => useLocalState("tasks.filter", "all"));
     act(() => result.current.setValue("completed"));
     expect(result.current.value).toBe("completed"); // 内存值保留。
     expect(result.current.persistent).toBe(true);

@@ -3,9 +3,11 @@ import type { SettingsResponse } from "@/shared/api/types";
 import {
   DOWNLOAD_CONNECTION_LIMIT_FIELDS,
   RATE_LIMIT_FIELDS,
+  buildChangedUpdatePayload,
   buildUpdatePayload,
   formFromSettings,
   initialSettingsFormState,
+  isSettingsFormDirty,
   settingsFormReducer,
   type SettingsForm,
 } from "@/features/settings/settingsForm";
@@ -238,5 +240,117 @@ describe("buildUpdatePayload", () => {
       expect(result.payload.ws_reconnect_jitter_seconds).toBe(3);
       expect(result.payload.ws_reconnect_factor).toBe(4);
     }
+  });
+});
+
+describe("settings form semantic diff", () => {
+  it("treats freshly built arrays and maps with equal values as clean", () => {
+    const saved = form();
+    const current = form();
+
+    expect(isSettingsFormDirty(current, saved)).toBe(false);
+    expect(buildChangedUpdatePayload(current, saved)).toEqual({ ok: true, payload: {} });
+  });
+
+  it("treats numeric 1 and 1.0 as equivalent", () => {
+    const saved = form({ historyRetentionDays: "1" });
+    const current = form({ historyRetentionDays: "1.0" });
+    expect(isSettingsFormDirty(current, saved)).toBe(false);
+    expect(buildChangedUpdatePayload(current, saved)).toEqual({ ok: true, payload: {} });
+  });
+
+  const equivalentCases: { name: string; patch: Partial<SettingsForm> }[] = [
+    {
+      name: "tracker trailing blank lines",
+      patch: {
+        trackerFixedListText: "udp://a/announce\n\n",
+        trackerRemoteUrlsText: "https://t.example/list.txt\n  \n",
+      },
+    },
+    { name: "empty and masked secret", patch: { aria2RpcSecret: "" } },
+  ];
+
+  it.each(equivalentCases)("does not mark $name as dirty", ({ patch }) => {
+    const current = form(patch);
+    expect(isSettingsFormDirty(current, form())).toBe(false);
+    expect(buildChangedUpdatePayload(current, form())).toEqual({ ok: true, payload: {} });
+  });
+
+  it("returns only the changed scalar and preserves hidden WS values", () => {
+    const result = buildChangedUpdatePayload(form({ siteTitle: "新标题" }), form());
+
+    expect(result).toEqual({ ok: true, payload: { site_title: "新标题" } });
+    expect(isSettingsFormDirty(form({ siteTitle: "新标题" }), form())).toBe(true);
+  });
+
+  it("compares tracker arrays by value and returns a changed array", () => {
+    const result = buildChangedUpdatePayload(
+      form({ trackerFixedListText: "udp://b/announce\nudp://a/announce" }),
+      form(),
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      payload: { tracker_fixed_list: ["udp://b/announce", "udp://a/announce"] },
+    });
+  });
+
+  it("returns the complete current connection map when any child changes", () => {
+    const saved = form({
+      downloadConnectionLimits: {
+        total_connections: "100",
+        anonymous_total_connections: "40",
+      },
+    });
+    const current = form({
+      downloadConnectionLimits: {
+        total_connections: "101",
+        anonymous_total_connections: "40",
+      },
+    });
+
+    expect(buildChangedUpdatePayload(current, saved)).toEqual({
+      ok: true,
+      payload: {
+        download_connection_limits: {
+          total_connections: 101,
+          anonymous_total_connections: 40,
+        },
+      },
+    });
+  });
+
+  it("submits a hidden WS field only when that field itself changes", () => {
+    expect(
+      buildChangedUpdatePayload(form({ wsReconnectJitterSeconds: "4" }), form()),
+    ).toEqual({ ok: true, payload: { ws_reconnect_jitter_seconds: 4 } });
+  });
+
+  it("includes a newly typed secret but not an unchanged mask", () => {
+    expect(buildChangedUpdatePayload(form(), form({ aria2RpcSecret: "" }))).toEqual({
+      ok: true,
+      payload: {},
+    });
+    expect(
+      buildChangedUpdatePayload(form({ aria2RpcSecret: "new-secret" }), form()),
+    ).toEqual({ ok: true, payload: { aria2_rpc_secret: "new-secret" } });
+  });
+
+  it("always treats an invalid current form as dirty and preserves validation", () => {
+    const current = form({ maxTaskSizeGib: "" });
+    expect(isSettingsFormDirty(current, form({ maxTaskSizeGib: "" }))).toBe(true);
+    expect(buildChangedUpdatePayload(current, form())).toEqual({
+      ok: false,
+      error: "最大任务大小必须是不小于 0 的数字",
+    });
+  });
+
+  it("does not produce a diff from an invalid saved snapshot", () => {
+    const saved = form({ historyRetentionDays: "0" });
+    expect(isSettingsFormDirty(form(), saved)).toBe(true);
+    expect(buildChangedUpdatePayload(form(), saved)).toEqual({
+      ok: false,
+      error: "历史保留天数必须在 1 到 3650 之间",
+    });
   });
 });

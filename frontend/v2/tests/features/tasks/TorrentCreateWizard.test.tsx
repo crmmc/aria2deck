@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createTorrent } from "@/features/tasks/api";
 import { TorrentCreateWizard } from "@/features/tasks/components/TorrentCreateWizard";
 import type { TorrentPreviewResponse, TaskResponse } from "@/shared/api/types";
@@ -127,11 +127,12 @@ describe("TorrentCreateWizard", () => {
   it("提交成功回调 onCreated", async () => {
     createTorrentMock.mockResolvedValue(TASK);
     const onCreated = jest.fn();
+    const onCancel = jest.fn();
     render(
       <TorrentCreateWizard
         torrentBase64="base64=="
         preview={preview}
-        onCancel={jest.fn()}
+        onCancel={onCancel}
         onCreated={onCreated}
         onError={jest.fn()}
       />,
@@ -139,6 +140,7 @@ describe("TorrentCreateWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: "下一阶段" }));
     fireEvent.click(await screen.findByRole("button", { name: "确认" }));
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(TASK));
+    expect(onCancel).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -155,7 +157,51 @@ describe("TorrentCreateWizard", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     fireEvent.click(await screen.findByRole("button", { name: "确认取消" }));
-    expect(onCancel).toHaveBeenCalled();
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("继续选择只关闭内层确认并把焦点还给外层取消按钮", () => {
+    const onCancel = jest.fn();
+    render(
+      <TorrentCreateWizard
+        torrentBase64="base64=="
+        preview={preview}
+        onCancel={onCancel}
+        onCreated={jest.fn()}
+        onError={jest.fn()}
+      />,
+    );
+    const outerCancel = screen.getByRole("button", { name: "取消" });
+    outerCancel.focus();
+    fireEvent.click(outerCancel);
+    const nested = screen.getByRole("dialog", { name: "取消添加任务" });
+    const continueButton = within(nested).getByRole("button", { name: "继续选择" });
+    expect(continueButton).toHaveFocus();
+
+    fireEvent.click(continueButton);
+    expect(screen.queryByRole("dialog", { name: "取消添加任务" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "添加 BT 下载任务" })).toBeInTheDocument();
+    expect(outerCancel).toHaveFocus();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("外层 Escape 只打开取消确认，不直接关闭向导", () => {
+    const onCancel = jest.fn();
+    render(
+      <TorrentCreateWizard
+        torrentBase64="base64=="
+        preview={preview}
+        onCancel={onCancel}
+        onCreated={jest.fn()}
+        onError={jest.fn()}
+      />,
+    );
+    fireEvent(
+      screen.getByRole("dialog", { name: "添加 BT 下载任务" }),
+      new Event("cancel", { bubbles: false, cancelable: true }),
+    );
+    expect(screen.getByRole("dialog", { name: "取消添加任务" })).toBeInTheDocument();
+    expect(onCancel).not.toHaveBeenCalled();
   });
 
   it("文件搜索过滤", () => {

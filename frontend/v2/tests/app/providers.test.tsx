@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
-import { useAuth } from "@/app/hooks";
+import { useAuth } from "@/shared/auth/hooks";
 import { DEFAULT_SITE_TITLE, getSiteTitle, setSiteTitle } from "@/shared/lib/siteTitle";
 import type { UserResponse } from "@/shared/api/types";
 

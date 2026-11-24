@@ -1,5 +1,4 @@
 import {
-  filterCurrentTasks,
   filterInFlightTasks,
   isCurrentVisibleStatus,
   isInFlightStatus,
@@ -33,13 +32,13 @@ function task(overrides: Partial<TaskResponse> & { id: number }): TaskResponse {
   };
 }
 
-describe("isCurrentVisibleStatus（当前任务视图，不含终态）", () => {
+describe("isCurrentVisibleStatus（会话内可见性：管线 + 失败）", () => {
   it.each<[TaskStatus, boolean]>([
     ["queued", true],
     ["active", true],
     ["waiting", true],
     ["paused", true],
-    ["failed", false],
+    ["failed", true],
     ["completed", false],
     ["cancelled", false],
     ["expired", false],
@@ -58,19 +57,6 @@ describe("isInFlightStatus（V1 进行中筛选）", () => {
     ["completed", false],
   ])("%s -> %s", (status, expected) => {
     expect(isInFlightStatus(status)).toBe(expected);
-  });
-});
-
-describe("filterCurrentTasks", () => {
-  it("剔除 failed 并维持原顺序", () => {
-    const tasks = [
-      task({ id: 1, status: "failed" }),
-      task({ id: 2, status: "completed" }),
-      task({ id: 3, status: "active" }),
-      task({ id: 4, status: "cancelled" }),
-      task({ id: 5, status: "waiting" }),
-    ];
-    expect(filterCurrentTasks(tasks).map((t) => t.id)).toEqual([3, 5]);
   });
 });
 

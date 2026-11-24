@@ -5,10 +5,14 @@ import { createPortal } from "react-dom";
 
 import { useToast } from "@/shared/components/toast-context";
 import { PaginationControls } from "@/shared/components/PaginationControls";
+import { PageHeader } from "@/shared/components/PageHeader";
 import { useIsMobile } from "@/shared/hooks/useIsMobile";
+import { Icon, type SortDirection } from "@/shared/components/Icon";
 import { useMounted } from "@/shared/hooks/useMounted";
 import { fileDownloadUrl } from "@/shared/api/urls";
 import { triggerBatchDownloads, triggerFileDownload } from "@/shared/lib/download";
+import { formatBytes } from "@/shared/lib/format";
+import { requestModalClose } from "@/shared/ui/modalClose";
 import { batchDeleteFiles, createPack, fetchEntries, fetchFiles, precomputePack, renameFile, searchFiles } from "./api";
 import {
   formatFileDate,
@@ -27,8 +31,7 @@ import { SearchModal } from "./components/SearchModal";
 import { FileToolbar, type BrowseContext, type SortField, type SortOrder } from "./components/FileToolbar";
 import { PackDialog } from "./components/PackDialog";
 import { RootFileTable } from "./components/RootFileTable";
-import { SpaceUsageCard } from "./components/SpaceUsageCard";
-import { PackTaskCard } from "./components/PackTaskCard";
+import { PackEntryButton } from "./components/PackEntryButton";
 import { CreateShareDialog } from "./components/CreateShareDialog";
 
 const LOCATE_HIGHLIGHT_MS = 1800;
@@ -39,7 +42,6 @@ const BATCH_DOWNLOAD_INTERVAL_MS = 1200;
 export function FilesPage() {
   const { showToast, showConfirm } = useToast();
   const [files, setFiles] = useState<FileView[]>([]);
-  const [space, setSpace] = useState<{ used: number; frozen: number; available: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<number | null>(null);
@@ -61,6 +63,7 @@ export function FilesPage() {
   const [highlightUserFileId, setHighlightUserFileId] = useState<number | null>(null);
   const [highlightName, setHighlightName] = useState<string | null>(null);
   const pendingRootLocateRef = useRef<number | null>(null);
+  const searchCloseTargetRef = useRef<Element | null>(null);
   const toolbarSearchInputRef = useRef<HTMLInputElement>(null);
 
   // Batch selection state
@@ -97,6 +100,7 @@ export function FilesPage() {
   const [totalFiles, setTotalFiles] = useState(0);
 
   const closeSearchModal = useCallback(() => {
+    searchCloseTargetRef.current = null;
     setShowSearchModal(false);
   }, []);
 
@@ -132,11 +136,6 @@ export function FilesPage() {
       const response = await fetchFiles(page, size);
       const views = response.items.map(toFileView);
       setFiles(views);
-      setSpace({
-        used: response.space.used_bytes,
-        frozen: response.space.reserved_bytes,
-        available: response.space.available_bytes,
-      });
       setTotalFiles(response.total);
       setSelectedFiles(new Set());
       const pendingLocateId = pendingRootLocateRef.current;
@@ -145,7 +144,8 @@ export function FilesPage() {
         if (views.some((f) => f.id === pendingLocateId)) {
           setHighlightUserFileId(pendingLocateId);
           window.setTimeout(() => setHighlightUserFileId(null), LOCATE_HIGHLIGHT_MS);
-          setShowSearchModal(false);
+          requestModalClose(searchCloseTargetRef.current);
+          searchCloseTargetRef.current = null;
         } else {
           showToast("定位失败：未在当前列表找到该文件", "error");
         }
@@ -168,13 +168,10 @@ export function FilesPage() {
         e.preventDefault();
         toolbarSearchInputRef.current?.focus();
       }
-      if (e.key === "Escape" && showSearchModal) {
-        closeSearchModal();
-      }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showSearchModal, closeSearchModal]);
+  }, []);
 
   const sortedFiles = useMemo(
     () => sortFiles(files, sortField, sortOrder),
@@ -195,9 +192,9 @@ export function FilesPage() {
     }
   };
 
-  const getSortIcon = (field: SortField) => {
-    if (sortField !== field) return "↕";
-    return sortOrder === "asc" ? "↑" : "↓";
+  const getSortIcon = (field: SortField): SortDirection => {
+    if (sortField !== field) return "none";
+    return sortOrder;
   };
 
   const runSearch = useCallback(async () => {
@@ -258,7 +255,7 @@ export function FilesPage() {
     setBrowsePage(1);
   }, []);
 
-  const locateInsideFolder = useCallback(async (item: SearchHitView) => {
+  const locateInsideFolder = useCallback(async (item: SearchHitView, trigger: Element) => {
     const segments = item.entryPath?.split("/").filter(Boolean) ?? [];
     const name = segments[segments.length - 1];
     const parentSegments = segments.slice(0, -1);
@@ -281,13 +278,14 @@ export function FilesPage() {
       }
       setHighlightName(name);
       window.setTimeout(() => setHighlightName(null), LOCATE_HIGHLIGHT_MS);
-      setShowSearchModal(false);
+      requestModalClose(trigger);
     } catch (err) {
       showToast(`定位失败: ${(err as Error).message}`, "error");
     }
   }, [browseContext, showToast, loadBrowsePage]);
 
-  const handleLocate = useCallback((item: SearchHitView) => {
+  const handleLocate = useCallback((item: SearchHitView, trigger: Element) => {
+    searchCloseTargetRef.current = trigger;
     if (item.entryPath === null) {
       // C31：V2 无 root_index，逐页扫描定位目标页。
       const locate = async () => {
@@ -310,12 +308,12 @@ export function FilesPage() {
         }
         setHighlightUserFileId(item.userFileId);
         window.setTimeout(() => setHighlightUserFileId(null), LOCATE_HIGHLIGHT_MS);
-        setShowSearchModal(false);
+        requestModalClose(trigger);
       };
       void locate();
       return;
     }
-    void locateInsideFolder(item);
+    void locateInsideFolder(item, trigger);
   }, [browseContext, pageSize, currentPage, showToast, locateInsideFolder, clearBrowseState]);
 
   const handleToolbarSearchKeyDown = (e: React.KeyboardEvent) => {
@@ -427,13 +425,13 @@ export function FilesPage() {
       setAvailableSpace(result.available_bytes);
     } catch (err) {
       showToast(`获取信息失败: ${(err as Error).message}`, "error");
-      setPackDialogOpen(false);
+      requestModalClose(document.querySelector('dialog[aria-label="创建打包任务"]'));
     } finally {
       setPackLoading(false);
     }
   };
 
-  const handlePackConfirm = async () => {
+  const handlePackConfirm = async (trigger: Element) => {
     setPacking(true);
     try {
       const fileIds = Array.from(selectedFiles);
@@ -441,7 +439,7 @@ export function FilesPage() {
       // V2 必填 output_name，前端按 归档参考规则复刻默认值。
       await createPack(fileIds, packOutputName || "archive.zip", packDeleteSource);
       showToast("打包任务已创建", "success");
-      setPackDialogOpen(false);
+      requestModalClose(trigger);
       setSelectedFiles(new Set());
       setPackOutputName("");
       setPackDeleteSource(false);
@@ -478,6 +476,12 @@ export function FilesPage() {
       .filter((f) => selectedFiles.has(f.id))
       .reduce((sum, f) => sum + f.size, 0);
   }, [files, selectedFiles]);
+
+  const selectedBrowseSize = useMemo(() => {
+    return browseContents
+      .filter((item) => selectedBrowseFiles.has([...(browseContext?.path ?? []), item.name].join("/")))
+      .reduce((sum, item) => sum + item.size, 0);
+  }, [browseContents, browseContext, selectedBrowseFiles]);
 
   const handleRename = async (file: FileView) => {
     if (!newName.trim()) {
@@ -518,6 +522,7 @@ export function FilesPage() {
   // Folder in-page navigation（导航事件内同步重置页码，保证只发一笔「第 1 页」请求）
   const enterFolder = async (file: FileView) => {
     setBrowseContext({ fileId: file.id, fileName: file.name, path: [] });
+    setSelectedFiles(new Set());
     setSelectedBrowseFiles(new Set());
     setBrowsePage(1);
     setBrowseTotal(0);
@@ -628,53 +633,37 @@ export function FilesPage() {
     loadFiles(currentPage, pageSize);
   }, [loadFiles, currentPage, pageSize]);
 
+  const hasBulkSelection = isInsideFolder ? selectedBrowseFiles.size > 0 : selectedFiles.size > 0;
+
   return (
-    <div className="glass-frame full-height animate-in">
-      <div className="flex-between mb-7">
-        <div>
-          <h1 className="text-2xl">文件</h1>
-          <p className="muted">管理您下载的文件</p>
-        </div>
-        <PackTaskCard key={packTasksKey} onTaskComplete={handlePackTaskComplete} />
-      </div>
-
-      {space && <SpaceUsageCard space={space} />}
-
-      {/* Toolbar - Always visible */}
-      <FileToolbar
-        isInsideFolder={isInsideFolder}
-        browseContext={browseContext}
-        browseContents={browseContents}
-        selectedBrowseFiles={selectedBrowseFiles}
-        selectedFiles={selectedFiles}
-        selectedSize={selectedSize}
-        sortedFilesLength={sortedFiles.length}
-        sortField={sortField}
-        sortOrder={sortOrder}
-        toolbarSearchKeyword={toolbarSearchKeyword}
-        searchGlobal={searchGlobal}
-        searchLoading={searchLoading}
-        searchInputRef={toolbarSearchInputRef}
-        isBatchOperating={isBatchOperating}
-        onReturnToRoot={returnToRoot}
-        onNavigateToBreadcrumb={navigateToBreadcrumb}
-        onSortFieldChange={setSortField}
-        onSortOrderChange={setSortOrder}
-        onToolbarSearchKeywordChange={setToolbarSearchKeyword}
-        onToolbarSearchKeyDown={handleToolbarSearchKeyDown}
-        onSearchGlobalChange={setSearchGlobal}
-        onSearchSubmit={() => { void runSearch(); }}
-        onToggleAllBrowseFiles={toggleAllBrowseFiles}
-        onBrowseBatchDownload={handleBrowseBatchDownload}
-        onToggleSelectAll={toggleSelectAll}
-        onBatchDownload={handleBatchDownload}
-        onBatchDelete={handleBatchDelete}
-        onOpenPackDialog={openPackDialog}
+    <div className={`glass-frame full-height animate-in${hasBulkSelection ? " has-bulk" : ""}`}>
+      <PageHeader
+        title="文件"
+        description="管理您下载的文件"
+        actions={<PackEntryButton key={packTasksKey} onTaskComplete={handlePackTaskComplete} />}
       />
 
-      {/* Folder contents table (inside folder) */}
-      {isInsideFolder ? (
-        <>
+      <section className="panel list-panel file-list-panel" aria-label="文件列表">
+        <FileToolbar
+          isInsideFolder={isInsideFolder}
+          browseContext={browseContext}
+          browseContents={browseContents}
+          sortField={sortField}
+          sortOrder={sortOrder}
+          toolbarSearchKeyword={toolbarSearchKeyword}
+          searchGlobal={searchGlobal}
+          searchLoading={searchLoading}
+          searchInputRef={toolbarSearchInputRef}
+          onReturnToRoot={returnToRoot}
+          onNavigateToBreadcrumb={navigateToBreadcrumb}
+          onSortFieldChange={setSortField}
+          onSortOrderChange={setSortOrder}
+          onToolbarSearchKeywordChange={setToolbarSearchKeyword}
+          onToolbarSearchKeyDown={handleToolbarSearchKeyDown}
+          onSearchGlobalChange={setSearchGlobal}
+          onSearchSubmit={() => { void runSearch(); }}
+        />
+        {isInsideFolder ? (
           <BrowseFolderView
             isMobile={isMobile}
             browseLoading={browseLoading}
@@ -695,17 +684,7 @@ export function FilesPage() {
               showToast("文件夹内暂不支持在此页面单文件直接删除", "warning");
             }}
           />
-          {!browseLoading && browseTotal > BROWSE_PAGE_SIZE && (
-            <PaginationControls
-              currentPage={browsePage}
-              pageSize={BROWSE_PAGE_SIZE}
-              totalFiles={browseTotal}
-              onPageChange={handleBrowsePageChange}
-            />
-          )}
-        </>
-      ) : (
-          <>
+        ) : (
           <RootFileTable
             isMobile={isMobile}
             loading={loading}
@@ -730,14 +709,76 @@ export function FilesPage() {
             onDelete={(file) => { void handleDelete(file); }}
             formatDate={formatFileDate}
           />
+        )}
+      </section>
+
+      {isInsideFolder ? (
+        !browseLoading && browseTotal > BROWSE_PAGE_SIZE && (
           <PaginationControls
-            currentPage={currentPage}
-            pageSize={pageSize}
-            totalFiles={totalFiles}
-            onPageChange={setCurrentPage}
-            onPageSizeChange={setPageSize}
+            currentPage={browsePage}
+            pageSize={BROWSE_PAGE_SIZE}
+            totalFiles={browseTotal}
+            onPageChange={handleBrowsePageChange}
           />
-          </>
+        )
+      ) : (
+        <PaginationControls
+          currentPage={currentPage}
+          pageSize={pageSize}
+          totalFiles={totalFiles}
+          onPageChange={setCurrentPage}
+          onPageSizeChange={setPageSize}
+        />
+      )}
+
+      {hasBulkSelection && mounted && createPortal(
+        <div className="file-bulk-layer">
+          <div className="bulk-bar" role="region" aria-label={isInsideFolder ? "目录文件批量操作" : "文件批量操作"}>
+            <span className="bulk-count">已选 <strong>{isInsideFolder ? selectedBrowseFiles.size : selectedFiles.size}</strong> 项</span>
+            <span className="bulk-size">{formatBytes(isInsideFolder ? selectedBrowseSize : selectedSize)}</span>
+            <span className="bulk-divider" />
+            <button
+              type="button"
+              className="button secondary btn-sm"
+              onClick={() => { void (isInsideFolder ? handleBrowseBatchDownload() : handleBatchDownload()); }}
+              disabled={!isInsideFolder && isBatchOperating}
+            >
+              <Icon name="download" className="icon-sm" />批量下载
+            </button>
+            {!isInsideFolder && (
+              <>
+                <button
+                  type="button"
+                  className="button secondary btn-sm"
+                  onClick={() => { void openPackDialog(); }}
+                  disabled={isBatchOperating}
+                >
+                  <Icon name="archive" className="icon-sm" />打包
+                </button>
+                <button
+                  type="button"
+                  className="button danger btn-sm"
+                  onClick={() => { void handleBatchDelete(); }}
+                  disabled={isBatchOperating}
+                >
+                  <Icon name="trash" className="icon-sm" />{isBatchOperating ? "删除中..." : "删除"}
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="取消选择"
+              onClick={() => {
+                if (isInsideFolder) setSelectedBrowseFiles(new Set());
+                else setSelectedFiles(new Set());
+              }}
+            >
+              <Icon name="x" className="icon-sm" />
+            </button>
+          </div>
+        </div>,
+        document.body,
       )}
 
       {/* Search result modal */}
@@ -767,7 +808,7 @@ export function FilesPage() {
           onClose={() => setPackDialogOpen(false)}
           onOutputNameChange={setPackOutputName}
           onDeleteSourceChange={setPackDeleteSource}
-          onConfirm={() => { void handlePackConfirm(); }}
+          onConfirm={(trigger) => { void handlePackConfirm(trigger); }}
         />,
         document.body,
       )}

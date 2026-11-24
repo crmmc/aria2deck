@@ -1,4 +1,5 @@
 import type { RpcAccessResponse } from "@/shared/api/types";
+import { Icon } from "@/shared/components/Icon";
 
 type RpcAccessSectionProps = {
   rpcAccess: RpcAccessResponse | null;
@@ -23,74 +24,61 @@ export function RpcAccessSection({
   onCopySecret,
   onCopyRpcUrl,
 }: RpcAccessSectionProps) {
+  const enabled = rpcAccess?.enabled === true;
   return (
-    <div className="card">
-      <h2 className="section-title">外部访问</h2>
-
-      <div className="max-w-600">
-        <div className={`bg-black-02 rounded-lg p-4 ${rpcAccess?.enabled ? "mb-6" : ""}`}>
-          <div className="flex-between mb-2">
-            <label className="font-semibold" htmlFor="profile-rpc-toggle">允许外部 aria2 客户端连接</label>
+    <section className="panel profile-panel profile-panel-wide">
+      <div className="panel-head"><h2>外部访问</h2></div>
+      <div className="panel-body">
+        <div className="switch-row">
+          <div className="switch-copy">
+            <strong><label htmlFor="profile-rpc-toggle">允许外部 aria2 客户端连接</label></strong>
+            <p>开启后可使用 AriaNg、Motrix 等客户端管理当前用户的下载任务。</p>
+          </div>
+          <div className="switch-control">
+            <span className="switch-state">{enabled ? "已启用" : "已停用"}</span>
             <button
               id="profile-rpc-toggle"
               type="button"
-              onClick={() => onToggle(!rpcAccess?.enabled)}
+              onClick={() => onToggle(!enabled)}
               disabled={rpcLoading}
-              className={`toggle-switch ${rpcAccess?.enabled ? "toggle-switch-on" : "toggle-switch-off"} ${rpcLoading ? "opacity-60 cursor-not-allowed" : ""}`}
+              className={`toggle-switch ${enabled ? "toggle-switch-on" : "toggle-switch-off"} ${rpcLoading ? "opacity-60 cursor-not-allowed" : ""}`}
               aria-label="允许外部 aria2 客户端连接"
             >
-              <div
-                className="toggle-knob"
-                style={{ left: rpcAccess?.enabled ? 24 : 2 }}
-              />
+              <div className="toggle-knob" style={{ transform: enabled ? "translateX(20px)" : "none" }} />
             </button>
           </div>
-          <p className="muted text-sm">开启后可使用 AriaNg、Motrix 等客户端管理下载任务</p>
         </div>
 
-        {rpcAccess?.enabled && rpcAccess.secret && (
-          <div className="alert alert-info p-4">
-            <div className="mb-5">
-              <div className="flex-between mb-2">
-                <span className="font-semibold text-base">RPC 密钥</span>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    className="button secondary btn-sm"
-                    onClick={onCopySecret}
-                  >
-                    {copiedSecret ? "已复制" : "复制"}
-                  </button>
-                  <button
-                    type="button"
-                    className="button secondary btn-sm"
-                    onClick={onRefreshSecret}
-                    disabled={rpcLoading}
-                    style={{ opacity: rpcLoading ? 0.6 : 1 }}
-                  >
-                    刷新
+        {enabled && rpcAccess?.secret && (
+          <>
+            <div className="form-grid profile-rpc-grid">
+              <div className="field">
+                <span className="form-label field-label">RPC 地址</span>
+                <div className="profile-secret">
+                  <code className="code-block input mono">{rpcUrl}</code>
+                  <button type="button" className="icon-btn" onClick={onCopyRpcUrl} title="复制 RPC 地址" aria-label={copiedUrl ? "已复制" : "复制 RPC 地址"}>
+                    <Icon name={copiedUrl ? "check" : "copy"} className="icon-sm" />
                   </button>
                 </div>
               </div>
-              <code className="code-block">{rpcAccess.secret}</code>
-            </div>
-
-            <div>
-              <div className="flex-between mb-2">
-                <span className="font-semibold text-base">RPC 地址</span>
-                <button
-                  type="button"
-                  className="button secondary btn-sm"
-                  onClick={onCopyRpcUrl}
-                >
-                  {copiedUrl ? "已复制" : "复制"}
-                </button>
+              <div className="field">
+                <span className="form-label field-label">RPC 密钥</span>
+                <div className="profile-secret">
+                  <code className="code-block input mono">{rpcAccess.secret}</code>
+                  <button type="button" className="icon-btn" onClick={onCopySecret} title="复制 RPC 密钥" aria-label={copiedSecret ? "已复制" : "复制 RPC 密钥"}>
+                    <Icon name={copiedSecret ? "check" : "copy"} className="icon-sm" />
+                  </button>
+                </div>
               </div>
-              <code className="code-block">{rpcUrl}</code>
             </div>
-          </div>
+            <div className="profile-actions">
+              <button type="button" className="button secondary btn-sm" onClick={onRefreshSecret} disabled={rpcLoading}>
+                <Icon name="refresh" className="icon-sm" />刷新
+              </button>
+            </div>
+          </>
         )}
       </div>
-    </div>
+    </section>
   );
 }

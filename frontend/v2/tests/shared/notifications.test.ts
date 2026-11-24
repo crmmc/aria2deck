@@ -1,6 +1,5 @@
 import {
   DEFAULT_NOTIFICATION_SETTINGS,
-  notificationPermission,
   readNotificationSettings,
   requestNotificationPermission,
   resetNotificationDegradeFlag,
@@ -43,21 +42,6 @@ function installNotification(overrides: {
     restore: () => delete (globalThis as { Notification?: unknown }).Notification,
   };
 }
-
-describe("notificationPermission", () => {
-  it("reports unsupported when Notification is absent", () => {
-    expect(notificationPermission()).toBe("unsupported");
-  });
-
-  it("reflects the current permission state", () => {
-    const impl = installNotification({ permission: "denied" });
-    try {
-      expect(notificationPermission()).toBe("denied");
-    } finally {
-      impl.restore();
-    }
-  });
-});
 
 describe("requestNotificationPermission", () => {
   it("returns granted immediately when already granted", async () => {

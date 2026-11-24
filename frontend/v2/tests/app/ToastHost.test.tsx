@@ -1,10 +1,13 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
-import { useAuth, useToast } from "@/app/hooks";
+import { useAuth, useToast } from "@/shared/auth/hooks";
+import { ModalOverlay } from "@/shared/components/ModalOverlay";
+import { requestModalClose } from "@/shared/ui/modalClose";
 import { DEFAULT_SITE_TITLE, getSiteTitle, setSiteTitle } from "@/shared/lib/siteTitle";
-import type { ToastKind } from "@/app/contexts";
+import type { ToastKind } from "@/shared/auth/contexts";
 import type { UserResponse } from "@/shared/api/types";
 
 const mockFetch = jest.fn();
@@ -29,6 +32,7 @@ function json(status: number, body: unknown): unknown {
 type ToastProbe = {
   push?: (kind: ToastKind, text: string) => void;
   dismiss?: (id: number) => void;
+  root?: HTMLElement;
 };
 
 /** AppProviders 自身渲染 ToastHost，因此这里只挂一个探针读取 toast 上下文。 */
@@ -40,21 +44,82 @@ function renderWithToasts(): ToastProbe {
     probe.dismiss = dismiss;
     return null;
   }
-  render(
+  const view = render(
     <AppProviders>
       <Probe />
     </AppProviders>,
   );
+  probe.root = view.container;
   return probe;
 }
 
+let originalShowModal: HTMLDialogElement["showModal"] | undefined;
+let originalClose: HTMLDialogElement["close"] | undefined;
+
+function AppToastLayerHarness() {
+  const { push } = useToast();
+  const [outerOpen, setOuterOpen] = useState(false);
+  const [innerOpen, setInnerOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOuterOpen(true)}>打开外层</button>
+      <button onClick={() => push("info", "模态提示")}>显示模态提示</button>
+      {outerOpen ? (
+        <ModalOverlay onClose={() => setOuterOpen(false)} ariaLabel="外层弹窗">
+          <button onClick={() => setInnerOpen(true)}>打开内层</button>
+          <button onClick={(event) => requestModalClose(event.currentTarget)}>关闭外层</button>
+        </ModalOverlay>
+      ) : null}
+      {innerOpen ? (
+        <ModalOverlay onClose={() => setInnerOpen(false)} ariaLabel="内层弹窗">
+          <button onClick={(event) => requestModalClose(event.currentTarget)}>关闭内层</button>
+        </ModalOverlay>
+      ) : null}
+    </>
+  );
+}
+
 beforeEach(() => {
+  originalShowModal = HTMLDialogElement.prototype.showModal;
+  originalClose = HTMLDialogElement.prototype.close;
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+    configurable: true,
+    value: jest.fn(function showModal(this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    }),
+  });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", {
+    configurable: true,
+    value: jest.fn(function close(this: HTMLDialogElement) {
+      this.removeAttribute("open");
+    }),
+  });
   mockFetch.mockReset();
   setSiteTitle(DEFAULT_SITE_TITLE);
   mockFetch.mockImplementation(async (url: string) => {
     if (url === "/api/v2/public/site-info") return json(200, { site_title: "Aria2Deck" });
     return json(200, ME);
   });
+});
+
+afterEach(() => {
+  document.querySelectorAll("dialog").forEach((dialog) => dialog.removeAttribute("open"));
+  if (originalShowModal) {
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value: originalShowModal,
+    });
+  } else {
+    Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
+  }
+  if (originalClose) {
+    Object.defineProperty(HTMLDialogElement.prototype, "close", {
+      configurable: true,
+      value: originalClose,
+    });
+  } else {
+    Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
+  }
 });
 
 describe("ToastHost（providers 内建 toast）", () => {
@@ -77,6 +142,7 @@ describe("ToastHost（providers 内建 toast）", () => {
     });
     const host = document.querySelector(".toast-host");
     expect(host).toBeTruthy();
+    expect(host?.parentElement).toBe(probe.root);
     expect(host).toHaveAttribute("role", "status");
     expect(document.querySelector(".toast-success")?.textContent).toContain("保存成功");
 
@@ -117,6 +183,67 @@ describe("ToastHost（providers 内建 toast）", () => {
         jest.advanceTimersByTime(5000);
       });
       expect(screen.queryByText("稍纵即逝")).not.toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("follows nested modals, traps Toast close focus, and keeps the original 5 second deadline", async () => {
+    jest.useFakeTimers();
+    try {
+      const view = render(
+        <AppProviders>
+          <AppToastLayerHarness />
+        </AppProviders>,
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const openOuter = screen.getByRole("button", { name: "打开外层" });
+      openOuter.focus();
+      fireEvent.click(openOuter);
+      fireEvent.click(screen.getByRole("button", { name: "显示模态提示" }));
+
+      const outer = screen.getByRole("dialog", { name: "外层弹窗" });
+      const getHost = () => document.querySelector(".toast-host");
+      expect(getHost()?.parentElement).toBe(outer);
+
+      const openInner = screen.getByRole("button", { name: "打开内层" });
+      const closeToast = screen.getByRole("button", { name: "关闭提示" });
+      fireEvent.keyDown(openInner, { key: "Tab", shiftKey: true });
+      expect(closeToast).toHaveFocus();
+      fireEvent.keyDown(closeToast, { key: "Tab" });
+      expect(openInner).toHaveFocus();
+
+      await act(async () => {
+        jest.advanceTimersByTime(1000);
+      });
+      fireEvent.click(openInner);
+      const inner = screen.getByRole("dialog", { name: "内层弹窗" });
+      expect(getHost()?.parentElement).toBe(inner);
+
+      await act(async () => {
+        jest.advanceTimersByTime(1000);
+      });
+      fireEvent.click(screen.getByRole("button", { name: "关闭内层" }));
+      expect(screen.queryByRole("dialog", { name: "内层弹窗" })).not.toBeInTheDocument();
+      expect(getHost()?.parentElement).toBe(outer);
+      expect(openInner).toHaveFocus();
+
+      await act(async () => {
+        jest.advanceTimersByTime(2000);
+      });
+      fireEvent.click(screen.getByRole("button", { name: "关闭外层" }));
+      expect(screen.queryByRole("dialog", { name: "外层弹窗" })).not.toBeInTheDocument();
+      expect(getHost()?.parentElement).toBe(view.container);
+      expect(openOuter).toHaveFocus();
+      expect(screen.getByText("模态提示")).toBeInTheDocument();
+
+      await act(async () => {
+        jest.advanceTimersByTime(1000);
+      });
+      expect(screen.queryByText("模态提示")).not.toBeInTheDocument();
+      expect(getHost()).toBeNull();
     } finally {
       jest.useRealTimers();
     }

@@ -14,9 +14,6 @@ import type {
   ShareItemResponse,
 } from "@/shared/api/types";
 
-export const ROOT_PAGE_SIZE = 20;
-export const ENTRY_PAGE_SIZE = 200;
-
 export async function fetchFiles(page: number, pageSize: number): Promise<FileListResponse> {
   const params = new URLSearchParams({
     page: String(page),
@@ -52,10 +49,6 @@ export async function renameFile(fileId: number, name: string): Promise<FileItem
   return api.patch<FileItemResponse>(`/api/v2/files/${fileId}`, { name });
 }
 
-export async function deleteFile(fileId: number): Promise<void> {
-  await api.del(`/api/v2/files/${fileId}`);
-}
-
 /** F1 批量删除走真正的批量端点（FILE-06），不在页面循环单删。 */
 export async function batchDeleteFiles(fileIds: number[]): Promise<FileBatchDeleteResponse> {
   return api.del<FileBatchDeleteResponse>("/api/v2/files", { file_ids: fileIds });
@@ -89,10 +82,6 @@ export async function createPack(
     output_name: outputName,
     delete_source: deleteSource,
   });
-}
-
-export async function fetchPack(packId: number): Promise<PackViewResponse> {
-  return api.get<PackViewResponse>(`/api/v2/packs/${packId}`);
 }
 
 /** F1 打包任务卡：本人最近任务（新任务在前）。 */

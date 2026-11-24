@@ -4,13 +4,16 @@ import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
 import { useToast } from "@/shared/components/toast-context";
 import { useClipboard } from "@/shared/hooks/useClipboard";
+import { PageHeader } from "@/shared/components/PageHeader";
 import { deleteShares, fetchSharesAll, revokeAllShares, revokeShares, shareCopyText } from "./api";
 import {
   filterRecords,
+  getEffectiveStatus,
   initialSharesState,
   sharesReducer,
   sortShareRecords,
   toShareRecordView,
+  type ShareFilterStatus,
   type ShareRecordView,
 } from "./model";
 import { SharesToolbar } from "./components/SharesToolbar";
@@ -135,6 +138,14 @@ export function SharesPage() {
     dispatch({ type: "toggle_selected", id });
   }, []);
 
+  const filterCounts = useMemo<Record<ShareFilterStatus, number>>(() => {
+    const counts = { all: state.records.length, active: 0, expired: 0, revoked: 0 };
+    state.records.forEach((record) => {
+      counts[getEffectiveStatus(record)] += 1;
+    });
+    return counts;
+  }, [state.records]);
+
   const filteredRecords = useMemo(
     () => filterRecords(state.records, state.searchKeyword, state.filterStatus),
     [state.records, state.searchKeyword, state.filterStatus],
@@ -187,32 +198,32 @@ export function SharesPage() {
 
   return (
     <div className="glass-frame full-height animate-in">
-      <div className="space-between mb-7">
-        <div>
-          <h1 className="text-2xl">分享管理</h1>
-          <p className="muted">管理你的文件分享链接</p>
+      <PageHeader title="分享管理" description="管理你的文件分享链接" />
+
+      <section className="panel list-panel" aria-label="分享列表">
+        <SharesToolbar
+          selectedCount={state.selectedIds.size}
+          filteredCount={filteredRecords.length}
+          filterCounts={filterCounts}
+          filterStatus={state.filterStatus}
+          searchKeyword={state.searchKeyword}
+          isOperating={state.isOperating}
+          hasRecords={state.records.length > 0}
+          onToggleSelectAll={toggleSelectAll}
+          onBatchDelete={batchDeleteShares}
+          onRevokeAll={revokeAllSharesHandler}
+          onFilterStatusChange={(status) => dispatch({ type: "set_filter_status", status })}
+          onSearchKeywordChange={(keyword: string) => dispatch({ type: "set_search_keyword", keyword })}
+        />
+        <div className="record-head">
+          <input
+            type="checkbox"
+            aria-label="选择全部分享"
+            checked={filteredRecords.length > 0 && state.selectedIds.size === filteredRecords.length}
+            onChange={toggleSelectAll}
+          />
+          <span>文件与提取码</span><span>状态</span><span>有效期</span><span className="text-right">操作</span>
         </div>
-      </div>
-
-      <SharesToolbar
-        selectedCount={state.selectedIds.size}
-        filteredCount={filteredRecords.length}
-        filterStatus={state.filterStatus}
-        searchKeyword={state.searchKeyword}
-        isOperating={state.isOperating}
-        hasRecords={state.records.length > 0}
-        onToggleSelectAll={toggleSelectAll}
-        onBatchDelete={batchDeleteShares}
-        onRevokeAll={revokeAllSharesHandler}
-        onFilterStatusChange={(status) =>
-          dispatch({ type: "set_filter_status", status })
-        }
-        onSearchKeywordChange={(keyword: string) =>
-          dispatch({ type: "set_search_keyword", keyword })
-        }
-      />
-
-      <div className="task-list">
         <SharesList
           loading={state.loading}
           filteredRecords={filteredRecords}
@@ -222,7 +233,7 @@ export function SharesPage() {
           onRevoke={revokeShare}
           onDelete={deleteShare}
         />
-      </div>
+      </section>
     </div>
   );
 }

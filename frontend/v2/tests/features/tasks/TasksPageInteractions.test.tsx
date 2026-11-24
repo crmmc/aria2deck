@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
+import { taskCommands } from "@/shared/lib/commands";
 import { TasksPage } from "@/features/tasks/TasksPage";
 import type { TaskResponse, TaskStatsResponse, UserResponse } from "@/shared/api/types";
 
@@ -487,7 +488,7 @@ describe("TasksPage 批量取消", () => {
       }
       return json(200, tasksEnvelope([task(1), task(2)]));
     });
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByLabelText("选择全部可见任务"));
     fireEvent.click(screen.getByRole("button", { name: "取消下载" }));
     const dialog = await screen.findByRole("dialog");
     const buttons = within(dialog).getAllByRole("button", { name: "取消" });
@@ -514,7 +515,7 @@ describe("TasksPage 批量取消", () => {
       }
       return json(200, tasksEnvelope([task(1), task(2)]));
     });
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByLabelText("选择全部可见任务"));
     fireEvent.click(screen.getByRole("button", { name: "取消下载" }));
     const dialog = await screen.findByRole("dialog");
     const buttons = within(dialog).getAllByRole("button", { name: "取消" });
@@ -584,6 +585,23 @@ describe("TasksPage 种子上传", () => {
     const torrent = new File(["garbage"], "bad.torrent", { type: "application/x-bittorrent" });
     fireEvent.change(input, { target: { files: [torrent] } });
     expect(await screen.findByText("种子解析失败")).toBeInTheDocument();
+    expect(input.value).toBe("");
+  });
+
+  it("重复种子用 warning Toast 提示，不占表单错误区（归档参考同款分支）", async () => {
+    await renderWithTasks(undefined, (url) => {
+      if (url === "/api/v2/tasks/torrent/preview") {
+        return json(409, { error: { code: "duplicate_resource", message: "您已拥有此文件" } });
+      }
+      return undefined;
+    });
+    const input = screen.getByLabelText("上传种子文件") as HTMLInputElement;
+    const torrent = new File(["d4:infod4:name4:demoe"], "demo.torrent", { type: "application/x-bittorrent" });
+    fireEvent.change(input, { target: { files: [torrent] } });
+
+    await waitFor(() => expect(screen.getAllByText("您已拥有此文件").length).toBeGreaterThan(0));
+    // 错误��不应重复出现该文案：V1 只用 Toast。
+    expect(document.querySelector(".form-error")).toBeNull();
     expect(input.value).toBe("");
   });
 
@@ -835,7 +853,7 @@ describe("TasksPage 单条创建 502 与批量取消 item 配对", () => {
       }
       return json(200, tasksEnvelope([task(1), task(2)]));
     });
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByLabelText("选择全部可见任务"));
     fireEvent.click(screen.getByRole("button", { name: "取消下载" }));
     const dialog = await screen.findByRole("dialog");
     const buttons = within(dialog).getAllByRole("button", { name: "取消" });
@@ -867,7 +885,7 @@ describe("TasksPage 批量成功与筛选切换", () => {
       }
       return json(200, tasksEnvelope([task(1), task(2)]));
     });
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
+    fireEvent.click(screen.getByLabelText("选择全部可见任务"));
     fireEvent.click(screen.getByRole("button", { name: "取消下载" }));
     const dialog = await screen.findByRole("dialog");
     const buttons = within(dialog).getAllByRole("button", { name: "取消" });
@@ -908,12 +926,124 @@ describe("TasksPage 批量成功与筛选切换", () => {
 
   it("筛选切到「进行中」只保留在管线任务", async () => {
     await renderWithTasks([task(1, "active"), task(2, "paused")]);
-    fireEvent.change(screen.getByLabelText("筛选任务"), { target: { value: "active" } });
+    fireEvent.click(screen.getByRole("tab", { name: /^进行中/ }));
     await waitFor(() => {
       expect(screen.getByText("task-1.bin")).toBeInTheDocument();
       expect(screen.getByText("task-2.bin")).toBeInTheDocument();
     });
-    fireEvent.change(screen.getByLabelText("筛选任务"), { target: { value: "all" } });
+    fireEvent.click(screen.getByRole("tab", { name: /^当前任务/ }));
     await waitFor(() => expect(screen.getByText("task-2.bin")).toBeInTheDocument());
+  });
+});
+
+describe("会话内失败任务保留（对齐归档参考回归测试）", () => {
+  it("WS 单帧转为失败时卡片保留在当前视图并出现重试按钮", async () => {
+    await renderWithTasks([task(1, "active")]);
+    expect(screen.getByText("task-1.bin")).toBeInTheDocument();
+    const socket = pageSockets[pageSockets.length - 1];
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: "task_update",
+          task: task(1, "failed", { error_code: "download_error", retryable: true }),
+        }),
+      });
+    });
+    // 关键断言：失败后卡片仍在，且重试/删除按钮可达。
+    await waitFor(() => {
+      expect(screen.getByText("task-1.bin")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "删除" })).toBeInTheDocument();
+    });
+  });
+
+  it("WS 单帧转为 completed 时卡片移出当前视图", async () => {
+    await renderWithTasks([task(1, "active")]);
+    const socket = pageSockets[pageSockets.length - 1];
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: "task_update",
+          task: task(1, "completed"),
+        }),
+      });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("task-1.bin")).not.toBeInTheDocument();
+    });
+  });
+
+  it("失败卡片点击重试后按返回任务更新卡片并可再次取消", async () => {
+    const retryResponse = {
+      accepted: true,
+      outcome: "created",
+      task: task(1, "queued", { status_label: "排队中" }),
+      error: null,
+      stop_confirmed: null,
+    };
+    await renderWithTasks([task(1, "failed", { error_code: "download_error" })], (url, init) => {
+      if (url === "/api/v2/tasks/1/retry" && init?.method === "POST") return retryResponse;
+      return undefined;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+    await waitFor(() => expect(screen.getByText("已重新添加下载任务")).toBeInTheDocument());
+    // 重试返回排队中的同一任务：卡片按新状态替换，重试按钮退出、取消按钮出现。
+    expect(screen.getByRole("button", { name: "取消" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+    const retryCall = mockFetch.mock.calls.find(([url]) => String(url) === "/api/v2/tasks/1/retry");
+    expect(JSON.parse(String(retryCall?.[1]?.body))).toEqual({ allow_rename: true });
+  });
+
+  it("不可重试的任务点击重试只提示、不发起请求", async () => {
+    await renderWithTasks([
+      task(1, "failed", { retryable: false, error_code: "download_error" }),
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+    await waitFor(() => expect(screen.getByText("不可重试")).toBeInTheDocument());
+    expect(mockFetch.mock.calls.some(([url]) => String(url).includes("/retry"))).toBe(false);
+  });
+
+  it("重试请求失败时提示后端原文且卡片保持失败态", async () => {
+    await renderWithTasks([task(1, "failed", { error_code: "download_error" })], (url, init) => {
+      if (url === "/api/v2/tasks/1/retry" && init?.method === "POST") {
+        return json(409, { error: { code: "duplicate_resource", message: "同名文件或活动任务已存在" } });
+      }
+      return undefined;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+    await waitFor(() =>
+      expect(screen.getByText("重试失败：同名文件或活动任务已存在")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+});
+
+
+describe("TasksPage 快捷操作", () => {
+  it("添加下载任务会聚焦真实链接输入框", async () => {
+    await renderWithTasks();
+    act(() => taskCommands.request("add"));
+    expect(screen.getByLabelText("下载链接")).toHaveFocus();
+  });
+
+  it("批量添加任务会打开现有批量弹窗", async () => {
+    await renderWithTasks();
+    act(() => taskCommands.request("batch"));
+    expect(await screen.findByRole("dialog", { name: "批量添加任务" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "关闭批量添加任务" })).toHaveFocus());
+  });
+
+  it("上传种子文件会点击现有种子输入", async () => {
+    await renderWithTasks();
+    const input = screen.getByLabelText("上传种子文件");
+    const clickSpy = jest.spyOn(input, "click");
+    act(() => taskCommands.request("torrent"));
+    expect(clickSpy).toHaveBeenCalledTimes(1);
   });
 });

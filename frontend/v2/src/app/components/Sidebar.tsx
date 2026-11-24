@@ -3,7 +3,8 @@
 import { Link, useLocation } from "react-router-dom";
 import { useState } from "react";
 import { ModalOverlay } from "@/shared/components/ModalOverlay";
-import { useAuth } from "@/app/hooks";
+import { requestModalClose } from "@/shared/ui/modalClose";
+import { useAuth } from "@/shared/auth/hooks";
 import { useSiteTitle } from "@/shared/lib/siteTitle";
 import type { UserResponse } from "@/shared/api/types";
 
@@ -262,7 +263,7 @@ export function Sidebar({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
               <button type="button"
                 className="more-menu-close"
                 aria-label="关闭更多菜单"
-                onClick={() => setShowMoreMenu(false)}
+                onClick={(event) => requestModalClose(event.currentTarget)}
               >
                 ×
               </button>
@@ -271,7 +272,7 @@ export function Sidebar({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
             <Link
               to="/profile"
               className="more-menu-item"
-              onClick={() => setShowMoreMenu(false)}
+              onClick={(event) => requestModalClose(event.currentTarget)}
             >
               <span className="more-menu-icon">
                 <ProfileIcon />
@@ -285,7 +286,7 @@ export function Sidebar({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
                 <Link
                   to="/users"
                   className="more-menu-item"
-                  onClick={() => setShowMoreMenu(false)}
+                  onClick={(event) => requestModalClose(event.currentTarget)}
                 >
                   <span className="more-menu-icon">
                     <UsersIcon />
@@ -295,7 +296,7 @@ export function Sidebar({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
                 <Link
                   to="/storage"
                   className="more-menu-item"
-                  onClick={() => setShowMoreMenu(false)}
+                  onClick={(event) => requestModalClose(event.currentTarget)}
                 >
                   <span className="more-menu-icon">
                     <StorageIcon />
@@ -305,7 +306,7 @@ export function Sidebar({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
                 <Link
                   to="/settings"
                   className="more-menu-item"
-                  onClick={() => setShowMoreMenu(false)}
+                  onClick={(event) => requestModalClose(event.currentTarget)}
                 >
                   <span className="more-menu-icon">
                     <SettingsIcon />
@@ -318,8 +319,8 @@ export function Sidebar({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
 
             <button type="button"
               className="more-menu-item danger"
-              onClick={() => {
-                setShowMoreMenu(false);
+              onClick={(event) => {
+                requestModalClose(event.currentTarget);
                 void logout();
               }}
             >
@@ -332,7 +333,8 @@ export function Sidebar({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
       )}
 
       {/* Desktop sidebar - Hidden on Mobile via CSS */}
-      <div
+      <aside
+        aria-label="主导航"
         className={`sidebar ${sidebarExpanded ? "expanded" : ""}`}
         onMouseEnter={() => !sidebarExpanded && setSidebarExpanded(true)}
         onMouseLeave={() => sidebarExpanded && setSidebarExpanded(false)}
@@ -385,7 +387,7 @@ export function Sidebar({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
             {sidebarExpanded && <span className="nav-text">退出登录</span>}
           </button>
         </div>
-      </div>
+      </aside>
     </>
   );
 }

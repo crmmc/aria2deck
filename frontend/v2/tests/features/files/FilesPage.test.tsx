@@ -96,7 +96,7 @@ afterEach(() => {
 });
 
 describe("FilesPage（V1 文件页）", () => {
-  it("渲染根列表（10 条页大小、空间卡、目录在前）", async () => {
+  it("渲染根列表（10 条页大小、目录在前）", async () => {
     const items = [
       fileItem(1, "b.txt"),
       fileItem(2, "设计素材", { kind: "directory", size: 6656 }),
@@ -109,13 +109,18 @@ describe("FilesPage（V1 文件页）", () => {
     const names = Array.from(document.querySelectorAll(".file-name-btn, .table-row .text-base")).map((el) => el.textContent);
     expect(names[0]).toBe("设计素材");
     expect(screen.getByText("共 12 项")).toBeInTheDocument();
-    expect(screen.getByText("850.0 B")).toBeInTheDocument();
+    expect(screen.queryByText("850.0 B")).not.toBeInTheDocument();
   });
 
-  it("空列表渲染空状态", async () => {
+  it("空列表渲染空状态且打包记录入口常显", async () => {
     setup((url) => (url.startsWith("/api/v2/files") ? filesEnvelope([]) : {}));
     renderPage();
     expect(await screen.findByText("暂无文件")).toBeInTheDocument();
+    const entry = screen.getByRole("button", { name: /打包记录/ });
+    expect(entry).toBeEnabled();
+    fireEvent.click(entry);
+    expect(await screen.findByRole("dialog", { name: "打包记录" })).toBeInTheDocument();
+    expect(await screen.findByText("还没有打包记录")).toBeInTheDocument();
   });
 
   it("加载失败显示错误", async () => {
@@ -228,9 +233,10 @@ describe("FilesPage（V1 文件页）", () => {
     renderPage();
     await screen.findByText("a.txt");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    const toolbar = document.querySelector(".filter-toolbar") as HTMLElement;
-    expect(within(toolbar).getByText(/已选 1 项/)).toBeInTheDocument();
-    fireEvent.click(within(toolbar).getByRole("button", { name: "批量删除" }));
+    const bulkBar = document.querySelector(".bulk-bar") as HTMLElement;
+    expect(bulkBar).toHaveTextContent("已选 1 项");
+    expect(document.querySelector(".filter-toolbar")).not.toHaveTextContent("已选");
+    fireEvent.click(within(bulkBar).getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
     await screen.findByText("已删除 1 个文件");
@@ -252,8 +258,8 @@ describe("FilesPage（V1 文件页）", () => {
     renderPage();
     await screen.findByText("a.txt");
     fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    const toolbar = document.querySelector(".filter-toolbar") as HTMLElement;
-    fireEvent.click(within(toolbar).getByRole("button", { name: "打包" }));
+    const bulkBar = document.querySelector(".bulk-bar") as HTMLElement;
+    fireEvent.click(within(bulkBar).getByRole("button", { name: "打包" }));
     await screen.findByText((_, el) => el?.textContent === "预估大小: 100.0 B");
     fireEvent.click(await screen.findByRole("button", { name: "确认打包" }));
     await waitFor(() => {
@@ -261,6 +267,11 @@ describe("FilesPage（V1 文件页）", () => {
       expect(call).toBeDefined();
       expect(JSON.parse(call![1].body as string)).toEqual({ items: [1], output_name: "archive.zip", delete_source: false });
     });
+    await waitFor(() => {
+      const reads = mockFetch.mock.calls.filter(([u]) => u === "/api/v2/packs?limit=50");
+      expect(reads).toHaveLength(2);
+    });
+    expect(document.querySelector(".bulk-bar")).toBeNull();
   });
 
   it("分享弹窗创建后展示链接", async () => {

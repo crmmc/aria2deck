@@ -162,6 +162,8 @@ describe("TaskToolbar", () => {
   const base = {
     selectedCount: 0,
     filteredCount: 3,
+    currentCount: 3,
+    activeCount: 1,
     filterStatus: "all",
     sortBy: "speed",
     searchKeyword: "",
@@ -174,13 +176,12 @@ describe("TaskToolbar", () => {
     onSearchKeywordChange: jest.fn(),
   };
 
-  it("全选与筛选/排序/搜索变更", () => {
+  it("筛选/排序/搜索变更并显示真实分段数量", () => {
     render(<TaskToolbar {...base} />);
-    fireEvent.click(screen.getByRole("button", { name: "全选" }));
-    expect(base.onToggleSelectAll).toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("筛选任务"), { target: { value: "active" } });
+    expect(screen.queryByRole("button", { name: "全选" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "进行中 1" }));
     expect(base.onFilterStatusChange).toHaveBeenCalledWith("active");
-    fireEvent.change(screen.getByLabelText("排序方式"), { target: { value: "progress" } });
+    fireEvent.change(screen.getByLabelText("任务排序"), { target: { value: "progress" } });
     expect(base.onSortByChange).toHaveBeenCalledWith("progress");
     fireEvent.change(screen.getByLabelText("搜索任务"), { target: { value: "ab" } });
     expect(base.onSearchKeywordChange).toHaveBeenCalledWith("ab");
@@ -189,20 +190,25 @@ describe("TaskToolbar", () => {
   it("全选状态显示取消全选，选中后显示批量取消", () => {
     render(<TaskToolbar {...base} selectedCount={3} hasActiveTasks />);
     expect(screen.getByRole("button", { name: "取消全选" })).toBeInTheDocument();
-    expect(screen.getByText("已选 3 项")).toBeInTheDocument();
+    expect(document.querySelector(".bulk-count")?.textContent).toBe("已选 3 个任务");
     expect(screen.getByRole("button", { name: "取消下载" })).toBeInTheDocument();
+    expect(document.querySelector(".toolbar-default")).toHaveAttribute("hidden");
+    expect(document.querySelector(".toolbar-bulk")).not.toHaveAttribute("hidden");
+    expect(document.querySelector(".filter-toolbar")).toHaveClass("is-bulk");
   });
 });
 
 describe("AddTaskForm", () => {
   it("提交与按钮组", () => {
     const onSubmit = jest.fn((e) => e.preventDefault());
+    const uriRef = { current: null };
     const torrentRef = { current: null };
     render(
       <AddTaskForm
         uri="https://a"
         error={null}
         isSubmitting={false}
+        uriInputRef={uriRef as never}
         torrentInputRef={torrentRef as never}
         onUriChange={jest.fn()}
         onSubmit={onSubmit}
@@ -211,6 +217,11 @@ describe("AddTaskForm", () => {
       />,
     );
     expect(screen.getByLabelText("下载链接")).toHaveValue("https://a");
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "批量添加",
+      "上传种子",
+      "+ 添加任务",
+    ]);
     fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
   });
 });
@@ -220,6 +231,7 @@ describe("TaskList", () => {
     selectedTasks: new Set<number>(),
     operatingTaskIds: new Set<number>(),
     onToggleSelection: jest.fn(),
+    onToggleSelectAll: jest.fn(),
     onCancel: jest.fn(),
     onCopyUri: jest.fn(),
     onRetry: jest.fn(),
@@ -230,9 +242,15 @@ describe("TaskList", () => {
     expect(screen.getByText("暂无活动任务")).toBeInTheDocument();
   });
 
-  it("渲染卡片列表", () => {
+  it("渲染表头、卡片列表和可用的表头全选", () => {
     render(<TaskList filteredTasks={[task()]} {...base} />);
     expect(screen.getByText("demo.bin")).toBeInTheDocument();
+    expect(screen.getByText("任务名称")).toBeInTheDocument();
+    expect(screen.getByText("进度")).toBeInTheDocument();
+    expect(screen.getByText("状态")).toBeInTheDocument();
+    expect(screen.getByText("速度")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("选择全部可见任务"));
+    expect(base.onToggleSelectAll).toHaveBeenCalled();
   });
 });
 
@@ -246,12 +264,12 @@ describe("StatsWidget", () => {
     };
     mockFetch.mockResolvedValue(json(200, stats));
     render(<StatsWidget />);
-    await screen.findByText("可用空间");
+    await screen.findByRole("img", { name: /1 次真实采样/ });
     // V1 公式 total-used-frozen = 500 B；quota 999999 不得出现在组件里。
     expect(screen.getByText("500.0 B")).toBeInTheDocument();
     expect(screen.queryByText(/999999/)).not.toBeInTheDocument();
     expect(screen.getByText("已冻结: 100.0 B (下载中)")).toBeInTheDocument();
-    expect(screen.getByText("活跃任务").parentElement?.textContent).toContain("2");
+    expect(screen.getByText("活动任务").parentElement?.textContent).toContain("2");
   });
 
   // jsdom 的 cssstyle 会丢弃 var() 颜色，颜色档位无法从 DOM 观察；此处只断言可从 DOM 读到的进度宽度。
@@ -265,7 +283,7 @@ describe("StatsWidget", () => {
       json(200, buildStats({ disk: { total_bytes: total, used_bytes: used, reserved_bytes: 0, available_bytes: 0, limited: false } })),
     );
     const { container } = render(<StatsWidget />);
-    await screen.findByText("可用空间");
+    await screen.findByRole("img", { name: /1 次真实采样/ });
     const bar = container.querySelector(".progress-bar") as HTMLElement;
     expect(bar.style.width).toBe(`${percent}%`);
   });
@@ -275,7 +293,7 @@ describe("StatsWidget", () => {
       json(200, buildStats({ disk: { total_bytes: 0, used_bytes: 0, reserved_bytes: 0, available_bytes: 0, limited: false } })),
     );
     const { container } = render(<StatsWidget />);
-    await screen.findByText("可用空间");
+    await screen.findByRole("img", { name: /1 次真实采样/ });
     expect((container.querySelector(".progress-bar") as HTMLElement).style.width).toBe("0%");
   });
 
@@ -289,24 +307,27 @@ describe("StatsWidget", () => {
     ) as TaskStatsResponse;
     mockFetch.mockResolvedValue(json(200, stats));
     const { container } = render(<StatsWidget />);
-    await screen.findByText("可用空间");
+    await screen.findByRole("img", { name: /1 次真实采样/ });
     expect((container.querySelector(".progress-bar") as HTMLElement).style.width).toBe("0%");
   });
 
   it("未冻结时不显示冻结行", async () => {
     mockFetch.mockResolvedValue(json(200, buildStats({})));
     render(<StatsWidget />);
-    await screen.findByText("可用空间");
+    await screen.findByRole("img", { name: /1 次真实采样/ });
     expect(screen.queryByText(/已冻结/)).not.toBeInTheDocument();
   });
 
-  it("首次加载失败时不渲染，也不抛错", async () => {
+  it("首次加载失败时保留诚实的空样本状态", async () => {
     mockFetch.mockRejectedValue(new TypeError("fetch failed"));
     const { container } = render(<StatsWidget />);
     await act(async () => {
       await Promise.resolve();
     });
-    expect(container).toBeEmptyDOMElement();
+    expect(screen.getByText("等待真实速度样本")).toBeInTheDocument();
+    expect(screen.getByText("等待真实磁盘数据")).toBeInTheDocument();
+    expect(container.querySelector(".speed-line")).toBeNull();
+    expect(container.querySelector(".speed-point")).toBeNull();
   });
 
   it("轮询失败保留上次读数", async () => {
@@ -317,14 +338,14 @@ describe("StatsWidget", () => {
       await act(async () => {
         await Promise.resolve();
       });
-      expect(screen.getByText("可用空间")).toBeInTheDocument();
+      expect(screen.getByText("存储空间")).toBeInTheDocument();
 
       mockFetch.mockRejectedValue(new TypeError("fetch failed"));
       await act(async () => {
         jest.advanceTimersByTime(5000);
         await Promise.resolve();
       });
-      expect(screen.getByText("可用空间")).toBeInTheDocument();
+      expect(screen.getByText("存储空间")).toBeInTheDocument();
     } finally {
       jest.useRealTimers();
     }
@@ -365,14 +386,82 @@ describe("StatsWidget", () => {
       await act(async () => {
         await Promise.resolve();
       });
-      expect(screen.getByText("活跃任务").parentElement?.textContent).toContain("1");
+      expect(screen.getByText("活动任务").parentElement?.textContent).toContain("1");
 
       mockFetch.mockResolvedValueOnce(json(200, buildStats({ counts: activeCount(3) })));
       await act(async () => {
         jest.advanceTimersByTime(5000);
         await Promise.resolve();
       });
-      expect(screen.getByText("活跃任务").parentElement?.textContent).toContain("3");
+      expect(screen.getByText("活动任务").parentElement?.textContent).toContain("3");
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("只用真实样本：首样本画点，第二次轮询后才连线", async () => {
+    jest.useFakeTimers();
+    try {
+      mockFetch.mockResolvedValueOnce(json(200, {
+        ...buildStats({}),
+        download_speed: 100,
+        upload_speed: 20,
+      }));
+      const { container } = render(<StatsWidget />);
+      expect(await screen.findByRole("img", { name: /1 次真实采样/ })).toBeInTheDocument();
+      expect(screen.getByText("仅 1 次真实采样，等待下一次连线")).toBeInTheDocument();
+      expect(container.querySelector(".speed-point")).not.toBeNull();
+      expect(container.querySelector(".upload-point")).not.toBeNull();
+      expect(container.querySelector(".speed-line")).toBeNull();
+      expect(container.querySelector(".upload-line")).toBeNull();
+
+      mockFetch.mockResolvedValueOnce(json(200, {
+        ...buildStats({}),
+        download_speed: 1000,
+        upload_speed: 100,
+      }));
+      await act(async () => {
+        jest.advanceTimersByTime(5000);
+        await Promise.resolve();
+      });
+      expect(await screen.findByRole("img", { name: /2 次真实采样/ })).toBeInTheDocument();
+      expect(container.querySelector(".speed-line")?.getAttribute("d")).toContain("L630.0 42.4");
+      expect(container.querySelector(".upload-line")?.getAttribute("d")).toContain("L630.0 135.6");
+      expect(screen.queryByText("仅 1 次真实采样，等待下一次连线")).not.toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("上一次轮询仍在途时跳过新请求", async () => {
+    jest.useFakeTimers();
+    try {
+      mockFetch.mockResolvedValueOnce(json(200, buildStats({})));
+      render(<StatsWidget />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const statsCalls = () => mockFetch.mock.calls.filter(([url]) => url === "/api/v2/tasks/stats").length;
+      expect(statsCalls()).toBe(1);
+
+      let release: (value: unknown) => void = () => undefined;
+      mockFetch.mockImplementationOnce(() => new Promise((resolve) => {
+        release = resolve;
+      }));
+      await act(async () => {
+        jest.advanceTimersByTime(5000);
+        await Promise.resolve();
+      });
+      expect(statsCalls()).toBe(2);
+      await act(async () => {
+        jest.advanceTimersByTime(5000);
+        await Promise.resolve();
+      });
+      expect(statsCalls()).toBe(2);
+      release(json(200, buildStats({})));
+      await act(async () => {
+        await Promise.resolve();
+      });
     } finally {
       jest.useRealTimers();
     }
@@ -389,7 +478,7 @@ describe("StatsWidget", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(screen.queryByText("可用空间")).not.toBeInTheDocument();
+    expect(screen.queryByText("存储空间")).not.toBeInTheDocument();
   });
 });
 
@@ -428,7 +517,9 @@ describe("BatchAddTasksDialog", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("提交结果暂无法确认");
   });
 
-  it("部分失败列表与回填按钮", () => {
+  it("部分失败列表支持回填，完成按钮只通知一次关闭", () => {
+    const onRetryFailed = jest.fn();
+    const onCancel = jest.fn();
     render(
       <BatchAddTasksDialog
         batchUris=""
@@ -436,13 +527,35 @@ describe("BatchAddTasksDialog", () => {
         feedback={{ kind: "result", acceptedCount: 1, failures: [{ uri: "https://a/2", reason: "链接无效" }] }}
         onBatchUrisChange={jest.fn()}
         onSubmit={jest.fn()}
-        onCancel={jest.fn()}
-        onRetryFailed={jest.fn()}
+        onCancel={onCancel}
+        onRetryFailed={onRetryFailed}
       />,
     );
     expect(screen.getByText("已提交 1 个，1 个失败")).toBeInTheDocument();
     expect(screen.getByText("链接无效")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重试失败项" }));
+    expect(onRetryFailed).toHaveBeenCalledTimes(1);
+    expect(onCancel).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "完成" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("提交按钮把自身交给父级用于成功后的统一退出", () => {
+    const onSubmit = jest.fn();
+    render(
+      <BatchAddTasksDialog
+        batchUris="https://a/1"
+        isBatchAdding={false}
+        feedback={null}
+        onBatchUrisChange={jest.fn()}
+        onSubmit={onSubmit}
+        onCancel={jest.fn()}
+        onRetryFailed={jest.fn()}
+      />,
+    );
+    const submit = screen.getByRole("button", { name: "添加任务" });
+    fireEvent.click(submit);
+    expect(onSubmit).toHaveBeenCalledWith(submit);
   });
 });
 
@@ -470,7 +583,7 @@ describe("api client boundary", () => {
       disk: { total_bytes: 1, used_bytes: 0, reserved_bytes: 0, available_bytes: 1, limited: false },
     }));
     render(<StatsWidget />);
-    await screen.findByText("可用空间");
+    await screen.findByRole("img", { name: /1 次真实采样/ });
     expect(mockFetch.mock.calls.some(([url]) => url === "/api/v2/tasks/stats")).toBe(true);
   });
 });

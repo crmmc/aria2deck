@@ -10,9 +10,9 @@ type EmptyStateProps = {
 export function EmptyState({ icon, title, description, children }: EmptyStateProps) {
   return (
     <div className="empty-state">
-      {icon && <div className="empty-state-icon">{icon}</div>}
-      {title && <p className="font-medium mb-1">{title}</p>}
-      {description && <p className="muted text-base">{description}</p>}
+      {icon && <span className="empty-state-icon">{icon}</span>}
+      {title && <h2 className="empty-state-title">{title}</h2>}
+      {description && <p className="empty-state-description">{description}</p>}
       {children}
     </div>
   );

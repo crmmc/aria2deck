@@ -1,4 +1,5 @@
 import { ModalOverlay } from "@/shared/components/ModalOverlay";
+import { requestModalClose } from "@/shared/ui/modalClose";
 
 type InitialPasswordAlertProps = {
   open: boolean;
@@ -12,7 +13,7 @@ export function InitialPasswordAlert({ open, onClose }: InitialPasswordAlertProp
     <ModalOverlay
       onClose={onClose}
       ariaLabel="初始密码安全提醒"
-      contentClassName="modal-content max-w-400 animate-in"
+      contentClassName="modal-content max-w-400"
     >
       <div className="alert alert-danger mb-4">
         <p className="text-center m-0" style={{ fontSize: '15px' }}>
@@ -22,7 +23,7 @@ export function InitialPasswordAlert({ open, onClose }: InitialPasswordAlertProp
       <button
         type="button"
         className="button w-full"
-        onClick={onClose}
+        onClick={(event) => requestModalClose(event.currentTarget)}
       >
         我知道了
       </button>

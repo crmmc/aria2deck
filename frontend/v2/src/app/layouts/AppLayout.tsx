@@ -3,10 +3,11 @@
 import { useState } from "react";
 import { Outlet } from "react-router-dom";
 
-import { useAuth } from "@/app/hooks";
+import { useAuth } from "@/shared/auth/hooks";
 import { Sidebar } from "@/app/components/Sidebar";
 import { PasswordWarningBanner } from "@/app/components/PasswordWarningBanner";
 import { BackendStatusBanner } from "@/app/components/BackendStatusBanner";
+import { CommandPalette } from "@/app/components/CommandPalette";
 
 export function AppLayout() {
   const { user, loading, error, retryAuth } = useAuth();
@@ -64,15 +65,22 @@ export function AppLayout() {
   }
 
   return (
-    <>
+    <div className="app-shell">
       <Sidebar user={user} sidebarExpanded={sidebarExpanded} setSidebarExpanded={setSidebarExpanded} />
       <PasswordWarningBanner user={user} />
       <BackendStatusBanner user={user} />
-      <div className={`main-content${sidebarExpanded ? " sidebar-expanded" : ""}`}>
-        <div className="auth-container">
-          <Outlet />
-        </div>
+      <div className="workspace">
+        <main
+          id="main"
+          tabIndex={-1}
+          className={`main-content${sidebarExpanded ? " sidebar-expanded" : ""}`}
+        >
+          <div className="auth-container">
+            <Outlet />
+          </div>
+        </main>
       </div>
-    </>
+      <CommandPalette isAdmin={user?.is_admin ?? false} />
+    </div>
   );
 }

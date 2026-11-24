@@ -4,6 +4,7 @@ type AddTaskFormProps = {
   uri: string;
   error: string | null;
   isSubmitting: boolean;
+  uriInputRef: RefObject<HTMLInputElement>;
   torrentInputRef: RefObject<HTMLInputElement>;
   onUriChange: (value: string) => void;
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
@@ -15,6 +16,7 @@ export function AddTaskForm({
   uri,
   error,
   isSubmitting,
+  uriInputRef,
   torrentInputRef,
   onUriChange,
   onSubmit,
@@ -25,6 +27,7 @@ export function AddTaskForm({
     <div className="card add-task-card">
       <form onSubmit={onSubmit} className="add-task-form">
         <input
+          ref={uriInputRef}
           className="input add-task-input"
           placeholder="粘贴磁力链接、HTTP 或 FTP URL..."
           value={uri}
@@ -41,13 +44,6 @@ export function AddTaskForm({
           aria-label="上传种子文件"
         />
         <button
-          className={`button flex-shrink-0 shadow-none${isSubmitting ? " opacity-60" : ""}`}
-          type="submit"
-          disabled={isSubmitting}
-        >
-          {isSubmitting ? "添加中..." : "+ 添加任务"}
-        </button>
-        <button
           className="button secondary flex-shrink-0 shadow-none"
           type="button"
           onClick={onBatchAdd}
@@ -61,6 +57,13 @@ export function AddTaskForm({
           title="上传种子文件"
         >
           上传种子
+        </button>
+        <button
+          className={`button flex-shrink-0${isSubmitting ? " opacity-60" : ""}`}
+          type="submit"
+          disabled={isSubmitting}
+        >
+          {isSubmitting ? "添加中..." : "+ 添加任务"}
         </button>
       </form>
       {error ? <div className="form-error">{error}</div> : null}

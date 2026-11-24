@@ -8,52 +8,11 @@
   box-shadow:
     0 20px 40px rgba(0, 0, 0, 0.05),
     0 1px 2px rgba(255, 255, 255, 0.5) inset;
-  border-radius: 24px;
-  padding: 40px;
+  border-radius: var(--r-shell);
+  padding: 32px;
   width: 100%;
   min-height: auto;
   overflow-y: visible;
-}
-
-.glass-frame::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(
-    135deg,
-    rgba(255, 255, 255, 0.4) 0%,
-    rgba(255, 255, 255, 0.05) 40%,
-    rgba(255, 255, 255, 0) 60%,
-    rgba(255, 255, 255, 0.15) 100%
-  );
-  pointer-events: none;
-  z-index: 1;
-}
-
-.glass-frame::after {
-  content: "";
-  position: absolute;
-  inset: 1px;
-  border-radius: inherit;
-  border: 1px solid transparent;
-  background: linear-gradient(
-    160deg,
-    rgba(255, 255, 255, 0.6) 0%,
-    rgba(255, 255, 255, 0) 30%,
-    rgba(255, 255, 255, 0) 70%,
-    rgba(255, 255, 255, 0.2) 100%
-  ) border-box;
-  -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
-  z-index: 1;
-}
-
-.glass-frame > * {
-  position: relative;
-  z-index: 2;
 }
 
 /* Full height variant for main content pages */
@@ -64,19 +23,22 @@
 
 /* Inner Cards */
 .card {
-  background: rgba(255, 255, 255, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  border-radius: 16px;
-  padding: 24px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-panel);
+  padding: 20px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03);
-  transition:
-    transform 0.2s ease,
-    box-shadow 0.2s ease;
 }
 
-.card:hover {
-  background: rgba(255, 255, 255, 0.6);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+.panel {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-panel);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03);
+}
+
+.list-panel {
+  overflow: hidden;
 }
 
 .row {

@@ -1,13 +1,11 @@
 import {
+  formatAdminBytes,
+  formatAdminDateTime,
   formatBytes,
-  formatDateTime,
-  formatDuration,
-  formatPercent,
-  formatSpeed,
 } from "@/shared/lib/format";
 
 describe("format", () => {
-  it("formats bytes with units (V1 口径)", () => {
+  it("formats bytes with units (归档参考口径)", () => {
     expect(formatBytes(0)).toBe("0 B");
     expect(formatBytes(1023)).toBe("1023.0 B");
     expect(formatBytes(1024)).toBe("1.0 KB");
@@ -17,27 +15,35 @@ describe("format", () => {
     expect(formatBytes(null)).toBe("0 B");
     expect(formatBytes(undefined)).toBe("0 B");
   });
+});
 
-  it("formats speed with /s suffix", () => {
-    expect(formatSpeed(2048)).toBe("2.0 KB/s");
+describe("formatAdminBytes", () => {
+  it.each([
+    [1023, "1023 B"],
+    [1024, "1.0 KB"],
+    [99.5 * 1024, "99.5 KB"],
+    [100 * 1024, "100 KB"],
+    [5 * 1024 ** 3, "5.0 GB"],
+    [1024 ** 5, "1024 TB"],
+  ])("formats %s with automatic precision", (value, expected) => {
+    expect(formatAdminBytes(value)).toBe(expected);
   });
 
-  it("formats datetime with padding", () => {
-    const ms = new Date(2026, 0, 5, 3, 4, 5).getTime();
-    expect(formatDateTime(ms)).toBe("2026-01-05 03:04:05");
-    expect(formatDateTime(null)).toBe("—");
-  });
+  it.each([0, -1, null, undefined, Number.NaN, Number.POSITIVE_INFINITY])(
+    "formats non-positive or invalid input %s as zero bytes",
+    (value) => {
+      expect(formatAdminBytes(value)).toBe("0 B");
+    },
+  );
+});
 
-  it("formats duration", () => {
-    expect(formatDuration(65000)).toBe("1:05");
-    expect(formatDuration(3600000 + 65000)).toBe("1:01:05");
-    expect(formatDuration(-1)).toBe("—");
-  });
-
-  it("formats percent", () => {
-    expect(formatPercent(50, 100)).toBe("50%");
-    expect(formatPercent(150, 100)).toBe("100%");
-    expect(formatPercent(10, null)).toBe("—");
-    expect(formatPercent(10, 0)).toBe("—");
+describe("formatAdminDateTime", () => {
+  it("uses zh-CN local date and minute precision", () => {
+    expect(formatAdminDateTime(new Date(2026, 10, 23, 9, 5, 59).getTime())).toBe(
+      "2026/11/23 09:05",
+    );
+    expect(formatAdminDateTime(new Date(2026, 0, 2, 0, 5, 59).getTime())).toBe(
+      "2026/01/02 00:05",
+    );
   });
 });

@@ -1,4 +1,4 @@
-/** 字节 / 速度 / 时间格式化（沿用 归档参考口径：B/KB/MB/GB/TB，固定 1 位小数）。 */
+/** 字节格式化（归档参考口径：B/KB/MB/GB/TB，固定 1 位小数）。 */
 
 export function formatBytes(value?: number | null): string {
   if (value === 0 || value == null || Number.isNaN(value)) return "0 B";
@@ -12,33 +12,27 @@ export function formatBytes(value?: number | null): string {
   return `${val.toFixed(1)} ${units[idx]}`;
 }
 
-export function formatSpeed(bytesPerSecond: number): string {
-  return `${formatBytes(bytesPerSecond)}/s`;
+/** 管理员页面：大于等于 100 的换算值和字节整数不保留小数。 */
+export function formatAdminBytes(value?: number | null): string {
+  if (value == null || !Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let unitIndex = 0;
+  let converted = value;
+  while (converted >= 1024 && unitIndex < units.length - 1) {
+    converted /= 1024;
+    unitIndex += 1;
+  }
+  const digits = unitIndex === 0 || converted >= 100 ? 0 : 1;
+  return `${converted.toFixed(digits)} ${units[unitIndex]}`;
 }
 
-function pad(value: number): string {
-  return String(value).padStart(2, "0");
-}
-
-export function formatDateTime(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined) return "—";
-  const date = new Date(ms);
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-}
-
-export function formatDuration(ms: number): string {
-  if (ms < 0) return "—";
-  const totalSeconds = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}:${pad(minutes)}:${pad(seconds)}`;
-  return `${minutes}:${pad(seconds)}`;
-}
-
-export function formatPercent(current: number, total: number | null): string {
-  if (total === null || total <= 0) return "—";
-  return `${Math.min(100, Math.floor((current / total) * 100))}%`;
+export function formatAdminDateTime(value: number): string {
+  return new Date(value).toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
 }

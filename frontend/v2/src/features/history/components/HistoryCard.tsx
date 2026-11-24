@@ -1,6 +1,7 @@
 import { memo, useCallback } from "react";
 
 import { formatBytes } from "@/shared/lib/format";
+import { Icon } from "@/shared/components/Icon";
 import type { HistoryRecordView } from "../model";
 import {
   canShowRetry,
@@ -28,21 +29,15 @@ export const HistoryCard = memo(function HistoryCard({
   onDelete,
 }: HistoryCardProps) {
   const handleCardClick = useCallback(() => {
-    if (record.uri) {
-      onCopyUri(record.uri);
-    }
+    if (record.uri) onCopyUri(record.uri);
   }, [record.uri, onCopyUri]);
-
   const handleCheckboxChange = useCallback(() => {
     onToggleSelection(record.id);
   }, [record.id, onToggleSelection]);
-
   const handleCopyClick = useCallback(() => {
     if (record.uri) onCopyUri(record.uri);
   }, [record.uri, onCopyUri]);
-
   const retryBlocked = isRetryBlocked(record);
-
   const handleRetryClick = useCallback(() => {
     if (retryBlocked) return;
     onRetry(record);
@@ -53,100 +48,80 @@ export const HistoryCard = memo(function HistoryCard({
         role: "button",
         tabIndex: 0,
         onClick: handleCardClick,
-        onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
+        onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
             handleCardClick();
           }
         },
         "aria-label": `复制历史任务链接 ${record.taskName}`,
       }
     : {};
-
   const reasonText = record.reason;
 
   return (
-    <div
-      className={`task-card-inner${isSelected ? " selected" : ""}${record.uri ? " cursor-pointer" : ""}`}
+    <article
+      className={`task-card-inner record-row${isSelected ? " selected" : ""}${record.uri ? " cursor-pointer" : ""}`}
       {...interactiveProps}
     >
-      <div>
-        <div className="space-between flex-start mb-3">
-          <div className="task-card-header">
-            <input
-              type="checkbox"
-              aria-label={`选择 ${record.taskName}`}
-              checked={isSelected}
-              onChange={handleCheckboxChange}
-              onClick={(e) => e.stopPropagation()}
-              className="checkbox-sm mt-2 cursor-pointer"
-            />
-            <div className="overflow-hidden flex-1">
-              <h3 className="task-name" title={record.taskName}>
-                {record.taskName}
-              </h3>
-              <div className="muted tabular-nums text-sm">
-                {formatBytes(record.totalLength)}
-              </div>
-            </div>
-          </div>
-          <div className="task-status-col">
-            <span className={`task-status ${historyStatusClass(record.result)}`}>
-              {historyStatusText(record.result)}
-            </span>
+      <input
+        type="checkbox"
+        aria-label={`选择 ${record.taskName}`}
+        checked={isSelected}
+        onChange={handleCheckboxChange}
+        onClick={(event) => event.stopPropagation()}
+        className="checkbox-sm cursor-pointer"
+      />
+      <div className="task-main">
+        <span className="file-mark"><Icon name="file" /></span>
+        <div className="task-name">
+          <h3 className="task-name-heading" title={record.taskName}>{record.taskName}</h3>
+          <div className="task-meta muted tabular-nums text-sm">
+            <span>{formatBytes(record.totalLength)}</span>
             {reasonText && (
-              <div
-                className={`task-status-reason text-sm ${
-                  record.result === "failed" ? "text-danger" : "muted"
-                }`}
+              <span
+                className={`task-status-reason error-code ${record.result === "failed" ? "text-danger" : "muted"}`}
                 title={reasonText}
               >
                 {reasonText}
-              </div>
+              </span>
             )}
           </div>
         </div>
       </div>
-
-      <div className="task-card-footer" role="presentation" onClick={(e) => e.stopPropagation()}>
-        <div className="task-footer-left">
-          <span className="muted text-sm" suppressHydrationWarning>
-            {formatFinishedAt(record.finishedAtMs)}
-          </span>
-        </div>
-
-        <div className="task-footer-right">
-          {record.uri && (
-            <button type="button"
-              className="button secondary btn-task"
-              onClick={handleCopyClick}
-              title="复制链接"
-            >
-              复制
-            </button>
-          )}
-          {canShowRetry(record) && (
-            <button type="button"
-              className={`button secondary btn-task${retryBlocked ? " opacity-60" : ""}`}
-              onClick={handleRetryClick}
-              disabled={retryBlocked}
-              title="重新下载"
-            >
-              重试
-            </button>
-          )}
-          <button type="button"
-            className="button danger btn-task"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete(record);
-            }}
-            title="删除这条历史记录"
-          >
-            删除
+      <span className={`task-status status-badge ${historyStatusClass(record.result)}`}>
+        <Icon name={record.result === "completed" ? "check" : record.result === "failed" ? "alert" : "x"} className="icon-sm" />
+        {historyStatusText(record.result)}
+      </span>
+      <span className="record-time" suppressHydrationWarning>{formatFinishedAt(record.finishedAtMs)}</span>
+      <div className="task-footer-right record-actions" role="presentation" onClick={(event) => event.stopPropagation()}>
+        {record.uri && (
+          <button type="button" className="icon-btn" onClick={handleCopyClick} title="复制链接" aria-label="复制">
+            <Icon name="copy" className="icon-sm" />
           </button>
-        </div>
+        )}
+        {canShowRetry(record) && (
+          <button
+            type="button"
+            className={`icon-btn${retryBlocked ? " opacity-60" : ""}`}
+            onClick={handleRetryClick}
+            disabled={retryBlocked}
+            title="重新下载"
+            aria-label="重试"
+          >
+            <Icon name="retry" className="icon-sm" />
+          </button>
+        )}
+        <button
+          type="button"
+          className="icon-btn danger"
+          onClick={() => onDelete(record)}
+          title="删除这条历史记录"
+          aria-label="删除"
+        >
+          <Icon name="trash" className="icon-sm" />
+        </button>
       </div>
-    </div>
+    </article>
   );
 });

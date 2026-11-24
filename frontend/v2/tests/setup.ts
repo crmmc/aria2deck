@@ -9,3 +9,13 @@ if (typeof globalThis.TextEncoder === "undefined") {
     configurable: true,
   });
 }
+
+// 业务组件测试默认按减少动态效果运行，避免真实 GSAP 帧跨用例残留；动画单测会显式覆盖为 false。
+Object.defineProperty(window, "matchMedia", {
+  configurable: true,
+  writable: true,
+  value: jest.fn((query: string) => ({
+    matches: query === "(prefers-reduced-motion: reduce)",
+    media: query,
+  })),
+});

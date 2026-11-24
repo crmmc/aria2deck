@@ -5,6 +5,7 @@ import { useState } from "react";
 import { useToast } from "@/shared/components/toast-context";
 import { useClipboard } from "@/shared/hooks/useClipboard";
 import { DialogShell } from "@/shared/components/DialogShell";
+import { requestModalClose } from "@/shared/ui/modalClose";
 import { createShare } from "../api";
 import type { ShareItemResponse } from "@/shared/api/types";
 
@@ -66,7 +67,12 @@ export function CreateShareDialog({
     >
         <div className="modal-header">
           <h3 className="modal-title">创建分享</h3>
-          <button type="button" className="modal-close-btn" aria-label="关闭创建分享" onClick={onClose}>
+          <button
+            type="button"
+            className="modal-close-btn"
+            aria-label="关闭创建分享"
+            onClick={(event) => requestModalClose(event.currentTarget)}
+          >
             ✕
           </button>
         </div>
@@ -101,7 +107,7 @@ export function CreateShareDialog({
                 type="button"
                 className="button secondary mt-3"
                 style={{ width: "100%" }}
-                onClick={onClose}
+                onClick={(event) => requestModalClose(event.currentTarget)}
               >
                 关闭
               </button>
