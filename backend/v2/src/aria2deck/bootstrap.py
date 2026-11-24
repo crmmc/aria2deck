@@ -419,7 +419,7 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         allow_all: bool
         allowed_origins: frozenset[str]
 
-    app = FastAPI(title="Aria2Deck V2", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Aria2Deck V2", version="1.0.0", lifespan=lifespan)
     app.add_middleware(RequestBodyLimitMiddleware)
     app.state.account_service = account_service
     app.state.download_queries = download_queries
