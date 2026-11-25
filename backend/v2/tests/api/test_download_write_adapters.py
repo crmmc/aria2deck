@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 from fastapi.responses import StreamingResponse
 
-from aria2deck.api.contracts import HistoryPurgeRequest, TaskActionRequest
+from aria2deck.api.contracts import TaskActionRequest
 from aria2deck.api.downloads import (
     delete_history as delete_history_handler,
 )
@@ -14,9 +14,6 @@ from aria2deck.api.downloads import (
 )
 from aria2deck.api.downloads import (
     list_history as list_history_handler,
-)
-from aria2deck.api.downloads import (
-    purge_history as purge_history_handler,
 )
 from aria2deck.application.accounts.models import Principal
 from aria2deck.application.downloads.gateway import DownloadGatewayService
@@ -53,13 +50,6 @@ async def test_history_api_adapters_map_requests_and_typed_responses() -> None:
     assert deleted.accepted_count == 0
     service.delete.assert_awaited_once_with(user_id=1, task_ids=[1])
 
-    service.purge.return_value = HistoryExpiration(3, 2)
-    purged = await purge_history_handler(
-        payload=HistoryPurgeRequest(before_ms=100), principal=principal(), service=service,
-    )
-    assert purged.expired_tasks == 3
-    assert purged.detached_sources == 2
-    service.purge.assert_awaited_once_with(principal(), before_ms=100, older_than_days=None)
 
 
 async def test_internal_fetch_adapter_returns_streaming_response() -> None:

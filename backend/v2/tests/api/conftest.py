@@ -86,3 +86,22 @@ def create_user(
     )
     assert response.status_code == 201
     return response.json()
+
+
+def fetch_task(client: TestClient, task_id: int) -> dict[str, object]:
+    """按 id 取单个任务投影：先查活动列表，再查历史（GET /tasks/{id} 已移除）。"""
+    for path in ("/api/v2/tasks", "/api/v2/history"):
+        items = client.get(f"{path}?page=1&page_size=100").json()["items"]
+        for item in items:
+            if item["id"] == task_id:
+                return item
+    raise AssertionError(f"任务 {task_id} 既不在活动列表也不在历史中")
+
+
+def fetch_user(client: TestClient, user_id: int) -> dict[str, object]:
+    """按 id 从用户列表取单个用户（GET /users/{id} 已移除）。"""
+    items = client.get("/api/v2/users?page=1&page_size=100").json()["items"]
+    for item in items:
+        if item["id"] == user_id:
+            return item
+    raise AssertionError(f"用户 {user_id} 不在用户列表中")

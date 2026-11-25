@@ -16,10 +16,8 @@ from ..application.settings.download_limit import DownloadConnectionLimiter
 from ..application.settings.rate_limit import RateLimiter
 from ..domain.accounts import require_session
 from ..domain.content import ContentKind
-from ..domain.errors import DomainError, ErrorCode
 from ..domain.quota import VisibleSpace
 from .contracts import (
-    DirectoryBreadcrumbResponse,
     ErrorBody,
     FileBatchDeleteRequest,
     FileBatchDeleteResponse,
@@ -31,7 +29,6 @@ from .contracts import (
     FileRenameRequest,
     FileSearchHitResponse,
     FileSearchResponse,
-    OkResponse,
     StorageDeleteRequest,
     StorageDeleteResponse,
     StorageDeleteResultResponse,
@@ -162,10 +159,6 @@ async def list_file_entries(
         total=total,
         page=page,
         page_size=page_size,
-        breadcrumbs=[
-            DirectoryBreadcrumbResponse(name=item.name, path=item.path)
-            for item in breadcrumbs
-        ],
     )
 
 
@@ -237,20 +230,6 @@ async def rename_file(
 
 
 @router.delete(
-    "/files/{file_id}",
-    response_model=OkResponse,
-    responses=error_responses(401, 404, 409, 422, 429, 500),
-)
-async def delete_file(
-    file_id: int = Path(ge=1),
-    principal: Principal = Depends(required_principal),
-    service: LibraryCommandService = Depends(library_commands),
-) -> OkResponse:
-    await service.delete_user_file(user_id=principal.user.id, file_id=file_id)
-    return OkResponse()
-
-
-@router.delete(
     "/files",
     response_model=FileBatchDeleteResponse,
     responses=error_responses(401, 404, 409, 422, 429, 500),
@@ -310,7 +289,6 @@ async def list_storage_files(
                 content_key=item.content_key,
                 kind=_kind(item.kind),
                 size=item.size,
-                storage_path=item.storage_path,
                 on_disk=item.on_disk,
                 reference_count=item.reference_count,
                 deletion_state=item.deletion_state.value,
@@ -380,23 +358,3 @@ async def delete_storage_files(
         rejected_count=len(results) - accepted,
         results=results,
     )
-
-
-@router.post(
-    "/storage/scan",
-    responses=error_responses(401, 403, 429, 500, 501),
-)
-async def scan_storage(
-    principal: Principal = Depends(required_admin_principal),
-) -> None:
-    raise DomainError(ErrorCode.NOT_IMPLEMENTED, "存储扫描暂未实现")
-
-
-@router.post(
-    "/storage/repair",
-    responses=error_responses(401, 403, 429, 500, 501),
-)
-async def repair_storage(
-    principal: Principal = Depends(required_admin_principal),
-) -> None:
-    raise DomainError(ErrorCode.NOT_IMPLEMENTED, "存储修复暂未实现")

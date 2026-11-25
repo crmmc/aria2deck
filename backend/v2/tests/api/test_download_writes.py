@@ -23,7 +23,7 @@ from aria2deck.infrastructure.sqlite.schema import (
     user_files,
 )
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
-from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, login
+from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, fetch_task, login
 from tests.download_fakes import FakeSubmissionBackend, make_torrent
 
 
@@ -416,8 +416,8 @@ def test_create_task_accepts_new_option_whitelist_without_echoing_credentials(
     assert "alice" not in response.text
     assert "s3cret-passwd" not in response.text
 
-    detail = client.get(f"/api/v2/tasks/{accepted_task['id']}")
-    assert "alice" not in detail.text and "s3cret-passwd" not in detail.text
+    detail = str(fetch_task(client, accepted_task["id"]))
+    assert "alice" not in detail and "s3cret-passwd" not in detail
 
     # aria2 提交载荷不含凭据（HTTP 走内部网关，凭据只留在来源数据里）。
     assert backend.submit_calls

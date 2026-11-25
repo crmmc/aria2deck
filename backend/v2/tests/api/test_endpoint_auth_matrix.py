@@ -66,7 +66,6 @@ PUBLIC_ENDPOINTS: dict[tuple[str, str], str] = {
     ("POST", "/api/s/{code}/verify"): "公开分享：提交分享密码换取访问令牌",
     ("GET", "/api/s/{code}/entries"): "公开分享：目录浏览；目录分享需令牌",
     ("GET", "/api/s/{code}/download"): "公开分享：下载；有密码时需 Bearer 令牌",
-    ("POST", "/api/s/{code}/download"): "公开分享：表单式下载（浏览器直链场景）",
     (
         "GET",
         "/api/v2/internal/fetch/{attempt_id}/{source_index}",

@@ -7,13 +7,8 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 from ..application.accounts.models import Principal, RpcAccess, UserView
 from ..application.accounts.service import AccountService
 from ..application.settings.rate_limit import RateLimiter
-from ..domain.accounts import ApiToken
 from ..domain.quota import available_user_bytes
 from .contracts import (
-    ApiTokenCreateRequest,
-    ApiTokenListResponse,
-    ApiTokenResponse,
-    CreatedApiTokenResponse,
     CredentialInvalidateRequest,
     CredentialInvalidateResponse,
     DeleteUserResponse,
@@ -56,20 +51,9 @@ def _user(view: UserView) -> UserResponse:
     )
 
 
-def _token(token: ApiToken) -> ApiTokenResponse:
-    return ApiTokenResponse(
-        id=token.id,
-        name=token.name,
-        prefix=token.prefix,
-        created_at_ms=token.created_at_ms,
-        last_used_at_ms=token.last_used_at_ms,
-    )
-
-
 def _rpc(access: RpcAccess) -> RpcAccessResponse:
     return RpcAccessResponse(
         enabled=access.enabled,
-        secret_prefix=access.secret_prefix,
         secret=access.secret,
     )
 
@@ -186,19 +170,6 @@ async def list_users(
     )
 
 
-@router.get(
-    "/users/{user_id}",
-    response_model=UserResponse,
-    responses=error_responses(401, 403, 404, 422, 429, 500),
-)
-async def get_user(
-    user_id: int,
-    principal: Principal = Depends(required_session_principal),
-    service: AccountService = Depends(account_service),
-) -> UserResponse:
-    return _user(await service.get_user(principal, user_id))
-
-
 @router.patch(
     "/users/{user_id}",
     response_model=UserResponse,
@@ -230,54 +201,6 @@ async def delete_user(
     await service.delete_user(principal, user_id=user_id)
     return DeleteUserResponse()
 
-
-
-@router.post(
-    "/credentials/tokens",
-    response_model=CreatedApiTokenResponse,
-    responses=error_responses(401, 403, 422, 429, 500),
-)
-async def create_api_token(
-    payload: ApiTokenCreateRequest,
-    principal: Principal = Depends(required_session_principal),
-    service: AccountService = Depends(account_service),
-) -> CreatedApiTokenResponse:
-    created = await service.create_api_token(principal, name=payload.name)
-    return CreatedApiTokenResponse(**_token(created.token).model_dump(), token=created.raw_token)
-
-
-@router.get(
-    "/credentials/tokens",
-    response_model=ApiTokenListResponse,
-    responses=error_responses(401, 403, 422, 429, 500),
-)
-async def list_api_tokens(
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
-    principal: Principal = Depends(required_session_principal),
-    service: AccountService = Depends(account_service),
-) -> ApiTokenListResponse:
-    tokens, total = await service.list_api_tokens(principal, page=page, page_size=page_size)
-    return ApiTokenListResponse(
-        items=[_token(token) for token in tokens],
-        total=total,
-        page=page,
-        page_size=page_size,
-    )
-
-
-@router.delete(
-    "/credentials/tokens/{token_id}",
-    response_model=OkResponse,
-    responses=error_responses(401, 403, 404, 422, 429, 500),
-)
-async def delete_api_token(
-    token_id: int,
-    principal: Principal = Depends(required_session_principal),
-    service: AccountService = Depends(account_service),
-) -> OkResponse:
-    await service.delete_api_token(principal, token_id=token_id)
-    return OkResponse()
 
 
 @router.get(

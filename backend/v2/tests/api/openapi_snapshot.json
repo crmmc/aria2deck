@@ -45,25 +45,6 @@
           "429": "ErrorResponse",
           "500": "ErrorResponse"
         }
-      },
-      "post": {
-        "parameters": [
-          "Range",
-          "code"
-        ],
-        "responses": {
-          "200": "none",
-          "400": "ErrorResponse",
-          "401": "ErrorResponse",
-          "403": "ErrorResponse",
-          "404": "ErrorResponse",
-          "410": "ErrorResponse",
-          "413": "ErrorResponse",
-          "416": "ErrorResponse",
-          "422": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse"
-        }
       }
     },
     "/api/s/{code}/entries": {
@@ -221,49 +202,6 @@
         }
       }
     },
-    "/api/v2/credentials/tokens": {
-      "get": {
-        "parameters": [
-          "page",
-          "page_size"
-        ],
-        "responses": {
-          "200": "ApiTokenListResponse",
-          "401": "ErrorResponse",
-          "403": "ErrorResponse",
-          "422": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse"
-        }
-      },
-      "post": {
-        "parameters": [],
-        "responses": {
-          "200": "CreatedApiTokenResponse",
-          "401": "ErrorResponse",
-          "403": "ErrorResponse",
-          "422": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse"
-        }
-      }
-    },
-    "/api/v2/credentials/tokens/{token_id}": {
-      "delete": {
-        "parameters": [
-          "token_id"
-        ],
-        "responses": {
-          "200": "OkResponse",
-          "401": "ErrorResponse",
-          "403": "ErrorResponse",
-          "404": "ErrorResponse",
-          "422": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse"
-        }
-      }
-    },
     "/api/v2/files": {
       "delete": {
         "parameters": [],
@@ -296,20 +234,6 @@
       }
     },
     "/api/v2/files/{file_id}": {
-      "delete": {
-        "parameters": [
-          "file_id"
-        ],
-        "responses": {
-          "200": "OkResponse",
-          "401": "ErrorResponse",
-          "404": "ErrorResponse",
-          "409": "ErrorResponse",
-          "422": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse"
-        }
-      },
       "patch": {
         "parameters": [
           "file_id"
@@ -391,31 +315,6 @@
         }
       }
     },
-    "/api/v2/history/all": {
-      "delete": {
-        "parameters": [],
-        "responses": {
-          "200": "HistoryClearAllResponse",
-          "401": "ErrorResponse",
-          "422": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse"
-        }
-      }
-    },
-    "/api/v2/history/purge": {
-      "post": {
-        "parameters": [],
-        "responses": {
-          "200": "HistoryPurgeResponse",
-          "401": "ErrorResponse",
-          "403": "ErrorResponse",
-          "422": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse"
-        }
-      }
-    },
     "/api/v2/packs": {
       "get": {
         "parameters": [
@@ -460,35 +359,6 @@
         "responses": {
           "200": "PackClearRecordsResponse",
           "401": "ErrorResponse",
-          "422": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse"
-        }
-      }
-    },
-    "/api/v2/packs/{pack_id}": {
-      "delete": {
-        "parameters": [
-          "pack_id"
-        ],
-        "responses": {
-          "200": "OkResponse",
-          "401": "ErrorResponse",
-          "404": "ErrorResponse",
-          "409": "ErrorResponse",
-          "422": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse"
-        }
-      },
-      "get": {
-        "parameters": [
-          "pack_id"
-        ],
-        "responses": {
-          "200": "PackViewResponse",
-          "401": "ErrorResponse",
-          "404": "ErrorResponse",
           "422": "ErrorResponse",
           "429": "ErrorResponse",
           "500": "ErrorResponse"
@@ -708,32 +578,6 @@
         }
       }
     },
-    "/api/v2/storage/repair": {
-      "post": {
-        "parameters": [],
-        "responses": {
-          "200": "null",
-          "401": "ErrorResponse",
-          "403": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse",
-          "501": "ErrorResponse"
-        }
-      }
-    },
-    "/api/v2/storage/scan": {
-      "post": {
-        "parameters": [],
-        "responses": {
-          "200": "null",
-          "401": "ErrorResponse",
-          "403": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse",
-          "501": "ErrorResponse"
-        }
-      }
-    },
     "/api/v2/system/status": {
       "get": {
         "parameters": [],
@@ -818,21 +662,6 @@
         "responses": {
           "200": "TorrentPreviewResponse",
           "401": "ErrorResponse",
-          "422": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse"
-        }
-      }
-    },
-    "/api/v2/tasks/{task_id}": {
-      "get": {
-        "parameters": [
-          "task_id"
-        ],
-        "responses": {
-          "200": "TaskResponse",
-          "401": "ErrorResponse",
-          "404": "ErrorResponse",
           "422": "ErrorResponse",
           "429": "ErrorResponse",
           "500": "ErrorResponse"
@@ -924,20 +753,6 @@
           "500": "ErrorResponse"
         }
       },
-      "get": {
-        "parameters": [
-          "user_id"
-        ],
-        "responses": {
-          "200": "UserResponse",
-          "401": "ErrorResponse",
-          "403": "ErrorResponse",
-          "404": "ErrorResponse",
-          "422": "ErrorResponse",
-          "429": "ErrorResponse",
-          "500": "ErrorResponse"
-        }
-      },
       "patch": {
         "parameters": [
           "user_id"
@@ -956,42 +771,6 @@
     }
   },
   "schemas": {
-    "ApiTokenCreateRequest": {
-      "fields": [
-        "name"
-      ],
-      "required": []
-    },
-    "ApiTokenListResponse": {
-      "fields": [
-        "items",
-        "page",
-        "page_size",
-        "total"
-      ],
-      "required": [
-        "items",
-        "page",
-        "page_size",
-        "total"
-      ]
-    },
-    "ApiTokenResponse": {
-      "fields": [
-        "created_at_ms",
-        "id",
-        "last_used_at_ms",
-        "name",
-        "prefix"
-      ],
-      "required": [
-        "created_at_ms",
-        "id",
-        "last_used_at_ms",
-        "name",
-        "prefix"
-      ]
-    },
     "Aria2TestRequest": {
       "fields": [
         "aria2_rpc_secret",
@@ -1017,24 +796,6 @@
       "required": [
         "message",
         "status"
-      ]
-    },
-    "CreatedApiTokenResponse": {
-      "fields": [
-        "created_at_ms",
-        "id",
-        "last_used_at_ms",
-        "name",
-        "prefix",
-        "token"
-      ],
-      "required": [
-        "created_at_ms",
-        "id",
-        "last_used_at_ms",
-        "name",
-        "prefix",
-        "token"
       ]
     },
     "CredentialInvalidateRequest": {
@@ -1063,16 +824,6 @@
         "state"
       ],
       "required": []
-    },
-    "DirectoryBreadcrumbResponse": {
-      "fields": [
-        "name",
-        "path"
-      ],
-      "required": [
-        "name",
-        "path"
-      ]
     },
     "DiskSpaceResponse": {
       "fields": [
@@ -1167,14 +918,12 @@
     },
     "FileEntryListResponse": {
       "fields": [
-        "breadcrumbs",
         "items",
         "page",
         "page_size",
         "total"
       ],
       "required": [
-        "breadcrumbs",
         "items",
         "page",
         "page_size",
@@ -1245,31 +994,6 @@
       "required": [
         "hits",
         "truncated"
-      ]
-    },
-    "HistoryClearAllResponse": {
-      "fields": [
-        "cleared_count"
-      ],
-      "required": [
-        "cleared_count"
-      ]
-    },
-    "HistoryPurgeRequest": {
-      "fields": [
-        "before_ms",
-        "older_than_days"
-      ],
-      "required": []
-    },
-    "HistoryPurgeResponse": {
-      "fields": [
-        "detached_sources",
-        "expired_tasks"
-      ],
-      "required": [
-        "detached_sources",
-        "expired_tasks"
       ]
     },
     "LiveResponse": {
@@ -1419,16 +1143,6 @@
         "new_password"
       ]
     },
-    "PublicBreadcrumbResponse": {
-      "fields": [
-        "name",
-        "path"
-      ],
-      "required": [
-        "name",
-        "path"
-      ]
-    },
     "PublicEntryItemResponse": {
       "fields": [
         "kind",
@@ -1445,14 +1159,12 @@
     },
     "PublicEntryListResponse": {
       "fields": [
-        "breadcrumbs",
         "items",
         "page",
         "page_size",
         "total"
       ],
       "required": [
-        "breadcrumbs",
         "items",
         "page",
         "page_size",
@@ -1511,13 +1223,11 @@
     "RpcAccessResponse": {
       "fields": [
         "enabled",
-        "secret",
-        "secret_prefix"
+        "secret"
       ],
       "required": [
         "enabled",
-        "secret",
-        "secret_prefix"
+        "secret"
       ]
     },
     "RpcAccessUpdateRequest": {
@@ -1757,12 +1467,10 @@
     },
     "ShareVerifyResponse": {
       "fields": [
-        "access_token",
-        "expires_in"
+        "access_token"
       ],
       "required": [
-        "access_token",
-        "expires_in"
+        "access_token"
       ]
     },
     "StorageDeleteRequest": {
@@ -1820,8 +1528,7 @@
         "kind",
         "on_disk",
         "reference_count",
-        "size",
-        "storage_path"
+        "size"
       ],
       "required": [
         "content_id",
@@ -1830,8 +1537,7 @@
         "kind",
         "on_disk",
         "reference_count",
-        "size",
-        "storage_path"
+        "size"
       ]
     },
     "StorageReferencingUserListResponse": {
@@ -2104,7 +1810,6 @@
         "items",
         "last_refresh_at_ms",
         "refresh_status",
-        "remote_items",
         "updated_at_ms"
       ],
       "required": [
@@ -2113,7 +1818,6 @@
         "items",
         "last_refresh_at_ms",
         "refresh_status",
-        "remote_items",
         "updated_at_ms"
       ]
     },

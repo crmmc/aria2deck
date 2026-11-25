@@ -45,10 +45,6 @@ async def test_session_login_logout_and_generation_validation(tmp_path: Path) ->
     users, total = await service.list_users(admin, page=1, page_size=20)
     assert total == 1
     assert users[0].user.id == admin.user.id
-    admin_token = await service.create_api_token(admin, name="admin-token")
-    with pytest.raises(DomainError):
-        await service.authenticate_api_token(admin_token.raw_token)
-
     for username, password in (("missing", PASSWORD), ("admin", OTHER_PASSWORD)):
         with pytest.raises(DomainError) as caught:
             await service.login(username=username, password_hash=password)
@@ -178,53 +174,6 @@ async def test_user_update_empty_and_password_success_paths(tmp_path: Path) -> N
     )
     assert updated.user.credential_generation == user.user.credential_generation + 1
     assert updated.user.is_initial_password is False
-
-
-async def test_token_and_rpc_service_paths_use_current_user_state(tmp_path: Path) -> None:
-    _app, service = await make_service(tmp_path)
-    admin = await create_admin(service)
-    user_view = await service.create_user(
-        admin,
-        username="user",
-        password_hash=OTHER_PASSWORD,
-        is_admin=False,
-        is_initial_password=False,
-        quota_bytes=100,
-    )
-    user = Principal(user_view.user, CredentialKind.SESSION)
-
-    created = await service.create_api_token(user, name="CLI")
-    assert created.raw_token.startswith("aria2_")
-    assert (await service.authenticate_api_token(created.raw_token)).user.id == user.user.id
-    with pytest.raises(DomainError):
-        await service.authenticate_api_token("invalid")
-    tokens, total = await service.list_api_tokens(user, page=1, page_size=1)
-    assert total == 1
-    assert tokens[0].last_used_at_ms is not None
-    beyond, total = await service.list_api_tokens(user, page=2, page_size=1)
-    assert beyond == []
-    assert total == 1
-    await service.delete_api_token(user, token_id=created.token.id)
-    with pytest.raises(DomainError):
-        await service.authenticate_api_token(created.raw_token)
-
-    assert (await service.rpc_access(user)).enabled is False
-    enabled = await service.set_rpc_access(user, enabled=True)
-    current = await current_principal(service, user.user.id)
-    assert (await service.rpc_access(current)).secret == enabled.secret
-    assert (await service.set_rpc_access(current, enabled=True)).secret == enabled.secret
-    rotated = await service.refresh_rpc_access(current)
-    assert rotated.secret != enabled.secret
-    current = await current_principal(service, user.user.id)
-    assert (await service.set_rpc_access(current, enabled=False)).secret is None
-    with pytest.raises(DomainError):
-        await service.refresh_rpc_access(user)
-
-    await service.create_api_token(user, name="to-invalidate")
-    await service.set_rpc_access(user, enabled=True)
-    assert await service.invalidate_credentials(
-        admin, confirmation="INVALIDATE_ALL_CREDENTIALS"
-    ) == (1, 1)
 
 
 async def current_principal(service: AccountService, user_id: int) -> Principal:

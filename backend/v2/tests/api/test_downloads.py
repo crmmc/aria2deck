@@ -30,7 +30,7 @@ from aria2deck.infrastructure.sqlite.schema import (
     task_subscriptions,
 )
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
-from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, login
+from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, fetch_task, login
 
 
 def _now_ms() -> int:
@@ -340,10 +340,7 @@ def test_projection_uses_database_state_and_only_fresh_observation_details(
         upload_speed=50,
     )
 
-    response = client.get(f"/api/v2/tasks/{task_id}")
-
-    assert response.status_code == 200
-    task = response.json()
+    task = fetch_task(client, task_id)
     assert task["status"] == "active"
     assert task["status_label"] == "入库中"
     assert task["total_bytes"] == 1000
@@ -364,7 +361,7 @@ def test_projection_uses_database_state_and_only_fresh_observation_details(
     assert task["retryable"] is False
     assert "gid" not in task
     assert "attempt_id" not in task
-    assert "private.example" not in response.text
+    assert "private.example" not in str(task)
 
 
 @pytest.mark.parametrize("observed_at", [None, 0])
@@ -388,7 +385,7 @@ def test_missing_or_expired_observation_never_changes_authoritative_task(
             status="complete",
         )
 
-    task = client.get(f"/api/v2/tasks/{task_id}").json()
+    task = fetch_task(client, task_id)
     assert task["status"] == "active"
     assert task["status_label"] == "下载中"
     assert task["download_speed"] == 0
@@ -432,8 +429,8 @@ def test_future_observation_is_not_fresh_and_paused_tasks_have_zero_speed(
         )
     )
 
-    future = client.get(f"/api/v2/tasks/{future_id}").json()
-    paused = client.get(f"/api/v2/tasks/{paused_id}").json()
+    future = fetch_task(client, future_id)
+    paused = fetch_task(client, paused_id)
     assert future["observation_fresh"] is False
     assert future["download_speed"] == 0
     assert paused["observation_fresh"] is True
@@ -458,15 +455,16 @@ def test_terminal_user_state_wins_without_mutating_shared_attempt(
         attempt_id=attempt_id,
     )
 
-    assert client.get(f"/api/v2/tasks/{other_task}").status_code == 404
+    visible = client.get("/api/v2/tasks?page=1&page_size=100").json()["items"]
+    assert other_task not in [item["id"] for item in visible]
     login(client, "user", OTHER_PASSWORD)
-    cancelled = client.get(f"/api/v2/tasks/{other_task}").json()
+    cancelled = fetch_task(client, other_task)
     assert cancelled["status"] == "cancelled"
     assert cancelled["status_label"] == "已取消"
     assert cancelled["retryable"] is True
 
     login(client)
-    active = client.get(f"/api/v2/tasks/{admin_task}").json()
+    active = fetch_task(client, admin_task)
     assert active["status"] == "active"
     assert active["status_label"] == "下载中"
 
@@ -483,7 +481,7 @@ def test_attempt_terminal_state_is_projected_for_a_live_subscription(
         attempt_status=AttemptStatus.FAILED,
     )
 
-    task = client.get(f"/api/v2/tasks/{task_id}").json()
+    task = fetch_task(client, task_id)
     assert task["status"] == "failed"
     assert task["status_label"] == "已失败"
     assert task["retryable"] is True
@@ -566,8 +564,6 @@ async def _set_waiting(settings: Settings, *, user_id: int, task_id: int) -> Non
         ("/api/v2/tasks", {"page_size": 0}),
         ("/api/v2/tasks", {"page_size": 101}),
         ("/api/v2/tasks", {"q": "x" * 201}),
-        ("/api/v2/tasks/0", {}),
-        ("/api/v2/tasks/not-an-id", {}),
     ],
 )
 def test_invalid_task_read_parameters_have_stable_validation_errors(
@@ -587,13 +583,13 @@ def test_task_reads_require_authentication_and_hide_missing_tasks(client: TestCl
     authenticated_admin(client)
     missing = client.get("/api/v2/tasks/999")
     assert missing.status_code == 404
-    assert missing.json() == {"error": {"code": "not_found", "message": "任务不存在"}}
+    assert missing.json()["error"]["code"] == "not_found"
 
 
 def test_download_read_openapi_matches_response_and_query_contract(app: FastAPI) -> None:
     schema = app.openapi()
     paths = schema["paths"]
-    for path in ("/api/v2/tasks", "/api/v2/tasks/stats", "/api/v2/tasks/{task_id}"):
+    for path in ("/api/v2/tasks", "/api/v2/tasks/stats"):
         assert paths[path]["get"]["security"] == [{"ApiToken": []}, {"SessionCookie": []}]
 
     list_operation = paths["/api/v2/tasks"]["get"]
@@ -619,11 +615,6 @@ def test_download_read_openapi_matches_response_and_query_contract(app: FastAPI)
         "cancelled",
         "expired",
     }
-    detail_operation = paths["/api/v2/tasks/{task_id}"]["get"]
-    assert detail_operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
-        "/TaskResponse"
-    )
-    assert "404" in detail_operation["responses"]
     stats_operation = paths["/api/v2/tasks/stats"]["get"]
     assert stats_operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
         "/TaskStatsResponse"

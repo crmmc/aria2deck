@@ -18,11 +18,12 @@ def _wait_pack_status(
     deadline = time.monotonic() + timeout
     last = "unknown"
     while time.monotonic() < deadline:
-        view = client.get(f"/api/v2/packs/{pack_id}")
-        if view.status_code == 200:
-            last = str(view.json()["status"])
+        items = client.get("/api/v2/packs?limit=50").json()["items"]
+        view = next((item for item in items if item["id"] == pack_id), None)
+        if view is not None:
+            last = str(view["status"])
             if last in statuses:
-                return dict(view.json())
+                return dict(view)
         time.sleep(0.02)
     raise AssertionError(f"pack {pack_id} 未在 {timeout}s 内进入 {statuses}（当前 {last}）")
 
@@ -99,7 +100,6 @@ def test_pack_execution_progress_and_output(client: TestClient, app: FastAPI, se
     assert view["output"] is not None
     assert view["step"] is None and view["step_progress"] == 100
     assert view["output"] is not None and view["output"]["display_name"] == "bundle.zip"
-    assert client.get("/api/v2/packs/999").status_code == 404
 
     import zipfile
 
@@ -135,9 +135,6 @@ def test_pack_failure_progress_and_lifecycle(client: TestClient, app: FastAPI, s
     ).json()["id"]
     assert client.post(f"/api/v2/packs/{pending}/cancel").status_code == 200
     assert client.post(f"/api/v2/packs/{pending}/cancel").status_code == 409
-    assert client.delete(f"/api/v2/packs/{pending}").status_code == 200
-    assert client.get(f"/api/v2/packs/{pending}").status_code == 404
-    assert client.delete(f"/api/v2/packs/{pending}").status_code == 404
 
     # 清记录语义：不删源的完成任务立即可清；删源任务等待来源清理收敛后可清
     # （409 门语义在 tests/application/test_pack_cleanup.py 有确定性证据）。
@@ -175,7 +172,6 @@ def test_openapi_contains_pack_and_share_paths(app: FastAPI) -> None:
     for expected in (
         "/api/v2/packs/precompute",
         "/api/v2/packs",
-        "/api/v2/packs/{pack_id}",
         "/api/v2/packs/{pack_id}/cancel",
         "/api/v2/packs/{pack_id}/record",
         "/api/v2/shares",

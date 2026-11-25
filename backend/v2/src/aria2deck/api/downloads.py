@@ -22,9 +22,6 @@ from ..domain.quota import available_user_bytes
 from .contracts import (
     DiskSpaceResponse,
     ErrorBody,
-    HistoryClearAllResponse,
-    HistoryPurgeRequest,
-    HistoryPurgeResponse,
     TaskActionRequest,
     TaskBatchCreateRequest,
     TaskBatchResponse,
@@ -46,7 +43,6 @@ from .dependencies import (
     download_history,
     download_queries,
     required_principal,
-    required_session_principal,
 )
 from .errors import error_responses
 
@@ -126,19 +122,6 @@ async def list_tasks(
         page=result.page,
         page_size=result.page_size,
     )
-
-
-@router.get(
-    "/tasks/{task_id}",
-    response_model=TaskResponse,
-    responses=error_responses(401, 404, 422, 429, 500),
-)
-async def get_task(
-    task_id: int = Path(ge=1),
-    principal: Principal = Depends(required_principal),
-    service: DownloadQueryService = Depends(download_queries),
-) -> TaskResponse:
-    return _task(await service.get_task(user_id=principal.user.id, task_id=task_id))
 
 
 async def _write_result(
@@ -331,40 +314,6 @@ async def delete_history(
 ) -> TaskBatchResponse:
     results = await service.delete(user_id=principal.user.id, task_ids=payload.task_ids)
     return await _batch_response(results, queries, user_id=principal.user.id, include_task=False)
-
-
-@router.delete(
-    "/history/all",
-    response_model=HistoryClearAllResponse,
-    responses=error_responses(401, 422, 429, 500),
-)
-async def clear_history(
-    principal: Principal = Depends(required_principal),
-    service: HistoryService = Depends(download_history),
-) -> HistoryClearAllResponse:
-    """一键清空本人全部终态任务（A2）。"""
-    cleared = await service.clear(user_id=principal.user.id)
-    return HistoryClearAllResponse(cleared_count=cleared)
-
-
-@router.post(
-    "/history/purge",
-    response_model=HistoryPurgeResponse,
-    responses=error_responses(401, 403, 422, 429, 500),
-)
-async def purge_history(
-    payload: HistoryPurgeRequest,
-    principal: Principal = Depends(required_session_principal),
-    service: HistoryService = Depends(download_history),
-) -> HistoryPurgeResponse:
-    result = await service.purge(
-        principal,
-        before_ms=payload.before_ms,
-        older_than_days=payload.older_than_days,
-    )
-    return HistoryPurgeResponse(
-        expired_tasks=result.expired_tasks, detached_sources=result.detached_sources
-    )
 
 
 @router.get("/internal/fetch/{attempt_id}/{source_index}", include_in_schema=False)

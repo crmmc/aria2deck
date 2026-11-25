@@ -105,7 +105,7 @@ def test_verify_semantics_and_rate_limit(client: TestClient, settings) -> None:
     assert wrong.json()["error"]["code"] == "password_invalid"
     ok = anon.post(f"/api/s/{guarded_code}/verify", json={"password": PASSWORD})
     assert ok.status_code == 200
-    assert ok.json()["expires_in"] == 1800 and ok.json()["access_token"]
+    assert ok.json()["access_token"]
 
     # 失效分享验密 410：直接把过期时间写到过去。
     async def expire() -> None:
@@ -149,7 +149,6 @@ def test_browse_and_query_token_ignored(client: TestClient, settings) -> None:
     body = entries.json()
     assert body["total"] == 1
     assert [(item["name"], item["kind"]) for item in body["items"]] == [("docs", "directory")]
-    assert [c["name"] for c in body["breadcrumbs"]] == ["dir-2"]
     nested = anon.get(f"/api/s/{dir_code}/entries", params={"path": "docs"})
     assert nested.json()["items"][0]["path"] == "docs/child.bin"
     junk = anon.get(f"/api/s/{dir_code}/entries", headers={"Authorization": "Bearer junk"})
@@ -173,12 +172,12 @@ def test_browse_and_query_token_ignored(client: TestClient, settings) -> None:
     assert cross.status_code == 401, "令牌绑定单一分享码"
 
 
-def test_download_matrix_headers_and_form_channel(client: TestClient, settings) -> None:
+def test_download_matrix_headers_and_token_semantics(client: TestClient, settings) -> None:
     user_id = _setup(client)
     payload = b"0123456789"
     file_id = seed_file(settings, user_id=user_id, index=1, payload=payload)[1]
     dir_file = _seed_directory(settings, user_id, 3)
-    code = _make_share(client, file_id, max_downloads=5)  # 非 bytes 回退也是完整实体，计入计数。
+    code = _make_share(client, file_id, max_downloads=4)  # 非 bytes 回退也是完整实体，计入计数。
     dir_code = _make_share(client, dir_file)
     anon = TestClient(client.app)
 
@@ -205,10 +204,6 @@ def test_download_matrix_headers_and_form_channel(client: TestClient, settings) 
     assert invalid.status_code == 416
     assert invalid.json()["error"]["code"] == "range_not_satisfiable"
 
-    # 表单通道（x-www-form-urlencoded）同样直接可用（token 可为空）。
-    form = anon.post(f"/api/s/{code}/download", data={"token": ""})
-    assert form.status_code == 200 and form.content == payload
-
     # 有密码分享的 token 语义：无 token 401；query token 一律忽略（含真实值）；
     # 错误表单 token 401；正确 token 表单通道 200。
     guarded_id = seed_file(settings, user_id=user_id, index=4, payload=b"g")[1]
@@ -220,10 +215,10 @@ def test_download_matrix_headers_and_form_channel(client: TestClient, settings) 
     assert (
         anon.get(f"/api/s/{guarded}/download", params={"token": token}).status_code == 401
     ), "query token 必须被忽略"
-    assert anon.post(f"/api/s/{guarded}/download", data={"token": "wrong"}).status_code == 401
-    guarded_form = anon.post(f"/api/s/{guarded}/download", data={"token": token})
-    assert guarded_form.status_code == 200 and guarded_form.content == b"g"
-    assert anon.post(f"/api/s/{code}/download", data={}).status_code == 422, "缺 Content-Type 按非表单拒绝"
+    guarded_get = anon.get(
+        f"/api/s/{guarded}/download", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert guarded_get.status_code == 200 and guarded_get.content == b"g"
 
     # 目录内条目下载 + 目录整体拒绝（无密码分享直接访问）。
     entry = anon.get(
@@ -244,36 +239,6 @@ def test_download_matrix_headers_and_form_channel(client: TestClient, settings) 
     assert exhausted.json()["error"]["code"] == "share_exhausted"
 
 
-def test_form_channel_content_type_size_and_rate_consumption(
-    client: TestClient, settings
-) -> None:
-    user_id = _setup(client)
-    file_id = seed_file(settings, user_id=user_id, index=1, payload=b"form")[1]
-    code = _make_share(client, file_id, max_downloads=10)
-
-    wrong_type = TestClient(client.app).post(
-        f"/api/s/{code}/download", json={"token": "x"}
-    )
-    assert wrong_type.status_code == 422
-    assert wrong_type.json()["error"]["code"] == "invalid_input"
-
-    oversized = TestClient(client.app).post(
-        f"/api/s/{code}/download", data={"token": "", "pad": "x" * (64 * 1024 + 1)}
-    )
-    assert oversized.status_code == 413
-    assert oversized.json()["error"]["code"] == "task_too_large"
-
-    login(client)
-    client.patch("/api/v2/settings", json={"share_access_rate_limit": 1})
-    login(client, "user", OTHER_PASSWORD)
-    limited = TestClient(client.app, client=("198.51.100.7", 2222))
-    # 限流在任何语义之前：第一次成功（无密码分享直接下载），第二次 429。
-    assert limited.post(f"/api/s/{code}/download", data={"token": ""}).status_code == 200
-    throttled = limited.post(f"/api/s/{code}/download", data={"token": ""})
-    assert throttled.status_code == 429
-    assert "Retry-After" in throttled.headers
-
-
 def test_public_rate_limit_covers_every_share_route(client: TestClient, settings) -> None:
     user_id = _setup(client)
     file_id = seed_file(settings, user_id=user_id, index=1, payload=b"payload")[1]
@@ -292,7 +257,6 @@ def test_public_rate_limit_covers_every_share_route(client: TestClient, settings
         lambda anon: anon.post(f"/api/s/{guarded_code}/verify", json={"password": PASSWORD}),
         lambda anon: anon.get(f"/api/s/{directory_code}/entries"),
         lambda anon: anon.get(f"/api/s/{file_code}/download"),
-        lambda anon: anon.post(f"/api/s/{file_code}/download", data={"token": ""}),
     )
     for index, request in enumerate(requests):
         anon = TestClient(client.app, client=(f"198.51.100.{30 + index}", 4321))
@@ -373,7 +337,6 @@ def test_directory_share_breadcrumb_root_follows_rename(
     entries = anon.get(f"/api/s/{code}/entries")
     assert entries.status_code == 200
     body = entries.json()
-    assert body["breadcrumbs"][0]["name"] == "bundle-v2"  # 修复前为 "dir-8"
     # 目录条目名来自内容层，不受目录改名影响。
     assert [item["name"] for item in body["items"]] == ["docs"]
 
@@ -385,8 +348,8 @@ def test_deleted_file_share_keeps_snapshot_shell_and_blocks_access(
     file_id = seed_file(settings, user_id=user_id, index=9, name="gone.bin", payload=b"x")[1]
     code = _make_share(client, file_id)
 
-    deleted = client.delete(f"/api/v2/files/{file_id}")
-    assert deleted.status_code in (200, 202, 204)
+    deleted = client.request("DELETE", "/api/v2/files", json={"file_ids": [file_id]})
+    assert deleted.status_code == 200
 
     anon = TestClient(client.app)
     info = anon.get(f"/api/s/{code}/info")
@@ -567,61 +530,6 @@ async def test_share_download_releases_read_lease_on_normal_completion() -> None
     assert set(calls) == {"content", "connection"}
 
 
-async def test_share_form_download_releases_read_lease_when_client_disconnects_mid_stream() -> None:
-    """POST 表单入口（token 只经表单/头进入）与 GET 入口共用 _streaming，同样要锁住释放。"""
-    import pytest
-    from starlette.requests import ClientDisconnect
-
-    from aria2deck.api.public_shares import download_share_by_form
-
-    calls: list[str] = []
-    service = _ShareDisconnectService(calls, [b"chunk-1", b"chunk-2", b"chunk-3"])
-    lease = _ShareDisconnectLease(calls)
-    form_body = b"token="
-
-    async def receive() -> dict:
-        return {"type": "http.request", "body": form_body, "more_body": False}
-
-    request = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/api/s/code/download",
-            "client": ("127.0.0.1", 50000),
-            "headers": [
-                (b"content-type", b"application/x-www-form-urlencoded"),
-                (b"content-length", str(len(form_body)).encode()),
-            ],
-        },
-        receive,
-    )
-    response = await download_share_by_form(
-        request=request,
-        code="code",
-        range_header=None,
-        limiter=_ShareDisconnectLimiter(lease),
-        service=service,
-        connections=_ShareDisconnectLimiter(lease),
-    )
-
-    bodies = 0
-
-    async def send(message: dict) -> None:
-        nonlocal bodies
-        if message["type"] == "http.response.body" and message.get("body"):
-            bodies += 1
-            if bodies == 2:
-                raise ClientDisconnect()
-
-    async def receive_disconnect() -> dict:
-        return {"type": "http.disconnect"}
-
-    with pytest.raises(ClientDisconnect):
-        await response({"type": "http"}, receive_disconnect, send)
-
-    assert set(calls) == {"content", "connection"}
-
-
 async def test_share_release_is_exactly_once_for_repeated_calls() -> None:
     """评审发现：_as_target 每次新建 target 时 double-release 会吃掉他人租约。
 
@@ -708,61 +616,3 @@ def test_bearer_header_with_non_bearer_scheme_is_ignored(client: TestClient, set
     assert ok.status_code != 401
 
 
-def test_form_download_failure_releases_anonymous_connection(
-    client: TestClient, settings
-) -> None:
-    """表单下载在业务阶段失败时必须释放匿名连接租约。
-
-    覆盖 `download_share_by_form` 的 `except BaseException: connection.release()`。
-    若不释放，失败的下载会永久占用匿名并发额度，后续请求被误判为超限。
-    """
-    user_id = _setup(client)
-    directory = _seed_directory(settings, user_id, 91)
-    code = _make_share(client, directory)
-    anon = TestClient(client.app)
-
-    # 目录分享缺 path 时业务层拒绝；此时连接必须先释放，再验证后续请求不受影响。
-    rejected = anon.post(f"/api/s/{code}/download", data={"token": ""})
-    assert rejected.status_code in {400, 404, 422}, rejected.text
-
-    # 若连接泄漏，这里会因匿名额度耗尽而 429；断言能反复成功。
-    for _ in range(5):
-        again = anon.post(f"/api/s/{code}/download", data={"token": ""})
-        assert again.status_code == rejected.status_code
-
-
-async def test_share_form_without_content_length_skips_precheck_and_reads_body() -> None:
-    """表单请求没有 content-length 时跳过预检，改由实际读取计数兜底。
-
-    覆盖 `_require_form_size` 的 `if declared.isdigit()` 为假分支（chunked 或无长度头）。
-    预检只是第一道闸，不能因为缺头部就放行超大请求——读取计数的防线仍然生效。
-    """
-    from aria2deck.api.public_shares import download_share_by_form
-
-    calls: list[str] = []
-    service = _ShareDisconnectService(calls, [b"x"])
-    lease = _ShareDisconnectLease(calls)
-
-    async def receive() -> dict:
-        return {"type": "http.request", "body": b"token=", "more_body": False}
-
-    request = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/api/s/code/download",
-            "client": ("127.0.0.1", 50000),
-            "headers": [(b"content-type", b"application/x-www-form-urlencoded")],
-        },
-        receive,
-    )
-    response = await download_share_by_form(
-        request=request,
-        code="code",
-        range_header=None,
-        limiter=_ShareDisconnectLimiter(lease),
-        service=service,
-        connections=_ShareDisconnectLimiter(lease),
-    )
-    # 缺 content-length 不改变正常路径的结果；关键是没有因预检缺失而报错。
-    assert response.status_code in {200, 206}

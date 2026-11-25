@@ -81,11 +81,6 @@ def test_openapi_success_and_error_models_match_actual_payloads(app: FastAPI) ->
                     )
                     assert schema_ref(operation, status).endswith(expected)
 
-    token_schema = schema["components"]["schemas"]["ApiTokenResponse"]
-    created_schema = schema["components"]["schemas"]["CreatedApiTokenResponse"]
-    assert "token" not in token_schema["properties"]
-    assert "token" in created_schema["properties"]
-
 
 def test_validation_and_unknown_api_use_the_same_chinese_structure(app: FastAPI) -> None:
     with TestClient(app) as client:

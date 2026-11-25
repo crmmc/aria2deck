@@ -8,7 +8,6 @@ from contextlib import AbstractAsyncContextManager
 from typing import cast
 
 from ...domain.accounts import (
-    ApiToken,
     CredentialKind,
     Permission,
     User,
@@ -22,7 +21,6 @@ from ...domain.accounts import (
     require_credential_invalidation,
     require_session,
     session_is_active,
-    validate_api_token_name,
     validate_password_change,
     validate_password_hash,
 )
@@ -36,7 +34,7 @@ from ..ports import (
     UnitOfWork,
     UserCleanupPort,
 )
-from .models import CleanupReport, CreatedApiToken, LoginResult, Principal, RpcAccess, UserView
+from .models import CleanupReport, LoginResult, Principal, RpcAccess, UserView
 
 logger = logging.getLogger(__name__)
 
@@ -352,51 +350,6 @@ class AccountService:
             await repository.mark_pending_delete(user_id=user.id, now_ms=self.clock_ms())
         self._publish_revocation(SessionRevocation(user_id=user_id))
 
-
-    async def create_api_token(
-        self, principal: Principal, *, name: str
-    ) -> CreatedApiToken:
-        require_session(principal.kind)
-        raw_token = self.credentials.new_api_token()
-        now_ms = self.clock_ms()
-        normalized_name = validate_api_token_name(name)
-        async with self.uow_factory() as uow:
-            token_id = await self.repository_factory(uow).create_api_token(
-                user_id=principal.user.id,
-                name=normalized_name,
-                token_digest=self.credentials.digest_api_token(raw_token),
-                prefix=raw_token[:12],
-                now_ms=now_ms,
-            )
-        token = ApiToken(
-            id=token_id,
-            user_id=principal.user.id,
-            name=normalized_name,
-            prefix=raw_token[:12],
-            created_at_ms=now_ms,
-            last_used_at_ms=None,
-        )
-        return CreatedApiToken(token, raw_token)
-
-    async def list_api_tokens(
-        self, principal: Principal, *, page: int, page_size: int
-    ) -> tuple[list[ApiToken], int]:
-        require_session(principal.kind)
-        offset = _page(page, page_size)
-        async with self.uow_factory() as uow:
-            repository = self.repository_factory(uow)
-            total = await repository.count_api_tokens(principal.user.id)
-            tokens = await repository.list_api_tokens(
-                user_id=principal.user.id, offset=min(offset, total), limit=page_size
-            )
-        return tokens, total
-
-    async def delete_api_token(self, principal: Principal, *, token_id: int) -> None:
-        require_session(principal.kind)
-        async with self.uow_factory() as uow:
-            await self.repository_factory(uow).delete_api_token(
-                token_id=token_id, user_id=principal.user.id
-            )
 
     async def authenticate_rpc_secret(self, raw_secret: str) -> Principal:
         """External RPC clients authenticate with the per-user RPC secret (ACC-10)."""

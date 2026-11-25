@@ -122,29 +122,6 @@ async def test_history_delete_validates_batch_and_returns_item_failures() -> Non
     assert [result.accepted for result in results] == [True, False, False]
 
 
-async def test_history_purge_conditions_and_worker() -> None:
-    service, repository = make_service([])
-    assert (await service.purge(principal(), before_ms=100, older_than_days=None)).expired_tasks == 2
-    await service.purge(principal(), before_ms=None, older_than_days=2)
-    await service.purge(principal(), before_ms=None, older_than_days=None)
-    assert repository.cutoffs[-2:] == [10**12 - 2 * 86400 * 1000, 10**12 - 30 * 86400 * 1000]
-    with pytest.raises(DomainError):
-        await service.purge(principal(), before_ms=1, older_than_days=1)
-    with pytest.raises(DomainError):
-        await service.purge(principal(), before_ms=-1, older_than_days=None)
-    empty_retention, _ = make_service([], retention=0)
-    with pytest.raises(DomainError):
-        await empty_retention.purge(principal(), before_ms=None, older_than_days=None)
-
-
-async def test_history_purge_uses_non_default_retention() -> None:
-    service, repository = make_service([], retention=7)
-
-    await service.purge(principal(), before_ms=None, older_than_days=None)
-
-    assert repository.cutoffs == [10**12 - 7 * 86400 * 1000]
-
-
 async def test_history_worker_expires_before_sleeping(monkeypatch: pytest.MonkeyPatch) -> None:
     service, repository = make_service([])
 
