@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useToast } from "@/shared/components/toast-context";
+import { BatchFailureDialog, type BatchFailure } from "@/shared/components/BatchFailureDialog";
 import { EmptyState } from "@/shared/components/EmptyState";
 import { Icon } from "@/shared/components/Icon";
 import { PaginationControls } from "@/shared/components/PaginationControls";
@@ -47,6 +48,7 @@ export function HistoryPage() {
   const [searchKeyword, setSearchKeyword] = useState("");
   const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [isBatchOperating, setIsBatchOperating] = useState(false);
+  const [batchFailures, setBatchFailures] = useState<BatchFailure[]>([]);
   const mountedRef = useRef(true);
   const requestIdRef = useRef(0);
   const countRequestIdRef = useRef(0);
@@ -213,6 +215,16 @@ export function HistoryPage() {
       setSelectedRecords(new Set());
       if (result.accepted_count > 0) void loadHistoryCounts();
       if (result.rejected_count > 0) {
+        const nameById = new Map(selectedList.map((r) => [r.id, r.taskName]));
+        setBatchFailures(
+          result.items
+            .map((item, index) => ({ item, id: item.task?.id ?? ids[index] }))
+            .filter(({ item }) => !item.accepted)
+            .map(({ item, id }) => ({
+              label: item.task?.name ?? nameById.get(id) ?? `任务 ${id}`,
+              reason: item.error?.message ?? "未知错误",
+            })),
+        );
         showToast(
           `已删除 ${result.accepted_count} 条，${result.rejected_count} 条删除失败`,
           "warning",
@@ -336,6 +348,7 @@ export function HistoryPage() {
           onPageSizeChange={setPageSize}
         />
       )}
+      <BatchFailureDialog failures={batchFailures} onClose={() => setBatchFailures([])} />
     </div>
   );
 }

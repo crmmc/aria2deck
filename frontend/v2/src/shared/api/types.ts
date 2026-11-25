@@ -167,17 +167,11 @@ export interface FileEntryItemResponse {
   size: number;
 }
 
-export interface DirectoryBreadcrumbResponse {
-  name: string;
-  path: string;
-}
-
 export interface FileEntryListResponse {
   items: FileEntryItemResponse[];
   total: number;
   page: number;
   page_size: number;
-  breadcrumbs: DirectoryBreadcrumbResponse[];
 }
 
 export interface FileSearchHitResponse {
@@ -318,7 +312,6 @@ export interface PublicShareInfoResponse {
 
 export interface ShareVerifyResponse {
   access_token: string;
-  expires_in: number;
 }
 
 export interface PublicEntryListResponse {
@@ -326,7 +319,6 @@ export interface PublicEntryListResponse {
   total: number;
   page: number;
   page_size: number;
-  breadcrumbs: DirectoryBreadcrumbResponse[];
 }
 
 /* ============ 账户与凭证（ACC-04~11） ============ */
@@ -346,7 +338,6 @@ export interface DeleteUserResponse {
 
 export interface RpcAccessResponse {
   enabled: boolean;
-  secret_prefix: string | null;
   secret: string | null;
 }
 
@@ -406,7 +397,6 @@ export interface PublicSiteInfoResponse {
 export interface TrackerStatusResponse {
   items: string[];
   entry_count: number;
-  remote_items: string[];
   refresh_status: string;
   failed_urls: string[];
   updated_at_ms: number | null;
@@ -420,7 +410,6 @@ export interface StorageFileResponse {
   content_key: string;
   kind: FileKind;
   size: number;
-  storage_path: string;
   on_disk: boolean;
   reference_count: number;
   deletion_state: "active" | "pending_delete" | "tombstoned";

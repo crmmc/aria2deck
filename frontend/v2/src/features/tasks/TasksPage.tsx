@@ -7,6 +7,7 @@ import { ApiRequestError } from "@/shared/api/client";
 import type { TaskResponse, TorrentPreviewResponse } from "@/shared/api/types";
 import { useMounted } from "@/shared/hooks/useMounted";
 import { useToast } from "@/shared/components/toast-context";
+import { BatchFailureDialog, type BatchFailure } from "@/shared/components/BatchFailureDialog";
 import { PageHeader } from "@/shared/components/PageHeader";
 import { taskCommands } from "@/shared/lib/commands";
 import { useClipboard } from "@/shared/hooks/useClipboard";
@@ -75,6 +76,7 @@ export function TasksPage() {
   const [sortBy, setSortBy] = useState<LegacySortKey>("speed");
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [isBatchAdding, setIsBatchAdding] = useState(false);
+  const [cancelFailures, setCancelFailures] = useState<BatchFailure[]>([]);
   const [batchUris, setBatchUris] = useState("");
   const [batchFeedback, setBatchFeedback] = useState<BatchFeedback | null>(null);
   const [torrentWizard, setTorrentWizard] = useState<{
@@ -428,6 +430,16 @@ export function TasksPage() {
       setTasks((prev) => prev.filter((t) => !cancelledIds.has(t.id)));
       clearSelection();
       if (response.rejected_count > 0) {
+        const nameById = new Map(activeTasks.map((task) => [task.id, task.name]));
+        setCancelFailures(
+          response.items
+            .map((item, index) => ({ item, id: item.task?.id ?? ids[index] }))
+            .filter(({ item }) => !item.accepted)
+            .map(({ item, id }) => ({
+              label: item.task?.name ?? nameById.get(id) ?? `任务 ${id}`,
+              reason: item.error?.message ?? "未知错误",
+            })),
+        );
         showToast(
           `已取消 ${response.accepted_count} 个任务，${response.rejected_count} 个取消失败`,
           "warning",
@@ -601,6 +613,7 @@ export function TasksPage() {
             document.body,
           )
         : null}
+      <BatchFailureDialog failures={cancelFailures} onClose={() => setCancelFailures([])} />
     </>
   );
 }

@@ -231,7 +231,6 @@ describe("TrackerSettingsSection", () => {
     return {
       items: [],
       entry_count: 0,
-      remote_items: [],
       refresh_status: "never",
       failed_urls: [],
       updated_at_ms: null,

@@ -2148,6 +2148,10 @@ dialog.command-dialog {
   margin-top: 0;
 }
 
+.speed-chart-plot {
+  position: relative;
+}
+
 .speed-chart {
   display: block;
   width: 100%;
@@ -2186,18 +2190,24 @@ dialog.command-dialog {
 
 .speed-point,
 .upload-point {
-  fill: #fff;
-  vector-effect: non-scaling-stroke;
+  position: absolute;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: #fff;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
 }
 
 .speed-point {
-  stroke: var(--primary);
-  stroke-width: 2.5;
+  width: 12px;
+  height: 12px;
+  border: 2.5px solid var(--primary);
 }
 
 .upload-point {
-  stroke: #e08600;
-  stroke-width: 2;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #e08600;
 }
 
 .chart-sample-state {
@@ -2261,6 +2271,7 @@ dialog.command-dialog {
 }
 
 .storage-track.progress-container {
+  display: flex;
   height: 5px;
   margin-top: 12px;
   overflow: hidden;
@@ -2271,8 +2282,22 @@ dialog.command-dialog {
 .storage-track > .progress-bar {
   display: block;
   height: 100%;
+  flex: none;
   border-radius: inherit;
   background: var(--primary);
+}
+
+/* 下载中的预留空间：与已用色同源、更淡，让“已用 + 冻结”一眼可读 */
+.storage-track > .progress-bar-reserved {
+  display: block;
+  height: 100%;
+  flex: none;
+  background: rgba(0, 113, 227, 0.32);
+  transition: width 0.5s ease;
+}
+
+.storage-frozen {
+  color: var(--primary);
 }
 
 .storage-detail {
@@ -2771,3 +2796,47 @@ dialog.confirm-overlay {
   margin-bottom: var(--space-1);
 }
 
+
+/* 批量操作失败明细：成功项走 toast，失败项逐条列出对象与原因 */
+.batch-failure-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  margin: 12px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.batch-failure-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 59, 48, 0.06);
+}
+
+.batch-failure-list strong {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-failure-list span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.batch-failure-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* 机器余量不足时，明确告诉用户这是磁盘限制而非配额缩水 */
+.storage-limited {
+  color: #b26a00;
+}

@@ -25,10 +25,9 @@ const ME_INITIAL: UserResponse = { ...ME, is_initial_password: true };
 
 const RPC_ON: RpcAccessResponse = {
   enabled: true,
-  secret_prefix: "abcd1234efgh",
   secret: "raw-secret-value",
 };
-const RPC_OFF: RpcAccessResponse = { enabled: false, secret_prefix: null, secret: null };
+const RPC_OFF: RpcAccessResponse = { enabled: false, secret: null };
 
 const RPC_URL = `${window.location.origin}/aria2/jsonrpc`;
 
@@ -589,7 +588,6 @@ describe("ProfilePage 卸载保护", () => {
     fireEvent.click(screen.getByRole("button", { name: "卸载页面" }));
     control.resolve({
       enabled: true,
-      secret_prefix: "newprefix123",
       secret: "brand-new-secret",
     });
     await flush();
@@ -841,7 +839,7 @@ describe("ProfilePage 外部访问", () => {
   it("刷新密钥需经危险确认框，取消不发请求", async () => {
     setup((_url, init) => {
       if (init?.method === "POST" && _url === "/api/v2/credentials/rpc/refresh") {
-        return { enabled: true, secret_prefix: "newprefix123", secret: "brand-new-secret" };
+        return { enabled: true, secret: "brand-new-secret" };
       }
       return RPC_ON;
     });
