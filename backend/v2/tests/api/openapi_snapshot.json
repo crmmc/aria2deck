@@ -531,6 +531,81 @@
         }
       }
     },
+    "/api/v2/storage/disk-orphans": {
+      "get": {
+        "parameters": [
+          "page",
+          "page_size",
+          "search"
+        ],
+        "responses": {
+          "200": "DiskOrphanListResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/storage/disk-orphans/queue": {
+      "delete": {
+        "parameters": [],
+        "responses": {
+          "200": "array",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": "QueueSnapshotResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      },
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "array",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/storage/disk-orphans/queue/start": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "QueueSnapshotResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
+    "/api/v2/storage/disk-orphans/queue/stop": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": "QueueSnapshotResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
+    },
     "/api/v2/storage/files": {
       "get": {
         "parameters": [
@@ -824,6 +899,38 @@
         "state"
       ],
       "required": []
+    },
+    "DiskOrphanItemResponse": {
+      "fields": [
+        "digest",
+        "kind",
+        "modified_at_ms",
+        "size",
+        "storage_path"
+      ],
+      "required": [
+        "digest",
+        "kind",
+        "modified_at_ms",
+        "size",
+        "storage_path"
+      ]
+    },
+    "DiskOrphanListResponse": {
+      "fields": [
+        "items",
+        "page",
+        "page_size",
+        "total",
+        "unrecognized_count"
+      ],
+      "required": [
+        "items",
+        "page",
+        "page_size",
+        "total",
+        "unrecognized_count"
+      ]
     },
     "DiskSpaceResponse": {
       "fields": [
@@ -1203,6 +1310,95 @@
         "ws_reconnect_factor",
         "ws_reconnect_jitter_seconds",
         "ws_reconnect_max_delay_seconds"
+      ]
+    },
+    "QueueDeleteRequest": {
+      "fields": [
+        "storage_paths"
+      ],
+      "required": [
+        "storage_paths"
+      ]
+    },
+    "QueueDeleteResultResponse": {
+      "fields": [
+        "accepted",
+        "error",
+        "freed_bytes",
+        "mode",
+        "storage_path"
+      ],
+      "required": [
+        "accepted",
+        "storage_path"
+      ]
+    },
+    "QueueEnqueueRequest": {
+      "fields": [
+        "storage_paths"
+      ],
+      "required": [
+        "storage_paths"
+      ]
+    },
+    "QueueEnqueueResultResponse": {
+      "fields": [
+        "accepted",
+        "error",
+        "state",
+        "storage_path"
+      ],
+      "required": [
+        "accepted",
+        "storage_path"
+      ]
+    },
+    "QueueItemResponse": {
+      "fields": [
+        "content_id",
+        "digest",
+        "enqueued_at_ms",
+        "error",
+        "finished_at_ms",
+        "kind",
+        "processed_bytes",
+        "size",
+        "started_at_ms",
+        "state",
+        "storage_path"
+      ],
+      "required": [
+        "content_id",
+        "digest",
+        "enqueued_at_ms",
+        "error",
+        "finished_at_ms",
+        "kind",
+        "processed_bytes",
+        "size",
+        "started_at_ms",
+        "state",
+        "storage_path"
+      ]
+    },
+    "QueueSnapshotResponse": {
+      "fields": [
+        "done_count",
+        "failed_count",
+        "items",
+        "pending_bytes",
+        "queued_count",
+        "running",
+        "running_count"
+      ],
+      "required": [
+        "done_count",
+        "failed_count",
+        "items",
+        "pending_bytes",
+        "queued_count",
+        "running",
+        "running_count"
       ]
     },
     "ReadyFailureResponse": {

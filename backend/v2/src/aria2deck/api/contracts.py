@@ -478,6 +478,71 @@ class StorageDeleteResponse(BaseModel):
     results: list[StorageDeleteResultResponse]
 
 
+class DiskOrphanItemResponse(BaseModel):
+    storage_path: str
+    kind: Literal["file", "directory"]
+    digest: str
+    size: int
+    modified_at_ms: int
+
+
+class DiskOrphanListResponse(BaseModel):
+    items: list[DiskOrphanItemResponse]
+    total: int
+    page: int
+    page_size: int
+    unrecognized_count: int
+
+
+class QueueItemResponse(BaseModel):
+    storage_path: str
+    kind: Literal["file", "directory"]
+    digest: str
+    size: int
+    state: Literal["queued", "running", "done", "failed"]
+    enqueued_at_ms: int
+    started_at_ms: int | None
+    finished_at_ms: int | None
+    processed_bytes: int
+    content_id: int | None
+    error: ErrorBody | None
+
+
+class QueueSnapshotResponse(BaseModel):
+    running: bool
+    items: list[QueueItemResponse]
+    queued_count: int
+    running_count: int
+    done_count: int
+    failed_count: int
+    pending_bytes: int
+
+
+class QueueEnqueueRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    storage_paths: list[str] = Field(min_length=1, max_length=1000)
+
+
+class QueueEnqueueResultResponse(BaseModel):
+    storage_path: str
+    accepted: bool
+    state: Literal["queued", "running", "done", "failed"] | None = None
+    error: ErrorBody | None = None
+
+
+class QueueDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    storage_paths: list[str] = Field(min_length=1, max_length=1000)
+
+
+class QueueDeleteResultResponse(BaseModel):
+    storage_path: str
+    accepted: bool
+    mode: Literal["immediate", "deferred"] | None = None
+    freed_bytes: int = 0
+    error: ErrorBody | None = None
+
+
 class PackPrecomputeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     items: list[int] = Field(min_length=1, max_length=1000)

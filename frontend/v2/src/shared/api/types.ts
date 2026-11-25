@@ -447,3 +447,64 @@ export interface StorageDeleteResponse {
   results: StorageDeleteResultResponse[];
 }
 
+
+/* ============ 磁盘未登记文件扫描与入库队列 ============ */
+
+export interface DiskOrphanItemResponse {
+  storage_path: string;
+  kind: FileKind;
+  digest: string;
+  size: number;
+  modified_at_ms: number;
+}
+
+export interface DiskOrphanListResponse {
+  items: DiskOrphanItemResponse[];
+  total: number;
+  page: number;
+  page_size: number;
+  unrecognized_count: number;
+}
+
+export type QueueState = "queued" | "running" | "done" | "failed";
+
+export interface QueueItemResponse {
+  storage_path: string;
+  kind: FileKind;
+  digest: string;
+  size: number;
+  state: QueueState;
+  enqueued_at_ms: number;
+  started_at_ms: number | null;
+  finished_at_ms: number | null;
+  processed_bytes: number;
+  content_id: number | null;
+  error: ApiError | null;
+}
+
+export interface QueueSnapshotResponse {
+  running: boolean;
+  items: QueueItemResponse[];
+  queued_count: number;
+  running_count: number;
+  done_count: number;
+  failed_count: number;
+  pending_bytes: number;
+}
+
+export interface QueueEnqueueResultResponse {
+  storage_path: string;
+  accepted: boolean;
+  state: QueueState | null;
+  error: ApiError | null;
+}
+
+export type QueueDeleteMode = "immediate" | "deferred";
+
+export interface QueueDeleteResultResponse {
+  storage_path: string;
+  accepted: boolean;
+  mode: QueueDeleteMode | null;
+  freed_bytes: number;
+  error: ApiError | null;
+}

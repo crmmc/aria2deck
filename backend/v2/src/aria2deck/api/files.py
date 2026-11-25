@@ -9,8 +9,14 @@ from fastapi import APIRouter, Depends, Header, Path, Query
 from ..application.accounts.models import Principal
 from ..application.downloads.queries import DownloadQueryService
 from ..application.library.commands import LibraryCommandService
+from ..application.library.disk_scan import (
+    DeleteOutcome,
+    DiskOrphanService,
+    EnqueueOutcome,
+    QueueSnapshot,
+)
 from ..application.library.download import LibraryDownloadService
-from ..application.library.models import UserFileView
+from ..application.library.models import CanonicalEntry, UserFileView
 from ..application.library.queries import LibraryQueryService
 from ..application.settings.download_limit import DownloadConnectionLimiter
 from ..application.settings.rate_limit import RateLimiter
@@ -18,6 +24,8 @@ from ..domain.accounts import require_session
 from ..domain.content import ContentKind
 from ..domain.quota import VisibleSpace
 from .contracts import (
+    DiskOrphanItemResponse,
+    DiskOrphanListResponse,
     ErrorBody,
     FileBatchDeleteRequest,
     FileBatchDeleteResponse,
@@ -29,6 +37,12 @@ from .contracts import (
     FileRenameRequest,
     FileSearchHitResponse,
     FileSearchResponse,
+    QueueDeleteRequest,
+    QueueDeleteResultResponse,
+    QueueEnqueueRequest,
+    QueueEnqueueResultResponse,
+    QueueItemResponse,
+    QueueSnapshotResponse,
     StorageDeleteRequest,
     StorageDeleteResponse,
     StorageDeleteResultResponse,
@@ -39,6 +53,7 @@ from .contracts import (
     TaskQuotaResponse,
 )
 from .dependencies import (
+    disk_orphans,
     download_connections,
     download_queries,
     library_commands,
@@ -77,6 +92,68 @@ def _space(visible: VisibleSpace) -> TaskQuotaResponse:
         reserved_bytes=visible.reserved_bytes,
         available_bytes=visible.available_bytes,
         limited=visible.limited,
+    )
+
+
+def _orphan(entry: CanonicalEntry) -> DiskOrphanItemResponse:
+    return DiskOrphanItemResponse(
+        storage_path=entry.storage_path,
+        kind=_kind(entry.kind),
+        digest=entry.digest,
+        size=entry.size,
+        modified_at_ms=entry.modified_at_ms,
+    )
+
+
+def _error(code: str | None, message: str | None) -> ErrorBody | None:
+    if code is None or message is None:
+        return None
+    return ErrorBody(code=code, message=message)
+
+
+def _queue_snapshot(snapshot: QueueSnapshot) -> QueueSnapshotResponse:
+    return QueueSnapshotResponse(
+        running=snapshot.running,
+        items=[
+            QueueItemResponse(
+                storage_path=item.storage_path,
+                kind=_kind(item.kind),
+                digest=item.digest,
+                size=item.size,
+                state=item.state.value,
+                enqueued_at_ms=item.enqueued_at_ms,
+                started_at_ms=item.started_at_ms,
+                finished_at_ms=item.finished_at_ms,
+                processed_bytes=item.processed_bytes,
+                content_id=item.content_id,
+                error=_error(item.error_code, item.message),
+            )
+            for item in snapshot.items
+        ],
+        queued_count=snapshot.queued_count,
+        running_count=snapshot.running_count,
+        done_count=snapshot.done_count,
+        failed_count=snapshot.failed_count,
+        pending_bytes=snapshot.pending_bytes,
+    )
+
+
+def _enqueue_result(outcome: EnqueueOutcome) -> QueueEnqueueResultResponse:
+    return QueueEnqueueResultResponse(
+        storage_path=outcome.storage_path,
+        accepted=outcome.accepted,
+        state=outcome.state.value if outcome.state is not None else None,
+        error=_error(outcome.error_code, outcome.message),
+    )
+
+
+def _delete_result(outcome: DeleteOutcome) -> QueueDeleteResultResponse:
+    return QueueDeleteResultResponse(
+        storage_path=outcome.storage_path,
+        accepted=outcome.accepted,
+        mode=outcome.mode,
+        freed_bytes=outcome.freed_bytes,
+        error=_error(outcome.error_code, outcome.message),
     )
 
 
@@ -358,3 +435,92 @@ async def delete_storage_files(
         rejected_count=len(results) - accepted,
         results=results,
     )
+
+
+@router.get(
+    "/storage/disk-orphans",
+    response_model=DiskOrphanListResponse,
+    responses=error_responses(401, 403, 422, 429, 500),
+)
+async def list_disk_orphans(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=200),
+    principal: Principal = Depends(required_admin_principal),
+    service: DiskOrphanService = Depends(disk_orphans),
+) -> DiskOrphanListResponse:
+    """扫描下载目录中未登记进库的规范存储文件；只读元数据，不算哈希。"""
+    result = await service.scan(search=search, page=page, page_size=page_size)
+    return DiskOrphanListResponse(
+        items=[_orphan(entry) for entry in result.items],
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
+        unrecognized_count=result.unrecognized_count,
+    )
+
+
+@router.get(
+    "/storage/disk-orphans/queue",
+    response_model=QueueSnapshotResponse,
+    responses=error_responses(401, 403, 429, 500),
+)
+async def get_disk_orphan_queue(
+    principal: Principal = Depends(required_admin_principal),
+    service: DiskOrphanService = Depends(disk_orphans),
+) -> QueueSnapshotResponse:
+    return _queue_snapshot(service.snapshot())
+
+
+@router.post(
+    "/storage/disk-orphans/queue",
+    response_model=list[QueueEnqueueResultResponse],
+    responses=error_responses(401, 403, 422, 429, 500),
+)
+async def enqueue_disk_orphans(
+    payload: QueueEnqueueRequest,
+    principal: Principal = Depends(required_admin_principal),
+    service: DiskOrphanService = Depends(disk_orphans),
+) -> list[QueueEnqueueResultResponse]:
+    """加入入库队列：只校验路径与存在性，不读内容、不设体积上限。"""
+    outcomes = await service.enqueue(payload.storage_paths)
+    return [_enqueue_result(outcome) for outcome in outcomes]
+
+
+@router.delete(
+    "/storage/disk-orphans/queue",
+    response_model=list[QueueDeleteResultResponse],
+    responses=error_responses(401, 403, 422, 429, 500),
+)
+async def delete_disk_orphans(
+    payload: QueueDeleteRequest,
+    principal: Principal = Depends(required_admin_principal),
+    service: DiskOrphanService = Depends(disk_orphans),
+) -> list[QueueDeleteResultResponse]:
+    """逐条删除：未登记直接删磁盘，已入库走既有异步删除链路。"""
+    outcomes = await service.delete(payload.storage_paths)
+    return [_delete_result(outcome) for outcome in outcomes]
+
+
+@router.post(
+    "/storage/disk-orphans/queue/start",
+    response_model=QueueSnapshotResponse,
+    responses=error_responses(401, 403, 429, 500),
+)
+async def start_disk_orphan_queue(
+    principal: Principal = Depends(required_admin_principal),
+    service: DiskOrphanService = Depends(disk_orphans),
+) -> QueueSnapshotResponse:
+    return _queue_snapshot(service.start())
+
+
+@router.post(
+    "/storage/disk-orphans/queue/stop",
+    response_model=QueueSnapshotResponse,
+    responses=error_responses(401, 403, 429, 500),
+)
+async def stop_disk_orphan_queue(
+    principal: Principal = Depends(required_admin_principal),
+    service: DiskOrphanService = Depends(disk_orphans),
+) -> QueueSnapshotResponse:
+    return _queue_snapshot(service.stop())

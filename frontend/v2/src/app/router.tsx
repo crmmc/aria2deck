@@ -12,6 +12,7 @@ import { ProfilePage } from "@/features/profile/ProfilePage";
 import { UsersPage } from "@/features/users/UsersPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { StoragePage } from "@/features/storage/StoragePage";
+import { DiskOrphanPage } from "@/features/storage/DiskOrphanPage";
 import { PublicSharePage } from "@/features/public-share/PublicSharePage";
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -56,6 +57,7 @@ export function AppRouter() {
         <Route path="users" element={<UsersPage />} />
         <Route path="settings/:section?" element={<SettingsPage />} />
         <Route path="storage" element={<StoragePage />} />
+        <Route path="storage/orphans" element={<DiskOrphanPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>
