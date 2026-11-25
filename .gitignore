@@ -30,6 +30,7 @@ backend/downloads/*
 !backend/downloads/.gitkeep
 backend/static/*
 !backend/static/.gitkeep
+backend/v1/static
 backend/v2/static/*
 !backend/v2/static/.gitkeep
 backend/v2/.coverage
@@ -52,6 +53,7 @@ frontend/coverage/
 frontend/v2/node_modules/
 frontend/v2/dist/
 frontend/v2/coverage/
+frontend/v1/.next/
 *.tsbuildinfo
 
 # IDE
