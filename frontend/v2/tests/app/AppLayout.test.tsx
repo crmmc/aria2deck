@@ -1,8 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
 import { AppLayout } from "@/app/layouts/AppLayout";
+import { emitToast } from "@/shared/components/toast-context";
 import { DEFAULT_SITE_TITLE, setSiteTitle } from "@/shared/lib/siteTitle";
 import type { UserResponse } from "@/shared/api/types";
 
@@ -190,6 +191,25 @@ describe("AppLayout（V1 应用壳）", () => {
     expect(await screen.findByText(/正在使用默认密码/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "前往修改" }));
     expect(await screen.findByText("个人资料页占位")).toBeInTheDocument();
+  });
+
+  it("安全提醒常驻排在临时提示之上", async () => {
+    setup((url) =>
+      url === "/api/v2/auth/me" ? { ...ME, is_initial_password: true } : defaultHandler(url),
+    );
+    expect(await screen.findByText(/正在使用默认密码/)).toBeInTheDocument();
+
+    act(() => {
+      emitToast("批量操作失败", "error");
+    });
+
+    const items = Array.from(document.querySelectorAll<HTMLElement>(".notification-stack-item"));
+    const bannerItem = items.find((item) => item.querySelector(".password-warning-banner"));
+    const toastItem = items.find((item) => item.querySelector(".toast-item"));
+    expect(bannerItem).toBeDefined();
+    expect(toastItem).toBeDefined();
+    expect(Number(bannerItem?.style.order)).toBe(0);
+    expect(Number(toastItem?.style.order)).toBeGreaterThan(0);
   });
 
   it("dismisses the initial-password banner via close button", async () => {

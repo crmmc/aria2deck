@@ -139,7 +139,7 @@ describe("ToastProvider", () => {
     fireEvent.click(screen.getByText("Show Info"));
     expect(screen.getByText("Test message")).toBeInTheDocument();
     expect(document.querySelector(".toast-info")).toBeTruthy();
-    expect(document.querySelector(".toast-container")?.parentElement).toBe(document.body);
+    expect(document.querySelector(".notification-stack")?.parentElement).toBe(document.body);
   });
 
   it("shows success toast with check icon", () => {
@@ -210,7 +210,7 @@ describe("ToastProvider", () => {
     fireEvent.click(screen.getByRole("button", { name: "显示层级提示" }));
 
     const outer = screen.getByRole("dialog", { name: "外层弹窗" });
-    const getToastContainer = () => document.querySelector(".toast-container");
+    const getToastContainer = () => document.querySelector(".notification-stack");
     expect(getToastContainer()?.parentElement).toBe(outer);
 
     act(() => jest.advanceTimersByTime(1000));
@@ -235,6 +235,46 @@ describe("ToastProvider", () => {
 
     act(() => jest.advanceTimersByTime(500));
     expect(screen.queryByText("层级提示")).not.toBeInTheDocument();
+  });
+
+  it("最新一条排在最上，旧的一条向下让位", () => {
+    render(
+      <ToastProvider>
+        <TestComponent />
+      </ToastProvider>
+    );
+
+    fireEvent.click(screen.getByText("Show Info"));
+    fireEvent.click(screen.getByText("Show Success"));
+    fireEvent.click(screen.getByText("Show Error"));
+
+    const orders = Array.from(
+      document.querySelectorAll<HTMLElement>(".notification-stack-item"),
+    ).map((item) => Number(item.style.order));
+    expect(orders).toEqual([3, 2, 1]);
+  });
+
+  it("同时最多显示 5 条，超出的排队，空出位置后依次入场", () => {
+    render(
+      <ToastProvider>
+        <TestComponent />
+      </ToastProvider>
+    );
+
+    for (let index = 0; index < 7; index += 1) {
+      fireEvent.click(screen.getByText("Show Info"));
+    }
+    expect(document.querySelectorAll(".toast-item")).toHaveLength(5);
+
+    act(() => {
+      jest.advanceTimersByTime(3000);
+    });
+    expect(document.querySelectorAll(".toast-item")).toHaveLength(2);
+
+    act(() => {
+      jest.advanceTimersByTime(3000);
+    });
+    expect(document.querySelectorAll(".toast-item")).toHaveLength(0);
   });
 
   it("confirm resolves true when confirmed", async () => {

@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { BackendStatusBanner } from "@/app/components/BackendStatusBanner";
 import { AppLayout } from "@/app/layouts/AppLayout";
 import { AppProviders } from "@/app/providers";
+import { NotificationStackProvider } from "@/shared/components/NotificationStack";
 import type { BackendStatusResponse, UserResponse } from "@/shared/api/types";
 
 const mockFetch = jest.fn();
@@ -42,10 +43,12 @@ function ok(status: "ok" | "degraded", message = ""): BackendStatusResponse {
 function renderBanner(user: UserResponse | null) {
   return render(
     <MemoryRouter initialEntries={["/tasks"]}>
-      <Routes>
-        <Route path="/tasks" element={<BackendStatusBanner user={user} />} />
-        <Route path="/settings" element={<div>系统设置占位</div>} />
-      </Routes>
+      <NotificationStackProvider>
+        <Routes>
+          <Route path="/tasks" element={<BackendStatusBanner user={user} />} />
+          <Route path="/settings" element={<div>系统设置占位</div>} />
+        </Routes>
+      </NotificationStackProvider>
     </MemoryRouter>,
   );
 }

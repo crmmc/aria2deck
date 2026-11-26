@@ -123,12 +123,12 @@ afterEach(() => {
 });
 
 describe("ToastHost（providers 内建 toast）", () => {
-  it("无 toast 时不渲染容器", async () => {
+  it("无 toast 时不渲染栈项", async () => {
     renderWithToasts();
     await act(async () => {
       await Promise.resolve();
     });
-    expect(document.querySelector(".toast-host")).toBeNull();
+    expect(document.querySelectorAll(".notification-stack-item")).toHaveLength(0);
   });
 
   it("推送 toast 后按类型渲染，并可手动关闭", async () => {
@@ -140,9 +140,9 @@ describe("ToastHost（providers 内建 toast）", () => {
     act(() => {
       probe.push?.("success", "保存成功");
     });
-    const host = document.querySelector(".toast-host");
+    const host = document.querySelector(".notification-stack-item");
     expect(host).toBeTruthy();
-    expect(host?.parentElement).toBe(probe.root);
+    expect(host?.parentElement).toBe(document.querySelector(".notification-stack"));
     expect(host).toHaveAttribute("role", "status");
     expect(document.querySelector(".toast-success")?.textContent).toContain("保存成功");
 
@@ -160,11 +160,11 @@ describe("ToastHost（providers 内建 toast）", () => {
     expect(document.querySelector(".toast-success")).toBeNull();
     expect(document.querySelector(".toast-error")?.textContent).toContain("保存失败");
 
-    // 关闭最后一条：容器消失。
+    // 关闭最后一条：栈项消失。
     act(() => {
       fireEvent.click(screen.getByRole("button", { name: "关闭提示" }));
     });
-    expect(document.querySelector(".toast-host")).toBeNull();
+    expect(document.querySelectorAll(".notification-stack-item")).toHaveLength(0);
   });
 
   it("toast 5 秒后自动消失", async () => {
@@ -191,7 +191,7 @@ describe("ToastHost（providers 内建 toast）", () => {
   it("follows nested modals, traps Toast close focus, and keeps the original 5 second deadline", async () => {
     jest.useFakeTimers();
     try {
-      const view = render(
+      render(
         <AppProviders>
           <AppToastLayerHarness />
         </AppProviders>,
@@ -205,7 +205,7 @@ describe("ToastHost（providers 内建 toast）", () => {
       fireEvent.click(screen.getByRole("button", { name: "显示模态提示" }));
 
       const outer = screen.getByRole("dialog", { name: "外层弹窗" });
-      const getHost = () => document.querySelector(".toast-host");
+      const getHost = () => document.querySelector(".notification-stack");
       expect(getHost()?.parentElement).toBe(outer);
 
       const openInner = screen.getByRole("button", { name: "打开内层" });
@@ -235,7 +235,7 @@ describe("ToastHost（providers 内建 toast）", () => {
       });
       fireEvent.click(screen.getByRole("button", { name: "关闭外层" }));
       expect(screen.queryByRole("dialog", { name: "外层弹窗" })).not.toBeInTheDocument();
-      expect(getHost()?.parentElement).toBe(view.container);
+      expect(getHost()?.parentElement).toBe(document.body);
       expect(openOuter).toHaveFocus();
       expect(screen.getByText("模态提示")).toBeInTheDocument();
 
@@ -243,7 +243,7 @@ describe("ToastHost（providers 内建 toast）", () => {
         jest.advanceTimersByTime(1000);
       });
       expect(screen.queryByText("模态提示")).not.toBeInTheDocument();
-      expect(getHost()).toBeNull();
+      expect(document.querySelectorAll(".notification-stack-item")).toHaveLength(0);
     } finally {
       jest.useRealTimers();
     }
