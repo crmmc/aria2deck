@@ -13,6 +13,7 @@ import { PaginationControls } from "@/shared/components/PaginationControls";
 import { ToolbarSearchInput } from "@/shared/components/Toolbar";
 import { useToast } from "@/shared/components/toast-context";
 import { BatchFailureDialog, type BatchFailure } from "@/shared/components/BatchFailureDialog";
+import { useIsMobile } from "@/shared/hooks/useIsMobile";
 import { useSelection } from "@/shared/hooks/useSelection";
 import { formatAdminBytes, formatAdminDateTime } from "@/shared/lib/format";
 import { requestModalClose } from "@/shared/ui/modalClose";
@@ -25,9 +26,81 @@ const PAGE_SIZE = 20;
 const SEARCH_DEBOUNCE_MS = 300;
 const EMPTY_FILE_IDS: number[] = [];
 
+type StorageMobileCardProps = {
+  file: StorageFileView;
+  selected: boolean;
+  deleting: boolean;
+  onToggleSelected: (checked: boolean) => void;
+  onShowReferences: () => void;
+  onDelete: () => void;
+};
+
+/** 移动端卡片：与桌面行同一份数据与同一份选择状态，免横向盲滑即可勾选与删除。 */
+function StorageMobileCard({
+  file,
+  selected,
+  deleting,
+  onToggleSelected,
+  onShowReferences,
+  onDelete,
+}: StorageMobileCardProps) {
+  const displayName = file.namesText || "—";
+
+  return (
+    <article
+      className={`mobile-file-card storage-mobile-card${selected ? " selected" : ""}`}
+      data-testid={`storage-card-${file.id}`}
+    >
+      <div className="card-header">
+        <input
+          type="checkbox"
+          className="checkbox-sm cursor-pointer"
+          checked={selected}
+          onChange={(event) => onToggleSelected(event.target.checked)}
+          aria-label={`选择文件 ${displayName}`}
+        />
+        <div className="file-title">
+          <span className="mobile-name" title={displayName}>{displayName}</span>
+        </div>
+      </div>
+      <div className="card-meta">
+        <span>{formatAdminBytes(file.size)}</span>
+        <button
+          type="button"
+          className="button secondary btn-sm admin-ref-button"
+          onClick={onShowReferences}
+          disabled={file.refCount === 0}
+          aria-label={`查看 ${displayName} 的 ${file.refCount} 条引用`}
+        >
+          {file.refCount} 条引用
+        </button>
+        <span className={`status-badge ${file.onDisk ? "status-success" : "status-danger"}`}>
+          <Icon name={file.onDisk ? "check" : "alert"} className="icon-sm" />
+          {file.onDisk ? "存在" : "缺失"}
+        </span>
+      </div>
+      <div className="card-hash">
+        <span className="admin-hash mono" title={file.hashFull}>{file.hashShort}</span>
+      </div>
+      <div className="card-actions">
+        <button
+          type="button"
+          className="button secondary danger btn-sm"
+          disabled={deleting}
+          onClick={onDelete}
+          aria-label={`删除 ${displayName}`}
+        >
+          删除
+        </button>
+      </div>
+    </article>
+  );
+}
+
 export function StoragePage() {
   const { user } = useAuth();
   const { showToast } = useToast();
+  const isMobile = useIsMobile();
 
   const [files, setFiles] = useState<StorageFileView[]>([]);
   const [total, setTotal] = useState(0);
@@ -113,7 +186,8 @@ export function StoragePage() {
     if (selectAllRef.current) {
       selectAllRef.current.indeterminate = currentPageSelectedCount > 0 && !allCurrentPageSelected;
     }
-  }, [allCurrentPageSelected, currentPageSelectedCount]);
+    // isMobile 参与依赖：视口切换会换掉全选框的 DOM 节点，新节点需要重新同步半选态。
+  }, [allCurrentPageSelected, currentPageSelectedCount, isMobile]);
 
   useEffect(() => {
     if (userModalFile) userModalCloseRef.current?.focus();
@@ -165,6 +239,12 @@ export function StoragePage() {
 
   const openDeleteDialog = () => {
     setDeleteTargetIds(files.filter((file) => selected.has(file.id)).map((file) => file.id));
+  };
+
+  /** 移动卡片上的单条删除：先只选中该条，让确认弹窗的文案与真实目标一致。 */
+  const openDeleteDialogFor = (file: StorageFileView) => {
+    selectAll([file.id]);
+    setDeleteTargetIds([file.id]);
   };
 
   const handleDelete = async (trigger: Element, targetIds: number[]) => {
@@ -238,6 +318,18 @@ export function StoragePage() {
   if (!user?.is_admin) return null;
   if (loading) return null;
 
+  const emptyState = (
+    <EmptyState
+      icon={<Icon name="search" className="icon-lg" />}
+      title="没有匹配的存储内容"
+      description="调整内容哈希或存储路径搜索或孤立文件筛选后再试。"
+    >
+      <button type="button" className="button secondary" onClick={handleResetFilters}>
+        重置筛选
+      </button>
+    </EmptyState>
+  );
+
   return (
     <>
       <div className="glass-frame">
@@ -283,6 +375,35 @@ export function StoragePage() {
             </button>
           </div>
 
+          {isMobile ? (
+            <div className="mobile-card-list">
+              <div className="storage-mobile-select-all">
+                <label className="checkbox-label">
+                  <input
+                    ref={selectAllRef}
+                    type="checkbox"
+                    checked={allCurrentPageSelected}
+                    disabled={files.length === 0}
+                    onChange={(event) => handleSelectAll(event.target.checked)}
+                    aria-label="选择当前页筛选结果"
+                  />
+                  <span>全选本页</span>
+                </label>
+              </div>
+              {files.map((file) => (
+                <StorageMobileCard
+                  key={file.id}
+                  file={file}
+                  selected={selected.has(file.id)}
+                  deleting={deleting}
+                  onToggleSelected={(checked) => setItemSelected(file.id, checked)}
+                  onShowReferences={() => void openUserModal(file)}
+                  onDelete={() => openDeleteDialogFor(file)}
+                />
+              ))}
+              {files.length === 0 && emptyState}
+            </div>
+          ) : (
           <div className="admin-table-scroll">
             <table className="admin-table admin-storage-table">
               <thead>
@@ -351,21 +472,14 @@ export function StoragePage() {
                 {files.length === 0 && (
                   <tr>
                     <td colSpan={7}>
-                      <EmptyState
-                        icon={<Icon name="search" className="icon-lg" />}
-                        title="没有匹配的存储内容"
-                        description="调整内容哈希或存储路径搜索或孤立文件筛选后再试。"
-                      >
-                        <button type="button" className="button secondary" onClick={handleResetFilters}>
-                          重置筛选
-                        </button>
-                      </EmptyState>
+                      {emptyState}
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
+          )}
 
           <div className="admin-table-footer admin-storage-footer">
             <span className="admin-result-count">

@@ -397,6 +397,72 @@
     width: 100%;
     min-width: 0;
   }
+
+  /* File page toolbar: the search group gets its own row so the input keeps
+     at least 200px usable width; global toggle and query button wrap under it. */
+  .filter-toolbar.file-toolbar .search-sort-row .search-input-group {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+
+  .filter-toolbar.file-toolbar .search-sort-row .search-input-group .toolbar-search-input {
+    min-width: 200px;
+  }
+
+  /* Shared ToolbarShell (tasks / history / shares): on desktop .toolbar-default is
+     display: contents so its children join the toolbar row. That leaves the "搜索"
+     label alone on its own line once the toolbar goes column on mobile, so rebuild
+     it as a wrapping row: segmented control on its line, label beside a wide input. */
+  .toolbar-default {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+
+  /* A spacer only separates a single row; wrapped it pushes the label away */
+  .toolbar-default > .toolbar-spacer {
+    display: none;
+  }
+
+  .toolbar-default > .segmented {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .toolbar-default > .toolbar-label {
+    flex: 0 0 auto;
+  }
+
+  .toolbar-default .search-input-group {
+    flex: 1 1 160px;
+    min-width: 0;
+  }
+}
+
+/* ==================== MOBILE PAGINATION ==================== */
+
+@media (max-width: 767px) {
+  .pagination-controls {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  /* Keep "共 N 项" on one line so it wraps as a whole instead of stacking glyphs */
+  .pagination-controls > .text-sm.muted {
+    white-space: nowrap;
+  }
+
+  /* Touch height comes from the shared mobile .button rule; only tighten the sides */
+  .pagination-controls .button {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  /* Jump input is a touch target too: raise from 28px to the 44px minimum */
+  .pagination-controls .jump-page-input {
+    min-height: 44px;
+  }
 }
 
 /* ==================== MOBILE TABLE TO CARD VIEW ==================== */
@@ -459,11 +525,10 @@
 
   .mobile-file-card .card-actions {
     display: flex;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     gap: 8px;
     padding-top: 12px;
     border-top: 1px solid rgba(0, 0, 0, 0.05);
-    padding-left: 28px;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
@@ -484,11 +549,161 @@
     white-space: nowrap;
     flex-shrink: 0;
   }
+}
 
-  .mobile-file-card .card-actions .button.danger {
-    margin-left: auto;
+/* ==================== MOBILE ADMIN TABLES → CARDS (USERS / STORAGE) ==================== */
+
+@media (max-width: 767px) {
+  .mobile-card-list {
+    padding-top: 12px;
   }
 
+  /* The pill badge contract lives under .admin-table in 06-components.css;
+     card views sit outside the table, so they restate it here. */
+  .user-mobile-card .status-badge,
+  .storage-mobile-card .status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    width: fit-content;
+    min-height: 24px;
+    padding: 2px 9px;
+    border: 0;
+    border-radius: 999px;
+    color: var(--muted);
+    background: rgba(0, 0, 0, 0.045);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .user-mobile-card .status-badge.status-active {
+    color: var(--primary);
+    background: rgba(0, 113, 227, 0.08);
+  }
+
+  .storage-mobile-card .status-badge.status-success {
+    color: #20883b;
+    background: rgba(52, 199, 89, 0.1);
+  }
+
+  .storage-mobile-card .status-badge.status-danger {
+    color: var(--danger);
+    background: rgba(255, 59, 48, 0.08);
+  }
+
+  /* User card: name + current-account marker left, role badge right */
+  .user-mobile-card .card-header {
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .user-mobile-card .admin-user-name {
+    flex: 1;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .user-mobile-card .admin-user-name strong {
+    overflow-wrap: anywhere;
+  }
+
+  .user-mobile-card .user-mobile-quota {
+    margin: 4px 0 12px;
+  }
+
+  /* Storage card: size · reference count · disk state on one meta line */
+  .storage-mobile-card .card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .storage-mobile-card .card-hash {
+    padding-left: 28px;
+    /* align with the name, past the checkbox */
+    margin-bottom: 12px;
+    overflow-wrap: anywhere;
+  }
+
+  .storage-mobile-card.selected {
+    border-color: rgba(0, 113, 227, 0.35);
+    background: rgba(0, 113, 227, 0.055);
+  }
+
+  /* Select-all stays reachable without the desktop table head */
+  .storage-mobile-select-all {
+    padding: 0 14px 8px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+}
+
+/* ==================== MOBILE ADMIN PANEL HEAD & TABLE SCROLL HINT ==================== */
+
+@media (max-width: 767px) {
+  /* Disk-orphan queue head: its stat row is all nowrap and took the row, squeezing
+     the title into a 26px column. Stack the head, let the stat row wrap. */
+  .admin-table-panel > .panel-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .admin-table-panel > .panel-head > div + div {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  /* Horizontal scroll hint on the two disk-orphan tables. The panel is translucent
+     glass (--card-bg carries alpha), so an opaque scroll-shadow would leave a white
+     band over the gradient background; a mask fade keeps the background intact. */
+  .admin-table-panel > .admin-table-scroll {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+  }
+
+  /* Tighten the queue table columns so the phone shows more than the path column */
+  .admin-orphan-queue-table .admin-name-cell,
+  .admin-orphan-table .admin-name-cell {
+    min-width: 140px;
+  }
+
+  .admin-orphan-queue-table td:nth-child(4) {
+    min-width: 110px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+/* ==================== MOBILE FILTER SEGMENTS & ERROR CODES ==================== */
+
+@media (max-width: 767px) {
+  /* Segmented control scrolls sideways instead of wrapping its labels */
+  .segmented {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .segmented::-webkit-scrollbar {
+    display: none;
+  }
+
+  .segmented .segment {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  /* Error codes break on character boundaries in a monospace grid */
+  .error-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: normal;
+    word-break: break-all;
+  }
 }
 
 /* ==================== MOBILE STATS WIDGET ==================== */
@@ -1064,6 +1279,9 @@
     gap: 5px;
     padding: 5px;
     overflow-x: auto;
+    /* Right-edge fade: the nav scrolls sideways, so hint more sections exist */
+    -webkit-mask-image: linear-gradient(to right, #000 85%, transparent);
+    mask-image: linear-gradient(to right, #000 85%, transparent);
   }
 
   .settings-nav button {

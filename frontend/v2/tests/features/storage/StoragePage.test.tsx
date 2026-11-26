@@ -760,6 +760,113 @@ describe("StoragePage 删除确认与 202 受理", () => {
   });
 });
 
+describe("StoragePage 移动卡片布局", () => {
+  const originalWidth = window.innerWidth;
+
+  function setViewportWidth(width: number) {
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
+    window.dispatchEvent(new Event("resize"));
+  }
+
+  beforeEach(() => {
+    setViewportWidth(390);
+  });
+
+  afterEach(() => {
+    // 只还原宽度、不再派发 resize：上一个测试的组件此刻尚未卸载，派发会触发 act 警告。
+    Object.defineProperty(window, "innerWidth", { value: originalWidth, configurable: true });
+  });
+
+  it("用卡片展示名称、大小、引用数、磁盘状态与截断哈希", async () => {
+    setup((url) => url.includes("/users") ? { items: [] } : list([
+      content(1, {
+        content_key: "file:0123456789abcdefXYZ",
+        file_names: ["a.bin", "b.bin"],
+        reference_count: 2,
+      }),
+      content(2, { on_disk: false, file_names: [] }),
+    ]));
+
+    const card = await screen.findByTestId("storage-card-1");
+    expect(document.querySelector(".admin-storage-table")).toBeNull();
+    expect(document.querySelectorAll(".storage-mobile-card")).toHaveLength(2);
+    expect(card).toHaveTextContent("a.bin、b.bin");
+    expect(card).toHaveTextContent("1.0 KB");
+    expect(card.querySelector("span[title='0123456789abcdefXYZ']")).toHaveTextContent("0123456789…defXYZ");
+    expect(card.querySelector(".status-badge")).toHaveTextContent("存在");
+    expect(card.querySelector(".status-badge")).toHaveClass("status-success");
+    expect(within(card).getByRole("button", { name: "查看 a.bin、b.bin 的 2 条引用" }))
+      .toHaveTextContent("2 条引用");
+    expect(within(card).getByRole("button", { name: "删除 a.bin、b.bin" })).toBeEnabled();
+
+    const missing = screen.getByTestId("storage-card-2");
+    expect(missing).toHaveTextContent("—");
+    expect(missing.querySelector(".status-badge")).toHaveClass("status-danger");
+    expect(within(missing).getByRole("button", { name: "查看 — 的 0 条引用" })).toBeDisabled();
+  });
+
+  it("卡片复选框、全选与批量删除计数共享同一份选择状态", async () => {
+    setup(() => list([content(1), content(2)]));
+    const first = await screen.findByTestId("storage-card-1");
+    const selectAllBox = screen.getByLabelText("选择当前页筛选结果") as HTMLInputElement;
+
+    fireEvent.click(within(first).getByLabelText("选择文件 user-file-1.bin"));
+    expect(first).toHaveClass("selected");
+    expect(selectAllBox.indeterminate).toBe(true);
+    expect(screen.getByRole("button", { name: "删除选中(1)" })).toBeEnabled();
+
+    fireEvent.click(selectAllBox);
+    expect(selectAllBox).toBeChecked();
+    expect(screen.getByLabelText("选择文件 user-file-2.bin")).toBeChecked();
+    expect(screen.getByRole("button", { name: "删除选中(2)" })).toBeEnabled();
+
+    fireEvent.click(selectAllBox);
+    expect(screen.getByLabelText("选择文件 user-file-1.bin")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "删除选中(0)" })).toBeDisabled();
+    expect(first).not.toHaveClass("selected");
+  });
+
+  it("卡片删除按钮只针对该条打开确认并提交单项删除", async () => {
+    setup((_url, init) => {
+      if (init?.method === "POST") {
+        return json(202, { accepted_count: 1, rejected_count: 0, results: [accepted(2)] });
+      }
+      return list([content(1), content(2)]);
+    });
+    const card = await screen.findByTestId("storage-card-2");
+    fireEvent.click(within(card).getByRole("button", { name: "删除 user-file-2.bin" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "删除存储文件" });
+    expect(dialog).toHaveTextContent("确定删除当前筛选结果中选中的 1 个文件吗？");
+    expect(screen.getByLabelText("选择文件 user-file-2.bin")).toBeChecked();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "删除文件" }));
+    expect(await screen.findByText("已受理删除 1 个文件")).toBeInTheDocument();
+    expect(JSON.parse(deleteCalls()[0][1].body as string)).toEqual({ content_ids: [2] });
+  });
+
+  it("卡片上的引用按钮打开同一套引用用户弹窗", async () => {
+    setup((url) => {
+      if (url.includes("/users")) {
+        return { items: [{ user_id: 5, username: "alice", display_name: "a.bin", referenced_at_ms: 1 }] };
+      }
+      return list([content(1, { reference_count: 1 })]);
+    });
+    const card = await screen.findByTestId("storage-card-1");
+    fireEvent.click(within(card).getByRole("button", { name: "查看 user-file-1.bin 的 1 条引用" }));
+    const dialog = await screen.findByRole("dialog", { name: "引用用户" });
+    expect(await within(dialog).findByText("用户 ID 5 · a.bin")).toBeInTheDocument();
+  });
+
+  it("空列表在移动端同样显示共享空态并禁用全选", async () => {
+    setup(() => list([]));
+    expect(await screen.findByText("没有匹配的存储内容")).toBeInTheDocument();
+    expect(screen.getByText("调整内容哈希或存储路径搜索或孤立文件筛选后再试。")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择当前页筛选结果")).toBeDisabled();
+    expect(document.querySelectorAll(".storage-mobile-card")).toHaveLength(0);
+  });
+});
+
 describe("storage model 与卸载保护", () => {
   it("映射名称、哈希与首个拒绝原因", () => {
     expect(digestOf("file:abcdef0123456789")).toBe("abcdef0123456789");
