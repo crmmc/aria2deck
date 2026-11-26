@@ -4,6 +4,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from ...domain.downloads import (
+    SYSTEM_PAUSE_CODES,
     SubscriptionStatus,
     can_retry,
     effective_task_status,
@@ -42,6 +43,13 @@ class TaskProjector:
         if not fresh:
             observation = None
         status = effective_task_status(record.subscription_status, record.attempt_status)
+        error_code = record.error_code
+        if error_code in SYSTEM_PAUSE_CODES and status is not SubscriptionStatus.FAILED:
+            # 系统暂停标记是提交管线自己的阶段（等待放行），不是失败原因也不是用户可暂停态：
+            # 用户字段里一律不出现，窗口期的暂停按排队中呈现（外部暂停与真实失败照常显示）。
+            error_code = None
+            if status is SubscriptionStatus.PAUSED:
+                status = SubscriptionStatus.QUEUED
         is_active = status is SubscriptionStatus.ACTIVE
         ingestion_pending = record.ingestion_pending or (
             observation is not None and observation.status == "complete"
@@ -61,7 +69,7 @@ class TaskProjector:
             files=observation.files if observation is not None else (),
             observation_fresh=fresh,
             reserved_bytes=record.reserved_bytes,
-            error_code=record.error_code,
+            error_code=error_code,
             retryable=can_retry(status),
             created_at_ms=record.created_at_ms,
             updated_at_ms=record.updated_at_ms,

@@ -352,3 +352,40 @@ def test_link_flag_parses() -> None:
         ["--v1-database", "a.db", "--v1-download-dir", "d", "--v2-root", "v2", "--link"]
     )
     assert options.link is True
+
+
+# ------------------------------------ 迁移后必须重配 aria2 RPC 密钥（真实迁移才提示）
+
+RPC_WARNING = "必须重新配置 aria2 RPC 密钥"
+
+
+def test_real_run_warns_that_the_rpc_secret_must_be_set_again(
+    v1_sample: SampleLayout, tmp_path: Path, capsys
+) -> None:
+    report_path = tmp_path / "report.txt"
+
+    exit_code = main(_args(v1_sample, tmp_path / "v2", "--report", str(report_path)))
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert RPC_WARNING in output
+    assert "「系统设置」" in output
+    assert "「aria2 后端」" in output
+    assert "「RPC Secret」" in output
+    assert "「测试连接」" in output
+    # 报告文件也要带上：运维存档后仍能看到这条待办
+    assert RPC_WARNING in report_path.read_text(encoding="utf-8")
+
+
+def test_dry_run_does_not_warn_about_the_rpc_secret(
+    v1_sample: SampleLayout, tmp_path: Path, capsys
+) -> None:
+    report_path = tmp_path / "report.txt"
+
+    exit_code = main(
+        _args(v1_sample, tmp_path / "v2", "--dry-run", "--report", str(report_path))
+    )
+
+    assert exit_code == 0
+    assert RPC_WARNING not in capsys.readouterr().out
+    assert RPC_WARNING not in report_path.read_text(encoding="utf-8")

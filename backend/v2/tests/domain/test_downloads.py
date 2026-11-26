@@ -5,6 +5,7 @@ import base64
 import pytest
 
 from aria2deck.domain.downloads import (
+    GENERIC_TASK_FAILURE_MESSAGE,
     AttemptStatus,
     RegistrationOutcome,
     SubscriptionStatus,
@@ -16,6 +17,7 @@ from aria2deck.domain.downloads import (
     require_gid_match,
     require_orphan_cleanup_safe,
     require_retryable,
+    task_failure_message,
     torrent_resource_key,
     transition_attempt,
     transition_subscription,
@@ -428,3 +430,53 @@ def test_allocate_download_display_name_keeps_200_character_limit() -> None:
     assert allocated != long_name
     assert len(allocated) <= 200
     assert allocated.endswith(".iso")
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        # 会写到下载任务上的 DomainError 码。
+        ("upstream_failure", "上游下载失败"),
+        ("download_unavailable", "下载不可用"),
+        ("rpc_unavailable", "aria2 连接不可用"),
+        ("aria2_rejected", "aria2 拒绝了操作"),
+        ("task_too_large", "任务超出大小限制"),
+        ("quota_exceeded", "存储配额不足"),
+        ("physical_space_exceeded", "机器空间不足"),
+        ("submission_uncertain", "提交结果不可确认"),
+        ("submission_timeout", "提交超时，结果无法确认"),
+        ("recovery_unsafe", "恢复不安全"),
+        ("invalid_input", "输入无效"),
+        ("invalid_state", "状态无效"),
+        ("content_busy", "内容被占用"),
+        ("stale_event", "下载事件已过期"),
+        # 生命周期与观测产生的运行期码。
+        ("aria2_error", "aria2 报告下载失败"),
+        ("aria2_removed", "任务已从 aria2 移除"),
+        ("aria2_gid_missing", "aria2 里找不到这个下载"),
+        ("ingestion_timeout", "下载完成后入库超时"),
+        ("expired", "任务已过期"),
+        # 系统暂停标记（会显示在非失败任务上）。
+        ("admission_paused", "系统暂停期间任务未提交"),
+        ("metadata_admission_paused", "系统暂停期间元数据未提交"),
+        ("external_paused", "任务在 aria2 中被外部暂停"),
+        # aria2 原生 fault 码并入拒绝语义，数字本身不外泄。
+        ("aria2_1", "aria2 拒绝了操作"),
+        ("aria2_24", "aria2 拒绝了操作"),
+    ],
+)
+def test_task_failure_message_maps_every_recorded_code(code: str, expected: str) -> None:
+    assert task_failure_message(code) == expected
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["some_unknown_code", "custom_extension_code", "UPPER-CASE Leak", "/data/x.iso", "a" * 200],
+)
+def test_task_failure_message_never_replays_unmapped_codes(code: str) -> None:
+    assert task_failure_message(code) == GENERIC_TASK_FAILURE_MESSAGE
+    assert code not in task_failure_message(code)
+
+
+def test_task_failure_message_is_empty_without_error_code() -> None:
+    assert task_failure_message(None) == ""

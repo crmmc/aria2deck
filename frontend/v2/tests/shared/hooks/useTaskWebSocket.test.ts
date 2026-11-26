@@ -52,6 +52,7 @@ function frame(id: number, updatedAt: number): string {
       observation_fresh: false,
       reserved_bytes: 0,
       error_code: null,
+      error_message: "",
       retryable: false,
       created_at_ms: 1,
       finished_at_ms: null,

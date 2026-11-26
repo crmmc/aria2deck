@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from urllib.parse import parse_qs, urlsplit
 
-from ...domain.downloads import SubscriptionStatus
+from ...domain.downloads import SubscriptionStatus, task_failure_message
 from .models import DownloadRecord, TaskProjection
 
 GID_LENGTH = 16
@@ -26,27 +26,8 @@ _ARIA2_STATUS: dict[SubscriptionStatus, str] = {
     SubscriptionStatus.EXPIRED: "removed",
 }
 
-# error_code → 脱敏中文失败原因（B2）：与前端 HistoryPage 的 ERROR_CODE_LABEL
-# 同口径；输入是受控 snake_case 码（DomainError 值 / aria2_{数字} / 暂停码），
-# 绝不落入路径、URI 或异常原文。
-_ERROR_MESSAGES: dict[str, str] = {
-    "upstream_failure": "上游下载失败",
-    "download_unavailable": "下载不可用",
-    "rpc_unavailable": "aria2 连接不可用",
-    "aria2_rejected": "aria2 拒绝了操作",
-    "task_too_large": "任务超出大小限制",
-    "quota_exceeded": "存储配额不足",
-    "physical_space_exceeded": "机器空间不足",
-    "submission_uncertain": "提交结果不可确认",
-    "recovery_unsafe": "恢复不安全",
-    "invalid_input": "输入无效",
-    "invalid_state": "状态无效",
-    "content_busy": "内容被占用",
-    "admission_paused": "系统暂停期间任务未提交",
-    "metadata_admission_paused": "系统暂停期间元数据未提交",
-}
-
-_SAFE_ERROR_CODE = re.compile(r"[a-z0-9_]{1,64}")
+# error_code → 脱敏中文失败原因：映射表的唯一事实源在 domain/downloads.py，
+# RPC 的 errorMessage 与 REST 的 error_message 同源，本模块只做转发。
 
 # 内部错误码 → aria2 EXIT STATUS 数字码。语义不能确定的一律归 1（未知错误）。
 # admission/暂停类内部标记（admission_paused、metadata_admission_paused、external_paused）
@@ -69,16 +50,9 @@ _HEX_INFO_HASH = re.compile(r"[0-9a-fA-F]{40}")
 
 
 def failure_message(error_code: str | None) -> str:
-    """errorCode → 中文文案；aria2 数字 fault 并入拒绝语义；非安全形态一律脱敏。"""
-    if error_code is None:
-        return ""
-    if error_code in _ERROR_MESSAGES:
-        return _ERROR_MESSAGES[error_code]
-    if error_code.startswith("aria2_"):
-        return _ERROR_MESSAGES["aria2_rejected"]
-    if _SAFE_ERROR_CODE.fullmatch(error_code):
-        return error_code
-    return "下载失败"
+    """RPC errorMessage：直接转发领域唯一映射（未收录码一律通用文案）。"""
+    return task_failure_message(error_code)
+
 
 RPC_VERSION = "1.37.0"
 RPC_FEATURES = ["aria2.rpc.multiCall", "aria2.rpc.listMethods", "aria2.rpc.secretToken"]

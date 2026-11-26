@@ -100,10 +100,18 @@ class FakeCommands:
         self.cancelled: list[int] = []
         self.stop_confirmed = stop_confirmed
 
-    async def create_uris(self, *, user_id: int, items: list) -> list:
+    async def create_uris(self, *, user_id: int, items: list, submit: bool = True) -> list:
         raise DomainError(ErrorCode.INVALID_INPUT, "不应在单元测试中触发真实创建")
 
-    async def create_torrent(self, *, user_id: int, payload_base64: str, selected_file_indexes):
+    async def create_torrent(
+        self,
+        *,
+        user_id: int,
+        payload_base64: str,
+        selected_file_indexes,
+        allow_rename: bool = True,
+        submit: bool = True,
+    ):
         raise DomainError(ErrorCode.INVALID_INPUT, "不应在单元测试中触发真实创建")
 
     async def cancel(self, *, user_id: int, task_ids: list[int]) -> list:
@@ -374,20 +382,29 @@ class RecordingCommands(FakeCommands):
     def __init__(self) -> None:
         super().__init__()
         self.uri_items: list[object] = []
+        self.uri_submit: list[bool] = []
         self.torrent_calls: list[dict[str, object]] = []
 
-    async def create_uris(self, *, user_id: int, items: list) -> list:
+    async def create_uris(self, *, user_id: int, items: list, submit: bool = True) -> list:
         self.uri_items.extend(items)
+        self.uri_submit.append(submit)
         return [DownloadWriteResult(accepted=True, task_id=42)]
 
     async def create_torrent(
-        self, *, user_id: int, payload_base64: str, selected_file_indexes, allow_rename: bool = True
+        self,
+        *,
+        user_id: int,
+        payload_base64: str,
+        selected_file_indexes,
+        allow_rename: bool = True,
+        submit: bool = True,
     ):
         self.torrent_calls.append(
             {
                 "payload": payload_base64,
                 "selected": selected_file_indexes,
                 "allow_rename": allow_rename,
+                "submit": submit,
             }
         )
         return DownloadWriteResult(accepted=True, task_id=99)
@@ -415,13 +432,33 @@ async def test_adduri_wraps_single_creation_with_mirrors() -> None:
         await service.dispatch("aria2.addUri", [], user_id=USER_ID)
 
     class Rejecting(RecordingCommands):
-        async def create_uris(self, *, user_id: int, items: list) -> list:
+        async def create_uris(
+            self, *, user_id: int, items: list, submit: bool = True
+        ) -> list:
             return [DownloadWriteResult(accepted=False, message="FTP 不支持")]
 
     service.commands = Rejecting()
     with pytest.raises(RpcMethodError) as caught:
         await service.dispatch("aria2.addUri", [["ftp://x"]], user_id=USER_ID)
     assert caught.value.code == 1
+
+
+async def test_rpc_creation_registers_without_waiting_for_submission() -> None:
+    """RPC-10/11 契约：RPC 面只登记（submit=False），提交交给恢复循环。
+
+    修复前的行为是同步提交：aria2 不可达会把已入队的任务报成添加失败。
+    """
+    service, gids = _service([])
+    service.commands = RecordingCommands()
+
+    gid = await service.dispatch(
+        "aria2.addUri", [["https://example.com/a.bin"]], user_id=USER_ID
+    )
+    await service.dispatch("aria2.addTorrent", ["dG9ycmVudA=="], user_id=USER_ID)
+
+    assert gid == gids.virtual_gid(42)
+    assert service.commands.uri_submit == [False]
+    assert service.commands.torrent_calls[-1]["submit"] is False
 
 
 async def test_adduri_ignores_unknown_aria2_client_options(caplog) -> None:
@@ -598,7 +635,13 @@ async def test_addtorrent_option_parsing_paths() -> None:
 
     class FailingTorrent(RecordingCommands):
         async def create_torrent(
-            self, *, user_id: int, payload_base64: str, selected_file_indexes, allow_rename: bool = True
+            self,
+            *,
+            user_id: int,
+            payload_base64: str,
+            selected_file_indexes,
+            allow_rename: bool = True,
+            submit: bool = True,
         ):
             return DownloadWriteResult(accepted=False, message="种子无效")
 

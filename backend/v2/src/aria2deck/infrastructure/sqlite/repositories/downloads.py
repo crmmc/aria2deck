@@ -1042,6 +1042,22 @@ class DownloadRepository:
             )
         return True
 
+    async def adopt_display_name(
+        self, attempt_id: int, *, fallback_name: str, display_name: str, now_ms: int
+    ) -> None:
+        """把仍停在兜底名（info hash）的活动订阅改成观测到的真名。
+
+        改名条件写进 WHERE：用户自定义名、dn 名、已分配后缀的名字都不等于兜底名，
+        因此永远不会被覆写；重复观测同一名字也是天然幂等的。
+        """
+        await self.connection.execute(
+            update(task_subscriptions)
+            .where(task_subscriptions.c.attempt_id == attempt_id)
+            .where(task_subscriptions.c.status.in_(LIVE_SUBSCRIPTION_STATUSES))
+            .where(task_subscriptions.c.display_name == fallback_name)
+            .values(display_name=display_name, updated_at_ms=now_ms)
+        )
+
     async def handoff_attempt(
         self, attempt_id: int, *, expected_gid: str, new_gid: str, now_ms: int
     ) -> None:

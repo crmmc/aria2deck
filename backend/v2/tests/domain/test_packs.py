@@ -5,6 +5,7 @@ import pytest
 from aria2deck.domain import packs as pack_domain
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.packs import (
+    GENERIC_PACK_FAILURE_MESSAGE,
     PACK_OUTPUT_DELETED_ERROR_CODE,
     PackProgress,
     PackSourceSnapshot,
@@ -100,6 +101,33 @@ def test_pack_state_machine_supports_requeue_but_not_terminal_reuse(
 def test_pack_output_deletion_reuses_done_history_with_a_dedicated_code() -> None:
     assert mark_output_deleted(PackStatus.DONE) is PackStatus.FAILED
     assert PACK_OUTPUT_DELETED_ERROR_CODE == "pack_output_deleted"
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        # dispatcher 落库的确定性 DomainError 码。
+        ("invalid_state", "打包来源或任务状态已变化"),
+        ("invalid_input", "打包参数无效"),
+        ("task_too_large", "打包输出超出大小限制"),
+        ("quota_exceeded", "存储配额不足"),
+        ("duplicate_resource", "已有相同的打包任务"),
+        # 产物物理删除后的历史改写码。
+        ("pack_output_deleted", "打包产物已删除"),
+        # 非 DomainError 与未知码一律通用文案，内部代号不外泄。
+        ("internal", GENERIC_PACK_FAILURE_MESSAGE),
+        ("some_future_code", GENERIC_PACK_FAILURE_MESSAGE),
+    ],
+)
+def test_pack_failure_message_maps_every_recorded_code(code: str, expected: str) -> None:
+    message = pack_domain.pack_failure_message(code)
+
+    assert message == expected
+    assert code not in message
+
+
+def test_pack_failure_message_is_empty_without_error() -> None:
+    assert pack_domain.pack_failure_message(None) == ""
 
 
 @pytest.mark.parametrize(

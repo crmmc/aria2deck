@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -24,12 +26,21 @@ from ..domain.torrents import rebuild_torrent_peer_payload, torrent_peer_candida
 from .http import PublicResolver, require_public_address, validate_public_url
 from .security import CredentialManager
 
+logger = logging.getLogger(__name__)
+
+# 单个主机名的解析上限。提交侧的 tracker/webseed/node 列表里常混着已死的域名，
+# 解析必须短线止损：一个死域名不能让整批磁力提交卡到 submission_timeout。
+_HOST_RESOLVE_TIMEOUT_SECONDS = 3.0
+
 
 def _uncertain(message: str = "aria2 提交结果无法确认") -> DomainError:
     return DomainError(ErrorCode.SUBMISSION_UNCERTAIN, message)
 
 
 _MISSING = object()
+
+# aria2 为磁力元数据下载生成的占位文件名（`[METADATA]<info hash>`），不是真名。
+_METADATA_FILE_PREFIX = "[METADATA]"
 
 
 class _RpcRejected(Exception):
@@ -57,13 +68,40 @@ async def _require_public_host(host: str, port: int, resolver: PublicResolver) -
         if ":" in host:
             raise DomainError(ErrorCode.PERMISSION_DENIED, "目标主机无效") from None
         try:
-            await resolver.resolve(host, port)
+            await asyncio.wait_for(
+                resolver.resolve(host, port), timeout=_HOST_RESOLVE_TIMEOUT_SECONDS
+            )
         except DomainError:
             raise
-        except (TimeoutError, OSError):
+        except TimeoutError:
+            raise DomainError(ErrorCode.UPSTREAM_FAILURE, "目标域名解析超时") from None
+        except OSError:
             raise DomainError(ErrorCode.UPSTREAM_FAILURE, "目标域名无法解析") from None
     else:
         require_public_address(host)
+
+
+async def _resolves_to_public_host(host: str, port: int, resolver: PublicResolver) -> bool:
+    """提交侧口径：主机不可用（私网，或解析失败/超时）一律只剔除该条目，不向上抛错。
+
+    tracker/webseed/node 只是可选的对端提示，死域名必须只丢自己一条：
+    让它冒泡成 upstream_failure 会把整批提交连活域名一起打死。
+    """
+    try:
+        await _require_public_host(host, port, resolver)
+    except DomainError as error:
+        if error.code is not ErrorCode.PERMISSION_DENIED:
+            # 只记主机名，不记完整 URI（可能含 passkey 等私有参数）。
+            logger.debug("跳过无法解析的下载对端主机 %s（%s）", host, error.code)
+        return False
+    return True
+
+
+def _is_http_url(value: str) -> bool:
+    try:
+        return urlsplit(value).scheme in {"http", "https"}
+    except ValueError:
+        return False
 
 
 async def _valid_tracker(tracker: str, resolver: PublicResolver) -> bool:
@@ -95,74 +133,59 @@ async def _valid_tracker(tracker: str, resolver: PublicResolver) -> bool:
             return False
         if not 1 <= port <= 65535:
             return False
-        await _require_public_host(host, port, resolver)
     except ValueError:
         return False
-    except DomainError as error:
-        if error.code is ErrorCode.PERMISSION_DENIED:
-            return False
-        raise
-    return True
+    except DomainError:
+        # validate_public_url 只抛 PERMISSION_DENIED（协议/userinfo/fragment/localhost）。
+        return False
+    return await _resolves_to_public_host(host, port, resolver)
 
 
 async def _filter_trackers(
     trackers: tuple[str, ...], resolver: PublicResolver
 ) -> tuple[str, ...]:
-    valid: list[str] = []
-    seen: set[str] = set()
-    for tracker in trackers:
-        if tracker in seen:
-            continue
-        seen.add(tracker)
-        if await _valid_tracker(tracker, resolver):
-            valid.append(tracker)
-    return tuple(valid)
+    """并发校验并按首次出现顺序去重：N 个死域名的总耗时 ≈ 单次解析超时，不是 N 倍。"""
+    unique = tuple(dict.fromkeys(trackers))
+    verdicts = await asyncio.gather(
+        *(_valid_tracker(tracker, resolver) for tracker in unique)
+    )
+    return tuple(tracker for tracker, keep in zip(unique, verdicts, strict=True) if keep)
 
 
 async def _filter_webseeds(
     webseeds: tuple[str, ...], resolver: PublicResolver
 ) -> tuple[str, ...]:
     """webseed 只允许 HTTP(S)，其余校验复用 _valid_tracker 的完整 SSRF 判定链。"""
-    valid: list[str] = []
-    seen: set[str] = set()
-    for webseed in webseeds:
-        if webseed in seen:
-            continue
-        seen.add(webseed)
-        if urlsplit(webseed).scheme not in {"http", "https"}:
-            continue
-        if await _valid_tracker(webseed, resolver):
-            valid.append(webseed)
-    return tuple(valid)
+    eligible = tuple(webseed for webseed in dict.fromkeys(webseeds) if _is_http_url(webseed))
+    verdicts = await asyncio.gather(
+        *(_valid_tracker(webseed, resolver) for webseed in eligible)
+    )
+    return tuple(webseed for webseed, keep in zip(eligible, verdicts, strict=True) if keep)
+
+
+async def _valid_node(host: str, port: int, resolver: PublicResolver) -> bool:
+    if not 1 <= port <= 65535:
+        return False
+    return await _resolves_to_public_host(host, port, resolver)
 
 
 async def _filter_nodes(
     nodes: tuple[tuple[str, int], ...], resolver: PublicResolver
 ) -> tuple[tuple[str, int], ...]:
-    valid: list[tuple[str, int]] = []
-    seen: set[tuple[str, int]] = set()
-    for host, port in nodes:
-        node = (host, port)
-        if node in seen:
-            continue
-        seen.add(node)
-        if not 1 <= port <= 65535:
-            continue
-        try:
-            await _require_public_host(host, port, resolver)
-        except DomainError as error:
-            if error.code is ErrorCode.PERMISSION_DENIED:
-                continue
-            raise
-        valid.append(node)
-    return tuple(valid)
+    unique = tuple(dict.fromkeys(nodes))
+    verdicts = await asyncio.gather(
+        *(_valid_node(host, port, resolver) for host, port in unique)
+    )
+    return tuple(node for node, keep in zip(unique, verdicts, strict=True) if keep)
 
 
 async def _sanitize_torrent(payload: str, resolver: PublicResolver) -> str:
     trackers, webseeds, nodes = torrent_peer_candidates(payload)
-    valid_trackers = await _filter_trackers(trackers, resolver)
-    valid_webseeds = await _filter_webseeds(webseeds, resolver)
-    valid_nodes = await _filter_nodes(nodes, resolver)
+    valid_trackers, valid_webseeds, valid_nodes = await asyncio.gather(
+        _filter_trackers(trackers, resolver),
+        _filter_webseeds(webseeds, resolver),
+        _filter_nodes(nodes, resolver),
+    )
     return rebuild_torrent_peer_payload(
         payload, trackers=valid_trackers, webseeds=valid_webseeds, nodes=valid_nodes
     )
@@ -216,13 +239,21 @@ class Aria2SubmissionClient:
                         try:
                             error_payload: object = json.loads(raw)
                         except (json.JSONDecodeError, UnicodeDecodeError):
-                            raise _uncertain(
-                                f"aria2 非 200 响应无法解析: status={response.status} raw={raw[:200]!r}"
-                            ) from None
-                        if not isinstance(error_payload, dict):
-                            raise _uncertain(
-                                f"aria2 非 200 响应缺少协议字段: status={response.status} raw={raw[:200]!r}"
+                            logger.warning(
+                                "aria2 非 200 响应无法解析 method=%s status=%s raw=%r",
+                                method,
+                                response.status,
+                                raw[:200],
                             )
+                            raise _uncertain("aria2 返回了无法解析的响应") from None
+                        if not isinstance(error_payload, dict):
+                            logger.warning(
+                                "aria2 非 200 响应不是协议对象 method=%s status=%s raw=%r",
+                                method,
+                                response.status,
+                                raw[:200],
+                            )
+                            raise _uncertain("aria2 返回了无法确认的响应")
                         error = error_payload.get("error")
                         if (
                             isinstance(error, dict)
@@ -231,11 +262,21 @@ class Aria2SubmissionClient:
                         ):
                             code = error.get("code")
                             raise _RpcRejected(code if isinstance(code, int) else -32603)
-                        raise _uncertain(
-                            f"aria2 非 200 响应缺少协议字段: status={response.status} raw={raw[:200]!r}"
+                        logger.warning(
+                            "aria2 非 200 响应缺少协议字段 method=%s status=%s raw=%r",
+                            method,
+                            response.status,
+                            raw[:200],
                         )
+                        raise _uncertain("aria2 返回了无法确认的响应")
         except (TimeoutError, aiohttp.ClientError, OSError) as transport_error:
-            raise _uncertain(f"aria2 传输异常: {type(transport_error).__name__}: {transport_error}") from None
+            logger.warning(
+                "aria2 传输异常 method=%s error_type=%s error=%s",
+                method,
+                type(transport_error).__name__,
+                transport_error,
+            )
+            raise _uncertain("aria2 连接失败") from None
         try:
             payload: object = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -450,7 +491,14 @@ class Aria2SubmissionClient:
                 return _MISSING
             raise self._unavailable() from None
         except DomainError as error:
-            raise DomainError(ErrorCode.RPC_UNAVAILABLE, f"aria2 暂时不可用: {error}") from None
+            # 用户级文案固定，原始异常细节只进日志。
+            logger.warning(
+                "aria2 调用失败按不可用处理 method=%s code=%s error=%s",
+                method,
+                error.code,
+                error,
+            )
+            raise self._unavailable() from None
 
     @staticmethod
     def _number(value: object) -> int:
@@ -520,7 +568,30 @@ class Aria2SubmissionClient:
             files=tuple(files),
             followed_by=self._gids(result.get("followedBy")),
             following=following,
+            name=self._observed_name(result, files),
         )
+
+    @staticmethod
+    def _observed_name(
+        result: dict[str, object], files: list[ObservedFile]
+    ) -> str | None:
+        """真实下载名：优先 bittorrent.info.name（man：magnet 元数据任务没有该键）。
+
+        名字只用于展示，异常形态不得让整份观测变成 rpc_unavailable，所以这里宽松取值。
+        多文件时 files[0] 只是内层文件名（不是任务名），不拿来当名字；
+        `[METADATA]` 前缀是 aria2 的元数据占位文件，也不是真名。
+        """
+        torrent = result.get("bittorrent")
+        if isinstance(torrent, dict):
+            info = torrent.get("info")
+            if isinstance(info, dict):
+                info_name = info.get("name")
+                if isinstance(info_name, str) and info_name:
+                    return info_name
+        if len(files) != 1:
+            return None
+        only = files[0].name
+        return None if only.startswith(_METADATA_FILE_PREFIX) else only
 
     async def snapshot(self, *, gid: str) -> DownloadObservation | None:
         result = await self._lifecycle_call("aria2.tellStatus", [gid], missing_ok=True)

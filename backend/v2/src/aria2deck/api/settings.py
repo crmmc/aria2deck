@@ -56,10 +56,15 @@ async def update_settings(
     payload: SettingsUpdateRequest,
     principal: Principal = Depends(required_session_principal),
     service: SettingsService = Depends(settings_service),
+    trackers: TrackerService = Depends(tracker_service),
 ) -> SettingsResponse:
+    """保存配置；远程源集合变化时立即重建 Tracker 缓存，保证生效列表与页面一致。"""
+    previous_remote_urls = service.read(principal).tracker_remote_urls
     updated = await service.update(
         principal, payload.model_dump(exclude_unset=True, exclude_none=True)
     )
+    if updated.tracker_remote_urls != previous_remote_urls:
+        await trackers.rebuild()
     return _settings_response(updated)
 
 

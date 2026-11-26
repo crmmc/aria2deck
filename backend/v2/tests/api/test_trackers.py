@@ -36,13 +36,15 @@ def configure(client: TestClient) -> FakeFetcher:
     create_admin(client)
     login(client)
     create_user(client)
+    fetcher = FakeFetcher()
+    # 保存配置会按新的远程源立即重建缓存，桩必须在 PATCH 之前装好，测试不出网。
+    client.app.state.tracker_service.fetcher = fetcher
     response = client.patch(
         "/api/v2/settings",
         json={"tracker_fixed_list": ["udp://fixed.example:80"], "tracker_remote_urls": [FIRST, SECOND]},
     )
     assert response.status_code == 200
-    fetcher = FakeFetcher()
-    client.app.state.tracker_service.fetcher = fetcher
+    fetcher.calls.clear()
     return fetcher
 
 
@@ -90,6 +92,73 @@ def test_tracker_permissions_and_empty_configuration(client: TestClient) -> None
     assert refreshed.json()["refresh_status"] == "success"
     assert refreshed.json()["items"] == []
     assert fetcher.calls == []
+
+
+def test_clearing_remote_urls_drops_cached_entries_without_refetching(client: TestClient) -> None:
+    fetcher = configure(client)
+    fetcher.results = {FIRST: "udp://one.example:80", SECOND: "udp://two.example:80"}
+    assert client.post("/api/v2/trackers/refresh").json()["items"] == [
+        "udp://fixed.example:80",
+        "udp://one.example:80",
+        "udp://two.example:80",
+    ]
+    fetcher.calls.clear()
+
+    assert client.patch("/api/v2/settings", json={"tracker_remote_urls": []}).status_code == 200
+    status = client.get("/api/v2/trackers").json()
+    assert status["items"] == ["udp://fixed.example:80"]
+    assert status["entry_count"] == 1
+    assert status["refresh_status"] == "success"
+    assert fetcher.calls == []
+
+
+def test_removing_one_remote_source_drops_only_its_entries(client: TestClient) -> None:
+    fetcher = configure(client)
+    fetcher.results = {FIRST: "udp://one.example:80", SECOND: "udp://two.example:80"}
+    client.post("/api/v2/trackers/refresh")
+    fetcher.results = {FIRST: "udp://one.example:80"}
+    fetcher.calls.clear()
+
+    assert client.patch("/api/v2/settings", json={"tracker_remote_urls": [FIRST]}).status_code == 200
+    status = client.get("/api/v2/trackers").json()
+    assert status["items"] == ["udp://fixed.example:80", "udp://one.example:80"]
+    assert status["refresh_status"] == "success"
+    assert fetcher.calls == [FIRST]
+
+
+def test_removing_a_source_keeps_no_stale_entries_when_remaining_sources_fail(
+    client: TestClient,
+) -> None:
+    fetcher = configure(client)
+    fetcher.results = {FIRST: "udp://one.example:80", SECOND: "udp://two.example:80"}
+    client.post("/api/v2/trackers/refresh")
+    fetcher.results = {FIRST: DomainError(ErrorCode.UPSTREAM_FAILURE, "offline")}
+
+    assert client.patch("/api/v2/settings", json={"tracker_remote_urls": [FIRST]}).status_code == 200
+    status = client.get("/api/v2/trackers").json()
+    assert status["items"] == ["udp://fixed.example:80"]
+    assert status["refresh_status"] == "failed"
+    assert status["failed_urls"] == [FIRST]
+
+
+def test_unrelated_settings_save_keeps_tracker_cache(client: TestClient) -> None:
+    fetcher = configure(client)
+    fetcher.results = {FIRST: "udp://one.example:80", SECOND: "udp://two.example:80"}
+    assert client.post("/api/v2/trackers/refresh").json()["entry_count"] == 3
+    fetcher.calls.clear()
+
+    response = client.patch(
+        "/api/v2/settings",
+        json={"tracker_fixed_list": ["udp://fixed.example:80", "udp://two.example:80"]},
+    )
+    assert response.status_code == 200
+    status = client.get("/api/v2/trackers").json()
+    assert fetcher.calls == []
+    assert status["items"] == [
+        "udp://fixed.example:80",
+        "udp://two.example:80",
+        "udp://one.example:80",
+    ]
 
 
 @pytest.mark.parametrize("bad_json", ["not-json", "{}", "[1]"])

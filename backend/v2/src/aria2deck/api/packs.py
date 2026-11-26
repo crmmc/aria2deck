@@ -8,6 +8,7 @@ from ..application.packs.control import PackControlService
 from ..application.packs.models import PackView, PrecomputeResultView
 from ..application.packs.progress import PackProgressService
 from ..application.settings.rate_limit import RateLimiter
+from ..domain.packs import pack_failure_message
 from .contracts import (
     ErrorBody,
     OkResponse,
@@ -43,6 +44,7 @@ def _pack(view: PackView) -> PackViewResponse:
         updated_at_ms=view.updated_at_ms,
         finished_at_ms=view.finished_at_ms,
         error_code=view.error_code,
+        error_message=pack_failure_message(view.error_code),
         delete_source=view.delete_source,
         output_name=view.output_name,
         output=(

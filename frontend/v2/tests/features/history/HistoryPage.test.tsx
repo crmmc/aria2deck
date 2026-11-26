@@ -22,7 +22,7 @@ function historyItem(id: number, status: TaskResponse["status"] = "completed", o
     name: `item-${id}.zip`, uri: `https://example.com/${id}.zip`,
     total_bytes: 100, completed_bytes: 100, download_speed: 0, upload_speed: 0,
     peer_count: 0, connection_count: 0, files: [], observation_fresh: true,
-    reserved_bytes: 0, error_code: null, retryable: false,
+    reserved_bytes: 0, error_code: null, error_message: "", retryable: false,
     created_at_ms: id, updated_at_ms: id, finished_at_ms: 1700000000000 + id,
     ...overrides,
   };
@@ -102,13 +102,18 @@ afterEach(() => {
 
 describe("HistoryPage（V1 历史页）", () => {
   it("renders items with status badge and finished time", async () => {
-    setup(() => listEnvelope([historyItem(1, "failed", { error_code: "quota_exceeded" })]));
+    setup(() =>
+      listEnvelope([
+        historyItem(1, "failed", { error_code: "quota_exceeded", error_message: "存储配额不足" }),
+      ]),
+    );
     renderPage();
     const card = await screen.findByText("item-1.zip");
     expect(card).toBeInTheDocument();
     const row = document.querySelector(".task-card-inner");
     expect(within(row as HTMLElement).getByText("失败")).toBeInTheDocument();
-    expect(screen.getByText("quota_exceeded")).toBeInTheDocument();
+    expect(screen.getByText("存储配额不足")).toBeInTheDocument();
+    expect(screen.queryByText("quota_exceeded")).not.toBeInTheDocument();
     expect(screen.getByText("100.0 B")).toBeInTheDocument();
   });
 
@@ -165,12 +170,25 @@ describe("HistoryPage（V1 历史页）", () => {
   });
 
   it("C13：expired 记录按失败展示且数据不消失", async () => {
-    setup(() => listEnvelope([historyItem(9, "expired", { error_code: "expired" })]));
+    setup(() =>
+      listEnvelope([
+        historyItem(9, "expired", { error_code: "expired", error_message: "任务已过期" }),
+      ]),
+    );
     renderPage();
     await screen.findByText("item-9.zip");
     const row = document.querySelector(".task-card-inner");
     expect(within(row as HTMLElement).getByText("失败")).toBeInTheDocument();
-    expect(screen.getByText("expired")).toBeInTheDocument();
+    expect(screen.getByText("任务已过期")).toBeInTheDocument();
+  });
+
+  it("chinese fallback：error_message 缺失时给中文兜底而非原始错误码", async () => {
+    setup(() => listEnvelope([historyItem(3, "failed", { error_code: "download_error" })]));
+    renderPage();
+    await screen.findByText("item-3.zip");
+    const row = document.querySelector(".task-card-inner") as HTMLElement;
+    expect(within(row).getByText("下载失败")).toBeInTheDocument();
+    expect(row).not.toHaveTextContent("download_error");
   });
 
   it("copies uri via clipboard and toasts success", async () => {
@@ -182,6 +200,18 @@ describe("HistoryPage（V1 历史页）", () => {
     fireEvent.click(screen.getByRole("button", { name: "复制" }));
     await screen.findByText("链接已复制");
     expect(writeText).toHaveBeenCalledWith("https://example.com/1.zip");
+  });
+
+  it("torrent 伪协议历史记录复制 info hash 而不是 torrent: 前缀", async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const infoHash = "0123456789abcdef0123456789abcdef01234567";
+    setup(() => listEnvelope([historyItem(1, "completed", { uri: `torrent:${infoHash}` })]));
+    renderPage();
+    await screen.findByText("item-1.zip");
+    fireEvent.click(screen.getByRole("button", { name: "复制" }));
+    await screen.findByText("链接已复制");
+    expect(writeText).toHaveBeenCalledWith(infoHash);
   });
 
   it("single delete has no confirm and toasts success", async () => {

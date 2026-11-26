@@ -4,7 +4,9 @@ import dataclasses
 
 import pytest
 
-from aria2deck.application.downloads.models import ObservedFile, TaskProjection
+from aria2deck.application.downloads.broadcast import task_message
+from aria2deck.application.downloads.models import DownloadRecord, ObservedFile, TaskProjection
+from aria2deck.application.downloads.projection import TaskProjector
 from aria2deck.application.downloads.rpc_projection import (
     VirtualGidSpace,
     aria2_error_code,
@@ -21,7 +23,8 @@ from aria2deck.application.downloads.rpc_projection import (
     uris_payload,
     version_payload,
 )
-from aria2deck.domain.downloads import SubscriptionStatus
+from aria2deck.domain.downloads import AttemptStatus, SubscriptionStatus
+from aria2deck.infrastructure.observations import InMemoryDownloadObservations
 
 TASK = TaskProjection(
     id=7,
@@ -162,16 +165,40 @@ def test_slice_window_matches_aria2_man_semantics() -> None:
         ("content_busy", "内容被占用"),
         ("admission_paused", "系统暂停期间任务未提交"),
         ("metadata_admission_paused", "系统暂停期间元数据未提交"),
+        ("external_paused", "任务在 aria2 中被外部暂停"),
+        ("submission_timeout", "提交超时，结果无法确认"),
+        ("aria2_error", "aria2 报告下载失败"),
+        ("aria2_removed", "任务已从 aria2 移除"),
+        ("aria2_gid_missing", "aria2 里找不到这个下载"),
+        ("ingestion_timeout", "下载完成后入库超时"),
+        ("stale_event", "下载事件已过期"),
         # aria2 数字 fault 码并入统一拒绝文案。
         ("aria2_1", "aria2 拒绝了操作"),
         ("aria2_17", "aria2 拒绝了操作"),
-        # 未知但形态安全的码原样回显（受控 snake_case 域，可排障）。
-        ("custom_extension_code", "custom_extension_code"),
+        # 未收录的码一律通用文案：内部代号不再原样回显。
+        ("custom_extension_code", "下载失败"),
+        ("some_unknown_code", "下载失败"),
     ],
 )
 def test_failure_message_maps_controlled_codes_to_chinese(code: str, expected: str) -> None:
     assert failure_message(code) == expected
     assert failure_message(None) == ""
+
+
+def test_rpc_and_rest_failure_text_share_one_source() -> None:
+    """RPC errorMessage 与 REST error_message 必须同源：同一个码→同一个中文。"""
+    for code in (
+        "upstream_failure",
+        "submission_timeout",
+        "aria2_error",
+        "metadata_admission_paused",
+        "some_unknown_code",
+        None,
+    ):
+        projection = dataclasses.replace(
+            TASK, status=SubscriptionStatus.FAILED, error_code=code
+        )
+        assert task_message(projection).payload["error_message"] == failure_message(code)
 
 
 def test_failed_task_projects_localized_error_message() -> None:
@@ -181,6 +208,101 @@ def test_failed_task_projects_localized_error_message() -> None:
     assert payload["status"] == "error"
     assert payload["errorCode"] == "1"
     assert payload["errorMessage"] == "上游下载失败"
+
+
+def _record(
+    *, subscription: SubscriptionStatus, attempt: AttemptStatus, error_code: str | None
+) -> DownloadRecord:
+    return DownloadRecord(
+        id=7,
+        attempt_id=1,
+        gid="0123456789abcdef",
+        subscription_status=subscription,
+        attempt_status=attempt,
+        name="movie.mkv",
+        display_uri="https://example.com/展示链接",
+        total_bytes=1000,
+        completed_bytes=0,
+        reserved_bytes=0,
+        error_code=error_code,
+        created_at_ms=1,
+        updated_at_ms=2,
+        finished_at_ms=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "subscription,attempt,error_code,status,label,visible_code,message,rpc_status",
+    [
+        # admission 窗口期：标记是提交管线自己的阶段（等待放行），错误字段必须为空；
+        # 窗口期在 aria2 侧的暂停态一律按排队中投影（aria2 只认 waiting）。
+        (
+            SubscriptionStatus.QUEUED, AttemptStatus.QUEUED, "admission_paused",
+            SubscriptionStatus.QUEUED, "排队中", None, "", "waiting",
+        ),
+        (
+            SubscriptionStatus.PAUSED, AttemptStatus.PAUSED, "admission_paused",
+            SubscriptionStatus.QUEUED, "排队中", None, "", "waiting",
+        ),
+        (
+            SubscriptionStatus.ACTIVE, AttemptStatus.ACTIVE, "metadata_admission_paused",
+            SubscriptionStatus.ACTIVE, "下载中", None, "", "active",
+        ),
+        (
+            SubscriptionStatus.CANCELLED, AttemptStatus.CANCELLED, "metadata_admission_paused",
+            SubscriptionStatus.CANCELLED, "已取消", None, "", "removed",
+        ),
+        # 真失败才把码当失败原因：终态失败任务的标记是历史记录（aria2 error 状态需 errorMessage）。
+        (
+            SubscriptionStatus.FAILED, AttemptStatus.FAILED, "metadata_admission_paused",
+            SubscriptionStatus.FAILED, "已失败", "metadata_admission_paused",
+            "系统暂停期间元数据未提交", "error",
+        ),
+        # 真暂停（aria2 外部暂停）与真实失败不属于管道阶段，照常显示。
+        (
+            SubscriptionStatus.PAUSED, AttemptStatus.PAUSED, "external_paused",
+            SubscriptionStatus.PAUSED, "已暂停", "external_paused",
+            "任务在 aria2 中被外部暂停", "paused",
+        ),
+        (
+            SubscriptionStatus.FAILED, AttemptStatus.FAILED, "submission_timeout",
+            SubscriptionStatus.FAILED, "已失败", "submission_timeout",
+            "提交超时，结果无法确认", "error",
+        ),
+    ],
+)
+def test_user_visible_fields_never_carry_pipeline_pause_markers(
+    subscription: SubscriptionStatus,
+    attempt: AttemptStatus,
+    error_code: str,
+    status: SubscriptionStatus,
+    label: str,
+    visible_code: str | None,
+    message: str,
+    rpc_status: str,
+) -> None:
+    """REST/WS 与 RPC 共用同一投影：admission 标记不进任何用户可见字段。"""
+    projection = TaskProjector(
+        observations=InMemoryDownloadObservations(), clock_ms=lambda: 0
+    ).project(_record(subscription=subscription, attempt=attempt, error_code=error_code))
+
+    assert projection.status is status
+    assert projection.status_label == label
+    assert projection.error_code == visible_code
+
+    rest = task_message(projection).payload
+    assert rest["status"] == status.value
+    assert rest["status_label"] == label
+    assert rest["error_code"] == visible_code
+    assert rest["error_message"] == message
+
+    rpc = tell_status_payload(projection, "g")
+    assert rpc["status"] == rpc_status
+    assert rpc["errorCode"] == ("1" if status is SubscriptionStatus.FAILED else "0")
+    # aria2 语义：errorMessage 只在 error 状态给失败原因，其余状态恒空串。
+    assert rpc["errorMessage"] == (
+        message if status is SubscriptionStatus.FAILED else ""
+    )
 
 
 # 权威清单：Aria2App `api/AriaRequests.java::SMALL_KEYS`（源码逐字），

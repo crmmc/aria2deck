@@ -1,6 +1,6 @@
 /**
  * H1 历史视图模型：V2 TaskResponse（历史分页项）→ 归档参考 HistoryCard 视图。
- * C13：cancelled/expired 集中映射到 归档参考 既有展示语义；C16 只用 error_code 不编造文本。
+ * C13：cancelled/expired 集中映射到 归档参考 既有展示语义；C16 错误原因取后端中文映射，前端不编造文本。
  */
 import type { TaskResponse } from "@/shared/api/types";
 
@@ -33,8 +33,8 @@ export function toHistoryRecordView(item: TaskResponse): HistoryRecordView {
     finishedAtMs: item.finished_at_ms,
     createdAtMs: item.created_at_ms,
     result: toHistoryResult(item.status),
-    // C16/C10：V2 只有 error_code，无原始错误文本与阻塞原因。
-    reason: item.error_code,
+    // error_message 是后端同源映射的中文原因；缺失时用固定中文，原始码不上屏（防御旧响应）。
+    reason: item.error_message || (item.error_code ? "下载失败" : null),
     retryable: item.retryable,
     uri: item.uri,
   };

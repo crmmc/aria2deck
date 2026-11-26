@@ -66,7 +66,7 @@ export function TrackerSettingsSection({
     <section id="settings-tracker" tabIndex={-1} className="admin-settings-section" aria-label="Tracker 列表">
       <div className="settings-section-head">
         <h2>Tracker 列表</h2>
-        <p>固定列表与远程列表合并去重后交给下载后端。</p>
+        <p>固定列表与远程列表合并去重后交给下载后端；远程 URL 变更保存后立即按新配置重建。</p>
       </div>
       <div className="form-grid">
         <div className="field span-2">
@@ -123,6 +123,16 @@ export function TrackerSettingsSection({
                 上次刷新{statusTextOf(trackerStatus, failedCount)} · {formatRefreshTime(trackerStatus.last_refresh_at_ms)}
               </span>
               {failedList.length > 0 && <span className="tracker-failed-sources">失败源：{failedList.join("、")}</span>}
+              {trackerStatus.items.length > 0 && (
+                <details className="tracker-item-details">
+                  <summary>查看 {trackerStatus.entry_count} 条生效 Tracker</summary>
+                  <ol className="tracker-item-list">
+                    {trackerStatus.items.map((item) => (
+                      <li key={item} className="mono">{item}</li>
+                    ))}
+                  </ol>
+                </details>
+              )}
             </>
           )}
         </div>

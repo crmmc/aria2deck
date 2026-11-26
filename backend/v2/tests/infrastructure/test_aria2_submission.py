@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json as json_codec
+import logging
 import socket
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -321,9 +324,11 @@ async def test_torrent_submission_omits_unsafe_or_malformed_peer_fields(
 
 
 @pytest.mark.parametrize("kind", ["magnet", "torrent", "dht-node", "os-error"])
-async def test_resolution_failure_aborts_before_any_rpc(
+async def test_unresolvable_peer_hosts_are_skipped_not_fatal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
+    """死域名只削掉自己一条：磁力/种子/dht 节点均不得因解析失败打死整批提交。"""
+
     def resolve(host: str, port: int, *, family: int, type: int) -> list[tuple[object, ...]]:
         if host == "os-failure.example":
             raise OSError("offline")
@@ -339,11 +344,12 @@ async def test_resolution_failure_aborts_before_any_rpc(
             "info": {"length": 3, "name": "file"},
             "announce": "https://tracker.example/announce",
             "announce-list": [["udp://dns-failure.example:6969/announce"]],
+            "url-list": ["https://dns-failure.example/file.iso", "https://good.example/file.iso"],
         })
     else:
         item = torrent_submission({
             "info": {"length": 3, "name": "file"},
-            "nodes": [["dns-failure.example", 6881]],
+            "nodes": [["dns-failure.example", 6881], ["dht.example", 6881]],
         })
     if kind == "magnet":
         trackers = (
@@ -357,17 +363,147 @@ async def test_resolution_failure_aborts_before_any_rpc(
     client = make_client(tmp_path)
     calls: list[dict[str, object]] = []
 
-    async def fake_call(*args: object, **kwargs: object) -> object:
-        calls.append({"args": args, "kwargs": kwargs})
+    async def fake_call(
+        settings: object, method: str, params: list[object], *, authenticate: bool = True
+    ) -> object:
+        calls.append({"method": method, "params": params})
         return [[item.gid]]
 
     monkeypatch.setattr(client, "_call", fake_call)
-    with pytest.raises(DomainError) as caught:
-        await client.submit_many([item], trackers=trackers)
+    replies = await client.submit_many([item], trackers=trackers)
 
-    assert caught.value.code is ErrorCode.UPSTREAM_FAILURE
-    assert "-failure.example" not in str(caught.value)
-    assert calls == []
+    assert [reply.accepted for reply in replies] == [True]
+    assert "-failure.example" not in repr(calls)
+    nested = calls[0]["params"][0]
+    if kind == "magnet":
+        assert nested[0]["params"][1]["bt-tracker"] == "https://tracker.example/announce"
+    elif kind == "os-error":
+        # 全部 tracker 被剔除是合法结果：磁力靠 DHT，不需要 bt-tracker。
+        assert "bt-tracker" not in nested[0]["params"][1]
+    elif kind == "torrent":
+        root, _payload = decoded_torrent_call(calls)
+        assert root[b"announce"] == b"https://tracker.example/announce"
+        assert b"announce-list" not in root
+        assert root[b"url-list"] == [b"https://good.example/file.iso"]
+    else:
+        root, _payload = decoded_torrent_call(calls)
+        assert root[b"nodes"] == [[b"dht.example", 6881]]
+
+
+async def test_unresolvable_tracker_hosts_are_logged_without_uri_parameters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def resolve(host: str, port: int, *, family: int, type: int) -> list[tuple[object, ...]]:
+        if host.endswith(".invalid"):
+            raise socket.gaierror("offline")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    item = submission("magnet", "0000000000000001")
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object, method: str, params: list[object], *, authenticate: bool = True
+    ) -> object:
+        calls.append({"method": method, "params": params})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    with caplog.at_level(logging.DEBUG, logger="aria2deck.infrastructure.aria2_submission"):
+        replies = await client.submit_many(
+            [item],
+            trackers=(
+                "https://dead.invalid/announce?key=pass",
+                "udp://tracker.example:6969/announce",
+            ),
+        )
+
+    assert [reply.accepted for reply in replies] == [True]
+    # debug 记录只给主机名（排查用），完整 URI 及其查询参数不得进日志。
+    assert "dead.invalid" in caplog.text
+    assert "pass" not in caplog.text
+
+
+async def test_all_trackers_unresolvable_submit_without_bt_tracker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def resolve(host: str, port: int, *, family: int, type: int) -> list[tuple[object, ...]]:
+        raise socket.gaierror("offline")
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    submissions = [
+        submission("magnet", "0000000000000001"),
+        submission("torrent", "0000000000000003"),
+    ]
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object, method: str, params: list[object], *, authenticate: bool = True
+    ) -> object:
+        calls.append({"method": method, "params": params})
+        return [[item.gid] for item in submissions]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    replies = await client.submit_many(
+        submissions,
+        trackers=("udp://dead.invalid:6969/announce", "https://also-dead.invalid/announce"),
+    )
+
+    assert [reply.accepted for reply in replies] == [True, True]
+    nested = calls[0]["params"][0]
+    assert "bt-tracker" not in nested[0]["params"][1]
+    assert "bt-tracker" not in nested[1]["params"][2]
+
+
+async def test_hung_resolution_costs_one_timeout_and_runs_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """解析挂起时：每个主机有 wait_for 上限，且 N 个主机并发校验（max_in_flight 证明）。"""
+    monkeypatch.setattr(
+        "aria2deck.infrastructure.aria2_submission._HOST_RESOLVE_TIMEOUT_SECONDS", 0.1
+    )
+    in_flight = {"now": 0, "max": 0}
+
+    class HangingResolver:
+        async def resolve(
+            self, host: str, port: int = 0, family: int = socket.AF_UNSPEC
+        ) -> list[object]:
+            in_flight["now"] += 1
+            in_flight["max"] = max(in_flight["max"], in_flight["now"])
+            try:
+                await asyncio.sleep(30)
+            finally:
+                in_flight["now"] -= 1
+            return []
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "aria2deck.infrastructure.aria2_submission.PublicResolver", HangingResolver
+    )
+    item = submission("magnet", "0000000000000001")
+    client = make_client(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_call(
+        settings: object, method: str, params: list[object], *, authenticate: bool = True
+    ) -> object:
+        calls.append({"method": method, "params": params})
+        return [[item.gid]]
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    dead = tuple(f"udp://dead-{index}.example:6969/announce" for index in range(6))
+    started = time.monotonic()
+    replies = await client.submit_many([item], trackers=dead)
+    elapsed = time.monotonic() - started
+
+    assert [reply.accepted for reply in replies] == [True]
+    assert in_flight["max"] == len(dead)
+    assert elapsed < 5  # 没有 wait_for 时会被 30 秒的挂起拖住
+    assert "bt-tracker" not in calls[0]["params"][0][0]["params"][1]
 
 
 @pytest.mark.parametrize(
@@ -382,6 +518,8 @@ async def test_resolution_failure_aborts_before_any_rpc(
         ("ftp://good.example/file.iso", False),
         ("https://good.example/file.iso#frag", False),
         ("https://good.example/a,https://evil.example/b", False),
+        # urlsplit 自身解析失败（非法 IPv6 字面量）也不得穿透。
+        ("https://[::1/file.iso", False),
         ("https://good.example/file.iso", True),  # 重复项只保留一份（下方断言去重）
     ],
 )
@@ -532,17 +670,16 @@ async def test_info_scoped_valid_webseed_keeps_info_hash_unchanged(
     assert parse_torrent(cleaned_payload, [1]).info_hash == original.info_hash
 
 
-async def test_webseed_resolution_failure_aborts_before_any_rpc(
+async def test_info_scoped_peer_that_fails_validation_rejects_the_torrent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """运行期 DNS 故障沿用 _require_public_host 语义，抛上游故障而不是静默放行。"""
+    """info 内的下载源无法剔除（会改 info hash）：解析失败也只能整种子拒绝，不发起 RPC。"""
     def resolve(host: str, port: int, *, family: int, type: int) -> list[tuple[object, ...]]:
-        raise OSError("offline")
+        raise socket.gaierror("offline")
 
     monkeypatch.setattr(socket, "getaddrinfo", resolve)
     item = torrent_submission({
-        "info": {"length": 3, "name": "file"},
-        "url-list": ["https://dns-failure.example/file.iso"],
+        "info": {"length": 3, "name": "file", "url-list": ["https://dead.invalid/a"]},
     })
     client = make_client(tmp_path)
     calls: list[dict[str, object]] = []
@@ -555,8 +692,8 @@ async def test_webseed_resolution_failure_aborts_before_any_rpc(
     with pytest.raises(DomainError) as caught:
         await client.submit_many([item], trackers=())
 
-    assert caught.value.code is ErrorCode.UPSTREAM_FAILURE
-    assert "-failure.example" not in str(caught.value)
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+    assert "dead.invalid" not in str(caught.value)
     assert calls == []
 
 
@@ -837,6 +974,60 @@ async def test_rpc_non_200_json_non_object_body_is_unavailable(
     with pytest.raises(DomainError) as caught:
         await client.remove_result(gid="gid")
     assert caught.value.code is ErrorCode.RPC_UNAVAILABLE
+
+
+# --- 回归：用户级 message 固定中文，异常原文与响应字节只进日志 ---
+@pytest.mark.parametrize(
+    "reply,expected_message,detail",
+    [
+        (aiohttp.ClientError("connection refused 10.9.8.7"), "aria2 连接失败", "10.9.8.7"),
+        ((502, b"<html>proxy 10.9.8.7</html>"), "aria2 返回了无法解析的响应", "10.9.8.7"),
+        ((400, b"[1, 2, 3]"), "aria2 返回了无法确认的响应", "[1, 2, 3]"),
+        (
+            (400, b'{"jsonrpc": "2.0", "id": "none"}'),
+            "aria2 返回了无法确认的响应",
+            '"id": "none"',
+        ),
+    ],
+)
+async def test_rpc_failure_message_is_fixed_chinese_and_details_go_to_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    reply: object,
+    expected_message: str,
+    detail: str,
+) -> None:
+    session = FakeSession(reply)
+    monkeypatch.setattr("aria2deck.infrastructure.aria2_submission.aiohttp.ClientSession", lambda **kwargs: session)
+    client = make_client(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="aria2deck.infrastructure.aria2_submission"):
+        with pytest.raises(DomainError) as caught:
+            await client.confirm(gid="abc")
+
+    assert caught.value.code is ErrorCode.SUBMISSION_UNCERTAIN
+    assert str(caught.value) == expected_message
+    assert detail not in str(caught.value)
+    assert detail in caplog.text
+
+
+async def test_lifecycle_call_hides_original_error_and_logs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = FakeSession(aiohttp.ClientError("cannot connect http://127.0.0.1:6800/jsonrpc"))
+    monkeypatch.setattr("aria2deck.infrastructure.aria2_submission.aiohttp.ClientSession", lambda **kwargs: session)
+    client = make_client(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="aria2deck.infrastructure.aria2_submission"):
+        with pytest.raises(DomainError) as caught:
+            await client.remove_result(gid="gid")
+
+    assert caught.value.code is ErrorCode.RPC_UNAVAILABLE
+    assert str(caught.value) == "aria2 暂时不可用"
+    assert "127.0.0.1" not in str(caught.value)
+    assert "127.0.0.1" in caplog.text
+    assert "method=aria2.removeDownloadResult" in caplog.text
 
 
 async def test_stop_validates_result_and_accepts_terminal_after_rejection(

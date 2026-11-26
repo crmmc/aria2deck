@@ -69,6 +69,7 @@ class Report:
     elapsed_seconds: float
     aborted_reason: str | None = None
     aborted_details: tuple[str, ...] = ()
+    # 结论之后单独成段打印的提醒；每项一段（可多行），段间空一行。
     extra_notes: tuple[str, ...] = field(default_factory=tuple)
     bootstrap_admin: BootstrapAdmin | None = None
 
@@ -244,9 +245,8 @@ def render(report: Report) -> str:
         lines.extend(_render_bootstrap_admin(report.bootstrap_admin))
     else:
         lines.append("结论: 迁移数据与 V1 侧统计不一致，请核对上面的 FAIL 项")
-    if report.extra_notes:
-        lines.append("")
-        lines.extend(report.extra_notes)
+    for note in report.extra_notes:
+        lines.extend(("", note))
     return "\n".join(lines) + "\n"
 
 

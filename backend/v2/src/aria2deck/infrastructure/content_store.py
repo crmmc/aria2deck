@@ -178,38 +178,32 @@ class DownloadContentStore:
     async def scan(self, attempt_id: int) -> ContentPreparation:
         return await asyncio.to_thread(self._scan, self._attempt_path(attempt_id))
 
-    def _discard_control_files(self, attempt_id: int, control_name: str) -> None:
-        # 控制名来自 parse_torrent 的 info.name，其接受集与 validate_display_name 一致
-        # （长度/点/斜杠/NUL）；这里只挡路径穿越，不再额外收紧字符集，否则合法但含
-        # 控制字符的种子名会被误判成致命错误并触发清库。
-        if (
-            not control_name
-            or control_name in {".", ".."}
-            or "/" in control_name
-            or "\\" in control_name
-        ):
-            raise DomainError(ErrorCode.INVALID_INPUT, "下载控制文件名无效")
+    def _sweep_control_files(self, attempt_id: int) -> None:
         source = self._attempt_path(attempt_id)
         if source.is_symlink():
             raise DomainError(ErrorCode.INVALID_INPUT, "下载控制文件路径无效")
         if not source.is_dir():
             return
-        control = source / f"{control_name}.aria2"
-        if not control.exists():
-            return
-        if control.is_symlink() or not control.is_file():
-            raise DomainError(ErrorCode.INVALID_INPUT, "下载控制文件路径无效")
-        control.unlink()
+        for parent, _directories, files in os.walk(source, followlinks=False):
+            parent_path = Path(parent)
+            for name in files:
+                if not name.endswith(".aria2"):
+                    continue
+                control = parent_path / name
+                if control.is_symlink() or not control.is_file():
+                    raise DomainError(ErrorCode.INVALID_INPUT, "下载控制文件路径无效")
+                control.unlink()
 
-    async def discard_control_files(self, attempt_id: int, control_name: str) -> None:
-        """按提交时确定的下载名精确移除 aria2 控制文件（<下载名>.aria2）。
+    async def sweep_control_files(self, attempt_id: int) -> None:
+        """按后缀清掉 attempt 目录下全部 aria2 控制文件（含子目录）。
 
-        选择子集 torrent 完成后 aria2 会保留控制文件，但此时平台已视该 attempt 终态，
-        入库前必须移除，否则扫描会因“下载控制文件尚未清理”持续拒绝。只删精确路径，
-        绝不按后缀通配——用户内容里真名以 .aria2 结尾的文件不受影响；attempt 目录
-        本身是符号链接时拒绝（与 _scan/_cleanup_attempt 同一防线，防越界删除）。
+        仅供 BT 源使用：控制文件按种子真名落盘，而磁力任务提交时的下载名在元数据
+        到达前是 info 哈希，入库时刻两者可能对不上，按名字精确删除必然漏；BT
+        attempt 目录里的 .aria2 定义上就是 aria2 的管道文件，不会误删用户内容。
+        HTTP 源不得走这里——用户内容真名可以以 .aria2 结尾。attempt 目录本身或
+        控制文件是符号链接时拒绝（与 _scan/_cleanup_attempt 同一防线，防越界删除）。
         """
-        await asyncio.to_thread(self._discard_control_files, attempt_id, control_name)
+        await asyncio.to_thread(self._sweep_control_files, attempt_id)
 
     def _destination(self, storage_path: str) -> Path:
         normalized = normalize_relative_path(storage_path)

@@ -157,6 +157,16 @@ def _bootstrap_admin(
 BOOTSTRAP_TITLE = "管理员登录凭据（仅本次显示，请立即保存）"
 HORIZONTAL_RULE = "=" * 70
 
+# 只进报告（终端与 --report 文件），预演不打印：还没写库，说「必须去改」会误导。
+RPC_SECRET_WARNING = (
+    "必须重新配置 aria2 RPC 密钥（否则下载提交会全部失败）\n"  # noqa: S105  # 提示文案，不是密钥
+    " V1 的 aria2 RPC 密钥无法迁移：V1 与 V2 使用不同的加密体系，V1 的密文在 V2 里解不开，"
+    "所以 V2 系统设置里的 RPC 密钥为空。\n"
+    " 部署后请用管理员账号登录，进入「系统设置」→「aria2 后端」，填写「RPC Secret」，"
+    "再点「测试连接」确认连接成功。\n"
+    " 在完成这一步之前，所有下载任务的提交都会失败。"
+)
+
 
 def render_bootstrap_admin(credentials: tuple[str, str]) -> str:
     """终端专用凭据段；绝不经 `render()`，因此不可能进 `--report` 文件。"""
@@ -217,7 +227,10 @@ def run_migration(
         expected_settings=None if dry_run else _settings_view(mapped.settings),
     )
     if not dry_run:
-        notes = (f"迁移后请把 {v2_root}/data 与 {v2_root}/downloads 放到 V2 部署位置。",)
+        notes = (
+            f"迁移后请把 {v2_root}/data 与 {v2_root}/downloads 放到 V2 部署位置。",
+            RPC_SECRET_WARNING,
+        )
     mode = "预演（--dry-run）" if dry_run else "正式执行"
     if link:
         mode += "＋硬链接"

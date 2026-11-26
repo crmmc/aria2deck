@@ -90,6 +90,7 @@ def test_ws_heartbeat_and_push_matching_rest(client: TestClient, app: FastAPI) -
                         "observation_fresh": True,
                         "reserved_bytes": 0,
                         "error_code": None,
+                        "error_message": "",
                         "retryable": False,
                         "created_at_ms": 1,
                         "updated_at_ms": 2,
@@ -106,7 +107,7 @@ def test_ws_heartbeat_and_push_matching_rest(client: TestClient, app: FastAPI) -
             "id", "status", "status_label", "name", "uri",
             "total_bytes", "completed_bytes", "download_speed", "upload_speed",
             "peer_count", "connection_count", "files", "observation_fresh",
-            "reserved_bytes", "error_code", "retryable",
+            "reserved_bytes", "error_code", "error_message", "retryable",
             "created_at_ms", "updated_at_ms", "finished_at_ms",
         }
 
@@ -160,6 +161,64 @@ def test_ws_rest_and_ws_projection_consistency(client: TestClient, app: FastAPI,
     assert frame["task"]["status"] == "completed"
     assert frame["task"]["name"] == "done.bin"
     assert frame["task"]["finished_at_ms"] == 3
+
+
+def test_ws_frame_hides_admission_pipeline_marker(
+    client: TestClient, app: FastAPI, settings
+) -> None:
+    """窗口期任务推到 WS：与 REST 同构，状态是排队中且不出现任何内部标记。"""
+    import asyncio
+
+    from aria2deck.application.downloads.broadcast import task_message
+    from aria2deck.application.downloads.projection import TaskProjector
+    from aria2deck.domain.downloads import AttemptStatus, SubscriptionStatus
+    from aria2deck.infrastructure.observations import InMemoryDownloadObservations
+    from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
+    from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
+    from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
+    from tests.api.test_downloads import seed_task
+
+    create_admin(client)
+    login(client)
+    user_id = int(client.get("/api/v2/auth/me").json()["id"])
+    _, task_id = seed_task(
+        settings,
+        user_id=user_id,
+        name="admission.bin",
+        subscription_status=SubscriptionStatus.PAUSED,
+        attempt_status=AttemptStatus.PAUSED,
+        error_code="admission_paused",
+    )
+
+    rest_item = next(
+        item for item in client.get("/api/v2/tasks").json()["items"] if item["id"] == task_id
+    )
+    assert rest_item["status"] == "queued"
+    assert rest_item["error_code"] is None
+    assert rest_item["error_message"] == ""
+
+    # 与生命周期广播同一入口：queries.get_task → TaskProjector → task_message。
+    async def _project() -> BroadcastMessage:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                record = await DownloadRepository(uow.connection).get_task(
+                    user_id=user_id, task_id=task_id
+                )
+            projector = TaskProjector(
+                observations=InMemoryDownloadObservations(), clock_ms=lambda: 0
+            )
+            return task_message(projector.project(record))
+        finally:
+            await database.close()
+
+    with _connect(client) as socket:
+        app.state.ws_service.broadcast.publish([user_id], asyncio.run(_project()))
+        frame = json.loads(socket.receive_text())
+    assert frame["task"] == rest_item, "WS 帧与 REST 逐字段一致"
+    assert frame["task"]["status_label"] == "排队中"
+    assert frame["task"]["error_code"] is None
+    assert frame["task"]["error_message"] == ""
 
 
 def test_ws_connection_limit_per_user(client: TestClient) -> None:

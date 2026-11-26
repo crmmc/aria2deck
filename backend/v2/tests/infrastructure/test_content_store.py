@@ -55,43 +55,47 @@ async def test_directory_scan_and_install_include_nested_and_empty_entries(tmp_p
     await store.cleanup_attempt(1)
 
 
-async def test_discard_control_files_hits_exact_name_and_never_suffix_matches(
-    tmp_path: Path,
-) -> None:
+async def test_sweep_control_files_removes_every_suffix_match_recursively(tmp_path: Path) -> None:
     store = DownloadContentStore(tmp_path)
     source = tmp_path / "1"
+    (source / "nested").mkdir(parents=True)
+    (source / "Real Torrent Name.aria2").write_bytes(b"control")
+    (source / "nested" / "child.bin.aria2").write_bytes(b"control")
+    (source / "Real Torrent Name.bin").write_bytes(b"data")
+    (source / "nested" / "child.bin").write_bytes(b"child")
+    (source / "hints.ARIADB").write_bytes(b"user content")
+
+    await store.sweep_control_files(1)
+    await store.sweep_control_files(1)  # 幂等
+    assert not (source / "Real Torrent Name.aria2").exists()
+    assert not (source / "nested" / "child.bin.aria2").exists()
+    assert (source / "Real Torrent Name.bin").read_bytes() == b"data"
+    assert (source / "nested" / "child.bin").read_bytes() == b"child"
+    assert (source / "hints.ARIADB").read_bytes() == b"user content"  # 非 aria2 后缀不动
+
+
+async def test_sweep_control_files_guards_symlinks_and_missing_directory(tmp_path: Path) -> None:
+    store = DownloadContentStore(tmp_path)
+    with pytest.raises(DomainError) as caught:
+        await store.sweep_control_files(0)
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+    await store.sweep_control_files(9)  # attempt 目录不存在：无事可做
+
+    source = tmp_path / "1"
     source.mkdir()
-    (source / "bundle.aria2").write_bytes(b"control")
-    (source / "user-data.aria2").write_bytes(b"user content")
-    (source / "bundle").mkdir()
-    (source / "bundle" / "file.bin").write_bytes(b"data")
-
-    await store.discard_control_files(1, "bundle")  # 精确命中 bundle.aria2
-    await store.discard_control_files(1, "bundle")  # 幂等
-    assert not (source / "bundle.aria2").exists()
-    assert (source / "user-data.aria2").read_bytes() == b"user content"  # 同名用户内容不动
-
+    (source / "target.bin").write_bytes(b"data")
+    (source / "link.aria2").symlink_to(source / "target.bin")
     with pytest.raises(DomainError) as caught:
-        await store.discard_control_files(1, "../escape")  # 路径穿越直接拒绝
+        await store.sweep_control_files(1)  # 控制文件是符号链接，拒绝
     assert caught.value.code is ErrorCode.INVALID_INPUT
-
-    with pytest.raises(DomainError) as caught:
-        await store.discard_control_files(1, "")  # 空控制名直接拒绝
-    assert caught.value.code is ErrorCode.INVALID_INPUT
-
-    (source / "link.aria2").write_bytes(b"x")
-    (source / "link.aria2").unlink()
-    (source / "link.aria2").symlink_to(source / "user-data.aria2")
-    with pytest.raises(DomainError) as caught:
-        await store.discard_control_files(1, "link")  # 控制文件是符号链接，拒绝
-    assert caught.value.code is ErrorCode.INVALID_INPUT
+    assert (source / "target.bin").read_bytes() == b"data"
 
     external = tmp_path / "external"
     external.mkdir()
     (external / "victim.aria2").write_bytes(b"do not touch")
     (tmp_path / "2").symlink_to(external, target_is_directory=True)
     with pytest.raises(DomainError) as caught:
-        await store.discard_control_files(2, "victim")  # attempt 根是符号链接，拒绝越界
+        await store.sweep_control_files(2)  # attempt 根是符号链接，拒绝越界
     assert caught.value.code is ErrorCode.INVALID_INPUT
     assert (external / "victim.aria2").exists()
 

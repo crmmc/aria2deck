@@ -14,10 +14,11 @@ from ...domain.downloads import (
     METADATA_ADMISSION_PAUSED,
     TERMINAL_SUBSCRIPTION_STATUSES,
     AttemptStatus,
+    adopted_display_name,
+    magnet_missing_name_fallback,
 )
 from ...domain.errors import DomainError, ErrorCode
 from ...domain.settings import SystemSettings
-from ...domain.torrents import parse_torrent
 from ..ports import UnitOfWork
 from .broadcast import BroadcastPort, task_message
 from .commands import SubmissionBackend
@@ -32,6 +33,9 @@ from .models import (
 logger = logging.getLogger(__name__)
 UowFactory = Callable[[], AbstractAsyncContextManager[UnitOfWork]]
 Sleep = Callable[[float], Awaitable[None]]
+
+# BT 源的 attempt 目录专属 aria2，.aria2 后缀不存在用户内容；HTTP 反之。
+_BT_SOURCE_KINDS = frozenset({"magnet", "torrent"})
 
 
 class LifecycleRepository(Protocol):
@@ -59,6 +63,10 @@ class LifecycleRepository(Protocol):
         clear_pause: bool = False,
         external_pause: bool = False,
     ) -> bool: ...
+
+    async def adopt_display_name(
+        self, attempt_id: int, *, fallback_name: str, display_name: str, now_ms: int
+    ) -> None: ...
 
     async def admit_size(
         self,
@@ -150,6 +158,8 @@ class LifecycleContentRepository(Protocol):
 
 
 class LifecycleBackend(SubmissionBackend, Protocol):
+    async def version(self) -> tuple[str, list[str]]: ...
+
     async def snapshot(self, *, gid: str) -> DownloadObservation | None: ...
 
     async def unpause(self, *, gid: str) -> None: ...
@@ -176,7 +186,7 @@ class ContentStore(Protocol):
 
     async def cleanup_attempt(self, attempt_id: int) -> None: ...
 
-    async def discard_control_files(self, attempt_id: int, control_name: str) -> None: ...
+    async def sweep_control_files(self, attempt_id: int) -> None: ...
 
 
 class TaskQueryPort(Protocol):
@@ -209,6 +219,7 @@ class DownloadLifecycleService:
         settings: Callable[[], SystemSettings],
         clock_ms: Callable[[], int],
         poll_interval_seconds: float = 2.0,
+        probe_timeout_seconds: float = 2.0,
         reconnect_max_seconds: float = 30.0,
         missing_grace_ms: int = 10_000,
         ingestion_timeout_ms: int = 60_000,
@@ -228,6 +239,7 @@ class DownloadLifecycleService:
         self.settings = settings
         self.clock_ms = clock_ms
         self.poll_interval_seconds = poll_interval_seconds
+        self.probe_timeout_seconds = probe_timeout_seconds
         self.reconnect_max_seconds = reconnect_max_seconds
         self.missing_grace_ms = missing_grace_ms
         self.ingestion_timeout_ms = ingestion_timeout_ms
@@ -301,7 +313,11 @@ class DownloadLifecycleService:
                         self._terminal_broadcast.popitem(last=False)
                 self.broadcast.publish([user_id], task_message(projection))
         except Exception as error:  # noqa: BLE001  # 广播失败不阻断生命周期决策
-            logger.warning("任务广播失败 error_type=%s", type(error).__name__)
+            logger.warning(
+                "任务广播失败 error_type=%s code=%s",
+                type(error).__name__,
+                getattr(error, "code", None),
+            )
 
     async def _reconcile(self, snapshot: DownloadObservation, attempt_id: int) -> None:
         attempt, source = await self._attempt_and_source(attempt_id, snapshot.gid)
@@ -312,6 +328,7 @@ class DownloadLifecycleService:
             AttemptStatus.PAUSED,
         }:
             return
+        await self._adopt_observed_name(attempt, source, snapshot)
         if attempt.completed_content_id is not None or attempt.ingestion_started_at_ms is not None:
             await self._ingest(
                 attempt, snapshot if snapshot.status == "complete" else None
@@ -359,6 +376,28 @@ class DownloadLifecycleService:
             return
         clear_pause = attempt.error_code in {ADMISSION_PAUSED, EXTERNAL_PAUSED}
         await self._apply(attempt, snapshot, target, clear_pause=clear_pause)
+
+    async def _adopt_observed_name(
+        self, attempt: AttemptRecord, source: SourceRecord, snapshot: DownloadObservation
+    ) -> None:
+        """无 dn 磁力任务在元数据到达后改用种子真名。
+
+        显示名只存在 task_subscriptions.display_name 一处，改名后 REST/WS/RPC 与
+        完成入库的文件名同一次生效；用户自定义名（out / dn）不在此列。
+        """
+        canonical_uri = source.display_uri or ""
+        name = adopted_display_name(
+            kind=source.kind, canonical_uri=canonical_uri, observed_name=snapshot.name
+        )
+        if name is None:
+            return
+        async with self.uow_factory() as uow:
+            await self.repository_factory(uow).adopt_display_name(
+                attempt.id,
+                fallback_name=magnet_missing_name_fallback(canonical_uri),
+                display_name=name,
+                now_ms=self.clock_ms(),
+            )
 
     async def _apply(
         self,
@@ -507,20 +546,20 @@ class DownloadLifecycleService:
             )
         return preparation
 
-    async def _discard_control_file(self, attempt: AttemptRecord) -> None:
-        """仅 torrent 源在提交时确定下载名：选择子集完成后 aria2 按 <种子名>.aria2
-        保留控制文件，入库前按精确路径移除。HTTP/Magnet 不处理——它们的控制文件
-        由 aria2 在完成时自行清理，残留的场合按 DOWNLOAD_UNAVAILABLE 在入库超时
-        窗口内显式失败并保留数据（到期清理与修复前一致）。"""
+    async def _sweep_bt_control_files(self, attempt: AttemptRecord) -> None:
+        """BT attempt 入库前清掉 aria2 控制文件。
+
+        控制文件按资源真名命名，而磁力任务在元数据到达前的下载名是 info 哈希，入库
+        时刻两者仍可能错位，按名字精确删必然漏；BT attempt 目录里的 .aria2 定义上
+        就是 aria2 的管道文件，按后缀全清。HTTP 不处理——用户内容真名可能就是
+        x.aria2，残留时按 DOWNLOAD_UNAVAILABLE 在入库超时窗口内显式失败并保留数据
+        （到期清理与修复前一致）。
+        """
         async with self.uow_factory() as uow:
             source = await self.repository_factory(uow).get_source_for_attempt(attempt.id)
-        if source.kind != "torrent":
+        if source.kind not in _BT_SOURCE_KINDS:
             return
-        payload = source.payload.get("torrent")
-        if not isinstance(payload, str):
-            return
-        metadata = await asyncio.to_thread(parse_torrent, payload)
-        await self.content_store.discard_control_files(attempt.id, metadata.name)
+        await self.content_store.sweep_control_files(attempt.id)
 
     async def _ingest(
         self, attempt: AttemptRecord, snapshot: DownloadObservation | None
@@ -532,7 +571,7 @@ class DownloadLifecycleService:
         if snapshot is not None:
             self.observations.put(snapshot)
         try:
-            await self._discard_control_file(attempt)
+            await self._sweep_bt_control_files(attempt)
             preparation = await self._prepare_content(attempt)
         except DomainError as error:
             if error.code is ErrorCode.INVALID_INPUT:
@@ -671,7 +710,9 @@ class DownloadLifecycleService:
                 complete = False
                 self.observations.discard(attempt.gid)
                 logger.warning(
-                    "生命周期轮询单项失败 error_type=%s", type(error).__name__
+                    "生命周期轮询单项失败 error_type=%s code=%s",
+                    type(error).__name__,
+                    getattr(error, "code", None),
                 )
         return complete
 
@@ -707,13 +748,19 @@ class DownloadLifecycleService:
                             await self._fail(attempt, "ingestion_timeout", cleanup=True)
                         else:
                             logger.warning(
-                                "入库恢复单项失败 error_type=%s", type(error).__name__
+                                "入库恢复单项失败 error_type=%s code=%s",
+                                type(error).__name__,
+                                getattr(error, "code", None),
                             )
                     finally:
                         await self._broadcast_attempt(attempt.id)
             except Exception as error:  # noqa: BLE001  # 保留其他恢复候选并禁止孤儿清理
                 complete = False
-                logger.warning("入库恢复单项失败 error_type=%s", type(error).__name__)
+                logger.warning(
+                    "入库恢复单项失败 error_type=%s code=%s",
+                    type(error).__name__,
+                    getattr(error, "code", None),
+                )
         return complete
 
     async def cleanup_terminal(self) -> bool:
@@ -729,7 +776,12 @@ class DownloadLifecycleService:
                     await self._cleanup_terminal(candidate.id)
             except Exception as error:  # noqa: BLE001  # 清理失败保留记录供下轮重试
                 complete = False
-                logger.warning("终态清理单项失败 error_type=%s message=%s", type(error).__name__, error)
+                logger.warning(
+                    "终态清理单项失败 error_type=%s code=%s message=%s",
+                    type(error).__name__,
+                    getattr(error, "code", None),
+                    error,
+                )
         return complete
 
     async def purge_orphans(self) -> None:
@@ -750,17 +802,35 @@ class DownloadLifecycleService:
         except Exception as error:  # noqa: BLE001  # 单个通知不得中断监听连接
             self.observations.discard(gid)
             self.connectivity.record_failure()
-            logger.warning("生命周期通知单项失败 error_type=%s", type(error).__name__)
+            logger.warning(
+                "生命周期通知单项失败 error_type=%s code=%s",
+                type(error).__name__,
+                getattr(error, "code", None),
+            )
+
+    async def _probe_backend(self) -> None:
+        """空闲探测：没有任务观测可依据时，仍让健康计数跟随 aria2 真实状态。"""
+        try:
+            await asyncio.wait_for(
+                self.backend.version(), timeout=self.probe_timeout_seconds
+            )
+        except Exception as error:  # noqa: BLE001  # 探测只服务横幅，失败不得中断轮询
+            logger.debug("空闲探测失败 error_type=%s", type(error).__name__)
+            self.connectivity.record_failure()
+            return
+        self.connectivity.record_success()
 
     async def run_polling(self) -> None:
         while True:
             ingestions_complete = await self.recover_ingestions()
             result = await self.reconcile_live()
-            if result is not None or not ingestions_complete:
-                if ingestions_complete and result is not False:
-                    self.connectivity.record_success()
-                else:
-                    self.connectivity.record_failure()
+            if result is None and ingestions_complete:
+                # 空闲没有任务观测可记：不探测则计数只能等新任务经过放行环节才归零，横幅会永久卡亮。
+                await self._probe_backend()
+            elif ingestions_complete and result is not False:
+                self.connectivity.record_success()
+            else:
+                self.connectivity.record_failure()
             await self.cleanup_terminal()
             await self.sleep(self.poll_interval_seconds)
 

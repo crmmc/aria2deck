@@ -50,6 +50,8 @@ class DownloadObservation:
     completed_length: int = 0
     followed_by: tuple[str, ...] = ()
     following: tuple[str, ...] = ()
+    # aria2 观测到的真实下载名（bittorrent.info.name，否则单文件 basename）；未知为 None。
+    name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

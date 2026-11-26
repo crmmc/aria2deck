@@ -84,7 +84,7 @@ function getRecordDetail(task: PackViewResponse, nowMs: number): string | null {
   if (task.status === "done" && task.output) {
     return `${formatBytes(task.output.size)}${task.delete_source ? " · 已删除源文件" : ""}`;
   }
-  if (task.status === "failed") return task.error_code;
+  if (task.status === "failed") return task.error_message || "打包失败";
   return null;
 }
 
@@ -107,13 +107,18 @@ function PackRecordRow({ task, nowMs, operation, onCancel, onDelete, onDownload 
     detail,
     formatFileDate(task.finished_at_ms ?? task.created_at_ms),
   ].filter(Boolean).join(" · ");
+  // 失败行只展示中文原因，原始代号只留在悬停提示供排障。
+  const errorHint = task.status === "failed" ? task.error_code ?? undefined : undefined;
 
   return (
     <article className="pack-record" data-pack-id={task.id}>
       <span className="file-mark"><Icon name="archive" /></span>
       <div className="pack-record-copy">
         <strong title={task.output_name}>{task.output_name}</strong>
-        <span className={task.status === "failed" && !isOutputDeleted(task) ? "pack-record-meta is-error" : "pack-record-meta"}>
+        <span
+          className={task.status === "failed" && !isOutputDeleted(task) ? "pack-record-meta is-error" : "pack-record-meta"}
+          title={errorHint}
+        >
           {metadata}
         </span>
         {active && (

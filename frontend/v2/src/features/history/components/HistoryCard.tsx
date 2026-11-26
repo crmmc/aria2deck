@@ -1,6 +1,7 @@
 import { memo, useCallback } from "react";
 
 import { formatBytes } from "@/shared/lib/format";
+import { copyTargetUri } from "@/shared/lib/uri";
 import { Icon } from "@/shared/components/Icon";
 import type { HistoryRecordView } from "../model";
 import {
@@ -29,13 +30,13 @@ export const HistoryCard = memo(function HistoryCard({
   onDelete,
 }: HistoryCardProps) {
   const handleCardClick = useCallback(() => {
-    if (record.uri) onCopyUri(record.uri);
+    if (record.uri) onCopyUri(copyTargetUri(record.uri));
   }, [record.uri, onCopyUri]);
   const handleCheckboxChange = useCallback(() => {
     onToggleSelection(record.id);
   }, [record.id, onToggleSelection]);
   const handleCopyClick = useCallback(() => {
-    if (record.uri) onCopyUri(record.uri);
+    if (record.uri) onCopyUri(copyTargetUri(record.uri));
   }, [record.uri, onCopyUri]);
   const retryBlocked = isRetryBlocked(record);
   const handleRetryClick = useCallback(() => {

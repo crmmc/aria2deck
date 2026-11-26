@@ -39,6 +39,20 @@ def _skip_startup_orphan_purge(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(DownloadLifecycleService, "purge_orphans", no_orphans)
 
 
+@pytest.fixture(autouse=True)
+def _offline_tracker_fetcher(app: FastAPI) -> None:
+    """保存配置会按远程源重建 Tracker 缓存，API 测试不能让真实 HTTP 出网。
+
+    需要控制抓取结果的测试（`tests/api/test_trackers.py`）自己换掉 fetcher。
+    """
+
+    class OfflineFetcher:
+        async def fetch_text(self, url: str) -> str:
+            return ""
+
+    app.state.tracker_service.fetcher = OfflineFetcher()
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(

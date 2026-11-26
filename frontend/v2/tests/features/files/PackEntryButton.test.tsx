@@ -25,6 +25,7 @@ function pack(overrides: Partial<PackViewResponse> = {}): PackViewResponse {
     updated_at_ms: 1,
     finished_at_ms: 2,
     error_code: null,
+    error_message: "",
     delete_source: false,
     output_name: "archive.zip",
     output: { user_file_id: 9, display_name: "archive.zip", size: 2048 },
@@ -179,8 +180,8 @@ describe("PackEntryButton 入口与记录展示", () => {
       pack({ id: 2, status: "packing", step: "compressing", step_progress: 40, output_name: "doing.zip", output: null, finished_at_ms: null }),
       pack({ id: 3, output_name: "finished.zip", delete_source: true }),
       pack({ id: 4, output_name: "missing.zip", output: null }),
-      pack({ id: 5, status: "failed", error_code: "pack_output_deleted", output_name: "shared.zip", output: null }),
-      pack({ id: 6, status: "failed", error_code: "disk_full", output_name: "failed.zip", output: null }),
+      pack({ id: 5, status: "failed", error_code: "pack_output_deleted", error_message: "打包产物已删除", output_name: "shared.zip", output: null }),
+      pack({ id: 6, status: "failed", error_code: "invalid_state", error_message: "打包来源或任务状态已变化", output_name: "failed.zip", output: null }),
       pack({ id: 7, status: "cancelled", output_name: "cancelled.zip", output: null }),
     ])));
     renderEntry();
@@ -192,7 +193,11 @@ describe("PackEntryButton 入口与记录展示", () => {
     expect(screen.getByText(/打包中 · 压缩 · 40%/)).toBeInTheDocument();
     expect(screen.getByText(/已完成 · 2.0 KB · 已删除源文件/)).toBeInTheDocument();
     expect(screen.getAllByText(/产物已删除/)).toHaveLength(2);
-    expect(screen.getByText(/disk_full/)).toBeInTheDocument();
+    expect(screen.getByText(/打包来源或任务状态已变化/)).toBeInTheDocument();
+    // 原始 error_code 不上屏，只留在悬停提示供排障。
+    expect(screen.queryByText(/invalid_state/)).not.toBeInTheDocument();
+    const failedMeta = screen.getByText(/打包来源或任务状态已变化/);
+    expect(failedMeta).toHaveAttribute("title", "invalid_state");
     expect(screen.queryByText(/pack_output_deleted/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "下载 missing.zip" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "下载 shared.zip" })).not.toBeInTheDocument();
@@ -204,6 +209,18 @@ describe("PackEntryButton 入口与记录展示", () => {
     expect(deletedRow).not.toHaveTextContent("0 B");
     const sharedRow = document.querySelector("[data-pack-id=5]") as HTMLElement;
     expect(sharedRow).not.toHaveTextContent("失败");
+  });
+
+  it("失败行缺少中文原因时给固定兜底，不回落到原始代号", async () => {
+    mockFetch.mockResolvedValue(json(200, listEnvelope([
+      pack({ id: 1, status: "failed", error_code: "internal", error_message: "", output: null }),
+    ])));
+    renderEntry();
+    await openDrawer();
+
+    const row = document.querySelector("[data-pack-id=1]") as HTMLElement;
+    expect(row).toHaveTextContent("打包失败");
+    expect(row).not.toHaveTextContent("internal");
   });
 });
 

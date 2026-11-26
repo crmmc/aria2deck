@@ -46,7 +46,7 @@ function task(id: number, status: TaskResponse["status"] = "active", overrides: 
     id, status, status_label: "下载中", name: `task-${id}.bin`, uri: `https://example.com/${id}.bin`,
     total_bytes: 100, completed_bytes: 40, download_speed: 10, upload_speed: 0,
     peer_count: 0, connection_count: 1, files: [], observation_fresh: true,
-    reserved_bytes: 0, error_code: null, retryable: true,
+    reserved_bytes: 0, error_code: null, error_message: "", retryable: true,
     created_at_ms: id, updated_at_ms: id, finished_at_ms: null,
     ...overrides,
   };

@@ -24,6 +24,7 @@ function task(overrides: Partial<TaskResponse> & { id: number }): TaskResponse {
     observation_fresh: true,
     reserved_bytes: 0,
     error_code: null,
+    error_message: "",
     retryable: false,
     created_at_ms: overrides.id,
     updated_at_ms: overrides.id,

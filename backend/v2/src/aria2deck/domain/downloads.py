@@ -214,6 +214,53 @@ def task_status_label(
     return _STATUS_LABELS[status]
 
 
+# error_code → 用户可见中文原因：RPC errorMessage 与 REST error_message 的唯一来源。
+# 输入是受控 snake_case 码（DomainError 值 / aria2_{数字} / 生命周期标记），绝不落入
+# 路径、URI 或异常原文；未收录的码一律通用文案，内部代号不出后端。
+GENERIC_TASK_FAILURE_MESSAGE = "下载失败"
+
+_TASK_FAILURE_MESSAGES: dict[str, str] = {
+    # 会写到下载任务上的 DomainError 码。
+    "upstream_failure": "上游下载失败",
+    "download_unavailable": "下载不可用",
+    "rpc_unavailable": "aria2 连接不可用",
+    "aria2_rejected": "aria2 拒绝了操作",
+    "task_too_large": "任务超出大小限制",
+    "quota_exceeded": "存储配额不足",
+    "physical_space_exceeded": "机器空间不足",
+    "submission_uncertain": "提交结果不可确认",
+    "submission_timeout": "提交超时，结果无法确认",
+    "recovery_unsafe": "恢复不安全",
+    "invalid_input": "输入无效",
+    "invalid_state": "状态无效",
+    "content_busy": "内容被占用",
+    "stale_event": "下载事件已过期",
+    # 生命周期与 aria2 观测产生的运行期码（lifecycle/recovery/下载观察）。
+    "aria2_error": "aria2 报告下载失败",
+    "aria2_removed": "任务已从 aria2 移除",
+    "aria2_gid_missing": "aria2 里找不到这个下载",
+    "ingestion_timeout": "下载完成后入库超时",
+    "expired": "任务已过期",
+    # 系统暂停标记：不是失败原因，但会随暂停态显示在任务上。
+    "admission_paused": "系统暂停期间任务未提交",
+    "metadata_admission_paused": "系统暂停期间元数据未提交",
+    "external_paused": "任务在 aria2 中被外部暂停",
+}
+
+
+def task_failure_message(error_code: str | None) -> str:
+    """error_code → 中文原因；无错误空串，未收录的码返回通用文案（不透出内部代号）。"""
+    if error_code is None:
+        return ""
+    message = _TASK_FAILURE_MESSAGES.get(error_code)
+    if message is not None:
+        return message
+    if error_code.startswith("aria2_"):
+        # aria2_{数字} 是提交阶段的原生 fault 码，统一按「拒绝」语义呈现。
+        return _TASK_FAILURE_MESSAGES["aria2_rejected"]
+    return GENERIC_TASK_FAILURE_MESSAGE
+
+
 def can_retry(status: SubscriptionStatus) -> bool:
     return status in {SubscriptionStatus.FAILED, SubscriptionStatus.CANCELLED}
 
@@ -525,12 +572,42 @@ def _normalize_max_connections(value: object) -> int | None:
     return value
 
 
+def magnet_missing_name_fallback(canonical_uri: str) -> str:
+    """无 dn 的 Magnet 兜底展示名：canonical URI 尾段（归一化后的 info hash）。
+
+    创建时的显示名与「元数据到达后改名」规则共用这一个定义，两边不会漂移。
+    """
+    return canonical_uri.rsplit(":", 1)[-1]
+
+
+def adopted_display_name(
+    *, kind: str, canonical_uri: str, observed_name: str | None
+) -> str | None:
+    """磁力元数据到达后应采用的种子真名；不该改名时返回 None。
+
+    只有 magnet 的「哈希兜底名」允许被覆盖：用户 out 自定义名、dn 名、种子任务的
+    名字都是用户可见的既有选择，不参与改名。观测名必须能当文件名用。
+    """
+    if kind != "magnet" or not observed_name:
+        return None
+    if observed_name == magnet_missing_name_fallback(canonical_uri):
+        return None
+    try:
+        return validate_display_name(observed_name)
+    except DomainError:
+        return None
+
+
 def resource_display_name(resource: NormalizedResource, original_uri: str) -> str:
     if resource.kind == "http":
         candidate = unquote(urlsplit(resource.canonical_uri).path).rsplit("/", 1)[-1]
     elif resource.kind == "magnet":
         values = parse_qs(urlsplit(original_uri).query).get("dn", [])
-        candidate = values[0] if values else resource.canonical_uri.rsplit(":", 1)[-1]
+        candidate = (
+            values[0]
+            if values
+            else magnet_missing_name_fallback(resource.canonical_uri)
+        )
     else:
         candidate = "download"
     candidate = candidate.strip() or "download"

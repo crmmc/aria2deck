@@ -192,6 +192,11 @@ class Aria2RpcService:
         return await handler(params, user_id)
 
     # --- 创建（RPC-10/11） ---
+    # 与 REST 刻意分道扬镳：RPC 只做登记，拿到 task_id 就回虚拟 GID，提交交给恢复循环
+    # （DownloadRecoveryService.run_worker，2 秒一轮，进程启动时先跑一次）。真实 aria2 的
+    # addUri/addTorrent 也是登记即返回：客户端不该被 tracker 解析或 aria2 往返卡住，更不能
+    # 因为“提交失败”把已经入队的任务判成添加失败。登记级错误（参数、配额、命名冲突）照旧
+    # 同步报错。REST 保持同步提交与“提交无法确认整批 502”契约（AGENTS.md），故那里传默认值。
 
     async def _aria2_addUri(self, params: list[object], user_id: int) -> str:
         if not params or not isinstance(params[0], list) or not params[0]:
@@ -210,7 +215,9 @@ class Aria2RpcService:
         from .models import UriDownloadInput
 
         results = await self.commands.create_uris(
-            user_id=user_id, items=[UriDownloadInput(uri=uris[0], options=options)]
+            user_id=user_id,
+            items=[UriDownloadInput(uri=uris[0], options=options)],
+            submit=False,
         )
         result = results[0]
         if not result.accepted or result.task_id is None:
@@ -253,6 +260,7 @@ class Aria2RpcService:
             payload_base64=params[0],
             selected_file_indexes=selected,
             allow_rename=allow_rename,
+            submit=False,
         )
         if not result.accepted or result.task_id is None:
             raise _bad(result.message or "创建种子下载失败")

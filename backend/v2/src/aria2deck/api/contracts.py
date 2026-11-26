@@ -220,6 +220,7 @@ class TaskResponse(BaseModel):
     observation_fresh: bool
     reserved_bytes: int
     error_code: str | None
+    error_message: str = Field(description="error_code 对应的中文原因；无错误时为空串")
     retryable: bool
     created_at_ms: int
     updated_at_ms: int
@@ -593,6 +594,7 @@ class PackViewResponse(BaseModel):
     updated_at_ms: int
     finished_at_ms: int | None
     error_code: str | None
+    error_message: str = Field(description="error_code 对应的中文原因；无错误时为空串")
     delete_source: bool
     output_name: str = ""
     output: PackOutputResponse | None = None
