@@ -658,6 +658,83 @@ describe("UsersPage 删除用户（Demo 弹窗 + V2 202 受理）", () => {
   });
 });
 
+describe("UsersPage 移动卡片布局", () => {
+  const originalWidth = window.innerWidth;
+
+  function setViewportWidth(width: number) {
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
+    window.dispatchEvent(new Event("resize"));
+  }
+
+  beforeEach(() => {
+    setViewportWidth(390);
+  });
+
+  afterEach(() => {
+    // 只还原宽度、不再派发 resize：上一个测试的组件此刻尚未卸载，派发会触发 act 警告。
+    Object.defineProperty(window, "innerWidth", { value: originalWidth, configurable: true });
+  });
+
+  it("用卡片展示用户名、角色、配额用量与进度条，不再渲染表格", async () => {
+    setup(() =>
+      list([
+        ME,
+        user(2, {
+          username: "alice",
+          used_bytes: 50 * GIB,
+          reserved_bytes: 10 * GIB,
+          available_bytes: 40 * GIB,
+        }),
+      ]),
+    );
+    const aliceCard = await screen.findByTestId("user-card-2");
+    expect(document.querySelector("table")).toBeNull();
+    expect(document.querySelectorAll(".user-mobile-card")).toHaveLength(2);
+
+    expect(within(aliceCard).getByText("alice")).toBeInTheDocument();
+    expect(within(aliceCard).getByText("普通用户").className).toBe("status-badge");
+    expect(aliceCard.textContent).toContain("50.0 GB / 100 GB");
+    expect(aliceCard.textContent).toContain("可用 40.0 GB");
+    expect(aliceCard.textContent).toContain("预留 10.0 GB");
+    expect(aliceCard.textContent).toContain("全站 98.0%");
+    expect(within(aliceCard).getByRole("meter", { name: "alice 配额使用 50.0%" }))
+      .toHaveAttribute("aria-valuenow", "50");
+    expect(aliceCard.querySelector(".admin-quota-used")).not.toBeNull();
+    expect(aliceCard.querySelector(".admin-quota-reserved")).not.toBeNull();
+    expect(within(aliceCard).getByRole("button", { name: "编辑用户 alice" })).toBeInTheDocument();
+    expect(within(aliceCard).getByRole("button", { name: "删除用户 alice" })).toBeInTheDocument();
+
+    const selfCard = screen.getByTestId("user-card-1");
+    expect(within(selfCard).getByText("当前账号")).toBeInTheDocument();
+    expect(within(selfCard).getByText("管理员").className).toBe("status-badge status-active");
+    expect(within(selfCard).queryByRole("button", { name: "删除用户 admin" })).toBeNull();
+
+    const footer = document.querySelector(".admin-table-footer") as HTMLElement;
+    expect(footer.textContent).toContain("共 2 个用户");
+    expect(footer.textContent).toContain("已使用 51.0 GB · 配额合计 300 GB");
+  });
+
+  it("卡片上的编辑与删除按钮走与桌面一致的既有流程", async () => {
+    setup((url, init) => {
+      if (init?.method === "DELETE") return json(202, { ok: true, state: "pending", accepted: true });
+      return list([ME, user(2, { username: "alice" })]);
+    });
+    const aliceCard = await screen.findByTestId("user-card-2");
+
+    fireEvent.click(within(aliceCard).getByRole("button", { name: "编辑用户 alice" }));
+    const editDialog = screen.getByRole("dialog", { name: "编辑用户 alice" });
+    expect(editDialog.textContent).toContain("编辑用户 alice");
+    fireEvent.click(within(editDialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    fireEvent.click(within(aliceCard).getByRole("button", { name: "删除用户 alice" }));
+    const deleteDialog = screen.getByRole("dialog", { name: "删除用户" });
+    fireEvent.click(within(deleteDialog).getByRole("button", { name: "删除用户" }));
+    expect(await screen.findByText("删除已受理，后台清理进行中")).toBeInTheDocument();
+    expect(mockFetch.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
+  });
+});
+
 describe("users 配额与占比口径", () => {
   it.each([
     { value: "2", unit: "MB", expected: 2 * MIB },

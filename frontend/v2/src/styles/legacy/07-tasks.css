@@ -870,7 +870,9 @@
   }
 
   .torrent-wizard {
+    /* dvh follows the mobile browser chrome shrink; vh stays as the vh-capable fallback */
     height: calc(100vh - 24px);
+    height: calc(100dvh - 24px);
   }
 
   .torrent-wizard-shell {
@@ -884,14 +886,25 @@
     border-bottom: 1px solid rgba(0, 0, 0, 0.08);
   }
 
-  .torrent-summary-grid,
+  /* Summary cards keep the desktop 3-column row: stacked single-column they eat
+     most of a phone screen and push the file tree out of view */
   .torrent-toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .torrent-summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .torrent-tree-head,
   .torrent-tree-row {
     grid-template-columns: 24px 24px minmax(0, 1fr) 86px;
+  }
+
+  /* Footer buttons become full touch targets that share the row */
+  .torrent-wizard-actions .button {
+    min-height: 44px;
+    flex: 1;
   }
 }
 
