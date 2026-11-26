@@ -1,9 +1,9 @@
 name: Quality Gate
 
+# 只在 PR 阶段运行：分支保护已强制这 4 项检查通过才能合并进 main，
+# 合并后对同一棵树重跑属于重复消耗，不再监听 push: main。
 on:
   pull_request:
-    branches: [main]
-  push:
     branches: [main]
 
 permissions:
