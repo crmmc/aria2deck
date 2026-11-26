@@ -40,6 +40,27 @@ def _skip_startup_orphan_purge(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _offline_aria2_idle_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """空闲轮询会真连 aria2 `getVersion` 探测健康，测试环境没有 aria2。
+
+    探测结果直接写共享的 `BackendConnectivity` 计数：每次探测失败都给计数器 +1，
+    与本目录里手动驱动计数器的用例（`test_settings_system` 的两失败才 degraded）
+    叠加后提前越阈。本地有 aria2 监听 6800 时探测成功反而清零，CI 上必然失败，
+    于是同一用例本地绿、CI 红——纯时序 flake。
+
+    这里把探测整体置空而不是让它返回成功：成功探测会把计数器清零，同样干扰
+    手动计数的用例。探测本身的行为（成功翻转、失败翻转、超时不卡轮询）由
+    `tests/application/test_download_lifecycle.py` 用替身后端真实覆盖。
+    """
+    from aria2deck.application.downloads.lifecycle import DownloadLifecycleService
+
+    async def no_probe(self: DownloadLifecycleService) -> None:
+        return None
+
+    monkeypatch.setattr(DownloadLifecycleService, "_probe_backend", no_probe)
+
+
+@pytest.fixture(autouse=True)
 def _offline_tracker_fetcher(app: FastAPI) -> None:
     """保存配置会按远程源重建 Tracker 缓存，API 测试不能让真实 HTTP 出网。
 
