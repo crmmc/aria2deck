@@ -323,13 +323,16 @@ describe("StatsWidget", () => {
     expect(screen.queryByText(/已冻结/)).not.toBeInTheDocument();
   });
 
-  it("首次加载失败时保留诚实的空样本状态", async () => {
+  it("首次加载失败时图表区只留骨架与空磁盘状态", async () => {
     mockFetch.mockRejectedValue(new TypeError("fetch failed"));
     const { container } = render(<StatsWidget />);
     await act(async () => {
       await Promise.resolve();
     });
-    expect(screen.getByText("等待真实速度样本")).toBeInTheDocument();
+    // 图表区不再有任何采样提示文字，只剩轴标签骨架。
+    expect(screen.queryByText(/等待真实速度样本/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/等待下一次连线/)).not.toBeInTheDocument();
+    expect(container.querySelector(".chart-axis")).not.toBeNull();
     expect(screen.getByText("等待真实磁盘数据")).toBeInTheDocument();
     expect(container.querySelector(".speed-line")).toBeNull();
     expect(container.querySelector(".speed-point")).toBeNull();
@@ -414,7 +417,8 @@ describe("StatsWidget", () => {
       }));
       const { container } = render(<StatsWidget />);
       expect(await screen.findByRole("img", { name: /1 次真实采样/ })).toBeInTheDocument();
-      expect(screen.getByText("仅 1 次真实采样，等待下一次连线")).toBeInTheDocument();
+      expect(screen.queryByText(/等待下一次连线/)).not.toBeInTheDocument();
+      expect(container.querySelector(".chart-axis")).not.toBeNull();
       expect(container.querySelector(".speed-point")).not.toBeNull();
       expect(container.querySelector(".upload-point")).not.toBeNull();
       expect(container.querySelector(".speed-line")).toBeNull();
@@ -432,7 +436,7 @@ describe("StatsWidget", () => {
       expect(await screen.findByRole("img", { name: /2 次真实采样/ })).toBeInTheDocument();
       expect(container.querySelector(".speed-line")?.getAttribute("d")).toContain("L630.0 42.4");
       expect(container.querySelector(".upload-line")?.getAttribute("d")).toContain("L630.0 135.6");
-      expect(screen.queryByText("仅 1 次真实采样，等待下一次连线")).not.toBeInTheDocument();
+      expect(screen.getByText("60 秒前")).toBeInTheDocument();
     } finally {
       jest.useRealTimers();
     }

@@ -18,7 +18,14 @@ import { PublicSharePage } from "@/features/public-share/PublicSharePage";
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
   const location = useLocation();
-  if (loading) return <div className="page-loading" aria-busy="true">正在加载…</div>;
+  if (loading) {
+    return (
+      <div className="page-loading" role="status" aria-live="polite" aria-busy="true">
+        <span className="page-loading-ring" aria-hidden="true" />
+        <span className="page-loading-text">正在加载</span>
+      </div>
+    );
+  }
   if (user === null) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }

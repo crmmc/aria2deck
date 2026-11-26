@@ -2210,17 +2210,6 @@ dialog.command-dialog {
   border: 2px solid #e08600;
 }
 
-.chart-sample-state {
-  position: absolute;
-  top: 48px;
-  left: 50%;
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-  pointer-events: none;
-  transform: translateX(-50%);
-}
-
 .chart-axis {
   display: flex;
   justify-content: space-between;
