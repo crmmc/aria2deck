@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from sqlalchemy import select, text
 from aria2deck.application.downloads.lifecycle import DownloadLifecycleService
 from aria2deck.application.downloads.models import DownloadObservation
 from aria2deck.application.downloads.projection import TaskProjector
+from aria2deck.application.downloads.rpc_projection import tell_status_payload
 from aria2deck.application.system.connectivity import BackendConnectivity
 from aria2deck.domain.downloads import (
     ADMISSION_PAUSED,
@@ -53,6 +56,17 @@ class LifecycleBackend(FakeSubmissionBackend):
         self.listen_returns = False
         self.resume_status = "active"
         self.resume_missing = False
+        self.version_calls = 0
+        self.version_error: Exception | None = None
+        self.version_hangs = False
+
+    async def version(self) -> tuple[str, list[str]]:
+        self.version_calls += 1
+        if self.version_hangs:
+            await asyncio.sleep(3600)
+        if self.version_error is not None:
+            raise self.version_error
+        return "1.37.0", ["Async DNS"]
 
     async def snapshot(self, *, gid: str) -> DownloadObservation | None:
         if gid in self.snapshot_errors:
@@ -151,6 +165,8 @@ async def runtime(
     total: int | None = 3,
     quota: int = 100,
     pause_code: str | None = ADMISSION_PAUSED,
+    display_name: str = "file.bin",
+    display_uri: str | None = None,
 ) -> AsyncIterator[Runtime]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     database = SQLiteDatabase(tmp_path / "v2.db")
@@ -188,8 +204,8 @@ async def runtime(
             payload_json=json.dumps(payload),
             options_json="{}",
             selected_file_indexes_json=None,
-            display_name="file.bin",
-            display_uri=None,
+            display_name=display_name,
+            display_uri=display_uri,
             now_ms=1,
         )
         reserved = total or 0
@@ -207,8 +223,8 @@ async def runtime(
             attempt_id=attempt_id,
             user_id=user_id,
             reserved_bytes=reserved,
-            display_name="file.bin",
-            display_uri=None,
+            display_name=display_name,
+            display_uri=display_uri,
             now_ms=1,
         )
         if reserved:
@@ -241,9 +257,9 @@ def put_download(runtime: Runtime, content: bytes = b"abc") -> Path:
 
 
 class RecordingStore:
-    """记录 discard_control_files 调用的透明包装，用于钉住「仅 torrent 接线」这道门。"""
+    """记录 sweep_control_files 调用的透明包装，用于钉住「仅 BT 源清扫」这道门。"""
 
-    def __init__(self, inner: DownloadContentStore, calls: list[tuple[int, str]]) -> None:
+    def __init__(self, inner: DownloadContentStore, calls: list[int]) -> None:
         self._inner = inner
         self.calls = calls
 
@@ -259,9 +275,9 @@ class RecordingStore:
     async def cleanup_attempt(self, attempt_id: int) -> None:
         await self._inner.cleanup_attempt(attempt_id)
 
-    async def discard_control_files(self, attempt_id: int, control_name: str) -> None:
-        self.calls.append((attempt_id, control_name))
-        await self._inner.discard_control_files(attempt_id, control_name)
+    async def sweep_control_files(self, attempt_id: int) -> None:
+        self.calls.append(attempt_id)
+        await self._inner.sweep_control_files(attempt_id)
 
 
 async def test_system_pause_resume_uses_shared_projection_and_monotonic_progress(
@@ -352,9 +368,9 @@ async def test_torrent_subset_completion_discards_control_file_before_scan(
     tmp_path: Path,
 ) -> None:
     """回归（缺陷2接线点）：选择子集 torrent 完成后 aria2 按 <种子名>.aria2 保留控制文件，
-    入库前必须按精确路径移除，否则扫描因“下载控制文件尚未清理”持续拒绝。"""
+    入库前必须移除，否则扫描因“下载控制文件尚未清理”持续拒绝。"""
     async with runtime(tmp_path, kind="torrent", total=3) as state:
-        calls: list[tuple[int, str]] = []
+        calls: list[int] = []
         state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
         directory = state.root / str(state.attempt_id)
         (directory / "bundle").mkdir(parents=True)
@@ -364,11 +380,63 @@ async def test_torrent_subset_completion_discards_control_file_before_scan(
 
         attempt, task, quota = await read(state)
         assert attempt.status is AttemptStatus.COMPLETED
-        assert calls == [(state.attempt_id, "bundle")]  # 仅 torrent 接线且名字精确
+        assert calls == [state.attempt_id]  # BT 源才接线
         assert not (directory / "bundle.aria2").exists()
         assert not directory.exists()  # 已整体搬入内容存储
         assert task.subscription_status is SubscriptionStatus.COMPLETED
         assert quota.used_bytes == 3
+
+
+async def test_magnet_completion_sweeps_control_file_named_by_swarm_not_display_name(
+    tmp_path: Path,
+) -> None:
+    """生产回归（ingestion_timeout）：无 dn 磁力的 display_name 是 info 哈希，
+    而 aria2 用种子真名落盘并命名控制文件；入库必须按后缀清扫，不能依赖名字一致。"""
+    async with runtime(
+        tmp_path, kind="magnet", total=3, display_name="ab" * 20, pause_code=None
+    ) as state:
+        calls: list[int] = []
+        state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
+        directory = state.root / str(state.attempt_id)
+        directory.mkdir()
+        (directory / "Real Torrent Name.bin").write_bytes(b"abc")
+        (directory / "Real Torrent Name.aria2").write_bytes(b"aria2 control")
+
+        await state.lifecycle.reconcile(observation(status="complete", completed=3))
+
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert attempt.completed_content_id is not None
+        assert calls == [state.attempt_id]
+        assert not directory.exists()
+        async with SQLiteUnitOfWork(state.database) as uow:
+            content = await ContentRepository(uow.connection).get_object(
+                attempt.completed_content_id
+            )
+            assert content.digest == hashlib.sha256(b"abc").hexdigest()
+        assert task.subscription_status is SubscriptionStatus.COMPLETED
+        assert quota.used_bytes == 3
+
+
+async def test_bt_completion_sweeps_primary_and_subfile_control_files(tmp_path: Path) -> None:
+    """BT attempt 的多文件种子会在主目录和子文件旁各留一份控制文件，全部清完才能扫描。"""
+    async with runtime(tmp_path, kind="torrent", total=6) as state:
+        calls: list[int] = []
+        state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
+        directory = state.root / str(state.attempt_id)
+        (directory / "bundle").mkdir(parents=True)
+        (directory / "bundle" / "file.bin").write_bytes(b"abc")
+        (directory / "bundle" / "extra.bin").write_bytes(b"def")
+        (directory / "bundle.aria2").write_bytes(b"aria2 control")
+        (directory / "bundle" / "file.bin.aria2").write_bytes(b"aria2 control")
+
+        await state.lifecycle.reconcile(observation(status="complete", completed=6))
+
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert calls == [state.attempt_id]
+        assert not directory.exists()
+        assert quota.used_bytes == 6
 
 
 async def test_http_user_content_named_aria2_suffix_is_never_discarded(
@@ -377,7 +445,7 @@ async def test_http_user_content_named_aria2_suffix_is_never_discarded(
     """回归（评审阻断项）：HTTP 用户内容真名以 .aria2 结尾时，入库不得删除它——
     控制文件清理只对 torrent 源生效且按提交名精确匹配，HTTP 走显式失败保留数据。"""
     async with runtime(tmp_path) as state:
-        calls: list[tuple[int, str]] = []
+        calls: list[int] = []
         state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
         directory = state.root / str(state.attempt_id)
         directory.mkdir()
@@ -386,7 +454,7 @@ async def test_http_user_content_named_aria2_suffix_is_never_discarded(
         with pytest.raises(DomainError) as caught:
             await state.lifecycle.reconcile(observation(status="complete", completed=13))
         assert caught.value.code is ErrorCode.DOWNLOAD_UNAVAILABLE
-        assert calls == []  # HTTP 源根本不触发控制文件清理
+        assert calls == []  # HTTP 源根本不触发控制文件清扫
         assert (directory / "user-data.aria2").read_bytes() == b"user content"
         attempt, _, _ = await read(state)
         # 未误判完成、数据原样保留（fixture 中 attempt 尚未推进过 active，保持 queued）
@@ -394,13 +462,12 @@ async def test_http_user_content_named_aria2_suffix_is_never_discarded(
         assert attempt.completed_content_id is None
 
 
-async def test_torrent_source_with_non_string_payload_skips_control_discard(
+async def test_bt_source_with_non_string_payload_still_sweeps_control_files(
     tmp_path: Path,
 ) -> None:
-    """守卫分支：torrent 源的 torrent 载荷不是字符串时跳过清理直接扫描，
-    不把防御性检查变成新的致命错误来源。"""
+    """清扫不再依赖种子载荷解析：载荷坏掉也不会绕过清扫，更不会变成新的致命错误来源。"""
     async with runtime(tmp_path, kind="torrent", total=3) as state:
-        calls: list[tuple[int, str]] = []
+        calls: list[int] = []
         state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
         async with SQLiteUnitOfWork(state.database) as uow:
             await uow.connection.execute(
@@ -410,11 +477,12 @@ async def test_torrent_source_with_non_string_payload_skips_control_discard(
         directory = state.root / str(state.attempt_id)
         directory.mkdir()
         (directory / "file.bin").write_bytes(b"abc")
+        (directory / "file.bin.aria2").write_bytes(b"aria2 control")
         await state.lifecycle.reconcile(observation(status="complete", completed=3))
 
         attempt, _, _ = await read(state)
         assert attempt.status is AttemptStatus.COMPLETED
-        assert calls == []  # 非字符串载荷走守卫，不调用清理
+        assert calls == [state.attempt_id]  # 不解析载荷也照样清扫
 
 
 async def test_completion_failure_rolls_back_references_and_releases_reservation(
@@ -619,6 +687,62 @@ async def test_listener_reconnects_with_backoff_and_polling_worker_is_cancellabl
         with pytest.raises(asyncio.CancelledError):
             await state.lifecycle.run_polling()
         assert polling_delays == [2.0, 2.0]
+
+
+async def leave_no_tasks(state: Runtime) -> None:
+    """清空任务表：构造真正空闲的轮询起点（无 live 任务、无入库意图）。"""
+    async with SQLiteUnitOfWork(state.database) as uow:
+        await uow.connection.execute(text("DELETE FROM task_subscriptions"))
+        await uow.connection.execute(text("DELETE FROM download_attempts"))
+
+
+async def poll_cycles(lifecycle: DownloadLifecycleService, cycles: int) -> None:
+    delays: list[float] = []
+
+    async def stop(delay: float) -> None:
+        delays.append(delay)
+        if len(delays) == cycles:
+            raise asyncio.CancelledError
+
+    lifecycle.sleep = stop
+    with pytest.raises(asyncio.CancelledError):
+        await lifecycle.run_polling()
+
+
+async def test_idle_polling_probe_flips_backend_status_both_directions(
+    tmp_path: Path,
+) -> None:
+    async with runtime(tmp_path) as state:
+        await leave_no_tasks(state)
+        state.connectivity.record_failure()
+        state.connectivity.record_failure()
+        assert state.connectivity.status(is_admin=True).status == "degraded"
+
+        await poll_cycles(state.lifecycle, 2)
+        assert state.backend.version_calls == 2
+        assert state.connectivity.status(is_admin=True).status == "ok"
+
+        state.backend.version_error = DomainError(ErrorCode.RPC_UNAVAILABLE, "offline")
+        await poll_cycles(state.lifecycle, 1)
+        assert state.connectivity.status(is_admin=True).status == "ok"
+        await poll_cycles(state.lifecycle, 1)
+        assert state.connectivity.status(is_admin=True).status == "degraded"
+
+        state.backend.version_error = None
+        await poll_cycles(state.lifecycle, 1)
+        assert state.connectivity.status(is_admin=True).status == "ok"
+
+
+async def test_polling_probe_timeout_does_not_stall_the_loop(tmp_path: Path) -> None:
+    async with runtime(tmp_path) as state:
+        await leave_no_tasks(state)
+        state.lifecycle.probe_timeout_seconds = 0.01
+        state.backend.version_hangs = True
+        started = time.monotonic()
+        await poll_cycles(state.lifecycle, 2)
+        assert time.monotonic() - started < 2
+        assert state.backend.version_calls == 2
+        assert state.connectivity.status(is_admin=True).status == "degraded"
 
 
 async def test_restart_resumes_installed_completion_intent(tmp_path: Path) -> None:
@@ -1538,3 +1662,100 @@ async def test_actual_size_over_quota_fails_cleans_and_keeps_accounting_legal(
                 )
             ).all()
         assert owned == []
+
+
+INFO_HASH = "ab" * 20
+MAGNET_URI = f"magnet:?xt=urn:btih:{INFO_HASH}"
+
+
+def named_observation(name: str | None, *, status: str = "active") -> DownloadObservation:
+    return dataclass_replace(observation(status=status, total=None), name=name)
+
+
+async def test_magnet_hash_fallback_name_is_replaced_by_the_seeded_name(tmp_path: Path) -> None:
+    """缺陷 2：无 dn 磁力任务元数据到达后，哈希名自动变成种子真名（三端同源）。"""
+    async with runtime(
+        tmp_path,
+        kind="magnet",
+        total=None,
+        pause_code=None,
+        display_name=INFO_HASH,
+        display_uri=MAGNET_URI,
+    ) as state:
+        await state.lifecycle.reconcile(named_observation("Big Buck Bunny"))
+
+        _, task, _ = await read(state)
+        assert task.name == "Big Buck Bunny"
+        projection = TaskProjector(
+            observations=state.observations, clock_ms=lambda: 100
+        ).project(task)
+        assert projection.name == "Big Buck Bunny"
+        payload = tell_status_payload(projection, "g")
+        files = payload["files"]
+        assert isinstance(files, list)
+        assert files[0]["path"] == "./Big Buck Bunny", "RPC files[0].path 与 REST name 同步"
+
+        # 重复观测同名是幂等的（不会反复改 updated_at_ms 造出重复推送）。
+        await state.lifecycle.reconcile(named_observation("Big Buck Bunny"))
+        _, again, _ = await read(state)
+        assert again.name == "Big Buck Bunny"
+
+
+async def test_user_supplied_display_name_is_never_overwritten(tmp_path: Path) -> None:
+    """out 自定义名（以及任何非哈希兜底名）不参与改名。"""
+    async with runtime(
+        tmp_path,
+        kind="magnet",
+        total=None,
+        pause_code=None,
+        display_name="my-own-name.mkv",
+        display_uri=MAGNET_URI,
+    ) as state:
+        await state.lifecycle.reconcile(named_observation("Big Buck Bunny"))
+
+        _, task, _ = await read(state)
+        assert task.name == "my-own-name.mkv"
+
+
+async def test_observation_without_name_keeps_the_fallback_name(tmp_path: Path) -> None:
+    async with runtime(
+        tmp_path,
+        kind="magnet",
+        total=None,
+        pause_code=None,
+        display_name=INFO_HASH,
+        display_uri=MAGNET_URI,
+    ) as state:
+        await state.lifecycle.reconcile(named_observation(None))
+
+        _, task, _ = await read(state)
+        assert task.name == INFO_HASH
+
+
+async def test_rename_happens_before_ingestion_so_the_file_gets_the_real_name(
+    tmp_path: Path,
+) -> None:
+    """入库文件名取的是订阅显示名：改名的挂载点必须在终态处理之前。"""
+    async with runtime(
+        tmp_path,
+        kind="magnet",
+        total=None,
+        pause_code=None,
+        display_name=INFO_HASH,
+        display_uri=MAGNET_URI,
+    ) as state:
+        put_download(state)
+        await state.lifecycle.reconcile(
+            dataclass_replace(named_observation("Big Buck Bunny"), status="complete")
+        )
+
+        attempt, task, _ = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert task.name == "Big Buck Bunny"
+        async with SQLiteUnitOfWork(state.database) as uow:
+            rows = (
+                await uow.connection.execute(
+                    select(user_files).where(user_files.c.user_id == state.user_id)
+                )
+            ).all()
+        assert [row.display_name for row in rows] == ["Big Buck Bunny"]

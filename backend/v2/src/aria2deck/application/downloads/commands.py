@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Callable, Mapping
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import replace
 from typing import Protocol, cast
 
@@ -530,11 +530,16 @@ class DownloadCommandService:
         )
 
     async def create_uris(
-        self, *, user_id: int, items: list[UriDownloadInput]
+        self, *, user_id: int, items: list[UriDownloadInput], submit: bool = True
     ) -> list[DownloadWriteResult]:
+        """`submit=False` 只登记不提交（RPC 面“登记即返回”），提交交给恢复循环。
+
+        登记并发由数据库事务裁决，不需要提交锁；锁保护的是 aria2 提交本身。
+        """
         if not 1 <= len(items) <= 30:
             raise DomainError(ErrorCode.INVALID_INPUT, "每批必须包含 1 到 30 个下载")
-        async with self.submission_lock:
+        lock = self.submission_lock if submit else nullcontext()
+        async with lock:
             results: list[DownloadWriteResult] = []
             pending: dict[int, DownloadWriteResult] = {}
             seen: set[str] = set()
@@ -558,7 +563,8 @@ class DownloadCommandService:
                         accepted=False, error_code=error.code.value, message=str(error)
                     )
                 results.append(result)
-            await self._submit_locked(pending)
+            if submit:
+                await self._submit_locked(pending)
             return [
                 pending.get(result.attempt_id, result)
                 if result.attempt_id is not None and result.outcome is RegistrationOutcome.CREATED
@@ -577,10 +583,13 @@ class DownloadCommandService:
         payload_base64: str,
         selected_file_indexes: list[int] | None,
         allow_rename: bool = True,
+        submit: bool = True,
     ) -> DownloadWriteResult:
+        """`submit=False` 的语义见 `create_uris`。"""
         self.rate_limiter.check_create_torrent(user_id=user_id)
         metadata = parse_torrent(payload_base64, selected_file_indexes)
-        async with self.submission_lock:
+        lock = self.submission_lock if submit else nullcontext()
+        async with lock:
             registered = await self._register(
                 user_id=user_id,
                 prepared=prepare_torrent_download(metadata, allow_rename=allow_rename),
@@ -591,7 +600,7 @@ class DownloadCommandService:
                 attempt_id=registered.attempt_id,
                 outcome=registered.outcome,
             )
-            if registered.should_submit:
+            if registered.should_submit and submit:
                 pending = {registered.attempt_id: result}
                 await self._submit_locked(pending)
                 return pending[registered.attempt_id]

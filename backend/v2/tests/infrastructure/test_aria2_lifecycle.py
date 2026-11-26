@@ -318,3 +318,89 @@ async def test_websocket_listener_maps_error_frames_and_network_failures(
 
 async def asyncio_sleep(value: str) -> None:
     return None
+
+
+async def test_snapshot_prefers_bittorrent_info_name_over_file_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """种子真名来自 bittorrent.info.name（aria2 man：magnet 元数据任务没有该键）。"""
+    adapter = client(tmp_path)
+    payload = {
+        **snapshot(),
+        "bittorrent": {"info": {"name": "Big Buck Bunny"}, "mode": "single"},
+    }
+
+    async def call(*args: object, **kwargs: object) -> object:
+        return payload
+
+    monkeypatch.setattr(adapter, "_call", call)
+    observed = await adapter.snapshot(gid=GID)
+    assert observed is not None
+    assert observed.name == "Big Buck Bunny"
+
+
+async def test_snapshot_falls_back_to_single_file_basename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = client(tmp_path)
+
+    async def call(*args: object, **kwargs: object) -> object:
+        return snapshot()
+
+    monkeypatch.setattr(adapter, "_call", call)
+    observed = await adapter.snapshot(gid=GID)
+    assert observed is not None
+    assert observed.name == "file.bin"
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        # 元数据占位文件不是真名。
+        [{"path": "[METADATA]aabb", "length": "1", "completedLength": "0"}],
+        # 多文件时 files[0] 只是内层文件名，不是任务名。
+        [
+            {"path": "/root/pkg/a.bin", "length": "1", "completedLength": "0"},
+            {"path": "/root/pkg/b.bin", "length": "1", "completedLength": "0"},
+        ],
+        # 无文件（元数据未到手）时没有名字。
+        [],
+    ],
+)
+async def test_snapshot_reports_no_name_without_a_real_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: list[dict[str, str]]
+) -> None:
+    adapter = client(tmp_path)
+    payload = {**snapshot(), "files": files}
+
+    async def call(*args: object, **kwargs: object) -> object:
+        return payload
+
+    monkeypatch.setattr(adapter, "_call", call)
+    observed = await adapter.snapshot(gid=GID)
+    assert observed is not None
+    assert observed.name is None
+
+
+@pytest.mark.parametrize(
+    "bittorrent",
+    # 形态异常的 bittorrent 不影响整份观测：只当作没有 bittorrent 名，回落单文件名。
+    ["bad", {"info": "bad"}, {"info": {"name": 7}}, {"info": {"name": ""}}],
+)
+async def test_snapshot_ignores_malformed_bittorrent_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bittorrent: object
+) -> None:
+    adapter = client(tmp_path)
+    payload = {
+        **snapshot(),
+        "files": [{"path": "/root/a.bin", "length": "1", "completedLength": "0"}],
+        "bittorrent": bittorrent,
+    }
+
+    async def call(*args: object, **kwargs: object) -> object:
+        return payload
+
+    monkeypatch.setattr(adapter, "_call", call)
+    observed = await adapter.snapshot(gid=GID)
+    assert observed is not None
+    assert observed.name == "a.bin"

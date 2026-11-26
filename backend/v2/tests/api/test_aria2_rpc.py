@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from aria2deck.application.downloads.models import DownloadObservation, ObservedFile
+from aria2deck.application.downloads.recovery import RecoveryReport
 from aria2deck.bootstrap import create_app
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.torrents import parse_torrent
@@ -51,6 +52,21 @@ def _rpc(
     effective = _secret() if token is None else token
     payload = {"jsonrpc": "2.0", "id": "1", "method": method, "params": [f"token:{effective}", *(params or [])]}
     return client.post("/aria2/jsonrpc", json=payload)
+
+
+def _pause_workers(client: TestClient) -> None:
+    """停掉后台 worker：由用例自己决定何时跑恢复循环，避免与 2 秒轮询抢同一批任务。"""
+    assert client.portal is not None, "TestClient 必须处于上下文内"
+    client.portal.call(client.app.state.supervisor.stop)
+
+
+def _run_recovery(client: TestClient) -> RecoveryReport:
+    """在应用自己的事件循环里跑一轮恢复：提交锁与数据库连接都属于那个循环。"""
+    assert client.portal is not None, "TestClient 必须处于上下文内"
+    report: RecoveryReport = client.portal.call(
+        client.app.state.download_recovery.recover_pending
+    )
+    return report
 
 
 def _seed_task(
@@ -992,6 +1008,40 @@ def test_tell_active_matches_client_key_list(rpc_client: TestClient, settings) -
     assert "bittorrent" not in item and "infoHash" not in item, "HTTP 任务不得伪装成种子任务"
 
 
+def test_tell_status_projects_admission_window_as_waiting(
+    rpc_client: TestClient, settings
+) -> None:
+    """抓包回归：admission 窗口期任务实质在排队，投影 waiting（不是 paused）。"""
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    task_id, gid = _seed_task(settings, user_id, status="paused", name="queued.bin")
+
+    async def mark_admission_paused() -> None:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                await uow.connection.execute(
+                    text("UPDATE task_subscriptions SET error_code = :code WHERE id = :id"),
+                    {"code": "admission_paused", "id": task_id},
+                )
+        finally:
+            await database.close()
+
+    asyncio.run(mark_admission_paused())
+
+    # 队列归属跟随同一投影：既不在 active，也不因 paused 被当成用户暂停。
+    assert _rpc(rpc_client, "aria2.tellActive", [["gid"]]).json()["result"] == []
+    waiting = _rpc(rpc_client, "aria2.tellWaiting", [0, 10, ["gid", "status"]]).json()["result"]
+    assert [item["status"] for item in waiting] == ["waiting"]
+    virtual_gid = waiting[0]["gid"]
+    assert virtual_gid != gid and len(virtual_gid) == 16, "响应侧只给虚拟 GID"
+
+    status = _rpc(rpc_client, "aria2.tellStatus", [virtual_gid]).json()["result"]
+    assert status["gid"] == virtual_gid
+    assert status["status"] == "waiting"
+    assert status["errorCode"] == "0"
+    assert status["errorMessage"] == ""
+
+
 def test_multicall_nested_adduri_filters_client_options(rpc_client: TestClient) -> None:
     """嵌套子调用走同一处理器：子调用里的 pause/dir/split 同样被过滤而非报错。"""
     response = rpc_client.post(
@@ -1054,6 +1104,7 @@ def test_remove_cancels_and_rejects_terminal(rpc_client: TestClient, settings) -
 def test_mixed_remove_results_keep_per_item_errors(
     rpc_client: TestClient, mode: str
 ) -> None:
+    _pause_workers(rpc_client)  # 后台轮询会抢先提交，本用例需要确定性的提交时机
     confirmed = _rpc(
         rpc_client, "aria2.addUri", [["https://example.com/rpc-confirmed.bin"]]
     )
@@ -1067,8 +1118,14 @@ def test_mixed_remove_results_keep_per_item_errors(
 
     backend = rpc_client.app.state.download_commands.backend
     assert isinstance(backend, FakeSubmissionBackend)
-    confirmed_raw_gid = backend.submit_calls[0][0].gid
-    unconfirmed_raw_gid = backend.submit_calls[1][0].gid
+    # RPC 只登记不提交（异步语义），提交由恢复循环承接：这里手动跑一轮拿 raw GID。
+    backend.confirm_default = False  # 否则恢复循环只确认、不提交
+    _run_recovery(rpc_client)
+    assert [call[0].source.display_name for call in backend.submit_calls] == [
+        "rpc-confirmed.bin",
+        "rpc-unconfirmed.bin",
+    ], "恢复循环按登记顺序逐个提交"
+    confirmed_raw_gid, unconfirmed_raw_gid = (call[0].gid for call in backend.submit_calls)
 
     async def stop(*, gid: str) -> None:
         backend.stop_calls.append(gid)
@@ -1587,3 +1644,102 @@ def test_multicall_child_domain_error_is_masked_to_fault_code_one(
     flag = response.json()["result"][0]
     assert flag["faultCode"] == 1
     assert flag["faultString"] == "URI 不能为空"
+
+
+# --- 回归（RPC-10/11 异步语义）：登记即返回，提交交给恢复循环 ---
+def _attempt_states(settings) -> list[str]:
+    """按登记顺序读出所有 attempt 的提交状态，用来证明任务是否真的入队。"""
+
+    async def read() -> list[str]:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                rows = await uow.connection.execute(
+                    text("SELECT submission_state FROM download_attempts ORDER BY id")
+                )
+                return [str(state) for state in rows.scalars().all()]
+        finally:
+            await database.close()
+
+    return asyncio.run(read())
+
+
+def test_adduri_returns_gid_without_waiting_for_submission(
+    rpc_client: TestClient, settings
+) -> None:
+    """aria2 不可达只影响提交，不影响添加动作的返回结果。
+
+    修复前：提交在请求路径内同步跑，异常直接甩给客户端，而任务其实已经入队。
+    """
+    _pause_workers(rpc_client)
+    backend = rpc_client.app.state.download_commands.backend
+    assert isinstance(backend, FakeSubmissionBackend)
+    backend.confirm_default = False
+    backend.submit_error = DomainError(ErrorCode.RPC_UNAVAILABLE, "aria2 不可达")
+
+    created = _rpc(rpc_client, "aria2.addUri", [["https://example.com/rpc-async.bin"]])
+
+    body = created.json()
+    assert "result" in body, body
+    gid = body["result"]
+    assert isinstance(gid, str) and len(gid) == 16
+    assert backend.submit_calls == [], "请求路径内不得提交，提交推迟到恢复循环"
+    assert _attempt_states(settings) == ["planned"], "添加成功即已入队"
+
+    # 提交归属：恢复循环拾取；异常落在 attempt 上（uncertain），不裸奔、不留孤儿。
+    report = _run_recovery(rpc_client)
+    assert report.uncertain == 1
+    assert _attempt_states(settings) == ["uncertain"]
+
+
+def test_addtorrent_returns_gid_without_waiting_for_submission(
+    rpc_client: TestClient, settings
+) -> None:
+    """种子下载同款异步语义：登记成功即回 GID，提交失败不影响添加结果。"""
+    _pause_workers(rpc_client)
+    backend = rpc_client.app.state.download_commands.backend
+    assert isinstance(backend, FakeSubmissionBackend)
+    backend.confirm_default = False
+    backend.submit_error = DomainError(ErrorCode.RPC_UNAVAILABLE, "aria2 不可达")
+
+    created = _rpc(rpc_client, "aria2.addTorrent", [make_torrent(files=[("a.bin", 3)])])
+
+    body = created.json()
+    assert "result" in body, body
+    assert len(body["result"]) == 16
+    assert backend.submit_calls == []
+    assert _attempt_states(settings) == ["planned"]
+
+    report = _run_recovery(rpc_client)
+    assert report.uncertain == 1
+    assert _attempt_states(settings) == ["uncertain"]
+
+
+def test_registration_failures_stay_synchronous(rpc_client: TestClient, settings) -> None:
+    """登记级失败（配额超限）照旧同步报错，且不留下半个任务。"""
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+
+    async def exhaust_quota() -> None:
+        async with rpc_client.app.state.download_commands.uow_factory() as uow:
+            quota_bytes = (
+                await uow.connection.execute(
+                    text("SELECT quota_bytes FROM users WHERE id = :user_id"),
+                    {"user_id": user_id},
+                )
+            ).scalar_one()
+            await uow.connection.execute(
+                text("UPDATE quota_accounts SET used_bytes = :used WHERE user_id = :user_id"),
+                {"used": int(quota_bytes), "user_id": user_id},
+            )
+
+    asyncio.run(exhaust_quota())
+
+    rejected = _rpc(rpc_client, "aria2.addTorrent", [make_torrent(files=[("big.iso", 3)])])
+
+    body = rejected.json()
+    assert "error" in body, body
+    assert body["error"]["code"] == 1
+    assert "配额不足" in body["error"]["message"]
+    backend = rpc_client.app.state.download_commands.backend
+    assert backend.submit_calls == []
+    assert _attempt_states(settings) == [], "登记被拒不得留下任务"

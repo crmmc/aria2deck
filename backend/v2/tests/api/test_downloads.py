@@ -50,6 +50,7 @@ def seed_task(
     reserved_bytes: int = 0,
     attempt_id: int | None = None,
     created_at_ms: int | None = None,
+    error_code: str | None = None,
 ) -> tuple[int, int]:
     async def write() -> tuple[int, int]:
         # 默认使用当前时间：1970 时间戳会被历史保留 worker 立即过期，与断言竞态（已知坑）。
@@ -94,6 +95,12 @@ def seed_task(
                     display_uri=display_uri,
                     now_ms=timestamp,
                 )
+                if error_code is not None:
+                    await uow.connection.execute(
+                        update(task_subscriptions)
+                        .where(task_subscriptions.c.id == subscription_id)
+                        .values(error_code=error_code)
+                    )
                 return current_attempt_id, subscription_id
         finally:
             await database.close()
@@ -487,6 +494,88 @@ def test_attempt_terminal_state_is_projected_for_a_live_subscription(
     assert task["retryable"] is True
     filtered = client.get("/api/v2/tasks", params={"status": "failed"}).json()
     assert [item["id"] for item in filtered["items"]] == [task_id]
+
+
+@pytest.mark.parametrize(
+    "error_code,expected",
+    [
+        ("submission_timeout", "提交超时，结果无法确认"),
+        ("aria2_error", "aria2 报告下载失败"),
+        ("metadata_admission_paused", "系统暂停期间元数据未提交"),
+        # 未收录的码也要出中文：内部代号不得成为用户可见文案。
+        ("some_unknown_code", "下载失败"),
+    ],
+)
+def test_failed_task_exposes_localized_error_message(
+    client: TestClient, settings: Settings, error_code: str, expected: str
+) -> None:
+    admin = authenticated_admin(client)
+    _, task_id = seed_task(
+        settings,
+        user_id=int(admin["id"]),
+        name=f"Raw {error_code}",
+        subscription_status=SubscriptionStatus.FAILED,
+        attempt_status=AttemptStatus.FAILED,
+        error_code=error_code,
+    )
+
+    task = fetch_task(client, task_id)
+    assert task["error_code"] == error_code, "原始码保留给排障（悬停展示）"
+    assert task["error_message"] == expected
+    assert task["error_message"] != error_code
+
+
+@pytest.mark.parametrize("error_code", ["admission_paused", "metadata_admission_paused"])
+def test_admission_window_hides_pipeline_marker_from_user_fields(
+    client: TestClient, settings: Settings, error_code: str
+) -> None:
+    """添加任务的窗口期：任务暂停在 aria2 里等放行，用户只能看到排队，看不到任何内部标记。"""
+    admin = authenticated_admin(client)
+    _, task_id = seed_task(
+        settings,
+        user_id=int(admin["id"]),
+        name=f"Admission {error_code}",
+        subscription_status=SubscriptionStatus.PAUSED,
+        attempt_status=AttemptStatus.PAUSED,
+        error_code=error_code,
+    )
+
+    task = fetch_task(client, task_id)
+    assert task["status"] == "queued"
+    assert task["status_label"] == "排队中"
+    assert task["error_code"] is None
+    assert task["error_message"] == ""
+
+
+def test_external_pause_stays_visible_as_a_real_pause(
+    client: TestClient, settings: Settings
+) -> None:
+    """真暂停（aria2 外部暂停）不是管道阶段：状态与原因照常展示。"""
+    admin = authenticated_admin(client)
+    _, task_id = seed_task(
+        settings,
+        user_id=int(admin["id"]),
+        name="External pause",
+        subscription_status=SubscriptionStatus.PAUSED,
+        attempt_status=AttemptStatus.PAUSED,
+        error_code="external_paused",
+    )
+
+    task = fetch_task(client, task_id)
+    assert task["status"] == "paused"
+    assert task["status_label"] == "已暂停"
+    assert task["error_code"] == "external_paused"
+    assert task["error_message"] == "任务在 aria2 中被外部暂停"
+
+
+def test_live_task_without_error_code_has_empty_error_message(
+    client: TestClient, settings: Settings
+) -> None:
+    admin = authenticated_admin(client)
+    _, task_id = seed_task(settings, user_id=int(admin["id"]), name="No error")
+    task = fetch_task(client, task_id)
+    assert task["error_code"] is None
+    assert task["error_message"] == ""
 
 
 def test_stats_share_projection_and_expose_quota(

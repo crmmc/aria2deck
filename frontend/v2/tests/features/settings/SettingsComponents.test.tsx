@@ -281,6 +281,27 @@ describe("TrackerSettingsSection", () => {
     expect(screen.getByText(new RegExp(text))).toBeInTheDocument();
   });
 
+  it("lists exactly the entries counted as effective, collapsed until asked", () => {
+    renderStatus(status({
+      items: ["udp://fixed.example:80", "udp://one.example:80"],
+      entry_count: 2,
+      refresh_status: "success",
+    }));
+    expect(screen.getByText("当前共 2 条 Tracker")).toBeInTheDocument();
+    const summary = screen.getByText("查看 2 条生效 Tracker");
+    expect(summary.closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText("udp://fixed.example:80")).toBeInTheDocument();
+    expect(screen.getByText("udp://one.example:80")).toBeInTheDocument();
+    fireEvent.click(summary);
+    expect(summary.closest("details")).toHaveAttribute("open");
+  });
+
+  it("renders a zero count with no detail section when nothing is effective", () => {
+    renderStatus(status({ items: [], entry_count: 0, refresh_status: "success" }));
+    expect(screen.getByText("当前共 0 条 Tracker")).toBeInTheDocument();
+    expect(screen.queryByText(/条生效 Tracker/)).not.toBeInTheDocument();
+  });
+
   it("edits all three fields and disables refresh while busy", () => {
     const onFieldChange = jest.fn();
     const onRefresh = jest.fn();

@@ -64,6 +64,8 @@ export interface TaskResponse {
   observation_fresh: boolean;
   reserved_bytes: number;
   error_code: string | null;
+  /** error_code 对应的中文原因（后端同源映射）；无错误时为空串。 */
+  error_message: string;
   retryable: boolean;
   created_at_ms: number;
   updated_at_ms: number;
@@ -236,6 +238,8 @@ export interface PackViewResponse {
   updated_at_ms: number;
   finished_at_ms: number | null;
   error_code: string | null;
+  /** error_code 对应的中文原因（后端同源映射）；无错误时为空串。 */
+  error_message: string;
   delete_source: boolean;
   output_name: string;
   output: { user_file_id: number; display_name: string; size: number } | null;

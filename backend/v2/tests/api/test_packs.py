@@ -79,6 +79,7 @@ def test_create_contract_success_and_failures(client: TestClient, settings) -> N
     assert view["status"] == "pending"
     assert view["delete_source"] is False
     assert view["output"] is None
+    assert view["error_code"] is None and view["error_message"] == ""
 
     assert client.post("/api/v2/packs", json={"items": [999], "output_name": "x.zip", "delete_source": False}).status_code == 404
     assert client.post("/api/v2/packs", json={"items": [first[1]], "output_name": "a/b", "delete_source": False}).status_code == 422
@@ -126,6 +127,9 @@ def test_pack_failure_progress_and_lifecycle(client: TestClient, app: FastAPI, s
     client.patch(f"/api/v2/files/{first[1]}", json={"name": "moved.bin"})
     view = _wait_pack_status(client, pack_id, ("failed",))
     assert view["error_code"] == "invalid_state"
+    # 失败原因必须是中文文案，内部代号只留在 error_code 字段供排障。
+    assert view["error_message"] == "打包来源或任务状态已变化"
+    assert "invalid_state" not in str(view["error_message"])
 
     # 取消语义：pending → cancelled；重复取消 409；终态删除成功。
     other = seed_file(settings, user_id=user_id, index=3, payload=b"c" * 4)

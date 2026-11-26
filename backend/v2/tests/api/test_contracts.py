@@ -144,6 +144,7 @@ def test_framework_method_not_allowed_is_chinese_and_structured() -> None:
         (ErrorCode.DOWNLOAD_UNAVAILABLE, 410),
         (ErrorCode.UPSTREAM_FAILURE, 502),
         (ErrorCode.RECOVERY_UNSAFE, 503),
+        (ErrorCode.RPC_UNAVAILABLE, 503),
         (ErrorCode.LAST_ADMIN, 409),
         (ErrorCode.SELF_DELETE, 409),
         (ErrorCode.CREDENTIAL_INVALID, 401),

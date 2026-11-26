@@ -17,7 +17,7 @@ function task(overrides: Partial<TaskResponse> = {}): TaskResponse {
     id: 1, status: "active", status_label: "下载中", name: "demo.bin", uri: "https://x/y",
     total_bytes: 200, completed_bytes: 100, download_speed: 50, upload_speed: 0,
     peer_count: 0, connection_count: 1, files: [], observation_fresh: true,
-    reserved_bytes: 0, error_code: null, retryable: true,
+    reserved_bytes: 0, error_code: null, error_message: "", retryable: true,
     created_at_ms: 1, updated_at_ms: 1, finished_at_ms: null,
     ...overrides,
   };
@@ -71,9 +71,21 @@ describe("TaskCard", () => {
     expect(screen.queryByText(/%/)).not.toBeInTheDocument();
   });
 
-  it("failed 任务显示错误码、重试与删除按钮", () => {
-    render(<TaskCard task={task({ status: "failed", status_label: "已失败", error_code: "download_error" })} {...base} />);
-    expect(screen.getByText("download_error")).toBeInTheDocument();
+  it("failed 任务显示中文原因、悬停原文、重试与删除按钮", () => {
+    render(
+      <TaskCard
+        task={task({
+          status: "failed",
+          status_label: "已失败",
+          error_code: "submission_timeout",
+          error_message: "提交超时，结果无法确认",
+        })}
+        {...base}
+      />,
+    );
+    const text = screen.getByText("提交超时，结果无法确认");
+    expect(text).toHaveAttribute("title", "submission_timeout");
+    expect(screen.queryByText("submission_timeout")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "删除" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
@@ -132,6 +144,41 @@ describe("TaskCard", () => {
   it("失败但无错误码时不渲染错误文本", () => {
     render(<TaskCard task={task({ status: "failed", error_code: null })} {...base} />);
     expect(document.querySelector(".task-error-text")).toBeNull();
+  });
+
+  it("只有中文原因时不给空悬停标题", () => {
+    render(
+      <TaskCard
+        task={task({ status: "failed", error_code: null, error_message: "下载失败" })}
+        {...base}
+      />,
+    );
+    const text = screen.getByText("下载失败");
+    expect(text).not.toHaveAttribute("title");
+  });
+
+  it("error_message 缺失时给固定中文兜底，不显示原始错误码（防御旧响应）", () => {
+    render(<TaskCard task={task({ status: "failed", error_code: "download_error" })} {...base} />);
+    const text = screen.getByText("下载失败");
+    expect(text).toHaveAttribute("title", "download_error");
+    expect(screen.queryByText("download_error")).not.toBeInTheDocument();
+  });
+
+  it("未知状态不给原始英文状态码", () => {
+    render(<TaskCard task={task({ status: "completed", status_label: "" })} {...base} />);
+    expect(screen.getByText("未知状态")).toBeInTheDocument();
+    expect(screen.queryByText("completed")).not.toBeInTheDocument();
+  });
+
+  it("种子任务复制 info hash 而不是 torrent: 伪协议", () => {
+    const onCopyUri = jest.fn();
+    const infoHash = "0123456789abcdef0123456789abcdef01234567";
+    render(<TaskCard task={task({ uri: `torrent:${infoHash}` })} {...base} onCopyUri={onCopyUri} />);
+    fireEvent.click(screen.getByRole("button", { name: "复制" }));
+    expect(onCopyUri).toHaveBeenCalledWith(infoHash);
+    fireEvent.click(screen.getByRole("button", { name: /demo\.bin/ }));
+    expect(onCopyUri).toHaveBeenLastCalledWith(infoHash);
+    expect(onCopyUri).toHaveBeenCalledTimes(2);
   });
 
   it("可点击卡片：点击复制链接、勾选框切换选中", () => {

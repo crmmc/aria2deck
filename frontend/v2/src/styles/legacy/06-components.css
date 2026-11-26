@@ -1501,6 +1501,24 @@ dialog.command-dialog {
   color: var(--danger);
 }
 
+.admin-settings-section .tracker-item-details {
+  margin-top: 8px;
+}
+
+.admin-settings-section .tracker-item-details summary {
+  color: var(--primary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.admin-settings-section .tracker-item-list {
+  margin: 8px 0 0;
+  padding-left: 22px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
 .admin-settings-section .machine-card {
   margin-bottom: 24px;
   padding: 20px;

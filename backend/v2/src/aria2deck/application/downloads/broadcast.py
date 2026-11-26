@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
-from ...domain.downloads import SubscriptionStatus
+from ...domain.downloads import SubscriptionStatus, task_failure_message
 from .models import TaskProjection
 
 MAX_QUEUE = 256
@@ -65,6 +65,8 @@ def task_message(projection: TaskProjection) -> BroadcastMessage:
             "observation_fresh": projection.observation_fresh,
             "reserved_bytes": projection.reserved_bytes,
             "error_code": projection.error_code,
+            # 与 RPC errorMessage 同源的中文原因：error_code 保留给排障，不直接展示。
+            "error_message": task_failure_message(projection.error_code),
             "retryable": projection.retryable,
             "created_at_ms": projection.created_at_ms,
             "updated_at_ms": projection.updated_at_ms,

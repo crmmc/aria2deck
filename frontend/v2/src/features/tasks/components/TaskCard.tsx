@@ -1,6 +1,7 @@
 import { memo, useCallback } from "react";
 import type { TaskResponse } from "@/shared/api/types";
 import { formatBytes } from "@/shared/lib/format";
+import { copyTargetUri } from "@/shared/lib/uri";
 import { Icon, type IconName } from "@/shared/components/Icon";
 
 function getTaskDisplayName(task: TaskResponse): string {
@@ -54,13 +55,13 @@ export const TaskCard = memo(function TaskCard({
   const progress = getTaskProgress(task);
 
   const handleCardClick = useCallback(() => {
-    if (task.uri) onCopyUri(task.uri);
+    if (task.uri) onCopyUri(copyTargetUri(task.uri));
   }, [task.uri, onCopyUri]);
   const handleCheckboxChange = useCallback(() => {
     onToggleSelection(task.id);
   }, [task.id, onToggleSelection]);
   const handleCopyClick = useCallback(() => {
-    if (task.uri) onCopyUri(task.uri);
+    if (task.uri) onCopyUri(copyTargetUri(task.uri));
   }, [task.uri, onCopyUri]);
   const handleCancelClick = useCallback(() => {
     onCancel(task.id);
@@ -75,7 +76,9 @@ export const TaskCard = memo(function TaskCard({
       ? "等待中"
       : task.status === "failed"
         ? "失败"
-        : task.status;
+        : "未知状态";
+  // error_message 是后端同源映射的中文原因；error_code 只在悬停时给出，供排障。
+  const errorText = task.error_message || (task.error_code ? "下载失败" : "");
   const nameContent = (
     <>
       <span role="heading" aria-level={3} className="task-name" title={task.name || undefined}>
@@ -85,9 +88,9 @@ export const TaskCard = memo(function TaskCard({
         <span>
           {formatBytes(task.completed_bytes)} / {task.total_bytes === null ? "0 B" : formatBytes(task.total_bytes)}
         </span>
-        {task.error_code && (
-          <span className="task-error-text error-code" title={task.error_code}>
-            {task.error_code}
+        {errorText && (
+          <span className="task-error-text error-code" title={task.error_code ?? undefined}>
+            {errorText}
           </span>
         )}
       </span>

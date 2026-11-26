@@ -4,6 +4,8 @@ import pytest
 
 from aria2deck.domain.downloads import (
     NormalizedResource,
+    adopted_display_name,
+    magnet_missing_name_fallback,
     normalize_download_options,
     normalize_resource,
     resource_display_name,
@@ -77,6 +79,44 @@ def test_display_name_fallback_and_validation_cover_non_uri_sources() -> None:
     assert resource_display_name(torrent, "ignored") == "download"
     with pytest.raises(DomainError):
         resource_display_name(normalize_resource("https://example.com/bad%0Aname"), "ignored")
+
+
+INFO_HASH = "ab" * 20
+MAGNET_URI = f"magnet:?xt=urn:btih:{INFO_HASH}"
+
+
+def test_magnet_without_dn_uses_info_hash_and_shares_one_fallback_definition() -> None:
+    """无 dn 的磁力任务显示名就是 canonical URI 尾段：创建与改名共用同一函数。"""
+    resource = normalize_resource(MAGNET_URI)
+    assert magnet_missing_name_fallback(resource.canonical_uri) == INFO_HASH
+    assert resource_display_name(resource, MAGNET_URI) == INFO_HASH
+
+
+@pytest.mark.parametrize(
+    "kind,canonical_uri,observed_name,expected",
+    [
+        ("magnet", MAGNET_URI, "Big Buck Bunny", "Big Buck Bunny"),
+        # 观测名就是兜底名：不改；空观测名：不改。
+        ("magnet", MAGNET_URI, INFO_HASH, None),
+        ("magnet", MAGNET_URI, None, None),
+        ("magnet", MAGNET_URI, "", None),
+        # 非 magnet 任务没有哈希兜底名，永不改名。
+        ("http", MAGNET_URI, "file.bin", None),
+        ("torrent", MAGNET_URI, "seed.bin", None),
+        # 观测名不能当文件名用时拒绝改名（不落库非法名）。
+        ("magnet", MAGNET_URI, "a/b.bin", None),
+        ("magnet", MAGNET_URI, "x" * 201, None),
+    ],
+)
+def test_adopted_display_name_only_replaces_magnet_hash_fallback(
+    kind: str, canonical_uri: str, observed_name: str | None, expected: str | None
+) -> None:
+    assert (
+        adopted_display_name(
+            kind=kind, canonical_uri=canonical_uri, observed_name=observed_name
+        )
+        == expected
+    )
 
 
 def test_tracker_merge_skips_blank_entries() -> None:

@@ -95,7 +95,7 @@ def test_task_message_matches_rest_shape() -> None:
         "id", "status", "status_label", "name", "uri",
         "total_bytes", "completed_bytes", "download_speed", "upload_speed",
         "peer_count", "connection_count", "files", "observation_fresh",
-        "reserved_bytes", "error_code", "retryable",
+        "reserved_bytes", "error_code", "error_message", "retryable",
         "created_at_ms", "updated_at_ms", "finished_at_ms",
     }
 

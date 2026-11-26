@@ -45,6 +45,27 @@ def transition_pack(current: PackStatus, target: PackStatus) -> PackStatus:
 
 PACK_OUTPUT_DELETED_ERROR_CODE = "pack_output_deleted"
 
+# error_code → 用户可见中文原因：打包记录里内部代号的唯一出口。
+# 输入是 dispatcher 落库的受控码（DomainError 值 / "internal" / pack_output_deleted），
+# 未收录的码一律通用文案，未经映射的代号不出后端。
+GENERIC_PACK_FAILURE_MESSAGE = "打包失败"
+
+_PACK_FAILURE_MESSAGES: dict[str, str] = {
+    "invalid_state": "打包来源或任务状态已变化",
+    "invalid_input": "打包参数无效",
+    "task_too_large": "打包输出超出大小限制",
+    "quota_exceeded": "存储配额不足",
+    "duplicate_resource": "已有相同的打包任务",
+    PACK_OUTPUT_DELETED_ERROR_CODE: "打包产物已删除",
+}
+
+
+def pack_failure_message(error_code: str | None) -> str:
+    """error_code → 中文原因；无错误空串，未收录的码返回通用文案（不透出内部代号）。"""
+    if error_code is None:
+        return ""
+    return _PACK_FAILURE_MESSAGES.get(error_code, GENERIC_PACK_FAILURE_MESSAGE)
+
 
 def mark_output_deleted(status: PackStatus) -> PackStatus:
     """产物已物理删除时只允许已完成历史改写为失败；通用终态复用规则不因此放开。"""
