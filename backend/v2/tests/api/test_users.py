@@ -13,6 +13,7 @@ from tests.api.conftest import (
     THIRD_PASSWORD,
     create_admin,
     create_user,
+    fetch_user,
     login,
 )
 
@@ -38,15 +39,12 @@ def test_admin_lists_and_reads_users_with_real_pagination(client: TestClient) ->
         "page": 3,
         "page_size": 1,
     }
-    detail = client.get(f"/api/v2/users/{user['id']}")
-    assert detail.status_code == 200
-    assert detail.json() == user
-    assert detail.json()["available_bytes"] == user["quota_bytes"]
-    assert "password_hash" not in detail.text
-    assert "rpc_secret" not in detail.text
-    assert client.get("/api/v2/users/999").status_code == 404
+    detail = fetch_user(client, user["id"])
+    assert detail == user
+    assert detail["available_bytes"] == user["quota_bytes"]
+    assert "password_hash" not in str(detail)
+    assert "rpc_secret" not in str(detail)
     assert client.get("/api/v2/users", params={"page_size": 101}).status_code == 422
-    assert client.get("/api/v2/users/not-an-int").status_code == 422
 
 
 def test_regular_user_cannot_manage_users(client: TestClient) -> None:
@@ -56,7 +54,6 @@ def test_regular_user_cannot_manage_users(client: TestClient) -> None:
     login(client, "user", OTHER_PASSWORD)
 
     assert client.get("/api/v2/users").status_code == 403
-    assert client.get(f"/api/v2/users/{admin['id']}").status_code == 403
     assert client.patch(f"/api/v2/users/{admin['id']}", json={}).status_code == 403
     assert client.delete(f"/api/v2/users/{admin['id']}").status_code == 403
     assert client.post(
@@ -119,7 +116,7 @@ def test_duplicate_rename_rolls_back_every_submitted_change(client: TestClient) 
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "duplicate_resource"
-    unchanged = client.get(f"/api/v2/users/{user['id']}").json()
+    unchanged = fetch_user(client, user["id"])
     assert unchanged["username"] == "user"
     assert unchanged["quota_bytes"] == user["quota_bytes"]
     login(client, "user", OTHER_PASSWORD)
@@ -158,13 +155,12 @@ def test_user_update_enforces_quota_and_role_guards(
     assert client.patch(f"/api/v2/users/{user_id}", json={"quota_bytes": -1}).status_code == 422
 
 
-def test_user_delete_is_accepted_and_revokes_session_and_tokens(client: TestClient) -> None:
+def test_user_delete_is_accepted_and_revokes_session(client: TestClient) -> None:
     admin = create_admin(client)
     login(client)
     user = create_user(client)
     login(client, "user", OTHER_PASSWORD)
     user_session = client.cookies.get(COOKIE)
-    token = client.post("/api/v2/credentials/tokens", json={}).json()["token"]
     login(client)
 
     response = client.delete(f"/api/v2/users/{user['id']}")
@@ -174,10 +170,6 @@ def test_user_delete_is_accepted_and_revokes_session_and_tokens(client: TestClie
     client.cookies.clear()
     client.cookies.set(COOKIE, user_session)
     assert client.get("/api/v2/auth/me").status_code == 401
-    client.cookies.clear()
-    assert client.get(
-        "/api/v2/auth/me", headers={"Authorization": f"Bearer {token}"}
-    ).status_code == 401
     login(client)
     assert client.delete(f"/api/v2/users/{admin['id']}").status_code == 409
     assert client.delete("/api/v2/users/999").status_code == 404
@@ -194,4 +186,4 @@ def test_initial_password_flag_requires_a_new_password(client: TestClient) -> No
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_input"
-    assert client.get(f"/api/v2/users/{user['id']}").json()["is_initial_password"] is False
+    assert fetch_user(client, user["id"])["is_initial_password"] is False

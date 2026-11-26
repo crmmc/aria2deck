@@ -34,7 +34,6 @@ function content(contentId: number, overrides: Partial<StorageFileResponse> = {}
     content_key: `file:abcd1234efgh5678-${contentId}`,
     kind: "file",
     size: 1024,
-    storage_path: `/data/objects/key-${contentId}`,
     on_disk: true,
     reference_count: 0,
     deletion_state: "active",
@@ -612,7 +611,11 @@ describe("StoragePage 删除确认与 202 受理", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "删除文件" }));
 
     expect(await screen.findByText("已受理删除 1 个文件")).toBeInTheDocument();
-    expect(await screen.findByText("内容被引用")).toBeInTheDocument();
+    // 失败项改为独立明细弹窗逐条列出：对象名 + 原因
+    const failures = await screen.findByRole("dialog", { name: "批量操作失败明细" });
+    expect(within(failures).getByText("user-file-2.bin")).toBeInTheDocument();
+    expect(within(failures).getByText("内容被引用")).toBeInTheDocument();
+    fireEvent.click(within(failures).getByRole("button", { name: "知道了" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     await waitFor(() => expect(listCalls()).toHaveLength(before + 1));
     expect(JSON.parse(deleteCalls()[0][1].body as string)).toEqual({ content_ids: [1, 2] });
@@ -677,7 +680,11 @@ describe("StoragePage 删除确认与 202 受理", () => {
     const dialog = await screen.findByRole("dialog", { name: "删除存储文件" });
     const before = listCalls().length;
     fireEvent.click(within(dialog).getByRole("button", { name: "删除文件" }));
-    expect(await screen.findByText("暂时无法删除")).toBeInTheDocument();
+    const failures = await screen.findByRole("dialog", { name: "批量操作失败明细" });
+    expect(
+      within(failures).getByText("暂时无法删除", { selector: ".batch-failure-list span" }),
+    ).toBeInTheDocument();
+    fireEvent.click(within(failures).getByRole("button", { name: "知道了" }));
     expect(screen.getByRole("dialog", { name: "删除存储文件" })).toBeInTheDocument();
     expect(screen.getByLabelText("选择文件 user-file-1.bin")).toBeChecked();
     expect(listCalls()).toHaveLength(before);

@@ -22,6 +22,21 @@ class ContentRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class CanonicalEntry:
+    """规范存储位上的一个条目；摘要就在文件名里，识别它不需要读内容。"""
+
+    storage_path: str
+    kind: ContentKind
+    digest: str
+    size: int
+    modified_at_ns: int
+
+    @property
+    def modified_at_ms(self) -> int:
+        return self.modified_at_ns // 1_000_000
+
+
+@dataclass(frozen=True, slots=True)
 class UserFileRecord:
     id: int
     user_id: int

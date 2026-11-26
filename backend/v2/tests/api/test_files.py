@@ -309,17 +309,12 @@ def test_directory_entries_contract(client: TestClient, settings: Settings) -> N
     assert body["total"] == 2
     assert [item["name"] for item in body["items"]] == ["z-dir"]
     assert body["items"][0]["kind"] == "directory"
-    assert [(crumb["name"], crumb["path"]) for crumb in body["breadcrumbs"]] == [("dir-2", "")]
 
     nested = client.get(f"/api/v2/files/{dir_file}/entries", params={"path": "z-dir"})
     assert nested.status_code == 200
     nested_body = nested.json()
     assert nested_body["total"] == 1
     assert nested_body["items"][0]["path"] == "z-dir/deep.bin"
-    assert [(crumb["name"], crumb["path"]) for crumb in nested_body["breadcrumbs"]] == [
-        ("dir-2", ""),
-        ("z-dir", "z-dir"),
-    ]
 
     beyond = client.get(f"/api/v2/files/{dir_file}/entries", params={"path": "", "page": 9})
     assert beyond.status_code == 200
@@ -426,17 +421,8 @@ def test_download_requires_browser_session(
     login(client, "user", OTHER_PASSWORD)
     _, file_id = seed_file(settings, user_id=user_id, index=1, payload=b"secret")
 
-    token_response = client.post("/api/v2/credentials/tokens", json={"name": "t"})
-    assert token_response.status_code == 200
-    token = token_response.json()["token"]
-
     anon = TestClient(app)
     assert anon.get(f"/api/v2/files/{file_id}/download").status_code == 401
-    rejected = anon.get(
-        f"/api/v2/files/{file_id}/download", headers={"Authorization": f"Bearer {token}"}
-    )
-    assert rejected.status_code == 403
-    assert rejected.json()["error"]["code"] == "permission_denied"
     assert anon.get("/api/v2/files").status_code == 401
 
 
@@ -459,35 +445,6 @@ def test_rename_contract(client: TestClient, settings: Settings) -> None:
     assert too_long.status_code == 422
     assert client.patch("/api/v2/files/999", json={"name": "x"}).status_code == 404
     assert other_file > 0
-
-
-def test_delete_file_contract(client: TestClient, settings: Settings) -> None:
-    _, user_id = setup_users(client)
-    _, file_id = seed_file(settings, user_id=user_id, index=1, name="doomed.bin")
-    _, blocked_file = seed_file(settings, user_id=user_id, index=2, name="busy.bin")
-
-    # 打包来源占用：最后引用删除被拒绝（409）。
-    busy = read_row(
-        settings,
-        "SELECT content_id FROM user_files WHERE id = :id",
-        {"id": blocked_file},
-    )
-    busy_content = int(busy.content_id)  # type: ignore[attr-defined]
-    seed_pack_source(
-        settings, user_id=user_id, file_id=blocked_file, content_id=busy_content
-    )
-    busy_response = client.delete(f"/api/v2/files/{blocked_file}")
-    assert busy_response.status_code == 409
-    assert busy_response.json()["error"]["code"] == "content_busy"
-    assert client.get("/api/v2/files").json()["total"] == 2
-
-    response = client.delete(f"/api/v2/files/{file_id}")
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    listing = client.get("/api/v2/files")
-    assert listing.json()["total"] == 1
-    assert listing.json()["space"]["used_bytes"] == 10
-    assert client.delete(f"/api/v2/files/{file_id}").status_code == 404
 
 
 def test_storage_admin_endpoints(client: TestClient, app: FastAPI, settings: Settings) -> None:
@@ -543,14 +500,8 @@ def test_storage_admin_endpoints(client: TestClient, app: FastAPI, settings: Set
         response = client.post("/api/v2/storage/files/delete", json={"content_ids": empty_ids})
         assert response.status_code == expected
 
-    for endpoint in ("scan", "repair"):
-        unimplemented = client.post(f"/api/v2/storage/{endpoint}")
-        assert unimplemented.status_code == 501
-        assert unimplemented.json()["error"]["code"] == "not_implemented"
-
     login(client, "user", OTHER_PASSWORD)
     assert client.get("/api/v2/storage/files").status_code == 403
-    assert client.post("/api/v2/storage/scan").status_code == 403
     assert TestClient(app).get("/api/v2/storage/files").status_code == 401
 
 
@@ -565,13 +516,8 @@ def test_openapi_contains_library_paths_and_no_legacy_alias(app: FastAPI) -> Non
         "/api/v2/storage/files",
         "/api/v2/storage/files/delete",
         "/api/v2/storage/files/{content_id}/users",
-        "/api/v2/storage/scan",
-        "/api/v2/storage/repair",
     ):
         assert expected in paths, expected
-    scan_responses = paths["/api/v2/storage/scan"]["post"]["responses"]
-    assert "501" in scan_responses
-    assert scan_responses["501"]["description"] == "暂未实现"
     assert not any(path.startswith("/api/files") for path in paths)
 
 

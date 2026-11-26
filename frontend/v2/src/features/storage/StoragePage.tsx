@@ -12,6 +12,7 @@ import { PageHeader } from "@/shared/components/PageHeader";
 import { PaginationControls } from "@/shared/components/PaginationControls";
 import { ToolbarSearchInput } from "@/shared/components/Toolbar";
 import { useToast } from "@/shared/components/toast-context";
+import { BatchFailureDialog, type BatchFailure } from "@/shared/components/BatchFailureDialog";
 import { useSelection } from "@/shared/hooks/useSelection";
 import { formatAdminBytes, formatAdminDateTime } from "@/shared/lib/format";
 import { requestModalClose } from "@/shared/ui/modalClose";
@@ -32,6 +33,7 @@ export function StoragePage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
+  const [batchFailures, setBatchFailures] = useState<BatchFailure[]>([]);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [orphanOnly, setOrphanOnly] = useState(false);
@@ -170,14 +172,21 @@ export function StoragePage() {
     try {
       const res = await deleteStorageFiles(targetIds);
       if (!mountedRef.current) return;
-      const rejectedMessage = firstRejectedMessage(res);
+      const nameById = new Map(files.map((file) => [file.id, file.namesText]));
+      const failures = res.results
+        .filter((item) => !item.accepted)
+        .map((item) => ({
+          label: nameById.get(item.content_id) ?? `内容 ${item.content_id}`,
+          reason: item.error?.message ?? "未知错误",
+        }));
       if (res.accepted_count === 0) {
-        showToast(rejectedMessage ?? "删除失败", "error");
+        setBatchFailures(failures.length > 0 ? failures : [{ label: "删除存储内容", reason: firstRejectedMessage(res) ?? "删除失败" }]);
+        showToast(firstRejectedMessage(res) ?? "删除失败", "error");
         return;
       }
 
       showToast(`已受理删除 ${res.accepted_count} 个文件`, "success");
-      if (rejectedMessage !== null) showToast(rejectedMessage, "error");
+      if (failures.length > 0) setBatchFailures(failures);
       clear();
       requestModalClose(trigger);
       const remainingTotal = Math.max(0, total - res.accepted_count);
@@ -481,6 +490,7 @@ export function StoragePage() {
           </div>
         </DialogShell>
       )}
+      <BatchFailureDialog failures={batchFailures} onClose={() => setBatchFailures([])} />
     </>
   );
 }

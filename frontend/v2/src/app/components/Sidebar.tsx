@@ -152,6 +152,23 @@ const StorageIcon = () => (
   </svg>
 );
 
+const DiskOrphanIcon = () => (
+  <svg
+    width="20"
+    height="20"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <circle cx="11" cy="11" r="7" />
+    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    <line x1="8" y1="11" x2="14" y2="11" />
+  </svg>
+);
+
 const ShareIcon = () => (
   <svg
     width="20"
@@ -220,10 +237,36 @@ export function Sidebar({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
 
   const pathname = location.pathname;
 
-  const isActive = (href: string) => {
-    if (!pathname) return false;
-    return pathname === href || pathname.startsWith(href + "/");
-  };
+  const navItems = [
+    { name: "任务", href: "/tasks", icon: <TasksIcon /> },
+    { name: "任务历史", href: "/history", icon: <HistoryIcon /> },
+    { name: "文件", href: "/files", icon: <FilesIcon /> },
+    { name: "分享", href: "/shares", icon: <ShareIcon /> },
+    { name: "设置", href: "/profile", icon: <ProfileIcon /> },
+    ...(user?.is_admin
+      ? [
+        {
+          name: "多用户管理",
+          href: "/users",
+          dividerBefore: true,
+          icon: <UsersIcon />,
+        },
+        { name: "存储管理", href: "/storage", icon: <StorageIcon /> },
+        { name: "未登记文件", href: "/storage/orphans", icon: <DiskOrphanIcon /> },
+        { name: "系统设置", href: "/settings", icon: <SettingsIcon /> },
+      ]
+      : []),
+  ];
+
+  // 取最长前缀命中项：/storage/orphans 属于「未登记文件」，不该连带点亮「存储管理」。
+  const activeHref = navItems.reduce<string | null>((matched, item) => {
+    if (!pathname) return matched;
+    const hit = pathname === item.href || pathname.startsWith(item.href + "/");
+    if (!hit) return matched;
+    return matched === null || item.href.length > matched.length ? item.href : matched;
+  }, null);
+
+  const isActive = (href: string) => href === activeHref;
 
   return (
     <>
@@ -304,6 +347,16 @@ export function Sidebar({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
                   存储管理
                 </Link>
                 <Link
+                  to="/storage/orphans"
+                  className="more-menu-item"
+                  onClick={(event) => requestModalClose(event.currentTarget)}
+                >
+                  <span className="more-menu-icon">
+                    <DiskOrphanIcon />
+                  </span>
+                  未登记文件
+                </Link>
+                <Link
                   to="/settings"
                   className="more-menu-item"
                   onClick={(event) => requestModalClose(event.currentTarget)}
@@ -347,25 +400,7 @@ export function Sidebar({ user, sidebarExpanded, setSidebarExpanded }: SidebarPr
         </div>
 
         <nav className="sidebar-nav">
-          {[
-            { name: "任务", href: "/tasks", icon: <TasksIcon /> },
-            { name: "任务历史", href: "/history", icon: <HistoryIcon /> },
-            { name: "文件", href: "/files", icon: <FilesIcon /> },
-            { name: "分享", href: "/shares", icon: <ShareIcon /> },
-            { name: "设置", href: "/profile", icon: <ProfileIcon /> },
-            ...(user?.is_admin
-              ? [
-                {
-                  name: "多用户管理",
-                  href: "/users",
-                  dividerBefore: true,
-                  icon: <UsersIcon />,
-                },
-                { name: "存储管理", href: "/storage", icon: <StorageIcon /> },
-                { name: "系统设置", href: "/settings", icon: <SettingsIcon /> },
-              ]
-              : []),
-          ].map((item) => (
+          {navItems.map((item) => (
             <div key={item.href}>
               {"dividerBefore" in item && item.dividerBefore && <div className="nav-divider" />}
               <Link

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import partial
 from typing import Annotated
-from urllib.parse import parse_qs, quote
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, Path, Query, Request
 
@@ -10,9 +10,7 @@ from ..application.settings.download_limit import DownloadConnectionLease, Downl
 from ..application.settings.rate_limit import RateLimiter
 from ..application.shares.access import PublicShareService
 from ..application.shares.models import PublicShareDownload
-from ..domain.errors import DomainError, ErrorCode
 from .contracts import (
-    PublicBreadcrumbResponse,
     PublicEntryItemResponse,
     PublicEntryListResponse,
     PublicShareInfoResponse,
@@ -29,27 +27,6 @@ router = APIRouter(prefix="/api/s", tags=["public-shares"])
 def _content_disposition(name: str) -> str:
     fallback = name if name.isascii() and '"' not in name and "\\" not in name else "download"
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
-
-
-MAX_FORM_BYTES = 64 * 1024
-
-
-def _require_urlencoded_form(request: Request) -> None:
-    content_type = request.headers.get("content-type", "")
-    media_type = content_type.split(";", 1)[0].strip().lower()
-    if media_type != "application/x-www-form-urlencoded":
-        raise DomainError(ErrorCode.INVALID_INPUT, "表单下载仅支持 application/x-www-form-urlencoded")
-
-
-def _require_form_size(request: Request) -> None:
-    declared = request.headers.get("content-length", "")
-    if declared.isdigit():
-        _require_form_body_size(int(declared))
-
-
-def _require_form_body_size(size: int) -> None:
-    if size > MAX_FORM_BYTES:
-        raise DomainError(ErrorCode.TASK_TOO_LARGE, "表单请求体过大")
 
 
 def _bearer_token(authorization: str | None) -> str:
@@ -135,7 +112,7 @@ async def verify_share(
     limiter.check_public(ip)
     limiter.check_share_access(ip)
     token, expires_in = await service.verify(code, payload.password)
-    return ShareVerifyResponse(access_token=token, expires_in=expires_in)
+    return ShareVerifyResponse(access_token=token)
 
 
 @router.get(
@@ -169,7 +146,6 @@ async def browse_share(
         total=total,
         page=page,
         page_size=page_size,
-        breadcrumbs=[PublicBreadcrumbResponse(name=item.name, path=item.path) for item in breadcrumbs],
     )
 
 
@@ -203,41 +179,3 @@ async def download_share(
         raise
     return _streaming(result, service, connection)
 
-
-@router.post(
-    "/{code}/download",
-    responses=error_responses(400, 401, 403, 404, 410, 413, 416, 422, 429, 500),
-)
-async def download_share_by_form(
-    request: Request,
-    code: str = Path(min_length=1, max_length=64),
-    range_header: str | None = Header(default=None, alias="Range"),
-    limiter: RateLimiter = Depends(rate_limiter),
-    service: PublicShareService = Depends(public_shares),
-    connections: DownloadConnectionLimiter = Depends(download_connections),
-) -> LeaseStreamingResponse:
-    # 限流先行：无 token 的请求同样消耗额度。
-    ip = client_ip(request)
-    limiter.check_public(ip)
-    limiter.check_share_access(ip)
-    _require_urlencoded_form(request)
-    _require_form_size(request)
-    # 表单通道：手工解析 x-www-form-urlencoded（不引 python-multipart），token 只从表单或 Bearer 头进入。
-    # token 是否必需由 service 按分享是否设密码裁决（无密码分享凭分享码直接访问）。
-    body = (await request.body()).decode("utf-8", errors="replace")
-    _require_form_body_size(len(body.encode("utf-8")))
-    form = parse_qs(body, keep_blank_values=True)
-    raw_token = form.get("token", [""])[0]
-    raw_path = form.get("path", [""])[0]
-    path = raw_path or None
-    # 校验先行（与旧版同序）：无效分享码/令牌不消耗匿名连接档；per-file 档按内容身份计。
-    record = await service.check_access(code, raw_token)
-    connection = await connections.acquire_anonymous(
-        client_ip=client_ip(request), file_key=record.content_key
-    )
-    try:
-        result = await service.download(code, raw_token, path, range_header)
-    except BaseException:
-        await connection.release()
-        raise
-    return _streaming(result, service, connection)

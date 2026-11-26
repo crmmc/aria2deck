@@ -75,30 +75,6 @@ class DeleteUserResponse(BaseModel):
     accepted: bool = True
 
 
-class ApiTokenCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(default="默认 Token", max_length=100)
-
-
-class ApiTokenResponse(BaseModel):
-    id: int
-    name: str
-    prefix: str
-    created_at_ms: int
-    last_used_at_ms: int | None
-
-
-class CreatedApiTokenResponse(ApiTokenResponse):
-    token: str
-
-
-class ApiTokenListResponse(BaseModel):
-    items: list[ApiTokenResponse]
-    total: int
-    page: int
-    page_size: int
-
-
 class RpcAccessUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
@@ -106,7 +82,6 @@ class RpcAccessUpdateRequest(BaseModel):
 
 class RpcAccessResponse(BaseModel):
     enabled: bool
-    secret_prefix: str | None
     secret: str | None
 
 
@@ -371,23 +346,6 @@ class TorrentPreviewResponse(BaseModel):
     default_selection: list[int]
 
 
-class HistoryPurgeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    before_ms: int | None = Field(default=None, ge=0)
-    older_than_days: int | None = Field(default=None, ge=1, le=3650)
-
-
-class HistoryPurgeResponse(BaseModel):
-    expired_tasks: int
-    detached_sources: int
-
-
-class HistoryClearAllResponse(BaseModel):
-    """一键清空本人全部终态任务（A2）。"""
-
-    cleared_count: int
-
-
 class FileBatchDeleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     file_ids: list[int] = Field(min_length=1, max_length=1000)
@@ -414,7 +372,6 @@ class PackClearRecordsResponse(BaseModel):
 class TrackerStatusResponse(BaseModel):
     items: list[str]
     entry_count: int
-    remote_items: list[str]
     refresh_status: str
     failed_urls: list[str]
     updated_at_ms: int | None
@@ -454,7 +411,6 @@ class FileEntryListResponse(BaseModel):
     total: int
     page: int
     page_size: int
-    breadcrumbs: list[DirectoryBreadcrumbResponse]
 
 
 class FileSearchHitResponse(BaseModel):
@@ -480,7 +436,6 @@ class StorageFileResponse(BaseModel):
     content_key: str
     kind: Literal["file", "directory"]
     size: int
-    storage_path: str
     on_disk: bool
     reference_count: int
     deletion_state: Literal["active", "pending_delete", "tombstoned"]
@@ -521,6 +476,71 @@ class StorageDeleteResponse(BaseModel):
     accepted_count: int
     rejected_count: int
     results: list[StorageDeleteResultResponse]
+
+
+class DiskOrphanItemResponse(BaseModel):
+    storage_path: str
+    kind: Literal["file", "directory"]
+    digest: str
+    size: int
+    modified_at_ms: int
+
+
+class DiskOrphanListResponse(BaseModel):
+    items: list[DiskOrphanItemResponse]
+    total: int
+    page: int
+    page_size: int
+    unrecognized_count: int
+
+
+class QueueItemResponse(BaseModel):
+    storage_path: str
+    kind: Literal["file", "directory"]
+    digest: str
+    size: int
+    state: Literal["queued", "running", "done", "failed"]
+    enqueued_at_ms: int
+    started_at_ms: int | None
+    finished_at_ms: int | None
+    processed_bytes: int
+    content_id: int | None
+    error: ErrorBody | None
+
+
+class QueueSnapshotResponse(BaseModel):
+    running: bool
+    items: list[QueueItemResponse]
+    queued_count: int
+    running_count: int
+    done_count: int
+    failed_count: int
+    pending_bytes: int
+
+
+class QueueEnqueueRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    storage_paths: list[str] = Field(min_length=1, max_length=1000)
+
+
+class QueueEnqueueResultResponse(BaseModel):
+    storage_path: str
+    accepted: bool
+    state: Literal["queued", "running", "done", "failed"] | None = None
+    error: ErrorBody | None = None
+
+
+class QueueDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    storage_paths: list[str] = Field(min_length=1, max_length=1000)
+
+
+class QueueDeleteResultResponse(BaseModel):
+    storage_path: str
+    accepted: bool
+    mode: Literal["immediate", "deferred"] | None = None
+    freed_bytes: int = 0
+    error: ErrorBody | None = None
 
 
 class PackPrecomputeRequest(BaseModel):
@@ -658,7 +678,6 @@ class ShareVerifyRequest(BaseModel):
 
 class ShareVerifyResponse(BaseModel):
     access_token: str
-    expires_in: int
 
 
 class PublicEntryItemResponse(BaseModel):
@@ -678,4 +697,3 @@ class PublicEntryListResponse(BaseModel):
     total: int
     page: int
     page_size: int
-    breadcrumbs: list[PublicBreadcrumbResponse]

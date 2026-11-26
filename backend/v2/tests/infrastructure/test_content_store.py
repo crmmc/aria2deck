@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
 
-from aria2deck.domain.content import ContentKind
+from aria2deck.domain.content import (
+    ContentEntryIdentity,
+    ContentKind,
+    directory_content_digest,
+)
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.infrastructure.content_store import DownloadContentStore
 
@@ -417,3 +422,337 @@ async def test_verify_prepared_distinguishes_missing_from_non_regular_entries(
     with pytest.raises(DomainError) as caught:
         await store.verify_prepared("packs/prepared-3.part")
     assert caught.value.code is ErrorCode.INVALID_STATE
+
+MIB = 1024 * 1024
+
+
+def _write_canonical_file(store_root: Path, payload: bytes) -> str:
+    digest = hashlib.sha256(payload).hexdigest()
+    target = store_root / "objects" / f"file-{digest}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(payload)
+    return f"objects/file-{digest}"
+
+
+def _write_canonical_directory(
+    store_root: Path, files: dict[str, bytes]
+) -> tuple[str, list[ContentEntryIdentity]]:
+    entries = [
+        ContentEntryIdentity(
+            name, ContentKind.FILE, len(payload), hashlib.sha256(payload).hexdigest()
+        )
+        for name, payload in files.items()
+    ]
+    digest = directory_content_digest(entries)
+    target = store_root / "objects" / f"directory-{digest}"
+    target.mkdir(parents=True, exist_ok=True)
+    for name, payload in files.items():
+        (target / name).write_bytes(payload)
+    return f"objects/directory-{digest}", entries
+
+
+@pytest.mark.parametrize(
+    ("storage_path", "expected_kind"),
+    [
+        ("objects/file-" + "a" * 64, ContentKind.FILE),
+        ("objects/directory-" + "0123456789abcdef" * 4, ContentKind.DIRECTORY),
+    ],
+)
+def test_parse_canonical_path_accepts_canonical_names_without_touching_disk(
+    tmp_path: Path, storage_path: str, expected_kind: ContentKind
+) -> None:
+    store = DownloadContentStore(tmp_path / "absent")
+    kind, digest = store.parse_canonical_path(storage_path)
+    assert kind is expected_kind
+    assert digest == storage_path.rpartition("-")[2]
+
+
+@pytest.mark.parametrize(
+    "storage_path",
+    [
+        "objects/file-" + "A" * 64,
+        "objects/file-" + "a" * 63,
+        "objects/file-" + "a" * 65,
+        "objects/file-" + "g" * 64,
+        "objects/link-" + "a" * 64,
+        "objects/file-" + "a" * 64 + "/nested",
+        "objects/file-" + "a" * 64 + "/",
+        "objects//file-" + "a" * 64,
+        "objects/../objects/file-" + "a" * 64,
+        "/objects/file-" + "a" * 64,
+        "objects\\file-" + "a" * 64,
+        "objects/file-" + "a" * 64 + "\x00",
+        "file-" + "a" * 64,
+        "",
+    ],
+)
+def test_parse_canonical_path_rejects_anything_else(tmp_path: Path, storage_path: str) -> None:
+    store = DownloadContentStore(tmp_path / "absent")
+    with pytest.raises(DomainError) as caught:
+        store.parse_canonical_path(storage_path)
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+
+
+async def test_list_canonical_entries_counts_unrecognized_and_measures_sizes(
+    tmp_path: Path,
+) -> None:
+    payload = b"hello"
+    storage_path = _write_canonical_file(tmp_path, payload)
+    directory_path, _entries = _write_canonical_directory(tmp_path, {"child.bin": b"child"})
+    objects = tmp_path / "objects"
+    (objects / "file-not-canonical").write_bytes(b"x")
+    (objects / f"file-{'d' * 64}").symlink_to(tmp_path / "outside")
+    store = DownloadContentStore(tmp_path)
+
+    entries, unrecognized = await store.list_canonical_entries()
+
+    assert unrecognized == 2, "命名不符与符号链接都不计入清单"
+    assert sorted(entry.storage_path for entry in entries) == sorted(
+        [storage_path, directory_path]
+    )
+    by_path = {entry.storage_path: entry for entry in entries}
+    file_entry = by_path[storage_path]
+    assert (file_entry.kind, file_entry.size) == (ContentKind.FILE, len(payload))
+    assert file_entry.digest == storage_path.rpartition("-")[2]
+    assert file_entry.modified_at_ms > 0
+    directory_entry = by_path[directory_path]
+    assert (directory_entry.kind, directory_entry.size) == (ContentKind.DIRECTORY, 5)
+
+
+async def test_list_canonical_entries_returns_empty_when_objects_is_unusable(
+    tmp_path: Path,
+) -> None:
+    store = DownloadContentStore(tmp_path)
+    assert await store.list_canonical_entries() == ([], 0)
+
+    (tmp_path / "actual").mkdir()
+    (tmp_path / "objects").symlink_to(tmp_path / "actual", target_is_directory=True)
+    assert await store.list_canonical_entries() == ([], 0), "objects 是符号链接时不跟随"
+
+
+async def test_list_canonical_entries_skips_entries_vanished_mid_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    objects = tmp_path / "objects"
+    objects.mkdir()
+    kept = objects / f"file-{'a' * 64}"
+    kept.write_bytes(b"keep")
+    vanished = objects / f"file-{'b' * 64}"
+    vanished.write_bytes(b"gone")
+    real_lstat = os.lstat
+
+    def racing_lstat(path: object) -> os.stat_result:
+        if Path(str(path)).name == vanished.name:
+            raise FileNotFoundError(str(path))
+        return real_lstat(path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", racing_lstat)
+    store = DownloadContentStore(tmp_path)
+
+    entries, unrecognized = await store.list_canonical_entries()
+
+    assert [entry.storage_path for entry in entries] == [f"objects/file-{'a' * 64}"]
+    assert unrecognized == 0, "竞态消失的条目既不进清单也不算不规范"
+
+
+async def test_stat_canonical_reads_metadata_and_rejects_links_and_escapes(
+    tmp_path: Path,
+) -> None:
+    payload = b"hello"
+    storage_path = _write_canonical_file(tmp_path, payload)
+    directory_path, _entries = _write_canonical_directory(
+        tmp_path, {"a.bin": b"12345", "b.bin": b"678"}
+    )
+    store = DownloadContentStore(tmp_path)
+
+    assert (await store.stat_canonical(storage_path)).size == len(payload)
+    assert (await store.stat_canonical(directory_path)).size == 8
+
+    with pytest.raises(DomainError) as caught:
+        await store.stat_canonical(f"objects/file-{'c' * 64}")
+    assert caught.value.code is ErrorCode.NOT_FOUND
+
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    link = tmp_path / "objects" / f"file-{'e' * 64}"
+    link.symlink_to(outside)
+    with pytest.raises(DomainError) as caught:
+        await store.stat_canonical(f"objects/file-{'e' * 64}")
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+    assert outside.read_bytes() == b"outside", "拒绝时不得读取链接指向的内容"
+
+    actual = tmp_path / "actual-objects"
+    actual.mkdir()
+    outside_dir = tmp_path / "escaped"
+    outside_dir.mkdir()
+    (tmp_path / "objects").rename(tmp_path / "objects-moved")
+    (tmp_path / "objects").symlink_to(actual, target_is_directory=True)
+    with pytest.raises(DomainError) as caught:
+        await store.stat_canonical(f"objects/file-{'f' * 64}")
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+
+
+async def test_stat_canonical_ignores_non_regular_files_when_measuring(tmp_path: Path) -> None:
+    directory_path, _entries = _write_canonical_directory(tmp_path, {"a.bin": b"123"})
+    (tmp_path / directory_path / "link").symlink_to(tmp_path / "outside")
+    os.mkfifo(tmp_path / directory_path / "pipe")
+
+    assert (await DownloadContentStore(tmp_path).stat_canonical(directory_path)).size == 3
+
+
+async def test_stat_canonical_ignores_files_vanished_while_measuring_a_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory_path, _entries = _write_canonical_directory(
+        tmp_path, {"kept.bin": b"12345", "gone.bin": b"xx"}
+    )
+    real_lstat = os.lstat
+
+    def racing_lstat(path: object) -> os.stat_result:
+        if Path(str(path)).name == "gone.bin":
+            raise FileNotFoundError(str(path))
+        return real_lstat(path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", racing_lstat)
+
+    assert (await DownloadContentStore(tmp_path).stat_canonical(directory_path)).size == 5
+
+
+async def test_verify_canonical_hashes_a_file_with_cumulative_progress(tmp_path: Path) -> None:
+    payload = b"a" * (20 * MIB)
+    storage_path = _write_canonical_file(tmp_path, payload)
+    store = DownloadContentStore(tmp_path)
+    reported: list[int] = []
+
+    measured, entries = await store.verify_canonical(storage_path, on_progress=reported.append)
+
+    assert entries == []
+    assert (measured.kind, measured.size) == (ContentKind.FILE, len(payload))
+    # 每读一块（1 MiB）就回调一次累计字节：停止指令靠它尽早生效，小文件也必须能中断
+    assert reported == [MIB * step for step in range(1, 21)], "进度按块报告"
+    assert reported[-2] < len(payload), "读到最后一块之前就已能收到停止指令"
+    without_progress, _ = await store.verify_canonical(storage_path)
+    assert without_progress.size == measured.size
+
+
+async def test_verify_canonical_keeps_directory_identity_for_a_single_file(tmp_path: Path) -> None:
+    payload = b"only"
+    storage_path, expected_entries = _write_canonical_directory(tmp_path, {"only.bin": payload})
+    store = DownloadContentStore(tmp_path)
+
+    measured, entries = await store.verify_canonical(storage_path)
+
+    assert measured.kind is ContentKind.DIRECTORY, "目录型对象即使只有一个文件也不得判成单文件"
+    assert measured.size == len(payload)
+    assert entries == expected_entries
+
+
+async def test_verify_canonical_lists_subdirectories_in_the_manifest(tmp_path: Path) -> None:
+    payload = b"abc"
+    expected = [
+        ContentEntryIdentity("sub", ContentKind.DIRECTORY, 0),
+        ContentEntryIdentity(
+            "sub/a.bin", ContentKind.FILE, len(payload), hashlib.sha256(payload).hexdigest()
+        ),
+    ]
+    storage_path = f"objects/directory-{directory_content_digest(expected)}"
+    (tmp_path / storage_path / "sub").mkdir(parents=True)
+    (tmp_path / storage_path / "sub" / "a.bin").write_bytes(payload)
+
+    measured, scanned = await DownloadContentStore(tmp_path).verify_canonical(storage_path)
+
+    assert scanned == expected
+    assert measured.size == len(payload)
+
+
+async def test_verify_canonical_accepts_an_empty_directory_and_accumulates_progress(
+    tmp_path: Path,
+) -> None:
+    store = DownloadContentStore(tmp_path)
+    empty_digest = directory_content_digest([])
+    (tmp_path / "objects" / f"directory-{empty_digest}").mkdir(parents=True)
+    measured, entries = await store.verify_canonical(f"objects/directory-{empty_digest}")
+    assert (measured.size, entries) == (0, [])
+
+    chunk = b"a" * (5 * MIB)
+    storage_path, _expected = _write_canonical_directory(
+        tmp_path, {"a.bin": chunk, "b.bin": chunk}
+    )
+    reported: list[int] = []
+    await store.verify_canonical(storage_path, on_progress=reported.append)
+    assert reported == [MIB * step for step in range(1, 11)], "多文件跨文件连续累计"
+
+    # 小于一块的条目也要先回调一次，否则点「停止」无法中断它
+    small = b"a" * (1024 * 1024)
+    small_path, _entries = _write_canonical_directory(tmp_path, {"s.bin": small})
+    small_reported: list[int] = []
+    await store.verify_canonical(small_path, on_progress=small_reported.append)
+    assert small_reported == [len(small)]
+
+
+async def test_verify_canonical_rejects_a_directory_whose_manifest_differs(tmp_path: Path) -> None:
+    store = DownloadContentStore(tmp_path)
+    storage_path, _expected = _write_canonical_directory(tmp_path, {"a.bin": b"1234567"})
+    (tmp_path / storage_path / "a.bin").write_bytes(b"7654321")  # 同大小、不同内容
+
+    with pytest.raises(DomainError) as caught:
+        await store.verify_canonical(storage_path)
+
+    assert caught.value.code is ErrorCode.INVALID_STATE
+
+
+async def test_verify_canonical_rejects_digest_and_kind_mismatches(tmp_path: Path) -> None:
+    store = DownloadContentStore(tmp_path)
+    wrong_digest = hashlib.sha256(b"other").hexdigest()
+    rewritten = tmp_path / "objects" / f"file-{wrong_digest}"
+    rewritten.parent.mkdir(parents=True)
+    rewritten.write_bytes(b"real")
+    with pytest.raises(DomainError) as caught:
+        await store.verify_canonical(f"objects/file-{wrong_digest}")
+    assert caught.value.code is ErrorCode.INVALID_STATE
+
+    (tmp_path / "objects" / f"file-{'1' * 64}").mkdir()
+    with pytest.raises(DomainError) as caught:
+        await store.verify_canonical(f"objects/file-{'1' * 64}")
+    assert caught.value.code is ErrorCode.INVALID_INPUT, "file- 前缀却是目录：类型不符"
+
+    (tmp_path / "objects" / f"directory-{'2' * 64}").write_bytes(b"x")
+    with pytest.raises(DomainError) as caught:
+        await store.verify_canonical(f"objects/directory-{'2' * 64}")
+    assert caught.value.code is ErrorCode.INVALID_INPUT, "directory- 前缀却是文件：类型不符"
+
+    with pytest.raises(DomainError) as caught:
+        await store.verify_canonical(f"objects/file-{'3' * 64}")
+    assert caught.value.code is ErrorCode.NOT_FOUND
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        ("control", ErrorCode.DOWNLOAD_UNAVAILABLE),
+        ("symlink", ErrorCode.INVALID_INPUT),
+        ("symlink-dir", ErrorCode.INVALID_INPUT),
+        ("fifo", ErrorCode.INVALID_INPUT),
+    ],
+)
+async def test_verify_canonical_rejects_unsafe_directory_contents(
+    tmp_path: Path, case: str, expected_code: ErrorCode
+) -> None:
+    store = DownloadContentStore(tmp_path)
+    storage_path = f"objects/directory-{'4' * 64}"
+    target = tmp_path / storage_path
+    target.mkdir(parents=True)
+    (target / "payload.bin").write_bytes(b"data")
+    if case == "control":
+        (target / "payload.bin.aria2").write_bytes(b"control")
+    elif case == "symlink":
+        (target / "link").symlink_to(tmp_path / "outside")
+    elif case == "symlink-dir":
+        (tmp_path / "outside-dir").mkdir()
+        (target / "link").symlink_to(tmp_path / "outside-dir", target_is_directory=True)
+    else:
+        os.mkfifo(target / "pipe")
+
+    with pytest.raises(DomainError) as caught:
+        await store.verify_canonical(storage_path)
+    assert caught.value.code is expected_code

@@ -110,6 +110,17 @@ function renderAt(path: string, me: UserResponse = ME) {
     if (url.startsWith("/api/v2/storage/files")) {
       return json(200, { items: [], total: 0, page: 1, page_size: 20 });
     }
+    if (url === "/api/v2/storage/disk-orphans/queue") {
+      return json(200, {
+        running: false, items: [], queued_count: 0, running_count: 0,
+        done_count: 0, failed_count: 0, pending_bytes: 0,
+      });
+    }
+    if (url.startsWith("/api/v2/storage/disk-orphans")) {
+      return json(200, {
+        items: [], total: 0, page: 1, page_size: 20, unrecognized_count: 0,
+      });
+    }
     return json(200, emptyStats());
   });
   return render(
@@ -221,6 +232,22 @@ describe("batch-3 routes", () => {
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "存储管理" })).toBeInTheDocument();
     });
+  });
+
+  it("renders the disk orphan page for admins", async () => {
+    renderAt("/storage/orphans");
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "未登记文件" })).toBeInTheDocument();
+    });
+  });
+
+  it("redirects non-admin users from /storage/orphans to /tasks", async () => {
+    renderAt("/storage/orphans", { ...ME, is_admin: false });
+    expect(await screen.findByRole("heading", { name: "任务" })).toBeInTheDocument();
+    const adminRequests = mockFetch.mock.calls.map(([url]) => String(url)).filter((url) =>
+      url.startsWith("/api/v2/storage/disk-orphans"),
+    );
+    expect(adminRequests).toEqual([]);
   });
 
   it("redirects non-admin users from settings without administrator data requests", async () => {

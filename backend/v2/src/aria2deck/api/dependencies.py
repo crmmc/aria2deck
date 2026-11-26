@@ -13,6 +13,7 @@ from ..application.downloads.history import HistoryService
 from ..application.downloads.queries import DownloadQueryService
 from ..application.library.commands import LibraryCommandService
 from ..application.library.deletion import ContentDeletionWorker
+from ..application.library.disk_scan import DiskOrphanService
 from ..application.library.download import LibraryDownloadService
 from ..application.library.queries import LibraryQueryService
 from ..application.packs.admission import PackAdmissionService
@@ -73,6 +74,10 @@ def library_download(request: Request) -> LibraryDownloadService:
 
 def library_deletion(request: Request) -> ContentDeletionWorker:
     return cast(ContentDeletionWorker, request.app.state.library_deletion)
+
+
+def disk_orphans(request: Request) -> DiskOrphanService:
+    return cast(DiskOrphanService, request.app.state.disk_orphans)
 
 
 def pack_admission(request: Request) -> PackAdmissionService:

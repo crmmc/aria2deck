@@ -124,6 +124,14 @@ describe("Sidebar（V1 侧栏与移动底栏）", () => {
     const adminNav = document.querySelector(".sidebar-nav");
     expect(adminNav?.textContent).toContain("多用户管理");
     expect(document.querySelector(".nav-divider")).toBeTruthy();
+    const orphanEntry = within(adminNav as HTMLElement).getByRole("link", {
+      name: "未登记文件",
+    });
+    expect(orphanEntry).toHaveAttribute("href", "/storage/orphans");
+    // 排在「存储管理」之后、「系统设置」之前。
+    const labels = Array.from(adminNav!.querySelectorAll(".nav-item .nav-text"))
+      .map((node) => node.textContent);
+    expect(labels.slice(-4)).toEqual(["多用户管理", "存储管理", "未登记文件", "系统设置"]);
     unmount();
 
     await renderSidebar({ user: REGULAR });
@@ -132,8 +140,15 @@ describe("Sidebar（V1 侧栏与移动底栏）", () => {
     expect(userNav?.textContent).toContain("任务历史");
     expect(userNav?.textContent).not.toContain("多用户管理");
     expect(userNav?.textContent).not.toContain("存储管理");
+    expect(userNav?.textContent).not.toContain("未登记文件");
     expect(userNav?.textContent).not.toContain("系统设置");
     expect(document.querySelector(".nav-divider")).toBeNull();
+  });
+
+  it("未登记文件导航项在子路径上也标记 active", async () => {
+    await renderSidebar({ user: ADMIN, initialPath: "/storage/orphans" });
+    const active = document.querySelector(".nav-item.active");
+    expect(active?.getAttribute("href")).toBe("/storage/orphans");
   });
 
   it("用户为空时按普通用户渲染", async () => {
@@ -165,6 +180,7 @@ describe("Sidebar（V1 侧栏与移动底栏）", () => {
     expect(dialog).toHaveTextContent("个人设置");
     expect(dialog).toHaveTextContent("多用户管理");
     expect(dialog).toHaveTextContent("存储管理");
+    expect(dialog).toHaveTextContent("未登记文件");
     expect(dialog).toHaveTextContent("系统设置");
     expect(dialog).toHaveTextContent("退出登录");
 
@@ -172,7 +188,7 @@ describe("Sidebar（V1 侧栏与移动底栏）", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
-  it.each(["个人设置", "多用户管理", "存储管理", "系统设置"])(
+  it.each(["个人设置", "多用户管理", "存储管理", "未登记文件", "系统设置"])(
     "更多菜单点击「%s」后收起菜单",
     async (label) => {
       await renderSidebar({ user: ADMIN });
@@ -190,6 +206,7 @@ describe("Sidebar（V1 侧栏与移动底栏）", () => {
     expect(dialog).toHaveTextContent("个人设置");
     expect(dialog).not.toHaveTextContent("多用户管理");
     expect(dialog).not.toHaveTextContent("存储管理");
+    expect(dialog).not.toHaveTextContent("未登记文件");
     expect(dialog).not.toHaveTextContent("系统设置");
     expect(dialog).toHaveTextContent("退出登录");
   });

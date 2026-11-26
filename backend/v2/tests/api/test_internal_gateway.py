@@ -14,7 +14,7 @@ from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from aria2deck.infrastructure.sqlite.repositories.quota import QuotaRepository
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
-from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, login
+from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, fetch_task, login
 from tests.api.test_download_writes import install_backend
 from tests.infrastructure.test_safe_http import Response, Session, install_session
 
@@ -141,7 +141,7 @@ def test_single_user_over_quota_fails_subscription_before_streaming(
     assert result.status_code == 409
     assert result.json()["error"]["code"] == "quota_exceeded"
     assert closed == [True]
-    assert client.get(f"/api/v2/tasks/{attempt_id}").json()["status"] == "failed"
+    assert fetch_task(client, attempt_id)["status"] == "failed"
 
 
 def test_shared_gateway_only_rejects_the_over_quota_subscriber(
@@ -178,7 +178,7 @@ def test_shared_gateway_only_rejects_the_over_quota_subscriber(
     )
     assert result.status_code == 200
     assert result.content == b"abc"
-    assert client.get(f"/api/v2/tasks/{first_id}").json()["status"] == "failed"
+    assert fetch_task(client, first_id)["status"] == "failed"
 
     async def quotas() -> tuple[int, int, int]:
         database = SQLiteDatabase(settings.database_path)

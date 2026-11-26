@@ -75,7 +75,6 @@ function tracker(overrides: Partial<TrackerStatusResponse> = {}): TrackerStatusR
   return {
     items: ["udp://a/announce"],
     entry_count: 1,
-    remote_items: ["udp://a/announce"],
     refresh_status: "success",
     failed_urls: [],
     updated_at_ms: 1700000000000,

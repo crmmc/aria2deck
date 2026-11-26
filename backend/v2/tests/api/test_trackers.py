@@ -72,13 +72,11 @@ def test_tracker_all_failed_preserves_last_good_remote_and_empty_success_is_part
     fetcher.results = {FIRST: DomainError(ErrorCode.UPSTREAM_FAILURE, "offline"), SECOND: DomainError(ErrorCode.UPSTREAM_FAILURE, "offline")}
     failed = client.post("/api/v2/trackers/refresh").json()
     assert failed["refresh_status"] == "failed"
-    assert failed["remote_items"] == ["udp://one.example:80", "udp://two.example:80"]
     assert failed["failed_urls"] == [FIRST, SECOND]
 
     fetcher.results = {FIRST: "# valid empty list", SECOND: DomainError(ErrorCode.UPSTREAM_FAILURE, "offline")}
     partial = client.post("/api/v2/trackers/refresh").json()
     assert partial["refresh_status"] == "partial"
-    assert partial["remote_items"] == []
 
 
 def test_tracker_permissions_and_empty_configuration(client: TestClient) -> None:

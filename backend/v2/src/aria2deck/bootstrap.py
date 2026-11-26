@@ -43,9 +43,11 @@ from .application.downloads.recovery import DownloadRecoveryService
 from .application.downloads.rpc_projection import VirtualGidSpace
 from .application.downloads.rpc_service import Aria2RpcService
 from .application.downloads.ws_service import WebSocketTaskService
+from .application.library.admission_worker import DiskAdmissionWorker
 from .application.library.cleanup import LibraryUserCleanup
 from .application.library.commands import LibraryCommandService
 from .application.library.deletion import ContentDeletionWorker
+from .application.library.disk_scan import DiskAdmissionQueue, DiskOrphanService
 from .application.library.download import LibraryDownloadService
 from .application.library.leases import ReadLeaseManager
 from .application.library.queries import LibraryQueryService
@@ -310,6 +312,24 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         lease_ttl_ms=DELETE_LEASE_TTL_MS,
     )
     supervisor.register("content-deletion", library_deletion.run_worker)
+    # 入库队列是进程内状态：重启即清空、开关复位为停止（V2 无迁移能力，不落表）。
+    disk_admission_queue = DiskAdmissionQueue()
+    disk_orphans = DiskOrphanService(
+        store=content_store,
+        uow_factory=uow_factory,
+        repository_factory=content_repository,
+        queue=disk_admission_queue,
+        library_commands=library_commands,
+        clock_ms=_clock_ms,
+    )
+    disk_admission = DiskAdmissionWorker(
+        queue=disk_admission_queue,
+        store=content_store,
+        uow_factory=uow_factory,
+        repository_factory=content_repository,
+        clock_ms=_clock_ms,
+    )
+    supervisor.register("disk-admission", disk_admission.run_worker)
     pack_admission = PackAdmissionService(
         uow_factory=uow_factory,
         repository_factory=pack_repository,
@@ -432,6 +452,8 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     app.state.library_commands = library_commands
     app.state.library_download = library_download
     app.state.library_deletion = library_deletion
+    app.state.disk_orphans = disk_orphans
+    app.state.disk_admission = disk_admission
     app.state.pack_admission = pack_admission
     app.state.pack_progress = pack_progress
     app.state.pack_control = pack_control

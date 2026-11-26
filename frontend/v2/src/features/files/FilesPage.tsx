@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 
 import { useToast } from "@/shared/components/toast-context";
+import { BatchFailureDialog, type BatchFailure } from "@/shared/components/BatchFailureDialog";
 import { PaginationControls } from "@/shared/components/PaginationControls";
 import { PageHeader } from "@/shared/components/PageHeader";
 import { useIsMobile } from "@/shared/hooks/useIsMobile";
@@ -69,6 +70,7 @@ export function FilesPage() {
   // Batch selection state
   const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
   const [isBatchOperating, setIsBatchOperating] = useState(false);
+  const [batchFailures, setBatchFailures] = useState<BatchFailure[]>([]);
 
   // Folder browsing state（in-page navigation）
   const [browseContext, setBrowseContext] = useState<BrowseContext | null>(null);
@@ -367,6 +369,15 @@ export function FilesPage() {
     try {
       const result = await batchDeleteFiles(selectedList.map((f) => f.id));
       if (result.rejected_count > 0) {
+        const nameById = new Map(selectedList.map((f) => [f.id, f.name]));
+        setBatchFailures(
+          result.results
+            .filter((item) => !item.accepted)
+            .map((item) => ({
+              label: nameById.get(item.file_id) ?? `文件 ${item.file_id}`,
+              reason: item.error?.message ?? "未知错误",
+            })),
+        );
         showToast(
           `已受理 ${result.accepted_count} 个文件，${result.rejected_count} 个删除失败`,
           "warning",
@@ -820,6 +831,7 @@ export function FilesPage() {
           onClose={() => setShareDialogFile(null)}
         />
       )}
+      <BatchFailureDialog failures={batchFailures} onClose={() => setBatchFailures([])} />
     </div>
   );
 }

@@ -9,6 +9,12 @@ import type { TaskStatsResponse } from "@/shared/api/types";
 
 const SAMPLE_WINDOW_MS = 60_000;
 const MAX_SAMPLES = 13;
+// 有任务在跑时加快刷新，否则短任务的冻结量会落在采样间隙里看不见
+const ACTIVE_POLL_MS = 2_000;
+const IDLE_POLL_MS = 5_000;
+// 与 svg 的 viewBox 一致：端点标记用百分比定位到这一坐标系
+const VIEW_WIDTH = 640;
+const VIEW_HEIGHT = 160;
 
 type SpeedSample = {
   at: number;
@@ -48,26 +54,48 @@ function SpeedChart({ samples }: { samples: SpeedSample[] }) {
 
   return (
     <div className="speed-chart-wrap">
-      <svg
-        className="speed-chart"
-        viewBox="0 0 640 160"
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={`最近 60 秒下载和上传速度，${samples.length} 次真实采样`}
-      >
-        <defs>
-          <linearGradient id="speed-area-gradient" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#0071e3" stopOpacity=".28" />
-            <stop offset="100%" stopColor="#64c8ff" stopOpacity=".015" />
-          </linearGradient>
-        </defs>
-        <path className="chart-grid" d="M10 34H630M10 72H630M10 110H630M10 146H630" />
-        {downloadLine && <path className="speed-area" d={`${downloadLine} L${lastDownload!.x.toFixed(1)} 146 L${downloadPoints[0].x.toFixed(1)} 146 Z`} />}
-        {downloadLine && <path className="speed-line" d={downloadLine} />}
-        {uploadPoints.length > 1 && <path className="upload-line" d={linePath(uploadPoints)} />}
-        {lastDownload && <circle className="speed-point" cx={lastDownload.x} cy={lastDownload.y} r="4.5" />}
-        {lastUpload && <circle className="upload-point" cx={lastUpload.x} cy={lastUpload.y} r="3.5" />}
-      </svg>
+      {/* svg 用 preserveAspectRatio="none" 铺满卡片，内部圆点会被拽成椭圆，
+          所以端点标记放在 svg 之外的等比层里。 */}
+      <div className="speed-chart-plot">
+        <svg
+          className="speed-chart"
+          viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
+          preserveAspectRatio="none"
+          role="img"
+          aria-label={`最近 60 秒下载和上传速度，${samples.length} 次真实采样`}
+        >
+          <defs>
+            <linearGradient id="speed-area-gradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#0071e3" stopOpacity=".28" />
+              <stop offset="100%" stopColor="#64c8ff" stopOpacity=".015" />
+            </linearGradient>
+          </defs>
+          <path className="chart-grid" d="M10 34H630M10 72H630M10 110H630M10 146H630" />
+          {downloadLine && <path className="speed-area" d={`${downloadLine} L${lastDownload!.x.toFixed(1)} 146 L${downloadPoints[0].x.toFixed(1)} 146 Z`} />}
+          {downloadLine && <path className="speed-line" d={downloadLine} />}
+          {uploadPoints.length > 1 && <path className="upload-line" d={linePath(uploadPoints)} />}
+        </svg>
+        {lastDownload && (
+          <span
+            className="speed-point"
+            aria-hidden="true"
+            style={{
+              left: `${(lastDownload.x / VIEW_WIDTH) * 100}%`,
+              top: `${(lastDownload.y / VIEW_HEIGHT) * 100}%`,
+            }}
+          />
+        )}
+        {lastUpload && (
+          <span
+            className="upload-point"
+            aria-hidden="true"
+            style={{
+              left: `${(lastUpload.x / VIEW_WIDTH) * 100}%`,
+              top: `${(lastUpload.y / VIEW_HEIGHT) * 100}%`,
+            }}
+          />
+        )}
+      </div>
       {samples.length < 2 && (
         <div className="chart-sample-state" role="status">
           {samples.length === 0 ? "等待真实速度样本" : "仅 1 次真实采样，等待下一次连线"}
@@ -88,15 +116,21 @@ export function StatsWidget() {
 
   useEffect(() => {
     let cancelled = false;
-    let isFetching = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let nextDelay = IDLE_POLL_MS;
     const load = () => {
-      if (isFetching) return;
-      isFetching = true;
+      if (document.hidden) {
+        timer = setTimeout(load, IDLE_POLL_MS);
+        return;
+      }
       api
         .get<TaskStatsResponse>("/api/v2/tasks/stats")
         .then((nextStats) => {
           if (cancelled) return;
           setStats(nextStats);
+          nextDelay = nextStats.counts.active > 0 || nextStats.counts.queued > 0
+            ? ACTIVE_POLL_MS
+            : IDLE_POLL_MS;
           const sample: SpeedSample = {
             at: Date.now(),
             download: nextStats.download_speed,
@@ -110,23 +144,25 @@ export function StatsWidget() {
           /* 保持上次读数 */
         })
         .finally(() => {
-          isFetching = false;
+          if (cancelled) return;
+          timer = setTimeout(load, nextDelay);
         });
     };
     load();
-    const interval = setInterval(() => {
-      if (document.hidden) return;
-      load();
-    }, 5000);
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      if (timer) clearTimeout(timer);
     };
   }, []);
 
+  const quota = stats?.quota;
   const disk = stats?.disk;
-  const diskPercent = disk ? toPercent(disk.used_bytes, disk.total_bytes) : 0;
-  const available = disk ? disk.total_bytes - disk.used_bytes - disk.reserved_bytes : null;
+  // 用户视角的「已使用」含在途冻结，与「可用」共用同一口径：total = 已用 + 冻结 + 可用。
+  const usedTotal = disk ? disk.used_bytes + disk.reserved_bytes : 0;
+  const usedPercent = disk ? toPercent(usedTotal, disk.total_bytes) : 0;
+  const storedPercent = disk ? toPercent(disk.used_bytes, disk.total_bytes) : 0;
+  const reservedPercent = disk ? toPercent(disk.reserved_bytes, disk.total_bytes) : 0;
+  const available = disk ? disk.total_bytes - usedTotal : null;
 
   return (
     <section className="card transmission-card" aria-label="实时传输">
@@ -168,19 +204,39 @@ export function StatsWidget() {
         <div
           className="storage-track progress-container"
           role="meter"
-          aria-label={`存储空间已使用 ${diskPercent.toFixed(0)}%`}
+          aria-label={
+            disk && disk.reserved_bytes > 0
+              ? `存储空间已使用 ${usedPercent.toFixed(0)}%，其中下载中 ${formatBytes(disk.reserved_bytes)}`
+              : `存储空间已使用 ${usedPercent.toFixed(0)}%`
+          }
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-valuenow={diskPercent}
+          aria-valuenow={usedPercent}
+          aria-valuetext={available === null ? undefined : `可用 ${formatBytes(available)}`}
         >
-          <span className="progress-bar" style={{ width: `${diskPercent}%` }} />
+          <span className="progress-bar" style={{ width: `${storedPercent}%` }} />
+          {reservedPercent > 0 && (
+            <span className="progress-bar-reserved" style={{ width: `${reservedPercent}%` }} />
+          )}
         </div>
         <div className="storage-detail">
           {disk ? (
             <>
-              <span>已使用 {formatBytes(disk.used_bytes)}（{diskPercent.toFixed(0)}%）</span>
+              <span>已使用 {formatBytes(usedTotal)}（{usedPercent.toFixed(0)}%）</span>
+              {disk.reserved_bytes > 0 && (
+                <span className="storage-frozen" title="其中正在下载、尚未落盘的部分">
+                  已冻结 {formatBytes(disk.reserved_bytes)}
+                </span>
+              )}
               <span>总空间 {formatBytes(disk.total_bytes)}</span>
-              {disk.reserved_bytes > 0 && <span>已冻结: {formatBytes(disk.reserved_bytes)} (下载中)</span>}
+              {disk.limited && quota && (
+                <span
+                  className="storage-limited"
+                  title="机器磁盘余量不足，可用空间已按全局预算收紧"
+                >
+                  配额 {formatBytes(quota.quota_bytes)}
+                </span>
+              )}
             </>
           ) : <span>等待真实磁盘数据</span>}
         </div>

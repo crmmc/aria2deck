@@ -126,6 +126,21 @@ class ContentRepository:
         ).first()
         return None if row is None else await self.get_object(int(row.id))
 
+    async def find_by_storage_path(self, storage_path: str) -> ContentRecord | None:
+        row = (
+            await self.connection.execute(
+                select(content_objects.c.id).where(
+                    content_objects.c.storage_path == storage_path
+                )
+            )
+        ).first()
+        return None if row is None else await self.get_object(int(row.id))
+
+    async def list_all_storage_paths(self) -> set[str]:
+        """只取一列用于磁盘差集，避免把整行映射成 ContentRecord。"""
+        rows = (await self.connection.execute(select(content_objects.c.storage_path))).all()
+        return {str(row.storage_path) for row in rows}
+
     async def add_user_file(
         self,
         *,

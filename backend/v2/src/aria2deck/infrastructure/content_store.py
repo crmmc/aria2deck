@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import shutil
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO
 
 from ..application.downloads.models import ContentPreparation
+from ..application.library.models import CanonicalEntry
 from ..application.packs.models import InstallOutcome
 from ..domain.content import (
     ContentEntryIdentity,
@@ -19,13 +22,84 @@ from ..domain.content import (
 )
 from ..domain.errors import DomainError, ErrorCode
 
+_CANONICAL_NAME = re.compile(r"(file|directory)-([0-9a-f]{64})")
+_CANONICAL_PATH = re.compile(rf"objects/{_CANONICAL_NAME.pattern}")
+ProgressCallback = Callable[[int], None]
 
-def _file_digest(path: Path) -> str:
+
+class _ProgressReporter:
+    """每读一块回调一次累计字节。
+
+    不能攒批回调：调用方靠它在停止时尽早中止校验，攒到 8 MiB 才发会让小于
+    8 MiB 的条目完全无法中断，点「停止」后照常入库。
+    """
+
+    def __init__(self, on_progress: ProgressCallback) -> None:
+        self.on_progress = on_progress
+        self.total = 0
+
+    def add(self, count: int) -> None:
+        self.total += count
+        self.on_progress(self.total)
+
+
+def _progress_sink(on_progress: ProgressCallback | None) -> Callable[[int], None] | None:
+    return None if on_progress is None else _ProgressReporter(on_progress).add
+
+
+def _file_digest(path: Path, on_bytes: Callable[[int], None] | None = None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
+            if on_bytes is not None:
+                on_bytes(len(chunk))
     return digest.hexdigest()
+
+
+def _tree_size(root: Path) -> int:
+    """目录型对象大小 = 内部普通文件 st_size 之和，与 _scan 的口径一致。"""
+    total = 0
+    for parent, _directories, files in os.walk(root, followlinks=False):
+        for name in files:
+            try:
+                info = os.lstat(Path(parent) / name)
+            except OSError:  # 竞态删除的文件按 0 计
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+    return total
+
+
+def _directory_entries(
+    source: Path, on_bytes: Callable[[int], None] | None
+) -> list[ContentEntryIdentity]:
+    """按 _scan 的防线遍历目录（符号链接、控制文件、非普通文件一律拒绝）。"""
+    entries: list[ContentEntryIdentity] = []
+    for parent, directories, files in os.walk(source, followlinks=False):
+        parent_path = Path(parent)
+        for name in directories:
+            item = parent_path / name
+            if item.is_symlink():
+                raise DomainError(ErrorCode.INVALID_INPUT, "内容不能包含符号链接")
+            entries.append(
+                ContentEntryIdentity(item.relative_to(source).as_posix(), ContentKind.DIRECTORY, 0)
+            )
+        for name in files:
+            item = parent_path / name
+            if item.is_symlink() or not item.is_file():
+                raise DomainError(ErrorCode.INVALID_INPUT, "内容只能包含普通文件")
+            if name.endswith(".aria2"):
+                raise DomainError(ErrorCode.DOWNLOAD_UNAVAILABLE, "下载控制文件尚未清理")
+            entries.append(
+                ContentEntryIdentity(
+                    item.relative_to(source).as_posix(),
+                    ContentKind.FILE,
+                    item.stat().st_size,
+                    _file_digest(item, on_bytes),
+                )
+            )
+    return entries
 
 
 class DownloadContentStore:
@@ -281,3 +355,110 @@ class DownloadContentStore:
 
     async def scan_entries(self, storage_path: str) -> list[ContentEntryIdentity]:
         return await asyncio.to_thread(self._scan_entries, storage_path)
+
+    def parse_canonical_path(self, storage_path: str) -> tuple[ContentKind, str]:
+        """整串匹配规范命名；不匹配即拒绝，绝不触碰文件系统。"""
+        match = _CANONICAL_PATH.fullmatch(storage_path)
+        if match is None:
+            raise DomainError(ErrorCode.INVALID_INPUT, "存储路径格式无效")
+        return ContentKind(match.group(1)), match.group(2)
+
+    def _canonical_root(self) -> Path:
+        return self.download_directory / "objects"
+
+    def _canonical_target(self, storage_path: str) -> tuple[Path, ContentKind, str]:
+        kind, digest = self.parse_canonical_path(storage_path)
+        if self._canonical_root().is_symlink():
+            raise DomainError(ErrorCode.INVALID_INPUT, "内容存储目录不能是符号链接")
+        return self.download_directory.joinpath(*storage_path.split("/")), kind, digest
+
+    @staticmethod
+    def _lstat_no_symlink(target: Path) -> os.stat_result:
+        try:
+            info = os.lstat(target)
+        except FileNotFoundError:
+            raise DomainError(ErrorCode.NOT_FOUND, "条目不存在") from None
+        if stat.S_ISLNK(info.st_mode):
+            raise DomainError(ErrorCode.INVALID_INPUT, "条目不能是符号链接")
+        return info
+
+    @staticmethod
+    def _entry(
+        storage_path: str,
+        target: Path,
+        kind: ContentKind,
+        digest: str,
+        info: os.stat_result,
+    ) -> CanonicalEntry:
+        size = _tree_size(target) if stat.S_ISDIR(info.st_mode) else info.st_size
+        return CanonicalEntry(storage_path, kind, digest, size, info.st_mtime_ns)
+
+    def _list_canonical_entries(self) -> tuple[list[CanonicalEntry], int]:
+        root = self._canonical_root()
+        if root.is_symlink() or not root.is_dir():
+            return [], 0
+        entries: list[CanonicalEntry] = []
+        unrecognized = 0
+        with os.scandir(root) as scanned:
+            for item in scanned:
+                match = _CANONICAL_NAME.fullmatch(item.name)
+                if match is None or item.is_symlink():
+                    unrecognized += 1
+                    continue
+                target = root / item.name
+                try:
+                    info = os.lstat(target)
+                except OSError:  # 竞态删除的条目不计入清单
+                    continue
+                entries.append(
+                    self._entry(
+                        f"objects/{item.name}",
+                        target,
+                        ContentKind(match.group(1)),
+                        match.group(2),
+                        info,
+                    )
+                )
+        return entries, unrecognized
+
+    async def list_canonical_entries(self) -> tuple[list[CanonicalEntry], int]:
+        """列出 objects/ 下的规范条目与不规范条目数量；只读目录项与元数据。"""
+        return await asyncio.to_thread(self._list_canonical_entries)
+
+    def _stat_canonical(self, storage_path: str) -> CanonicalEntry:
+        target, kind, digest = self._canonical_target(storage_path)
+        info = self._lstat_no_symlink(target)
+        return self._entry(storage_path, target, kind, digest, info)
+
+    async def stat_canonical(self, storage_path: str) -> CanonicalEntry:
+        return await asyncio.to_thread(self._stat_canonical, storage_path)
+
+    def _verify_canonical(
+        self, storage_path: str, on_progress: ProgressCallback | None
+    ) -> tuple[CanonicalEntry, list[ContentEntryIdentity]]:
+        target, kind, digest = self._canonical_target(storage_path)
+        info = self._lstat_no_symlink(target)
+        on_bytes = _progress_sink(on_progress)
+        if kind is ContentKind.FILE:
+            if not stat.S_ISREG(info.st_mode):
+                raise DomainError(ErrorCode.INVALID_INPUT, "条目类型与文件名不一致")
+            if _file_digest(target, on_bytes) != digest:
+                raise DomainError(ErrorCode.INVALID_STATE, "内容与文件名摘要不一致")
+            return (
+                CanonicalEntry(storage_path, kind, digest, info.st_size, info.st_mtime_ns),
+                [],
+            )
+        if not stat.S_ISDIR(info.st_mode):
+            raise DomainError(ErrorCode.INVALID_INPUT, "条目类型与文件名不一致")
+        # 不复用 _scan：它的「根目录只有一个文件就当单文件」特例会把目录型对象判成文件型。
+        entries = _directory_entries(target, on_bytes)
+        if directory_content_digest(entries) != digest:
+            raise DomainError(ErrorCode.INVALID_STATE, "内容与文件名摘要不一致")
+        size = sum(entry.size for entry in entries)
+        return CanonicalEntry(storage_path, kind, digest, size, info.st_mtime_ns), entries
+
+    async def verify_canonical(
+        self, storage_path: str, *, on_progress: ProgressCallback | None = None
+    ) -> tuple[CanonicalEntry, list[ContentEntryIdentity]]:
+        """读内容校验摘要与文件名一致；on_progress 每读满 8 MiB 收到一次累计字节。"""
+        return await asyncio.to_thread(self._verify_canonical, storage_path, on_progress)

@@ -144,19 +144,6 @@ async def clear_pack_records(
     return PackClearRecordsResponse(cleared_count=cleared)
 
 
-@router.get(
-    "/packs/{pack_id}",
-    response_model=PackViewResponse,
-    responses=error_responses(401, 404, 422, 429, 500),
-)
-async def get_pack(
-    pack_id: int = Path(ge=1),
-    principal: Principal = Depends(required_principal),
-    service: PackProgressService = Depends(pack_progress),
-) -> PackViewResponse:
-    return _pack(await service.get_pack(principal.user.id, pack_id))
-
-
 @router.post(
     "/packs/{pack_id}/cancel",
     response_model=OkResponse,
@@ -168,20 +155,6 @@ async def cancel_pack(
     service: PackControlService = Depends(pack_control),
 ) -> OkResponse:
     await service.cancel(principal.user.id, pack_id)
-    return OkResponse()
-
-
-@router.delete(
-    "/packs/{pack_id}",
-    response_model=OkResponse,
-    responses=error_responses(401, 404, 409, 422, 429, 500),
-)
-async def delete_pack(
-    pack_id: int = Path(ge=1),
-    principal: Principal = Depends(required_principal),
-    service: PackControlService = Depends(pack_control),
-) -> OkResponse:
-    await service.delete_pack(principal.user.id, pack_id)
     return OkResponse()
 
 

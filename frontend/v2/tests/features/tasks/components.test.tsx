@@ -263,12 +263,17 @@ describe("StatsWidget", () => {
       disk: { total_bytes: 1000, used_bytes: 400, reserved_bytes: 100, available_bytes: 500, limited: true },
     };
     mockFetch.mockResolvedValue(json(200, stats));
-    render(<StatsWidget />);
+    const { container } = render(<StatsWidget />);
     await screen.findByRole("img", { name: /1 次真实采样/ });
-    // V1 公式 total-used-frozen = 500 B；quota 999999 不得出现在组件里。
-    expect(screen.getByText("500.0 B")).toBeInTheDocument();
+    // 可用 = total-used-frozen = 500 B；quota 999999 不得出现在组件里。
+    expect(container.querySelector(".storage-available strong")?.textContent).toBe("500.0 B");
     expect(screen.queryByText(/999999/)).not.toBeInTheDocument();
-    expect(screen.getByText("已冻结: 100.0 B (下载中)")).toBeInTheDocument();
+    // 「已使用」含在途冻结，与「可用」同一口径：400 + 100 = 500，占 50%。
+    expect(screen.getByText("已使用 500.0 B（50%）")).toBeInTheDocument();
+    // 冻结量仍单独标出，并以浅色分段接在实色段之后。
+    expect(screen.getByText("已冻结 100.0 B")).toBeInTheDocument();
+    expect((container.querySelector(".progress-bar") as HTMLElement).style.width).toBe("40%");
+    expect((container.querySelector(".progress-bar-reserved") as HTMLElement).style.width).toBe("10%");
     expect(screen.getByText("活动任务").parentElement?.textContent).toContain("2");
   });
 

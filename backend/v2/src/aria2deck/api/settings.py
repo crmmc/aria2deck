@@ -129,7 +129,6 @@ def _tracker_status(cache: TrackerCache) -> TrackerStatusResponse:
     return TrackerStatusResponse(
         items=list(cache.merged),
         entry_count=len(cache.merged),
-        remote_items=list(cache.remote),
         refresh_status=cache.refresh_status,
         failed_urls=list(cache.failed_urls),
         updated_at_ms=cache.updated_at_ms,

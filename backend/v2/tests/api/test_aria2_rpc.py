@@ -204,15 +204,6 @@ def test_completed_single_file_is_projected_after_observation_is_empty(
     assert status.json()["result"]["files"] == [expected]
     files = _rpc(rpc_client, "aria2.getFiles", [gid])
     assert files.json()["result"] == [expected]
-    rest = rpc_client.get(f"/api/v2/tasks/{task_id}")
-    assert rest.json()["files"] == [
-        {
-            "name": "completed.bin",
-            "total_bytes": 577,
-            "completed_bytes": 577,
-            "selected": True,
-        }
-    ]
     projection = asyncio.run(
         rpc_client.app.state.download_queries.get_task(user_id=user_id, task_id=task_id)
     )
@@ -274,20 +265,6 @@ def test_completed_directory_projects_sorted_real_files_and_safe_rpc_basenames(
     files = _rpc(rpc_client, "aria2.getFiles", [gid])
     assert files.json()["result"] == expected
     assert "folder/" not in files.text
-    rest = rpc_client.get(f"/api/v2/tasks/{task_id}").json()["files"]
-    assert rest == [
-        {
-            "name": path,
-            "total_bytes": size,
-            "completed_bytes": size,
-            "selected": True,
-        }
-        for path, size in (
-            ("folder/a-first.bin", 4),
-            ("folder/nested/b.bin", 2),
-            ("z-last.bin", 5),
-        )
-    ]
     projection = asyncio.run(
         rpc_client.app.state.download_queries.get_task(user_id=user_id, task_id=task_id)
     )
@@ -334,15 +311,6 @@ def test_completed_files_prefer_nonempty_live_observation(
             "uris": [],
         }
     ]
-    rest = rpc_client.get(f"/api/v2/tasks/{task_id}").json()["files"]
-    assert rest == [
-        {
-            "name": "live/current.bin",
-            "total_bytes": 900,
-            "completed_bytes": 300,
-            "selected": False,
-        }
-    ]
 
 
 def test_completed_files_remain_user_scoped(rpc_client: TestClient, settings) -> None:
@@ -358,7 +326,8 @@ def test_completed_files_remain_user_scoped(rpc_client: TestClient, settings) ->
         response = _rpc(rpc_client, method, [gid])
         assert response.json()["error"]["code"] == 1
         assert "completed.bin" not in response.text
-    assert rpc_client.get(f"/api/v2/tasks/{task_id}").status_code == 404
+    visible = rpc_client.get("/api/v2/tasks?page=1&page_size=100").json()["items"]
+    assert task_id not in [item["id"] for item in visible]
 
 
 def test_completed_files_survive_restart_with_empty_observations(settings) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
+from aria2deck.domain.content import ContentKind
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
@@ -28,6 +29,36 @@ async def test_content_key_and_canonical_path_are_unique(database: SQLiteDatabas
             await repo.create_object(kind="directory", digest=HASH, size=10, storage_path="objects/abab", now_ms=1)
         directory_id = await repo.create_object(kind="directory", digest=HASH, size=10, storage_path="objects/directory", now_ms=1)
         assert (await repo.get_object(directory_id)).kind.value == "directory"
+
+
+async def test_find_by_storage_path_and_list_all_storage_paths_match_written_rows(
+    database: SQLiteDatabase,
+) -> None:
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = ContentRepository(uow.connection)
+        assert await repo.find_by_storage_path("objects/file-" + "a" * 64) is None
+        assert await repo.list_all_storage_paths() == set()
+
+    first = f"objects/file-{'a' * 64}"
+    second = f"objects/directory-{'b' * 64}"
+    async with SQLiteUnitOfWork(database) as uow:
+        repo = ContentRepository(uow.connection)
+        first_id = await repo.create_object(
+            kind="file", digest="a" * 64, size=10, storage_path=first, now_ms=1
+        )
+        await repo.create_object(
+            kind="directory", digest="b" * 64, size=20, storage_path=second, now_ms=1
+        )
+        found = await repo.find_by_storage_path(first)
+        assert found is not None
+        assert (found.id, found.kind, found.size, found.storage_path) == (
+            first_id,
+            ContentKind.FILE,
+            10,
+            first,
+        )
+        assert await repo.find_by_storage_path(second + "-missing") is None
+        assert await repo.list_all_storage_paths() == {first, second}
 
 
 async def test_content_path_validation_runs_before_persistence(database: SQLiteDatabase) -> None:
