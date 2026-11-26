@@ -2,10 +2,13 @@
 
 V1 的摘要把真实 sha256 再套一层域分隔哈希，与 V2 不能换算，必须重算。
 `--dry-run` 走同一条读盘路径，只是不落任何字节。
+`--link` 用硬链接代替复制：摘要照算，但不写新字节，源与规范对象共享 inode，
+适用于目标盘剩余空间装不下一份完整复制的场景；要求源与目标在同一文件系统。
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import shutil
@@ -70,14 +73,43 @@ def _place(temporary: Path, destination: Path) -> None:
         temporary.rename(destination)
 
 
+def _link_place(source: Path, destination: Path) -> None:
+    """同内容已存在则复用已有规范对象；硬链接不动源文件。"""
+    if not destination.exists():
+        os.link(source, destination)
+
+
+def _anchor(path: Path) -> Path:
+    """返回 path 自身或最近的已存在祖先，用于判定目标落在哪个文件系统。"""
+    while not path.exists():
+        path = path.parent
+    return path
+
+
+def _same_device(a: Path, b: Path) -> bool:
+    return os.stat(a).st_dev == os.stat(b).st_dev
+
+
 class _ObjectBuilder:
     """按 dry-run 决定是否真的写字节；两条路径共用同一套读盘与摘要逻辑。"""
 
-    def __init__(self, objects: Path, *, dry_run: bool) -> None:
+    def __init__(self, objects: Path, *, dry_run: bool, link: bool = False) -> None:
         self.objects = objects
         self.dry_run = dry_run
+        self.link = link
+
+    def _check_linkable(self, source: Path) -> None:
+        if not _same_device(source, _anchor(self.objects)):
+            raise _layout_invalid("--link 要求 V1 下载目录与 --v2-root 在同一文件系统")
 
     def file(self, stored: StoredFilePlan) -> MigratedContent:
+        if self.link:
+            self._check_linkable(stored.source)
+            digest, size = _stream(stored.source, None)
+            if not self.dry_run:
+                self.objects.mkdir(parents=True, exist_ok=True)
+                _link_place(stored.source, self.objects / f"file-{digest}")
+            return _content("file", digest, size, (), stored.created_at_ms)
         temporary = self.objects / f".tmp-file-{stored.v1_id}"
         if not self.dry_run:
             self.objects.mkdir(parents=True, exist_ok=True)
@@ -135,7 +167,16 @@ class _ObjectBuilder:
                 if name.endswith(".aria2"):
                     raise _layout_invalid("目录内残留 .aria2 控制文件")
                 relative = _relative(item, source)
-                if self.dry_run:
+                if self.link:
+                    if self.dry_run:
+                        self._check_linkable(item)
+                        digest, size = _stream(item, None)
+                    else:
+                        target = temporary.joinpath(*relative.split("/"))
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        digest, size = _stream(item, None)
+                        _link_place(item, target)
+                elif self.dry_run:
                     digest, size = _stream(item, None)
                 else:
                     target = temporary.joinpath(*relative.split("/"))
@@ -180,14 +221,18 @@ def _content(
 def _failure_reason(error: Exception) -> str:
     if isinstance(error, DomainError):
         return f"内容布局不符合 V2 规范：{error}"
+    if isinstance(error, OSError) and error.errno == errno.EXDEV:
+        return "跨文件系统，无法硬链接"
     if isinstance(error, FileNotFoundError):
         return "磁盘文件缺失"
     return f"读取失败：{type(error).__name__}"
 
 
-def migrate_contents(plan: Plan, v2_root: Path, *, dry_run: bool) -> ContentMigration:
+def migrate_contents(
+    plan: Plan, v2_root: Path, *, dry_run: bool, link: bool = False
+) -> ContentMigration:
     """把计划里的每一条内容搬到 `downloads/objects/`，按 V2 摘要去重。"""
-    builder = _ObjectBuilder(objects_root(Path(v2_root)), dry_run=dry_run)
+    builder = _ObjectBuilder(objects_root(Path(v2_root)), dry_run=dry_run, link=link)
     by_key: dict[str, MigratedContent] = {}
     by_stored_file: dict[int, MigratedContent] = {}
     failures: list[tuple[int, str]] = []

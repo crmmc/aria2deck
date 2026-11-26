@@ -342,3 +342,12 @@ def test_checksum_mismatch_still_prints_the_password(
     username, password = _credentials_from(output)
     assert username == "alice"
     assert len(password) >= 24
+
+
+def test_link_flag_parses() -> None:
+    from tools.migrate_v1.__main__ import build_parser
+
+    options = build_parser().parse_args(
+        ["--v1-database", "a.db", "--v1-download-dir", "d", "--v2-root", "v2", "--link"]
+    )
+    assert options.link is True
