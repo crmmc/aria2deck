@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from aria2deck.application.downloads.models import (
@@ -250,7 +252,7 @@ async def test_get_files_uris_and_projection_safety() -> None:
     service, gids = _service([_record(3, SubscriptionStatus.COMPLETED)])
     gid = gids.virtual_gid(3)
     files = await service.dispatch("aria2.getFiles", [gid], user_id=USER_ID)
-    assert files[0]["path"] == "leaf.bin"
+    assert files[0]["path"] == "./leaf.bin"
     uris = await service.dispatch("aria2.getUris", [gid], user_id=USER_ID)
     assert uris == [{"uri": "https://example.com/展示链接", "status": "used"}]
 
@@ -269,11 +271,14 @@ async def test_global_stat_version_session_option_compat() -> None:
     assert "dir" in options and "capability" not in options
 
 
-async def test_peers_and_servers_return_empty_collections() -> None:
+async def test_peers_empty_and_servers_mirror_file_indexes() -> None:
     service, gids = _service([_record(5, SubscriptionStatus.ACTIVE)])
     gid = gids.virtual_gid(5)
     assert await service.dispatch("aria2.getPeers", [gid], user_id=USER_ID) == []
-    assert await service.dispatch("aria2.getServers", [gid], user_id=USER_ID) == []
+    # 单文件观测：条目与 getFiles 的 index 一一对应，servers 恒空。
+    assert await service.dispatch("aria2.getServers", [gid], user_id=USER_ID) == [
+        {"index": "1", "servers": []}
+    ]
     with pytest.raises(RpcMethodError):
         await service.dispatch("aria2.getPeers", ["unknown"], user_id=USER_ID)
 
@@ -419,6 +424,122 @@ async def test_adduri_wraps_single_creation_with_mirrors() -> None:
     assert caught.value.code == 1
 
 
+async def test_adduri_ignores_unknown_aria2_client_options(caplog) -> None:
+    """回归：AriaNg/Motrix 附带的标准 aria2 选项不得让 addUri 失败。"""
+    service, gids = _service([])
+    service.commands = RecordingCommands()
+
+    with caplog.at_level(logging.DEBUG, logger="aria2deck.application.downloads.rpc_service"):
+        gid = await service.dispatch(
+            "aria2.addUri",
+            [
+                ["https://example.com/a.zip"],
+                {
+                    "pause": "true",
+                    "dir": "/data/downloads",
+                    "split": "8",
+                    "user-agent": "Motrix",
+                    "out": "改名.zip",
+                    "max-connection-per-server": "4",
+                },
+            ],
+            user_id=USER_ID,
+        )
+
+    assert gid == gids.virtual_gid(42)
+    assert service.commands.uri_items[0].options == {
+        "out": "改名.zip",
+        "max-connection-per-server": "4",
+    }
+    assert "split" in caplog.text, "被丢弃的选项键名需要留痕"
+    assert "/data/downloads" not in caplog.text and "Motrix" not in caplog.text, "日志只记键名，不记值"
+
+
+async def test_adduri_maps_aria2_header_option_to_headers() -> None:
+    """规范 header（"Name: Value" 数组）→ 内部 headers dict，原始大小写保留。"""
+    service, _ = _service([])
+    service.commands = RecordingCommands()
+
+    await service.dispatch(
+        "aria2.addUri",
+        [
+            ["https://example.com/a.bin"],
+            {"header": ["Referer: https://a", "User-Agent: X"]},
+        ],
+        user_id=USER_ID,
+    )
+
+    assert service.commands.uri_items[0].options == {
+        "headers": {"Referer": "https://a", "User-Agent": "X"}
+    }
+
+
+async def test_header_option_single_string_and_later_wins(caplog) -> None:
+    """header 也接受单个字符串（规范允许）；同名后者覆盖；非法项忽略不报错。"""
+    import logging
+
+    service, _ = _service([])
+    service.commands = RecordingCommands()
+
+    with caplog.at_level(logging.DEBUG, logger="aria2deck.application.downloads.rpc_service"):
+        await service.dispatch(
+            "aria2.addUri",
+            [["https://example.com/a.bin"], {"header": "X-Single: 1"}],
+            user_id=USER_ID,
+        )
+        await service.dispatch(
+            "aria2.addUri",
+            [["https://example.com/b.bin"], {"header": ["X-Dup: 老值", "X-Dup: 新值"]}],
+            user_id=USER_ID,
+        )
+        await service.dispatch(
+            "aria2.addUri",
+            [
+                ["https://example.com/c.bin"],
+                {"header": ["缺冒号", 123, ": 空头名", "X-Ok: 值"], "pause": "true"},
+            ],
+            user_id=USER_ID,
+        )
+        # 全部非法 → 不产生 headers 键，也不报错。
+        await service.dispatch(
+            "aria2.addUri", [["https://example.com/d.bin"], {"header": ["缺冒号"]}], user_id=USER_ID
+        )
+
+    assert service.commands.uri_items[0].options == {"headers": {"X-Single": "1"}}
+    assert service.commands.uri_items[1].options == {"headers": {"X-Dup": "新值"}}
+    assert service.commands.uri_items[2].options == {"headers": {"X-Ok": "值"}}
+    assert service.commands.uri_items[3].options == {}
+    assert "忽略非法项" in caplog.text
+    assert "缺冒号" not in caplog.text and "空头名" not in caplog.text, "只记个数，不记值"
+
+
+async def test_header_option_merges_into_existing_headers_dict() -> None:
+    service, _ = _service([])
+    service.commands = RecordingCommands()
+
+    await service.dispatch(
+        "aria2.addUri",
+        [["https://example.com/a.bin"], {"headers": {"X-A": "旧"}, "header": ["X-A: 新", "X-B: 2"]}],
+        user_id=USER_ID,
+    )
+
+    assert service.commands.uri_items[0].options == {"headers": {"X-A": "新", "X-B": "2"}}
+
+
+async def test_adduri_keeps_allow_rename_policy() -> None:
+    """allow_rename 由 create_uris 消费（D7），过滤后必须原样送达。"""
+    service, _ = _service([])
+    service.commands = RecordingCommands()
+
+    await service.dispatch(
+        "aria2.addUri",
+        [["https://example.com/a.zip"], {"out": "同名.zip", "allow_rename": "false", "pause": "true"}],
+        user_id=USER_ID,
+    )
+
+    assert service.commands.uri_items[0].options == {"out": "同名.zip", "allow_rename": "false"}
+
+
 async def test_addtorrent_option_parsing_paths() -> None:
     service, gids = _service([])
     service.commands = RecordingCommands()
@@ -448,8 +569,28 @@ async def test_addtorrent_option_parsing_paths() -> None:
     with pytest.raises(RpcMethodError) as caught:
         await service.dispatch("aria2.addTorrent", ["dG9ycmVudA==", {"select-file": 5}], user_id=USER_ID)
     assert caught.value.code == 1
-    with pytest.raises(RpcMethodError):
-        await service.dispatch("aria2.addTorrent", ["dG9ycmVudA==", {"bt-tracker": "http://t"}], user_id=USER_ID)
+    # 官方签名 addTorrent(torrent, [uris], [options], [position])：position 接受并忽略。
+    await service.dispatch(
+        "aria2.addTorrent",
+        ["dG9ycmVudA==", [], {"pause": "true", "select-file": "2"}, 0],
+        user_id=USER_ID,
+    )
+    assert service.commands.torrent_calls[-1]["selected"] == [2]
+
+    # 未知种子选项只记键名后丢弃，不再整次拒绝（客户端兼容）。
+    await service.dispatch(
+        "aria2.addTorrent",
+        ["dG9ycmVudA==", {"bt-tracker": "http://t", "pause": "true"}],
+        user_id=USER_ID,
+    )
+    assert service.commands.torrent_calls[-1]["selected"] is None
+    # 规范 header 选项在种子路径同样先转换再过滤：不报错，但 create_torrent 无 options 通道。
+    await service.dispatch(
+        "aria2.addTorrent",
+        ["dG9ycmVudA==", {"header": ["X-A: 1"]}, ],
+        user_id=USER_ID,
+    )
+    assert service.commands.torrent_calls[-1]["selected"] is None
     with pytest.raises(RpcMethodError):
         await service.dispatch("aria2.addTorrent", ["", []], user_id=USER_ID)
     with pytest.raises(RpcMethodError):
@@ -474,10 +615,180 @@ async def test_keys_and_int_param_edges() -> None:
     assert set(payload) == {"gid", "status"}
     empty_keys = await service.dispatch("aria2.tellStatus", [gid, []], user_id=USER_ID)
     assert "status" in empty_keys
-    defaulted = await service.dispatch("aria2.tellWaiting", ["not-int", 0], user_id=USER_ID)
-    assert defaulted == []  # 非整数 offset 走默认 0；num=0 → 空。
-    boolean_offset = await service.dispatch("aria2.tellWaiting", [True, 0], user_id=USER_ID)
-    assert boolean_offset == []
+    # 非数值形态才报错（规范内字符串数字走宽容转换，见 tellWaiting 专项用例）。
+    with pytest.raises(RpcMethodError) as caught:
+        await service.dispatch("aria2.tellWaiting", ["not-int", 0], user_id=USER_ID)
+    assert caught.value.code == 1 and "offset" in str(caught.value)
+    with pytest.raises(RpcMethodError):
+        await service.dispatch("aria2.tellWaiting", [True, 0], user_id=USER_ID)
+
+
+async def test_tell_waiting_accepts_string_numbers_and_keys(caplog) -> None:
+    """客户端常把 offset/num 传成字符串：宽容转换后按窗口切片，keys 照常过滤。"""
+    records = [_record(index, SubscriptionStatus.WAITING) for index in range(1, 6)]
+    service, _ = _service(records)
+
+    with caplog.at_level(logging.DEBUG, logger="aria2deck.application.downloads.rpc_service"):
+        page = await service.dispatch(
+            "aria2.tellWaiting", ["1", "2", ["gid", "status"], "extras-不应入日志"], user_id=USER_ID
+        )
+
+    assert len(page) == 2
+    assert set(page[0]) == {"gid", "status"}
+    assert "aria2.tellWaiting" in caplog.text, "方法名留痕"
+    assert "extras-不应入日志" not in caplog.text, "只记个数，不记值"
+
+    with pytest.raises(RpcMethodError) as caught:
+        await service.dispatch("aria2.tellWaiting", ["0", "abc"], user_id=USER_ID)
+    assert "num" in str(caught.value)
+    with pytest.raises(RpcMethodError) as caught:
+        await service.dispatch("aria2.tellWaiting", [None, 0], user_id=USER_ID)
+    assert "offset" in str(caught.value)
+    # 缺省 offset/num 走默认 0：num=0 → 空窗口。
+    assert await service.dispatch("aria2.tellWaiting", [], user_id=USER_ID) == []
+
+
+async def test_tell_keys_arrays_are_accepted() -> None:
+    service, gids = _service([_record(8, SubscriptionStatus.ACTIVE)])
+    gid = gids.virtual_gid(8)
+    full = await service.dispatch("aria2.tellStatus", [gid], user_id=USER_ID)
+    assert "status" in full
+    subset = await service.dispatch("aria2.tellStatus", [gid, ["gid"], "多余"], user_id=USER_ID)
+    assert set(subset) == {"gid"}
+
+    active = await service.dispatch("aria2.tellActive", [["gid", "status"]], user_id=USER_ID)
+    assert [set(item) for item in active] == [{"gid", "status"}]
+    assert await service.dispatch("aria2.tellActive", [], user_id=USER_ID)
+
+
+async def test_adduri_accepts_trailing_position_param() -> None:
+    """官方签名 addUri(uris, [options], [position])：position 接受并忽略。"""
+    service, gids = _service([])
+    service.commands = RecordingCommands()
+
+    gid = await service.dispatch(
+        "aria2.addUri",
+        [["https://example.com/a.zip"], {"pause": "true"}, 0],
+        user_id=USER_ID,
+    )
+
+    assert gid == gids.virtual_gid(42)
+    assert service.commands.uri_items[0].options == {}
+
+
+async def test_change_position_accepts_spec_params() -> None:
+    """changePosition(gid, pos, how)：字符串 pos 与三个 how 枚举都不得报错。"""
+    service, gids = _service([_record(4, SubscriptionStatus.WAITING)])
+    gid = gids.virtual_gid(4)
+
+    for how in ("POS_SET", "POS_CUR", "POS_END"):
+        assert await service.dispatch("aria2.changePosition", [gid, "0", how], user_id=USER_ID) == 0
+    assert await service.dispatch("aria2.changePosition", [gid, 3, "POS_SET", "多余"], user_id=USER_ID) == 0
+    assert await service.dispatch("aria2.changePosition", [gid, "2"], user_id=USER_ID) == 0
+    assert await service.dispatch("aria2.changePosition", [gid], user_id=USER_ID) == 0
+
+    with pytest.raises(RpcMethodError) as caught:
+        await service.dispatch("aria2.changePosition", [gid, "abc", "POS_SET"], user_id=USER_ID)
+    assert "pos" in str(caught.value)
+    with pytest.raises(RpcMethodError) as caught:
+        await service.dispatch("aria2.changePosition", [gid, 0, "POS_MIDDLE"], user_id=USER_ID)
+    assert "how" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "aria2.getFiles",
+        "aria2.getUris",
+        "aria2.getPeers",
+        "aria2.getServers",
+        "aria2.getOption",
+        "aria2.tellStatus",
+    ],
+)
+async def test_gid_methods_tolerate_extra_params(method: str) -> None:
+    service, gids = _service([_record(5, SubscriptionStatus.ACTIVE)])
+    gid = gids.virtual_gid(5)
+
+    baseline = await service.dispatch(method, [gid], user_id=USER_ID)
+    assert await service.dispatch(method, [gid, "多余", 42], user_id=USER_ID) == baseline
+
+
+@pytest.mark.parametrize("method", ["aria2.remove", "aria2.forceRemove"])
+async def test_remove_tolerates_extra_params(method: str) -> None:
+    service, gids = _service([_record(9, SubscriptionStatus.ACTIVE)])
+    gid = gids.virtual_gid(9)
+
+    assert await service.dispatch(method, [gid, "多余"], user_id=USER_ID) == gid
+
+
+async def test_terminal_removal_tolerates_extra_params() -> None:
+    service, gids = _service([_record(1, SubscriptionStatus.COMPLETED)])
+    assert (
+        await service.dispatch(
+            "aria2.removeDownloadResult", [gids.virtual_gid(1), "多余"], user_id=USER_ID
+        )
+        == "OK"
+    )
+    assert await service.dispatch("aria2.purgeDownloadResult", ["多余"], user_id=USER_ID) == "OK"
+    assert await service.dispatch("aria2.saveSession", ["多余"], user_id=USER_ID) == "OK"
+
+
+# 规范形态清单：逐条对照 aria2 官方 RPC 章节签名
+# （aria2.addUri([secret], uris[, options[, position]]) 等）。
+# 原则：规范内入参一律不得报错；未实现/产品明确拒绝的方法不在此表。
+_SPEC_SHAPED_CALLS: list[tuple[str, object]] = [
+    (
+        "aria2.addUri",
+        lambda gid, terminal: [
+            ["https://example.com/a.bin"],
+            {"dir": "/data/downloads", "split": "8", "out": "a.bin"},
+            0,
+        ],
+    ),
+    (
+        "aria2.addTorrent",
+        lambda gid, terminal: ["dG9ycmVudA==", [], {"select-file": "1"}, 0],
+    ),
+    ("aria2.remove", lambda gid, terminal: [gid]),
+    ("aria2.forceRemove", lambda gid, terminal: [gid]),
+    ("aria2.tellStatus", lambda gid, terminal: [gid, ["gid", "status"]]),
+    ("aria2.tellStatus", lambda gid, terminal: [gid, []]),
+    ("aria2.tellActive", lambda gid, terminal: [["gid"]]),
+    ("aria2.tellActive", lambda gid, terminal: []),
+    ("aria2.tellWaiting", lambda gid, terminal: [0, 10]),
+    ("aria2.tellWaiting", lambda gid, terminal: [-1, 2, ["gid"]]),
+    ("aria2.tellStopped", lambda gid, terminal: [0, 10, []]),
+    ("aria2.changePosition", lambda gid, terminal: [gid, 0, "POS_SET"]),
+    ("aria2.changePosition", lambda gid, terminal: [gid, -1, "POS_CUR"]),
+    ("aria2.changePosition", lambda gid, terminal: [gid, 2, "POS_END"]),
+    ("aria2.getUris", lambda gid, terminal: [gid]),
+    ("aria2.getFiles", lambda gid, terminal: [gid]),
+    ("aria2.getPeers", lambda gid, terminal: [gid]),
+    ("aria2.getServers", lambda gid, terminal: [gid]),
+    ("aria2.getOption", lambda gid, terminal: [gid]),
+    ("aria2.getGlobalStat", lambda gid, terminal: []),
+    ("aria2.getGlobalOption", lambda gid, terminal: []),
+    ("aria2.getVersion", lambda gid, terminal: []),
+    ("aria2.getSessionInfo", lambda gid, terminal: []),
+    ("aria2.saveSession", lambda gid, terminal: []),
+    ("aria2.purgeDownloadResult", lambda gid, terminal: []),
+    ("aria2.removeDownloadResult", lambda gid, terminal: [terminal]),
+    ("system.listMethods", lambda gid, terminal: []),
+]
+
+
+@pytest.mark.parametrize("method,params_of", _SPEC_SHAPED_CALLS)
+async def test_spec_shaped_calls_never_error(method: str, params_of) -> None:
+    """官方签名里的每一个可选参数位置都照单全收，不得因规范内入参报错。"""
+    service, gids = _service(
+        [_record(9, SubscriptionStatus.ACTIVE), _record(1, SubscriptionStatus.COMPLETED)]
+    )
+    service.commands = RecordingCommands()
+
+    await service.dispatch(
+        method, params_of(gids.virtual_gid(9), gids.virtual_gid(1)), user_id=USER_ID
+    )
 
 
 async def test_get_option_resolves_raw_gid_too() -> None:
