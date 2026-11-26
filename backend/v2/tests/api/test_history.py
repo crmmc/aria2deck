@@ -10,7 +10,7 @@ from aria2deck.domain.downloads import AttemptStatus, SubscriptionStatus
 from aria2deck.infrastructure.config import Settings
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.schema import download_sources, task_subscriptions
-from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, login
+from tests.api.conftest import create_admin, login
 from tests.api.test_download_writes import install_backend
 from tests.api.test_downloads import _now_ms, seed_task
 

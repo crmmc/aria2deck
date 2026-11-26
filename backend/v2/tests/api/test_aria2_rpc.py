@@ -16,7 +16,7 @@ from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
-from tests.api.conftest import create_admin, fetch_task, login
+from tests.api.conftest import create_admin, login
 from tests.download_fakes import FakeSubmissionBackend
 
 WRONG_SECRET = "错误令牌"  # noqa: S105  # 测试夹具令牌，非凭据

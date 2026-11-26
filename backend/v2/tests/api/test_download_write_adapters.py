@@ -18,7 +18,7 @@ from aria2deck.api.downloads import (
 from aria2deck.application.accounts.models import Principal
 from aria2deck.application.downloads.gateway import DownloadGatewayService
 from aria2deck.application.downloads.history import HistoryService
-from aria2deck.application.downloads.models import GatewayResponse, HistoryExpiration, TaskPage
+from aria2deck.application.downloads.models import GatewayResponse, TaskPage
 from aria2deck.application.downloads.queries import DownloadQueryService
 from aria2deck.domain.accounts import CredentialKind, User
 from aria2deck.domain.downloads import SubscriptionStatus

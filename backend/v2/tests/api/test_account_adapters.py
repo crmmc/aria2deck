@@ -12,9 +12,6 @@ from aria2deck.api.contracts import (
     PasswordChangeRequest,
     UserCreateRequest,
 )
-from aria2deck.api.dependencies import SESSION_COOKIE, optional_principal
-from aria2deck.application.accounts.models import Principal
-from aria2deck.domain.accounts import CredentialKind
 from tests.application.test_account_cleanup import OTHER_PASSWORD, PASSWORD, make_service
 
 
