@@ -67,11 +67,11 @@ export function AnimatedToast({
   }, [dismiss, duration]);
 
   return (
-    <div ref={toastRef} className={className} role={type === "error" ? "alert" : "status"}>
+    <div ref={toastRef} className={`notification-card ${className}`} role={type === "error" ? "alert" : "status"}>
       <span className="toast-icon"><Icon name={TOAST_ICONS[type]} className="icon-sm" /></span>
       <span className="toast-message">{message}</span>
       {showClose ? (
-        <button type="button" className="toast-close" aria-label="关闭提示" onClick={dismiss}>
+        <button type="button" className="notification-card-close" aria-label="关闭提示" onClick={dismiss}>
           <Icon name="x" className="icon-sm" />
         </button>
       ) : null}

@@ -710,17 +710,16 @@
   }
 
   /* Toast positioning */
-  .toast-container,
-  .toast-host {
-    top: auto;
-    bottom: calc(72px + env(safe-area-inset-bottom, 0));
+  .notification-stack {
+    top: calc(8px + env(safe-area-inset-top, 0px));
     right: 8px;
     left: 8px;
+    align-items: stretch;
+    max-width: none;
   }
 
-  .toast-item,
-  .toast-host .toast {
-    max-width: 100%;
+  .notification-card {
+    width: 100%;
   }
 
   .settings-advanced-toggle {

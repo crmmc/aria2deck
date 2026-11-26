@@ -2347,78 +2347,187 @@ dialog.command-dialog {
   }
 }
 
-/* Toast specific：两套真实 Toast 共用 AnimatedToast，仅容器与关闭能力不同。 */
-.toast-container,
-.toast-host {
+/* 通知栈：常驻横幅与临时 toast 共用一条纵向队列，彼此不覆盖。 */
+.notification-stack {
   position: fixed;
   top: 20px;
   right: 20px;
   z-index: 10000;
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: 8px;
+  max-width: min(400px, calc(100vw - 40px));
   pointer-events: none;
 }
 
+.notification-stack-item {
+  display: flex;
+  justify-content: flex-end;
+  max-width: 100%;
+  pointer-events: auto;
+}
+
+/* 通知卡片：常驻横幅与临时 toast 共用同一套外观与控件，
+   类型差异只体现在图标强调色（--notification-accent）。 */
+.notification-card {
+  width: 320px;
+  max-width: 100%;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+  color: var(--foreground);
+}
+
+.notification-card-panel {
+  padding: 16px;
+}
+
+.notification-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.notification-card-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--notification-accent, var(--muted));
+}
+
+.notification-card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.notification-card-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.notification-card-text .text-danger {
+  color: var(--danger);
+  font-weight: 500;
+}
+
+.notification-card-footer {
+  display: flex;
+  margin-top: 12px;
+}
+
+.notification-card-action {
+  width: 100%;
+  padding: 8px 16px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.notification-card-action:hover {
+  background: #f5f5f5;
+}
+
+.notification-card-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.05);
+  color: #8a8a8e;
+  font-size: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.notification-card-close:hover {
+  background: rgba(0, 0, 0, 0.1);
+  color: #555;
+}
+
+/* 常驻横幅的入场 */
+.password-warning-banner,
+.backend-status-banner {
+  animation: notificationCardIn 0.25s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .password-warning-banner,
+  .backend-status-banner {
+    animation: none;
+  }
+}
+
+@keyframes notificationCardIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 类型强调色 */
+.tone-success,
+.toast-success {
+  --notification-accent: var(--success);
+}
+
+.tone-error,
+.toast-error {
+  --notification-accent: var(--danger);
+}
+
+.tone-warning,
+.tone-alert,
+.toast-warning {
+  --notification-accent: var(--warning);
+}
+
+.tone-info,
+.toast-info {
+  --notification-accent: var(--primary);
+}
+
+/* toast：卡片外观 + 单行横向排版 */
 .toast-item,
 .toast {
   display: flex;
   align-items: center;
   gap: 10px;
-  max-width: 400px;
   padding: 13px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.65);
-  border-radius: 18px;
-  box-shadow: 0 12px 36px rgba(60, 60, 90, 0.12);
   font-size: 14px;
   font-weight: 500;
   pointer-events: auto;
 }
 
-.toast-success {
-  background: var(--success);
-  color: white;
-}
-
-.toast-error {
-  background: var(--danger);
-  color: white;
-}
-
-.toast-warning {
-  background: var(--warning);
-  color: white;
-}
-
-.toast-info {
-  background: #1d1d1f;
-  color: white;
-}
-
 .toast-icon {
   display: inline-flex;
   flex: 0 0 auto;
+  color: var(--notification-accent, var(--muted));
 }
 
 .toast-message {
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
-}
-
-.toast-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 28px;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  color: inherit;
-  background: rgba(255, 255, 255, 0.16);
-  cursor: pointer;
 }
 
 /* Confirm Modal */

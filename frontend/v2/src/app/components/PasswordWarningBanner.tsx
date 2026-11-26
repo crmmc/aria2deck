@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { UserResponse } from "@/shared/api/types";
+import { Icon } from "@/shared/components/Icon";
+import { NotificationStackItem } from "@/shared/components/NotificationStack";
 
 interface Props {
   user: UserResponse | null;
@@ -17,137 +19,36 @@ export function PasswordWarningBanner({ user }: Props) {
   }
 
   return (
-    <div className="password-warning-banner">
-      <div className="password-warning-card">
-        <div className="password-warning-header">
-          <span className="password-warning-icon">⚠️</span>
-          <span className="password-warning-title">安全提醒</span>
-          <button type="button"
-            className="password-warning-close"
+    <NotificationStackItem order={0}>
+      <div className="notification-card notification-card-panel password-warning-banner tone-alert">
+        <div className="notification-card-header">
+          <span className="notification-card-icon">
+            <Icon name="alert" className="icon-sm" />
+          </span>
+          <span className="notification-card-title">安全提醒</span>
+          <button
+            type="button"
+            className="notification-card-close"
             aria-label="关闭安全提醒"
-            onClick={() => setDismissed(true)}
             title="关闭"
+            onClick={() => setDismissed(true)}
           >
-            ✕
+            <Icon name="x" className="icon-sm" />
           </button>
         </div>
-        <p className="password-warning-text">
+        <p className="notification-card-text">
           您<span className="text-danger">正在使用默认密码</span>，请尽快修改以确保账户安全
         </p>
-        <div className="password-warning-footer">
-          <button type="button"
-            className="password-warning-action"
+        <div className="notification-card-footer">
+          <button
+            type="button"
+            className="notification-card-action"
             onClick={() => navigate("/profile")}
           >
             前往修改
           </button>
         </div>
       </div>
-
-      <style>{`
-        .password-warning-banner {
-          position: fixed;
-          bottom: 16px;
-          right: 16px;
-          z-index: 1000;
-          animation: slideIn 0.3s ease-out;
-        }
-
-        .password-warning-card {
-          width: 280px;
-          background: #fff;
-          border: 1px solid rgba(0, 0, 0, 0.08);
-          border-radius: 16px;
-          padding: 16px;
-          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
-        }
-
-        .password-warning-header {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          margin-bottom: 8px;
-        }
-
-        .password-warning-icon {
-          font-size: 16px;
-        }
-
-        .password-warning-title {
-          flex: 1;
-          font-size: 14px;
-          font-weight: 600;
-          color: #1a1a1a;
-        }
-
-        .password-warning-close {
-          width: 20px;
-          height: 20px;
-          border-radius: 50%;
-          background: rgba(0, 0, 0, 0.05);
-          border: none;
-          color: #999;
-          cursor: pointer;
-          font-size: 10px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          transition: all 0.15s ease;
-        }
-
-        .password-warning-close:hover {
-          background: rgba(0, 0, 0, 0.1);
-          color: #666;
-        }
-
-        .password-warning-text {
-          margin: 0 0 12px 0;
-          font-size: 13px;
-          color: #666;
-          line-height: 1.5;
-        }
-
-        .password-warning-text .text-danger {
-          color: #ef4444;
-          font-weight: 500;
-        }
-
-        .password-warning-footer {
-          display: flex;
-        }
-
-        .password-warning-action {
-          width: 100%;
-          padding: 8px 16px;
-          background: #fff;
-          color: #1a1a1a;
-          border: 1px solid rgba(0, 0, 0, 0.1);
-          border-radius: 8px;
-          font-size: 13px;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.15s ease;
-        }
-
-        .password-warning-action:hover {
-          background: #f5f5f5;
-        }
-
-        @media (max-width: 767px) {
-          .password-warning-banner { bottom: 88px; }
-        }
-
-        @keyframes slideIn {
-          from {
-            opacity: 0;
-            transform: translateY(10px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-      `}</style>
-    </div>
+    </NotificationStackItem>
   );
 }

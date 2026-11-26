@@ -5,8 +5,11 @@ import { createPortal } from "react-dom";
 import { useMounted } from "@/shared/hooks/useMounted";
 import { AnimatedToast } from "@/shared/components/AnimatedToast";
 import { ModalOverlay } from "@/shared/components/ModalOverlay";
-import { ToastPortal } from "@/shared/components/ToastPortal";
 import { requestModalClose } from "@/shared/ui/modalClose";
+import {
+  NotificationStackItem,
+  NotificationStackProvider,
+} from "@/shared/components/NotificationStack";
 import {
   ToastContext,
   bindToastEmitter,
@@ -22,6 +25,9 @@ interface Toast {
 }
 
 let toastId = 0;
+
+/** 同时可见上限：多出的排队，等有空位再入场（此时才开始计时）。 */
+const MAX_VISIBLE_TOASTS = 5;
 
 function getToastClass(type: ToastType): string {
   switch (type) {
@@ -83,24 +89,29 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [showToast, showConfirm],
   );
 
+  const visibleToasts = toasts.slice(0, MAX_VISIBLE_TOASTS);
+
   return (
-    <ToastContext.Provider value={contextValue}>
-      {children}
-      {typeof window !== "undefined" &&
-        mounted && (
-          <>
-            <ToastPortal className="toast-container">
-              {toasts.map((toast) => (
-                <AnimatedToast
+    <NotificationStackProvider>
+      <ToastContext.Provider value={contextValue}>
+        {children}
+        {typeof window !== "undefined" &&
+          mounted && (
+            <>
+              {visibleToasts.map((toast, index) => (
+                <NotificationStackItem
                   key={toast.id}
-                  className={`toast-item ${getToastClass(toast.type)}`}
-                  message={toast.message}
-                  type={toast.type}
-                  duration={3000}
-                  onDismiss={() => setToasts((current) => current.filter((item) => item.id !== toast.id))}
-                />
+                  order={1 + visibleToasts.length - 1 - index}
+                >
+                  <AnimatedToast
+                    className={`toast-item ${getToastClass(toast.type)}`}
+                    message={toast.message}
+                    type={toast.type}
+                    duration={3000}
+                    onDismiss={() => setToasts((current) => current.filter((item) => item.id !== toast.id))}
+                  />
+                </NotificationStackItem>
               ))}
-            </ToastPortal>
 
             {confirm && createPortal(
               <ModalOverlay
@@ -141,6 +152,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             )}
           </>
         )}
-    </ToastContext.Provider>
+      </ToastContext.Provider>
+    </NotificationStackProvider>
   );
 }

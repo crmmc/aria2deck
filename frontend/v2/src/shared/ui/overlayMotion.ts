@@ -30,7 +30,7 @@ export interface OverlayTriggerMotionResult {
 
 const ANIMATING_CLASS = "overlay-animating";
 
-function prefersReducedMotion() {
+export function prefersReducedMotion() {
   return typeof window !== "undefined" &&
     typeof window.matchMedia === "function" &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
