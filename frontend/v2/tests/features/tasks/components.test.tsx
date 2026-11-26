@@ -589,6 +589,18 @@ describe("api client boundary", () => {
 });
 
 describe("TorrentFileTree 只读与部分选中", () => {
+  it("文件名与目录名都带完整名称的悬停提示", () => {
+    const nodes = fillDirectorySizes(buildTorrentTree([
+      { index: 1, path: "很长的目录名称会被截断/很长的文件名会被截断.mkv", size: 10 },
+    ]));
+    const { container } = render(
+      <TorrentFileTree nodes={nodes} selectedIndexes={new Set([1])} searchQuery="" />,
+    );
+    const titles = Array.from(container.querySelectorAll(".torrent-tree-name"))
+      .map((element) => element.getAttribute("title"));
+    expect(titles).toEqual(["很长的目录名称会被截断", "很长的文件名会被截断.mkv"]);
+  });
+
   it("只读模式下只渲染有选中叶子的节点", () => {
     const nodes = fillDirectorySizes(buildTorrentTree([
       { index: 1, path: "A/x.bin", size: 10 },
