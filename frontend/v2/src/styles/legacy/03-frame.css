@@ -54,3 +54,45 @@
   gap: 16px;
 }
 
+/* 认证恢复期间的页面级加载态：fixed inset 0 让桌面与移动端都天然占满视口居中。
+   环形 spinner 用 conic-gradient 画渐隐尾部，再用 radial mask 挖空中心；
+   颜色全部取 :root 变量，背景透出页面既有 body 背景，不另加卡片。 */
+.page-loading {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+}
+
+.page-loading-ring {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: conic-gradient(from 90deg, transparent 0deg, var(--primary) 300deg, var(--primary) 360deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  animation: page-loading-spin 0.9s linear infinite;
+}
+
+.page-loading-text {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  letter-spacing: 0.02em;
+}
+
+@keyframes page-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 降低动态偏好下停转，改画一整圈实色环，静态也能看出"加载中"。 */
+@media (prefers-reduced-motion: reduce) {
+  .page-loading-ring {
+    animation: none;
+    background: var(--primary);
+  }
+}

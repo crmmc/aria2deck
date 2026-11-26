@@ -96,11 +96,6 @@ function SpeedChart({ samples }: { samples: SpeedSample[] }) {
           />
         )}
       </div>
-      {samples.length < 2 && (
-        <div className="chart-sample-state" role="status">
-          {samples.length === 0 ? "等待真实速度样本" : "仅 1 次真实采样，等待下一次连线"}
-        </div>
-      )}
       <div className="chart-axis">
         <span>{samples.length > 1 ? "60 秒前" : "真实采样"}</span>
         <span>现在</span>

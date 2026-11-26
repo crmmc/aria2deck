@@ -1129,12 +1129,6 @@
     font-size: 26px;
   }
 
-  .chart-sample-state {
-    max-width: calc(100% - 24px);
-    text-align: center;
-    white-space: normal;
-  }
-
   .profile-grid,
   .profile-rpc-grid {
     grid-template-columns: 1fr;

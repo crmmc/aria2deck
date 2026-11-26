@@ -140,6 +140,18 @@
   margin-left: 244px;
 }
 
+/* 鼠标点击聚焦不画环（防强制焦点高亮类浏览器在视口左缘画出单边竖线）；
+   tabindex=-1 不可 Tab 到达，键盘滚动行为不受影响 */
+.main-content:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* 浏览器判定需要焦点指示时（键盘/无障碍强制模式）：内嵌设计环 */
+.main-content:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -6px;
+}
+
 /* Override container for auth layout */
 .auth-container {
   width: 100%;
