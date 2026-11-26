@@ -12,12 +12,13 @@ from sqlalchemy import text
 from aria2deck.application.downloads.models import DownloadObservation, ObservedFile
 from aria2deck.bootstrap import create_app
 from aria2deck.domain.errors import DomainError, ErrorCode
+from aria2deck.domain.torrents import parse_torrent
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
 from tests.api.conftest import create_admin, login
-from tests.download_fakes import FakeSubmissionBackend
+from tests.download_fakes import FakeSubmissionBackend, make_torrent
 
 WRONG_SECRET = "错误令牌"  # noqa: S105  # 测试夹具令牌，非凭据
 
@@ -52,7 +53,15 @@ def _rpc(
     return client.post("/aria2/jsonrpc", json=payload)
 
 
-def _seed_task(settings, user_id: int, *, status: str = "active", name: str = "demo.bin") -> tuple[int, str]:
+def _seed_task(
+    settings,
+    user_id: int,
+    *,
+    status: str = "active",
+    name: str = "demo.bin",
+    gid: str = "feedface0123456789abcdef",
+    display_uri: str | None = None,
+) -> tuple[int, str]:
     now_ms = time.time_ns() // 1_000_000  # 当前时间基准：1970 时间戳会被历史保留 worker 过期（已知坑）。
 
     async def write() -> tuple[int, str]:
@@ -73,7 +82,7 @@ def _seed_task(settings, user_id: int, *, status: str = "active", name: str = "d
                 attempt_id = await repository.create_attempt(
                     source_id=source_id,
                     resource_key=f"http:rpc-{user_id}-{name}",
-                    gid="feedface0123456789abcdef",
+                    gid=gid,
                     now_ms=now_ms,
                 )
                 task_id = await repository.create_subscription(
@@ -81,14 +90,14 @@ def _seed_task(settings, user_id: int, *, status: str = "active", name: str = "d
                     user_id=user_id,
                     reserved_bytes=0,
                     display_name=name,
-                    display_uri=None,
+                    display_uri=display_uri,
                     now_ms=now_ms,
                 )
                 await uow.connection.execute(
                     text("UPDATE task_subscriptions SET status = :status WHERE id = :id"),
                     {"status": status, "id": task_id},
                 )
-                return task_id, "feedface0123456789abcdef"
+                return task_id, gid
         finally:
             await database.close()
 
@@ -193,11 +202,11 @@ def test_completed_single_file_is_projected_after_observation_is_empty(
     gid = next(item["gid"] for item in stopped if item["status"] == "complete")
     expected = {
         "index": "1",
-        "path": "completed.bin",
+        "path": "./completed.bin",
         "length": "577",
         "completedLength": "577",
         "selected": "true",
-        "uris": [],
+        "uris": [{"uri": "https://example.com/completed.bin", "status": "used"}],
     }
 
     status = _rpc(rpc_client, "aria2.tellStatus", [gid])
@@ -238,15 +247,15 @@ def test_completed_directory_projects_sorted_real_files_and_safe_rpc_basenames(
     expected = [
         {
             "index": "1",
-            "path": "a-first.bin",
+            "path": "./a-first.bin",
             "length": "4",
             "completedLength": "4",
             "selected": "true",
-            "uris": [],
+            "uris": [{"uri": "https://example.com/completed.bin", "status": "used"}],
         },
         {
             "index": "2",
-            "path": "b.bin",
+            "path": "./b.bin",
             "length": "2",
             "completedLength": "2",
             "selected": "true",
@@ -254,7 +263,7 @@ def test_completed_directory_projects_sorted_real_files_and_safe_rpc_basenames(
         },
         {
             "index": "3",
-            "path": "z-last.bin",
+            "path": "./z-last.bin",
             "length": "5",
             "completedLength": "5",
             "selected": "true",
@@ -304,13 +313,51 @@ def test_completed_files_prefer_nonempty_live_observation(
     assert status["files"] == [
         {
             "index": "1",
-            "path": "current.bin",
+            "path": "./current.bin",
             "length": "900",
             "completedLength": "300",
             "selected": "false",
-            "uris": [],
+            "uris": [{"uri": "https://example.com/completed.bin", "status": "used"}],
         }
     ]
+
+
+def test_get_servers_indexes_match_get_files(rpc_client: TestClient, settings) -> None:
+    """真机崩溃回归：getServers 缺条目 → 客户端 SparseArray.get(file.index) 为 null → NPE。"""
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    _, gid = _seed_completed_content(
+        settings,
+        user_id,
+        name="bundle",
+        size=11,
+        kind="directory",
+        entries=(
+            ("folder/a.bin", "file", 4),
+            ("folder/b.bin", "file", 2),
+            ("c.bin", "file", 5),
+        ),
+    )
+
+    files = _rpc(rpc_client, "aria2.getFiles", [gid]).json()["result"]
+    servers = _rpc(rpc_client, "aria2.getServers", [gid]).json()["result"]
+    assert [entry["index"] for entry in servers] == [entry["index"] for entry in files]
+    assert all(entry["servers"] == [] for entry in servers)
+
+    sparse = {int(entry["index"]): entry["servers"] for entry in servers}
+    assert [sparse.get(int(entry["index"])) for entry in files] == [[] for _ in files]
+
+
+def test_get_servers_covers_synthesized_file_entry(rpc_client: TestClient, settings) -> None:
+    """无文件任务：getServers 也要覆盖 getFiles 的合成项 index（客户端不做空判断）。"""
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    _seed_task(settings, user_id, status="failed", name="Big Buck Bunny")
+    listed = _rpc(rpc_client, "aria2.tellStopped", [0, 10]).json()["result"]
+    gid = listed[0]["gid"]
+
+    files = _rpc(rpc_client, "aria2.getFiles", [gid]).json()["result"]
+    servers = _rpc(rpc_client, "aria2.getServers", [gid]).json()["result"]
+    assert [entry["index"] for entry in servers] == ["1"]
+    assert [entry["index"] for entry in files] == ["1"]
 
 
 def test_completed_files_remain_user_scoped(rpc_client: TestClient, settings) -> None:
@@ -358,11 +405,11 @@ def test_completed_files_survive_restart_with_empty_observations(settings) -> No
         assert status.json()["result"]["files"] == [
             {
                 "index": "1",
-                "path": "completed.bin",
+                "path": "./completed.bin",
                 "length": "577",
                 "completedLength": "577",
                 "selected": "true",
-                "uris": [],
+                "uris": [{"uri": "https://example.com/completed.bin", "status": "used"}],
             }
         ]
 
@@ -755,12 +802,224 @@ def test_adduri_rejects_ftp_and_path_out(rpc_client: TestClient) -> None:
         rpc_client, "aria2.addUri", [["https://example.com/file.bin"], {"out": "/etc/passwd"}]
     )
     assert out.json()["error"]["code"] == 1
-    tracker = _rpc(
+
+
+def test_adduri_accepts_standard_aria2_client_options(rpc_client: TestClient) -> None:
+    """回归：AriaNg/Motrix 附带 pause/dir/split/user-agent/bt-tracker 时创建成功。"""
+    response = _rpc(
         rpc_client,
         "aria2.addUri",
-        [["https://example.com/file.bin"], {"bt-tracker": "http://t/announce"}],
+        [
+            ["https://example.com/rpc-compat.bin"],
+            {
+                "pause": "true",
+                "dir": "/data/downloads",
+                "split": "8",
+                "user-agent": "Motrix",
+                "continue": "true",
+                "bt-tracker": "http://t/announce",
+                "out": "compat.bin",
+            },
+        ],
     )
-    assert tracker.json()["error"]["code"] == 1
+    body = response.json()
+    assert "result" in body, response.text
+    assert len(body["result"]) == 16
+
+
+def test_adduri_accepts_trailing_position_param(rpc_client: TestClient) -> None:
+    """官方签名 addUri(uris, [options], [position])：多传 position 不得报错。"""
+    response = _rpc(
+        rpc_client,
+        "aria2.addUri",
+        [["https://example.com/rpc-position.bin"], {"dir": "/data/downloads"}, 0],
+    )
+    body = response.json()
+    assert "result" in body, response.text
+    assert len(body["result"]) == 16
+
+
+def test_control_methods_accept_string_numbers(rpc_client: TestClient, settings) -> None:
+    """客户端常把整数序列化成字符串：offset/num/pos/how 均不得报错。"""
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    _seed_task(settings, user_id, status="active", name="string-numbers.bin")
+    gid = _rpc(rpc_client, "aria2.tellActive", []).json()["result"][0]["gid"]
+
+    waiting = _rpc(rpc_client, "aria2.tellWaiting", ["0", "10", ["gid", "status"]]).json()
+    assert "result" in waiting, waiting
+    assert all(set(item) == {"gid", "status"} for item in waiting["result"])
+
+    moved = _rpc(rpc_client, "aria2.changePosition", [gid, "0", "POS_SET"]).json()
+    assert moved.get("result") == 0, moved
+
+
+def test_adduri_maps_header_option_into_stored_source(rpc_client: TestClient, settings) -> None:
+    """规范 header（"Name: Value" 数组）落进 source options，下载仍创建成功。"""
+    import json as json_module
+
+    response = _rpc(
+        rpc_client,
+        "aria2.addUri",
+        [
+            ["https://example.com/rpc-header.bin"],
+            {"header": ["Referer: https://a", "X-Test: 1"]},
+        ],
+    )
+    assert "result" in response.json(), response.text
+
+    async def read_options() -> dict[str, object]:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                row = (
+                    await uow.connection.execute(
+                        text("SELECT options_json FROM download_sources ORDER BY id DESC LIMIT 1")
+                    )
+                ).scalar_one()
+        finally:
+            await database.close()
+        return json_module.loads(row)
+
+    options = asyncio.run(read_options())
+    assert options["headers"] == {"referer": "https://a", "x-test": "1"}, options  # 领域层小写归一
+
+
+def test_tell_waiting_reports_waiting_and_reverses_negative_offset(
+    rpc_client: TestClient, settings
+) -> None:
+    """排队任务在 RPC 里映射为 waiting（aria2 无 queued 枚举）；负 offset 按 man 倒序。"""
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    for index, name in enumerate(("queue-a.bin", "queue-b.bin", "queue-c.bin")):
+        _seed_task(settings, user_id, status="queued", name=name, gid=f"feedface0123456789012{index}")
+
+    waiting = _rpc(rpc_client, "aria2.tellWaiting", [0, 10]).json()["result"]
+    assert [item["status"] for item in waiting] == ["waiting", "waiting", "waiting"], waiting
+
+    reversed_window = _rpc(rpc_client, "aria2.tellWaiting", [-1, 2]).json()["result"]
+    assert [item["gid"] for item in reversed_window] == [
+        waiting[-1]["gid"],
+        waiting[-2]["gid"],
+    ], reversed_window
+
+
+def test_fileless_task_name_matches_rest_in_all_three_views(
+    rpc_client: TestClient, settings
+) -> None:
+    """失败且无文件的任务：RPC 三个视图的 files[0].path 必须等于 REST 那份名字（不再是 ???）。"""
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    _seed_task(
+        settings,
+        user_id,
+        status="failed",
+        name="Big Buck Bunny",
+        display_uri="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+    )
+
+    listed = _rpc(rpc_client, "aria2.tellStopped", [0, 10]).json()["result"]
+    assert len(listed) == 1
+    gid = listed[0]["gid"]
+    assert listed[0]["files"][0]["path"] == "./Big Buck Bunny"
+
+    single = _rpc(rpc_client, "aria2.tellStatus", [gid]).json()["result"]
+    files = _rpc(rpc_client, "aria2.getFiles", [gid]).json()["result"]
+    assert single["files"][0]["path"] == "./Big Buck Bunny"
+    assert files[0]["path"] == "./Big Buck Bunny"
+    assert files[0]["uris"] == [
+        {
+            "uri": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "status": "used",
+        }
+    ]
+
+    rest = rpc_client.get("/api/v2/tasks").json()
+    assert [item["name"] for item in rest["items"]] == ["Big Buck Bunny"]
+
+
+def test_addtorrent_tell_status_exposes_real_info_hash(rpc_client: TestClient) -> None:
+    """种子任务：Aria2App BigUpdate 硬读顶层 infoHash，必须是真实种子的 info-hash。"""
+    payload = make_torrent(files=[("a.bin", 3)])
+    created = _rpc(rpc_client, "aria2.addTorrent", [payload])
+    assert "result" in created.json(), created.text
+
+    status = _rpc(rpc_client, "aria2.tellStatus", [created.json()["result"]]).json()["result"]
+    expected = parse_torrent(payload).info_hash
+    assert status["infoHash"] == expected
+    assert status["bittorrent"]["infoHash"] == expected
+    assert status["numSeeders"] == "0" and status["seeder"] == "false"
+
+
+def test_adduri_magnet_tell_status_exposes_info_hash(rpc_client: TestClient) -> None:
+    """磁力任务同样按 BT 投影：带 bittorrent/infoHash，客户端才会走种子分支。"""
+    info_hash = "0123456789abcdef0123456789abcdef01234567"
+    created = _rpc(rpc_client, "aria2.addUri", [[f"magnet:?xt=urn:btih:{info_hash}&dn=movie"]])
+    assert "result" in created.json(), created.text
+
+    status = _rpc(rpc_client, "aria2.tellStatus", [created.json()["result"]]).json()["result"]
+    assert status["infoHash"] == info_hash
+    assert status["bittorrent"]["infoHash"] == info_hash
+
+
+def test_tell_active_matches_client_key_list(rpc_client: TestClient, settings) -> None:
+    """抓包回归：active 任务即使带 admission 标记，errorCode 恒 "0" 且客户端点名键齐全。"""
+    user_id = int(rpc_client.get("/api/v2/auth/me").json()["id"])
+    task_id, _raw_gid = _seed_task(settings, user_id, status="active", name="meta-magnet.bin")
+
+    async def mark_admission_paused() -> None:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                await uow.connection.execute(
+                    text("UPDATE task_subscriptions SET error_code = :code WHERE id = :id"),
+                    {"code": "metadata_admission_paused", "id": task_id},
+                )
+        finally:
+            await database.close()
+
+    asyncio.run(mark_admission_paused())
+
+    # Aria2App `AriaRequests.SMALL_KEYS` 的 HTTP 子集（bittorrent/numSeeders 是 BT 专属，不下发）。
+    keys = [
+        "totalLength", "gid", "status", "pieceLength", "numPieces", "dir",
+        "completedLength", "downloadSpeed", "uploadSpeed", "connections", "uploadLength",
+        "files", "errorCode", "errorMessage",
+    ]
+    listed = _rpc(rpc_client, "aria2.tellActive", [keys]).json()["result"]
+    assert len(listed) == 1
+    item = listed[0]
+    assert [key for key in keys if key not in item] == [], item
+    assert item["errorCode"] == "0"
+    assert item["errorMessage"] == ""
+    assert "bittorrent" not in item and "infoHash" not in item, "HTTP 任务不得伪装成种子任务"
+
+
+def test_multicall_nested_adduri_filters_client_options(rpc_client: TestClient) -> None:
+    """嵌套子调用走同一处理器：子调用里的 pause/dir/split 同样被过滤而非报错。"""
+    response = rpc_client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "system.multicall",
+            "params": [
+                f"token:{_secret()}",
+                [
+                    {
+                        "methodName": "aria2.addUri",
+                        "params": [
+                            ["https://example.com/rpc-nested.bin"],
+                            {"pause": "true", "dir": "/data/downloads", "split": "8", "user-agent": "Motrix"},
+                            0,
+                        ],
+                    }
+                ],
+            ],
+        },
+    )
+    body = response.json()
+    assert "result" in body, response.text
+    nested = body["result"][0]
+    assert isinstance(nested, list), body
+    assert len(nested[0]) == 16
 
 
 def test_adduri_creates_and_is_idempotent(rpc_client: TestClient, settings) -> None:
@@ -869,18 +1128,26 @@ def test_mixed_remove_results_keep_per_item_errors(
     assert set(backend.stop_calls) == {confirmed_raw_gid, unconfirmed_raw_gid}
 
 
-def test_addtorrent_rejects_bad_options(rpc_client: TestClient) -> None:
+def test_addtorrent_ignores_unknown_options(rpc_client: TestClient) -> None:
+    """未知种子选项只记键名后丢弃；剩余错误必须来自种子本身，而非选项校验。"""
     payload = base64.b64encode(b"not-a-torrent").decode()
     webseed = _rpc(
         rpc_client,
         "aria2.addTorrent",
-        [payload, {"follow-web-seed": "http://mirror/"}],
+        [payload, {"follow-web-seed": "http://mirror/", "pause": "true"}],
     )
     assert webseed.json()["error"]["code"] == 1
-    tracker = _rpc(rpc_client, "aria2.addTorrent", [payload, {"bt-tracker": "http://t/a"}])
+    assert "选项" not in webseed.json()["error"]["message"], webseed.text
+    tracker = _rpc(
+        rpc_client,
+        "aria2.addTorrent",
+        [payload, {"bt-tracker": "http://t/a", "dir": "/data/downloads"}],
+    )
     assert tracker.json()["error"]["code"] == 1
+    assert tracker.json()["error"]["message"] == webseed.json()["error"]["message"]
     invalid = _rpc(rpc_client, "aria2.addTorrent", [payload])
     assert invalid.json()["error"]["code"] == 1
+    assert invalid.json()["error"]["message"] == webseed.json()["error"]["message"]
 
 
 def test_removed_projection_for_cancelled_tasks(rpc_client: TestClient, settings) -> None:
