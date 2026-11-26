@@ -91,6 +91,15 @@ export function LoginPage() {
       navigate(from && from !== "/login" ? from : "/tasks", { replace: true });
     } catch (caught) {
       if (caught instanceof ApiRequestError) {
+        // 冻结/锁定用独立错误码，不能靠文案匹配；401 仍统一为通用密码错误。
+        if (caught.code === "account_frozen") {
+          setError("该用户已冻结，详情请联系管理员");
+          return;
+        }
+        if (caught.code === "account_locked") {
+          setError("该用户已锁定，请联系管理员轮换新的密码");
+          return;
+        }
         if (caught.status === 401) {
           setError("用户名或密码无效");
           return;

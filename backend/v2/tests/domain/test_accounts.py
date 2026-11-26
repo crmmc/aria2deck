@@ -4,6 +4,7 @@ import pytest
 
 from aria2deck.domain.accounts import (
     DEFAULT_QUOTA_BYTES,
+    AccountStatus,
     CredentialKind,
     Permission,
     Role,
@@ -14,12 +15,15 @@ from aria2deck.domain.accounts import (
     ensure_quota_change,
     ensure_user_delete,
     ensure_user_role_change,
+    ensure_user_status_change,
     ensure_username_change,
     normalize_username,
     require_credential_invalidation,
+    require_login_allowed,
     require_password_generation,
     require_session,
     session_is_active,
+    status_after_password_reset,
     validate_api_token_name,
     validate_new_user,
     validate_password_change,
@@ -104,18 +108,125 @@ def test_async_user_delete_only_finalizes_after_all_owned_work_is_gone() -> None
             can_finalize_user_deletion(active_tasks=values[0], file_references=values[1], active_packs=values[2])
 
 
-@pytest.mark.parametrize("admin,pending,allowed", [(False, False, True), (True, False, False), (False, True, False)])
-def test_api_token_cannot_be_used_by_admin_or_pending_user(
-    admin: bool, pending: bool, allowed: bool
+@pytest.mark.parametrize(
+    "admin,pending,status,allowed",
+    [
+        (False, False, AccountStatus.ACTIVE, True),
+        (True, False, AccountStatus.ACTIVE, False),
+        (False, True, AccountStatus.ACTIVE, False),
+        (False, False, AccountStatus.FROZEN, False),
+        (False, False, AccountStatus.LOCKED, False),
+    ],
+)
+def test_api_token_cannot_be_used_by_admin_pending_or_inactive_user(
+    admin: bool, pending: bool, status: AccountStatus, allowed: bool
 ) -> None:
-    assert api_token_allowed(is_admin=admin, pending_delete=pending) is allowed
+    assert (
+        api_token_allowed(is_admin=admin, pending_delete=pending, status=status) is allowed
+    )
 
 
 def test_session_expiry_revocation_and_user_deletion_are_unambiguous() -> None:
-    assert session_is_active(expires_at_ms=100, now_ms=99, revoked_at_ms=None, pending_delete=False)
-    assert not session_is_active(expires_at_ms=100, now_ms=100, revoked_at_ms=None, pending_delete=False)
-    assert not session_is_active(expires_at_ms=100, now_ms=1, revoked_at_ms=50, pending_delete=False)
-    assert not session_is_active(expires_at_ms=100, now_ms=1, revoked_at_ms=None, pending_delete=True)
+    assert session_is_active(
+        expires_at_ms=100, now_ms=99, revoked_at_ms=None, pending_delete=False,
+        status=AccountStatus.ACTIVE,
+    )
+    assert not session_is_active(
+        expires_at_ms=100, now_ms=100, revoked_at_ms=None, pending_delete=False,
+        status=AccountStatus.ACTIVE,
+    )
+    assert not session_is_active(
+        expires_at_ms=100, now_ms=1, revoked_at_ms=50, pending_delete=False,
+        status=AccountStatus.ACTIVE,
+    )
+    assert not session_is_active(
+        expires_at_ms=100, now_ms=1, revoked_at_ms=None, pending_delete=True,
+        status=AccountStatus.ACTIVE,
+    )
+    for inactive in (AccountStatus.FROZEN, AccountStatus.LOCKED):
+        assert not session_is_active(
+            expires_at_ms=100, now_ms=1, revoked_at_ms=None, pending_delete=False,
+            status=inactive,
+        )
+
+
+@pytest.mark.parametrize(
+    "status,expected_code,message",
+    [
+        (AccountStatus.FROZEN, ErrorCode.ACCOUNT_FROZEN, "该用户已冻结，详情请联系管理员"),
+        (AccountStatus.LOCKED, ErrorCode.ACCOUNT_LOCKED, "该用户已锁定，请联系管理员轮换新的密码"),
+    ],
+)
+def test_frozen_and_locked_accounts_get_their_own_login_error(
+    status: AccountStatus, expected_code: ErrorCode, message: str
+) -> None:
+    with pytest.raises(DomainError) as caught:
+        require_login_allowed(status)
+    assert caught.value.code is expected_code
+    assert str(caught.value) == message
+
+
+def test_active_accounts_pass_the_login_gate() -> None:
+    require_login_allowed(AccountStatus.ACTIVE)
+
+
+@pytest.mark.parametrize(
+    "current,expected",
+    [
+        (AccountStatus.ACTIVE, AccountStatus.ACTIVE),
+        (AccountStatus.FROZEN, AccountStatus.FROZEN),
+        (AccountStatus.LOCKED, AccountStatus.ACTIVE),
+    ],
+)
+def test_password_reset_status_table(current: AccountStatus, expected: AccountStatus) -> None:
+    assert status_after_password_reset(current) is expected
+
+
+def _status_change(
+    *,
+    actor_id: int = 1,
+    target_id: int = 2,
+    role: Role = Role.ADMIN,
+    current: AccountStatus = AccountStatus.ACTIVE,
+    new: AccountStatus = AccountStatus.FROZEN,
+    target_is_admin: bool = False,
+    active_admins: int = 2,
+) -> None:
+    ensure_user_status_change(
+        actor_id=actor_id,
+        target_id=target_id,
+        actor_role=role,
+        current=current,
+        new=new,
+        target_is_admin=target_is_admin,
+        active_admin_count=active_admins,
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected_code",
+    [
+        ({}, None),
+        ({"current": AccountStatus.FROZEN, "new": AccountStatus.ACTIVE}, None),
+        ({"target_is_admin": True, "active_admins": 2}, None),
+        ({"role": Role.USER}, ErrorCode.PERMISSION_DENIED),
+        ({"new": AccountStatus.LOCKED}, ErrorCode.INVALID_INPUT),
+        ({"current": AccountStatus.LOCKED, "new": AccountStatus.ACTIVE}, ErrorCode.INVALID_STATE),
+        ({"current": AccountStatus.ACTIVE, "new": AccountStatus.ACTIVE}, ErrorCode.INVALID_STATE),
+        ({"current": AccountStatus.FROZEN, "new": AccountStatus.FROZEN}, ErrorCode.INVALID_STATE),
+        ({"actor_id": 1, "target_id": 1}, ErrorCode.PERMISSION_DENIED),
+        ({"target_is_admin": True, "active_admins": 1}, ErrorCode.LAST_ADMIN),
+    ],
+)
+def test_status_changes_enforce_scope_self_and_last_admin(
+    kwargs: dict[str, object], expected_code: ErrorCode | None
+) -> None:
+    if expected_code is None:
+        _status_change(**kwargs)  # type: ignore[arg-type]
+        return
+    with pytest.raises(DomainError) as caught:
+        _status_change(**kwargs)  # type: ignore[arg-type]
+    assert caught.value.code is expected_code
 
 
 def test_global_credential_invalidation_requires_exact_confirmation() -> None:

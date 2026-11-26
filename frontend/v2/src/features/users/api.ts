@@ -4,6 +4,7 @@ import { passwordClientHash } from "@/shared/lib/crypto";
 import type {
   DeleteUserResponse,
   UserListResponse,
+  UserPasswordResetResponse,
   UserResponse,
 } from "@/shared/api/types";
 
@@ -64,6 +65,19 @@ export async function updateUser(
     payload.is_initial_password = plan.markInitialPassword;
   }
   return api.patch<UserResponse>(`/api/v2/users/${userId}`, payload);
+}
+
+/** 冻结/解冻复用用户 PATCH：后端只接受 active 与 frozen，locked 不经此入口写入。 */
+export function updateUserStatus(
+  userId: number,
+  status: "active" | "frozen",
+): Promise<UserResponse> {
+  return api.patch<UserResponse>(`/api/v2/users/${userId}`, { status });
+}
+
+/** 管理员随机重置：明文只在本响应里出现一次，不进入任何列表或本地存储。 */
+export function resetUserPassword(userId: number): Promise<UserPasswordResetResponse> {
+  return api.post<UserPasswordResetResponse>(`/api/v2/users/${userId}/password-reset`);
 }
 
 export function deleteUser(userId: number): Promise<DeleteUserResponse> {

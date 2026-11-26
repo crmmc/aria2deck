@@ -19,7 +19,7 @@ from aria2deck.application.downloads.models import (
     TaskProjection,
 )
 from aria2deck.application.downloads.queries import DownloadQueryService
-from aria2deck.domain.accounts import CredentialKind, User
+from aria2deck.domain.accounts import AccountStatus, CredentialKind, User
 from aria2deck.domain.downloads import AttemptStatus, SubscriptionStatus
 from aria2deck.infrastructure.config import Settings
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
@@ -653,6 +653,7 @@ async def test_list_api_adapter_maps_query_arguments_and_typed_response() -> Non
             username="user",
             username_key="user",
             password_hash="ab" * 32,
+            status=AccountStatus.ACTIVE,
             is_admin=False,
             quota_bytes=1000,
             is_initial_password=False,

@@ -7,7 +7,7 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ....domain.accounts import ApiToken, Session, User, validate_new_user
+from ....domain.accounts import AccountStatus, ApiToken, Session, User, validate_new_user
 from ....domain.errors import DomainError, ErrorCode
 from ....domain.quota import Quota
 from ..schema import api_tokens, quota_accounts, sessions, users
@@ -38,6 +38,7 @@ class AccountRepository:
                     is_admin=new_user.is_admin,
                     quota_bytes=new_user.quota_bytes,
                     is_initial_password=is_initial_password,
+                    status=AccountStatus.ACTIVE,
                     created_at_ms=now_ms,
                     updated_at_ms=now_ms,
                 )
@@ -57,6 +58,7 @@ class AccountRepository:
             username=str(row["username"]),
             username_key=str(row["username_key"]),
             password_hash=str(row["password_hash"]),
+            status=AccountStatus(str(row["status"])),
             is_admin=bool(row["is_admin"]),
             quota_bytes=int(cast(int, row["quota_bytes"])),
             is_initial_password=bool(row["is_initial_password"]),
@@ -82,6 +84,15 @@ class AccountRepository:
     async def count_admins(self) -> int:
         result = await self.connection.execute(
             select(func.count(users.c.id)).where(users.c.is_admin.is_(True))
+        )
+        return int(result.scalar_one())
+
+    async def count_active_admins(self) -> int:
+        result = await self.connection.execute(
+            select(func.count(users.c.id))
+            .where(users.c.is_admin.is_(True))
+            .where(users.c.pending_delete.is_(False))
+            .where(users.c.status == AccountStatus.ACTIVE)
         )
         return int(result.scalar_one())
 
@@ -130,6 +141,7 @@ class AccountRepository:
         is_admin: bool,
         quota_bytes: int,
         is_initial_password: bool,
+        status: AccountStatus,
         now_ms: int,
     ) -> None:
         try:
@@ -143,6 +155,7 @@ class AccountRepository:
                     is_admin=is_admin,
                     quota_bytes=quota_bytes,
                     is_initial_password=is_initial_password,
+                    status=status,
                     updated_at_ms=now_ms,
                 )
             )
@@ -158,6 +171,7 @@ class AccountRepository:
         expected_generation: int,
         password_hash: str,
         is_initial_password: bool,
+        status: AccountStatus,
         now_ms: int,
     ) -> bool:
         result = await self.connection.execute(
@@ -167,6 +181,7 @@ class AccountRepository:
             .values(
                 password_hash=password_hash,
                 is_initial_password=is_initial_password,
+                status=status,
                 credential_generation=users.c.credential_generation + 1,
                 updated_at_ms=now_ms,
             )

@@ -8,7 +8,7 @@ from aria2deck.application.accounts.models import Principal
 from aria2deck.application.downloads.history import HistoryService
 from aria2deck.application.downloads.models import DownloadRecord, HistoryExpiration
 from aria2deck.application.downloads.projection import TaskProjector
-from aria2deck.domain.accounts import CredentialKind, User
+from aria2deck.domain.accounts import AccountStatus, CredentialKind, User
 from aria2deck.domain.downloads import SubscriptionStatus, effective_task_status
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.infrastructure.observations import InMemoryDownloadObservations
@@ -85,7 +85,7 @@ def make_service(records: list[DownloadRecord], *, retention: int = 30) -> tuple
 
 def principal() -> Principal:
     return Principal(
-        User(1, "admin", "admin", "ab" * 32, True, 1000, False, False, 1, 1, 1),
+        User(1, "admin", "admin", "ab" * 32, AccountStatus.ACTIVE, True, 1000, False, False, 1, 1, 1),
         CredentialKind.SESSION,
         "session",
     )

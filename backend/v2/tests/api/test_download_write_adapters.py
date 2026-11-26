@@ -20,13 +20,13 @@ from aria2deck.application.downloads.gateway import DownloadGatewayService
 from aria2deck.application.downloads.history import HistoryService
 from aria2deck.application.downloads.models import GatewayResponse, TaskPage
 from aria2deck.application.downloads.queries import DownloadQueryService
-from aria2deck.domain.accounts import CredentialKind, User
+from aria2deck.domain.accounts import AccountStatus, CredentialKind, User
 from aria2deck.domain.downloads import SubscriptionStatus
 
 
 def principal() -> Principal:
     return Principal(
-        User(1, "admin", "admin", "ab" * 32, True, 1000, False, False, 1, 1, 1),
+        User(1, "admin", "admin", "ab" * 32, AccountStatus.ACTIVE, True, 1000, False, False, 1, 1, 1),
         CredentialKind.SESSION,
         "session",
     )

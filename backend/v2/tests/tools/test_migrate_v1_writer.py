@@ -127,6 +127,27 @@ def test_users_are_marked_as_initial_password(v1_sample: SampleLayout, tmp_path:
     assert {str(row["username_key"]) for row in rows} == {"alice", "bob", "dave"}
 
 
+def test_only_the_bootstrap_admin_starts_active_and_the_rest_are_locked(
+    v1_sample: SampleLayout, tmp_path: Path
+) -> None:
+    """AC9：迁移后只有引导管理员可登录，其余账号明确写为锁定。"""
+    from sqlalchemy import select
+
+    from aria2deck.infrastructure.sqlite.schema import users
+
+    _run(v1_sample, tmp_path / "v2")
+
+    rows = _fetch(tmp_path / "v2", select(users.c.username, users.c.status, users.c.password_hash))
+    assert {str(name): str(status) for name, status, _hash in rows} == {
+        "alice": "active",
+        "bob": "locked",
+        "dave": "locked",
+    }
+    assert {
+        str(name) for name, _status, stored in rows if str(stored) == PLACEHOLDER_PASSWORD
+    } == {"bob", "dave"}
+
+
 def test_admin_flag_and_quota_are_preserved(v1_sample: SampleLayout, tmp_path: Path) -> None:
     _run(v1_sample, tmp_path / "v2")
 

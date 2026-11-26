@@ -25,6 +25,7 @@ const MIB = 1024 ** 2;
 const SLOW = { timeout: 5000 } as const;
 
 const ME: UserResponse = {
+  status: "active",
   id: 1,
   username: "admin",
   is_admin: true,
@@ -40,6 +41,7 @@ function user(id: number, overrides: Partial<UserResponse> = {}): UserResponse {
   return {
     id,
     username: `user-${id}`,
+    status: "active",
     is_admin: false,
     quota_bytes: 100 * GIB,
     is_initial_password: false,
@@ -178,7 +180,14 @@ describe("UsersPage 列表（Demo 表格）", () => {
     expect(table).not.toBeNull();
     expect(document.querySelector(".admin-table-panel")).not.toBeNull();
     const headers = Array.from(table.querySelectorAll("thead th")).map((cell) => cell.textContent);
-    expect(headers).toEqual(["ID", "用户名", "角色", "存储用量 / 配额 / 可用 / 全站占比", "操作"]);
+    expect(headers).toEqual([
+      "ID",
+      "用户名",
+      "角色",
+      "状态",
+      "存储用量 / 配额 / 可用 / 全站占比",
+      "操作",
+    ]);
 
     expect(within(rowOf("admin")).getByText("当前账号")).toBeInTheDocument();
     expect(within(rowOf("admin")).getByText("管理员").className).toBe("status-badge status-active");
@@ -733,6 +742,116 @@ describe("UsersPage 移动卡片布局", () => {
     expect(await screen.findByText("删除已受理，后台清理进行中")).toBeInTheDocument();
     expect(mockFetch.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
   });
+
+  it("卡片头部只给冻结与锁定补状态徽标，正常状态不加", async () => {
+    setup(() =>
+      list([
+        ME,
+        user(2, { username: "alice", status: "frozen" }),
+        user(3, { username: "bob", status: "locked" }),
+      ]),
+    );
+    const aliceCard = await screen.findByTestId("user-card-2");
+    expect(within(aliceCard).getByText("冻结").className).toBe("status-badge");
+    expect(aliceCard.querySelectorAll(".user-mobile-badges .status-badge")).toHaveLength(2);
+
+    const bobCard = screen.getByTestId("user-card-3");
+    expect(within(bobCard).getByText("锁定").className).toBe("status-badge status-danger");
+
+    const selfCard = screen.getByTestId("user-card-1");
+    expect(within(selfCard).queryByText("正常")).toBeNull();
+    expect(selfCard.querySelectorAll(".user-mobile-badges .status-badge")).toHaveLength(1);
+  });
+
+  it("卡片上的冻结按钮走确认流程并回写状态", async () => {
+    setup((url, init) => {
+      if (init?.method === "PATCH" && url === "/api/v2/users/2") {
+        return user(2, { username: "alice", status: "frozen" });
+      }
+      return list([ME, user(2, { username: "alice" })]);
+    });
+    const aliceCard = await screen.findByTestId("user-card-2");
+    expect(within(aliceCard).queryByRole("button", { name: "解冻用户 alice" })).toBeNull();
+    fireEvent.click(within(aliceCard).getByRole("button", { name: "冻结用户 alice" }));
+
+    const dialog = screen.getByRole("dialog", { name: "冻结用户 alice" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "冻结账号" }));
+
+    await waitFor(() => {
+      const patch = mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH");
+      expect(patch).toBeDefined();
+      expect(patch![0]).toBe("/api/v2/users/2");
+      expect(JSON.parse(patch![1].body as string)).toEqual({ status: "frozen" });
+    });
+    expect(await screen.findByText("账号已冻结")).toBeInTheDocument();
+    const refreshed = screen.getByTestId("user-card-2");
+    expect(within(refreshed).getByText("冻结")).toBeInTheDocument();
+    expect(within(refreshed).getByRole("button", { name: "解冻用户 alice" })).toBeInTheDocument();
+  });
+
+  it("冻结账号的卡片把冻结换成解冻，确认后回到正常", async () => {
+    setup((url, init) => {
+      if (init?.method === "PATCH" && url === "/api/v2/users/2") {
+        return user(2, { username: "alice", status: "active" });
+      }
+      return list([ME, user(2, { username: "alice", status: "frozen" })]);
+    });
+    const aliceCard = await screen.findByTestId("user-card-2");
+    expect(within(aliceCard).queryByRole("button", { name: "冻结用户 alice" })).toBeNull();
+    fireEvent.click(within(aliceCard).getByRole("button", { name: "解冻用户 alice" }));
+
+    const dialog = screen.getByRole("dialog", { name: "解冻用户 alice" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "解冻账号" }));
+
+    expect(await screen.findByText("账号已解冻")).toBeInTheDocument();
+    const refreshed = screen.getByTestId("user-card-2");
+    expect(within(refreshed).getByRole("button", { name: "冻结用户 alice" })).toBeInTheDocument();
+    expect(refreshed.querySelectorAll(".user-mobile-badges .status-badge")).toHaveLength(1);
+  });
+
+  it("卡片上的重置密码按钮打开一次性密码弹窗并发出重置请求", async () => {
+    setup((url, init) => {
+      if (init?.method === "POST" && url === "/api/v2/users/2/password-reset") {
+        return {
+          user: user(2, { username: "alice", is_initial_password: true }),
+          temporary_password: "Tmp59Yd5Im6Im3Kdn",
+        };
+      }
+      return list([ME, user(2, { username: "alice" })]);
+    });
+    const aliceCard = await screen.findByTestId("user-card-2");
+    fireEvent.click(within(aliceCard).getByRole("button", { name: "重置密码 alice" }));
+
+    const dialog = screen.getByRole("dialog", { name: "重置用户 alice 密码" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "重置密码" }));
+
+    expect(await screen.findByLabelText("临时密码")).toHaveValue("Tmp59Yd5Im6Im3Kdn");
+    expect(
+      mockFetch.mock.calls.filter(
+        ([url, init]) => url === "/api/v2/users/2/password-reset" && init?.method === "POST",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("当前账号的卡片不提供冻结、重置密码与删除入口", async () => {
+    setup(() => list([ME, user(2, { username: "alice" })]));
+    const selfCard = await screen.findByTestId("user-card-1");
+    expect(within(selfCard).getByRole("button", { name: "编辑用户 admin" })).toBeInTheDocument();
+    expect(within(selfCard).queryByRole("button", { name: "冻结用户 admin" })).toBeNull();
+    expect(within(selfCard).queryByRole("button", { name: "重置密码 admin" })).toBeNull();
+    expect(within(selfCard).queryByRole("button", { name: "删除用户 admin" })).toBeNull();
+    expect(
+      within(screen.getByTestId("user-card-2")).getByRole("button", { name: "重置密码 alice" }),
+    ).toBeInTheDocument();
+  });
+
+  it("锁定账号的卡片只留重置密码，不提供手动解冻", async () => {
+    setup(() => list([ME, user(2, { username: "bob", status: "locked" })]));
+    const card = await screen.findByTestId("user-card-2");
+    expect(within(card).queryByRole("button", { name: "冻结用户 bob" })).toBeNull();
+    expect(within(card).queryByRole("button", { name: "解冻用户 bob" })).toBeNull();
+    expect(within(card).getByRole("button", { name: "重置密码 bob" })).toBeInTheDocument();
+  });
 });
 
 describe("users 配额与占比口径", () => {
@@ -807,5 +926,293 @@ describe("users 配额与占比口径", () => {
     // quota 为 0 时按 V1 公式占比为 0，但机器占比仍按全量分母计算。
     expect(views[1].usage_percent).toBe(0);
     expect(views[1].machine_share_percent).toBe(75);
+  });
+});
+
+describe("UsersPage 账号状态与随机重置", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  function mockClipboard(writeText: jest.Mock) {
+    const original = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    return () => {
+      if (original === undefined) {
+        Reflect.deleteProperty(navigator, "clipboard");
+        return;
+      }
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: original,
+      });
+    };
+  }
+
+  it("maps all three statuses to visible labels without blanks", async () => {
+    setup(() =>
+      list([
+        ME,
+        user(2, { username: "frozen-user", status: "frozen" }),
+        user(3, { username: "locked-user", status: "locked" }),
+      ]),
+    );
+    await screen.findByText("frozen-user");
+
+    expect(within(rowOf("admin")).getByText("正常").className).toBe(
+      "status-badge status-success",
+    );
+    expect(within(rowOf("frozen-user")).getByText("冻结").className).toBe("status-badge");
+    expect(within(rowOf("locked-user")).getByText("锁定").className).toBe(
+      "status-badge status-danger",
+    );
+    for (const username of ["admin", "frozen-user", "locked-user"]) {
+      expect(rowOf(username).textContent).not.toContain("undefined");
+    }
+  });
+
+  it("freezes a normal account after confirmation and updates the row", async () => {
+    setup((url, init) => {
+      if (init?.method === "PATCH" && url === "/api/v2/users/2") {
+        return user(2, { username: "alice", status: "frozen" });
+      }
+      return list([ME, user(2, { username: "alice" })]);
+    });
+    await screen.findByText("alice");
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "冻结用户 alice" }));
+
+    const dialog = screen.getByRole("dialog", { name: "冻结用户 alice" });
+    expect(dialog.textContent).toContain("文件、分享和正在运行的任务不会被删除");
+    fireEvent.click(within(dialog).getByRole("button", { name: "冻结账号" }));
+
+    await waitFor(() => {
+      const patch = mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH");
+      expect(patch).toBeDefined();
+      expect(patch![0]).toBe("/api/v2/users/2");
+      expect(JSON.parse(patch![1].body as string)).toEqual({ status: "frozen" });
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(within(rowOf("alice")).getByText("冻结")).toBeInTheDocument();
+    expect(await screen.findByText("账号已冻结")).toBeInTheDocument();
+  });
+
+  it("keeps the unfreeze dialog open on failure and succeeds on retry", async () => {
+    let attempts = 0;
+    setup((url, init) => {
+      if (init?.method === "PATCH" && url === "/api/v2/users/2") {
+        attempts += 1;
+        if (attempts === 1) {
+          return json(409, { error: { code: "invalid_state", message: "账号状态未发生变化" } });
+        }
+        return user(2, { username: "alice", status: "active" });
+      }
+      return list([ME, user(2, { username: "alice", status: "frozen" })]);
+    });
+    await screen.findByText("alice");
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "解冻用户 alice" }));
+
+    const dialog = screen.getByRole("dialog", { name: "解冻用户 alice" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "解冻账号" }));
+
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent("账号状态未发生变化"),
+    );
+    expect(screen.getByRole("dialog", { name: "解冻用户 alice" })).toBeInTheDocument();
+    expect(within(rowOf("alice")).getByText("冻结")).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "解冻账号" }));
+    expect(await screen.findByText("账号已解冻")).toBeInTheDocument();
+    expect(within(rowOf("alice")).getByText("正常")).toBeInTheDocument();
+    expect(attempts).toBe(2);
+  });
+
+  it("reports a failed freeze without changing the row", async () => {
+    setup((url, init) => {
+      if (init?.method === "PATCH" && url === "/api/v2/users/2") {
+        return json(409, { error: { code: "last_admin", message: "不能冻结最后一名可用管理员" } });
+      }
+      return list([ME, user(2, { username: "alice", is_admin: true })]);
+    });
+    await screen.findByText("alice");
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "冻结用户 alice" }));
+
+    const dialog = screen.getByRole("dialog", { name: "冻结用户 alice" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "冻结账号" }));
+
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent("不能冻结最后一名可用管理员"),
+    );
+    expect(within(rowOf("alice")).getByText("正常")).toBeInTheDocument();
+  });
+
+  it("keeps freeze and reset entries off the current account row", async () => {
+    setup(() => list([ME, user(2, { username: "alice" })]));
+    await screen.findByText("alice");
+    const self = rowOf("admin");
+    expect(within(self).queryByRole("button", { name: "冻结用户 admin" })).toBeNull();
+    expect(within(self).queryByRole("button", { name: "重置密码 admin" })).toBeNull();
+    expect(within(rowOf("alice")).getByRole("button", { name: "重置密码 alice" })).toBeInTheDocument();
+  });
+
+  it("offers reset but no manual unlock for locked accounts", async () => {
+    setup(() => list([ME, user(2, { username: "locked-user", status: "locked" })]));
+    await screen.findByText("locked-user");
+    const row = rowOf("locked-user");
+    expect(within(row).queryByRole("button", { name: "冻结用户 locked-user" })).toBeNull();
+    expect(within(row).queryByRole("button", { name: "解冻用户 locked-user" })).toBeNull();
+    expect(within(row).getByRole("button", { name: "重置密码 locked-user" })).toBeInTheDocument();
+  });
+
+  it("shows the one-time password once, copies it, and drops it on close", async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    const restoreClipboard = mockClipboard(writeText);
+    const temporary = "P0ODK0i5pgbGNpdy";
+    setup((url, init) => {
+      if (init?.method === "POST" && url === "/api/v2/users/2/password-reset") {
+        return {
+          user: user(2, { username: "locked", is_initial_password: true }),
+          temporary_password: temporary,
+        };
+      }
+      return list([ME, user(2, { username: "locked", status: "locked" })]);
+    });
+    await screen.findByText("locked");
+    const trigger = within(rowOf("locked")).getByRole("button", { name: "重置密码 locked" });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const dialog = screen.getByRole("dialog", { name: "重置用户 locked 密码" });
+    expect(dialog.textContent).toContain("只显示一次");
+    fireEvent.click(within(dialog).getByRole("button", { name: "重置密码" }));
+
+    const field = (await screen.findByLabelText("临时密码")) as HTMLInputElement;
+    expect(field).toHaveValue(temporary);
+    expect(field).toHaveAttribute("readonly");
+    fireEvent.focus(field);
+    expect(field.selectionStart).toBe(0);
+    expect(field.selectionEnd).toBe(temporary.length);
+    const copyButton = screen.getByRole("button", { name: "复制临时密码" });
+    expect(copyButton).toHaveFocus();
+    fireEvent.click(copyButton);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(temporary));
+    expect(await screen.findByText("临时密码已复制")).toBeInTheDocument();
+
+    // 列表里留下的是响应里的新用户对象：状态与初始密码标记都来自后端。
+    expect(within(rowOf("locked")).getByText("正常")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByLabelText("临时密码")).toBeNull();
+    expect(document.body.textContent).not.toContain(temporary);
+    expect(trigger).toHaveFocus();
+    restoreClipboard();
+  });
+
+  it("keeps the dialog with a real error and retries without inventing a password", async () => {
+    let attempts = 0;
+    setup((url, init) => {
+      if (init?.method === "POST" && url === "/api/v2/users/2/password-reset") {
+        attempts += 1;
+        if (attempts === 1) {
+          return json(500, { error: { code: "internal_error", message: "服务器内部错误" } });
+        }
+        return {
+          user: user(2, { username: "alice", is_initial_password: true }),
+          temporary_password: "Zx81Qq0Lm3Vt7Rpa",
+        };
+      }
+      return list([ME, user(2, { username: "alice" })]);
+    });
+    await screen.findByText("alice");
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "重置密码 alice" }));
+
+    const dialog = screen.getByRole("dialog", { name: "重置用户 alice 密码" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "重置密码" }));
+
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent("服务器内部错误"),
+    );
+    expect(screen.queryByLabelText("临时密码")).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "重试" })).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "重试" }));
+    expect(await screen.findByLabelText("临时密码")).toHaveValue("Zx81Qq0Lm3Vt7Rpa");
+    expect(attempts).toBe(2);
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭对话框" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("cancels the reset confirmation without any request", async () => {
+    setup(() => list([ME, user(2, { username: "alice" })]));
+    await screen.findByText("alice");
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "重置密码 alice" }));
+
+    const dialog = screen.getByRole("dialog", { name: "重置用户 alice 密码" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(
+      mockFetch.mock.calls.find(([url]) => url === "/api/v2/users/2/password-reset"),
+    ).toBeUndefined();
+  });
+
+  it("blocks repeat submission and dismissal while the reset request is in flight", async () => {
+    const pending = deferred<unknown>();
+    setup((url, init) => {
+      if (init?.method === "POST" && url === "/api/v2/users/2/password-reset") {
+        return pending.promise;
+      }
+      return list([ME, user(2, { username: "alice" })]);
+    });
+    await screen.findByText("alice");
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "重置密码 alice" }));
+
+    const dialog = screen.getByRole("dialog", { name: "重置用户 alice 密码" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "重置密码" }));
+
+    const busy = await within(dialog).findByRole("button", { name: "重置中..." });
+    expect(busy).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "关闭对话框" })).toBeDisabled();
+    fireEvent.click(busy);
+    dialog.dispatchEvent(new Event("cancel"));
+    expect(screen.getByRole("dialog", { name: "重置用户 alice 密码" })).toBeInTheDocument();
+    const resets = mockFetch.mock.calls.filter(
+      ([url, init]) => url === "/api/v2/users/2/password-reset" && init?.method === "POST",
+    );
+    expect(resets).toHaveLength(1);
+
+    pending.resolve({
+      user: user(2, { username: "alice", is_initial_password: true }),
+      temporary_password: "Kk29Pp7Lm4Nq8Trb",
+    });
+    expect(await screen.findByLabelText("临时密码")).toHaveValue("Kk29Pp7Lm4Nq8Trb");
+  });
+
+  it("closes the status dialog from the header close button", async () => {
+    setup(() => list([ME, user(2, { username: "alice" })]));
+    await screen.findByText("alice");
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "冻结用户 alice" }));
+
+    const dialog = screen.getByRole("dialog", { name: "冻结用户 alice" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭对话框" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("closes through the shared reverse-exit path on cancel", async () => {
+    setup(() => list([ME, user(2, { username: "alice" })]));
+    await screen.findByText("alice");
+    fireEvent.click(within(rowOf("alice")).getByRole("button", { name: "冻结用户 alice" }));
+
+    const dialog = screen.getByRole("dialog", { name: "冻结用户 alice" });
+    expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(mockFetch.mock.calls.find(([, init]) => init?.method === "PATCH")).toBeUndefined();
   });
 });

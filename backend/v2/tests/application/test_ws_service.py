@@ -11,7 +11,7 @@ from aria2deck.application.downloads.ws_service import (
     ConnectionRegistry,
     WebSocketTaskService,
 )
-from aria2deck.domain.accounts import CredentialKind, User
+from aria2deck.domain.accounts import AccountStatus, CredentialKind, User
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.settings import SystemSettings
 from aria2deck.infrastructure.sqlite.repositories.accounts import AccountRepository
@@ -32,6 +32,7 @@ def _user() -> User:
         username="ws-user",
         username_key="ws-user",
         password_hash="x",  # noqa: S106  # 测试假数据，非真实凭证
+        status=AccountStatus.ACTIVE,
         is_admin=False,
         quota_bytes=100,
         is_initial_password=False,

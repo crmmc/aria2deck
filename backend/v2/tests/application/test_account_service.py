@@ -12,7 +12,8 @@ from aria2deck.api.contracts import SettingsUpdateRequest
 from aria2deck.api.settings import public_site_info, update_settings
 from aria2deck.application.accounts.models import Principal
 from aria2deck.application.accounts.service import AccountService
-from aria2deck.domain.accounts import CredentialKind
+from aria2deck.application.ports import SessionRevocation
+from aria2deck.domain.accounts import AccountStatus, CredentialKind
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.settings import SystemSettings
 from aria2deck.infrastructure.sqlite.repositories.accounts import AccountRepository
@@ -287,3 +288,311 @@ async def test_initial_admin_rule_covers_required_optional_short_and_existing_us
     logged_in = await service.login(username="admin", password_hash=derived)
     assert logged_in.view.user.is_admin is True
     assert logged_in.view.user.is_initial_password is True
+
+
+async def status_of(service: AccountService, user_id: int) -> AccountStatus:
+    async with service.uow_factory() as uow:
+        return (await service.repository_factory(uow).get_user(user_id)).status
+
+
+async def set_status(service: AccountService, user_id: int, status: AccountStatus) -> None:
+    async with service.uow_factory() as uow:
+        repository = service.repository_factory(uow)
+        user = await repository.get_user(user_id)
+        await repository.update_user(
+            user_id=user.id,
+            username=user.username,
+            username_key=user.username_key,
+            password_hash=user.password_hash,
+            is_admin=user.is_admin,
+            quota_bytes=user.quota_bytes,
+            is_initial_password=user.is_initial_password,
+            status=status,
+            now_ms=service.clock_ms(),
+        )
+
+
+async def test_login_gates_frozen_and_locked_before_the_password_check(tmp_path: Path) -> None:
+    _app, service = await make_service(tmp_path)
+    admin = await create_admin(service)
+    user = await service.create_user(
+        admin,
+        username="user",
+        password_hash=OTHER_PASSWORD,
+        is_admin=False,
+        is_initial_password=False,
+        quota_bytes=100,
+    )
+
+    await set_status(service, user.user.id, AccountStatus.FROZEN)
+    for candidate in (OTHER_PASSWORD, THIRD_PASSWORD):
+        with pytest.raises(DomainError) as caught:
+            await service.login(username="user", password_hash=candidate)
+        assert caught.value.code is ErrorCode.ACCOUNT_FROZEN
+        assert str(caught.value) == "该用户已冻结，详情请联系管理员"
+
+    await set_status(service, user.user.id, AccountStatus.LOCKED)
+    with pytest.raises(DomainError) as caught:
+        await service.login(username="user", password_hash=OTHER_PASSWORD)
+    assert caught.value.code is ErrorCode.ACCOUNT_LOCKED
+    assert str(caught.value) == "该用户已锁定，请联系管理员轮换新的密码"
+
+    with pytest.raises(DomainError) as caught:
+        await service.login(username="missing", password_hash=OTHER_PASSWORD)
+    assert caught.value.code is ErrorCode.UNAUTHENTICATED
+
+
+async def test_freeze_revokes_sessions_publishes_and_blocks_session_api_token_and_rpc(
+    tmp_path: Path,
+) -> None:
+    app, service = await make_service(tmp_path)
+    admin = await create_admin(service)
+    user = await service.create_user(
+        admin,
+        username="user",
+        password_hash=OTHER_PASSWORD,
+        is_admin=False,
+        is_initial_password=False,
+        quota_bytes=100,
+    )
+    principal, raw_session = await login_session(service, "user", OTHER_PASSWORD)
+    rpc = await service.set_rpc_access(principal, enabled=True)
+    assert rpc.secret is not None
+    raw_token = service.credentials.new_api_token()
+    async with service.uow_factory() as uow:
+        await service.repository_factory(uow).create_api_token(
+            user_id=user.user.id,
+            name="cli",
+            token_digest=service.credentials.digest_api_token(raw_token),
+            prefix=raw_token[:12],
+            now_ms=service.clock_ms(),
+        )
+    assert (await service.authenticate_api_token(raw_token)).user.id == user.user.id
+
+    published: list[SessionRevocation] = []
+    app.state.session_revocations.subscribe(published.append)
+
+    frozen = await service.update_user(
+        admin, user_id=user.user.id, changes={"status": "frozen"}
+    )
+
+    assert frozen.user.status is AccountStatus.FROZEN
+    assert published == [SessionRevocation(user_id=user.user.id)]
+    with pytest.raises(DomainError) as caught:
+        await service.authenticate_session(raw_session)
+    assert caught.value.code is ErrorCode.UNAUTHENTICATED
+    with pytest.raises(DomainError):
+        await service.authenticate_api_token(raw_token)
+    with pytest.raises(DomainError):
+        await service.authenticate_rpc_secret(rpc.secret)
+
+    await service.update_user(admin, user_id=user.user.id, changes={"status": "active"})
+    with pytest.raises(DomainError):
+        await service.authenticate_session(raw_session)
+    assert (await service.authenticate_rpc_secret(rpc.secret)).user.id == user.user.id
+
+
+async def test_status_writes_enforce_self_admin_and_locked_rules(tmp_path: Path) -> None:
+    _app, service = await make_service(tmp_path)
+    admin = await create_admin(service)
+    other_admin = await service.create_user(
+        admin,
+        username="ops",
+        password_hash=OTHER_PASSWORD,
+        is_admin=True,
+        is_initial_password=False,
+        quota_bytes=100,
+    )
+    user = await service.create_user(
+        admin,
+        username="user",
+        password_hash=THIRD_PASSWORD,
+        is_admin=False,
+        is_initial_password=False,
+        quota_bytes=100,
+    )
+
+    with pytest.raises(DomainError) as caught:
+        await service.update_user(
+            admin, user_id=admin.user.id, changes={"status": "frozen"}
+        )
+    assert caught.value.code is ErrorCode.PERMISSION_DENIED
+    assert await status_of(service, admin.user.id) is AccountStatus.ACTIVE
+
+    frozen = await service.update_user(
+        admin, user_id=other_admin.user.id, changes={"status": "frozen"}
+    )
+    assert frozen.user.status is AccountStatus.FROZEN
+    with pytest.raises(DomainError) as caught:
+        await service.update_user(
+            admin, user_id=other_admin.user.id, changes={"status": "frozen"}
+        )
+    assert caught.value.code is ErrorCode.INVALID_STATE
+
+    with pytest.raises(DomainError) as caught:
+        await service.update_user(
+            admin, user_id=user.user.id, changes={"status": "locked"}
+        )
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+    with pytest.raises(DomainError) as caught:
+        await service.update_user(
+            admin, user_id=user.user.id, changes={"status": "unknown"}
+        )
+    assert caught.value.code is ErrorCode.INVALID_INPUT
+
+    await set_status(service, user.user.id, AccountStatus.LOCKED)
+    with pytest.raises(DomainError) as caught:
+        await service.update_user(
+            admin, user_id=user.user.id, changes={"status": "active"}
+        )
+    assert caught.value.code is ErrorCode.INVALID_STATE
+    assert await status_of(service, user.user.id) is AccountStatus.LOCKED
+
+
+async def test_random_reset_unlocks_locked_keeps_frozen_and_returns_unique_passwords(
+    tmp_path: Path,
+) -> None:
+    _app, service = await make_service(tmp_path)
+    admin = await create_admin(service)
+    view = await service.create_user(
+        admin,
+        username="user",
+        password_hash=OTHER_PASSWORD,
+        is_admin=False,
+        is_initial_password=False,
+        quota_bytes=100,
+    )
+    user_id = view.user.id
+
+    first_view, first_password = await service.reset_password(admin, user_id=user_id)
+    second_view, second_password = await service.reset_password(admin, user_id=user_id)
+
+    assert first_view.user.status is AccountStatus.ACTIVE
+    assert second_view.user.status is AccountStatus.ACTIVE
+    assert first_view.user.is_initial_password is True
+    assert len(first_password) == 16
+    assert first_password != second_password
+    assert first_password not in str(second_view)
+
+    def submitted(password: str) -> str:
+        return service.credentials.derive_password_hash(username="user", password=password)
+
+    with pytest.raises(DomainError) as caught:
+        await service.login(username="user", password_hash=submitted(first_password))
+    assert caught.value.code is ErrorCode.UNAUTHENTICATED
+    logged_in = await service.login(username="user", password_hash=submitted(second_password))
+    assert logged_in.view.user.is_initial_password is True
+
+    async with service.uow_factory() as uow:
+        stored = await service.repository_factory(uow).get_user(user_id)
+    assert service.credentials.verify_password(
+        service.credentials.derive_password_hash(username="user", password=second_password),
+        stored.password_hash,
+    )
+
+    await set_status(service, user_id, AccountStatus.LOCKED)
+    locked_view, locked_password = await service.reset_password(admin, user_id=user_id)
+    assert locked_view.user.status is AccountStatus.ACTIVE
+    login_result = await service.login(
+        username="user", password_hash=submitted(locked_password)
+    )
+    assert login_result.view.user.status is AccountStatus.ACTIVE
+
+    await set_status(service, user_id, AccountStatus.FROZEN)
+    frozen_view, frozen_password = await service.reset_password(admin, user_id=user_id)
+    assert frozen_view.user.status is AccountStatus.FROZEN
+    with pytest.raises(DomainError) as caught:
+        await service.login(username="user", password_hash=submitted(frozen_password))
+    assert caught.value.code is ErrorCode.ACCOUNT_FROZEN
+
+
+async def test_manual_password_change_applies_the_same_status_transition(tmp_path: Path) -> None:
+    _app, service = await make_service(tmp_path)
+    admin = await create_admin(service)
+    view = await service.create_user(
+        admin,
+        username="user",
+        password_hash=OTHER_PASSWORD,
+        is_admin=False,
+        is_initial_password=False,
+        quota_bytes=100,
+    )
+    _, old_session = await login_session(service, "user", OTHER_PASSWORD)
+    user_id = view.user.id
+
+    for current, expected in (
+        (AccountStatus.LOCKED, AccountStatus.ACTIVE),
+        (AccountStatus.FROZEN, AccountStatus.FROZEN),
+        (AccountStatus.ACTIVE, AccountStatus.ACTIVE),
+    ):
+        await set_status(service, user_id, current)
+        updated = await service.update_user(
+            admin,
+            user_id=user_id,
+            changes={"password_hash": THIRD_PASSWORD, "is_initial_password": True},
+        )
+        assert updated.user.status is expected
+        assert updated.user.is_initial_password is True
+        with pytest.raises(DomainError):
+            await service.authenticate_session(old_session)
+
+    with pytest.raises(DomainError):
+        await service.login(username="user", password_hash=OTHER_PASSWORD)
+    logged_in = await service.login(username="user", password_hash=THIRD_PASSWORD)
+    assert logged_in.view.user.status is AccountStatus.ACTIVE
+
+
+async def test_reset_password_rejects_non_admin_missing_and_pending_targets(tmp_path: Path) -> None:
+    _app, service = await make_service(tmp_path)
+    admin = await create_admin(service)
+    view = await service.create_user(
+        admin,
+        username="user",
+        password_hash=OTHER_PASSWORD,
+        is_admin=False,
+        is_initial_password=False,
+        quota_bytes=100,
+    )
+    user_principal = await current_principal(service, view.user.id)
+
+    with pytest.raises(DomainError) as caught:
+        await service.reset_password(user_principal, user_id=admin.user.id)
+    assert caught.value.code is ErrorCode.PERMISSION_DENIED
+    with pytest.raises(DomainError) as caught:
+        await service.reset_password(admin, user_id=999)
+    assert caught.value.code is ErrorCode.NOT_FOUND
+
+    await service.delete_user(admin, user_id=view.user.id)
+    with pytest.raises(DomainError) as caught:
+        await service.reset_password(admin, user_id=view.user.id)
+    assert caught.value.code is ErrorCode.INVALID_STATE
+
+
+async def test_stale_generation_blocks_reset_and_manual_password_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app, service = await make_service(tmp_path)
+    admin = await create_admin(service)
+    view = await service.create_user(
+        admin,
+        username="user",
+        password_hash=OTHER_PASSWORD,
+        is_admin=False,
+        is_initial_password=False,
+        quota_bytes=100,
+    )
+
+    async def reject_change(*args: object, **kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(AccountRepository, "change_password", reject_change)
+    with pytest.raises(DomainError) as caught:
+        await service.reset_password(admin, user_id=view.user.id)
+    assert caught.value.code is ErrorCode.INVALID_STATE
+    with pytest.raises(DomainError) as caught:
+        await service.update_user(
+            admin, user_id=view.user.id, changes={"password_hash": THIRD_PASSWORD}
+        )
+    assert caught.value.code is ErrorCode.INVALID_STATE
+    assert await status_of(service, view.user.id) is AccountStatus.ACTIVE
+    assert (await service.login(username="user", password_hash=OTHER_PASSWORD)).session_id

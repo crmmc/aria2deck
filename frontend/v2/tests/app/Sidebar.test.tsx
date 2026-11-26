@@ -11,6 +11,7 @@ const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
 const ADMIN: UserResponse = {
+  status: "active",
   id: 1, username: "admin", is_admin: true, quota_bytes: 1,
   is_initial_password: false, pending_delete: false,
   used_bytes: 0, reserved_bytes: 0, available_bytes: 1,

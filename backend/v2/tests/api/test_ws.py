@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from aria2deck.application.downloads.broadcast import BroadcastMessage
-from tests.api.conftest import create_admin, create_user, login
+from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, login
 
 
 @contextmanager
@@ -267,6 +267,24 @@ def test_ws_revocation_scenarios_e2e(client: TestClient, app: FastAPI) -> None:
         with pytest.raises(WebSocketDisconnect) as caught:
             socket.receive_text()
         assert caught.value.code in (4401, 1001)
+
+
+def test_freeze_closes_the_live_task_stream_with_4401(client: TestClient) -> None:
+    """冻结后已建立的 WS 立即以 4401 关闭（撤销总线），不依赖 30 秒复验。"""
+    create_admin(client)
+    login(client)
+    victim = create_user(client, "victim")
+    login(client, "victim", OTHER_PASSWORD)
+
+    with _connect(client) as socket:
+        socket.send_text("ping")
+        assert socket.receive_text() == "pong"
+        login(client)
+        frozen = client.patch(f"/api/v2/users/{victim['id']}", json={"status": "frozen"})
+        assert frozen.status_code == 200
+        with pytest.raises(WebSocketDisconnect) as caught:
+            socket.receive_text()
+        assert caught.value.code == 4401
 
 
 def test_bootstrap_wiring_broadcast_shared(app: FastAPI) -> None:

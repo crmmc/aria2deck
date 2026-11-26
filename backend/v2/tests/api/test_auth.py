@@ -22,6 +22,7 @@ from tests.api.conftest import (
     create_admin,
     create_user,
     login,
+    set_user_status,
 )
 
 COOKIE = "aria2deck_v2_session"
@@ -366,3 +367,90 @@ def test_authenticated_api_rate_limit_shares_one_bucket_across_endpoints(
     assert limited.status_code == 429
     assert limited.headers["Retry-After"] == "60"
     assert client.get("/api/v2/public/site-info").status_code == 200
+
+
+def test_frozen_and_locked_logins_return_dedicated_403_before_password_check(
+    client: TestClient, settings
+) -> None:
+    create_admin(client)
+    login(client)
+    user = create_user(client)
+    user_id = int(user["id"])
+
+    client.patch(f"/api/v2/users/{user_id}", json={"status": "frozen"})
+    for candidate in (OTHER_PASSWORD, THIRD_PASSWORD):
+        frozen = client.post(
+            "/api/v2/auth/login", json={"username": "user", "password": candidate}
+        )
+        assert frozen.status_code == 403
+        assert frozen.json() == {
+            "error": {
+                "code": "account_frozen",
+                "message": "该用户已冻结，详情请联系管理员",
+            }
+        }
+
+    set_user_status(settings, user_id, "locked")
+    for candidate in (OTHER_PASSWORD, "00" * 32):
+        locked = client.post(
+            "/api/v2/auth/login", json={"username": "user", "password": candidate}
+        )
+        assert locked.status_code == 403
+        assert locked.json() == {
+            "error": {
+                "code": "account_locked",
+                "message": "该用户已锁定，请联系管理员轮换新的密码",
+            }
+        }
+
+    wrong = client.post(
+        "/api/v2/auth/login", json={"username": "admin", "password": OTHER_PASSWORD}
+    )
+    assert wrong.status_code == 401
+    assert wrong.json()["error"]["code"] == "unauthenticated"
+
+
+def _rpc_version(client: TestClient, secret: str) -> object:
+    return client.post(
+        "/aria2/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "aria2.getVersion",
+            "params": [f"token:{secret}"],
+        },
+    )
+
+
+def test_freeze_revokes_live_session_and_rpc_access(client: TestClient) -> None:
+    admin = create_admin(client)
+    login(client)
+    user = create_user(client)
+    login(client, "user", OTHER_PASSWORD)
+    old_session = client.cookies.get(COOKIE)
+    rpc = client.put("/api/v2/credentials/rpc", json={"enabled": True}).json()
+    secret = rpc["secret"]
+    assert secret
+    assert _rpc_version(client, secret).json()["result"]["version"]
+
+    login(client)
+    assert client.patch(
+        f"/api/v2/users/{user['id']}", json={"status": "frozen"}
+    ).status_code == 200
+
+    client.cookies.clear()
+    client.cookies.set(COOKIE, old_session)
+    assert client.get("/api/v2/auth/me").status_code == 401
+    rejected = _rpc_version(client, secret)
+    assert rejected.status_code == 200
+    assert "error" in rejected.json()
+    assert rejected.json()["error"]["code"] == 1
+
+    client.cookies.clear()
+    login(client)
+    client.patch(f"/api/v2/users/{user['id']}", json={"status": "active"})
+    client.cookies.clear()
+    client.cookies.set(COOKIE, old_session)
+    assert client.get("/api/v2/auth/me").status_code == 401
+    assert _rpc_version(client, secret).json()["result"]["version"]
+    assert admin["id"] != user["id"]

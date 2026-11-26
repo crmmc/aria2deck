@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 _STATUS = {
     ErrorCode.INVALID_INPUT: 422,
     ErrorCode.UNAUTHENTICATED: 401,
+    ErrorCode.ACCOUNT_FROZEN: 403,
+    ErrorCode.ACCOUNT_LOCKED: 403,
     ErrorCode.CREDENTIAL_INVALID: 401,
     ErrorCode.MISSING_CREDENTIALS: 401,
     ErrorCode.INVALID_CREDENTIALS: 403,

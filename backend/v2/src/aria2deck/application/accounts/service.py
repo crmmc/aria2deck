@@ -8,6 +8,7 @@ from contextlib import AbstractAsyncContextManager
 from typing import cast
 
 from ...domain.accounts import (
+    AccountStatus,
     CredentialKind,
     Permission,
     User,
@@ -16,11 +17,14 @@ from ...domain.accounts import (
     ensure_quota_change,
     ensure_user_delete,
     ensure_user_role_change,
+    ensure_user_status_change,
     ensure_username_change,
     normalize_username,
     require_credential_invalidation,
+    require_login_allowed,
     require_session,
     session_is_active,
+    status_after_password_reset,
     validate_password_change,
     validate_password_hash,
 )
@@ -91,6 +95,7 @@ class AccountService:
             now_ms=self.clock_ms(),
             revoked_at_ms=session.revoked_at_ms,
             pending_delete=user.pending_delete,
+            status=user.status,
         ):
             raise _authentication_failed()
         return Principal(user, CredentialKind.SESSION, session_id)
@@ -104,7 +109,11 @@ class AccountService:
             if result is None:
                 raise _authentication_failed()
             token, user = result
-            if not api_token_allowed(is_admin=user.is_admin, pending_delete=user.pending_delete):
+            if not api_token_allowed(
+                is_admin=user.is_admin,
+                pending_delete=user.pending_delete,
+                status=user.status,
+            ):
                 raise _authentication_failed()
             await repository.touch_api_token(token_id=token.id, now_ms=self.clock_ms())
         return Principal(user, CredentialKind.API_TOKEN)
@@ -115,11 +124,11 @@ class AccountService:
         async with self.uow_factory() as uow:
             repository = self.repository_factory(uow)
             user = await repository.find_user_by_username(username.strip())
-            if (
-                user is None
-                or user.pending_delete
-                or not self.credentials.verify_password(password_hash, user.password_hash)
-            ):
+            if user is None or user.pending_delete:
+                raise _authentication_failed()
+            # 冻结/锁定在密码校验之前给出专属 403；普通密码错误仍是通用 401。
+            require_login_allowed(user.status)
+            if not self.credentials.verify_password(password_hash, user.password_hash):
                 raise _authentication_failed()
             await repository.revoke_user_sessions(user_id=user.id, now_ms=now_ms)
             self._publish_revocation(SessionRevocation(user_id=user.id))
@@ -178,6 +187,7 @@ class AccountService:
                 expected_generation=user.credential_generation,
                 password_hash=self.credentials.hash_password(new_password_hash),
                 is_initial_password=False,
+                status=user.status,
                 now_ms=now_ms,
             )
             if not changed:
@@ -276,6 +286,7 @@ class AccountService:
         changes: Mapping[str, object],
     ) -> UserView:
         self._require_admin(principal, Permission.MANAGE_USERS)
+        revoked = False
         async with self.uow_factory() as uow:
             repository = self.repository_factory(uow)
             user = await repository.get_user(user_id)
@@ -312,6 +323,14 @@ class AccountService:
                 used_bytes=quota.used_bytes,
                 reserved_bytes=quota.reserved_bytes,
             )
+            status = await self._updated_status(
+                principal=principal,
+                repository=repository,
+                user=user,
+                requested=changes.get("status"),
+                password_changed=raw_password is not None,
+            )
+            now_ms = self.clock_ms()
             await repository.update_user(
                 user_id=user.id,
                 username=username,
@@ -320,7 +339,8 @@ class AccountService:
                 is_admin=new_is_admin,
                 quota_bytes=new_quota_bytes,
                 is_initial_password=user.is_initial_password,
-                now_ms=self.clock_ms(),
+                status=status,
+                now_ms=now_ms,
             )
             if raw_password is not None:
                 changed = await repository.change_password(
@@ -328,12 +348,79 @@ class AccountService:
                     expected_generation=user.credential_generation,
                     password_hash=self.credentials.hash_password(str(raw_password)),
                     is_initial_password=bool(changes.get("is_initial_password", True)),
-                    now_ms=self.clock_ms(),
+                    status=status,
+                    now_ms=now_ms,
                 )
                 if not changed:
                     raise DomainError(ErrorCode.INVALID_STATE, "用户凭证已变化，请重试")
-                await repository.revoke_user_sessions(user_id=user.id, now_ms=self.clock_ms())
-            return await self._view(repository, await repository.get_user(user.id))
+                await repository.revoke_user_sessions(user_id=user.id, now_ms=now_ms)
+                revoked = True
+            elif status is AccountStatus.FROZEN:
+                await repository.revoke_user_sessions(user_id=user.id, now_ms=now_ms)
+                revoked = True
+            view = await self._view(repository, await repository.get_user(user.id))
+        if revoked:
+            self._publish_revocation(SessionRevocation(user_id=user_id))
+        return view
+
+    async def _updated_status(
+        self,
+        *,
+        principal: Principal,
+        repository: AccountRepositoryPort,
+        user: User,
+        requested: object,
+        password_changed: bool,
+    ) -> AccountStatus:
+        status = user.status
+        if requested is not None:
+            try:
+                target = AccountStatus(str(requested))
+            except ValueError:
+                raise DomainError(ErrorCode.INVALID_INPUT, "账号状态只能改为正常或冻结") from None
+            ensure_user_status_change(
+                actor_id=principal.user.id,
+                target_id=user.id,
+                actor_role=principal.user.role,
+                current=user.status,
+                new=target,
+                target_is_admin=user.is_admin,
+                active_admin_count=await repository.count_active_admins(),
+            )
+            status = target
+        if password_changed:
+            status = status_after_password_reset(status)
+        return status
+
+    async def reset_password(
+        self, principal: Principal, *, user_id: int
+    ) -> tuple[UserView, str]:
+        """管理员随机重置：生成一次性密码，写入哈希并按状态表恢复账号，随后撤销旧会话。"""
+        self._require_admin(principal, Permission.MANAGE_USERS)
+        temporary_password = self.credentials.new_temporary_password()
+        now_ms = self.clock_ms()
+        async with self.uow_factory() as uow:
+            repository = self.repository_factory(uow)
+            user = await repository.get_user(user_id)
+            if user.pending_delete:
+                raise DomainError(ErrorCode.INVALID_STATE, "待删除用户不能重置密码")
+            derived = self.credentials.derive_password_hash(
+                username=user.username, password=temporary_password
+            )
+            changed = await repository.change_password(
+                user_id=user.id,
+                expected_generation=user.credential_generation,
+                password_hash=self.credentials.hash_password(derived),
+                is_initial_password=True,
+                status=status_after_password_reset(user.status),
+                now_ms=now_ms,
+            )
+            if not changed:
+                raise DomainError(ErrorCode.INVALID_STATE, "用户凭证已变化，请重试")
+            await repository.revoke_user_sessions(user_id=user.id, now_ms=now_ms)
+            view = await self._view(repository, await repository.get_user(user.id))
+        self._publish_revocation(SessionRevocation(user_id=user_id))
+        return view, temporary_password
 
     async def delete_user(self, principal: Principal, *, user_id: int) -> None:
         self._require_admin(principal, Permission.MANAGE_USERS)
@@ -356,7 +443,7 @@ class AccountService:
         async with self.uow_factory() as uow:
             candidates = await self.repository_factory(uow).list_rpc_enabled_users()
         for user in candidates:
-            if user.pending_delete:
+            if user.pending_delete or user.status is not AccountStatus.ACTIVE:
                 continue
             ciphertext = user.rpc_secret_ciphertext
             if ciphertext is None:

@@ -266,9 +266,10 @@ def _render_bootstrap_admin(admin: BootstrapAdmin | None) -> list[str]:
         if admin.promoted:
             lines.append(" V1 里没有任何管理员，因此选的是最早的账号。")
         lines.append(
-            f" 其余 {admin.placeholder_accounts} 个账号为占位密码，需由该管理员设置临时密码后才能登录。"
+            f" 其余 {admin.placeholder_accounts} 个账号为锁定状态，需由该管理员在「用户管理」"
+            "逐个重置密码后才能登录。"
             if admin.placeholder_accounts
-            else " 没有其他账号需要设置临时密码。"
+            else " 没有其他账号需要重置密码。"
         )
         return lines
     if admin.promoted:
@@ -281,10 +282,11 @@ def _render_bootstrap_admin(admin: BootstrapAdmin | None) -> list[str]:
         )
     if admin.placeholder_accounts:
         lines.append(
-            f" 其余 {admin.placeholder_accounts} 个账号为占位密码，需由该管理员设置临时密码后才能登录。"
+            f" 其余 {admin.placeholder_accounts} 个账号为锁定状态，需由该管理员在「用户管理」"
+            "逐个重置密码后才能登录。"
         )
     else:
-        lines.append(" 没有其他账号需要设置临时密码。")
+        lines.append(" 没有其他账号需要重置密码。")
     lines.append(" 用户用临时密码登录后会看到改密横幅，改密时无需输入旧密码。")
     return lines
 

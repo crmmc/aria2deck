@@ -55,10 +55,14 @@ def test_openapi_success_and_error_models_match_actual_payloads(app: FastAPI) ->
     paths = schema["paths"]
 
     login = paths["/api/v2/auth/login"]["post"]
-    assert set(login["responses"]) == {"200", "401", "422", "429", "500"}
+    assert set(login["responses"]) == {"200", "401", "403", "422", "429", "500"}
     assert schema_ref(login, "200") == "#/components/schemas/UserResponse"
     assert schema_ref(login, "401") == "#/components/schemas/ErrorResponse"
+    assert schema_ref(login, "403") == "#/components/schemas/ErrorResponse"
     assert schema_ref(login, "422") == "#/components/schemas/ErrorResponse"
+    reset = paths["/api/v2/users/{user_id}/password-reset"]["post"]
+    assert schema_ref(reset, "200") == "#/components/schemas/UserPasswordResetResponse"
+    assert set(reset["responses"]) == {"200", "401", "403", "404", "409", "422", "429", "500"}
 
     public = paths["/api/v2/public/site-info"]["get"]
     assert set(public["responses"]) == {"200", "429", "500"}

@@ -20,7 +20,7 @@ from sqlalchemy.dialects import sqlite
 from sqlalchemy.engine import Dialect
 from sqlalchemy.schema import CreateIndex, CreateTable
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 metadata = MetaData()
 
 schema_meta = Table(
@@ -42,6 +42,7 @@ users = Table(
     Column("is_admin", Boolean, nullable=False, default=False),
     Column("quota_bytes", BigInteger, nullable=False),
     Column("is_initial_password", Boolean, nullable=False, default=False),
+    Column("status", Text, nullable=False, server_default="active"),
     Column("rpc_secret_ciphertext", Text),
     Column("rpc_secret_prefix", Text),
     Column("credential_generation", Integer, nullable=False, default=1),
@@ -55,6 +56,7 @@ users = Table(
     CheckConstraint("quota_bytes >= 0", name="ck_users_quota_nonnegative"),
     CheckConstraint("credential_generation >= 1", name="ck_users_credential_generation"),
     CheckConstraint("delete_retry_count >= 0", name="ck_users_delete_retry"),
+    CheckConstraint("status IN ('active', 'frozen', 'locked')", name="ck_users_status"),
     CheckConstraint(
         "(rpc_secret_ciphertext IS NULL) = (rpc_secret_prefix IS NULL)",
         name="ck_users_rpc_secret_pair",
@@ -506,8 +508,15 @@ TRIGGER_STATEMENTS = (
 
 TARGET_TABLES = tuple(sorted(metadata.tables))
 _DIALECT = cast(type[Dialect], sqlite.dialect)()
+
+
+def create_table_statement(table_name: str) -> str:
+    """目标结构的建表语句；新库与升级后的旧库执行同一段文本，快照才能逐字一致。"""
+    return str(CreateTable(metadata.tables[table_name]).compile(dialect=_DIALECT)).strip()
+
+
 DDL_STATEMENTS = tuple(
-    [str(CreateTable(table).compile(dialect=_DIALECT)).strip() for table in metadata.sorted_tables]
+    [create_table_statement(table.name) for table in metadata.sorted_tables]
     + [
         str(CreateIndex(index).compile(dialect=_DIALECT)).strip()
         for index in sorted(

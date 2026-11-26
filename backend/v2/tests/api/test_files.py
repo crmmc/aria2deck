@@ -11,7 +11,7 @@ from sqlalchemy import text
 from aria2deck.api.files import download_file
 from aria2deck.application.accounts.models import Principal
 from aria2deck.application.library.models import DownloadTarget
-from aria2deck.domain.accounts import CredentialKind, User
+from aria2deck.domain.accounts import AccountStatus, CredentialKind, User
 from aria2deck.domain.packs import PackSourceSnapshot
 from aria2deck.infrastructure.config import Settings
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
@@ -630,6 +630,7 @@ def _session_principal() -> Principal:
             username="u",
             username_key="u",
             password_hash="x",  # noqa: S106  # 测试夹具占位，非真实凭据
+            status=AccountStatus.ACTIVE,
             is_admin=False,
             quota_bytes=0,
             is_initial_password=False,

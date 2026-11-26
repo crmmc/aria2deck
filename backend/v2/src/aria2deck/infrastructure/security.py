@@ -31,6 +31,10 @@ class CredentialManager:
     def new_rpc_secret(self) -> str:
         return "rpc_" + secrets.token_urlsafe(32)
 
+    def new_temporary_password(self) -> str:
+        """管理员重置用的一次性密码：16 位可输入随机串，只在成功响应里出现一次。"""
+        return secrets.token_urlsafe(12)
+
     def digest_session(self, session_id: str) -> str:
         return self._digest(b"session", session_id)
 
