@@ -14,6 +14,7 @@ from pathlib import Path
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from aria2deck.domain.accounts import AccountStatus
 from aria2deck.domain.settings import SystemSettings
 from aria2deck.infrastructure.security import CredentialManager
 from aria2deck.infrastructure.sqlite.bootstrap import initialize_database
@@ -73,8 +74,10 @@ async def _write_users(
         if user.accepts_generated_password:
             stored_hash, plain = _generated_password(user.username)
             bootstrap = (user.username, plain)
+            status = AccountStatus.ACTIVE
         else:
             stored_hash = PLACEHOLDER_PASSWORD
+            status = AccountStatus.LOCKED
         result = await connection.execute(
             users.insert().values(
                 username=user.username,
@@ -83,6 +86,7 @@ async def _write_users(
                 is_admin=user.is_admin,
                 quota_bytes=user.quota_bytes,
                 is_initial_password=True,
+                status=status,
                 rpc_secret_ciphertext=None,
                 rpc_secret_prefix=None,
                 pending_delete=False,

@@ -7,7 +7,7 @@ from aria2deck.application.settings.service import (
     Aria2TestResult,
     SettingsService,
 )
-from aria2deck.domain.accounts import CredentialKind, User
+from aria2deck.domain.accounts import AccountStatus, CredentialKind, User
 from aria2deck.domain.errors import DomainError, ErrorCode
 
 
@@ -40,7 +40,7 @@ def make_service(port: FakeVersionPort | None) -> SettingsService:
 
 def admin_principal() -> Principal:
     return Principal(
-        User(1, "admin", "admin", "ab" * 32, True, 1000, False, False, 1, 1, 1),
+        User(1, "admin", "admin", "ab" * 32, AccountStatus.ACTIVE, True, 1000, False, False, 1, 1, 1),
         CredentialKind.SESSION,
         "session",
     )
@@ -74,7 +74,7 @@ async def test_aria2_connection_failure_reports_disconnected_without_raising(
 @pytest.mark.parametrize("kind", [CredentialKind.API_TOKEN, CredentialKind.RPC_SECRET])
 async def test_aria2_rejects_non_session_credentials(kind: CredentialKind) -> None:
     principal = Principal(
-        User(1, "admin", "admin", "ab" * 32, True, 1000, False, False, 1, 1, 1),
+        User(1, "admin", "admin", "ab" * 32, AccountStatus.ACTIVE, True, 1000, False, False, 1, 1, 1),
         kind,
         None,
     )
@@ -87,7 +87,7 @@ async def test_aria2_rejects_non_session_credentials(kind: CredentialKind) -> No
 
 async def test_aria2_rejects_non_admin_sessions() -> None:
     principal = Principal(
-        User(2, "user", "user", "cd" * 32, False, 1000, False, False, 1, 1, 1),
+        User(2, "user", "user", "cd" * 32, AccountStatus.ACTIVE, False, 1000, False, False, 1, 1, 1),
         CredentialKind.SESSION,
         "session",
     )

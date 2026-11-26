@@ -10,6 +10,7 @@ const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
 const ME: UserResponse = {
+  status: "active",
   id: 1,
   username: "admin",
   is_admin: true,
@@ -91,6 +92,32 @@ describe("LoginPage", () => {
     fillAndSubmit("admin", "wrong");
     await waitFor(() => {
       expect(document.querySelector(".alert-danger")).toHaveTextContent("用户名或密码无效");
+    }, { timeout: 3000 });
+  });
+
+  it.each([
+    ["account_frozen", "该用户已冻结，详情请联系管理员"],
+    ["account_locked", "该用户已锁定，请联系管理员轮换新的密码"],
+  ])("shows the dedicated message for %s instead of the generic 401 text", async (code, text) => {
+    routeMocks({
+      "/api/v2/auth/login": json(403, { error: { code, message: "后端原始文案" } }),
+    });
+    renderLogin();
+    fillAndSubmit("admin", "whatever");
+    await waitFor(() => {
+      expect(document.querySelector(".alert-danger")).toHaveTextContent(text);
+    }, { timeout: 3000 });
+    expect(document.querySelector(".alert-danger")).not.toHaveTextContent("用户名或密码无效");
+  });
+
+  it("keeps the generic message for a plain 403 without a status code", async () => {
+    routeMocks({
+      "/api/v2/auth/login": json(403, { error: { code: "permission_denied", message: "没有权限" } }),
+    });
+    renderLogin();
+    fillAndSubmit("admin", "whatever");
+    await waitFor(() => {
+      expect(document.querySelector(".alert-danger")).toHaveTextContent("没有权限");
     }, { timeout: 3000 });
   });
 

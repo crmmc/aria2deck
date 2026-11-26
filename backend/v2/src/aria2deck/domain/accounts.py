@@ -15,6 +15,21 @@ class Role(StrEnum):
     ADMIN = "admin"
 
 
+class AccountStatus(StrEnum):
+    ACTIVE = "active"
+    FROZEN = "frozen"
+    LOCKED = "locked"
+
+
+# 普通用户编辑接口只能在这两种状态间切换；锁定只由迁移与结构升级写入。
+PATCHABLE_ACCOUNT_STATUSES = frozenset({AccountStatus.ACTIVE, AccountStatus.FROZEN})
+
+_LOGIN_STATUS_ERRORS: dict[AccountStatus, tuple[ErrorCode, str]] = {
+    AccountStatus.FROZEN: (ErrorCode.ACCOUNT_FROZEN, "该用户已冻结，详情请联系管理员"),
+    AccountStatus.LOCKED: (ErrorCode.ACCOUNT_LOCKED, "该用户已锁定，请联系管理员轮换新的密码"),
+}
+
+
 class CredentialKind(StrEnum):
     SESSION = "session"
     API_TOKEN = "api_token"  # noqa: S105  # 凭证类型标识，不是密钥
@@ -55,6 +70,7 @@ class User:
     username: str
     username_key: str
     password_hash: str = field(repr=False)
+    status: AccountStatus
     is_admin: bool
     quota_bytes: int
     is_initial_password: bool
@@ -156,14 +172,61 @@ def can_finalize_user_deletion(*, active_tasks: int, file_references: int, activ
         raise DomainError(ErrorCode.CONTENT_BUSY, "用户仍有未清理的任务、文件或打包")
 
 
-def api_token_allowed(*, is_admin: bool, pending_delete: bool) -> bool:
-    return not is_admin and not pending_delete
+def api_token_allowed(*, is_admin: bool, pending_delete: bool, status: AccountStatus) -> bool:
+    return not is_admin and not pending_delete and status is AccountStatus.ACTIVE
 
 
 def session_is_active(
-    *, expires_at_ms: int, now_ms: int, revoked_at_ms: int | None, pending_delete: bool
+    *,
+    expires_at_ms: int,
+    now_ms: int,
+    revoked_at_ms: int | None,
+    pending_delete: bool,
+    status: AccountStatus,
 ) -> bool:
-    return revoked_at_ms is None and not pending_delete and now_ms < expires_at_ms
+    return (
+        revoked_at_ms is None
+        and not pending_delete
+        and status is AccountStatus.ACTIVE
+        and now_ms < expires_at_ms
+    )
+
+
+def require_login_allowed(status: AccountStatus) -> None:
+    """冻结与锁定在密码校验之前拒绝；普通密码错误仍由调用方给出通用 401。"""
+    detail = _LOGIN_STATUS_ERRORS.get(status)
+    if detail is not None:
+        raise DomainError(*detail)
+
+
+def status_after_password_reset(current: AccountStatus) -> AccountStatus:
+    """改密与随机重置共用的状态转换：锁定解锁、冻结保持冻结、正常保持正常。"""
+    return AccountStatus.ACTIVE if current is AccountStatus.LOCKED else current
+
+
+def ensure_user_status_change(
+    *,
+    actor_id: int,
+    target_id: int,
+    actor_role: Role,
+    current: AccountStatus,
+    new: AccountStatus,
+    target_is_admin: bool,
+    active_admin_count: int,
+) -> None:
+    authorize(actor_role, Permission.MANAGE_USERS)
+    if new not in PATCHABLE_ACCOUNT_STATUSES:
+        raise DomainError(ErrorCode.INVALID_INPUT, "账号状态只能改为正常或冻结")
+    if current is AccountStatus.LOCKED:
+        raise DomainError(ErrorCode.INVALID_STATE, "锁定账号需要通过重置密码解锁")
+    if current is new:
+        raise DomainError(ErrorCode.INVALID_STATE, "账号状态未发生变化")
+    if new is AccountStatus.ACTIVE:
+        return
+    if actor_id == target_id:
+        raise DomainError(ErrorCode.PERMISSION_DENIED, "不能冻结当前登录用户")
+    if target_is_admin and active_admin_count <= 1:
+        raise DomainError(ErrorCode.LAST_ADMIN, "不能冻结最后一名可用管理员")
 
 
 def require_credential_invalidation(confirmation: str) -> None:

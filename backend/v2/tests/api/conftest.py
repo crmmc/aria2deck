@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from aria2deck.bootstrap import create_app
 from aria2deck.infrastructure.config import Settings
+from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
+from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
 
 PASSWORD = "ab" * 32
 OTHER_PASSWORD = "cd" * 32
@@ -105,3 +109,20 @@ def fetch_user(client: TestClient, user_id: int) -> dict[str, object]:
         if item["id"] == user_id:
             return item
     raise AssertionError(f"用户 {user_id} 不在用户列表中")
+
+
+def set_user_status(settings: Settings, user_id: int, status: str) -> None:
+    """直接把账号写成指定状态：锁定只能由迁移/结构升级产生，没有写它的 HTTP 入口。"""
+
+    async def write() -> None:
+        database = SQLiteDatabase(settings.database_path)
+        try:
+            async with SQLiteUnitOfWork(database) as uow:
+                await uow.connection.execute(
+                    text("UPDATE users SET status = :status WHERE id = :user_id"),
+                    {"status": status, "user_id": user_id},
+                )
+        finally:
+            await database.close()
+
+    asyncio.run(write())

@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..domain.accounts import ApiToken, Session, User
+from ..domain.accounts import AccountStatus, ApiToken, Session, User
 from ..domain.quota import Quota
 from ..domain.settings import SystemSettings
 
@@ -31,6 +31,8 @@ class CredentialPort(Protocol):
 
     def verify_password(self, password_hash: str, stored: str) -> bool: ...
 
+    def new_temporary_password(self) -> str: ...
+
     def encrypt(self, value: str) -> str: ...
 
     def decrypt(self, value: str) -> str: ...
@@ -40,6 +42,8 @@ class AccountRepositoryPort(Protocol):
     async def count_users(self) -> int: ...
 
     async def count_admins(self) -> int: ...
+
+    async def count_active_admins(self) -> int: ...
 
     async def create_user(
         self,
@@ -70,6 +74,7 @@ class AccountRepositoryPort(Protocol):
         is_admin: bool,
         quota_bytes: int,
         is_initial_password: bool,
+        status: AccountStatus,
         now_ms: int,
     ) -> None: ...
 
@@ -80,6 +85,7 @@ class AccountRepositoryPort(Protocol):
         expected_generation: int,
         password_hash: str,
         is_initial_password: bool,
+        status: AccountStatus,
         now_ms: int,
     ) -> bool: ...
 

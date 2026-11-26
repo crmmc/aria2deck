@@ -16,13 +16,17 @@ import {
   fetchUsersAll,
   formatQuotaForForm,
   parseQuotaBytes,
+  resetUserPassword,
   updateUser,
+  updateUserStatus,
 } from "./api";
 import { toUserViews, type UserView } from "./model";
 import { CreateUserForm } from "./components/CreateUserForm";
 import { UsersTable } from "./components/UsersTable";
 import { EditUserDialog, type EditingUser } from "./components/EditUserDialog";
 import { DeleteUserDialog } from "./components/DeleteUserDialog";
+import { AccountStatusDialog } from "./components/AccountStatusDialog";
+import { ResetPasswordDialog } from "./components/ResetPasswordDialog";
 
 const DEFAULT_QUOTA_VALUE = "10";
 const DEFAULT_QUOTA_UNIT = "GB";
@@ -48,6 +52,18 @@ export function UsersPage() {
 
   const [deletingUser, setDeletingUser] = useState<UserView | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  const [statusTarget, setStatusTarget] = useState<{
+    user: UserView;
+    next: "active" | "frozen";
+  } | null>(null);
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
+
+  const [resetTarget, setResetTarget] = useState<UserView | null>(null);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [temporaryPassword, setTemporaryPassword] = useState<string | null>(null);
 
   // 全站占比的分母是全部用户 used 之和，任何增删改后都按全量重算（C17，归档参考 list_users 同口径）。
   const userViews = useMemo(() => toUserViews(users), [users]);
@@ -184,6 +200,60 @@ export function UsersPage() {
     }
   }
 
+  function openStatusDialog(user: UserView, next: "active" | "frozen") {
+    setStatusError(null);
+    setStatusTarget({ user, next });
+  }
+
+  function closeStatusDialog() {
+    setStatusTarget(null);
+    setStatusError(null);
+  }
+
+  async function handleStatusChange(target: UserView, next: "active" | "frozen", trigger: Element) {
+    setStatusBusy(true);
+    setStatusError(null);
+    try {
+      const updated = await updateUserStatus(target.id, next);
+      setUsers((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      requestModalClose(trigger);
+      showToast(next === "frozen" ? "账号已冻结" : "账号已解冻", "success");
+    } catch (caught) {
+      setStatusError(errorMessage(caught, next === "frozen" ? "冻结账号失败" : "解冻账号失败"));
+    } finally {
+      setStatusBusy(false);
+    }
+  }
+
+  function openResetDialog(user: UserView) {
+    setResetError(null);
+    setTemporaryPassword(null);
+    setResetTarget(user);
+  }
+
+  function closeResetDialog() {
+    // 明文只留在组件内存：关闭即丢弃，重新打开只能再重置一次。
+    setResetTarget(null);
+    setResetError(null);
+    setTemporaryPassword(null);
+  }
+
+  async function handleResetPassword(target: UserView) {
+    setResetBusy(true);
+    setResetError(null);
+    try {
+      const result = await resetUserPassword(target.id);
+      setUsers((prev) =>
+        prev.map((item) => (item.id === result.user.id ? result.user : item)),
+      );
+      setTemporaryPassword(result.temporary_password);
+    } catch (caught) {
+      setResetError(errorMessage(caught, "重置密码失败"));
+    } finally {
+      setResetBusy(false);
+    }
+  }
+
   async function handleDeleteUser(target: UserView, trigger: Element) {
     setDeleting(true);
     try {
@@ -231,6 +301,9 @@ export function UsersPage() {
           users={userViews}
           currentUserId={currentUser.id}
           onEdit={openEditModal}
+          onFreeze={(user) => openStatusDialog(user, "frozen")}
+          onUnfreeze={(user) => openStatusDialog(user, "active")}
+          onResetPassword={openResetDialog}
           onDelete={setDeletingUser}
         />
       </div>
@@ -243,6 +316,30 @@ export function UsersPage() {
           onFieldChange={(updates) => setEditingUser({ ...editingUser, ...updates })}
           onSubmit={(event) => void handleUpdateUser(event, editingUser)}
           onClose={() => setEditingUser(null)}
+        />
+      )}
+
+      {statusTarget && (
+        <AccountStatusDialog
+          user={statusTarget.user}
+          next={statusTarget.next}
+          busy={statusBusy}
+          error={statusError}
+          onConfirm={(trigger) =>
+            void handleStatusChange(statusTarget.user, statusTarget.next, trigger)
+          }
+          onClose={closeStatusDialog}
+        />
+      )}
+
+      {resetTarget && (
+        <ResetPasswordDialog
+          user={resetTarget}
+          busy={resetBusy}
+          error={resetError}
+          temporaryPassword={temporaryPassword}
+          onConfirm={() => void handleResetPassword(resetTarget)}
+          onClose={closeResetDialog}
         />
       )}
 

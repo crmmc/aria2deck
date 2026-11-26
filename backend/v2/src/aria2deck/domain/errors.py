@@ -8,6 +8,8 @@ class ErrorCode(StrEnum):
     INVALID_STATE = "invalid_state"
     NOT_FOUND = "not_found"
     UNAUTHENTICATED = "unauthenticated"
+    ACCOUNT_FROZEN = "account_frozen"
+    ACCOUNT_LOCKED = "account_locked"
     PERMISSION_DENIED = "permission_denied"
     DUPLICATE_RESOURCE = "duplicate_resource"
     QUOTA_EXCEEDED = "quota_exceeded"

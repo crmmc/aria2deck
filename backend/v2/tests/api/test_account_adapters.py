@@ -12,6 +12,7 @@ from aria2deck.api.contracts import (
     PasswordChangeRequest,
     UserCreateRequest,
 )
+from aria2deck.domain.accounts import AccountStatus
 from tests.application.test_account_cleanup import OTHER_PASSWORD, PASSWORD, make_service
 
 
@@ -55,6 +56,15 @@ async def test_account_adapters_map_real_service_results(tmp_path: Path) -> None
     )
     users = await accounts.list_users(page=1, page_size=20, principal=principal, service=service)
     assert users.total == 2
+    assert users.items[1].status is AccountStatus.ACTIVE
+
+    reset = await accounts.reset_user_password(user.id, principal=principal, service=service)
+    assert reset.user.status is AccountStatus.ACTIVE
+    assert reset.user.is_initial_password is True
+    assert len(reset.temporary_password) == 16
+    assert reset.temporary_password not in reset.model_dump_json(
+        exclude={"temporary_password"}
+    )
     deleted = await accounts.delete_user(user.id, principal=principal, service=service)
     assert deleted.accepted is True
 

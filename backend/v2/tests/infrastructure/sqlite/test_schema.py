@@ -16,6 +16,7 @@ from aria2deck.infrastructure.sqlite.schema import (
     app_settings,
     download_attempts,
     tracker_cache,
+    users,
 )
 
 EXPECTED_TABLES = {
@@ -147,6 +148,28 @@ async def test_failed_initialization_rolls_back_every_object(tmp_path: Path, mon
         count = (await connection.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"))).scalar_one()
     assert count == 0
     await db.close()
+
+
+async def test_fresh_database_defaults_new_accounts_to_active(database: SQLiteDatabase) -> None:
+    async with database.connection() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO users (username, username_key, password_hash, is_admin, quota_bytes, "
+                "is_initial_password, credential_generation, pending_delete, delete_retry_count, "
+                "created_at_ms, updated_at_ms) "
+                "VALUES ('u', 'u', 'h', 0, 0, 0, 1, 0, 0, 0, 0)"
+            )
+        )
+        await connection.commit()
+        status = (await connection.execute(text("SELECT status FROM users"))).scalar_one()
+    assert status == "active"
+    assert SCHEMA_VERSION == 2
+
+
+def test_users_status_column_is_required_with_active_default() -> None:
+    column = users.c.status
+    assert column.nullable is False
+    assert str(column.server_default.arg) == "active"
 
 
 def test_download_attempt_schema_persists_optional_ingestion_start() -> None:

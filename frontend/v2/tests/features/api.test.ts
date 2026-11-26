@@ -22,6 +22,7 @@ import {
   retryTask,
 } from "@/features/tasks/api";
 import { retryFromHistory } from "@/features/history/api";
+import { resetUserPassword, updateUserStatus } from "@/features/users/api";
 import {
   deleteShares,
   fetchSharesAll,
@@ -512,5 +513,40 @@ describe("shareCopyText (C01)", () => {
     expect(shareCopyText({ code: "ab", has_password: true })).toBe(
       `${window.location.origin}/s/ab\n密码：（请向分享者索取）`,
     );
+  });
+});
+
+describe("users api contracts", () => {
+  it("freezes and unfreezes through the user PATCH with only the status field", async () => {
+    mockFetch.mockResolvedValueOnce(
+      json(200, { id: 2, username: "alice", status: "frozen" }),
+    );
+    const frozen = await updateUserStatus(2, "frozen");
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/v2/users/2");
+    expect(mockFetch.mock.calls[0][1].method).toBe("PATCH");
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body as string)).toEqual({ status: "frozen" });
+    expect(frozen.status).toBe("frozen");
+
+    mockFetch.mockResolvedValueOnce(
+      json(200, { id: 2, username: "alice", status: "active" }),
+    );
+    const unfrozen = await updateUserStatus(2, "active");
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body as string)).toEqual({ status: "active" });
+    expect(unfrozen.status).toBe("active");
+  });
+
+  it("posts to the dedicated password-reset endpoint and returns the one-time password", async () => {
+    mockFetch.mockResolvedValueOnce(
+      json(200, {
+        user: { id: 2, username: "alice", status: "active" },
+        temporary_password: "P0ODK0i5pgbGNpdy",
+      }),
+    );
+    const result = await resetUserPassword(2);
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/v2/users/2/password-reset");
+    expect(mockFetch.mock.calls[0][1].method).toBe("POST");
+    expect(mockFetch.mock.calls[0][1].body).toBeUndefined();
+    expect(result.temporary_password).toBe("P0ODK0i5pgbGNpdy");
+    expect(result.user.status).toBe("active");
   });
 });

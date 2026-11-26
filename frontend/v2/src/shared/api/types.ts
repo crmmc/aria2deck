@@ -9,9 +9,12 @@ export interface OkResponse {
   ok: boolean;
 }
 
+export type AccountStatus = "active" | "frozen" | "locked";
+
 export interface UserResponse {
   id: number;
   username: string;
+  status: AccountStatus;
   is_admin: boolean;
   quota_bytes: number;
   is_initial_password: boolean;
@@ -19,6 +22,11 @@ export interface UserResponse {
   used_bytes: number;
   reserved_bytes: number;
   available_bytes: number;
+}
+
+export interface UserPasswordResetResponse {
+  user: UserResponse;
+  temporary_password: string;
 }
 
 export type TaskStatus =

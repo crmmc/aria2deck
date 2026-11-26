@@ -209,7 +209,8 @@ def test_help_mentions_reset_password(v1_sample: SampleLayout) -> None:
     text = build_parser().format_help()
 
     assert "--dry-run" in text
-    assert "临时密码" in text
+    assert "重置密码" in text
+    assert "锁定状态" in text
 
 
 def test_insufficient_space_aborts(

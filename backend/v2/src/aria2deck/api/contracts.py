@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..domain.accounts import AccountStatus
 from ..domain.downloads import SubscriptionStatus
 
 
@@ -48,11 +49,13 @@ class UserUpdateRequest(BaseModel):
     is_admin: bool | None = None
     is_initial_password: bool | None = None
     quota_bytes: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    status: Literal["active", "frozen"] | None = None
 
 
 class UserResponse(BaseModel):
     id: int
     username: str
+    status: AccountStatus
     is_admin: bool
     quota_bytes: int
     is_initial_password: bool
@@ -60,6 +63,11 @@ class UserResponse(BaseModel):
     used_bytes: int
     reserved_bytes: int
     available_bytes: int
+
+
+class UserPasswordResetResponse(BaseModel):
+    user: UserResponse
+    temporary_password: str = Field(description="仅本次成功响应返回一次，之后无法再次读取")
 
 
 class UserListResponse(BaseModel):

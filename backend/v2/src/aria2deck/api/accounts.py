@@ -19,6 +19,7 @@ from .contracts import (
     RpcAccessUpdateRequest,
     UserCreateRequest,
     UserListResponse,
+    UserPasswordResetResponse,
     UserResponse,
     UserUpdateRequest,
 )
@@ -41,6 +42,7 @@ def _user(view: UserView) -> UserResponse:
     return UserResponse(
         id=view.user.id,
         username=view.user.username,
+        status=view.user.status,
         is_admin=view.user.is_admin,
         quota_bytes=view.user.quota_bytes,
         is_initial_password=view.user.is_initial_password,
@@ -72,7 +74,11 @@ def _set_session_cookie(
     )
 
 
-@router.post("/auth/login", response_model=UserResponse, responses=error_responses(401, 422, 429, 500))
+@router.post(
+    "/auth/login",
+    response_model=UserResponse,
+    responses=error_responses(401, 403, 422, 429, 500),
+)
 async def login(
     payload: LoginRequest,
     request: Request,
@@ -185,6 +191,22 @@ async def update_user(
     changes["password_hash"] = changes.pop("password", None)
     changes = {key: value for key, value in changes.items() if value is not None}
     return _user(await service.update_user(principal, user_id=user_id, changes=changes))
+
+
+@router.post(
+    "/users/{user_id}/password-reset",
+    response_model=UserPasswordResetResponse,
+    responses=error_responses(401, 403, 404, 409, 422, 429, 500),
+)
+async def reset_user_password(
+    user_id: int,
+    principal: Principal = Depends(required_session_principal),
+    service: AccountService = Depends(account_service),
+) -> UserPasswordResetResponse:
+    view, temporary_password = await service.reset_password(principal, user_id=user_id)
+    return UserPasswordResetResponse(
+        user=_user(view), temporary_password=temporary_password
+    )
 
 
 @router.delete(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
+from aria2deck.domain.accounts import AccountStatus
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.accounts import AccountRepository
@@ -43,6 +44,7 @@ async def test_account_repository_missing_rows_and_conditional_writes(
                 is_admin=False,
                 quota_bytes=1,
                 is_initial_password=False,
+                status=AccountStatus.ACTIVE,
                 now_ms=2,
             )
         assert caught.value.code is ErrorCode.NOT_FOUND
@@ -51,6 +53,7 @@ async def test_account_repository_missing_rows_and_conditional_writes(
             expected_generation=999,
             password_hash=HASH,
             is_initial_password=False,
+            status=AccountStatus.ACTIVE,
             now_ms=2,
         )
         with pytest.raises(DomainError):
@@ -94,3 +97,49 @@ async def test_token_repository_round_trip_and_missing_delete(
 
     async with database.connection() as connection:
         assert (await connection.execute(text("SELECT COUNT(*) FROM api_tokens"))).scalar_one() == 0
+
+
+async def test_status_round_trip_and_active_admin_counting(database: SQLiteDatabase) -> None:
+    admin_id = await create_user(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = AccountRepository(uow.connection)
+        assert (await repository.get_user(admin_id)).status is AccountStatus.ACTIVE
+        assert await repository.count_active_admins() == 1
+
+        await repository.update_user(
+            user_id=admin_id,
+            username="admin",
+            username_key="admin",
+            password_hash=HASH,
+            is_admin=True,
+            quota_bytes=100,
+            is_initial_password=False,
+            status=AccountStatus.LOCKED,
+            now_ms=3,
+        )
+        assert (await repository.get_user(admin_id)).status is AccountStatus.LOCKED
+        assert await repository.count_active_admins() == 0
+
+        assert await repository.change_password(
+            user_id=admin_id,
+            expected_generation=1,
+            password_hash=HASH,
+            is_initial_password=True,
+            status=AccountStatus.ACTIVE,
+            now_ms=4,
+        )
+        assert (await repository.get_user(admin_id)).status is AccountStatus.ACTIVE
+        assert await repository.count_active_admins() == 1
+
+        second = await repository.create_user(
+            username="second",
+            password_hash=HASH,
+            is_admin=True,
+            quota_bytes=100,
+            now_ms=5,
+        )
+        assert await repository.count_admins() == 2
+        assert await repository.count_active_admins() == 2
+        await repository.mark_pending_delete(user_id=second, now_ms=6)
+        assert await repository.count_admins() == 2
+        assert await repository.count_active_admins() == 1

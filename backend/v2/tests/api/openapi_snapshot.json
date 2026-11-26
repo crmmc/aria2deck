@@ -106,6 +106,7 @@
         "responses": {
           "200": "UserResponse",
           "401": "ErrorResponse",
+          "403": "ErrorResponse",
           "422": "ErrorResponse",
           "429": "ErrorResponse",
           "500": "ErrorResponse"
@@ -843,9 +844,30 @@
           "500": "ErrorResponse"
         }
       }
+    },
+    "/api/v2/users/{user_id}/password-reset": {
+      "post": {
+        "parameters": [
+          "user_id"
+        ],
+        "responses": {
+          "200": "UserPasswordResetResponse",
+          "401": "ErrorResponse",
+          "403": "ErrorResponse",
+          "404": "ErrorResponse",
+          "409": "ErrorResponse",
+          "422": "ErrorResponse",
+          "429": "ErrorResponse",
+          "500": "ErrorResponse"
+        }
+      }
     }
   },
   "schemas": {
+    "AccountStatus": {
+      "fields": [],
+      "required": []
+    },
     "Aria2TestRequest": {
       "fields": [
         "aria2_rpc_secret",
@@ -2044,6 +2066,16 @@
         "total"
       ]
     },
+    "UserPasswordResetResponse": {
+      "fields": [
+        "temporary_password",
+        "user"
+      ],
+      "required": [
+        "temporary_password",
+        "user"
+      ]
+    },
     "UserResponse": {
       "fields": [
         "available_bytes",
@@ -2053,6 +2085,7 @@
         "pending_delete",
         "quota_bytes",
         "reserved_bytes",
+        "status",
         "used_bytes",
         "username"
       ],
@@ -2064,6 +2097,7 @@
         "pending_delete",
         "quota_bytes",
         "reserved_bytes",
+        "status",
         "used_bytes",
         "username"
       ]
@@ -2074,6 +2108,7 @@
         "is_initial_password",
         "password",
         "quota_bytes",
+        "status",
         "username"
       ],
       "required": []

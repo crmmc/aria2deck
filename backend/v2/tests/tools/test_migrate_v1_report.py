@@ -401,7 +401,8 @@ def test_report_names_the_bootstrap_admin_without_its_password(v1_sample: Sample
     assert "管理员引导" in text
     assert f"已将账号 {username} (id={result.user_ids[1]}) 设为可登录" in text
     assert "密码只在终端显示，不写入本报告" in text
-    assert "其余 2 个账号为占位密码" in text
+    assert "其余 2 个账号为锁定状态" in text
+    assert "逐个重置密码后才能登录" in text
     # 关键断言：密码明文（整体与任意 8 字符片段）都不在报告里
     assert password not in text
     for start in range(0, len(password) - 8, 8):
@@ -433,7 +434,7 @@ def test_report_says_nothing_to_reset_when_no_other_accounts() -> None:
         )
     )
 
-    assert "没有其他账号需要设置临时密码" in text
+    assert "没有其他账号需要重置密码" in text
 
 
 def test_dry_run_report_promises_the_password_without_claiming_it_was_shown() -> None:

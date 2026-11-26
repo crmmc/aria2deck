@@ -587,6 +587,7 @@
     background: rgba(52, 199, 89, 0.1);
   }
 
+  .user-mobile-card .status-badge.status-danger,
   .storage-mobile-card .status-badge.status-danger {
     color: var(--danger);
     background: rgba(255, 59, 48, 0.08);
@@ -597,6 +598,14 @@
     align-items: center;
     justify-content: space-between;
     gap: 10px;
+  }
+
+  /* 角色徽标与账号状态徽标并排贴右，避免被 space-between 拉开 */
+  .user-mobile-card .user-mobile-badges {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
   }
 
   .user-mobile-card .admin-user-name {

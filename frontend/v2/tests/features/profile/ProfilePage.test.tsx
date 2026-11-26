@@ -10,6 +10,7 @@ const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
 const ME: UserResponse = {
+  status: "active",
   id: 1,
   username: "alice",
   is_admin: false,
