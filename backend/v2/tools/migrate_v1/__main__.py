@@ -66,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="完整走一遍流程但不写任何文件，只输出报告",
     )
+    parser.add_argument(
+        "--link",
+        action="store_true",
+        help="用硬链接代替复制（零额外空间；要求 V1 下载目录与 --v2-root 在同一文件系统）",
+    )
     parser.add_argument("--report", help="把报告写入指定文件；不传则只打印到标准输出")
     return parser
 
@@ -181,6 +186,7 @@ def run_migration(
     v1_download_dir: Path,
     v2_root: Path,
     dry_run: bool,
+    link: bool = False,
 ) -> MigrationOutcome:
     """跑完整流程并返回报告与一次性凭据；任何一步失败都抛 `MigrationAbort`。"""
     started = time.monotonic()
@@ -188,9 +194,10 @@ def run_migration(
     _check_target(v2_root)
     snapshot = read_snapshot(v1_database)
     plan = build_plan(snapshot, v1_download_dir)
-    _check_space(v2_root, plan.planned_bytes)
+    if not link:
+        _check_space(v2_root, plan.planned_bytes)
     mapped: SettingsOutcome = map_settings(snapshot.settings)
-    migration = migrate_contents(plan, v2_root, dry_run=dry_run)
+    migration = migrate_contents(plan, v2_root, dry_run=dry_run, link=link)
     write = finalize(plan, migration)
     migrated_bytes = sum(content.size for content in write.contents)
     observed = Observed()
@@ -211,8 +218,11 @@ def run_migration(
     )
     if not dry_run:
         notes = (f"迁移后请把 {v2_root}/data 与 {v2_root}/downloads 放到 V2 部署位置。",)
+    mode = "预演（--dry-run）" if dry_run else "正式执行"
+    if link:
+        mode += "＋硬链接"
     report = Report(
-        mode="预演（--dry-run）" if dry_run else "正式执行",
+        mode=mode,
         v1_database=str(v1_database),
         v1_version=snapshot.version,
         integrity_check=snapshot.integrity_check,
@@ -278,6 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             v1_download_dir=v1_download_dir,
             v2_root=v2_root,
             dry_run=dry_run,
+            link=bool(options.link),
         )
         report = outcome.report
         credentials = outcome.bootstrap_credentials

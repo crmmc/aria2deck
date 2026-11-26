@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -19,9 +21,9 @@ from tools.migrate_v1.planner import build_plan
 from tools.migrate_v1.reader import read_snapshot
 
 
-def _migrate(layout: SampleLayout, v2_root: Path, *, dry_run: bool = False):
+def _migrate(layout: SampleLayout, v2_root: Path, *, dry_run: bool = False, link: bool = False):
     plan = build_plan(read_snapshot(layout.database), layout.download_dir)
-    return plan, migrate_contents(plan, v2_root, dry_run=dry_run)
+    return plan, migrate_contents(plan, v2_root, dry_run=dry_run, link=link)
 
 
 def test_file_content_is_byte_identical_and_digest_is_plain_sha256(
@@ -212,6 +214,69 @@ def test_v1_tree_is_untouched(v1_sample: SampleLayout, tmp_path: Path) -> None:
     _migrate(v1_sample, tmp_path / "v2")
 
     assert checksum_tree(v1_sample.download_dir) == before
+
+
+def test_link_mode_hardlinks_instead_of_copying(v1_sample: SampleLayout, tmp_path: Path) -> None:
+    """硬链接模式：规范对象与源共享 inode，摘要算法不变，源树原样未动。"""
+    v2_root = tmp_path / "v2"
+    before = checksum_tree(v1_sample.download_dir)
+    _, migration = _migrate(v1_sample, v2_root, link=True)
+
+    assert migration.failures == ()
+    source = v1_sample.file_paths["solo"]
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    stored = objects_root(v2_root) / f"file-{expected}"
+    assert os.stat(stored).st_ino == os.stat(source).st_ino
+    assert checksum_tree(v1_sample.download_dir) == before
+
+    # 再跑一遍：目标已存在时复用规范对象，不报错也不重复链接
+    _, again = _migrate(v1_sample, v2_root, link=True)
+    assert again.failures == ()
+
+
+def test_link_mode_directory_files_are_hardlinked(v1_sample: SampleLayout, tmp_path: Path) -> None:
+    v2_root = tmp_path / "v2"
+    _, migration = _migrate(v1_sample, v2_root, link=True)
+
+    assert migration.failures == ()
+    directory = next(item for item in migration.objects if item.kind == "directory")
+    entry = next(e for e in directory.entries if e.kind is ContentKind.FILE)
+    parts = entry.path.split("/")
+    linked = (objects_root(v2_root) / f"directory-{directory.digest}").joinpath(*parts)
+    source = v1_sample.file_paths["folder"].joinpath(*parts)
+    assert os.stat(linked).st_ino == os.stat(source).st_ino
+
+
+def test_link_mode_dry_run_writes_nothing_but_surfaces_cross_device(
+    v1_sample: SampleLayout, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """dry-run 不落字节，但跨盘不可行必须在预演阶段就暴露。"""
+    v2_root = tmp_path / "v2"
+    _, ok = _migrate(v1_sample, v2_root, dry_run=True, link=True)
+    assert ok.failures == ()
+    assert not v2_root.exists()
+
+    monkeypatch.setattr("tools.migrate_v1.contents._same_device", lambda a, b: False)
+    _, blocked = _migrate(v1_sample, v2_root, dry_run=True, link=True)
+    assert blocked.by_stored_file == {}
+    assert blocked.failures
+    assert all("同一文件系统" in reason for _, reason in blocked.failures)
+
+
+def test_link_mode_records_cross_device_link_errors_as_failures(
+    v1_sample: SampleLayout, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """st_dev 检查漏掉的嵌套挂载：os.link 抛 EXDEV 时记为逐项失败而不是崩溃。"""
+
+    def deny(source: Path, destination: Path) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr("tools.migrate_v1.contents.os.link", deny)
+    _, migration = _migrate(v1_sample, tmp_path / "v2", link=True)
+
+    assert migration.objects == ()
+    assert migration.failures
+    assert all(reason == "跨文件系统，无法硬链接" for _, reason in migration.failures)
 
 
 def test_objects_root_layout(tmp_path: Path) -> None:
