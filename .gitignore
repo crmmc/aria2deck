@@ -20,40 +20,15 @@ venv/
 env/
 
 # Backend runtime files
-backend/data/*.db
-backend/data/*.db-shm
-backend/data/*.db-wal
-backend/data/*.sqlite
-backend/data/*.sqlite3
-backend/data/admin_credentials.txt
-backend/downloads/*
-!backend/downloads/.gitkeep
-backend/static/*
-!backend/static/.gitkeep
-backend/v1/static
 backend/v2/static/*
 !backend/v2/static/.gitkeep
 backend/v2/.coverage
-backend/v2/data/
-backend/aria2/aria2.log
-backend/aria2/aria2.session
-backend/aria2/aria2.session.lock
-backend/aria2/*.aria2
-backend/aria2/DHT*.dat
-backend/aria2/*.7z
-backend/.coverage
+backend/v2/aria2/runtime/
 
 # Frontend
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-frontend/.env.local
-frontend/.env*.local
-frontend/coverage/
 frontend/v2/node_modules/
 frontend/v2/dist/
 frontend/v2/coverage/
-frontend/v1/.next/
 *.tsbuildinfo
 
 # IDE
@@ -98,6 +73,7 @@ CLAUDE.md
 # Local planning artifacts
 .planning/
 .worktrees/
+TODO.md
 
 # agent 工具产物
 .codegraph/
