@@ -167,6 +167,7 @@ class DownloadQueryService:
                         total_bytes=content.size,
                         completed_bytes=content.size,
                         selected=True,
+                        relpath=projection.name,
                     ),
                 )
             else:
@@ -176,6 +177,7 @@ class DownloadQueryService:
                         total_bytes=entry.size,
                         completed_bytes=entry.size,
                         selected=True,
+                        relpath=entry.path,
                     )
                     for entry in await contents.list_files(content.id)
                 )

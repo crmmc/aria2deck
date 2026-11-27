@@ -26,6 +26,7 @@ from .models import (
     AttemptRecord,
     ContentPreparation,
     DownloadObservation,
+    ManifestEntry,
     SourceRecord,
     TaskProjection,
 )
@@ -33,9 +34,6 @@ from .models import (
 logger = logging.getLogger(__name__)
 UowFactory = Callable[[], AbstractAsyncContextManager[UnitOfWork]]
 Sleep = Callable[[float], Awaitable[None]]
-
-# BT 源的 attempt 目录专属 aria2，.aria2 后缀不存在用户内容；HTTP 反之。
-_BT_SOURCE_KINDS = frozenset({"magnet", "torrent"})
 
 
 class LifecycleRepository(Protocol):
@@ -50,6 +48,12 @@ class LifecycleRepository(Protocol):
     async def list_live_attempts(self, *, submitted_only: bool = False) -> list[AttemptRecord]: ...
 
     async def list_completion_intents(self) -> list[AttemptRecord]: ...
+
+    async def record_manifest(
+        self, attempt_id: int, *, entries: tuple[ManifestEntry, ...], now_ms: int
+    ) -> None: ...
+
+    async def get_manifest(self, attempt_id: int) -> tuple[ManifestEntry, ...] | None: ...
 
     async def apply_observation(
         self,
@@ -160,7 +164,7 @@ class LifecycleContentRepository(Protocol):
 class LifecycleBackend(SubmissionBackend, Protocol):
     async def version(self) -> tuple[str, list[str]]: ...
 
-    async def snapshot(self, *, gid: str) -> DownloadObservation | None: ...
+    async def snapshot(self, *, gid: str, attempt_id: int) -> DownloadObservation | None: ...
 
     async def unpause(self, *, gid: str) -> None: ...
 
@@ -180,13 +184,18 @@ class ObservationSink(Protocol):
 class ContentStore(Protocol):
     def machine_free_bytes(self) -> int: ...
 
-    async def scan(self, attempt_id: int) -> ContentPreparation: ...
+    async def collect(
+        self, attempt_id: int, manifest: tuple[ManifestEntry, ...]
+    ) -> ContentPreparation: ...
 
-    async def install(self, attempt_id: int, expected: ContentPreparation) -> None: ...
+    async def install(
+        self,
+        attempt_id: int,
+        expected: ContentPreparation,
+        manifest: tuple[ManifestEntry, ...],
+    ) -> None: ...
 
     async def cleanup_attempt(self, attempt_id: int) -> None: ...
-
-    async def sweep_control_files(self, attempt_id: int) -> None: ...
 
 
 class TaskQueryPort(Protocol):
@@ -201,6 +210,15 @@ class Connectivity(Protocol):
 
 RepositoryFactory = Callable[[UnitOfWork], LifecycleRepository]
 ContentRepositoryFactory = Callable[[UnitOfWork], LifecycleContentRepository]
+
+
+def _manifest_entries(snapshot: DownloadObservation) -> tuple[ManifestEntry, ...]:
+    """完成清单的唯一口径：只收选中项（未选中文件 aria2 不落盘），路径用 attempt 内相对路径。"""
+    return tuple(
+        ManifestEntry(path=file.relpath, size=file.total_bytes)
+        for file in snapshot.files
+        if file.selected
+    )
 
 
 class DownloadLifecycleService:
@@ -450,7 +468,9 @@ class DownloadLifecycleService:
                 return
         try:
             await self.backend.unpause(gid=snapshot.gid)
-            confirmed = await self.backend.snapshot(gid=snapshot.gid)
+            confirmed = await self.backend.snapshot(
+                gid=snapshot.gid, attempt_id=attempt.id
+            )
         except DomainError:
             self.observations.discard(snapshot.gid)
             self.connectivity.record_failure()
@@ -487,7 +507,7 @@ class DownloadLifecycleService:
         except DomainError:
             logger.warning("交接父任务结果暂未清理 error_type=DomainError")
         try:
-            following = await self.backend.snapshot(gid=new_gid)
+            following = await self.backend.snapshot(gid=new_gid, attempt_id=attempt.id)
         except DomainError:
             self.observations.discard(new_gid)
             self.connectivity.record_failure()
@@ -495,7 +515,9 @@ class DownloadLifecycleService:
         if following is not None:
             await self._reconcile(following, attempt.id)
 
-    async def _prepare_content(self, attempt: AttemptRecord) -> ContentPreparation:
+    async def _prepare_content(
+        self, attempt: AttemptRecord, manifest: tuple[ManifestEntry, ...]
+    ) -> ContentPreparation:
         if attempt.completed_content_id is not None:
             async with self.uow_factory() as uow:
                 content = await self.content_repository_factory(uow).get_object(
@@ -507,7 +529,7 @@ class DownloadLifecycleService:
                 content.storage_path,
                 (),
             )
-        preparation = await self.content_store.scan(attempt.id)
+        preparation = await self.content_store.collect(attempt.id, manifest)
         async with self.uow_factory() as uow:
             repository = self.repository_factory(uow)
             content_repository = self.content_repository_factory(uow)
@@ -546,33 +568,72 @@ class DownloadLifecycleService:
             )
         return preparation
 
-    async def _sweep_bt_control_files(self, attempt: AttemptRecord) -> None:
-        """BT attempt 入库前清掉 aria2 控制文件。
+    async def _manifest_or_restore(
+        self, attempt: AttemptRecord
+    ) -> tuple[ManifestEntry, ...] | None:
+        """读完成清单；缺清单就向 aria2 重观测补写，补不回来按 manifest_unavailable 收尾。
 
-        控制文件按资源真名命名，而磁力任务在元数据到达前的下载名是 info 哈希，入库
-        时刻两者仍可能错位，按名字精确删必然漏；BT attempt 目录里的 .aria2 定义上
-        就是 aria2 的管道文件，按后缀全清。HTTP 不处理——用户内容真名可能就是
-        x.aria2，残留时按 DOWNLOAD_UNAVAILABLE 在入库超时窗口内显式失败并保留数据
-        （到期清理与修复前一致）。
+        没有任何“扫磁盘猜内容”的退路：清单是入库的唯一事实来源。
+        返回 None 表示本轮不得继续入库：要么终态已经写死（文件留在盘上等人工处理），
+        要么 aria2 暂时查不到这个任务、还在丢失宽限期内。
         """
         async with self.uow_factory() as uow:
-            source = await self.repository_factory(uow).get_source_for_attempt(attempt.id)
-        if source.kind not in _BT_SOURCE_KINDS:
-            return
-        await self.content_store.sweep_control_files(attempt.id)
+            manifest = await self.repository_factory(uow).get_manifest(attempt.id)
+        if manifest is not None:
+            return manifest
+        try:
+            snapshot = await self.backend.snapshot(gid=attempt.gid, attempt_id=attempt.id)
+        except DomainError as error:
+            # 连不上 aria2 不等于 aria2 没有这个任务：清单可能还在，保持可重试，
+            # 由恢复循环的入库超时判死（错误码仍取 manifest_unavailable，文案才准）。
+            raise DomainError(
+                ErrorCode.MANIFEST_UNAVAILABLE, "下载完成清单暂时无法核对"
+            ) from error
+        if snapshot is None:
+            # 与 _confirm_missing 同一口径：aria2 重启 reload 会话的瞬间也会查不到任务，
+            # 首次查不到起算宽限（_missing_since），宽限内只重试，到期才判死。
+            first_seen = self._missing_since.setdefault(attempt.id, self.clock_ms())
+            if self.clock_ms() - first_seen < self.missing_grace_ms:
+                return None
+            await self._fail(attempt, ErrorCode.MANIFEST_UNAVAILABLE.value, cleanup=False)
+            return None
+        entries = _manifest_entries(snapshot)
+        if not entries:
+            # aria2 有这条任务却报不出可信文件：重观测同样拿不到清单，不再重试。
+            await self._fail(attempt, ErrorCode.MANIFEST_UNAVAILABLE.value, cleanup=False)
+            return None
+        self._missing_since.pop(attempt.id, None)
+        async with self.uow_factory() as uow:
+            await self.repository_factory(uow).record_manifest(
+                attempt.id, entries=entries, now_ms=self.clock_ms()
+            )
+        return entries
 
     async def _ingest(
         self, attempt: AttemptRecord, snapshot: DownloadObservation | None
     ) -> None:
+        now_ms = self.clock_ms()
         async with self.uow_factory() as uow:
-            await self.repository_factory(uow).start_ingestion(
-                attempt.id, expected_gid=attempt.gid, now_ms=self.clock_ms()
+            repository = self.repository_factory(uow)
+            await repository.start_ingestion(
+                attempt.id, expected_gid=attempt.gid, now_ms=now_ms
             )
+            # 清单与完成意图同一事务：清单写入失败会连同意图一起回滚，
+            # 不存在“意图在、清单丢”。
+            # 空条目不落行：完成态的 aria2 报告必然有文件，凑不出选中项只能说明“不知道”，
+            # 留给恢复循环重观测补写（补不出来按 manifest_unavailable 收尾）。
+            entries = _manifest_entries(snapshot) if snapshot is not None else ()
+            if entries:
+                await repository.record_manifest(
+                    attempt.id, entries=entries, now_ms=now_ms
+                )
         if snapshot is not None:
             self.observations.put(snapshot)
         try:
-            await self._sweep_bt_control_files(attempt)
-            preparation = await self._prepare_content(attempt)
+            manifest = await self._manifest_or_restore(attempt)
+            if manifest is None:
+                return
+            preparation = await self._prepare_content(attempt, manifest)
         except DomainError as error:
             if error.code is ErrorCode.INVALID_INPUT:
                 await self._fail(attempt, error.code.value, cleanup=True)
@@ -581,7 +642,7 @@ class DownloadLifecycleService:
                 await self._abort_stale_ingest(attempt, error)
                 return
             raise
-        await self.content_store.install(attempt.id, preparation)
+        await self.content_store.install(attempt.id, preparation, manifest)
         try:
             async with self.uow_factory() as uow:
                 await self.repository_factory(uow).finalize_completion(
@@ -623,6 +684,13 @@ class DownloadLifecycleService:
             )
         if cleanup:
             await self._cleanup_terminal(attempt.id)
+            return
+        # 不清理：清单核对不出来的下载文件留在盘上等人工处理。终态收尾必须同轮记下，
+        # 否则轮询里的 cleanup_terminal 下一轮照样把目录删掉，“文件已保留”就是空话。
+        async with self.uow_factory() as uow:
+            await self.repository_factory(uow).finish_terminal_cleanup(
+                attempt.id, expected_gid=attempt.gid, now_ms=self.clock_ms()
+            )
 
     async def _stop_failed(self, attempt: AttemptRecord, failure: DomainError) -> None:
         try:
@@ -679,7 +747,9 @@ class DownloadLifecycleService:
                     await self._ingest(current, None)
                     self._missing_since.pop(attempt.id, None)
                     return
-                confirmed = await self.backend.snapshot(gid=current.gid)
+                confirmed = await self.backend.snapshot(
+                    gid=current.gid, attempt_id=current.id
+                )
                 if confirmed is not None:
                     self._missing_since.pop(attempt.id, None)
                     await self._reconcile(confirmed, current.id)
@@ -696,7 +766,9 @@ class DownloadLifecycleService:
         complete = True
         for attempt in attempts:
             try:
-                snapshot = await self.backend.snapshot(gid=attempt.gid)
+                snapshot = await self.backend.snapshot(
+                    gid=attempt.gid, attempt_id=attempt.id
+                )
                 if snapshot is None:
                     self.observations.discard(attempt.gid)
                     complete = False
@@ -745,7 +817,21 @@ class DownloadLifecycleService:
                             started is not None
                             and self.clock_ms() - started >= self.ingestion_timeout_ms
                         ):
-                            await self._fail(attempt, "ingestion_timeout", cleanup=True)
+                            # 清单核不出来导致的超时用 manifest_unavailable（并保留文件），
+                            # 其余（collect/install/finalize 反复失败）仍是入库超时。
+                            manifest_missing = (
+                                isinstance(error, DomainError)
+                                and error.code is ErrorCode.MANIFEST_UNAVAILABLE
+                            )
+                            await self._fail(
+                                attempt,
+                                (
+                                    ErrorCode.MANIFEST_UNAVAILABLE.value
+                                    if manifest_missing
+                                    else "ingestion_timeout"
+                                ),
+                                cleanup=not manifest_missing,
+                            )
                         else:
                             logger.warning(
                                 "入库恢复单项失败 error_type=%s code=%s",
@@ -793,7 +879,13 @@ class DownloadLifecycleService:
 
     async def _on_gid(self, gid: str) -> None:
         try:
-            snapshot = await self.backend.snapshot(gid=gid)
+            async with self.uow_factory() as uow:
+                attempt = await self.repository_factory(uow).find_attempt_by_gid(gid)
+            if attempt is None:
+                self.observations.discard(gid)
+                return
+            # 观测文件的相对路径需要 attempt 上下文（目录前缀），所以先定位归属再取快照。
+            snapshot = await self.backend.snapshot(gid=gid, attempt_id=attempt.id)
             if snapshot is None:
                 self.observations.discard(gid)
                 return

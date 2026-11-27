@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, insert, select, text, update
 
+from aria2deck.application.downloads.models import ManifestEntry
 from aria2deck.domain.downloads import (
     LIVE_ATTEMPT_STATUSES,
     AttemptStatus,
@@ -12,11 +14,13 @@ from aria2deck.domain.downloads import (
 )
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.domain.quota import PhysicalDownload
+from aria2deck.infrastructure.sqlite.bootstrap import initialize_database
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
 from aria2deck.infrastructure.sqlite.repositories.content import ContentRepository
 from aria2deck.infrastructure.sqlite.repositories.downloads import DownloadRepository
 from aria2deck.infrastructure.sqlite.repositories.quota import QuotaRepository
 from aria2deck.infrastructure.sqlite.schema import (
+    attempt_manifests,
     content_objects,
     download_attempts,
     quota_accounts,
@@ -458,6 +462,106 @@ async def test_ingestion_start_is_persistent_idempotent_and_a_recovery_candidate
         assert attempt.ingestion_started_at_ms == 11
         assert [item.id for item in await repository.list_completion_intents()] == [attempt_id]
         assert (await repository.get_submission(attempt_id)).created_at_ms == 7
+
+
+async def test_manifest_round_trips_and_the_first_write_wins(
+    database: SQLiteDatabase,
+) -> None:
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        attempt_id = await repository.create_attempt(
+            source_id=source_id, resource_key="http:key", gid=GID, now_ms=1
+        )
+        assert await repository.get_manifest(attempt_id) is None
+        await repository.record_manifest(
+            attempt_id,
+            entries=(ManifestEntry("first.bin", 3), ManifestEntry("子目录/second.bin", 5)),
+            now_ms=2,
+        )
+    # 换事务重读：读到的是落库的数据，不是调用方的内存对象
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        expected = (ManifestEntry("first.bin", 3), ManifestEntry("子目录/second.bin", 5))
+        assert await repository.get_manifest(attempt_id) == expected
+        await repository.record_manifest(
+            attempt_id, entries=(ManifestEntry("late.bin", 9),), now_ms=3
+        )
+        # 后到的观测不覆盖已有清单
+        assert await repository.get_manifest(attempt_id) == expected
+
+
+async def test_manifest_distinguishes_absent_from_explicitly_empty(
+    database: SQLiteDatabase,
+) -> None:
+    """没有清单（不知道有哪些文件）与空清单（明确知道没有文件）必须是两个值。"""
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        attempt_id = await repository.create_attempt(
+            source_id=source_id, resource_key="http:key", gid=GID, now_ms=1
+        )
+        assert await repository.get_manifest(attempt_id) is None
+        await uow.connection.execute(
+            insert(attempt_manifests).values(
+                attempt_id=attempt_id, files_json="[]", created_at_ms=2
+            )
+        )
+        assert await repository.get_manifest(attempt_id) == ()
+
+
+@pytest.mark.parametrize(
+    "files_json",
+    [
+        "not-json",
+        '{"path": "a.bin", "size": 1}',
+        "[1]",
+        '[{"path": 1, "size": 2}]',
+        '[{"path": "a.bin", "size": true}]',
+    ],
+)
+async def test_manifest_rejects_corrupt_payloads(
+    database: SQLiteDatabase, files_json: str
+) -> None:
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        attempt_id = await repository.create_attempt(
+            source_id=source_id, resource_key="http:key", gid=GID, now_ms=1
+        )
+        await uow.connection.execute(
+            insert(attempt_manifests).values(
+                attempt_id=attempt_id, files_json=files_json, created_at_ms=2
+            )
+        )
+        with pytest.raises(DomainError) as caught:
+            await repository.get_manifest(attempt_id)
+        assert caught.value.code is ErrorCode.INVALID_STATE
+
+
+async def test_manifest_survives_database_restart(tmp_path: Path) -> None:
+    path = tmp_path / "v2.db"
+    database = SQLiteDatabase(path)
+    await initialize_database(database)
+    source_id = await source(database)
+    async with SQLiteUnitOfWork(database) as uow:
+        repository = DownloadRepository(uow.connection)
+        attempt_id = await repository.create_attempt(
+            source_id=source_id, resource_key="http:key", gid=GID, now_ms=1
+        )
+        await repository.record_manifest(
+            attempt_id, entries=(ManifestEntry("a/b.bin", 7),), now_ms=2
+        )
+    await database.close()
+
+    reopened = SQLiteDatabase(path)
+    try:
+        async with SQLiteUnitOfWork(reopened) as uow:
+            assert await DownloadRepository(uow.connection).get_manifest(attempt_id) == (
+                ManifestEntry("a/b.bin", 7),
+            )
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.parametrize("status", [AttemptStatus.FAILED, AttemptStatus.CANCELLED])

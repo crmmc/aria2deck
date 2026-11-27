@@ -31,6 +31,7 @@ class ErrorCode(StrEnum):
     DOWNLOAD_UNAVAILABLE = "download_unavailable"
     UPSTREAM_FAILURE = "upstream_failure"
     RECOVERY_UNSAFE = "recovery_unsafe"
+    MANIFEST_UNAVAILABLE = "manifest_unavailable"
     LAST_ADMIN = "last_admin"
     SELF_DELETE = "self_delete"
     CREDENTIAL_INVALID = "credential_invalid"

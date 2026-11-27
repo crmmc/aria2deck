@@ -24,7 +24,7 @@ from aria2deck.infrastructure.sqlite.bootstrap import (
     validate_database,
 )
 from aria2deck.infrastructure.sqlite.engine import SQLiteDatabase
-from aria2deck.infrastructure.sqlite.schema import create_table_statement
+from aria2deck.infrastructure.sqlite.schema import SCHEMA_VERSION, create_table_statement
 from aria2deck.infrastructure.sqlite.upgrade import (
     MIGRATED_PLACEHOLDER_PASSWORD,
     RELEASED_SCHEMA_1_USERS_DDL,
@@ -57,9 +57,10 @@ async def _fresh(path: Path) -> None:
 
 
 def _downgrade_to_schema_1(path: Path) -> None:
-    """把全新库改写成上一版真实结构：只去掉 users.status 并把版本写回 1。"""
+    """把全新库改写成上一版真实结构：去掉 users.status 与 schema 3 新表，并把版本写回 1。"""
     connection = sqlite3.connect(path)
     try:
+        connection.execute("DROP TABLE attempt_manifests")
         connection.execute(
             "CREATE TABLE _users_copy AS SELECT id, username, username_key, password_hash, "
             "is_admin, quota_bytes, is_initial_password, rpc_secret_ciphertext, "
@@ -220,19 +221,26 @@ async def test_upgrade_backs_up_and_locks_only_placeholder_accounts(tmp_path: Pa
     report = await upgrade_database(path, now=FIXED_TIME)
 
     assert report.changed is True
-    assert report.version == 2
+    assert report.version == SCHEMA_VERSION == 3
     assert (report.active_accounts, report.locked_accounts) == (2, 1)
     assert report.backup_path is not None and report.backup_path.is_file()
     assert report.backup_path.name == "v2-pre-status-upgrade-20261126T083000Z.db"
     assert rows(report.backup_path, "SELECT schema_version FROM schema_meta") == [(1,)]
     assert "status" not in [column[1] for column in rows(report.backup_path, "PRAGMA table_info(users)")]
+    assert "attempt_manifests" not in [
+        name for (name,) in rows(report.backup_path, "SELECT name FROM sqlite_master WHERE type = 'table'")
+    ]
 
     assert rows(path, "SELECT username, status FROM users ORDER BY id") == [
         ("admin", "active"),
         ("placeholder", "locked"),
         ("changed", "active"),
     ]
-    assert rows(path, "SELECT schema_version FROM schema_meta") == [(2,)]
+    assert rows(path, "SELECT schema_version FROM schema_meta") == [(3,)]
+    # schema 1 库走 1→2→3 两级：账号状态回填与 schema 3 新表都要到位。
+    assert rows(
+        path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'attempt_manifests'"
+    ) == [(1,)]
     assert rows(path, "SELECT id, username, password_hash, quota_bytes, credential_generation "
                        "FROM users ORDER BY id") == before_users
     assert rows(path, "SELECT (SELECT COUNT(*) FROM user_files), "
@@ -373,7 +381,7 @@ def test_cli_reports_counts_and_refusals(
     assert "逐个重置密码" in first_run
 
     assert upgrade_module.main([]) == 0
-    assert "已是 schema 2" in capsys.readouterr().out
+    assert "已是 schema 3" in capsys.readouterr().out
 
     missing = tmp_path / "missing.db"
     monkeypatch.setenv("ARIA2DECK_DATABASE_PATH", str(missing))

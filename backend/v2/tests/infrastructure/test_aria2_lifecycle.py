@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import aiohttp
@@ -11,6 +12,8 @@ from aria2deck.infrastructure.aria2_submission import Aria2SubmissionClient, _Rp
 from aria2deck.infrastructure.security import CredentialManager
 
 GID = "0123456789abcdef"
+# 清单用的相对路径靠 `{下载根}/{attempt_id}/` 前缀裁剪出来，测试里的文件项都挂在这个目录下。
+ATTEMPT_ID = 5
 
 
 def client(tmp_path: Path, *, url: str = "https://aria2.example/jsonrpc") -> Aria2SubmissionClient:
@@ -23,7 +26,24 @@ def client(tmp_path: Path, *, url: str = "https://aria2.example/jsonrpc") -> Ari
     )
 
 
-def snapshot() -> dict[str, object]:
+def file_entry(
+    root: Path,
+    relpath: str,
+    *,
+    length: str = "10",
+    completed: str = "4",
+    selected: str = "true",
+) -> dict[str, str]:
+    """aria2 的文件项：path 是平台设置的 `dir + "/" + 名字`，dir = `{root}/{attempt_id}`。"""
+    return {
+        "path": f"{root}/{ATTEMPT_ID}/{relpath}",
+        "length": length,
+        "completedLength": completed,
+        "selected": selected,
+    }
+
+
+def snapshot(files: list[dict[str, str]] | None = None) -> dict[str, object]:
     return {
         "gid": GID,
         "status": "active",
@@ -33,14 +53,7 @@ def snapshot() -> dict[str, object]:
         "uploadSpeed": 2,
         "numPeers": "3",
         "connections": "1",
-        "files": [
-            {
-                "path": "/private/root/file.bin",
-                "length": "10",
-                "completedLength": "4",
-                "selected": "true",
-            }
-        ],
+        "files": [] if files is None else files,
         "followedBy": ["fedcba0987654321"],
         "following": [],
     }
@@ -52,10 +65,10 @@ async def test_snapshot_parses_safe_files_numbers_and_handoff_links(
     adapter = client(tmp_path)
 
     async def call(*args: object, **kwargs: object) -> object:
-        return snapshot()
+        return snapshot([file_entry(tmp_path, "file.bin")])
 
     monkeypatch.setattr(adapter, "_call", call)
-    observed = await adapter.snapshot(gid=GID)
+    observed = await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
     assert observed is not None
     assert observed.observed_at_ms == 100
     assert observed.total_length == 10
@@ -65,7 +78,7 @@ async def test_snapshot_parses_safe_files_numbers_and_handoff_links(
     assert observed.peer_count == 3
     assert observed.connection_count == 1
     assert observed.files[0].name == "file.bin"
-    assert "/private" not in observed.files[0].name
+    assert observed.files[0].relpath == "file.bin"
     assert observed.files[0].selected is True
     assert observed.followed_by == ("fedcba0987654321",)
 
@@ -98,7 +111,7 @@ async def test_snapshot_rejects_malformed_or_inconsistent_payloads(
 
     monkeypatch.setattr(adapter, "_call", call)
     with pytest.raises(DomainError) as caught:
-        await adapter.snapshot(gid=GID)
+        await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
     assert caught.value.code is ErrorCode.RPC_UNAVAILABLE
 
 
@@ -112,7 +125,7 @@ async def test_snapshot_accepts_single_following_gid_string(
         return {**snapshot(), "following": parent_gid}
 
     monkeypatch.setattr(adapter, "_call", call)
-    observed = await adapter.snapshot(gid=GID)
+    observed = await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
     assert observed is not None
     assert observed.following == (parent_gid,)
 
@@ -126,7 +139,7 @@ async def test_snapshot_accepts_empty_following_string(
         return {**snapshot(), "following": ""}
 
     monkeypatch.setattr(adapter, "_call", call)
-    observed = await adapter.snapshot(gid=GID)
+    observed = await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
     assert observed is not None
     assert observed.following == ()
 
@@ -140,7 +153,7 @@ async def test_missing_snapshot_and_result_are_idempotent_but_other_rejections_f
         raise _RpcRejected(1)
 
     monkeypatch.setattr(adapter, "_call", missing)
-    assert await adapter.snapshot(gid=GID) is None
+    assert await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID) is None
     await adapter.remove_result(gid=GID)
 
     async def rejected(*args: object, **kwargs: object) -> object:
@@ -148,7 +161,7 @@ async def test_missing_snapshot_and_result_are_idempotent_but_other_rejections_f
 
     monkeypatch.setattr(adapter, "_call", rejected)
     with pytest.raises(DomainError) as caught:
-        await adapter.snapshot(gid=GID)
+        await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
     assert caught.value.code is ErrorCode.RPC_UNAVAILABLE
 
     async def transport(*args: object, **kwargs: object) -> object:
@@ -207,7 +220,19 @@ async def test_live_gid_enumeration_combines_active_waiting_and_pages(
     assert calls[1:] == [("aria2.tellWaiting", [0, 1000]), ("aria2.tellWaiting", [1000, 1000])]
 
 
-@pytest.mark.parametrize("method,bad", [("aria2.tellActive", {}), ("aria2.tellActive", [None]), ("aria2.tellWaiting", {})])
+@pytest.mark.parametrize(
+    "method,bad",
+    [
+        ("aria2.tellActive", {}),
+        ("aria2.tellActive", [None]),
+        # 是 dict 但没有可用的 gid：枚举只认 gid，缺了就是 aria2 不可用。
+        ("aria2.tellActive", [{"status": "active"}]),
+        ("aria2.tellWaiting", [{"gid": 5}]),
+        # 列表里混进非 dict：不能静默少认一个 GID。
+        ("aria2.tellWaiting", [{"gid": GID}, None]),
+        ("aria2.tellWaiting", {}),
+    ],
+)
 async def test_live_gid_enumeration_rejects_malformed_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str, bad: object
 ) -> None:
@@ -326,7 +351,8 @@ async def test_snapshot_prefers_bittorrent_info_name_over_file_paths(
     """种子真名来自 bittorrent.info.name（aria2 man：magnet 元数据任务没有该键）。"""
     adapter = client(tmp_path)
     payload = {
-        **snapshot(),
+        # 单文件也有 basename 可作名字，但种子真名优先。
+        **snapshot([file_entry(tmp_path, "file.bin")]),
         "bittorrent": {"info": {"name": "Big Buck Bunny"}, "mode": "single"},
     }
 
@@ -334,7 +360,7 @@ async def test_snapshot_prefers_bittorrent_info_name_over_file_paths(
         return payload
 
     monkeypatch.setattr(adapter, "_call", call)
-    observed = await adapter.snapshot(gid=GID)
+    observed = await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
     assert observed is not None
     assert observed.name == "Big Buck Bunny"
 
@@ -345,39 +371,38 @@ async def test_snapshot_falls_back_to_single_file_basename(
     adapter = client(tmp_path)
 
     async def call(*args: object, **kwargs: object) -> object:
-        return snapshot()
+        return snapshot([file_entry(tmp_path, "file.bin")])
 
     monkeypatch.setattr(adapter, "_call", call)
-    observed = await adapter.snapshot(gid=GID)
+    observed = await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
     assert observed is not None
     assert observed.name == "file.bin"
 
 
 @pytest.mark.parametrize(
-    "files",
+    "relpaths",
     [
         # 元数据占位文件不是真名。
-        [{"path": "[METADATA]aabb", "length": "1", "completedLength": "0"}],
+        ["[METADATA]aabb"],
         # 多文件时 files[0] 只是内层文件名，不是任务名。
-        [
-            {"path": "/root/pkg/a.bin", "length": "1", "completedLength": "0"},
-            {"path": "/root/pkg/b.bin", "length": "1", "completedLength": "0"},
-        ],
+        ["pkg/a.bin", "pkg/b.bin"],
         # 无文件（元数据未到手）时没有名字。
         [],
     ],
 )
 async def test_snapshot_reports_no_name_without_a_real_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: list[dict[str, str]]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relpaths: list[str]
 ) -> None:
     adapter = client(tmp_path)
-    payload = {**snapshot(), "files": files}
+    payload = snapshot([
+        file_entry(tmp_path, relpath, length="1", completed="0") for relpath in relpaths
+    ])
 
     async def call(*args: object, **kwargs: object) -> object:
         return payload
 
     monkeypatch.setattr(adapter, "_call", call)
-    observed = await adapter.snapshot(gid=GID)
+    observed = await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
     assert observed is not None
     assert observed.name is None
 
@@ -392,8 +417,7 @@ async def test_snapshot_ignores_malformed_bittorrent_name(
 ) -> None:
     adapter = client(tmp_path)
     payload = {
-        **snapshot(),
-        "files": [{"path": "/root/a.bin", "length": "1", "completedLength": "0"}],
+        **snapshot([file_entry(tmp_path, "a.bin", length="1", completed="0")]),
         "bittorrent": bittorrent,
     }
 
@@ -401,6 +425,123 @@ async def test_snapshot_ignores_malformed_bittorrent_name(
         return payload
 
     monkeypatch.setattr(adapter, "_call", call)
-    observed = await adapter.snapshot(gid=GID)
+    observed = await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
     assert observed is not None
     assert observed.name == "a.bin"
+
+
+async def test_snapshot_keeps_attempt_relative_paths_for_bt_subdirectories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BT 多文件磁盘布局是 `{attempt}/{种子名}/子目录/文件`，清单必须拿到整段相对路径。"""
+    adapter = client(tmp_path)
+    payload = snapshot(
+        [
+            file_entry(tmp_path, "bundle/sub/deep.bin", length="5", completed="5"),
+            file_entry(tmp_path, "bundle/root.bin", length="3", completed="3"),
+        ]
+    )
+
+    async def call(*args: object, **kwargs: object) -> object:
+        return payload
+
+    monkeypatch.setattr(adapter, "_call", call)
+    observed = await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
+    assert observed is not None
+    assert [(item.name, item.relpath) for item in observed.files] == [
+        ("deep.bin", "bundle/sub/deep.bin"),
+        ("root.bin", "bundle/root.bin"),
+    ]
+
+
+async def test_snapshot_normalizes_windows_separators_in_reported_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = client(tmp_path)
+    payload = snapshot(
+        [
+            {
+                "path": f"{tmp_path}\\{ATTEMPT_ID}\\bundle\\a.bin",
+                "length": "1",
+                "completedLength": "1",
+                "selected": "true",
+            }
+        ]
+    )
+
+    async def call(*args: object, **kwargs: object) -> object:
+        return payload
+
+    monkeypatch.setattr(adapter, "_call", call)
+    observed = await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
+    assert observed is not None
+    assert observed.files[0].relpath == "bundle/a.bin"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # 别的 attempt 目录（任务串了）。
+        "{root}/6/a.bin",
+        # 前缀只共享字符串前缀，不是同一目录。
+        "{root}/50/a.bin",
+        # 不在下载根下的绝对路径。
+        "/elsewhere/5/a.bin",
+        # 相对路径：aria2 没有按我们设的 dir 回报。
+        "5/a.bin",
+        # 正好就是尝试目录本身，没有文件名。
+        "{root}/5/",
+    ],
+)
+async def test_snapshot_drops_files_whose_path_is_not_under_the_attempt_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+) -> None:
+    """dir 由平台设置，路径不在本次尝试目录下只能视为不可信：不猜、不转换，整条剔除。"""
+    adapter = client(tmp_path)
+    payload = snapshot(
+        [
+            {"path": path.format(root=tmp_path), "length": "1", "completedLength": "1"},
+            # 可信的那一条必须留下：剔除只针对坏条目。
+            file_entry(tmp_path, "keep.bin", length="2", completed="2"),
+        ]
+    )
+
+    async def call(*args: object, **kwargs: object) -> object:
+        return payload
+
+    monkeypatch.setattr(adapter, "_call", call)
+    with caplog.at_level(
+        logging.WARNING, logger="aria2deck.infrastructure.aria2_submission"
+    ):
+        observed = await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
+
+    assert observed is not None
+    assert [item.relpath for item in observed.files] == ["keep.bin"]
+    assert any("不在任务目录下" in record.getMessage() for record in caplog.records)
+
+
+async def test_snapshot_keeps_unselected_files_for_display(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """子集下载的未选中项没落盘，但显示侧要能看到，剔除交给清单落库那一层。"""
+    adapter = client(tmp_path)
+    payload = snapshot(
+        [
+            file_entry(tmp_path, "picked.bin", length="2", completed="2"),
+            file_entry(
+                tmp_path, "skipped.bin", length="1", completed="0", selected="false"
+            ),
+        ]
+    )
+
+    async def call(*args: object, **kwargs: object) -> object:
+        return payload
+
+    monkeypatch.setattr(adapter, "_call", call)
+    observed = await adapter.snapshot(gid=GID, attempt_id=ATTEMPT_ID)
+    assert observed is not None
+    assert [(item.relpath, item.selected) for item in observed.files] == [
+        ("picked.bin", True),
+        ("skipped.bin", False),
+    ]

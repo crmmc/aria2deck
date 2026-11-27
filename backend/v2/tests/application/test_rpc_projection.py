@@ -38,7 +38,7 @@ TASK = TaskProjection(
     upload_speed=16,
     peer_count=3,
     connection_count=5,
-    files=(ObservedFile("folder/movie.mkv", 1000, 400, True),),
+    files=(ObservedFile("folder/movie.mkv", 1000, 400, True, "folder/movie.mkv"),),
     observation_fresh=True,
     reserved_bytes=0,
     error_code=None,
@@ -192,6 +192,7 @@ def test_rpc_and_rest_failure_text_share_one_source() -> None:
         "submission_timeout",
         "aria2_error",
         "metadata_admission_paused",
+        "manifest_unavailable",
         "some_unknown_code",
         None,
     ):
@@ -199,6 +200,18 @@ def test_rpc_and_rest_failure_text_share_one_source() -> None:
             TASK, status=SubscriptionStatus.FAILED, error_code=code
         )
         assert task_message(projection).payload["error_message"] == failure_message(code)
+
+
+def test_manifest_unavailable_keeps_the_unknown_aria2_error_code() -> None:
+    """新失败码走既有通道：errorCode 归 1（未知，不新造数字），errorMessage 用同源中文。"""
+    failed = dataclasses.replace(
+        TASK, status=SubscriptionStatus.FAILED, error_code="manifest_unavailable"
+    )
+    payload = tell_status_payload(failed, "g")
+    assert payload["errorCode"] == "1"
+    assert payload["errorMessage"] == (
+        "下载完成后无法核对文件清单，文件已保留在下载目录中，请联系管理员处理"
+    )
 
 
 def test_failed_task_projects_localized_error_message() -> None:
@@ -500,9 +513,9 @@ def test_task_info_hash_derivation(uri: str | None, expected: str) -> None:
 MULTI_FILE_TASK = dataclasses.replace(
     TASK,
     files=(
-        ObservedFile("a/one.bin", 10, 10, True),
-        ObservedFile("a/two.bin", 5, 0, False),
-        ObservedFile("b/three.bin", 7, 7, True),
+        ObservedFile("a/one.bin", 10, 10, True, "a/one.bin"),
+        ObservedFile("a/two.bin", 5, 0, False, "a/two.bin"),
+        ObservedFile("b/three.bin", 7, 7, True, "b/three.bin"),
     ),
 )
 
@@ -554,8 +567,8 @@ def test_client_sparse_lookup_never_null(projection: TaskProjection) -> None:
         dataclasses.replace(
             TASK,
             files=(
-                ObservedFile("x/a", 1, 0, True),
-                ObservedFile("x/b.bin", 2, 0, True),
+                ObservedFile("x/a", 1, 0, True, "x/a"),
+                ObservedFile("x/b.bin", 2, 0, True, "x/b.bin"),
             ),
         ),
     ],
@@ -609,8 +622,8 @@ def test_only_first_file_carries_display_uri() -> None:
     projection = dataclasses.replace(
         TASK,
         files=(
-            ObservedFile("a/one.bin", 10, 10, True),
-            ObservedFile("a/two.bin", 5, 0, False),
+            ObservedFile("a/one.bin", 10, 10, True, "a/one.bin"),
+            ObservedFile("a/two.bin", 5, 0, False, "a/two.bin"),
         ),
     )
     files = tell_status_payload(projection, "g")["files"]

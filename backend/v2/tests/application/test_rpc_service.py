@@ -59,7 +59,7 @@ def _projection(record: DownloadRecord) -> TaskProjection:
         upload_speed=1,
         peer_count=0,
         connection_count=2,
-        files=(ObservedFile("folder/leaf.bin", 100, 40, True),),
+        files=(ObservedFile("folder/leaf.bin", 100, 40, True, "folder/leaf.bin"),),
         observation_fresh=True,
         reserved_bytes=0,
         error_code=None,

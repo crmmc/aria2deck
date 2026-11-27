@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from sqlalchemy import case, delete, func, or_, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Row, RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -14,6 +15,7 @@ from ....application.downloads.models import (
     CancellationResult,
     DownloadRecord,
     HistoryExpiration,
+    ManifestEntry,
     SourceRecord,
     Submission,
 )
@@ -37,6 +39,7 @@ from ....domain.downloads import (
 from ....domain.errors import DomainError, ErrorCode
 from ....domain.quota import PhysicalDownload, available_machine_bytes
 from ..schema import (
+    attempt_manifests,
     content_objects,
     download_attempts,
     download_sources,
@@ -982,6 +985,55 @@ class DownloadRepository:
             )
         ).all()
         return [self._attempt(row) for row in rows]
+
+    async def record_manifest(
+        self, attempt_id: int, *, entries: tuple[ManifestEntry, ...], now_ms: int
+    ) -> None:
+        """写完成清单。首次写入生效，后到的观测不覆盖。
+
+        同一 attempt 的 GID 与文件集合不会变，清单是完成时刻的一次性事实，
+        所以用 insert-or-ignore：后到的观测不可能更准，空观测更不可能更准。
+        真正需要补写的只有“本来没有”（升级前的未完成入库），同样走插入。
+        """
+        await self.connection.execute(
+            sqlite_insert(attempt_manifests)
+            .values(
+                attempt_id=attempt_id,
+                files_json=json.dumps(
+                    [{"path": entry.path, "size": entry.size} for entry in entries]
+                ),
+                created_at_ms=now_ms,
+            )
+            .on_conflict_do_nothing(index_elements=[attempt_manifests.c.attempt_id])
+        )
+
+    async def get_manifest(self, attempt_id: int) -> tuple[ManifestEntry, ...] | None:
+        """None = 没有清单（不知道有哪些文件）；() = 空清单（明确知道没有文件）。"""
+        raw = (
+            await self.connection.execute(
+                select(attempt_manifests.c.files_json).where(
+                    attempt_manifests.c.attempt_id == attempt_id
+                )
+            )
+        ).scalar_one_or_none()
+        if raw is None:
+            return None
+        try:
+            parsed: object = json.loads(str(raw))
+        except json.JSONDecodeError:
+            raise DomainError(ErrorCode.INVALID_STATE, "完成清单数据无效") from None
+        if not isinstance(parsed, list):
+            raise DomainError(ErrorCode.INVALID_STATE, "完成清单数据无效")
+        entries: list[ManifestEntry] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                raise DomainError(ErrorCode.INVALID_STATE, "完成清单数据无效")
+            path = item.get("path")
+            size = item.get("size")
+            if not isinstance(path, str) or not isinstance(size, int) or isinstance(size, bool):
+                raise DomainError(ErrorCode.INVALID_STATE, "完成清单数据无效")
+            entries.append(ManifestEntry(path=path, size=size))
+        return tuple(entries)
 
     async def apply_observation(
         self,

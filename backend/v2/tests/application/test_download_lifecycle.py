@@ -12,11 +12,18 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select, text
 
+from aria2deck.application.downloads.broadcast import TaskBroadcast
 from aria2deck.application.downloads.lifecycle import DownloadLifecycleService
-from aria2deck.application.downloads.models import DownloadObservation
+from aria2deck.application.downloads.models import (
+    DownloadObservation,
+    ManifestEntry,
+    ObservedFile,
+    TaskProjection,
+)
 from aria2deck.application.downloads.projection import TaskProjector
 from aria2deck.application.downloads.rpc_projection import tell_status_payload
 from aria2deck.application.system.connectivity import BackendConnectivity
+from aria2deck.domain.content import ContentKind
 from aria2deck.domain.downloads import (
     ADMISSION_PAUSED,
     EXTERNAL_PAUSED,
@@ -47,6 +54,7 @@ class LifecycleBackend(FakeSubmissionBackend):
         super().__init__()
         self.snapshots: dict[str, DownloadObservation] = {}
         self.snapshot_errors: dict[str, DomainError] = {}
+        self.snapshot_calls: list[str] = []
         self.unpause_calls: list[str] = []
         self.unpause_error: DomainError | None = None
         self.remove_calls: list[str] = []
@@ -68,7 +76,10 @@ class LifecycleBackend(FakeSubmissionBackend):
             raise self.version_error
         return "1.37.0", ["Async DNS"]
 
-    async def snapshot(self, *, gid: str) -> DownloadObservation | None:
+    async def snapshot(
+        self, *, gid: str, attempt_id: int
+    ) -> DownloadObservation | None:
+        self.snapshot_calls.append(gid)
         if gid in self.snapshot_errors:
             raise self.snapshot_errors[gid]
         return self.snapshots.get(gid)
@@ -90,6 +101,7 @@ class LifecycleBackend(FakeSubmissionBackend):
                         if self.resume_status == "complete"
                         else current.completed_length
                     ),
+                    files=current.files,
                 )
 
     async def remove_result(self, *, gid: str) -> None:
@@ -113,6 +125,7 @@ def observation(
     total: int | None = 3,
     completed: int = 0,
     followed_by: tuple[str, ...] = (),
+    files: tuple[ObservedFile, ...] = (),
 ) -> DownloadObservation:
     return DownloadObservation(
         gid=gid,
@@ -125,6 +138,14 @@ def observation(
         total_length=total,
         completed_length=completed,
         followed_by=followed_by,
+        files=files,
+    )
+
+
+def manifest_files(*entries: tuple[str, int]) -> tuple[ObservedFile, ...]:
+    """构造 aria2 完成报告的 files：relpath 是 attempt 内相对路径，name 取 basename。"""
+    return tuple(
+        ObservedFile(path.rsplit("/", 1)[-1], size, size, True, path) for path, size in entries
     )
 
 
@@ -249,6 +270,27 @@ async def read(runtime: Runtime) -> tuple[object, object, object]:
         )
 
 
+async def read_manifest(runtime: Runtime) -> tuple[ManifestEntry, ...] | None:
+    async with SQLiteUnitOfWork(runtime.database) as uow:
+        return await DownloadRepository(uow.connection).get_manifest(runtime.attempt_id)
+
+
+class DatabaseProjection:
+    """广播入口用的真实投影：错误码与中文文案必须来自落库记录，而不是测试编的对象。"""
+
+    def __init__(self, state: Runtime) -> None:
+        self.state = state
+
+    async def get_task(self, *, user_id: int, task_id: int) -> TaskProjection:
+        async with SQLiteUnitOfWork(self.state.database) as uow:
+            record = await DownloadRepository(uow.connection).get_task(
+                user_id=user_id, task_id=task_id
+            )
+        return TaskProjector(
+            observations=self.state.observations, clock_ms=lambda: 100
+        ).project(record)
+
+
 def put_download(runtime: Runtime, content: bytes = b"abc") -> Path:
     directory = runtime.root / str(runtime.attempt_id)
     directory.mkdir()
@@ -257,27 +299,28 @@ def put_download(runtime: Runtime, content: bytes = b"abc") -> Path:
 
 
 class RecordingStore:
-    """记录 sweep_control_files 调用的透明包装，用于钉住「仅 BT 源清扫」这道门。"""
+    """记录入库入口收到的清单：用于断言“清单外的东西根本没被看”。"""
 
-    def __init__(self, inner: DownloadContentStore, calls: list[int]) -> None:
+    def __init__(self, inner: DownloadContentStore) -> None:
         self._inner = inner
-        self.calls = calls
+        self.collect_calls: list[tuple[int, tuple[ManifestEntry, ...]]] = []
+        self.install_calls: list[tuple[int, tuple[ManifestEntry, ...]]] = []
 
     def machine_free_bytes(self) -> int:
         return self._inner.machine_free_bytes()
 
-    async def scan(self, attempt_id: int):
-        return await self._inner.scan(attempt_id)
+    async def collect(self, attempt_id: int, manifest: tuple[ManifestEntry, ...]):
+        self.collect_calls.append((attempt_id, manifest))
+        return await self._inner.collect(attempt_id, manifest)
 
-    async def install(self, attempt_id: int, expected) -> None:
-        await self._inner.install(attempt_id, expected)
+    async def install(
+        self, attempt_id: int, expected, manifest: tuple[ManifestEntry, ...]
+    ) -> None:
+        self.install_calls.append((attempt_id, manifest))
+        await self._inner.install(attempt_id, expected, manifest)
 
     async def cleanup_attempt(self, attempt_id: int) -> None:
         await self._inner.cleanup_attempt(attempt_id)
-
-    async def sweep_control_files(self, attempt_id: int) -> None:
-        self.calls.append(attempt_id)
-        await self._inner.sweep_control_files(attempt_id)
 
 
 async def test_system_pause_resume_uses_shared_projection_and_monotonic_progress(
@@ -342,7 +385,9 @@ async def test_completion_installs_content_and_atomically_completes_quota_and_su
 ) -> None:
     async with runtime(tmp_path) as state:
         source = put_download(state)
-        complete = observation(status="complete", completed=3)
+        complete = observation(
+            status="complete", completed=3, files=manifest_files(("file.bin", 3))
+        )
         await asyncio.gather(state.lifecycle.reconcile(complete), state.lifecycle.reconcile(complete))
 
         attempt, task, quota = await read(state)
@@ -364,65 +409,430 @@ async def test_completion_installs_content_and_atomically_completes_quota_and_su
             ) is not None
 
 
-async def test_torrent_subset_completion_discards_control_file_before_scan(
+async def test_completion_persists_manifest_in_the_same_transaction_as_the_intent(
     tmp_path: Path,
 ) -> None:
-    """回归（缺陷2接线点）：选择子集 torrent 完成后 aria2 按 <种子名>.aria2 保留控制文件，
-    入库前必须移除，否则扫描因“下载控制文件尚未清理”持续拒绝。"""
+    """HTTP 单文件：观测到完成那一刻，清单与完成意图一起落库。"""
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete",
+                completed=3,
+                files=(ObservedFile("file.bin", 3, 3, True, "file.bin"),),
+            )
+        )
+
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert attempt.ingestion_started_at_ms is not None
+        assert attempt.completed_content_id is not None
+        assert task.subscription_status is SubscriptionStatus.COMPLETED
+        assert quota.used_bytes == 3
+        assert await read_manifest(state) == (ManifestEntry("file.bin", 3),)
+
+
+async def test_bt_multi_file_completion_persists_relative_paths_for_subdirectories(
+    tmp_path: Path,
+) -> None:
+    """BT 多文件：清单存 attempt 内相对路径——basename 无法定位 `{种子名}/子目录/文件`。"""
+    async with runtime(tmp_path, kind="torrent", total=5) as state:
+        directory = state.root / str(state.attempt_id)
+        (directory / "bundle" / "sub").mkdir(parents=True)
+        (directory / "bundle" / "sub" / "a.bin").write_bytes(b"abc")
+        (directory / "bundle" / "b.bin").write_bytes(b"de")
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete",
+                total=5,
+                completed=5,
+                files=(
+                    ObservedFile("a.bin", 3, 3, True, "bundle/sub/a.bin"),
+                    ObservedFile("b.bin", 2, 2, True, "bundle/b.bin"),
+                ),
+            )
+        )
+
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert quota.used_bytes == 5
+        assert await read_manifest(state) == (
+            ManifestEntry("bundle/sub/a.bin", 3),
+            ManifestEntry("bundle/b.bin", 2),
+        )
+
+
+async def test_manifest_keeps_only_selected_files(tmp_path: Path) -> None:
+    """子集下载：未选中项 aria2 不落盘（bt-remove-unselected-file），清单只记应存在的文件。"""
     async with runtime(tmp_path, kind="torrent", total=3) as state:
-        calls: list[int] = []
-        state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
+        directory = state.root / str(state.attempt_id)
+        (directory / "bundle").mkdir(parents=True)
+        (directory / "bundle" / "picked.bin").write_bytes(b"abc")
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete",
+                total=3,
+                completed=3,
+                files=(
+                    ObservedFile("picked.bin", 3, 3, True, "bundle/picked.bin"),
+                    ObservedFile("skipped.bin", 1, 0, False, "bundle/skipped.bin"),
+                ),
+            )
+        )
+
+        attempt, _, _ = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert await read_manifest(state) == (ManifestEntry("bundle/picked.bin", 3),)
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        (),
+        (ObservedFile("file.bin", 3, 3, False, "file.bin"),),
+    ],
+    ids=["no-files", "all-unselected"],
+)
+async def test_completion_without_usable_manifest_settles_as_manifest_unavailable(
+    tmp_path: Path, files: tuple[ObservedFile, ...]
+) -> None:
+    """凑不出清单的完成观测不再无限重试：重观测也拿不到可信文件就判死并保留文件。
+
+    完成态的 aria2 报告必然有文件列表，空观测/全未选中只能说明“不知道”，所以不落
+    空清单；重观测仍是同样结果时不猜内容，按 manifest_unavailable 收尾。
+    """
+    async with runtime(tmp_path) as state:
+        directory = put_download(state)
+        state.backend.snapshots[GID] = observation(
+            status="complete", completed=3, files=files
+        )
+
+        await state.lifecycle.reconcile(
+            observation(status="complete", completed=3, files=files)
+        )
+
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_code == "manifest_unavailable"
+        assert attempt.completed_content_id is None
+        assert task.subscription_status is SubscriptionStatus.FAILED
+        assert quota.reserved_bytes == 0
+        assert await read_manifest(state) is None
+        async with SQLiteUnitOfWork(state.database) as uow:
+            assert (await uow.connection.execute(select(content_objects))).all() == []
+        assert (directory / "file.bin").read_bytes() == b"abc", "无法核对的文件留在盘上"
+
+
+async def test_missing_manifest_is_restored_from_a_fresh_snapshot(tmp_path: Path) -> None:
+    """无清单（升级前的未完成入库）但 aria2 仍可观测：补写清单后同轮入库，不进终态。"""
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        state.backend.snapshots[GID] = observation(
+            status="complete", completed=3, files=manifest_files(("file.bin", 3))
+        )
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await DownloadRepository(uow.connection).start_ingestion(
+                state.attempt_id, expected_gid=GID, now_ms=100
+            )
+
+        assert await state.lifecycle.recover_ingestions() is True
+
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert task.subscription_status is SubscriptionStatus.COMPLETED
+        assert quota.used_bytes == 3
+        assert quota.reserved_bytes == 0
+        assert await read_manifest(state) == (ManifestEntry("file.bin", 3),)
+
+
+async def test_manifest_unavailable_keeps_files_releases_quota_and_broadcasts(
+    tmp_path: Path,
+) -> None:
+    """aria2 丢失该任务且过了宽限：失败终态 + 文件保留 + 配额释放 + 终态帧。"""
+    async with runtime(tmp_path) as state:
+        directory = put_download(state)
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await DownloadRepository(uow.connection).start_ingestion(
+                state.attempt_id, expected_gid=GID, now_ms=100
+            )
+        now = [100]
+        state.lifecycle.clock_ms = lambda: now[0]
+        bus = TaskBroadcast()
+        sink = bus.subscribe(state.user_id)
+        state.lifecycle.broadcast = bus
+        state.lifecycle.queries = DatabaseProjection(state)
+
+        assert await state.lifecycle.recover_ingestions() is True
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED, "宽限内不判死"
+        assert quota.reserved_bytes == 3
+        sink.queue.clear()  # 宽限期内的非终态帧不参与下面的终态断言
+
+        now[0] += 10_000
+        assert await state.lifecycle.recover_ingestions() is True
+
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_code == "manifest_unavailable"
+        assert attempt.result_consumed_at_ms is not None
+        assert task.subscription_status is SubscriptionStatus.FAILED
+        assert quota.reserved_bytes == 0
+        assert [message.payload["error_message"] for message in sink.queue] == [
+            "下载完成后无法核对文件清单，文件已保留在下载目录中，请联系管理员处理"
+        ]
+
+        # 终态清理循环不得删掉保留的文件：清理入口只看“已收尾”标记，这里已经记下。
+        assert await state.lifecycle.cleanup_terminal() is True
+        assert (directory / "file.bin").read_bytes() == b"abc"
+
+
+async def test_manifest_restore_waits_out_the_missing_grace_and_then_recovers(
+    tmp_path: Path,
+) -> None:
+    """aria2 重启 reload 的瞬间查不到任务：宽限内只重试，恢复可观测后照常补清单入库。"""
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await DownloadRepository(uow.connection).start_ingestion(
+                state.attempt_id, expected_gid=GID, now_ms=100
+            )
+        now = [100]
+        state.lifecycle.clock_ms = lambda: now[0]
+
+        assert await state.lifecycle.recover_ingestions() is True
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED, "首次查不到任务不算判死"
+        assert quota.reserved_bytes == 3
+
+        now[0] += 5_000
+        state.backend.snapshots[GID] = observation(
+            status="complete", completed=3, files=manifest_files(("file.bin", 3))
+        )
+        assert await state.lifecycle.recover_ingestions() is True
+
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert task.subscription_status is SubscriptionStatus.COMPLETED
+        assert quota.used_bytes == 3
+        assert quota.reserved_bytes == 0
+        assert await read_manifest(state) == (ManifestEntry("file.bin", 3),)
+
+
+async def test_manifest_restore_transport_failure_waits_for_the_ingestion_timeout(
+    tmp_path: Path,
+) -> None:
+    """连不上 aria2 不等于任务丢失：先保持可重试，超时判死的错误码是 manifest_unavailable。"""
+    async with runtime(tmp_path) as state:
+        directory = put_download(state)
+        async with SQLiteUnitOfWork(state.database) as uow:
+            await DownloadRepository(uow.connection).start_ingestion(
+                state.attempt_id, expected_gid=GID, now_ms=100
+            )
+        now = [100]
+        state.lifecycle.clock_ms = lambda: now[0]
+        state.lifecycle.ingestion_timeout_ms = 10_000
+        state.backend.snapshot_errors[GID] = DomainError(ErrorCode.RPC_UNAVAILABLE, "offline")
+
+        assert await state.lifecycle.recover_ingestions() is False
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED, "暂时连不上 aria2 不判死"
+        assert attempt.ingestion_started_at_ms == 100
+        assert quota.reserved_bytes == 3
+
+        now[0] += 9_999
+        assert await state.lifecycle.recover_ingestions() is False
+        attempt, _, _ = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED
+
+        now[0] += 1
+        assert await state.lifecycle.recover_ingestions() is False
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_code == "manifest_unavailable"
+        assert task.subscription_status is SubscriptionStatus.FAILED
+        assert quota.reserved_bytes == 0
+        assert (directory / "file.bin").read_bytes() == b"abc"
+
+
+async def test_manifest_size_mismatch_is_retryable_and_never_judged_dead(
+    tmp_path: Path,
+) -> None:
+    """aria2 报告 5 字节而磁盘只有 3 字节（还在写/异常）：按可重试处理，补齐后照常入库。"""
+    async with runtime(tmp_path, total=5) as state:
+        directory = put_download(state, b"abc")
+
+        with pytest.raises(DomainError) as caught:
+            await state.lifecycle.reconcile(
+                observation(
+                    status="complete",
+                    total=5,
+                    completed=5,
+                    files=manifest_files(("file.bin", 5)),
+                )
+            )
+
+        assert caught.value.code is ErrorCode.INVALID_STATE
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.QUEUED
+        assert attempt.ingestion_started_at_ms == 100, "完成意图保留，等下一轮重试"
+        assert attempt.completed_content_id is None
+        assert task.subscription_status is SubscriptionStatus.QUEUED
+        assert quota.used_bytes == 0
+        async with SQLiteUnitOfWork(state.database) as uow:
+            assert (await uow.connection.execute(select(content_objects))).all() == []
+
+        (directory / "file.bin").write_bytes(b"abcde")  # 磁盘补齐到清单大小
+        assert await state.lifecycle.recover_ingestions() is True
+        attempt, task, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert task.subscription_status is SubscriptionStatus.COMPLETED
+        assert quota.used_bytes == 5
+
+
+async def test_manifest_write_failure_rolls_back_the_completion_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing_manifest(
+        self: DownloadRepository,
+        attempt_id: int,
+        *,
+        entries: tuple[ManifestEntry, ...],
+        now_ms: int,
+    ) -> None:
+        raise RuntimeError("清单写入失败")
+
+    async with runtime(tmp_path) as state:
+        source = put_download(state)
+        monkeypatch.setattr(DownloadRepository, "record_manifest", failing_manifest)
+        with pytest.raises(RuntimeError):
+            await state.lifecycle.reconcile(
+                observation(
+                    status="complete",
+                    completed=3,
+                    files=(ObservedFile("file.bin", 3, 3, True, "file.bin"),),
+                )
+            )
+
+        attempt, task, _ = await read(state)
+        # 清单写入失败 → 同一事务里先写的完成意图一起回滚，不可能出现“意图在、清单丢”。
+        assert attempt.ingestion_started_at_ms is None
+        assert attempt.completed_content_id is None
+        assert attempt.status is AttemptStatus.QUEUED
+        assert task.subscription_status is SubscriptionStatus.QUEUED
+        assert await read_manifest(state) is None
+        assert source.is_dir()  # 半成品未被当成成功结果删掉
+
+
+async def test_restart_recovery_ingestion_keeps_the_manifest_written_at_completion(
+    tmp_path: Path,
+) -> None:
+    """恢复路径的完成意图写入（_ingest(attempt, None)）不改写也不丢失已有清单。"""
+    async with runtime(tmp_path) as state:
+        put_download(state)
+        async with SQLiteUnitOfWork(state.database) as uow:
+            repository = DownloadRepository(uow.connection)
+            await repository.start_ingestion(state.attempt_id, expected_gid=GID, now_ms=2)
+            await repository.record_manifest(
+                state.attempt_id, entries=(ManifestEntry("file.bin", 3),), now_ms=2
+            )
+
+        await state.database.close()
+        state.database = SQLiteDatabase(tmp_path / "v2.db")
+        restarted = make_lifecycle(state)
+        assert await restarted.recover_ingestions() is True
+
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert quota.used_bytes == 3
+        assert await read_manifest(state) == (ManifestEntry("file.bin", 3),)
+
+
+async def test_torrent_subset_completion_ignores_control_file_residue(tmp_path: Path) -> None:
+    """回归（缺陷2）：选择子集 torrent 完成后 aria2 按 <种子名>.aria2 留下控制文件；
+    清单只含选中的文件，残留既不参与入库也没被删（不再是“清扫后重扫描”）。"""
+    async with runtime(tmp_path, kind="torrent", total=3) as state:
+        store = RecordingStore(state.store)
+        state.lifecycle.content_store = store  # type: ignore[assignment]
         directory = state.root / str(state.attempt_id)
         (directory / "bundle").mkdir(parents=True)
         (directory / "bundle" / "file.bin").write_bytes(b"abc")
         (directory / "bundle.aria2").write_bytes(b"aria2 control")
-        await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete",
+                completed=3,
+                files=manifest_files(("bundle/file.bin", 3)),
+            )
+        )
 
         attempt, task, quota = await read(state)
         assert attempt.status is AttemptStatus.COMPLETED
-        assert calls == [state.attempt_id]  # BT 源才接线
-        assert not (directory / "bundle.aria2").exists()
-        assert not directory.exists()  # 已整体搬入内容存储
+        assert store.collect_calls == [
+            (state.attempt_id, (ManifestEntry("bundle/file.bin", 3),))
+        ]
+        assert store.install_calls == [
+            (state.attempt_id, (ManifestEntry("bundle/file.bin", 3),))
+        ]
         assert task.subscription_status is SubscriptionStatus.COMPLETED
         assert quota.used_bytes == 3
+        async with SQLiteUnitOfWork(state.database) as uow:
+            rows = (
+                await uow.connection.execute(
+                    select(content_entries.c.path)
+                    .where(content_entries.c.content_id == attempt.completed_content_id)
+                    .order_by(content_entries.c.path)
+                )
+            ).scalars().all()
+        assert rows == ["bundle", "bundle/file.bin"], "控制文件不进内容"
 
 
-async def test_magnet_completion_sweeps_control_file_named_by_swarm_not_display_name(
+async def test_magnet_completion_ingests_the_reported_name_and_ignores_residue(
     tmp_path: Path,
 ) -> None:
     """生产回归（ingestion_timeout）：无 dn 磁力的 display_name 是 info 哈希，
-    而 aria2 用种子真名落盘并命名控制文件；入库必须按后缀清扫，不能依赖名字一致。"""
+    aria2 却用种子真名落盘；入库只听清单，清单外残留（含 .aria2）不参与也不被删。"""
     async with runtime(
         tmp_path, kind="magnet", total=3, display_name="ab" * 20, pause_code=None
     ) as state:
-        calls: list[int] = []
-        state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
+        store = RecordingStore(state.store)
+        state.lifecycle.content_store = store  # type: ignore[assignment]
         directory = state.root / str(state.attempt_id)
         directory.mkdir()
         (directory / "Real Torrent Name.bin").write_bytes(b"abc")
         (directory / "Real Torrent Name.aria2").write_bytes(b"aria2 control")
 
-        await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete",
+                completed=3,
+                files=manifest_files(("Real Torrent Name.bin", 3)),
+            )
+        )
 
         attempt, task, quota = await read(state)
         assert attempt.status is AttemptStatus.COMPLETED
         assert attempt.completed_content_id is not None
-        assert calls == [state.attempt_id]
-        assert not directory.exists()
+        assert store.collect_calls == [
+            (state.attempt_id, (ManifestEntry("Real Torrent Name.bin", 3),))
+        ]
         async with SQLiteUnitOfWork(state.database) as uow:
             content = await ContentRepository(uow.connection).get_object(
                 attempt.completed_content_id
             )
-            assert content.digest == hashlib.sha256(b"abc").hexdigest()
+        assert content.kind is ContentKind.FILE
+        assert content.digest == hashlib.sha256(b"abc").hexdigest()
+        assert (state.root / content.storage_path).read_bytes() == b"abc"
         assert task.subscription_status is SubscriptionStatus.COMPLETED
         assert quota.used_bytes == 3
 
 
-async def test_bt_completion_sweeps_primary_and_subfile_control_files(tmp_path: Path) -> None:
-    """BT attempt 的多文件种子会在主目录和子文件旁各留一份控制文件，全部清完才能扫描。"""
+async def test_bt_completion_ingests_only_the_reported_multi_file_manifest(
+    tmp_path: Path,
+) -> None:
+    """BT 多文件：清单带子目录路径，主目录与子文件旁的控制文件残留都不进内容。"""
     async with runtime(tmp_path, kind="torrent", total=6) as state:
-        calls: list[int] = []
-        state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
+        store = RecordingStore(state.store)
+        state.lifecycle.content_store = store  # type: ignore[assignment]
         directory = state.root / str(state.attempt_id)
         (directory / "bundle").mkdir(parents=True)
         (directory / "bundle" / "file.bin").write_bytes(b"abc")
@@ -430,45 +840,72 @@ async def test_bt_completion_sweeps_primary_and_subfile_control_files(tmp_path: 
         (directory / "bundle.aria2").write_bytes(b"aria2 control")
         (directory / "bundle" / "file.bin.aria2").write_bytes(b"aria2 control")
 
-        await state.lifecycle.reconcile(observation(status="complete", completed=6))
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete",
+                completed=6,
+                files=manifest_files(("bundle/file.bin", 3), ("bundle/extra.bin", 3)),
+            )
+        )
 
         attempt, _, quota = await read(state)
         assert attempt.status is AttemptStatus.COMPLETED
-        assert calls == [state.attempt_id]
-        assert not directory.exists()
+        assert store.collect_calls == [
+            (
+                state.attempt_id,
+                (ManifestEntry("bundle/file.bin", 3), ManifestEntry("bundle/extra.bin", 3)),
+            )
+        ]
         assert quota.used_bytes == 6
+        async with SQLiteUnitOfWork(state.database) as uow:
+            content = await ContentRepository(uow.connection).get_object(
+                attempt.completed_content_id
+            )
+            rows = (
+                await uow.connection.execute(
+                    select(content_entries.c.path)
+                    .where(content_entries.c.content_id == content.id)
+                    .order_by(content_entries.c.path)
+                )
+            ).scalars().all()
+        assert rows == ["bundle", "bundle/extra.bin", "bundle/file.bin"]
+        assert not (state.root / content.storage_path / "bundle.aria2").exists()
 
 
-async def test_http_user_content_named_aria2_suffix_is_never_discarded(
+async def test_http_user_content_named_aria2_suffix_is_content_when_reported(
     tmp_path: Path,
 ) -> None:
-    """回归（评审阻断项）：HTTP 用户内容真名以 .aria2 结尾时，入库不得删除它——
-    控制文件清理只对 torrent 源生效且按提交名精确匹配，HTTP 走显式失败保留数据。"""
+    """回归（评审阻断项）：`.aria2` 后缀不再是判据。
+
+    清单报了它 → 就是用户内容，照常入库，绝不删；清单没报它 → 不参与入库。
+    """
     async with runtime(tmp_path) as state:
-        calls: list[int] = []
-        state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
         directory = state.root / str(state.attempt_id)
         directory.mkdir()
         (directory / "user-data.aria2").write_bytes(b"user content")
 
-        with pytest.raises(DomainError) as caught:
-            await state.lifecycle.reconcile(observation(status="complete", completed=13))
-        assert caught.value.code is ErrorCode.DOWNLOAD_UNAVAILABLE
-        assert calls == []  # HTTP 源根本不触发控制文件清扫
-        assert (directory / "user-data.aria2").read_bytes() == b"user content"
-        attempt, _, _ = await read(state)
-        # 未误判完成、数据原样保留（fixture 中 attempt 尚未推进过 active，保持 queued）
-        assert attempt.status is AttemptStatus.QUEUED
-        assert attempt.completed_content_id is None
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete",
+                completed=12,
+                files=manifest_files(("user-data.aria2", 12)),
+            )
+        )
+
+        attempt, _, quota = await read(state)
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert quota.used_bytes == 12
+        async with SQLiteUnitOfWork(state.database) as uow:
+            content = await ContentRepository(uow.connection).get_object(
+                attempt.completed_content_id
+            )
+        assert content.digest == hashlib.sha256(b"user content").hexdigest()
+        assert (state.root / content.storage_path).read_bytes() == b"user content"
 
 
-async def test_bt_source_with_non_string_payload_still_sweeps_control_files(
-    tmp_path: Path,
-) -> None:
-    """清扫不再依赖种子载荷解析：载荷坏掉也不会绕过清扫，更不会变成新的致命错误来源。"""
+async def test_ingestion_never_parses_the_source_payload(tmp_path: Path) -> None:
+    """入库只看清单，不解析种子载荷：载荷坏掉也不会变成新的致命错误来源。"""
     async with runtime(tmp_path, kind="torrent", total=3) as state:
-        calls: list[int] = []
-        state.lifecycle.content_store = RecordingStore(state.store, calls)  # type: ignore[assignment]
         async with SQLiteUnitOfWork(state.database) as uow:
             await uow.connection.execute(
                 text("UPDATE download_sources SET payload_json = :payload WHERE id = 1"),
@@ -478,11 +915,17 @@ async def test_bt_source_with_non_string_payload_still_sweeps_control_files(
         directory.mkdir()
         (directory / "file.bin").write_bytes(b"abc")
         (directory / "file.bin.aria2").write_bytes(b"aria2 control")
-        await state.lifecycle.reconcile(observation(status="complete", completed=3))
+
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete",
+                completed=3,
+                files=manifest_files(("file.bin", 3)),
+            )
+        )
 
         attempt, _, _ = await read(state)
         assert attempt.status is AttemptStatus.COMPLETED
-        assert calls == [state.attempt_id]  # 不解析载荷也照样清扫
 
 
 async def test_completion_failure_rolls_back_references_and_releases_reservation(
@@ -504,7 +947,11 @@ async def test_completion_failure_rolls_back_references_and_releases_reservation
                 state.user_id, 0, content_size=1, already_owned=False
             )
         put_download(state)
-        await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete", completed=3, files=manifest_files(("file.bin", 3))
+            )
+        )
 
         attempt, task, quota = await read(state)
         assert attempt.status is AttemptStatus.FAILED
@@ -526,16 +973,20 @@ async def test_completion_wins_a_concurrent_failure_without_double_accounting(
         put_download(state)
         started = asyncio.Event()
         release = asyncio.Event()
-        original_scan = state.store.scan
+        original_collect = state.store.collect
 
-        async def slow_scan(attempt_id: int):
+        async def slow_collect(attempt_id: int, manifest):
             started.set()
             await release.wait()
-            return await original_scan(attempt_id)
+            return await original_collect(attempt_id, manifest)
 
-        state.store.scan = slow_scan  # type: ignore[method-assign]
+        state.store.collect = slow_collect  # type: ignore[method-assign]
         completing = asyncio.create_task(
-            state.lifecycle.reconcile(observation(status="complete", completed=3))
+            state.lifecycle.reconcile(
+                observation(
+                    status="complete", completed=3, files=manifest_files(("file.bin", 3))
+                )
+            )
         )
         await started.wait()
         failing = asyncio.create_task(state.lifecycle.reconcile(observation(status="error")))
@@ -748,7 +1199,8 @@ async def test_polling_probe_timeout_does_not_stall_the_loop(tmp_path: Path) -> 
 async def test_restart_resumes_installed_completion_intent(tmp_path: Path) -> None:
     async with runtime(tmp_path) as state:
         put_download(state)
-        preparation = await state.store.scan(state.attempt_id)
+        entries = (ManifestEntry("file.bin", 3),)
+        preparation = await state.store.collect(state.attempt_id, entries)
         async with SQLiteUnitOfWork(state.database) as uow:
             content_id = await ContentRepository(uow.connection).create_object(
                 kind=preparation.identity.kind.value,
@@ -757,10 +1209,12 @@ async def test_restart_resumes_installed_completion_intent(tmp_path: Path) -> No
                 storage_path=preparation.storage_path,
                 now_ms=2,
             )
-            await DownloadRepository(uow.connection).begin_completion(
+            repository = DownloadRepository(uow.connection)
+            await repository.begin_completion(
                 state.attempt_id, expected_gid=GID, content_id=content_id, now_ms=2
             )
-        await state.store.install(state.attempt_id, preparation)
+            await repository.record_manifest(state.attempt_id, entries=entries, now_ms=2)
+        await state.store.install(state.attempt_id, preparation, entries)
 
         await state.database.close()
         state.database = SQLiteDatabase(tmp_path / "v2.db")
@@ -782,7 +1236,9 @@ async def test_unpause_is_only_confirmed_by_a_fresh_followup_snapshot(
         if confirmed == "complete":
             put_download(state)
         state.backend.resume_status = confirmed
-        state.backend.snapshots[GID] = observation(status="paused")
+        state.backend.snapshots[GID] = observation(
+            status="paused", files=manifest_files(("file.bin", 3))
+        )
         await state.lifecycle.reconcile(observation(status="paused"))
         attempt, _, quota = await read(state)
         if confirmed == "paused":
@@ -861,7 +1317,14 @@ async def test_directory_completion_persists_entries_and_reuses_existing_content
         (source / "nested").mkdir(parents=True)
         (source / "file.bin").write_bytes(b"abc")
         (source / "nested" / "child.bin").write_bytes(b"def")
-        await state.lifecycle.reconcile(observation(status="complete", total=6, completed=6))
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete",
+                total=6,
+                completed=6,
+                files=manifest_files(("file.bin", 3), ("nested/child.bin", 3)),
+            )
+        )
         first, _, first_quota = await read(state)
         assert first.status is AttemptStatus.COMPLETED
         assert first_quota.used_bytes == 6
@@ -899,7 +1362,13 @@ async def test_directory_completion_persists_entries_and_reuses_existing_content
         (duplicate / "file.bin").write_bytes(b"abc")
         (duplicate / "nested" / "child.bin").write_bytes(b"def")
         await state.lifecycle.reconcile(
-            observation(PAYLOAD_GID, "complete", total=6, completed=6)
+            observation(
+                PAYLOAD_GID,
+                "complete",
+                total=6,
+                completed=6,
+                files=manifest_files(("file.bin", 3), ("nested/child.bin", 3)),
+            )
         )
         async with SQLiteUnitOfWork(state.database) as uow:
             second = await DownloadRepository(uow.connection).get_attempt(second_id)
@@ -913,14 +1382,19 @@ async def test_directory_completion_persists_entries_and_reuses_existing_content
 async def test_existing_content_identity_conflict_is_not_overwritten(tmp_path: Path) -> None:
     async with runtime(tmp_path) as state:
         put_download(state)
-        preparation = await state.store.scan(state.attempt_id)
+        entries = (ManifestEntry("file.bin", 3),)
+        preparation = await state.store.collect(state.attempt_id, entries)
         async with SQLiteUnitOfWork(state.database) as uow:
             await ContentRepository(uow.connection).create_object(
                 kind="file", digest=preparation.identity.digest, size=99,
                 storage_path="objects/conflict", now_ms=2,
             )
         with pytest.raises(DomainError) as caught:
-            await state.lifecycle.reconcile(observation(status="complete", completed=3))
+            await state.lifecycle.reconcile(
+                observation(
+                    status="complete", completed=3, files=manifest_files(("file.bin", 3))
+                )
+            )
         assert caught.value.code is ErrorCode.INVALID_STATE
         attempt, _, _ = await read(state)
         assert attempt.status is AttemptStatus.QUEUED
@@ -934,7 +1408,11 @@ async def test_unsafe_content_fails_without_leaking_a_user_file(tmp_path: Path) 
         external = tmp_path / "external"
         external.write_bytes(b"abc")
         (source / "file.bin").symlink_to(external)
-        await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete", completed=3, files=manifest_files(("file.bin", 3))
+            )
+        )
         attempt, _, quota = await read(state)
         assert attempt.status is AttemptStatus.FAILED
         assert quota.reserved_bytes == 0
@@ -974,15 +1452,18 @@ async def test_recovery_failure_is_retained_and_stale_completion_is_ignored(
 ) -> None:
     async with runtime(tmp_path) as state:
         preparation = put_download(state)
-        scanned = await state.store.scan(state.attempt_id)
+        entries = (ManifestEntry("file.bin", 3),)
+        collected = await state.store.collect(state.attempt_id, entries)
         async with SQLiteUnitOfWork(state.database) as uow:
             content_id = await ContentRepository(uow.connection).create_object(
-                kind="file", digest=scanned.identity.digest, size=3,
-                storage_path=scanned.storage_path, now_ms=2,
+                kind="file", digest=collected.identity.digest, size=3,
+                storage_path=collected.storage_path, now_ms=2,
             )
-            await DownloadRepository(uow.connection).begin_completion(
+            repository = DownloadRepository(uow.connection)
+            await repository.begin_completion(
                 state.attempt_id, expected_gid=GID, content_id=content_id, now_ms=2
             )
+            await repository.record_manifest(state.attempt_id, entries=entries, now_ms=2)
         import shutil
         shutil.rmtree(preparation)
         assert await state.lifecycle.recover_ingestions() is False
@@ -993,7 +1474,11 @@ async def test_recovery_failure_is_retained_and_stale_completion_is_ignored(
         async def stale(*args: object, **kwargs: object) -> bool:
             raise DomainError(ErrorCode.STALE_EVENT, "stale")
         monkeypatch.setattr(DownloadRepository, "finalize_completion", stale)
-        await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete", completed=3, files=manifest_files(("file.bin", 3))
+            )
+        )
         attempt, _, _ = await read(state)
         assert attempt.status is AttemptStatus.QUEUED
         assert state.observations.get(GID) is None
@@ -1015,6 +1500,17 @@ async def test_notification_missing_failure_and_success_share_the_same_reconcile
         state.backend.snapshot_errors[GID] = DomainError(ErrorCode.RPC_UNAVAILABLE, "offline")
         await state.lifecycle._on_gid(GID)
         assert state.observations.get(GID) is None
+
+
+async def test_notification_for_an_unmanaged_gid_never_asks_aria2(tmp_path: Path) -> None:
+    """未知 GID（不是本平台的 attempt）直接忽略：没有 attempt 就没有相对路径的基准目录。"""
+    async with runtime(tmp_path) as state:
+        state.backend.snapshots["unmanaged"] = observation("unmanaged", "active")
+
+        await state.lifecycle._on_gid("unmanaged")
+
+        assert state.backend.snapshot_calls == []
+        assert state.observations.get("unmanaged") is None
 
 
 async def test_missing_gid_requires_grace_and_a_second_missing_snapshot(
@@ -1065,24 +1561,28 @@ async def test_missing_gid_query_errors_do_not_start_or_confirm_failure(
         assert attempt.status is AttemptStatus.QUEUED
 
 
-async def test_ingestion_started_before_scan_and_missing_gid_recovers_after_restart(
+async def test_ingestion_started_before_collect_and_missing_gid_recovers_after_restart(
     tmp_path: Path,
 ) -> None:
     async with runtime(tmp_path) as state:
         put_download(state)
-        original_scan = state.store.scan
+        original_collect = state.store.collect
 
-        async def scan_failed(attempt_id: int) -> object:
-            raise OSError("scan offline")
+        async def collect_failed(attempt_id: int, manifest: object) -> object:
+            raise OSError("collect offline")
 
-        state.store.scan = scan_failed  # type: ignore[method-assign]
-        with pytest.raises(OSError, match="scan offline"):
-            await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        state.store.collect = collect_failed  # type: ignore[method-assign]
+        with pytest.raises(OSError, match="collect offline"):
+            await state.lifecycle.reconcile(
+                observation(
+                    status="complete", completed=3, files=manifest_files(("file.bin", 3))
+                )
+            )
         attempt, _, _ = await read(state)
         assert attempt.ingestion_started_at_ms == 100
         assert attempt.completed_content_id is None
 
-        state.store.scan = original_scan  # type: ignore[method-assign]
+        state.store.collect = original_collect  # type: ignore[method-assign]
         await state.database.close()
         state.database = SQLiteDatabase(tmp_path / "v2.db")
         restarted = make_lifecycle(state)
@@ -1101,7 +1601,7 @@ async def test_ingestion_started_before_scan_and_missing_gid_recovers_after_rest
         assert quota.reserved_bytes == 0
 
 
-@pytest.mark.parametrize("stage", ["scan", "install", "finalize"])
+@pytest.mark.parametrize("stage", ["collect", "install", "finalize"])
 async def test_persistent_ingestion_failure_times_out_without_resetting_age(
     tmp_path: Path, stage: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1111,17 +1611,19 @@ async def test_persistent_ingestion_failure_times_out_without_resetting_age(
         async def failed(*args: object, **kwargs: object) -> object:
             raise OSError(f"{stage} offline")
 
-        if stage == "scan":
-            monkeypatch.setattr(state.store, "scan", failed)
-        elif stage == "install":
-            monkeypatch.setattr(state.store, "install", failed)
+        if stage in {"collect", "install"}:
+            monkeypatch.setattr(state.store, stage, failed)
         else:
             monkeypatch.setattr(DownloadRepository, "finalize_completion", failed)
         now = [100]
         state.lifecycle.clock_ms = lambda: now[0]
         state.lifecycle.ingestion_timeout_ms = 10_000
         with pytest.raises(OSError, match=f"{stage} offline"):
-            await state.lifecycle.reconcile(observation(status="complete", completed=3))
+            await state.lifecycle.reconcile(
+                observation(
+                    status="complete", completed=3, files=manifest_files(("file.bin", 3))
+                )
+            )
         first, _, _ = await read(state)
 
         now[0] += 9_999
@@ -1146,15 +1648,19 @@ async def test_ingestion_intent_wins_over_late_non_completion_snapshots(
 ) -> None:
     async with runtime(tmp_path) as state:
         put_download(state)
-        original_scan = state.store.scan
+        original_collect = state.store.collect
 
-        async def scan_failed(attempt_id: int) -> object:
-            raise OSError("scan offline")
+        async def collect_failed(attempt_id: int, manifest: object) -> object:
+            raise OSError("collect offline")
 
-        state.store.scan = scan_failed  # type: ignore[method-assign]
-        with pytest.raises(OSError, match="scan offline"):
-            await state.lifecycle.reconcile(observation(status="complete", completed=3))
-        state.store.scan = original_scan  # type: ignore[method-assign]
+        state.store.collect = collect_failed  # type: ignore[method-assign]
+        with pytest.raises(OSError, match="collect offline"):
+            await state.lifecycle.reconcile(
+                observation(
+                    status="complete", completed=3, files=manifest_files(("file.bin", 3))
+                )
+            )
+        state.store.collect = original_collect  # type: ignore[method-assign]
 
         await state.lifecycle.reconcile(observation(status=late_status, completed=3))
         attempt, _, quota = await read(state)
@@ -1166,12 +1672,16 @@ async def test_ingestion_timeout_cleanup_failure_remains_retryable(tmp_path: Pat
     async with runtime(tmp_path) as state:
         put_download(state)
 
-        async def scan_failed(attempt_id: int) -> object:
-            raise OSError("scan offline")
+        async def collect_failed(attempt_id: int, manifest: object) -> object:
+            raise OSError("collect offline")
 
-        state.store.scan = scan_failed  # type: ignore[method-assign]
-        with pytest.raises(OSError, match="scan offline"):
-            await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        state.store.collect = collect_failed  # type: ignore[method-assign]
+        with pytest.raises(OSError, match="collect offline"):
+            await state.lifecycle.reconcile(
+                observation(
+                    status="complete", completed=3, files=manifest_files(("file.bin", 3))
+                )
+            )
         now = [100]
         state.lifecycle.clock_ms = lambda: now[0]
         now[0] += 60_000
@@ -1193,15 +1703,19 @@ async def test_ingestion_timeout_cleanup_failure_remains_retryable(tmp_path: Pat
 async def test_polling_recovers_pending_ingestion_before_sleeping(tmp_path: Path) -> None:
     async with runtime(tmp_path) as state:
         put_download(state)
-        original_scan = state.store.scan
+        original_collect = state.store.collect
 
-        async def scan_failed(attempt_id: int) -> object:
-            raise OSError("scan offline")
+        async def collect_failed(attempt_id: int, manifest: object) -> object:
+            raise OSError("collect offline")
 
-        state.store.scan = scan_failed  # type: ignore[method-assign]
-        with pytest.raises(OSError, match="scan offline"):
-            await state.lifecycle.reconcile(observation(status="complete", completed=3))
-        state.store.scan = original_scan  # type: ignore[method-assign]
+        state.store.collect = collect_failed  # type: ignore[method-assign]
+        with pytest.raises(OSError, match="collect offline"):
+            await state.lifecycle.reconcile(
+                observation(
+                    status="complete", completed=3, files=manifest_files(("file.bin", 3))
+                )
+            )
+        state.store.collect = original_collect  # type: ignore[method-assign]
 
         async def stop(delay: float) -> None:
             raise asyncio.CancelledError
@@ -1229,7 +1743,14 @@ async def test_followed_by_handoff_completes_actual_payload(
             observation(status="complete", total=0, followed_by=(PAYLOAD_GID,))
         )
         put_download(state)
-        await state.lifecycle.reconcile(observation(PAYLOAD_GID, "complete", completed=3))
+        await state.lifecycle.reconcile(
+            observation(
+                PAYLOAD_GID,
+                "complete",
+                completed=3,
+                files=manifest_files(("file.bin", 3)),
+            )
+        )
 
         attempt, task, quota = await read(state)
         assert attempt.gid == PAYLOAD_GID
@@ -1250,12 +1771,12 @@ async def test_missing_gid_recheck_uses_a_valid_second_snapshot(tmp_path: Path) 
         original = state.backend.snapshot
         calls = 0
 
-        async def snapshots(*, gid: str) -> DownloadObservation | None:
+        async def snapshots(*, gid: str, attempt_id: int) -> DownloadObservation | None:
             nonlocal calls
             calls += 1
             if calls == 3:
                 state.backend.snapshots[GID] = observation(status="active")
-            return await original(gid=gid)
+            return await original(gid=gid, attempt_id=attempt_id)
 
         state.backend.snapshot = snapshots  # type: ignore[method-assign]
         assert await state.lifecycle.reconcile_live() is False
@@ -1274,7 +1795,7 @@ async def test_missing_gid_recheck_transport_error_is_not_terminal(tmp_path: Pat
         await state.lifecycle.reconcile_live()
         calls = 0
 
-        async def snapshots(*, gid: str) -> DownloadObservation | None:
+        async def snapshots(*, gid: str, attempt_id: int) -> DownloadObservation | None:
             nonlocal calls
             calls += 1
             if calls == 2:
@@ -1316,7 +1837,7 @@ async def test_missing_recheck_does_not_overwrite_a_terminal_attempt(tmp_path: P
         original = state.backend.snapshot
         calls = 0
 
-        async def snapshots(*, gid: str) -> DownloadObservation | None:
+        async def snapshots(*, gid: str, attempt_id: int) -> DownloadObservation | None:
             nonlocal calls
             calls += 1
             if calls == 2:
@@ -1324,7 +1845,7 @@ async def test_missing_recheck_does_not_overwrite_a_terminal_attempt(tmp_path: P
                     await DownloadRepository(uow.connection).fail_attempt(
                         state.attempt_id, error_code="cancelled_elsewhere", now_ms=now[0]
                     )
-            return await original(gid=gid)
+            return await original(gid=gid, attempt_id=attempt_id)
 
         state.backend.snapshot = snapshots  # type: ignore[method-assign]
         await state.lifecycle.reconcile_live()
@@ -1408,18 +1929,22 @@ async def test_cancel_before_completion_intent_rolls_back_content_and_stops_inst
 ) -> None:
     async with runtime(tmp_path) as state:
         put_download(state)
-        original_scan = state.store.scan
+        original_collect = state.store.collect
         entered = asyncio.Event()
         release = asyncio.Event()
 
-        async def gated_scan(attempt_id: int):
+        async def gated_collect(attempt_id: int, manifest: object):
             entered.set()
             await release.wait()
-            return await original_scan(attempt_id)
+            return await original_collect(attempt_id, manifest)
 
-        state.store.scan = gated_scan  # type: ignore[method-assign]
+        state.store.collect = gated_collect  # type: ignore[method-assign]
         completing = asyncio.create_task(
-            state.lifecycle.reconcile(observation(status="complete", completed=3))
+            state.lifecycle.reconcile(
+                observation(
+                    status="complete", completed=3, files=manifest_files(("file.bin", 3))
+                )
+            )
         )
         await entered.wait()
         async with SQLiteUnitOfWork(state.database) as uow:
@@ -1440,6 +1965,7 @@ async def test_cancel_before_completion_intent_rolls_back_content_and_stops_inst
             rows = (await uow.connection.execute(select(content_objects))).all()
         assert rows == []
         assert not (state.root / "objects").exists()
+        assert not (state.root / ".ingest").exists(), "入库没开始就不该有暂存目录"
 
 
 # --- 回归（D3/D4）：安装期间取消（停止已确认）在 install 返回后必须原子终态完成 ---
@@ -1454,14 +1980,18 @@ async def test_cancel_during_install_reclaims_orphan_content_after_install_retur
         entered = asyncio.Event()
         release = asyncio.Event()
 
-        async def gated_install(attempt_id: int, preparation: object):
+        async def gated_install(attempt_id: int, preparation: object, manifest: object):
             entered.set()
             await release.wait()
-            return await original_install(attempt_id, preparation)
+            return await original_install(attempt_id, preparation, manifest)
 
         state.store.install = gated_install  # type: ignore[method-assign]
         completing = asyncio.create_task(
-            state.lifecycle.reconcile(observation(status="complete", completed=3))
+            state.lifecycle.reconcile(
+                observation(
+                    status="complete", completed=3, files=manifest_files(("file.bin", 3))
+                )
+            )
         )
         await entered.wait()
         async with SQLiteUnitOfWork(state.database) as uow:
@@ -1495,14 +2025,18 @@ async def test_uncertain_stop_waits_for_confirmation_before_reclaim(tmp_path: Pa
         entered = asyncio.Event()
         release = asyncio.Event()
 
-        async def gated_install(attempt_id: int, preparation: object):
+        async def gated_install(attempt_id: int, preparation: object, manifest: object):
             entered.set()
             await release.wait()
-            return await original_install(attempt_id, preparation)
+            return await original_install(attempt_id, preparation, manifest)
 
         state.store.install = gated_install  # type: ignore[method-assign]
         completing = asyncio.create_task(
-            state.lifecycle.reconcile(observation(status="complete", completed=3))
+            state.lifecycle.reconcile(
+                observation(
+                    status="complete", completed=3, files=manifest_files(("file.bin", 3))
+                )
+            )
         )
         await entered.wait()
         async with SQLiteUnitOfWork(state.database) as uow:
@@ -1615,6 +2149,7 @@ async def test_actual_size_settlement_uses_content_size_not_declared_total(
             total_length=3,
             completed_length=3,
             followed_by=(),
+            files=manifest_files(("file.bin", 5)),
         )
         await state.lifecycle.reconcile(complete)
 
@@ -1643,6 +2178,7 @@ async def test_actual_size_over_quota_fails_cleans_and_keeps_accounting_legal(
             total_length=3,
             completed_length=3,
             followed_by=(),
+            files=manifest_files(("file.bin", 5)),
         )
         await state.lifecycle.reconcile(complete)
 
@@ -1746,7 +2282,11 @@ async def test_rename_happens_before_ingestion_so_the_file_gets_the_real_name(
     ) as state:
         put_download(state)
         await state.lifecycle.reconcile(
-            dataclass_replace(named_observation("Big Buck Bunny"), status="complete")
+            dataclass_replace(
+                named_observation("Big Buck Bunny"),
+                status="complete",
+                files=manifest_files(("file.bin", 3)),
+            )
         )
 
         attempt, task, _ = await read(state)

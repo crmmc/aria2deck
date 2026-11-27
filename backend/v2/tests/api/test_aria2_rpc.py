@@ -238,6 +238,7 @@ def test_completed_single_file_is_projected_after_observation_is_empty(
             total_bytes=577,
             completed_bytes=577,
             selected=True,
+            relpath="completed.bin",
         ),
     )
 
@@ -294,9 +295,9 @@ def test_completed_directory_projects_sorted_real_files_and_safe_rpc_basenames(
         rpc_client.app.state.download_queries.get_task(user_id=user_id, task_id=task_id)
     )
     assert projection.files == (
-        ObservedFile("folder/a-first.bin", 4, 4, True),
-        ObservedFile("folder/nested/b.bin", 2, 2, True),
-        ObservedFile("z-last.bin", 5, 5, True),
+        ObservedFile("folder/a-first.bin", 4, 4, True, "folder/a-first.bin"),
+        ObservedFile("folder/nested/b.bin", 2, 2, True, "folder/nested/b.bin"),
+        ObservedFile("z-last.bin", 5, 5, True, "z-last.bin"),
     )
 
 
@@ -320,6 +321,7 @@ def test_completed_files_prefer_nonempty_live_observation(
                     total_bytes=900,
                     completed_bytes=300,
                     selected=False,
+                    relpath="live/current.bin",
                 ),
             ),
         )
