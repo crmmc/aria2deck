@@ -8,7 +8,7 @@ import type { PackStatus, PackViewResponse } from "@/shared/api/types";
 import { fileDownloadUrl } from "@/shared/api/urls";
 import { triggerFileDownload } from "@/shared/lib/download";
 import { cancelPack, clearPackRecords, deletePackRecord, fetchPacks } from "../api";
-import { PackRecordsDrawer, type PackOperation } from "./PackRecordsDrawer";
+import { PackRecordsPopover, type PackOperation } from "./PackRecordsPopover";
 
 type PackEntryButtonProps = {
   onTaskComplete?: () => void;
@@ -20,6 +20,7 @@ export function PackEntryButton({ onTaskComplete }: PackEntryButtonProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [operation, setOperation] = useState<PackOperation>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -141,14 +142,23 @@ export function PackEntryButton({ onTaskComplete }: PackEntryButtonProps) {
 
   const activeCount = tasks.filter((task) => task.status === "pending" || task.status === "packing").length;
 
+  // 入口按钮即浮层开关：开着时点击播放收起动画，动画结束才真正卸载。
+  const requestClose = () => {
+    if (open) setClosing(true);
+  };
+  const handleClosed = () => {
+    setOpen(false);
+    setClosing(false);
+  };
+
   return (
     <>
       <button
         ref={buttonRef}
         type="button"
         className="button secondary btn-sm pack-entry-btn"
-        onClick={() => setOpen(true)}
-        aria-expanded={open}
+        onClick={() => (open ? requestClose() : setOpen(true))}
+        aria-expanded={open && !closing}
         aria-haspopup="dialog"
       >
         <Icon name="archive" className="icon-sm" />
@@ -156,14 +166,16 @@ export function PackEntryButton({ onTaskComplete }: PackEntryButtonProps) {
         <span className="pack-entry-badge" hidden={activeCount === 0}>{activeCount}</span>
       </button>
       {open && (
-        <PackRecordsDrawer
+        <PackRecordsPopover
           tasks={tasks}
           loading={loading}
           error={error}
           nowMs={nowMs}
           operation={operation}
           trigger={buttonRef.current}
-          onClose={() => setOpen(false)}
+          closing={closing}
+          onRequestClose={requestClose}
+          onClosed={handleClosed}
           onRetry={() => { void loadTasks(true); }}
           onClear={() => { void handleClear(); }}
           onCancel={(task) => { void handleCancel(task); }}

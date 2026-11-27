@@ -46,8 +46,7 @@
 
 dialog.modal-overlay,
 dialog.confirm-overlay,
-dialog.more-menu-overlay,
-dialog.drawer-overlay {
+dialog.more-menu-overlay {
   width: 100vw;
   max-width: none;
   height: 100vh;
@@ -68,16 +67,13 @@ dialog.modal-overlay::after,
 dialog.confirm-overlay::before,
 dialog.confirm-overlay::after,
 dialog.more-menu-overlay::before,
-dialog.more-menu-overlay::after,
-dialog.drawer-overlay::before,
-dialog.drawer-overlay::after {
+dialog.more-menu-overlay::after {
   content: none;
 }
 
 dialog.modal-overlay::backdrop,
 dialog.confirm-overlay::backdrop,
-dialog.more-menu-overlay::backdrop,
-dialog.drawer-overlay::backdrop {
+dialog.more-menu-overlay::backdrop {
   background: rgba(20, 24, 32, 0.52);
   backdrop-filter: blur(10px) saturate(0.85);
   -webkit-backdrop-filter: blur(10px) saturate(0.85);
@@ -102,8 +98,7 @@ dialog.drawer-overlay::backdrop {
 .delete-modal-content,
 .torrent-wizard,
 .torrent-cancel-dialog,
-.more-menu,
-.drawer-content {
+.more-menu {
   position: relative;
   z-index: 1;
   overflow: hidden;
@@ -123,8 +118,7 @@ dialog.drawer-overlay::backdrop {
 .delete-modal-content::after,
 .torrent-wizard::after,
 .torrent-cancel-dialog::after,
-.more-menu::after,
-.drawer-content::after {
+.more-menu::after {
   position: absolute;
   inset: 0;
   border-radius: inherit;
@@ -136,43 +130,6 @@ dialog.drawer-overlay::backdrop {
 .modal-content {
   padding: 24px;
   width: 90%;
-}
-
-.drawer-content {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-  max-height: 100%;
-  min-height: 0;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.72);
-  box-shadow: 0 24px 64px rgba(60, 60, 90, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.7);
-}
-
-.drawer-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.drawer-actions {
-  flex: 0 0 auto;
-}
-
-dialog.drawer-overlay {
-  display: block;
-}
-
-@media (min-width: 701px) {
-  dialog.drawer-overlay {
-    inset: 16px 16px 16px auto;
-    width: min(480px, calc(100vw - 32px));
-    height: calc(100dvh - 32px);
-    max-height: calc(100dvh - 32px);
-    margin: 0;
-    border-radius: 18px;
-  }
 }
 
 dialog.command-dialog {
@@ -2626,7 +2583,7 @@ dialog.confirm-overlay {
   color: #cc0000;
 }
 
-/* Pack records entry and drawer */
+/* Pack records entry and popover */
 .pack-entry-btn {
   gap: 7px;
 }
@@ -2645,60 +2602,168 @@ dialog.confirm-overlay {
   font-weight: 600;
 }
 
-.pack-records-drawer .drawer-header {
+/* 非模态浮层：锚定入口按钮、点击穿透、按条数自适应高度；top/left/max-height 由组件内联计算。 */
+.pack-pop {
+  position: fixed;
+  z-index: 1400;
+  top: 0;
+  left: 0;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  min-height: 64px;
+  flex-direction: column;
+  width: 372px;
+  max-width: calc(100vw - 24px);
+  max-height: min(660px, calc(100dvh - 110px));
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow:
+    0 16px 48px rgba(60, 60, 90, 0.16),
+    0 2px 10px rgba(60, 60, 90, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+  transform-origin: top right;
+  will-change: transform, opacity;
+}
+
+.pack-pop.is-open {
+  animation: pack-pop-in 0.32s cubic-bezier(0.3, 1.4, 0.46, 1) both;
+}
+
+.pack-pop.is-closing {
+  animation: pack-pop-out 0.16s cubic-bezier(0.5, 0, 0.75, 0) both;
+  pointer-events: none;
+}
+
+@keyframes pack-pop-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.85);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(1px) scale(1.015);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pack-pop-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.95);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pack-pop.is-open,
+  .pack-pop.is-closing {
+    animation: none;
+  }
+}
+
+.pack-pop-body {
+  flex: 1;
+  min-height: 0;
+  padding: 6px;
+  overflow-y: auto;
+}
+
+.pack-pop-footer {
+  display: flex;
   flex: 0 0 auto;
-  padding: 0 22px;
-  border-bottom: 1px solid rgba(60, 60, 67, 0.08);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0));
-}
-
-.pack-records-drawer .drawer-header h2 {
-  margin: 0;
-  font-size: 17px;
-  letter-spacing: -0.02em;
-}
-
-.pack-records-drawer .drawer-body {
-  min-height: auto;
-  padding: 20px 22px;
-}
-
-.pack-records-drawer .drawer-actions {
-  display: flex;
   justify-content: flex-end;
-  gap: 10px;
-  padding: 14px 22px;
-  border-top: 1px solid rgba(60, 60, 67, 0.08);
-  background: rgba(255, 255, 255, 0.32);
+  padding: 6px 12px 10px;
 }
 
+.pack-pop-footer .button {
+  min-height: 0;
+  padding: 3px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 清单式行：无卡片边框，发丝分割线 + 悬停底色，行首图标承载状态语义。 */
 .pack-records {
   display: grid;
-  gap: 10px;
+  gap: 0;
   align-content: start;
-}
-
-.pack-section-label {
-  margin: 4px 0 2px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 400;
+  /* nowrap 长文本会把隐式 auto 列撑出容器，显式约束列宽才能触发省略号。 */
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .pack-record {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  border-radius: var(--r-control);
-  background: rgba(255, 255, 255, 0.42);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 8px;
+}
+
+.pack-record:hover {
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.pack-record:not(:last-child)::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 38px;
+  border-bottom: 1px solid rgba(60, 60, 67, 0.08);
+  content: "";
+}
+
+.pack-record .file-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.pack-record .file-mark .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.pack-record[data-status="packing"] .file-mark {
+  color: var(--primary);
+}
+
+.pack-record[data-status="packing"] .file-mark .icon {
+  animation: pack-spin 1.6s linear infinite;
+}
+
+.pack-record[data-status="done"] .file-mark {
+  color: var(--success);
+}
+
+.pack-record[data-status="failed"] .file-mark {
+  color: var(--danger);
+}
+
+@keyframes pack-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pack-record[data-status="packing"] .file-mark .icon {
+    animation: none;
+  }
 }
 
 .pack-record-copy {
@@ -2709,7 +2774,7 @@ dialog.confirm-overlay {
 .pack-record-copy strong {
   display: block;
   overflow: hidden;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2717,9 +2782,12 @@ dialog.confirm-overlay {
 
 .pack-record-copy span {
   display: block;
-  margin-top: 3px;
+  margin-top: 2px;
+  overflow: hidden;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pack-record-copy .pack-record-meta.is-error {
@@ -2729,13 +2797,37 @@ dialog.confirm-overlay {
 .pack-record-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
   flex: 0 0 auto;
 }
 
+.pack-record-actions .icon-btn {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  padding: 0;
+  border-radius: 7px;
+}
+
+.pack-record-actions .icon-btn .icon-sm {
+  width: 13px;
+  height: 13px;
+}
+
+.pack-record-actions .button.secondary {
+  min-height: 0;
+  padding: 2px 9px;
+  border: 1px solid rgba(60, 60, 67, 0.14);
+  border-radius: 7px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
 .pack-progress-bar {
-  height: 6px;
-  margin-top: 8px;
+  height: 4px;
+  margin-top: 5px;
   overflow: hidden;
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.05);
@@ -2752,7 +2844,7 @@ dialog.confirm-overlay {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 12px;
+  margin: 6px 6px 10px;
   padding: 12px;
   border-radius: var(--r-inner);
   color: var(--danger);
@@ -2767,6 +2859,7 @@ dialog.confirm-overlay {
 
 .pack-records-loading {
   margin: 0;
+  padding: 18px 0;
   text-align: center;
 }
 

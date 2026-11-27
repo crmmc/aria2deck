@@ -399,48 +399,6 @@ describe("ModalOverlay", () => {
     expect(toMock).not.toHaveBeenCalled();
   });
 
-  it("drawer uses the shared right-side entry and exit, then cleans up its animation", () => {
-    const onClose = jest.fn();
-    const { unmount } = render(
-      <ModalOverlay
-        onClose={onClose}
-        ariaLabel="打包记录"
-        motionVariant="drawer"
-        contentClassName="pack-records-drawer"
-      >
-        <div className="drawer-body">记录内容</div>
-        <div className="drawer-actions"><button type="button">关闭</button></div>
-      </ModalOverlay>,
-    );
-    const dialog = screen.getByRole("dialog", { name: "打包记录" });
-    const content = document.querySelector(".drawer-content");
-    expect(dialog).toHaveClass("drawer-overlay");
-    expect(content).toHaveClass("pack-records-drawer");
-    expect(setMock).toHaveBeenCalledWith(content, { opacity: 0, scale: 0.985, x: 24, y: 0 });
-    expect(lastToVars()).toMatchObject({ duration: 0.26, ease: "back.out(1.12)" });
-    expect(screen.getByRole("button", { name: "关闭" })).toHaveFocus();
-
-    const entryTweenCount = toMock.mock.calls.length;
-    fireEvent.click(document.querySelector(".modal-backdrop-button")!);
-    fireEvent.click(document.querySelector(".modal-backdrop-button")!);
-    expect(toMock).toHaveBeenCalledTimes(entryTweenCount + 1);
-    expect(onClose).not.toHaveBeenCalled();
-    expect(lastToVars()).toMatchObject({
-      opacity: 0,
-      scale: 0.985,
-      x: 24,
-      y: 0,
-      duration: 0.26,
-      ease: "back.in(1.12)",
-    });
-    completeExit();
-    expect(onClose).toHaveBeenCalledTimes(1);
-
-    unmount();
-    expect(killMock).toHaveBeenCalledWith(content);
-    expect(content).not.toHaveClass("overlay-animating");
-  });
-
   it("closeDisabled blocks backdrop and Escape without starting an exit", () => {
     const onClose = jest.fn();
     const { rerender } = render(
@@ -490,20 +448,6 @@ describe("ModalOverlay", () => {
     completeExit();
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onRequestClose).toHaveBeenCalledTimes(1);
-  });
-
-  it("drawer also opens and closes immediately with reduced motion", () => {
-    setReducedMotion(true);
-    const onClose = jest.fn();
-    render(
-      <ModalOverlay onClose={onClose} ariaLabel="抽屉" motionVariant="drawer">
-        <button type="button">Inside</button>
-      </ModalOverlay>,
-    );
-    expect(toMock).not.toHaveBeenCalled();
-    fireEvent.click(document.querySelector(".modal-backdrop-button")!);
-    expect(onClose).toHaveBeenCalledTimes(1);
-    expect(toMock).not.toHaveBeenCalled();
   });
 
 });
