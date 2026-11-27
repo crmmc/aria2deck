@@ -31,6 +31,7 @@ function baseProps() {
     getSortIcon: jest.fn(() => "none" as const),
     onToggleSelectAll: jest.fn(),
     onToggleFileSelection: jest.fn(),
+    onSelectionKeyDown: jest.fn(),
     onNewNameChange: jest.fn(),
     onRename: jest.fn(),
     onCancelRename: jest.fn(),
@@ -98,7 +99,7 @@ describe("RootFileTable 桌面表格", () => {
     expect(boxes[0].checked).toBe(true);
     expect(boxes[1].checked).toBe(false);
     fireEvent.click(boxes[1]);
-    expect(props.onToggleFileSelection).toHaveBeenCalledWith(2);
+    expect(props.onToggleFileSelection).toHaveBeenCalledWith(2, false);
 
     rerender(<RootFileTable {...props} selectedFiles={new Set()} />);
     expect((screen.getAllByLabelText("选择文件") as HTMLInputElement[])[0].checked).toBe(false);
@@ -177,6 +178,36 @@ describe("RootFileTable 桌面表格", () => {
   });
 });
 
+describe("RootFileTable 多选交互", () => {
+  it("桌面行复选框带连续 data-select-index，shift+点击把 shiftKey 传给上层", () => {
+    const props = baseProps();
+    render(<RootFileTable {...props} />);
+    const boxes = screen.getAllByLabelText("选择文件") as HTMLInputElement[];
+    expect(boxes.map((box) => box.dataset.selectIndex)).toEqual(["0", "1"]);
+
+    fireEvent.click(boxes[0], { shiftKey: true });
+    expect(props.onToggleFileSelection).toHaveBeenCalledWith(1, true);
+  });
+
+  it("列表容器把键盘事件交给 onSelectionKeyDown", () => {
+    const props = baseProps();
+    render(<RootFileTable {...props} />);
+
+    fireEvent.keyDown(screen.getByTestId("file-list"), { key: "a", ctrlKey: true });
+    expect(props.onSelectionKeyDown).toHaveBeenCalledTimes(1);
+  });
+
+  it("移动卡片同样带 data-select-index 并传递 shiftKey", () => {
+    const props = baseProps();
+    render(<RootFileTable {...props} isMobile />);
+    const boxes = screen.getAllByLabelText(/^选择 /) as HTMLInputElement[];
+    expect(boxes.map((box) => box.dataset.selectIndex)).toEqual(["0", "1"]);
+
+    fireEvent.click(boxes[1], { shiftKey: true });
+    expect(props.onToggleFileSelection).toHaveBeenCalledWith(2, true);
+  });
+});
+
 describe("RootFileTable 移动卡片", () => {
   it("渲染卡片：大小与时间、浏览/重命名/分享/删除", () => {
     const props = baseProps();
@@ -223,7 +254,7 @@ describe("RootFileTable 移动卡片", () => {
     expect(boxes[0].checked).toBe(false);
     expect(boxes[1].checked).toBe(true);
     fireEvent.click(boxes[0]);
-    expect(props.onToggleFileSelection).toHaveBeenCalledWith(1);
+    expect(props.onToggleFileSelection).toHaveBeenCalledWith(1, false);
   });
 
   it("移动端重命名编辑态使用紧凑布局", () => {

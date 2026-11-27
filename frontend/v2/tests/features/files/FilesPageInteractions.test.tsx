@@ -1666,3 +1666,332 @@ describe("FilesPage 导航竞态（prev 为 null 的回调）", () => {
     expect(screen.getByRole("button", { name: "浏览" })).toBeInTheDocument();
   });
 });
+
+describe("FilesPage 多选快捷键", () => {
+  const desktopBoxes = () => screen.getAllByLabelText("选择文件") as HTMLInputElement[];
+  const checkedStates = () => desktopBoxes().map((box) => box.checked);
+
+  it("Shift+点击按当前顺序取闭区间并替换范围外选择", async () => {
+    setup(() => filesEnvelope([fileItem(1, "a.txt"), fileItem(2, "b.txt"), fileItem(3, "c.txt")]));
+    renderPage();
+    await screen.findByText("a.txt");
+    // 默认按 created_at desc，屏上顺序为 c, b, a。
+    expect(checkedStates()).toEqual([false, false, false]);
+
+    // 没有锚点时 Shift+点击只选中目标项。
+    fireEvent.click(desktopBoxes()[2], { shiftKey: true });
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 1 项"));
+    expect(checkedStates()).toEqual([false, false, true]);
+
+    // 取消选择后重新用普通点击建立锚点：先选 c，再选 a，锚点落在 a。
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "取消选择" }));
+    await waitFor(() => expect(document.querySelector(".bulk-bar")).toBeNull());
+
+    fireEvent.click(desktopBoxes()[0]);
+    fireEvent.click(desktopBoxes()[2]);
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 2 项"));
+
+    // 从锚点 a 向上 Shift 到 b：只剩 b、a，范围外的 c 被替换。
+    fireEvent.click(desktopBoxes()[1], { shiftKey: true });
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 2 项"));
+    expect(bulkBar()).toHaveTextContent("300.0 B");
+    expect(checkedStates()).toEqual([false, true, true]);
+
+    // 同一锚点反向 Shift 到 c：选中全部三项。
+    fireEvent.click(desktopBoxes()[0], { shiftKey: true });
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 3 项"));
+    expect(bulkBar()).toHaveTextContent("600.0 B");
+    expect(checkedStates()).toEqual([true, true, true]);
+  });
+
+  it("排序改变后 Shift+点击按屏幕上的新顺序计算范围", async () => {
+    setup(() =>
+      filesEnvelope([
+        fileItem(1, "d.txt"),
+        fileItem(2, "a.txt"),
+        fileItem(3, "c.txt"),
+        fileItem(4, "b.txt"),
+      ]),
+    );
+    renderPage();
+    await screen.findByText("d.txt");
+    fireEvent.click(screen.getByRole("button", { name: /名称/ }));
+    await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("name-asc"));
+
+    // 名称升序：a(2), b(4), c(3), d(1)；只按屏幕下标取范围。
+    fireEvent.click(desktopBoxes()[0]);
+    fireEvent.click(desktopBoxes()[2], { shiftKey: true });
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 3 项"));
+    expect(checkedStates()).toEqual([true, true, true, false]);
+  });
+
+  it("Shift+方向键沿列表扩缩范围并移动焦点，首尾不越界也不滚动", async () => {
+    setup(() => filesEnvelope([fileItem(1, "a.txt"), fileItem(2, "b.txt"), fileItem(3, "c.txt")]));
+    renderPage();
+    await screen.findByText("a.txt");
+    desktopBoxes()[0].focus();
+
+    // 无锚点时以当前项为锚点，向下扩到第 2 行。
+    expect(fireEvent.keyDown(desktopBoxes()[0], { key: "ArrowDown", shiftKey: true })).toBe(false);
+    await waitFor(() => expect(checkedStates()).toEqual([true, true, false]));
+    expect(document.activeElement).toBe(desktopBoxes()[1]);
+
+    fireEvent.keyDown(desktopBoxes()[1], { key: "ArrowDown", shiftKey: true });
+    await waitFor(() => expect(checkedStates()).toEqual([true, true, true]));
+    expect(document.activeElement).toBe(desktopBoxes()[2]);
+
+    // 反向缩小：第 3 行回到第 2 行，再回到第 1 行。
+    fireEvent.keyDown(desktopBoxes()[2], { key: "ArrowUp", shiftKey: true });
+    await waitFor(() => expect(checkedStates()).toEqual([true, true, false]));
+    expect(document.activeElement).toBe(desktopBoxes()[1]);
+
+    fireEvent.keyDown(desktopBoxes()[1], { key: "ArrowUp", shiftKey: true });
+    await waitFor(() => expect(checkedStates()).toEqual([true, false, false]));
+    expect(document.activeElement).toBe(desktopBoxes()[0]);
+
+    // 首尾边界：拦截默认行为（不滚动），但不移动焦点、不改选择。
+    expect(fireEvent.keyDown(desktopBoxes()[0], { key: "ArrowUp", shiftKey: true })).toBe(false);
+    expect(checkedStates()).toEqual([true, false, false]);
+    expect(document.activeElement).toBe(desktopBoxes()[0]);
+
+    fireEvent.click(within(bulkBar()).getByRole("button", { name: "取消选择" }));
+    desktopBoxes()[2].focus();
+    expect(fireEvent.keyDown(desktopBoxes()[2], { key: "ArrowDown", shiftKey: true })).toBe(false);
+    expect(checkedStates()).toEqual([false, false, false]);
+    expect(document.activeElement).toBe(desktopBoxes()[2]);
+
+    // 未按 Shift 的方向键不拦截。
+    expect(fireEvent.keyDown(desktopBoxes()[2], { key: "ArrowUp" })).toBe(true);
+
+    // 表头全选没有 data-select-index，不参与方向键扩缩。
+    const selectAllBox = screen.getByLabelText("全选") as HTMLInputElement;
+    selectAllBox.focus();
+    fireEvent.keyDown(selectAllBox, { key: "ArrowDown", shiftKey: true });
+    expect(checkedStates()).toEqual([false, false, false]);
+
+    // 非方向键的 Shift 操作不改选择。
+    desktopBoxes()[0].focus();
+    fireEvent.keyDown(desktopBoxes()[0], { key: "A", shiftKey: true });
+    expect(checkedStates()).toEqual([false, false, false]);
+  });
+
+  it("Ctrl/Cmd+A 全选当前可见项且幂等，Escape 清空并隐藏批量条", async () => {
+    setup(() => filesEnvelope([fileItem(1, "a.txt"), fileItem(2, "b.txt")]));
+    renderPage();
+    await screen.findByText("a.txt");
+    desktopBoxes()[0].focus();
+
+    expect(fireEvent.keyDown(desktopBoxes()[0], { key: "a", ctrlKey: true })).toBe(false);
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 2 项"));
+    expect(checkedStates()).toEqual([true, true]);
+
+    fireEvent.keyDown(desktopBoxes()[1], { key: "a", metaKey: true });
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 2 项"));
+    expect(checkedStates()).toEqual([true, true]);
+
+    fireEvent.keyDown(desktopBoxes()[0], { key: "Escape" });
+    await waitFor(() => expect(screen.queryByText(/已选 /)).not.toBeInTheDocument());
+    expect(document.querySelector(".bulk-bar")).toBeNull();
+    expect(checkedStates()).toEqual([false, false]);
+  });
+
+  it("搜索框与重命名输入框内不触发列表快捷键", async () => {
+    setup(() => filesEnvelope([fileItem(1, "a.txt"), fileItem(2, "b.txt")]));
+    renderPage();
+    await screen.findByText("a.txt");
+
+    const search = screen.getByLabelText("搜索文件") as HTMLInputElement;
+    fireEvent.keyDown(search, { key: "a", ctrlKey: true });
+    fireEvent.keyDown(search, { key: "Escape" });
+    fireEvent.keyDown(search, { key: "ArrowDown", shiftKey: true });
+    expect(document.querySelector(".bulk-bar")).toBeNull();
+
+    fireEvent.click(desktopBoxes()[0]);
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 1 项"));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "重命名" })[0]);
+    const renameInput = screen.getByLabelText("重命名文件") as HTMLInputElement;
+    expect(document.activeElement).toBe(renameInput);
+
+    fireEvent.keyDown(renameInput, { key: "a", ctrlKey: true });
+    fireEvent.keyDown(renameInput, { key: "ArrowDown", shiftKey: true });
+    expect(bulkBar()).toHaveTextContent("已选 1 项");
+    expect(checkedStates()).toEqual([true, false]);
+
+    // Escape 仍只用于取消重命名，不改选择。
+    fireEvent.keyDown(renameInput, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByLabelText("重命名文件")).not.toBeInTheDocument());
+    expect(bulkBar()).toHaveTextContent("已选 1 项");
+  });
+
+  it("搜索弹窗关闭不清空列表选择", async () => {
+    setup((url) => {
+      if (url.includes("search=")) return { hits: [], truncated: false };
+      return filesEnvelope([fileItem(1, "a.txt")]);
+    });
+    renderPage();
+    await screen.findByText("a.txt");
+    fireEvent.click(desktopBoxes()[0]);
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 1 项"));
+
+    const search = screen.getByLabelText("搜索文件");
+    fireEvent.change(search, { target: { value: "abc" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    const dialog = await screen.findByRole("dialog", { name: "搜索结果" });
+    fireEvent(dialog, new Event("cancel", { cancelable: true }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "搜索结果" })).not.toBeInTheDocument());
+
+    expect(bulkBar()).toHaveTextContent("已选 1 项");
+    expect(checkedStates()).toEqual([true]);
+  });
+
+  it("文件夹与嵌套文件夹使用完整相对路径，范围只覆盖当前目录", async () => {
+    setup((url) => {
+      if (url.startsWith("/api/v2/files?")) {
+        return filesEnvelope([fileItem(9, "素材", { kind: "directory" })]);
+      }
+      if (url.includes("/entries")) {
+        const path = new URL(String(url), "http://localhost").searchParams.get("path");
+        if (path === "") {
+          return entriesEnvelope([
+            { name: "a.png", path: "a.png", kind: "file", size: 100 },
+            { name: "b.png", path: "b.png", kind: "file", size: 200 },
+            { name: "子目录", path: "子目录", kind: "directory", size: 0 },
+          ]);
+        }
+        return entriesEnvelope([{ name: "内层.png", path: `${path}/内层.png`, kind: "file", size: 300 }]);
+      }
+      return {};
+    });
+    renderPage();
+    await screen.findByText("素材");
+    fireEvent.click(screen.getByRole("button", { name: "浏览" }));
+    await screen.findByText("a.png");
+
+    // 目录优先排序：子目录, b.png, a.png。
+    fireEvent.click(desktopBoxes()[1]);
+    fireEvent.click(desktopBoxes()[2], { shiftKey: true });
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 2 项"));
+    expect(bulkBar()).toHaveTextContent("300.0 B");
+    expect(checkedStates()).toEqual([false, true, true]);
+
+    fireEvent.click(screen.getByRole("button", { name: "子目录" }));
+    await screen.findByText("内层.png");
+    expect(document.querySelector(".bulk-bar")).toBeNull();
+
+    desktopBoxes()[0].focus();
+    fireEvent.keyDown(desktopBoxes()[0], { key: "a", ctrlKey: true });
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 1 项"));
+    expect(bulkBar()).toHaveTextContent("300.0 B");
+  });
+
+  it("翻页后旧选择与旧锚点都失效", async () => {
+    setup((url) => {
+      if (url.startsWith("/api/v2/files?")) {
+        const page = Number(new URL(String(url), "http://localhost").searchParams.get("page") ?? "1");
+        return page === 1
+          ? filesEnvelope([fileItem(1, "a.txt"), fileItem(2, "b.txt")], 12)
+          : filesEnvelope([fileItem(3, "c.txt"), fileItem(4, "d.txt")], 12);
+      }
+      return {};
+    });
+    renderPage();
+    await screen.findByText("a.txt");
+    fireEvent.click(desktopBoxes()[0]);
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 1 项"));
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await screen.findByText("c.txt");
+    expect(document.querySelector(".bulk-bar")).toBeNull();
+
+    // 第 2 页没有有效锚点：Shift+点击只选中目标项。
+    fireEvent.click(desktopBoxes()[1], { shiftKey: true });
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 1 项"));
+    expect(checkedStates()).toEqual([false, true]);
+  });
+
+  it("移动卡片布局下 Shift+点击与 Escape 同样生效", async () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { value: 500, configurable: true });
+    window.dispatchEvent(new Event("resize"));
+    try {
+      setup(() => filesEnvelope([fileItem(1, "a.txt"), fileItem(2, "b.txt")]));
+      renderPage();
+      await screen.findByText("a.txt");
+      const mobileBoxes = () => screen.getAllByLabelText(/^选择 /) as HTMLInputElement[];
+      expect(document.querySelectorAll(".mobile-file-card")).toHaveLength(2);
+
+      fireEvent.click(mobileBoxes()[1]);
+      fireEvent.click(mobileBoxes()[0], { shiftKey: true });
+      await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 2 项"));
+
+      mobileBoxes()[0].focus();
+      fireEvent.keyDown(mobileBoxes()[0], { key: "Escape" });
+      await waitFor(() => expect(document.querySelector(".bulk-bar")).toBeNull());
+    } finally {
+      act(() => {
+        Object.defineProperty(window, "innerWidth", { value: originalWidth, configurable: true });
+        window.dispatchEvent(new Event("resize"));
+      });
+    }
+  });
+
+  it("取消全选后 Shift+点击只选中目标项", async () => {
+    setup(() => filesEnvelope([fileItem(1, "a.txt"), fileItem(2, "b.txt"), fileItem(3, "c.txt")]));
+    renderPage();
+    await screen.findByText("a.txt");
+
+    // 普通点击建立锚点，再走表头全选 / 取消全选。
+    fireEvent.click(desktopBoxes()[1]);
+    fireEvent.click(screen.getByLabelText("全选"));
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 3 项"));
+    fireEvent.click(screen.getByLabelText("全选"));
+    await waitFor(() => expect(document.querySelector(".bulk-bar")).toBeNull());
+
+    fireEvent.click(desktopBoxes()[2], { shiftKey: true });
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 1 项"));
+    expect(checkedStates()).toEqual([false, false, true]);
+  });
+
+  it("搜索定位进入目录会清空根选择与锚点", async () => {
+    setup((url) => {
+      if (url.includes("search=")) {
+        return {
+          hits: [{ user_file_id: 7, display_name: "内层.txt", path: "素材/内层.txt", kind: "file", size: 10 }],
+          truncated: false,
+        };
+      }
+      if (url.startsWith("/api/v2/files?")) {
+        return filesEnvelope([fileItem(1, "a.txt"), fileItem(2, "b.txt")]);
+      }
+      if (url.includes("/entries")) {
+        return entriesEnvelope([{ name: "内层.txt", path: "内层.txt", kind: "file", size: 10 }]);
+      }
+      return {};
+    });
+    renderPage();
+    await screen.findByText("a.txt");
+    fireEvent.click(desktopBoxes()[0]);
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 1 项"));
+
+    const search = screen.getByLabelText("搜索文件");
+    fireEvent.change(search, { target: { value: "内层" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await screen.findByRole("dialog", { name: "搜索结果" });
+    fireEvent.click(await screen.findByRole("button", { name: "定位" }));
+    await waitFor(() => expect(document.querySelector(".path-breadcrumb")?.textContent).toContain("素材"));
+
+    // 进入目录时已清空根选择，目录视图没有批量条。
+    expect(document.querySelector(".bulk-bar")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /根目录/ }));
+    await screen.findByText("a.txt");
+    expect(checkedStates()).toEqual([false, false]);
+    expect(document.querySelector(".bulk-bar")).toBeNull();
+
+    // 旧锚点不复活：Shift+点击只选目标项。
+    fireEvent.click(desktopBoxes()[1], { shiftKey: true });
+    await waitFor(() => expect(bulkBar()).toHaveTextContent("已选 1 项"));
+    expect(checkedStates()).toEqual([false, true]);
+  });
+});

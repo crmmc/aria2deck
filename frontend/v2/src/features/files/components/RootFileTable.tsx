@@ -1,5 +1,6 @@
 import { type KeyboardEvent, type MouseEvent } from "react";
 import { formatBytes } from "@/shared/lib/format";
+import { isShiftClick } from "@/shared/lib/selection";
 import { Icon, SortIcon, type SortDirection } from "@/shared/components/Icon";
 import type { FileView } from "../model";
 import type { SortField } from "./FileToolbar";
@@ -17,7 +18,8 @@ type RootFileTableProps = {
   onSort: (field: SortField) => void;
   getSortIcon: (field: SortField) => SortDirection;
   onToggleSelectAll: () => void;
-  onToggleFileSelection: (id: number) => void;
+  onToggleFileSelection: (id: number, shiftKey: boolean) => void;
+  onSelectionKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
   onNewNameChange: (value: string) => void;
   onRename: (file: FileView) => void;
   onCancelRename: () => void;
@@ -100,12 +102,12 @@ function RootFileMobileList({
 }: RootFileListProps) {
   return (
     <div className="mobile-file-list">
-      {sortedFiles.map((file) => {
+      {sortedFiles.map((file, index) => {
         const isHighlighted = highlightUserFileId != null && file.id === highlightUserFileId;
         return (
           <div key={file.id} className={`mobile-file-card${isHighlighted ? " file-locate-highlight" : ""}`} aria-current={isHighlighted ? "true" : undefined}>
             <div className="card-header">
-              <input type="checkbox" checked={selectedFiles.has(file.id)} onChange={() => onToggleFileSelection(file.id)} className="checkbox-sm cursor-pointer" aria-label={`选择 ${file.name}`} />
+              <input type="checkbox" checked={selectedFiles.has(file.id)} onChange={(event) => onToggleFileSelection(file.id, isShiftClick(event.nativeEvent))} data-select-index={index} className="checkbox-sm cursor-pointer" aria-label={`选择 ${file.name}`} />
               <div className="file-title">
                 <FileMark directory={file.isDirectory} />
                 {renaming === file.id ? (
@@ -166,7 +168,7 @@ function RootFileDesktopTable({
         <div className="table-cell text-right">操作</div>
       </div>
       <div className="file-rows">
-        {sortedFiles.map((file) => {
+        {sortedFiles.map((file, index) => {
           const isHighlighted = highlightUserFileId != null && file.id === highlightUserFileId;
           const selected = selectedFiles.has(file.id);
           return (
@@ -176,7 +178,7 @@ function RootFileDesktopTable({
               className={`table-row file-row${selected ? " selected" : ""}${isHighlighted ? " file-locate-highlight" : ""}`}
               aria-current={isHighlighted ? "true" : undefined}
             >
-              <input type="checkbox" checked={selected} onChange={() => onToggleFileSelection(file.id)} className="checkbox-sm cursor-pointer" aria-label="选择文件" />
+              <input type="checkbox" checked={selected} onChange={(event) => onToggleFileSelection(file.id, isShiftClick(event.nativeEvent))} data-select-index={index} className="checkbox-sm cursor-pointer" aria-label="选择文件" />
               <div className="task-main">
                 <FileMark directory={file.isDirectory} />
                 <div className="file-name">
@@ -225,7 +227,11 @@ export function RootFileTable(props: RootFileTableProps) {
     );
   }
   return (
-    <div className="card p-0 overflow-hidden file-table-wrapper" data-testid="file-list">
+    <div
+      className="card p-0 overflow-hidden file-table-wrapper"
+      data-testid="file-list"
+      onKeyDown={props.onSelectionKeyDown}
+    >
       {props.isMobile ? <RootFileMobileList {...props} /> : <RootFileDesktopTable {...props} />}
     </div>
   );

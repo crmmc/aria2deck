@@ -10,12 +10,14 @@ import { PageHeader } from "@/shared/components/PageHeader";
 import { useIsMobile } from "@/shared/hooks/useIsMobile";
 import { Icon, type SortDirection } from "@/shared/components/Icon";
 import { useMounted } from "@/shared/hooks/useMounted";
+import { useListSelection } from "@/shared/hooks/useListSelection";
 import { fileDownloadUrl } from "@/shared/api/urls";
 import { triggerBatchDownloads, triggerFileDownload } from "@/shared/lib/download";
 import { formatBytes } from "@/shared/lib/format";
 import { requestModalClose } from "@/shared/ui/modalClose";
 import { batchDeleteFiles, createPack, fetchEntries, fetchFiles, precomputePack, renameFile, searchFiles } from "./api";
 import {
+  browseItemKey,
   formatFileDate,
   locateFilePage,
   sortBrowseItems,
@@ -68,7 +70,6 @@ export function FilesPage() {
   const toolbarSearchInputRef = useRef<HTMLInputElement>(null);
 
   // Batch selection state
-  const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
   const [isBatchOperating, setIsBatchOperating] = useState(false);
   const [batchFailures, setBatchFailures] = useState<BatchFailure[]>([]);
 
@@ -79,11 +80,43 @@ export function FilesPage() {
   const [browsePage, setBrowsePage] = useState(1);
   const [browseTotal, setBrowseTotal] = useState(0);
   const browseRequestIdRef = useRef(0);
-  const [selectedBrowseFiles, setSelectedBrowseFiles] = useState<Set<string>>(new Set());
   const isInsideFolder = browseContext !== null;
 
   const [packTasksKey, setPackTasksKey] = useState(0);
   const [downloadingFile, setDownloadingFile] = useState<number | null>(null);
+
+  // 排序与多选：选择集挂在排序后的可见顺序上，范围选择与方向键扩缩都用同一数组算下标。
+  const sortedFiles = useMemo(
+    () => sortFiles(files, sortField, sortOrder),
+    [files, sortField, sortOrder],
+  );
+
+  const sortedBrowseContents = useMemo(
+    () => sortBrowseItems(browseContents, sortField, sortOrder),
+    [browseContents, sortField, sortOrder],
+  );
+
+  const rootSelectionIds = useMemo(() => sortedFiles.map((file) => file.id), [sortedFiles]);
+  const browseSelectionIds = useMemo(
+    () => sortedBrowseContents.map((item) => browseItemKey(browseContext?.path ?? [], item.name)),
+    [browseContext, sortedBrowseContents],
+  );
+  const rootSelection = useListSelection(rootSelectionIds);
+  const browseSelection = useListSelection(browseSelectionIds);
+  const selectedFiles = rootSelection.selected;
+  const selectedBrowseFiles = browseSelection.selected;
+  const {
+    clear: clearRootSelection,
+    toggle: toggleFileSelection,
+    toggleAll: toggleRootSelectionAll,
+    handleKeyDown: handleRootSelectionKeyDown,
+  } = rootSelection;
+  const {
+    clear: clearBrowseSelection,
+    toggle: toggleBrowseItemSelection,
+    toggleAll: toggleBrowseSelectionAll,
+    handleKeyDown: handleBrowseSelectionKeyDown,
+  } = browseSelection;
 
   // Share dialog state
   const [shareDialogFile, setShareDialogFile] = useState<{ id: number; name: string } | null>(null);
@@ -139,7 +172,7 @@ export function FilesPage() {
       const views = response.items.map(toFileView);
       setFiles(views);
       setTotalFiles(response.total);
-      setSelectedFiles(new Set());
+      clearRootSelection();
       const pendingLocateId = pendingRootLocateRef.current;
       if (pendingLocateId !== null) {
         pendingRootLocateRef.current = null;
@@ -157,7 +190,7 @@ export function FilesPage() {
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, [showToast, clearRootSelection]);
 
   useEffect(() => {
     loadFiles(currentPage, pageSize);
@@ -174,16 +207,6 @@ export function FilesPage() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
-
-  const sortedFiles = useMemo(
-    () => sortFiles(files, sortField, sortOrder),
-    [files, sortField, sortOrder],
-  );
-
-  const sortedBrowseContents = useMemo(
-    () => sortBrowseItems(browseContents, sortField, sortOrder),
-    [browseContents, sortField, sortOrder],
-  );
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -252,10 +275,10 @@ export function FilesPage() {
     browseRequestIdRef.current += 1;
     setBrowseContext(null);
     setBrowseContents([]);
-    setSelectedBrowseFiles(new Set());
+    clearBrowseSelection();
     setBrowseTotal(0);
     setBrowsePage(1);
-  }, []);
+  }, [clearBrowseSelection]);
 
   const locateInsideFolder = useCallback(async (item: SearchHitView, trigger: Element) => {
     const segments = item.entryPath?.split("/").filter(Boolean) ?? [];
@@ -273,7 +296,8 @@ export function FilesPage() {
       );
       if (!result) return;
       setBrowseContext({ fileId: item.userFileId, fileName: keepName, path: parentSegments });
-      setSelectedBrowseFiles(new Set());
+      clearRootSelection();
+      clearBrowseSelection();
       if (!name || !result.items.some((c) => c.name === name)) {
         showToast("定位失败：未在文件夹中找到该文件", "error");
         return;
@@ -284,7 +308,7 @@ export function FilesPage() {
     } catch (err) {
       showToast(`定位失败: ${(err as Error).message}`, "error");
     }
-  }, [browseContext, showToast, loadBrowsePage]);
+  }, [browseContext, showToast, loadBrowsePage, clearRootSelection, clearBrowseSelection]);
 
   const handleLocate = useCallback((item: SearchHitView, trigger: Element) => {
     searchCloseTargetRef.current = trigger;
@@ -451,7 +475,7 @@ export function FilesPage() {
       await createPack(fileIds, packOutputName || "archive.zip", packDeleteSource);
       showToast("打包任务已创建", "success");
       requestModalClose(trigger);
-      setSelectedFiles(new Set());
+      clearRootSelection();
       setPackOutputName("");
       setPackDeleteSource(false);
       setPackTasksKey((k) => k + 1);
@@ -462,25 +486,9 @@ export function FilesPage() {
     }
   };
 
-  const toggleFileSelection = useCallback((id: number) => {
-    setSelectedFiles((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
   const toggleSelectAll = useCallback(() => {
-    if (selectedFiles.size === sortedFiles.length) {
-      setSelectedFiles(new Set());
-    } else {
-      setSelectedFiles(new Set(sortedFiles.map((f) => f.id)));
-    }
-  }, [selectedFiles.size, sortedFiles]);
+    toggleRootSelectionAll();
+  }, [toggleRootSelectionAll]);
 
   const selectedSize = useMemo(() => {
     return files
@@ -533,8 +541,8 @@ export function FilesPage() {
   // Folder in-page navigation（导航事件内同步重置页码，保证只发一笔「第 1 页」请求）
   const enterFolder = async (file: FileView) => {
     setBrowseContext({ fileId: file.id, fileName: file.name, path: [] });
-    setSelectedFiles(new Set());
-    setSelectedBrowseFiles(new Set());
+    clearRootSelection();
+    clearBrowseSelection();
     setBrowsePage(1);
     setBrowseTotal(0);
     try {
@@ -554,7 +562,7 @@ export function FilesPage() {
       const result = await loadBrowsePage(browseContext.fileId, newPath.join("/"), 1);
       if (!result) return;
       setBrowseContext((prev) => (prev ? { ...prev, path: newPath } : prev));
-      setSelectedBrowseFiles(new Set());
+      clearBrowseSelection();
     } catch (err) {
       showToast(`打开文件夹失败: ${(err as Error).message}`, "error");
     }
@@ -572,7 +580,7 @@ export function FilesPage() {
       );
       if (!result) return;
       setBrowseContext((prev) => (prev ? { ...prev, path: newPath } : prev));
-      setSelectedBrowseFiles(new Set());
+      clearBrowseSelection();
     } catch (err) {
       showToast(`导航失败: ${(err as Error).message}`, "error");
     }
@@ -583,12 +591,12 @@ export function FilesPage() {
     (page: number) => {
       if (!browseContext) return;
       const path = browseContext.path.length > 0 ? browseContext.path.join("/") : undefined;
-      setSelectedBrowseFiles(new Set());
+      clearBrowseSelection();
       loadBrowsePage(browseContext.fileId, path, page).catch((err) => {
         showToast(`翻页失败: ${(err as Error).message}`, "error");
       });
     },
-    [browseContext, loadBrowsePage, showToast],
+    [browseContext, loadBrowsePage, showToast, clearBrowseSelection],
   );
 
   const returnToRoot = () => {
@@ -596,28 +604,9 @@ export function FilesPage() {
   };
 
   // Browse file selection helpers
-  const toggleBrowseFileSelection = (item: BrowseItemView) => {
-    const key = [...(browseContext?.path ?? []), item.name].join("/");
-    setSelectedBrowseFiles((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      return next;
-    });
-  };
-
-  const toggleAllBrowseFiles = () => {
-    const keys = browseContents.map((f) => [...(browseContext?.path ?? []), f.name].join("/"));
-    const allSelected = keys.length > 0 && keys.every((k) => selectedBrowseFiles.has(k));
-    if (allSelected) {
-      setSelectedBrowseFiles(new Set());
-    } else {
-      setSelectedBrowseFiles(new Set(keys));
-    }
-  };
+  const toggleAllBrowseFiles = useCallback(() => {
+    toggleBrowseSelectionAll();
+  }, [toggleBrowseSelectionAll]);
 
   const handleBrowseBatchDownload = async () => {
     if (!browseContext || selectedBrowseFiles.size === 0) return;
@@ -686,7 +675,8 @@ export function FilesPage() {
             onSort={handleSort}
             getSortIcon={getSortIcon}
             onToggleAllBrowseFiles={toggleAllBrowseFiles}
-            onToggleBrowseFileSelection={toggleBrowseFileSelection}
+            onToggleBrowseFileSelection={toggleBrowseItemSelection}
+            onSelectionKeyDown={handleBrowseSelectionKeyDown}
             onNavigateIntoSubfolder={navigateIntoSubfolder}
             onDownload={(subpath) => {
               void handleDownload({ id: browseContext.fileId, name: browseContext.fileName, size: 0, isDirectory: true, createdAtMs: 0 }, subpath);
@@ -710,6 +700,7 @@ export function FilesPage() {
             getSortIcon={getSortIcon}
             onToggleSelectAll={toggleSelectAll}
             onToggleFileSelection={toggleFileSelection}
+            onSelectionKeyDown={handleRootSelectionKeyDown}
             onNewNameChange={setNewName}
             onRename={handleRename}
             onCancelRename={cancelRename}
@@ -781,8 +772,8 @@ export function FilesPage() {
               className="icon-btn"
               aria-label="取消选择"
               onClick={() => {
-                if (isInsideFolder) setSelectedBrowseFiles(new Set());
-                else setSelectedFiles(new Set());
+                if (isInsideFolder) clearBrowseSelection();
+                else clearRootSelection();
               }}
             >
               <Icon name="x" className="icon-sm" />

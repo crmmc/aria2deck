@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type KeyboardEvent } from "react";
 import { formatBytes } from "@/shared/lib/format";
+import { isShiftClick } from "@/shared/lib/selection";
 import { Icon, SortIcon, type SortDirection } from "@/shared/components/Icon";
-import type { BrowseItemView } from "../model";
+import { browseItemKey, type BrowseItemView } from "../model";
 import type { SortField, BrowseContext } from "./FileToolbar";
 
 type BrowseFolderViewProps = {
@@ -15,15 +16,12 @@ type BrowseFolderViewProps = {
   onSort: (field: SortField) => void;
   getSortIcon: (field: SortField) => SortDirection;
   onToggleAllBrowseFiles: () => void;
-  onToggleBrowseFileSelection: (item: BrowseItemView) => void;
+  onToggleBrowseFileSelection: (itemKey: string, shiftKey: boolean) => void;
+  onSelectionKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
   onNavigateIntoSubfolder: (name: string) => void;
   onDownload: (subpath: string) => void;
   onUnavailableDelete: () => void;
 };
-
-function getBrowseItemKey(context: BrowseContext, item: BrowseItemView) {
-  return [...context.path, item.name].join("/");
-}
 
 export function BrowseFolderView({
   isMobile,
@@ -37,6 +35,7 @@ export function BrowseFolderView({
   getSortIcon,
   onToggleAllBrowseFiles,
   onToggleBrowseFileSelection,
+  onSelectionKeyDown,
   onNavigateIntoSubfolder,
   onDownload,
   onUnavailableDelete,
@@ -63,13 +62,18 @@ export function BrowseFolderView({
   }
 
   return (
-    <div ref={containerRef} className="card p-0 overflow-hidden file-table-wrapper" data-testid="file-list">
+    <div
+      ref={containerRef}
+      className="card p-0 overflow-hidden file-table-wrapper"
+      data-testid="file-list"
+      onKeyDown={onSelectionKeyDown}
+    >
       {!isMobile && (
         <div className="table-header file-table-head browse-file-head">
           <input
             type="checkbox"
             checked={(() => {
-              const allKeys = browseContents.map((item) => getBrowseItemKey(browseContext, item));
+              const allKeys = browseContents.map((item) => browseItemKey(browseContext.path, item.name));
               return allKeys.length > 0 && allKeys.every((key) => selectedBrowseFiles.has(key));
             })()}
             onChange={onToggleAllBrowseFiles}
@@ -84,13 +88,13 @@ export function BrowseFolderView({
 
       {isMobile ? (
         <div className="mobile-file-list">
-          {sortedBrowseContents.map((item) => {
-            const itemKey = getBrowseItemKey(browseContext, item);
+          {sortedBrowseContents.map((item, index) => {
+            const itemKey = browseItemKey(browseContext.path, item.name);
             const isHighlighted = highlightName != null && item.name === highlightName;
             return (
               <div key={item.name} className={`mobile-file-card${isHighlighted ? " file-locate-highlight" : ""}`} aria-current={isHighlighted ? "true" : undefined}>
                 <div className="card-header">
-                  <input type="checkbox" checked={selectedBrowseFiles.has(itemKey)} onChange={() => onToggleBrowseFileSelection(item)} className="checkbox-sm cursor-pointer" aria-label={`选择 ${item.name}`} />
+                  <input type="checkbox" checked={selectedBrowseFiles.has(itemKey)} onChange={(event) => onToggleBrowseFileSelection(itemKey, isShiftClick(event.nativeEvent))} data-select-index={index} className="checkbox-sm cursor-pointer" aria-label={`选择 ${item.name}`} />
                   <div className="file-title">
                     <span className={`file-mark${item.isDirectory ? " folder" : ""}`}><Icon name={item.isDirectory ? "folder" : "file"} /></span>
                     {item.isDirectory ? (
@@ -113,13 +117,13 @@ export function BrowseFolderView({
         </div>
       ) : (
         <div className="file-rows">
-          {sortedBrowseContents.map((item) => {
-            const itemKey = getBrowseItemKey(browseContext, item);
+          {sortedBrowseContents.map((item, index) => {
+            const itemKey = browseItemKey(browseContext.path, item.name);
             const isHighlighted = highlightName != null && item.name === highlightName;
             const selected = selectedBrowseFiles.has(itemKey);
             return (
               <article key={item.name} className={`table-row file-row browse-file-row${selected ? " selected" : ""}${isHighlighted ? " file-locate-highlight" : ""}`} aria-current={isHighlighted ? "true" : undefined}>
-                <input type="checkbox" checked={selected} onChange={() => onToggleBrowseFileSelection(item)} className="checkbox-sm cursor-pointer" aria-label="选择文件" />
+                <input type="checkbox" checked={selected} onChange={(event) => onToggleBrowseFileSelection(itemKey, isShiftClick(event.nativeEvent))} data-select-index={index} className="checkbox-sm cursor-pointer" aria-label="选择文件" />
                 <div className="task-main">
                   <span className={`file-mark${item.isDirectory ? " folder" : ""}`}><Icon name={item.isDirectory ? "folder" : "file"} /></span>
                   <div className="file-name">
