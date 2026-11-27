@@ -16,6 +16,8 @@ from .models import AttemptRecord, Submission
 UowFactory = Callable[[], AbstractAsyncContextManager[UnitOfWork]]
 Sleep = Callable[[float], Awaitable[None]]
 
+POLL_INTERVAL_SECONDS = 2.0
+
 
 @dataclass(frozen=True, slots=True)
 class RecoveryReport:
@@ -73,7 +75,7 @@ class DownloadRecoveryService:
         quota_repository_factory: QuotaRepositoryFactory | None = None,
         submission_lock: asyncio.Lock | None = None,
         submission_timeout_ms: int = 60_000,
-        poll_interval_seconds: float = 2.0,
+        poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
         sleep: Sleep = asyncio.sleep,
     ) -> None:
         self.uow_factory = uow_factory

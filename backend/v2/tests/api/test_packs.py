@@ -244,25 +244,29 @@ def test_clear_pack_records_endpoint_removes_terminal_and_keeps_outputs(
         json={"items": [first[1]], "output_name": "clear-done.zip", "delete_source": False},
     ).json()["id"]
     _wait_pack_status(client, done, ("done",))
-    client.post(  # 活动任务不参与清理（副作用调用，返回值由下方 remaining 断言覆盖）。
+    live_id = client.post(
         "/api/v2/packs",
         json={"items": [second[1]], "output_name": "clear-live.zip", "delete_source": False},
-    )
+    ).json()["id"]
+    # 推迟认领让「活动」确定化：小节拍下 dispatcher 会在断言前跑完未推迟的任务。
+    _delay_pack_claim(settings, live_id)
     cancelled_view = client.post(
         "/api/v2/packs",
         json={"items": [second[1]], "output_name": "clear-cancel.zip", "delete_source": False},
     ).json()["id"]
+    _delay_pack_claim(settings, cancelled_view)
     client.post(f"/api/v2/packs/{cancelled_view}/cancel")
 
     response = client.delete("/api/v2/packs/records")
 
     assert response.status_code == 200
     cleared = response.json()["cleared_count"]
-    # done 与 cancelled 都属终态（cancelled 可能仍被 dispatcher 推进中，容忍 1 或 2）。
-    assert cleared in {1, 2}
+    # done 与 cancelled 都是终态，live 被推迟认领保持活动：确定清 2 条。
+    assert cleared == 2
     assert client.get(f"/api/v2/packs/{done}").status_code == 404
     remaining = {item["id"] for item in client.get("/api/v2/packs", params={"limit": 50}).json()["items"]}
     assert done not in remaining
+    assert live_id in remaining, "活动任务不得被记录清理移除"
     # 输出文件保留：文件列表里仍有 clear-done.zip。
     names = {item["display_name"] for item in client.get("/api/v2/files").json()["items"]}
     assert "clear-done.zip" in names

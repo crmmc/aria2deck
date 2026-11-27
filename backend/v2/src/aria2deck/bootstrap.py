@@ -36,9 +36,15 @@ from .application.downloads.cleanup import DownloadUserCleanup
 from .application.downloads.commands import DownloadCommandService
 from .application.downloads.gateway import DownloadGatewayService
 from .application.downloads.history import HistoryService
+from .application.downloads.lifecycle import (
+    POLL_INTERVAL_SECONDS as download_lifecycle_poll_default,
+)
 from .application.downloads.lifecycle import DownloadLifecycleService
 from .application.downloads.projection import TaskProjector
 from .application.downloads.queries import DownloadQueryService
+from .application.downloads.recovery import (
+    POLL_INTERVAL_SECONDS as download_recovery_poll_default,
+)
 from .application.downloads.recovery import DownloadRecoveryService
 from .application.downloads.rpc_projection import VirtualGidSpace
 from .application.downloads.rpc_service import Aria2RpcService
@@ -46,6 +52,9 @@ from .application.downloads.ws_service import WebSocketTaskService
 from .application.library.admission_worker import DiskAdmissionWorker
 from .application.library.cleanup import LibraryUserCleanup
 from .application.library.commands import LibraryCommandService
+from .application.library.deletion import (
+    POLL_INTERVAL_SECONDS as content_deletion_poll_default,
+)
 from .application.library.deletion import ContentDeletionWorker
 from .application.library.disk_scan import DiskAdmissionQueue, DiskOrphanService
 from .application.library.download import LibraryDownloadService
@@ -54,8 +63,14 @@ from .application.library.queries import LibraryQueryService
 from .application.packs.admission import PackAdmissionService
 from .application.packs.cleanup import PackUserCleanup
 from .application.packs.control import PackControlService
+from .application.packs.dispatcher import (
+    POLL_INTERVAL_SECONDS as pack_dispatcher_poll_default,
+)
 from .application.packs.dispatcher import PackDispatcher
 from .application.packs.progress import PackProgressService
+from .application.packs.source_cleanup import (
+    POLL_INTERVAL_SECONDS as source_cleanup_poll_default,
+)
 from .application.packs.source_cleanup import SourceCleanupWorker
 from .application.ports import UnitOfWork
 from .application.settings.download_limit import DownloadConnectionLimiter
@@ -232,6 +247,8 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
     connectivity = BackendConnectivity()
     machine_stats = MachineStatsService(content_store)
     task_broadcast = TaskBroadcast()
+    # 测试可经 Settings 注入小节拍让后台收敛确定化；生产保持各循环默认。
+    poll_override = config.background_poll_interval_seconds
     download_lifecycle = DownloadLifecycleService(
         uow_factory=uow_factory,
         repository_factory=download_repository,
@@ -244,6 +261,9 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         clock_ms=_clock_ms,
         broadcast=task_broadcast,
         queries=download_queries,
+        poll_interval_seconds=(
+            poll_override if poll_override is not None else download_lifecycle_poll_default
+        ),
     )
     download_recovery = DownloadRecoveryService(
         uow_factory=uow_factory,
@@ -254,6 +274,9 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         lifecycle=download_lifecycle,
         quota_repository_factory=lambda uow: QuotaRepository(cast(AsyncConnection, uow.connection)),
         submission_lock=submission_lock,
+        poll_interval_seconds=(
+            poll_override if poll_override is not None else download_recovery_poll_default
+        ),
     )
     download_gateway = DownloadGatewayService(
         uow_factory=uow_factory,
@@ -310,6 +333,9 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         clock_ms=_clock_ms,
         owner=DELETE_LEASE_OWNER,
         lease_ttl_ms=DELETE_LEASE_TTL_MS,
+        poll_interval_seconds=(
+            poll_override if poll_override is not None else content_deletion_poll_default
+        ),
     )
     supervisor.register("content-deletion", library_deletion.run_worker)
     # 入库队列是进程内状态：重启即清空、开关复位为停止（V2 无迁移能力，不落表）。
@@ -366,6 +392,9 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         writer_control=pack_writer_control,
         settings=settings_service.current,
         clock_ms=_clock_ms,
+        poll_interval_seconds=(
+            poll_override if poll_override is not None else pack_dispatcher_poll_default
+        ),
     )
     pack_source_cleanup = SourceCleanupWorker(
         uow_factory=uow_factory,
@@ -375,6 +404,9 @@ def create_app(*, static_dir: Path | None = None, settings: Settings | None = No
         clock_ms=_clock_ms,
         lease_owner=DELETE_LEASE_OWNER,
         lease_ttl_ms=DELETE_LEASE_TTL_MS,
+        poll_interval_seconds=(
+            poll_override if poll_override is not None else source_cleanup_poll_default
+        ),
     )
     supervisor.register("pack-dispatcher", pack_dispatcher.run_worker)
     supervisor.register("pack-source-cleanup", pack_source_cleanup.run_worker)
