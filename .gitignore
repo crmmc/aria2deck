@@ -73,6 +73,7 @@ CLAUDE.md
 # Local planning artifacts
 .planning/
 .worktrees/
+TODO.md
 
 # agent 工具产物
 .codegraph/
