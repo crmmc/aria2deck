@@ -20,8 +20,8 @@ venv
 *.swp
 
 # Build artifacts
-backend/static
-frontend/out
+backend/v2/static
+frontend/v2/dist
 
 # Data (mounted as volumes)
 /data/
@@ -35,31 +35,14 @@ backend/v2/aria2/runtime
 PRD_Tracking
 
 # Tests
-backend/tests
+backend/v2/tests
+frontend/v2/tests
 
 # Misc
 .DS_Store
 **/*.log
 
-# aria2 runtime files
-backend/aria2/*.session*
-backend/aria2/*.aria2
-backend/aria2/DHT*.dat
-
-# V2 isolation: archives and legacy source trees are never build inputs
-backend/v1
-frontend/v1
-backend/app
-backend/tests
-frontend/app
-frontend/components
-frontend/__tests__
-frontend/hooks
-frontend/lib
-frontend/v2/tests
-backend/v2/tests
-frontend/v2/dist
-backend/v2/static
+# Secrets
 **/.env
 **/.env.*
 **/*.key

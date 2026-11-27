@@ -135,7 +135,8 @@ def test_package_discovery_and_test_collection_are_scoped_to_v2() -> None:
     assert not (REPO_ROOT / "pyproject.toml").exists()
     root_pytest = (REPO_ROOT / "pytest.ini").read_text(encoding="utf-8")
     assert "testpaths = backend/v2/tests" in root_pytest
-    assert "norecursedirs = backend/v1 frontend/v1" in root_pytest
+    assert "norecursedirs" in root_pytest
+    assert "backend/v1" not in root_pytest
 
     package = json.loads((FRONTEND_ROOT / "package.json").read_text(encoding="utf-8"))
     dependencies = {**package["dependencies"], **package["devDependencies"]}
@@ -144,13 +145,12 @@ def test_package_discovery_and_test_collection_are_scoped_to_v2() -> None:
     assert "roots: ['<rootDir>/tests']" in jest_config
 
 
-def test_docker_context_excludes_archives_and_runtime_data() -> None:
+def test_docker_context_excludes_runtime_data_and_tests() -> None:
     ignored = set((REPO_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
     assert {
-        "backend/v1",
-        "frontend/v1",
         "backend/data",
         "backend/downloads",
+        "backend/v2/aria2/runtime",
         "backend/v2/tests",
         "frontend/v2/tests",
     } <= ignored
@@ -192,12 +192,6 @@ def _is_dockerignored(path: str) -> bool:
         "frontend/v2/node_modules/react/index.js",
         "frontend/v2/tests/helper/node_modules/fake/index.js",
         "aria2.log",
-        "backend/aria2/aria2.log",
-        "backend/aria2/aria2.session",
-        "backend/aria2/aria2.session.lock",
-        "backend/aria2/download.aria2",
-        "backend/aria2/DHT.dat",
-        "backend/aria2/DHT6.dat",
         "backend/v2/aria2/runtime/aria2.log",
         "backend/v2/aria2/runtime/aria2.session",
         "data/app/v2.db",
@@ -211,7 +205,6 @@ def test_docker_context_excludes_concrete_runtime_paths(path: str) -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "backend/aria2/start.sh",
         "backend/v2/aria2/start.sh",
         "backend/v2/pyproject.toml",
         "backend/v2/src/aria2deck/main.py",
