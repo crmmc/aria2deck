@@ -11,6 +11,7 @@ from aria2deck.application.downloads.broadcast import TaskBroadcast
 from aria2deck.application.downloads.models import (
     AttemptRecord,
     BackendSubmissionResult,
+    ManifestEntry,
     SourceRecord,
     Submission,
     TaskProjection,
@@ -23,6 +24,7 @@ from aria2deck.infrastructure.sqlite.schema import content_objects, user_files
 from aria2deck.infrastructure.sqlite.unit_of_work import SQLiteUnitOfWork
 from tests.application.test_download_lifecycle import (
     make_lifecycle,
+    manifest_files,
     observation,
     put_download,
     read,
@@ -413,6 +415,10 @@ async def test_submission_timeout_defers_to_persisted_ingestion_and_settles_once
             await downloads.start_ingestion(
                 state.attempt_id, expected_gid="0123456789abcdef", now_ms=50
             )
+            # 完成意图与清单同一事务落库：恢复路径按清单入库，不再扫磁盘。
+            await downloads.record_manifest(
+                state.attempt_id, entries=(ManifestEntry("file.bin", 3),), now_ms=50
+            )
         state.backend.confirm_error = DomainError(
             ErrorCode.SUBMISSION_UNCERTAIN, "offline"
         )
@@ -435,7 +441,11 @@ async def test_submission_timeout_defers_to_persisted_ingestion_and_settles_once
 
         assert await state.lifecycle.recover_ingestions() is True
         assert await state.lifecycle.recover_ingestions() is True
-        await state.lifecycle.reconcile(observation(status="complete", completed=3))
+        await state.lifecycle.reconcile(
+            observation(
+                status="complete", completed=3, files=manifest_files(("file.bin", 3))
+            )
+        )
 
         attempt, task, quota = await read(state)
         assert attempt.status is AttemptStatus.COMPLETED

@@ -240,6 +240,7 @@ _TASK_FAILURE_MESSAGES: dict[str, str] = {
     "aria2_removed": "任务已从 aria2 移除",
     "aria2_gid_missing": "aria2 里找不到这个下载",
     "ingestion_timeout": "下载完成后入库超时",
+    "manifest_unavailable": "下载完成后无法核对文件清单，文件已保留在下载目录中，请联系管理员处理",
     "expired": "任务已过期",
     # 系统暂停标记：不是失败原因，但会随暂停态显示在任务上。
     "admission_paused": "系统暂停期间任务未提交",

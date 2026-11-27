@@ -136,6 +136,7 @@ def observe(
                     total_bytes=1000,
                     completed_bytes=100,
                     selected=True,
+                    relpath="public-file.iso",
                 ),
             ),
         )
@@ -501,6 +502,7 @@ def test_attempt_terminal_state_is_projected_for_a_live_subscription(
     [
         ("submission_timeout", "提交超时，结果无法确认"),
         ("aria2_error", "aria2 报告下载失败"),
+        ("manifest_unavailable", "下载完成后无法核对文件清单，文件已保留在下载目录中，请联系管理员处理"),
         ("metadata_admission_paused", "系统暂停期间元数据未提交"),
         # 未收录的码也要出中文：内部代号不得成为用户可见文案。
         ("some_unknown_code", "下载失败"),

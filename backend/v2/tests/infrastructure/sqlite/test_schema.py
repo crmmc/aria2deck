@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from aria2deck.domain.errors import DomainError, ErrorCode
 from aria2deck.infrastructure.sqlite import bootstrap as bootstrap_module
@@ -27,6 +28,7 @@ EXPECTED_TABLES = {
     "app_settings",
     "download_sources",
     "download_attempts",
+    "attempt_manifests",
     "task_subscriptions",
     "content_objects",
     "content_entries",
@@ -163,7 +165,7 @@ async def test_fresh_database_defaults_new_accounts_to_active(database: SQLiteDa
         await connection.commit()
         status = (await connection.execute(text("SELECT status FROM users"))).scalar_one()
     assert status == "active"
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
 
 
 def test_users_status_column_is_required_with_active_default() -> None:
@@ -176,3 +178,55 @@ def test_download_attempt_schema_persists_optional_ingestion_start() -> None:
     column = download_attempts.c.ingestion_started_at_ms
     assert column.nullable is True
     assert column.default is None
+
+
+async def test_attempt_manifest_is_one_required_row_per_attempt(database: SQLiteDatabase) -> None:
+    """清单表由 attempt 派生：一次尝试一份、内容必填、尝试删除时跟着走。"""
+    async with database.connection() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO download_sources (id, kind, resource_key, payload_json, options_json, "
+                "display_name, created_at_ms) VALUES (1, 'http', 'rk', '{}', '{}', 'f.bin', 1)"
+            )
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO download_attempts (id, source_id, resource_key, gid, status, "
+                "submission_state, completed_length, physical_reserved_bytes, created_at_ms, "
+                "updated_at_ms) VALUES (1, 1, 'rk', 'gid', 'completed', 'submitted', 1, 1, 1, 1)"
+            )
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO attempt_manifests (attempt_id, files_json, created_at_ms) "
+                "VALUES (1, '[{\"path\": \"a.bin\", \"size\": 1}]', 1)"
+            )
+        )
+        await connection.commit()
+        stored = (
+            await connection.execute(text("SELECT files_json FROM attempt_manifests"))
+        ).scalar_one()
+        assert json.loads(stored) == [{"path": "a.bin", "size": 1}]
+
+        with pytest.raises(IntegrityError):
+            await connection.execute(
+                text(
+                    "INSERT INTO attempt_manifests (attempt_id, files_json, created_at_ms) "
+                    "VALUES (1, '[]', 1)"
+                )
+            )
+        await connection.rollback()
+        with pytest.raises(IntegrityError):
+            await connection.execute(
+                text(
+                    "INSERT INTO attempt_manifests (attempt_id, created_at_ms) VALUES (2, 1)"
+                )
+            )
+        await connection.rollback()
+
+        await connection.execute(text("DELETE FROM download_attempts WHERE id = 1"))
+        await connection.commit()
+        remaining = (
+            await connection.execute(text("SELECT COUNT(*) FROM attempt_manifests"))
+        ).scalar_one()
+    assert remaining == 0

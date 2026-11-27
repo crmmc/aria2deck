@@ -939,7 +939,7 @@ async def test_rpc_non_200_method_error_code_one_is_missing_not_uncertain(
     session = FakeSession(lambda request: _non_200_error_body(request, code=1))
     monkeypatch.setattr("aria2deck.infrastructure.aria2_submission.aiohttp.ClientSession", lambda **kwargs: session)
     client = make_client(tmp_path)
-    assert await client.snapshot(gid="gone-gid") is None
+    assert await client.snapshot(gid="gone-gid", attempt_id=1) is None
     await client.remove_result(gid="gone-gid")  # 结果已不在 aria2：静默成功
 
 

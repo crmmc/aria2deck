@@ -20,7 +20,7 @@ from sqlalchemy.dialects import sqlite
 from sqlalchemy.engine import Dialect
 from sqlalchemy.schema import CreateIndex, CreateTable
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 metadata = MetaData()
 
 schema_meta = Table(
@@ -201,6 +201,19 @@ download_attempts = Table(
         name="ck_attempt_progress",
     ),
     CheckConstraint("physical_reserved_bytes >= 0", name="ck_attempt_physical_reserved"),
+)
+
+attempt_manifests = Table(
+    "attempt_manifests",
+    metadata,
+    Column(
+        "attempt_id",
+        Integer,
+        ForeignKey("download_attempts.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("files_json", Text, nullable=False),
+    Column("created_at_ms", BigInteger, nullable=False),
 )
 
 task_subscriptions = Table(

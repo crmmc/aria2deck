@@ -206,6 +206,9 @@ class Aria2SubmissionClient:
         self.credentials = credentials
         self.internal_base_url = internal_base_url.rstrip("/")
         self.download_directory = download_directory
+        # aria2 的 `files[].path` 是 `dir + "/" + 名字`，dir 由平台设为 `{下载根}/{attempt_id}`；
+        # 统一成 posix 分隔符后按此前缀裁出清单用的相对路径（Windows 下两侧都可能带反斜杠）。
+        self._download_prefix = f"{str(download_directory).replace('\\', '/').rstrip('/')}/"
         self.timeout_seconds = timeout_seconds
         self.clock_ms = clock_ms
 
@@ -522,7 +525,9 @@ class Aria2SubmissionClient:
             raise Aria2SubmissionClient._unavailable()
         return tuple(value)
 
-    def _parse_snapshot(self, result: object, gid: str) -> DownloadObservation:
+    def _parse_snapshot(
+        self, result: object, gid: str, attempt_id: int
+    ) -> DownloadObservation:
         if not isinstance(result, dict) or result.get("gid") != gid:
             raise self._unavailable()
         status = result.get("status")
@@ -531,6 +536,7 @@ class Aria2SubmissionClient:
         raw_files = result.get("files", [])
         if not isinstance(raw_files, list):
             raise self._unavailable()
+        prefix = f"{self._download_prefix}{attempt_id}/"
         files: list[ObservedFile] = []
         for item in raw_files:
             if not isinstance(item, dict):
@@ -541,12 +547,27 @@ class Aria2SubmissionClient:
             selected = item.get("selected", "true")
             if selected not in {"true", "false", True, False}:
                 raise self._unavailable()
+            total_bytes = self._number(item.get("length", "0"))
+            completed_bytes = self._number(item.get("completedLength", "0"))
+            # dir 是平台设的，路径不在本次尝试目录下只可能是 aria2 报告异常或任务串了：
+            # 不猜、不转换，整条剔除（清单宁缺勿错，缺文件会在入库校验时暴露）。
+            normalized = raw_path.replace("\\", "/")
+            relpath = normalized[len(prefix) :] if normalized.startswith(prefix) else ""
+            if not relpath:
+                logger.warning(
+                    "观测文件路径不在任务目录下，已剔除 gid=%s attempt_id=%s path=%s",
+                    gid,
+                    attempt_id,
+                    raw_path[:200],
+                )
+                continue
             files.append(
                 ObservedFile(
-                    name=raw_path.replace("\\", "/").rsplit("/", 1)[-1],
-                    total_bytes=self._number(item.get("length", "0")),
-                    completed_bytes=self._number(item.get("completedLength", "0")),
+                    name=relpath.rsplit("/", 1)[-1],
+                    total_bytes=total_bytes,
+                    completed_bytes=completed_bytes,
                     selected=selected in {"true", True},
+                    relpath=relpath,
                 )
             )
         following_value = result.get("following")
@@ -593,11 +614,11 @@ class Aria2SubmissionClient:
         only = files[0].name
         return None if only.startswith(_METADATA_FILE_PREFIX) else only
 
-    async def snapshot(self, *, gid: str) -> DownloadObservation | None:
+    async def snapshot(self, *, gid: str, attempt_id: int) -> DownloadObservation | None:
         result = await self._lifecycle_call("aria2.tellStatus", [gid], missing_ok=True)
         if result is _MISSING:
             return None
-        return self._parse_snapshot(result, gid)
+        return self._parse_snapshot(result, gid, attempt_id)
 
     async def unpause(self, *, gid: str) -> None:
         if await self._lifecycle_call("aria2.unpause", [gid]) != gid:
@@ -610,11 +631,22 @@ class Aria2SubmissionClient:
         if result is not _MISSING and result != "OK":
             raise self._unavailable()
 
+    @staticmethod
+    def _live_gid(item: object) -> str:
+        """枚举在跑 GID 只认 gid 本身：文件路径必须绑定 attempt 才有相对路径，这里不解析文件。"""
+        if not isinstance(item, dict) or not isinstance(item.get("gid"), str):
+            raise Aria2SubmissionClient._unavailable()
+        return str(item["gid"])
+
     async def list_live_gids(self) -> list[str]:
+        """列出 aria2 正在跑/待跑的 GID。
+
+        只读 gid 一个字段：完整观测需要 attempt 上下文（目录前缀），枚举场景没有。
+        """
         active = await self._lifecycle_call("aria2.tellActive", [])
         if not isinstance(active, list):
             raise self._unavailable()
-        gids = [self._parse_snapshot(item, str(item.get("gid"))).gid for item in active if isinstance(item, dict)]
+        gids = [self._live_gid(item) for item in active if isinstance(item, dict)]
         if len(gids) != len(active):
             raise self._unavailable()
         offset = 0
@@ -622,11 +654,7 @@ class Aria2SubmissionClient:
             waiting = await self._lifecycle_call("aria2.tellWaiting", [offset, 1000])
             if not isinstance(waiting, list):
                 raise self._unavailable()
-            parsed = [
-                self._parse_snapshot(item, str(item.get("gid"))).gid
-                for item in waiting
-                if isinstance(item, dict)
-            ]
+            parsed = [self._live_gid(item) for item in waiting if isinstance(item, dict)]
             if len(parsed) != len(waiting):
                 raise self._unavailable()
             gids.extend(parsed)

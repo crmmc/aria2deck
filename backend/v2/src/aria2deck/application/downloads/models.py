@@ -34,6 +34,20 @@ class ObservedFile:
     total_bytes: int
     completed_bytes: int
     selected: bool
+    # aria2 报告的路径减去 `{下载根}/{attempt_id}/` 前缀后的相对路径：清单与入库靠它定位磁盘文件。
+    # name 仍是 basename，只服务显示场景（RPC 投影、单文件真名回退）。
+    relpath: str
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestEntry:
+    """完成清单的一项：完成时刻 aria2 报告的文件路径与大小。
+
+    path 是 attempt 目录内的相对路径（如 `bundle/sub/a.bin`），不是 basename。
+    """
+
+    path: str
+    size: int
 
 
 @dataclass(frozen=True, slots=True)
