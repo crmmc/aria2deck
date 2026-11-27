@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from contextlib import closing
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -11,21 +12,64 @@ from tests.api.conftest import OTHER_PASSWORD, create_admin, create_user, login
 from tests.api.test_files import seed_file
 
 
-def _wait_pack_status(
-    client: TestClient, pack_id: int, statuses: tuple[str, ...], timeout: float = 30.0
-) -> dict[str, object]:
-    """后台 pack-dispatcher 每 1s 推进一轮：轮询等待真实 worker 收敛。"""
+def _wait_pack_status_in_db(
+    settings: Settings, pack_id: int, statuses: tuple[str, ...], timeout: float = 30.0
+) -> str:
+    """后台 pack-dispatcher 每 0.2s 推进一轮：只读库等待真实 worker 收敛。
+
+    不轮询 HTTP 列表：每 20ms 一次请求会撞上 authenticated API 限流（600 次/分钟），
+    429 响应体只有 error 字段，盲取 items 会退化成 KeyError，掩盖真实的收敛超时。
+    """
     deadline = time.monotonic() + timeout
-    last = "unknown"
-    while time.monotonic() < deadline:
-        items = client.get("/api/v2/packs?limit=50").json()["items"]
-        view = next((item for item in items if item["id"] == pack_id), None)
-        if view is not None:
-            last = str(view["status"])
+    last: str | None = None
+    with closing(sqlite3.connect(settings.database_path)) as conn:
+        while time.monotonic() < deadline:
+            row = conn.execute("SELECT status FROM pack_jobs WHERE id = ?", (pack_id,)).fetchone()
+            last = None if row is None else str(row[0])
             if last in statuses:
-                return dict(view)
-        time.sleep(0.02)
+                return last
+            time.sleep(0.02)
     raise AssertionError(f"pack {pack_id} 未在 {timeout}s 内进入 {statuses}（当前 {last}）")
+
+
+def _list_packs(client: TestClient) -> list[dict[str, object]]:
+    """列表接口只调用一次，显式校验 HTTP 契约：200 + 含 items 的字典。"""
+    response = client.get("/api/v2/packs", params={"limit": 50})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body, dict) and isinstance(body.get("items"), list)
+    return list(body["items"])
+
+
+def _wait_pack_then_verify_api(
+    client: TestClient,
+    settings: Settings,
+    pack_id: int,
+    statuses: tuple[str, ...],
+    timeout: float = 30.0,
+) -> dict[str, object]:
+    """库内状态收敛到目标后，用一次列表请求校验 API 投影。"""
+    status = _wait_pack_status_in_db(settings, pack_id, statuses, timeout)
+    view = next((item for item in _list_packs(client) if item["id"] == pack_id), None)
+    assert view is not None, f"pack {pack_id} 不在列表投影中"
+    assert view["status"] == status
+    return dict(view)
+
+
+def _wait_sources_cleanup_in_db(settings: Settings, pack_id: int, timeout: float = 15.0) -> None:
+    """等后台 source-cleanup worker 清完来源；清记录接口的 409 门只看是否仍有 pending 来源。"""
+    deadline = time.monotonic() + timeout
+    with closing(sqlite3.connect(settings.database_path)) as conn:
+        while time.monotonic() < deadline:
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM pack_sources"
+                " WHERE pack_id = ? AND cleanup_status = 'pending')",
+                (pack_id,),
+            ).fetchone()
+            if row is not None and not row[0]:
+                return
+            time.sleep(0.02)
+    raise AssertionError(f"pack {pack_id} 来源清理未在 {timeout}s 内收敛")
 
 
 def _delay_pack_claim(settings: Settings, pack_id: int, *, delay_ms: int = 5000) -> None:
@@ -97,7 +141,7 @@ def test_pack_execution_progress_and_output(client: TestClient, app: FastAPI, se
         json={"items": [first[1], second[1]], "output_name": "bundle.zip", "delete_source": False},
     ).json()["id"]
 
-    view = _wait_pack_status(client, pack_id, ("done",))
+    view = _wait_pack_then_verify_api(client, settings, pack_id, ("done",))
     assert view["output"] is not None
     assert view["step"] is None and view["step_progress"] == 100
     assert view["output"] is not None and view["output"]["display_name"] == "bundle.zip"
@@ -125,7 +169,7 @@ def test_pack_failure_progress_and_lifecycle(client: TestClient, app: FastAPI, s
     ).json()["id"]
     _delay_pack_claim(settings, pack_id)
     client.patch(f"/api/v2/files/{first[1]}", json={"name": "moved.bin"})
-    view = _wait_pack_status(client, pack_id, ("failed",))
+    view = _wait_pack_then_verify_api(client, settings, pack_id, ("failed",))
     assert view["error_code"] == "invalid_state"
     # 失败原因必须是中文文案，内部代号只留在 error_code 字段供排障。
     assert view["error_message"] == "打包来源或任务状态已变化"
@@ -147,15 +191,10 @@ def test_pack_failure_progress_and_lifecycle(client: TestClient, app: FastAPI, s
         "/api/v2/packs",
         json={"items": [third[1]], "output_name": "cleanup.zip", "delete_source": True},
     ).json()["id"]
-    _wait_pack_status(client, done, ("done",))
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        if client.delete(f"/api/v2/packs/{done}/record").status_code == 200:
-            break
-        time.sleep(0.05)
-    else:
-        raise AssertionError("来源清理后清记录未收敛")
-    assert client.get(f"/api/v2/packs/{done}").status_code == 404
+    _wait_pack_then_verify_api(client, settings, done, ("done",))
+    _wait_sources_cleanup_in_db(settings, done)
+    assert client.delete(f"/api/v2/packs/{done}/record").status_code == 200
+    assert done not in {item["id"] for item in _list_packs(client)}
 
 
 def test_create_rate_limit(client: TestClient, settings) -> None:
@@ -243,7 +282,7 @@ def test_clear_pack_records_endpoint_removes_terminal_and_keeps_outputs(
         "/api/v2/packs",
         json={"items": [first[1]], "output_name": "clear-done.zip", "delete_source": False},
     ).json()["id"]
-    _wait_pack_status(client, done, ("done",))
+    _wait_pack_then_verify_api(client, settings, done, ("done",))
     live_id = client.post(
         "/api/v2/packs",
         json={"items": [second[1]], "output_name": "clear-live.zip", "delete_source": False},
