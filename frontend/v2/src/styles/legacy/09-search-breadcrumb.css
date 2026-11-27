@@ -225,6 +225,12 @@
   color: var(--faint);
 }
 
+/* type=search 聚焦时浏览器自带的 × 会与自定义清空按钮同时出现，隐藏它保留单一控件 */
+.toolbar-search-input::-webkit-search-cancel-button,
+.command-input input::-webkit-search-cancel-button {
+  display: none;
+}
+
 .search-clear-btn {
   position: absolute;
   right: 20px;
