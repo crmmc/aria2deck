@@ -81,6 +81,11 @@ def settings(tmp_path: Path) -> Settings:
         download_directory=tmp_path / "downloads",
         static_directory=tmp_path / "static",
         debug=True,
+        # 后台循环小节拍：收敛从「秒级碰运气」变为确定快速，
+        # 消除高负载 CI 上的轮询超时型 flaky。
+        # 不低于 0.2s：创建响应等「初始态」断言依赖请求窗口内不被认领，
+        # 请求内两次 DB 操作 <5ms，0.2s 留 40 倍余量。
+        background_poll_interval_seconds=0.2,
     )
 
 

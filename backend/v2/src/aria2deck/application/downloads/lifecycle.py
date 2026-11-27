@@ -36,6 +36,9 @@ UowFactory = Callable[[], AbstractAsyncContextManager[UnitOfWork]]
 Sleep = Callable[[float], Awaitable[None]]
 
 
+POLL_INTERVAL_SECONDS = 2.0
+
+
 class LifecycleRepository(Protocol):
     async def find_attempt_by_gid(self, gid: str) -> AttemptRecord | None: ...
 
@@ -236,7 +239,7 @@ class DownloadLifecycleService:
         connectivity: Connectivity,
         settings: Callable[[], SystemSettings],
         clock_ms: Callable[[], int],
-        poll_interval_seconds: float = 2.0,
+        poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
         probe_timeout_seconds: float = 2.0,
         reconnect_max_seconds: float = 30.0,
         missing_grace_ms: int = 10_000,

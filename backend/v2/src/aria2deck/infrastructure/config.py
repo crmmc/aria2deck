@@ -28,6 +28,8 @@ class Settings:
     # ARIA2C_RPC_ALLOWED_ORIGINS=逗号分隔精确白名单；默认空 = 仅同源（不附 CORS 头）。
     rpc_allow_all_origins: bool = False
     rpc_allowed_origins: frozenset[str] = frozenset()
+    # 后台循环节拍覆盖：None = 各循环用自身生产默认；测试注入小值让收敛确定化。
+    background_poll_interval_seconds: float | None = None
 
     @property
     def instance_lock_path(self) -> Path:
