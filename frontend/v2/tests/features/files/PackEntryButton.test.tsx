@@ -3,7 +3,7 @@ import { StrictMode } from "react";
 import { renderToString } from "react-dom/server";
 
 import { PackEntryButton } from "@/features/files/components/PackEntryButton";
-import { PackRecordsDrawer } from "@/features/files/components/PackRecordsDrawer";
+import { PackRecordsPopover } from "@/features/files/components/PackRecordsPopover";
 import { ToastProvider } from "@/shared/components/Toast";
 import type { PackViewResponse } from "@/shared/api/types";
 
@@ -41,12 +41,17 @@ let originalShowModal: HTMLDialogElement["showModal"] | undefined;
 let originalClose: HTMLDialogElement["close"] | undefined;
 const originalMatchMedia = window.matchMedia;
 
-beforeEach(() => {
+/** beforeEach 默认低动效开启（matches: true），关闭立即完成；动画用例自行切回 false。 */
+function setReducedMotion(matches: boolean) {
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     writable: true,
-    value: jest.fn(() => ({ matches: true })),
+    value: jest.fn(() => ({ matches })),
   });
+}
+
+beforeEach(() => {
+  setReducedMotion(true);
   mockFetch.mockReset();
   originalShowModal = HTMLDialogElement.prototype.showModal;
   originalClose = HTMLDialogElement.prototype.close;
@@ -95,11 +100,11 @@ function renderEntry(onTaskComplete?: () => void) {
   );
 }
 
-async function openDrawer(): Promise<HTMLDialogElement> {
+async function openPopover(): Promise<HTMLElement> {
   const entry = await screen.findByRole("button", { name: /打包记录/ });
   entry.focus();
   fireEvent.click(entry);
-  return await screen.findByRole("dialog", { name: "打包记录" }) as HTMLDialogElement;
+  return await screen.findByRole("dialog", { name: "打包记录" });
 }
 
 function packCalls(): number {
@@ -107,7 +112,7 @@ function packCalls(): number {
 }
 
 describe("PackEntryButton 入口与记录展示", () => {
-  it("空记录也常显入口，抽屉展示空态且清空禁用", async () => {
+  it("空记录也常显入口，浮层展示空态且清空禁用", async () => {
     mockFetch.mockResolvedValue(json(200, listEnvelope([])));
     renderEntry();
     const entry = screen.getByRole("button", { name: /打包记录/ });
@@ -115,24 +120,22 @@ describe("PackEntryButton 入口与记录展示", () => {
     expect(entry.querySelector("[data-icon=archive]")).not.toBeNull();
     expect(entry.querySelector(".pack-entry-badge")).toHaveAttribute("hidden");
 
-    const dialog = await openDrawer();
+    const popover = await openPopover();
     expect(entry).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByText("还没有打包记录")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "清空已结束" })).toBeDisabled();
-    expect(dialog).toHaveClass("drawer-overlay");
-    const content = dialog.querySelector(".drawer-content");
-    expect(content).toHaveClass("pack-records-drawer");
-    expect(content?.querySelector(":scope > .drawer-body")).not.toBeNull();
-    expect(content?.querySelector(":scope > .drawer-actions")).not.toBeNull();
+    expect(popover).toHaveClass("pack-pop", "is-open");
+    expect(popover.querySelector(":scope > .pack-pop-body")).not.toBeNull();
+    expect(popover.querySelector(":scope > .pack-pop-footer")).not.toBeNull();
   });
 
-  it("读取失败在抽屉显示真实错误，重试成功后显示真实记录", async () => {
+  it("读取失败在浮层显示真实错误，重试成功后显示真实记录", async () => {
     let resolveRetry: ((value: unknown) => void) | undefined;
     mockFetch
       .mockRejectedValueOnce(new TypeError("fetch failed"))
       .mockReturnValueOnce(new Promise((resolve) => { resolveRetry = resolve; }));
     renderEntry();
-    await openDrawer();
+    await openPopover();
     expect(await screen.findByRole("alert")).toHaveTextContent("加载失败：网络异常，请检查连接后重试");
     expect(screen.queryByText("还没有打包记录")).not.toBeInTheDocument();
 
@@ -151,7 +154,7 @@ describe("PackEntryButton 入口与记录展示", () => {
     let resolveFetch: ((value: unknown) => void) | undefined;
     mockFetch.mockReturnValue(new Promise((resolve) => { resolveFetch = resolve; }));
     renderEntry();
-    await openDrawer();
+    await openPopover();
     expect(screen.getByRole("status", { name: "" })).toHaveTextContent("正在读取打包记录...");
     expect(screen.queryByText("还没有打包记录")).not.toBeInTheDocument();
     await act(async () => {
@@ -174,21 +177,25 @@ describe("PackEntryButton 入口与记录展示", () => {
     expect(screen.getByRole("button", { name: /打包记录/ })).toHaveTextContent("2");
   });
 
-  it("按进行中与已结束分组，并诚实展示进度、产物和错误", async () => {
+  it("不分组但进行中排前，并诚实展示进度、产物和错误", async () => {
     mockFetch.mockResolvedValue(json(200, listEnvelope([
-      pack({ id: 1, status: "pending", step_progress: 0, output_name: "waiting.zip", output: null, finished_at_ms: null }),
-      pack({ id: 2, status: "packing", step: "compressing", step_progress: 40, output_name: "doing.zip", output: null, finished_at_ms: null }),
       pack({ id: 3, output_name: "finished.zip", delete_source: true }),
+      pack({ id: 1, status: "pending", step_progress: 0, output_name: "waiting.zip", output: null, finished_at_ms: null }),
+      pack({ id: 7, status: "cancelled", output_name: "cancelled.zip", output: null }),
+      pack({ id: 2, status: "packing", step: "compressing", step_progress: 40, output_name: "doing.zip", output: null, finished_at_ms: null }),
       pack({ id: 4, output_name: "missing.zip", output: null }),
       pack({ id: 5, status: "failed", error_code: "pack_output_deleted", error_message: "打包产物已删除", output_name: "shared.zip", output: null }),
       pack({ id: 6, status: "failed", error_code: "invalid_state", error_message: "打包来源或任务状态已变化", output_name: "failed.zip", output: null }),
-      pack({ id: 7, status: "cancelled", output_name: "cancelled.zip", output: null }),
     ])));
     renderEntry();
-    await openDrawer();
+    await openPopover();
 
-    expect(screen.getByText("进行中 · 2")).toBeInTheDocument();
-    expect(screen.getByText("已结束 · 5")).toBeInTheDocument();
+    // 无分组标签，一个连续列表：进行中在前，已结束按原顺序随其后。
+    expect(screen.queryByText(/^进行中 · /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^已结束 · /)).not.toBeInTheDocument();
+    const rowIds = [...document.querySelectorAll(".pack-record")].map((row) => row.getAttribute("data-pack-id"));
+    expect(rowIds).toEqual(["1", "2", "3", "7", "4", "5", "6"]);
+
     expect(screen.getByText("waiting.zip")).toBeInTheDocument();
     expect(screen.getByText(/打包中 · 压缩 · 40%/)).toBeInTheDocument();
     expect(screen.getByText(/已完成 · 2.0 KB · 已删除源文件/)).toBeInTheDocument();
@@ -204,11 +211,25 @@ describe("PackEntryButton 入口与记录展示", () => {
     expect(screen.getByRole("button", { name: "下载 finished.zip" })).toBeInTheDocument();
     expect(screen.getAllByRole("progressbar")).toHaveLength(2);
     expect(screen.getByRole("progressbar", { name: "doing.zip 打包进度" })).toHaveAttribute("aria-valuenow", "40");
-    const deletedRow = document.querySelector("[data-pack-id=4]") as HTMLElement;
+
+    // 行首图标承载状态语义：进行中行省略日期，产物已删除使用独立状态。
+    const pendingRow = document.querySelector("[data-pack-id='1']") as HTMLElement;
+    expect(pendingRow).toHaveAttribute("data-status", "pending");
+    expect(pendingRow.querySelector("[data-icon=clock]")).not.toBeNull();
+    const packingRow = document.querySelector("[data-pack-id='2']") as HTMLElement;
+    expect(packingRow).toHaveAttribute("data-status", "packing");
+    expect(packingRow.querySelector("[data-icon=refresh]")).not.toBeNull();
+    expect(packingRow).not.toHaveTextContent("1970");
+    const deletedRow = document.querySelector("[data-pack-id='4']") as HTMLElement;
+    expect(deletedRow).toHaveAttribute("data-status", "deleted");
     expect(deletedRow).not.toHaveTextContent("已完成");
     expect(deletedRow).not.toHaveTextContent("0 B");
-    const sharedRow = document.querySelector("[data-pack-id=5]") as HTMLElement;
+    const sharedRow = document.querySelector("[data-pack-id='5']") as HTMLElement;
+    expect(sharedRow).toHaveAttribute("data-status", "deleted");
     expect(sharedRow).not.toHaveTextContent("失败");
+    const failedRow = document.querySelector("[data-pack-id='6']") as HTMLElement;
+    expect(failedRow).toHaveAttribute("data-status", "failed");
+    expect(failedRow.querySelector("[data-icon=alert]")).not.toBeNull();
   });
 
   it("失败行缺少中文原因时给固定兜底，不回落到原始代号", async () => {
@@ -216,7 +237,7 @@ describe("PackEntryButton 入口与记录展示", () => {
       pack({ id: 1, status: "failed", error_code: "internal", error_message: "", output: null }),
     ])));
     renderEntry();
-    await openDrawer();
+    await openPopover();
 
     const row = document.querySelector("[data-pack-id=1]") as HTMLElement;
     expect(row).toHaveTextContent("打包失败");
@@ -275,34 +296,157 @@ describe("PackEntryButton 耗时文本", () => {
   });
 });
 
-describe("PackRecordsDrawer 退出与焦点", () => {
-  it.each(["按钮", "标题按钮", "Escape", "遮罩"])("%s 关闭后焦点恢复到入口", async (method) => {
+describe("PackRecordsPopover 关闭与焦点", () => {
+  it.each(["再次点击入口", "Escape"] as const)("%s 收起浮层并复原 aria-expanded", async (method) => {
     mockFetch.mockResolvedValue(json(200, listEnvelope([pack()])));
     renderEntry();
     const entry = screen.getByRole("button", { name: /打包记录/ });
-    const dialog = await openDrawer();
-    expect(dialog).toBeInTheDocument();
+    await openPopover();
+    expect(entry).toHaveAttribute("aria-expanded", "true");
 
-    if (method === "按钮") fireEvent.click(screen.getByRole("button", { name: "关闭" }));
-    if (method === "标题按钮") fireEvent.click(screen.getByRole("button", { name: "关闭打包记录" }));
-    if (method === "Escape") fireEvent(dialog, new Event("cancel", { cancelable: true }));
-    if (method === "遮罩") fireEvent.click(dialog.querySelector(".modal-backdrop-button")!);
+    if (method === "再次点击入口") fireEvent.click(entry);
+    if (method === "Escape") fireEvent.keyDown(document, { key: "Escape" });
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "打包记录" })).not.toBeInTheDocument());
-    expect(entry).toHaveFocus();
     expect(entry).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("点击浮层外部收起且不拦截该次点击（点击穿透）", async () => {
+    mockFetch.mockResolvedValue(json(200, listEnvelope([pack()])));
+    renderEntry();
+    const entry = await screen.findByRole("button", { name: /打包记录/ });
+    await openPopover();
+
+    const notPrevented = fireEvent.pointerDown(document.body);
+    expect(notPrevented).toBe(true);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "打包记录" })).not.toBeInTheDocument());
+    expect(entry).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("焦点在浮层内时关闭，焦点回到入口按钮", async () => {
+    mockFetch.mockResolvedValue(json(200, listEnvelope([pack()])));
+    renderEntry();
+    const entry = await screen.findByRole("button", { name: /打包记录/ });
+    await openPopover();
+    screen.getByRole("button", { name: "清空已结束" }).focus();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "打包记录" })).not.toBeInTheDocument());
+    expect(entry).toHaveFocus();
+  });
+
+  it("浮层内部与入口上的 pointerdown 不会误关闭", async () => {
+    mockFetch.mockResolvedValue(json(200, listEnvelope([pack()])));
+    renderEntry();
+    const entry = await screen.findByRole("button", { name: /打包记录/ });
+    const popover = await openPopover();
+
+    fireEvent.pointerDown(popover.querySelector(".pack-pop-body")!);
+    fireEvent.click(popover.querySelector(".pack-pop-body")!);
+    fireEvent.pointerDown(entry);
+    expect(screen.getByRole("dialog", { name: "打包记录" })).toBeInTheDocument();
+  });
+
+  it("上层确认框打开时，Escape 与外部点击不关闭浮层", async () => {
+    mockFetch.mockResolvedValue(json(200, listEnvelope([pack({ id: 5, status: "packing", output: null })])));
+    renderEntry();
+    await openPopover();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    const confirm = await screen.findByRole("dialog", { name: "取消打包任务" });
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.pointerDown(confirm);
+    expect(screen.getByRole("dialog", { name: "打包记录" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "取消打包任务" })).toBeInTheDocument();
+  });
+
+  it("非低动效环境先播放收起动画，animationend 后卸载", async () => {
+    setReducedMotion(false);
+    mockFetch.mockResolvedValue(json(200, listEnvelope([pack()])));
+    renderEntry();
+    const popover = await openPopover();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.getByRole("dialog", { name: "打包记录" })).toHaveClass("is-closing");
+    // 子元素动画结束（如进度条过渡）不触发卸载，只有浮层自身的 animationend 才算数。
+    fireEvent(popover.querySelector(".pack-pop-body")!, new Event("animationend", { bubbles: true }));
+    expect(screen.getByRole("dialog", { name: "打包记录" })).toBeInTheDocument();
+    fireEvent(popover, new Event("animationend"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "打包记录" })).not.toBeInTheDocument());
+  });
+
+  it("animationend 未触发时按兜底时长卸载", async () => {
+    jest.useFakeTimers();
+    try {
+      setReducedMotion(false);
+      mockFetch.mockResolvedValue(json(200, listEnvelope([pack()])));
+      renderEntry();
+      await act(async () => { await Promise.resolve(); });
+      fireEvent.click(screen.getByRole("button", { name: /打包记录/ }));
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(screen.getByRole("dialog", { name: "打包记录" })).toHaveClass("is-closing");
+      await act(async () => {
+        jest.advanceTimersByTime(200);
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("dialog", { name: "打包记录" })).not.toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("按入口位置锚定，并随 resize 与滚动重算", async () => {
+    mockFetch.mockResolvedValue(json(200, listEnvelope([pack()])));
+    renderEntry();
+    const entry = await screen.findByRole("button", { name: /打包记录/ });
+    const rect = (bottom: number, right: number) => ({
+      bottom,
+      right,
+      top: bottom - 24,
+      left: right - 140,
+      width: 140,
+      height: 24,
+      x: right - 140,
+      y: bottom - 24,
+      toJSON: () => ({}),
+    }) as DOMRect;
+    const rectSpy = jest.spyOn(entry, "getBoundingClientRect").mockReturnValue(rect(100, 400));
+    try {
+      fireEvent.click(entry);
+      const popover = await screen.findByRole("dialog", { name: "打包记录" });
+      // jsdom 中 offsetWidth 为 0：left = max(12, min(400 - 0, innerWidth - 0 - 12))。
+      expect(popover.style.top).toBe("108px");
+      expect(popover.style.left).toBe("400px");
+      expect(popover.style.maxHeight).toBe("648px");
+
+      rectSpy.mockReturnValue(rect(300, 500));
+      fireEvent(window, new Event("resize"));
+      expect(popover.style.top).toBe("308px");
+      expect(popover.style.left).toBe("500px");
+      expect(popover.style.maxHeight).toBe("448px");
+
+      rectSpy.mockReturnValue(rect(60, 100));
+      fireEvent(window, new Event("scroll"));
+      expect(popover.style.top).toBe("68px");
+      expect(popover.style.left).toBe("100px");
+      expect(popover.style.maxHeight).toBe("660px");
+    } finally {
+      rectSpy.mockRestore();
+    }
   });
 
   it("静态首次渲染不挂 portal，由客户端 mounted 后接管", () => {
     const html = renderToString(
-      <PackRecordsDrawer
+      <PackRecordsPopover
         tasks={[]}
         loading={false}
         error={null}
         nowMs={0}
         operation={null}
         trigger={null}
-        onClose={jest.fn()}
+        closing={false}
+        onRequestClose={jest.fn()}
+        onClosed={jest.fn()}
         onRetry={jest.fn()}
         onClear={jest.fn()}
         onCancel={jest.fn()}
@@ -311,14 +455,6 @@ describe("PackRecordsDrawer 退出与焦点", () => {
       />,
     );
     expect(html).toBe("");
-  });
-
-  it("抽屉内部点击不会误关闭", async () => {
-    mockFetch.mockResolvedValue(json(200, listEnvelope([pack()])));
-    renderEntry();
-    const dialog = await openDrawer();
-    fireEvent.click(dialog.querySelector(".drawer-body")!);
-    expect(screen.getByRole("dialog", { name: "打包记录" })).toBeInTheDocument();
   });
 });
 
@@ -333,7 +469,7 @@ describe("PackEntryButton 真实操作", () => {
     });
     try {
       renderEntry();
-      await openDrawer();
+      await openPopover();
       fireEvent.click(screen.getByRole("button", { name: "下载 record.zip" }));
       expect(clicked).toHaveLength(1);
       expect(clicked[0].getAttribute("href")).toBe("/api/v2/files/42/download");
@@ -354,7 +490,7 @@ describe("PackEntryButton 真实操作", () => {
       return json(404, {});
     });
     renderEntry();
-    await openDrawer();
+    await openPopover();
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     const confirm = await screen.findByRole("dialog", { name: "取消打包任务" });
     fireEvent.click(within(confirm).getByRole("button", { name: "取消任务" }));
@@ -374,7 +510,7 @@ describe("PackEntryButton 真实操作", () => {
   it("取消确认被驳回时不发请求", async () => {
     mockFetch.mockResolvedValue(json(200, listEnvelope([pack({ id: 5, status: "packing", output: null })])));
     renderEntry();
-    await openDrawer();
+    await openPopover();
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     const confirm = await screen.findByRole("dialog", { name: "取消打包任务" });
     fireEvent.click(within(confirm).getByRole("button", { name: "取消" }));
@@ -390,7 +526,7 @@ describe("PackEntryButton 真实操作", () => {
       return json(404, {});
     });
     renderEntry();
-    await openDrawer();
+    await openPopover();
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     const confirm = await screen.findByRole("dialog", { name: "取消打包任务" });
     fireEvent.click(within(confirm).getByRole("button", { name: "取消任务" }));
@@ -405,7 +541,7 @@ describe("PackEntryButton 真实操作", () => {
       return json(404, {});
     });
     renderEntry();
-    await openDrawer();
+    await openPopover();
     fireEvent.click(screen.getByRole("button", { name: "删除 archive.zip 记录" }));
     const confirm = await screen.findByRole("dialog", { name: "删除任务记录" });
     fireEvent.click(within(confirm).getByRole("button", { name: "删除" }));
@@ -425,7 +561,7 @@ describe("PackEntryButton 真实操作", () => {
       return json(404, {});
     });
     renderEntry();
-    await openDrawer();
+    await openPopover();
     fireEvent.click(screen.getByRole("button", { name: "删除 archive.zip 记录" }));
     const confirm = await screen.findByRole("dialog", { name: "删除任务记录" });
     fireEvent.click(within(confirm).getByRole("button", { name: "删除" }));
@@ -443,7 +579,7 @@ describe("PackEntryButton 真实操作", () => {
   it("删除确认被驳回时不发请求", async () => {
     mockFetch.mockResolvedValue(json(200, listEnvelope([pack({ id: 8 })])));
     renderEntry();
-    await openDrawer();
+    await openPopover();
     fireEvent.click(screen.getByRole("button", { name: "删除 archive.zip 记录" }));
     const confirm = await screen.findByRole("dialog", { name: "删除任务记录" });
     fireEvent.click(within(confirm).getByRole("button", { name: "取消" }));
@@ -458,7 +594,7 @@ describe("PackEntryButton 真实操作", () => {
       return json(404, {});
     });
     renderEntry();
-    await openDrawer();
+    await openPopover();
     fireEvent.click(screen.getByRole("button", { name: "删除 archive.zip 记录" }));
     const confirm = await screen.findByRole("dialog", { name: "删除任务记录" });
     fireEvent.click(within(confirm).getByRole("button", { name: "删除" }));
@@ -475,7 +611,7 @@ describe("PackEntryButton 真实操作", () => {
       return json(404, {});
     });
     renderEntry();
-    await openDrawer();
+    await openPopover();
     fireEvent.click(screen.getByRole("button", { name: "清空已结束" }));
     expect(await screen.findByRole("button", { name: "清空中..." })).toBeDisabled();
     const beforeReload = packCalls();
@@ -494,7 +630,7 @@ describe("PackEntryButton 真实操作", () => {
       return json(404, {});
     });
     renderEntry();
-    await openDrawer();
+    await openPopover();
     fireEvent.click(screen.getByRole("button", { name: "清空已结束" }));
     expect(await screen.findByText("清空失败: 服务器错误")).toBeInTheDocument();
   });
@@ -511,7 +647,7 @@ describe("PackEntryButton 轮询与完成刷新", () => {
     return { promise, resolve, reject };
   }
 
-  it("有活跃任务时每 2 秒轮询，打开抽屉不另发读取", async () => {
+  it("有活跃任务时每 2 秒轮询，打开浮层不另发读取", async () => {
     jest.useFakeTimers();
     try {
       mockFetch.mockResolvedValue(json(200, listEnvelope([pack({ id: 1, status: "packing", output: null })])));
@@ -626,7 +762,7 @@ describe("PackEntryButton 轮询与完成刷新", () => {
       </StrictMode>,
     );
     expect(packCalls()).toBe(2);
-    await openDrawer();
+    await openPopover();
 
     await act(async () => {
       oldRequest.resolve(json(200, listEnvelope([pack({ output_name: "old.zip" })])));
@@ -663,7 +799,7 @@ describe("PackEntryButton 轮询与完成刷新", () => {
     try {
       renderEntry(onTaskComplete);
       await act(async () => { await Promise.resolve(); });
-      await openDrawer();
+      await openPopover();
       await act(async () => {
         jest.advanceTimersByTime(2000);
         await Promise.resolve();
@@ -718,7 +854,7 @@ describe("PackEntryButton 轮询与完成刷新", () => {
     try {
       renderEntry();
       await act(async () => { await Promise.resolve(); });
-      await openDrawer();
+      await openPopover();
       await act(async () => {
         jest.advanceTimersByTime(2000);
         await Promise.resolve();

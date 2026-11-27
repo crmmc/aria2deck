@@ -25,6 +25,7 @@ function baseProps() {
     getSortIcon: jest.fn(() => "none" as const),
     onToggleAllBrowseFiles: jest.fn(),
     onToggleBrowseFileSelection: jest.fn(),
+    onSelectionKeyDown: jest.fn(),
     onNavigateIntoSubfolder: jest.fn(),
     onDownload: jest.fn(),
     onUnavailableDelete: jest.fn(),
@@ -112,7 +113,7 @@ describe("BrowseFolderView 桌面表格", () => {
     const props = baseProps();
     render(<BrowseFolderView {...props} />);
     fireEvent.click((screen.getAllByLabelText("选择文件") as HTMLInputElement[])[0]);
-    expect(props.onToggleBrowseFileSelection).toHaveBeenCalledWith(ITEMS[0]);
+    expect(props.onToggleBrowseFileSelection).toHaveBeenCalledWith("a.png", false);
 
     // 目录名与「打开」都进入子目录。
     fireEvent.click(screen.getByRole("button", { name: "子目录" }));
@@ -152,6 +153,39 @@ describe("BrowseFolderView 桌面表格", () => {
   });
 });
 
+describe("BrowseFolderView 多选交互", () => {
+  it("行复选框带 data-select-index，回调带完整相对路径与 shiftKey", () => {
+    const props = baseProps();
+    render(<BrowseFolderView {...props} browseContext={NESTED} />);
+    const boxes = screen.getAllByLabelText("选择文件") as HTMLInputElement[];
+    expect(boxes.map((box) => box.dataset.selectIndex)).toEqual(["0", "1"]);
+
+    fireEvent.click(boxes[1], { shiftKey: true });
+    expect(props.onToggleBrowseFileSelection).toHaveBeenCalledWith("2026/子目录", true);
+  });
+
+  it("桌面对移动端容器都把键盘事件交给 onSelectionKeyDown", () => {
+    const props = baseProps();
+    const { unmount } = render(<BrowseFolderView {...props} />);
+    fireEvent.keyDown(screen.getByTestId("file-list"), { key: "Escape" });
+    expect(props.onSelectionKeyDown).toHaveBeenCalledTimes(1);
+
+    unmount();
+    render(<BrowseFolderView {...props} isMobile />);
+    fireEvent.keyDown(screen.getByTestId("file-list"), { key: "ArrowDown", shiftKey: true });
+    expect(props.onSelectionKeyDown).toHaveBeenCalledTimes(2);
+  });
+
+  it("移动卡片选择回调带相对路径", () => {
+    const props = baseProps();
+    render(<BrowseFolderView {...props} isMobile selectedBrowseFiles={new Set(["子目录"])} />);
+    const boxes = screen.getAllByLabelText(/^选择 /) as HTMLInputElement[];
+
+    fireEvent.click(boxes[0], { shiftKey: true });
+    expect(props.onToggleBrowseFileSelection).toHaveBeenCalledWith("a.png", true);
+  });
+});
+
 describe("BrowseFolderView 移动卡片", () => {
   it("渲染卡片并用卡片尺寸显示目录占位符", () => {
     const props = baseProps();
@@ -183,7 +217,7 @@ describe("BrowseFolderView 移动卡片", () => {
     expect(boxes[0].checked).toBe(false);
     expect(boxes[1].checked).toBe(true);
     fireEvent.click(boxes[0]);
-    expect(props.onToggleBrowseFileSelection).toHaveBeenCalledWith(ITEMS[0]);
+    expect(props.onToggleBrowseFileSelection).toHaveBeenCalledWith("a.png", false);
 
     fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
     expect(props.onUnavailableDelete).toHaveBeenCalled();

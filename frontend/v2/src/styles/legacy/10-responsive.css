@@ -293,20 +293,11 @@
     min-height: 44px;
   }
 
-  .pack-records-drawer .drawer-header {
-    min-height: 60px;
-    padding: 0 16px;
+  .pack-pop {
+    width: calc(100vw - 16px);
   }
 
-  .pack-records-drawer .drawer-body {
-    padding: 16px;
-  }
-
-  .pack-records-drawer .drawer-actions {
-    padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
-  }
-
-  .pack-records-drawer .drawer-actions .button {
+  .pack-pop-footer .button {
     min-height: 44px;
     flex: 1;
   }
@@ -407,6 +398,11 @@
 
   .filter-toolbar.file-toolbar .search-sort-row .search-input-group .toolbar-search-input {
     min-width: 200px;
+  }
+
+  /* 包装层承担整行宽度：输入框仍占满可用宽度，全局开关与查询按钮换到下一行 */
+  .filter-toolbar.file-toolbar .search-sort-row .search-input-group .search-field {
+    flex: 1 1 100%;
   }
 
   /* Shared ToolbarShell (tasks / history / shares): on desktop .toolbar-default is

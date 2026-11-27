@@ -104,6 +104,16 @@ describe("FileToolbar 排序与搜索", () => {
     const button = screen.getByRole("button", { name: "查询中..." });
     expect(button).toBeDisabled();
   });
+
+  it("清空按钮与输入框同处一个定位容器，不跟随整组跑到查询按钮上", () => {
+    render(<FileToolbar {...baseProps()} toolbarSearchKeyword="报告" />);
+    const input = screen.getByLabelText("搜索文件");
+    const clear = screen.getByRole("button", { name: "清除搜索" });
+    expect(clear.parentElement).toBe(input.parentElement);
+    expect(input.parentElement).toHaveClass("search-field");
+    expect(input.parentElement?.contains(screen.getByLabelText("全局"))).toBe(false);
+    expect(input.parentElement?.contains(screen.getByRole("button", { name: "查询" }))).toBe(false);
+  });
 });
 
 describe("FileToolbar 选择操作边界", () => {

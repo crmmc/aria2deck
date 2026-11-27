@@ -115,27 +115,29 @@ export function FileToolbar({
         </div>
 
         <div className="filter-group search-input-group">
-          <Icon name="search" className="search-input-icon" />
-          <input
-            ref={searchInputRef}
-            type="text"
-            className="toolbar-search-input"
-            placeholder="输入文件名，点查询或按回车"
-            value={toolbarSearchKeyword}
-            onChange={(e) => onToolbarSearchKeywordChange(e.target.value)}
-            onKeyDown={onToolbarSearchKeyDown}
-            aria-label="搜索文件"
-          />
-          {toolbarSearchKeyword && (
-            <button
-              type="button"
-              className="search-clear-btn"
-              onClick={() => onToolbarSearchKeywordChange("")}
-              aria-label="清除搜索"
-            >
-              <Icon name="x" className="icon-sm" />
-            </button>
-          )}
+          <div className="search-field">
+            <Icon name="search" className="search-input-icon" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              className="toolbar-search-input"
+              placeholder="输入文件名，点查询或按回车"
+              value={toolbarSearchKeyword}
+              onChange={(e) => onToolbarSearchKeywordChange(e.target.value)}
+              onKeyDown={onToolbarSearchKeyDown}
+              aria-label="搜索文件"
+            />
+            {toolbarSearchKeyword && (
+              <button
+                type="button"
+                className="search-clear-btn"
+                onClick={() => onToolbarSearchKeywordChange("")}
+                aria-label="清除搜索"
+              >
+                <Icon name="x" className="icon-sm" />
+              </button>
+            )}
+          </div>
           <label className="search-global-toggle">
             <input
               type="checkbox"

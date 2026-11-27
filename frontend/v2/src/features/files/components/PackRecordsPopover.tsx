@@ -1,24 +1,32 @@
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
 import { EmptyState } from "@/shared/components/EmptyState";
-import { Icon } from "@/shared/components/Icon";
-import { ModalOverlay } from "@/shared/components/ModalOverlay";
+import { Icon, type IconName } from "@/shared/components/Icon";
 import { useMounted } from "@/shared/hooks/useMounted";
 import { formatBytes } from "@/shared/lib/format";
-import { requestModalClose } from "@/shared/ui/modalClose";
 import type { PackViewResponse } from "@/shared/api/types";
 import { formatFileDate } from "../model";
 
 export type PackOperation = number | "clear" | null;
 
-type PackRecordsDrawerProps = {
+/** 收起动画时长（与 06-components.css 的 pack-pop-out 一致），animationend 未触发时兜底。 */
+const CLOSE_FALLBACK_MS = 200;
+/** 浮层与入口按钮的间距与视口最小边距。 */
+const ANCHOR_GAP_PX = 8;
+const VIEWPORT_MARGIN_PX = 12;
+const MAX_HEIGHT_PX = 660;
+
+type PackRecordsPopoverProps = {
   tasks: PackViewResponse[];
   loading: boolean;
   error: string | null;
   nowMs: number;
   operation: PackOperation;
-  trigger: Element | null;
-  onClose: () => void;
+  trigger: HTMLElement | null;
+  closing: boolean;
+  onRequestClose: () => void;
+  onClosed: () => void;
   onRetry: () => void;
   onClear: () => void;
   onCancel: (task: PackViewResponse) => void;
@@ -40,6 +48,15 @@ function getStatusText(task: PackViewResponse): string {
     case "failed": return "失败";
     case "cancelled": return "已取消";
   }
+}
+
+function getStatusIcon(task: PackViewResponse): IconName {
+  if (task.status === "packing") return "refresh";
+  if (task.status === "pending") return "clock";
+  if (isOutputDeleted(task)) return "archive";
+  if (task.status === "done") return "check";
+  if (task.status === "failed") return "alert";
+  return "x";
 }
 
 function getStepText(step: PackViewResponse["step"]): string {
@@ -102,17 +119,19 @@ function PackRecordRow({ task, nowMs, operation, onCancel, onDelete, onDownload 
   const busy = operation !== null;
   const detail = getRecordDetail(task, nowMs);
   const downloadableOutput = task.status === "done" ? task.output : null;
+  // 进行中行省略日期（正在发生，日期是噪音），已结束行保留完成时间。
   const metadata = [
     getStatusText(task),
     detail,
-    formatFileDate(task.finished_at_ms ?? task.created_at_ms),
+    active ? null : formatFileDate(task.finished_at_ms ?? task.created_at_ms),
   ].filter(Boolean).join(" · ");
   // 失败行只展示中文原因，原始代号只留在悬停提示供排障。
   const errorHint = task.status === "failed" ? task.error_code ?? undefined : undefined;
+  const rowStatus = isOutputDeleted(task) ? "deleted" : task.status;
 
   return (
-    <article className="pack-record" data-pack-id={task.id}>
-      <span className="file-mark"><Icon name="archive" /></span>
+    <article className="pack-record" data-pack-id={task.id} data-status={rowStatus}>
+      <span className="file-mark"><Icon name={getStatusIcon(task)} /></span>
       <div className="pack-record-copy">
         <strong title={task.output_name}>{task.output_name}</strong>
         <span
@@ -177,47 +196,122 @@ function PackRecordRow({ task, nowMs, operation, onCancel, onDelete, onDownload 
   );
 }
 
-export function PackRecordsDrawer({
+export function PackRecordsPopover(props: PackRecordsPopoverProps) {
+  const mounted = useMounted();
+  // 静态渲染（SSR）不挂 portal；内部组件只在客户端 mounted 后渲染，可安全使用 useLayoutEffect。
+  if (!mounted) return null;
+  return <PackRecordsPopoverPortal {...props} />;
+}
+
+function PackRecordsPopoverPortal({
   tasks,
   loading,
   error,
   nowMs,
   operation,
   trigger,
-  onClose,
+  closing,
+  onRequestClose,
+  onClosed,
   onRetry,
   onClear,
   onCancel,
   onDelete,
   onDownload,
-}: PackRecordsDrawerProps) {
-  const mounted = useMounted();
-  if (!mounted) return null;
+}: PackRecordsPopoverProps) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const finishedRef = useRef(false);
+
+  const finish = useCallback(() => {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
+    // 焦点在浮层内被卸载时会丢到 body，还给入口按钮；浮层外（点击穿透）不抢夺焦点。
+    const root = rootRef.current;
+    if (root && document.activeElement instanceof HTMLElement && root.contains(document.activeElement)) {
+      if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus();
+    }
+    onClosed();
+  }, [onClosed, trigger]);
+
+  useEffect(() => {
+    if (!closing) return undefined;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      finish();
+      return undefined;
+    }
+    const root = rootRef.current;
+    const timer = window.setTimeout(finish, CLOSE_FALLBACK_MS);
+    const handleAnimationEnd = (event: AnimationEvent) => {
+      if (event.target === root) finish();
+    };
+    root?.addEventListener("animationend", handleAnimationEnd);
+    return () => {
+      window.clearTimeout(timer);
+      root?.removeEventListener("animationend", handleAnimationEnd);
+    };
+  }, [closing, finish]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      // 上层还有模态（如行内操作的确认框）时，Escape 交给模态处理。
+      if (document.querySelector("dialog[open]")) return;
+      onRequestClose();
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (rootRef.current?.contains(target)) return;
+      if (trigger?.contains(target)) return;
+      // 模态（确认框、其他对话框）内部或背板上的点击不影响浮层。
+      if (target.closest("dialog")) return;
+      // 不拦截事件：点击穿透到页面元素正常生效，浮层只负责收起。
+      onRequestClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, [onRequestClose, trigger]);
+
+  useLayoutEffect(() => {
+    const place = () => {
+      const root = rootRef.current;
+      if (!root || !trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const top = Math.round(rect.bottom + ANCHOR_GAP_PX);
+      root.style.top = `${top}px`;
+      root.style.maxHeight = `${Math.max(200, Math.min(MAX_HEIGHT_PX, window.innerHeight - top - VIEWPORT_MARGIN_PX))}px`;
+      const width = root.offsetWidth;
+      const left = Math.max(
+        VIEWPORT_MARGIN_PX,
+        Math.min(rect.right - width, window.innerWidth - width - VIEWPORT_MARGIN_PX),
+      );
+      root.style.left = `${left}px`;
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [trigger]);
 
   const active = tasks.filter((task) => task.status === "pending" || task.status === "packing");
   const finished = tasks.filter((task) => task.status === "done" || task.status === "failed" || task.status === "cancelled");
   const rowProps = { nowMs, operation, onCancel, onDelete, onDownload };
 
   return createPortal(
-    <ModalOverlay
-      onClose={onClose}
-      ariaLabel="打包记录"
-      motionVariant="drawer"
-      contentClassName="pack-records-drawer"
-      trigger={trigger}
+    <div
+      ref={rootRef}
+      className={closing ? "pack-pop is-closing" : "pack-pop is-open"}
+      role="dialog"
+      aria-label="打包记录"
     >
-      <div className="drawer-header">
-        <h2>打包记录</h2>
-        <button
-          type="button"
-          className="icon-btn"
-          aria-label="关闭打包记录"
-          onClick={(event) => requestModalClose(event.currentTarget)}
-        >
-          <span><Icon name="x" /></span>
-        </button>
-      </div>
-      <div className="drawer-body pack-records-body">
+      <div className="pack-pop-body">
         {error && (
           <div className="pack-records-error" role="alert">
             <span>加载失败：{error}</span>
@@ -229,51 +323,32 @@ export function PackRecordsDrawer({
         {loading && tasks.length === 0 ? (
           <p className="muted pack-records-loading" role="status">正在读取打包记录...</p>
         ) : (tasks.length > 0 || !error) && (
-          <div className="pack-records">
-            {tasks.length === 0 ? (
-              <EmptyState
-                icon={<Icon name="archive" className="icon-lg" />}
-                title="还没有打包记录"
-                description="在文件列表选择文件后点击“打包”，记录会出现在这里。"
-              />
-            ) : (
-              <>
-                {active.length > 0 && (
-                  <>
-                    <h3 className="pack-section-label">进行中 · {active.length}</h3>
-                    {active.map((task) => <PackRecordRow key={task.id} task={task} {...rowProps} />)}
-                  </>
-                )}
-                {finished.length > 0 && (
-                  <>
-                    <h3 className="pack-section-label">已结束 · {finished.length}</h3>
-                    {finished.map((task) => <PackRecordRow key={task.id} task={task} {...rowProps} />)}
-                  </>
-                )}
-              </>
-            )}
-          </div>
+          tasks.length === 0 ? (
+            <EmptyState
+              icon={<Icon name="archive" className="icon-lg" />}
+              title="还没有打包记录"
+              description="在文件列表选择文件后点击“打包”，记录会出现在这里。"
+            />
+          ) : (
+            <div className="pack-records">
+              {active.map((task) => <PackRecordRow key={task.id} task={task} {...rowProps} />)}
+              {finished.map((task) => <PackRecordRow key={task.id} task={task} {...rowProps} />)}
+            </div>
+          )
         )}
       </div>
-      <div className="drawer-actions">
+      <div className="pack-pop-footer">
         <button
           type="button"
-          className="button secondary"
+          className="button secondary btn-sm"
           onClick={onClear}
           disabled={finished.length === 0 || operation !== null}
           aria-busy={operation === "clear"}
         >
           {operation === "clear" ? "清空中..." : "清空已结束"}
         </button>
-        <button
-          type="button"
-          className="button primary"
-          onClick={(event) => requestModalClose(event.currentTarget)}
-        >
-          关闭
-        </button>
       </div>
-    </ModalOverlay>,
+    </div>,
     document.body,
   );
 }

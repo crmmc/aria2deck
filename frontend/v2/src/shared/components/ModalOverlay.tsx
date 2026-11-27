@@ -29,7 +29,7 @@ const FOCUSABLE_SELECTOR = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
-export type OverlayMotionVariant = "dialog" | "command" | "drawer";
+export type OverlayMotionVariant = "dialog" | "command";
 
 interface ModalOverlayProps {
   onClose: () => void;
@@ -117,21 +117,20 @@ export function ModalOverlay({
 
     const variant = motionVariantRef.current;
     const isCommand = variant === "command";
-    const isDrawer = variant === "drawer";
     if (isCommand) dialog.style.opacity = "0";
     if (!dialog.open) dialog.showModal();
     setModalDialogOpen(dialog, true);
 
     const focusTarget = content.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
-    const motion = isDrawer ? null : overlayTriggerMotion(content, invokerRef.current);
+    const motion = overlayTriggerMotion(content, invokerRef.current);
     const entryMotion = {
       ...(motion ?? {
-        scale: isDrawer ? 0.985 : isCommand ? 0.86 : 0.96,
-        x: isDrawer ? 24 : 0,
+        scale: isCommand ? 0.86 : 0.96,
+        x: 0,
         y: 0,
       }),
       duration: isCommand ? 0.34 : 0.26,
-      ease: isDrawer ? "back.out(1.12)" : isCommand ? "back.out(1.2)" : "back.out(1.15)",
+      ease: isCommand ? "back.out(1.2)" : "back.out(1.15)",
     };
     entryMotionRef.current = entryMotion;
     overlayIn(content, entryMotion);
@@ -205,7 +204,7 @@ export function ModalOverlay({
   return (
     <dialog
       ref={dialogRef}
-      className={motionVariant === "drawer" ? `${className} drawer-overlay` : className}
+      className={className}
       aria-label={ariaLabel}
       aria-modal="true"
       onClick={handleDialogClick}
@@ -221,9 +220,7 @@ export function ModalOverlay({
       )}
       <div
         ref={contentRef}
-        className={motionVariant === "drawer"
-          ? `drawer-content${contentClassName ? ` ${contentClassName}` : ""}`
-          : contentClassName}
+        className={contentClassName}
         style={contentStyle}
         tabIndex={-1}
       >

@@ -32,6 +32,11 @@ export interface SearchHitView {
   entryPath: string | null;
 }
 
+/** 目录项 key：相对当前文件夹的完整路径，根目录下就是文件名本身。 */
+export function browseItemKey(path: readonly string[], name: string): string {
+  return [...path, name].join("/");
+}
+
 export function toFileView(item: FileItemResponse): FileView {
   return {
     id: item.id,
