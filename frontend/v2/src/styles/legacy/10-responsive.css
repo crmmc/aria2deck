@@ -409,6 +409,11 @@
     min-width: 200px;
   }
 
+  /* 包装层承担整行宽度：输入框仍占满可用宽度，全局开关与查询按钮换到下一行 */
+  .filter-toolbar.file-toolbar .search-sort-row .search-input-group .search-field {
+    flex: 1 1 100%;
+  }
+
   /* Shared ToolbarShell (tasks / history / shares): on desktop .toolbar-default is
      display: contents so its children join the toolbar row. That leaves the "搜索"
      label alone on its own line once the toolbar goes column on mobile, so rebuild

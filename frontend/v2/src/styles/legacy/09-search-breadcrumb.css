@@ -149,6 +149,19 @@
   align-items: center;
 }
 
+/* 输入框自己的定位容器：清空按钮挂在这里，才能贴在输入框末尾而不是整组右端（查询按钮处） */
+.search-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.search-field .toolbar-search-input {
+  padding-right: 46px;
+}
+
 .search-box {
   min-width: 220px;
 }
@@ -214,7 +227,7 @@
 
 .search-clear-btn {
   position: absolute;
-  right: 6px;
+  right: 20px;
   background: rgba(0, 0, 0, 0.1);
   border: none;
   width: 16px;
