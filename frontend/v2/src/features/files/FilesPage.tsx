@@ -20,6 +20,7 @@ import {
   browseItemKey,
   formatFileDate,
   locateFilePage,
+  matchesCondition,
   sortBrowseItems,
   sortFiles,
   toBrowseItemView,
@@ -27,6 +28,7 @@ import {
   toSearchHitView,
   type BrowseItemView,
   type FileView,
+  type FilterCondition,
   type SearchHitView,
 } from "./model";
 import { BrowseFolderView } from "./components/BrowseFolderView";
@@ -36,6 +38,7 @@ import { PackDialog } from "./components/PackDialog";
 import { RootFileTable } from "./components/RootFileTable";
 import { PackEntryButton } from "./components/PackEntryButton";
 import { CreateShareDialog } from "./components/CreateShareDialog";
+import { FilterPopover } from "./components/FilterPopover";
 
 const LOCATE_HIGHLIGHT_MS = 1800;
 const BROWSE_PAGE_SIZE = 200;
@@ -85,18 +88,30 @@ export function FilesPage() {
   const [packTasksKey, setPackTasksKey] = useState(0);
   const [downloadingFile, setDownloadingFile] = useState<number | null>(null);
 
-  // 排序与多选：选择集挂在排序后的可见顺序上，范围选择与方向键扩缩都用同一数组算下标。
+  // 本页条件筛选：条件只作用于当前页已加载数据，翻页保留、刷新不保留
+  const [conditions, setConditions] = useState<FilterCondition[]>([]);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterClosing, setFilterClosing] = useState(false);
+  const filterButtonRef = useRef<HTMLButtonElement>(null);
+
+  // 排序与多选：选择集挂在筛选后的可见顺序上，范围选择与方向键扩缩都用同一数组算下标。
   const sortedFiles = useMemo(
     () => sortFiles(files, sortField, sortOrder),
     [files, sortField, sortOrder],
   );
+
+  const visibleFiles = useMemo(
+    () => sortedFiles.filter((file) => conditions.every((condition) => matchesCondition(file, condition))),
+    [sortedFiles, conditions],
+  );
+  const activeFilterCount = conditions.filter((condition) => condition.value !== "").length;
 
   const sortedBrowseContents = useMemo(
     () => sortBrowseItems(browseContents, sortField, sortOrder),
     [browseContents, sortField, sortOrder],
   );
 
-  const rootSelectionIds = useMemo(() => sortedFiles.map((file) => file.id), [sortedFiles]);
+  const rootSelectionIds = useMemo(() => visibleFiles.map((file) => file.id), [visibleFiles]);
   const browseSelectionIds = useMemo(
     () => sortedBrowseContents.map((item) => browseItemKey(browseContext?.path ?? [], item.name)),
     [browseContext, sortedBrowseContents],
@@ -110,6 +125,7 @@ export function FilesPage() {
     toggle: toggleFileSelection,
     toggleAll: toggleRootSelectionAll,
     handleKeyDown: handleRootSelectionKeyDown,
+    setSelected: setRootSelected,
   } = rootSelection;
   const {
     clear: clearBrowseSelection,
@@ -117,6 +133,16 @@ export function FilesPage() {
     toggleAll: toggleBrowseSelectionAll,
     handleKeyDown: handleBrowseSelectionKeyDown,
   } = browseSelection;
+
+  // 筛选/翻页导致可见集合变化时，剔除已不可见的选中项：隐藏项不参与任何批量操作
+  useEffect(() => {
+    setRootSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const visibleIds = new Set(visibleFiles.map((file) => file.id));
+      const next = new Set([...prev].filter((id) => visibleIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visibleFiles, setRootSelected]);
 
   // Share dialog state
   const [shareDialogFile, setShareDialogFile] = useState<{ id: number; name: string } | null>(null);
@@ -177,6 +203,8 @@ export function FilesPage() {
       if (pendingLocateId !== null) {
         pendingRootLocateRef.current = null;
         if (views.some((f) => f.id === pendingLocateId)) {
+          // 定位目标可能被筛选隐藏：先清条件再高亮，避免定位静默失败
+          setConditions((prev) => (prev.length === 0 ? prev : []));
           setHighlightUserFileId(pendingLocateId);
           window.setTimeout(() => setHighlightUserFileId(null), LOCATE_HIGHLIGHT_MS);
           requestModalClose(searchCloseTargetRef.current);
@@ -190,7 +218,7 @@ export function FilesPage() {
     } finally {
       setLoading(false);
     }
-  }, [showToast, clearRootSelection]);
+  }, [showToast, clearRootSelection, setConditions]);
 
   useEffect(() => {
     loadFiles(currentPage, pageSize);
@@ -213,7 +241,7 @@ export function FilesPage() {
       setSortOrder(sortOrder === "asc" ? "desc" : "asc");
     } else {
       setSortField(field);
-      setSortOrder(field === "name" ? "asc" : "desc");
+      setSortOrder(field === "name" || field === "type" ? "asc" : "desc");
     }
   };
 
@@ -332,6 +360,7 @@ export function FilesPage() {
           setCurrentPage(targetPage);
           return;
         }
+        setConditions((prev) => (prev.length === 0 ? prev : []));
         setHighlightUserFileId(item.userFileId);
         window.setTimeout(() => setHighlightUserFileId(null), LOCATE_HIGHLIGHT_MS);
         requestModalClose(trigger);
@@ -380,7 +409,7 @@ export function FilesPage() {
       return;
     }
 
-    const selectedList = files.filter((f) => selectedFiles.has(f.id));
+    const selectedList = visibleFiles.filter((f) => selectedFiles.has(f.id));
     const confirmed = await showConfirm({
       title: "批量删除",
       message: `确定要删除选中的 ${selectedList.length} 个文件吗？`,
@@ -426,13 +455,13 @@ export function FilesPage() {
 
   const handleBatchDownload = async () => {
     if (selectedFiles.size === 0) return;
-    const hasFolder = files.some((f) => selectedFiles.has(f.id) && f.isDirectory);
+    const hasFolder = visibleFiles.some((f) => selectedFiles.has(f.id) && f.isDirectory);
     if (hasFolder) {
       showToast("当前选择包含文件夹，无法批量下载，请先打包后下载", "warning");
       return;
     }
 
-    const selectedList = files.filter((f) => selectedFiles.has(f.id));
+    const selectedList = visibleFiles.filter((f) => selectedFiles.has(f.id));
     showToast(`正在发送已选 ${selectedList.length} 个文件的下载请求，请稍候...`, "info");
 
     // C24：归档参考 节奏 1200ms，显式传入。
@@ -454,7 +483,7 @@ export function FilesPage() {
     setAvailableSpace(null);
     setPackOutputName("");
     try {
-      const fileIds = Array.from(selectedFiles);
+      const fileIds = visibleFiles.filter((f) => selectedFiles.has(f.id)).map((f) => f.id);
       const result = await precomputePack(fileIds);
       setPackSize(result.total_size);
       setAvailableSpace(result.available_bytes);
@@ -469,7 +498,7 @@ export function FilesPage() {
   const handlePackConfirm = async (trigger: Element) => {
     setPacking(true);
     try {
-      const fileIds = Array.from(selectedFiles);
+      const fileIds = visibleFiles.filter((f) => selectedFiles.has(f.id)).map((f) => f.id);
       // P1：归档参考实现的默认输出名由后端生成（base="archive" + "." + pack_format，默认 zip）。
       // V2 必填 output_name，前端按 归档参考规则复刻默认值。
       await createPack(fileIds, packOutputName || "archive.zip", packDeleteSource);
@@ -491,10 +520,10 @@ export function FilesPage() {
   }, [toggleRootSelectionAll]);
 
   const selectedSize = useMemo(() => {
-    return files
+    return visibleFiles
       .filter((f) => selectedFiles.has(f.id))
       .reduce((sum, f) => sum + f.size, 0);
-  }, [files, selectedFiles]);
+  }, [visibleFiles, selectedFiles]);
 
   const selectedBrowseSize = useMemo(() => {
     return browseContents
@@ -654,6 +683,10 @@ export function FilesPage() {
           searchGlobal={searchGlobal}
           searchLoading={searchLoading}
           searchInputRef={toolbarSearchInputRef}
+          filterButtonRef={filterButtonRef}
+          filterActiveCount={activeFilterCount}
+          filterOpen={filterOpen}
+          onToggleFilter={() => (filterOpen ? setFilterClosing(true) : setFilterOpen(true))}
           onReturnToRoot={returnToRoot}
           onNavigateToBreadcrumb={navigateToBreadcrumb}
           onSortFieldChange={setSortField}
@@ -663,6 +696,12 @@ export function FilesPage() {
           onSearchGlobalChange={setSearchGlobal}
           onSearchSubmit={() => { void runSearch(); }}
         />
+        {activeFilterCount > 0 && (
+          <div className="filter-status">
+            <span>已隐藏 {files.length - visibleFiles.length} / 本页 {files.length} 项</span>
+            <button type="button" className="link-btn" onClick={() => setConditions([])}>清除筛选</button>
+          </div>
+        )}
         {isInsideFolder ? (
           <BrowseFolderView
             isMobile={isMobile}
@@ -690,7 +729,9 @@ export function FilesPage() {
             isMobile={isMobile}
             loading={loading}
             error={error}
-            sortedFiles={sortedFiles}
+            sortedFiles={visibleFiles}
+            filteredEmpty={files.length > 0 && visibleFiles.length === 0}
+            onClearFilter={() => setConditions([])}
             selectedFiles={selectedFiles}
             renaming={renaming}
             newName={newName}
@@ -781,6 +822,23 @@ export function FilesPage() {
           </div>
         </div>,
         document.body,
+      )}
+
+      {/* Filter Popover */}
+      {filterOpen && mounted && (
+        <FilterPopover
+          conditions={conditions}
+          files={files}
+          visibleCount={visibleFiles.length}
+          trigger={filterButtonRef.current}
+          closing={filterClosing}
+          onChange={setConditions}
+          onRequestClose={() => setFilterClosing(true)}
+          onClosed={() => {
+            setFilterOpen(false);
+            setFilterClosing(false);
+          }}
+        />
       )}
 
       {/* Search result modal */}

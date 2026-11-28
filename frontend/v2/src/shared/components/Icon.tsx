@@ -16,6 +16,7 @@ export type IconName =
   | "eye-off"
   | "file"
   | "files"
+  | "filter"
   | "folder"
   | "info"
   | "key"
@@ -52,6 +53,7 @@ const drawings: Record<IconName, ReactNode> = {
   "eye-off": <path d="m3 3 18 18M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3 3.5M6.2 6.2C3.4 8.2 2 12 2 12s3.5 7 10 7a10 10 0 0 0 4-.8M10 10a3 3 0 0 0 4 4" />,
   file: <><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" /><path d="M14 3v6h6M8 14h8M8 17h5" /></>,
   files: <path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
+  filter: <path d="M3 5h18l-7 8v6l-4 2v-8Z" />,
   folder: <path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
   info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>,
   key: <><circle cx="8" cy="15" r="4" /><path d="m11 12 9-9M15 8l3 3M17 6l2 2" /></>,

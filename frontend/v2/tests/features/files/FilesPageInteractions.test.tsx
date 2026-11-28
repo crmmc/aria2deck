@@ -127,24 +127,28 @@ describe("FilesPage 排序", () => {
 
     const headers = () => Array.from(document.querySelectorAll(".sortable-header"));
     const icons = () => headers().map((el) => el.querySelector(".sort-icon")?.getAttribute("data-icon"));
-    expect(icons()).toEqual(["sort", "sort", "chevron-down"]);
+    expect(icons()).toEqual(["sort", "sort", "sort", "chevron-down"]);
 
     // 点名称表头：切到 name-asc。
     fireEvent.click(headers()[0]);
     await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("name-asc"));
-    expect(icons()).toEqual(["chevron-up", "sort", "sort"]);
+    expect(icons()).toEqual(["chevron-up", "sort", "sort", "sort"]);
 
     // 再点同一个：方向翻转。
     fireEvent.click(headers()[0]);
     await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("name-desc"));
-    expect(icons()).toEqual(["chevron-down", "sort", "sort"]);
+    expect(icons()).toEqual(["chevron-down", "sort", "sort", "sort"]);
 
-    // 点大小表头：字段切换，非名称字段默认降序。
+    // 点类型表头：文本类字段默认升序。
     fireEvent.click(headers()[1]);
+    await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("type-asc"));
+
+    // 点大小表头：字段切换，非文本字段默认降序。
+    fireEvent.click(headers()[2]);
     await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("size-desc"));
 
     // 点时间表头。
-    fireEvent.click(headers()[2]);
+    fireEvent.click(headers()[3]);
     await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("created_at-desc"));
   });
 });

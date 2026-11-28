@@ -2,7 +2,7 @@ import type { RefObject } from "react";
 import { Icon } from "@/shared/components/Icon";
 import type { BrowseItemView } from "../model";
 
-export type SortField = "name" | "size" | "created_at";
+export type SortField = "name" | "size" | "created_at" | "type";
 export type SortOrder = "asc" | "desc";
 
 export type BrowseContext = {
@@ -21,6 +21,10 @@ type FileToolbarProps = {
   searchGlobal: boolean;
   searchLoading: boolean;
   searchInputRef?: RefObject<HTMLInputElement>;
+  filterButtonRef: RefObject<HTMLButtonElement>;
+  filterActiveCount: number;
+  filterOpen: boolean;
+  onToggleFilter: () => void;
   onReturnToRoot: () => void;
   onNavigateToBreadcrumb: (index: number) => void;
   onSortFieldChange: (field: SortField) => void;
@@ -41,6 +45,10 @@ export function FileToolbar({
   searchGlobal,
   searchLoading,
   searchInputRef,
+  filterButtonRef,
+  filterActiveCount,
+  filterOpen,
+  onToggleFilter,
   onReturnToRoot,
   onNavigateToBreadcrumb,
   onSortFieldChange,
@@ -109,10 +117,25 @@ export function FileToolbar({
             <option value="created_at-asc">时间 (最早)</option>
             <option value="name-asc">名称 (A-Z)</option>
             <option value="name-desc">名称 (Z-A)</option>
+            <option value="type-asc">类型 (A-Z)</option>
+            <option value="type-desc">类型 (Z-A)</option>
             <option value="size-desc">大小 (最大)</option>
             <option value="size-asc">大小 (最小)</option>
           </select>
         </div>
+
+        <button
+          ref={filterButtonRef}
+          type="button"
+          className={`button secondary btn-sm filter-btn${filterActiveCount > 0 ? " is-active" : ""}`}
+          aria-haspopup="dialog"
+          aria-expanded={filterOpen}
+          onClick={onToggleFilter}
+        >
+          <Icon name="filter" className="icon-sm" />
+          筛选
+          {filterActiveCount > 0 && <span className="filter-badge">{filterActiveCount}</span>}
+        </button>
 
         <div className="filter-group search-input-group">
           <div className="search-field">

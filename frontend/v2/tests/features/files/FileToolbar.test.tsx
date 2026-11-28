@@ -19,6 +19,10 @@ function baseProps() {
     toolbarSearchKeyword: "",
     searchGlobal: false,
     searchLoading: false,
+    filterButtonRef: { current: null },
+    filterActiveCount: 0,
+    filterOpen: false,
+    onToggleFilter: jest.fn(),
     onReturnToRoot: jest.fn(),
     onNavigateToBreadcrumb: jest.fn(),
     onSortFieldChange: jest.fn(),
@@ -29,6 +33,29 @@ function baseProps() {
     onSearchSubmit: jest.fn(),
   };
 }
+
+describe("FileToolbar 筛选入口与排序选项", () => {
+  it("筛选按钮触发开关回调，激活时显示条件数徽标", () => {
+    const props = baseProps();
+    const { rerender } = render(<FileToolbar {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    expect(props.onToggleFilter).toHaveBeenCalled();
+    rerender(<FileToolbar {...props} filterActiveCount={2} filterOpen />);
+    expect(screen.getByRole("button", { name: /筛选/ })).toHaveClass("is-active");
+    expect(screen.getByText("2")).toHaveClass("filter-badge");
+    expect(screen.getByRole("button", { name: /筛选/ })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("排序下拉包含类型选项并可切换", () => {
+    const props = baseProps();
+    render(<FileToolbar {...props} />);
+    const select = screen.getByLabelText("排序方式") as HTMLSelectElement;
+    expect([...select.options].map((option) => option.value)).toContain("type-asc");
+    fireEvent.change(select, { target: { value: "type-asc" } });
+    expect(props.onSortFieldChange).toHaveBeenCalledWith("type");
+    expect(props.onSortOrderChange).toHaveBeenCalledWith("asc");
+  });
+});
 
 describe("FileToolbar 面包屑", () => {
   it("根目录态只显示根目录标签，没有返回按钮", () => {

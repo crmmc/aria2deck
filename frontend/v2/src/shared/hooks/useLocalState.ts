@@ -6,7 +6,8 @@ export type LocalStateKey =
   | "tasks.filter"
   | "notifications.enabled"
   | "notifications.on_completed"
-  | "notifications.on_failed";
+  | "notifications.on_failed"
+  | "files.column_widths";
 
 const STORAGE_ERROR_MESSAGE = "浏览器本地存储不可用，设置将不会保留";
 

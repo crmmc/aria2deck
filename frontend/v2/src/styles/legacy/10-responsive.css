@@ -999,14 +999,21 @@
     grid-template-columns: 34px minmax(200px, 1.3fr) minmax(135px, 0.75fr) 84px 94px 116px;
   }
 
-  .file-table-head,
-  .file-row {
-    grid-template-columns: 34px minmax(220px, 1fr) 90px 126px;
+  .file-table-head:not(.browse-file-head),
+  .file-row:not(.browse-file-row) {
+    grid-template-columns:
+      34px minmax(200px, 1fr) var(--file-cols-type, 84px) var(--file-cols-size, 92px)
+      var(--file-cols-ops, 122px);
   }
 
-  .file-table-head:not(.browse-file-head) > :nth-child(4),
+  .file-table-head:not(.browse-file-head) > :nth-child(5),
   .file-row:not(.browse-file-row) > .file-date {
     display: none;
+  }
+
+  .browse-file-head,
+  .browse-file-row {
+    grid-template-columns: 34px minmax(220px, 1fr) 90px 126px;
   }
 }
 
