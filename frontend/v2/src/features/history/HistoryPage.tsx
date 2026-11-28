@@ -206,6 +206,8 @@ export function HistoryPage() {
     try {
       const ids = selectedList.map((r) => r.id);
       const result = await deleteHistory(ids);
+      // 与单条删除一致：迟到响应不得在卸载后提示或触发刷新
+      if (!mountedRef.current) return;
       // items 按请求顺序回位；accepted 项以 task.id 为准，缺 task 时按序号配对。
       const deletedIds = new Set(
         result.items
