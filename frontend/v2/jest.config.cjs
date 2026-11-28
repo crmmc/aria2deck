@@ -2,6 +2,9 @@
 module.exports = {
   coverageProvider: 'v8',
   testEnvironment: 'jsdom',
+  // 全量 + 覆盖率插桩在负载机器上的单用例耗时远高于开发机空载；30s 是护栏而非修复，
+  // 真正的提速来自 setup.ts 注入原生 webcrypto（消除纯 JS PBKDF2）。
+  testTimeout: 30000,
   roots: ['<rootDir>/tests'],
   setupFilesAfterEnv: ['<rootDir>/tests/setup.ts'],
   transform: {
