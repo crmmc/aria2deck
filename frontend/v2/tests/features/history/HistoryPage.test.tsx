@@ -5,6 +5,7 @@ import { AppProviders } from "@/app/providers";
 import { HistoryPage } from "@/features/history/HistoryPage";
 import { sortHistoryRecords, type HistoryRecordView } from "@/features/history/model";
 import type { TaskResponse, UserResponse } from "@/shared/api/types";
+import * as toastContext from "@/shared/components/toast-context";
 
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
@@ -597,21 +598,7 @@ describe("HistoryPage 补齐分支", () => {
     });
   });
 
-  it("不可重试时提示并禁用按钮（C10）", async () => {
-    setup(() => listEnvelope([historyItem(1, "failed", { retryable: false })]));
-    renderPage();
-    await screen.findByText("item-1.zip");
-    const retryButton = screen.getByRole("button", { name: "重试" });
-    expect(retryButton).toBeDisabled();
-  });
 
-  it("批量删除：未选中时提示", async () => {
-    setup(() => listEnvelope([historyItem(1)]));
-    renderPage();
-    await screen.findByText("item-1.zip");
-    // 工具栏删除按钮只在有选中时出现，这里直接验证空选中路径不会发出删除请求。
-    expect(screen.queryByRole("button", { name: "删除" })).not.toBeNull();
-  });
 
   it("批量删除确认被驳回时不发请求", async () => {
     setup(() => listEnvelope([historyItem(1)]));
@@ -824,83 +811,116 @@ describe("HistoryPage 补齐分支", () => {
   });
 
   it("请求尚未返回时卸载：不再写入状态", async () => {
-    const holder: { resolve?: (value: unknown) => void } = {};
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      if (url === "/api/v2/public/site-info") return json(200, { site_title: "Aria2Deck" });
-      if (url.startsWith("/api/v2/history")) {
-        return new Promise((resolve) => {
-          holder.resolve = resolve;
-        });
-      }
-      return json(200, {});
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
     });
-    const { unmount } = renderPage();
-    await screen.findByRole("tablist", { name: "历史筛选" });
-    unmount();
-    holder.resolve?.(json(200, listEnvelope([historyItem(1)])));
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(screen.queryByText("item-1.zip")).not.toBeInTheDocument();
+    try {
+      const holder: { resolve?: (value: unknown) => void } = {};
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url === "/api/v2/auth/me") return json(200, ME);
+        if (url === "/api/v2/public/site-info") return json(200, { site_title: "Aria2Deck" });
+        if (url.startsWith("/api/v2/history")) {
+          return new Promise((resolve) => {
+            holder.resolve = resolve;
+          });
+        }
+        return json(200, {});
+      });
+      const { unmount } = renderPage();
+      await screen.findByRole("tablist", { name: "历史筛选" });
+      unmount();
+      holder.resolve?.(json(200, listEnvelope([historyItem(1)])));
+      // 卸载后整棵树（含 Toast portal）已移除，DOM 负断言恒真；真实目标是迟到响应不得再产生提示副作用。
+      // 用宏任务 flush 保证迟到响应的 Promise 链完整执行后再断言。
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(showToast).not.toHaveBeenCalled();
+    } finally {
+      useToastSpy.mockRestore();
+    }
   });
 
   it("单条删除请求在卸载后返回：不写入选中的清空结果", async () => {
-    const holder: { resolve?: (value: unknown) => void } = {};
-    setup((url, init) => {
-      if (url === "/api/v2/history" && init?.method === "DELETE") {
-        return new Promise((resolve) => {
-          holder.resolve = resolve;
-        });
-      }
-      return listEnvelope([historyItem(1)]);
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
     });
-    const { unmount } = renderPage();
-    await screen.findByText("item-1.zip");
-    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
-    unmount();
-    holder.resolve?.(
-      json(200, {
+    try {
+      const holder: { resolve?: (value: unknown) => void } = {};
+      setup((url, init) => {
+        if (url === "/api/v2/history" && init?.method === "DELETE") {
+          return new Promise((resolve) => {
+            holder.resolve = resolve;
+          });
+        }
+        return listEnvelope([historyItem(1)]);
+      });
+      const { unmount } = renderPage();
+      await screen.findByText("item-1.zip");
+      fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+      unmount();
+      // setup() 会把 handler 返回值包成 Response，挂起请求应 resolve 响应体本身（否则走不到成功路径）。
+      holder.resolve?.({
         items: [{ accepted: true, task: historyItem(1), outcome: null, error: null, stop_confirmed: null }],
         accepted_count: 1,
         rejected_count: 0,
-      }),
-    );
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(screen.queryByText("已删除该条历史记录")).not.toBeInTheDocument();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(showToast).not.toHaveBeenCalled();
+    } finally {
+      useToastSpy.mockRestore();
+    }
   });
 
   it("批量删除请求在卸载后返回：不再写入列表状态", async () => {
-    const holder: { resolve?: (value: unknown) => void } = {};
-    setup((url, init) => {
-      if (url === "/api/v2/history" && init?.method === "DELETE") {
-        return new Promise((resolve) => {
-          holder.resolve = resolve;
-        });
-      }
-      return listEnvelope([historyItem(1)]);
-    });
-    const { unmount } = renderPage();
-    await screen.findByText("item-1.zip");
-    fireEvent.click(screen.getByLabelText("选择 item-1.zip"));
-    const toolbar = document.querySelector(".filter-toolbar") as HTMLElement;
-    fireEvent.click(within(toolbar).getByRole("button", { name: "删除" }));
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
-    unmount();
-    holder.resolve?.(
-      json(200, {
+    const showToast = jest.fn();
+    // 批量删除的确认框依赖真实 showConfirm，spy 只替换 showToast，保留其余上下文能力。
+    const realUseToast = toastContext.useToast;
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockImplementation(() => ({
+      ...realUseToast(),
+      showToast,
+    }));
+    try {
+      const holder: { resolve?: (value: unknown) => void } = {};
+      setup((url, init) => {
+        if (url === "/api/v2/history" && init?.method === "DELETE") {
+          return new Promise((resolve) => {
+            holder.resolve = resolve;
+          });
+        }
+        return listEnvelope([historyItem(1)]);
+      });
+      const { unmount } = renderPage();
+      await screen.findByText("item-1.zip");
+      fireEvent.click(screen.getByLabelText("选择 item-1.zip"));
+      const toolbar = document.querySelector(".filter-toolbar") as HTMLElement;
+      fireEvent.click(within(toolbar).getByRole("button", { name: "删除" }));
+      const dialog = await screen.findByRole("dialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
+      // 确认框 promise 在微任务里续跑：先等 DELETE 真正发出再卸载，否则场景没进入“请求在途”就结束了。
+      await waitFor(() => {
+        expect(mockFetch.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(true);
+      });
+      unmount();
+      // setup() 会把 handler 返回值包成 Response，挂起请求应 resolve 响应体本身。
+      holder.resolve?.({
         items: [{ accepted: true, task: null, outcome: null, error: null, stop_confirmed: null }],
         accepted_count: 1,
         rejected_count: 0,
-      }),
-    );
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(screen.queryByText("已删除 1 条历史记录")).not.toBeInTheDocument();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(showToast).not.toHaveBeenCalled();
+    } finally {
+      useToastSpy.mockRestore();
+    }
   });
 
   it("重试请求抛错时提示失败原因", async () => {

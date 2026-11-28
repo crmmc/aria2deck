@@ -274,3 +274,101 @@ describe("RootFileTable 移动卡片", () => {
     expect(cards[1].getAttribute("aria-current")).toBeNull();
   });
 });
+
+describe("RootFileTable 类型列", () => {
+  it("渲染类型单元格并支持类型排序", () => {
+    const props = baseProps();
+    render(<RootFileTable {...props} />);
+    expect(screen.getByText("txt")).toBeInTheDocument();
+    const typeCells = [...document.querySelectorAll(".file-row .file-type")].map((el) => el.textContent);
+    expect(typeCells).toEqual(["txt", "文件夹"]);
+    fireEvent.click(screen.getByRole("button", { name: /类型/ }));
+    expect(props.onSort).toHaveBeenCalledWith("type");
+  });
+
+  it("筛选至空时显示专属空态并可清除筛选", () => {
+    const onClearFilter = jest.fn();
+    render(<RootFileTable {...baseProps()} sortedFiles={[]} filteredEmpty onClearFilter={onClearFilter} />);
+    expect(screen.getByText("当前页没有符合筛选条件的文件")).toBeInTheDocument();
+    expect(screen.queryByText("暂无文件")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(onClearFilter).toHaveBeenCalled();
+  });
+});
+
+describe("RootFileTable 列宽调节", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("默认列宽经 CSS 自定义属性注入", () => {
+    render(<RootFileTable {...baseProps()} />);
+    const wrapper = screen.getByTestId("file-list");
+    expect(wrapper.style.getPropertyValue("--file-cols-type")).toBe("84px");
+    expect(wrapper.style.getPropertyValue("--file-cols-size")).toBe("92px");
+    expect(wrapper.style.getPropertyValue("--file-cols-date")).toBe("146px");
+    expect(wrapper.style.getPropertyValue("--file-cols-ops")).toBe("122px");
+  });
+
+  it("读取持久化列宽并钳制越界值", () => {
+    window.localStorage.setItem("files.column_widths", JSON.stringify({ type: 120, size: 999 }));
+    render(<RootFileTable {...baseProps()} />);
+    const wrapper = screen.getByTestId("file-list");
+    expect(wrapper.style.getPropertyValue("--file-cols-type")).toBe("120px");
+    expect(wrapper.style.getPropertyValue("--file-cols-size")).toBe("200px");
+  });
+
+  it("损坏的本地数据回退默认值", () => {
+    window.localStorage.setItem("files.column_widths", "not-json");
+    render(<RootFileTable {...baseProps()} />);
+    expect(screen.getByTestId("file-list").style.getPropertyValue("--file-cols-type")).toBe("84px");
+  });
+
+  it("拖拽更新预览、越界钳制、抬起后持久化", () => {
+    render(<RootFileTable {...baseProps()} />);
+    const wrapper = screen.getByTestId("file-list");
+    const handle = screen.getByRole("separator", { name: "调整类型列宽" });
+    // jsdom 无 PointerEvent 构造器，用 MouseEvent 携带 clientX 模拟 pointer 序列
+    const pointer = (type: string, clientX: number) => new MouseEvent(type, { bubbles: true, cancelable: true, clientX });
+    fireEvent(handle, pointer("pointerdown", 100));
+    expect(document.body.classList.contains("col-resizing")).toBe(true);
+    fireEvent(handle, pointer("pointermove", 130));
+    expect(wrapper.style.getPropertyValue("--file-cols-type")).toBe("114px");
+    fireEvent(handle, pointer("pointermove", 600));
+    expect(wrapper.style.getPropertyValue("--file-cols-type")).toBe("200px");
+    fireEvent(handle, pointer("pointerup", 600));
+    expect(document.body.classList.contains("col-resizing")).toBe(false);
+    expect(JSON.parse(window.localStorage.getItem("files.column_widths")!).type).toBe(200);
+  });
+
+  it("双击手柄恢复该列默认宽度", () => {
+    window.localStorage.setItem("files.column_widths", JSON.stringify({ type: 120 }));
+    render(<RootFileTable {...baseProps()} />);
+    const wrapper = screen.getByTestId("file-list");
+    fireEvent.doubleClick(screen.getByRole("separator", { name: "调整类型列宽" }));
+    expect(wrapper.style.getPropertyValue("--file-cols-type")).toBe("84px");
+    expect(JSON.parse(window.localStorage.getItem("files.column_widths")!).type).toBe(84);
+  });
+
+  it("拖拽时不触发列头排序", () => {
+    const props = baseProps();
+    render(<RootFileTable {...props} />);
+    const handle = screen.getByRole("separator", { name: "调整类型列宽" });
+    const pointer = (type: string, clientX: number) => new MouseEvent(type, { bubbles: true, cancelable: true, clientX });
+    fireEvent(handle, pointer("pointerdown", 100));
+    fireEvent(handle, pointer("pointermove", 120));
+    fireEvent(handle, pointer("pointerup", 120));
+    fireEvent.click(handle);
+    expect(props.onSort).not.toHaveBeenCalled();
+  });
+
+  it("未开始拖拽时移动与抬起均为空操作", () => {
+    render(<RootFileTable {...baseProps()} />);
+    const wrapper = screen.getByTestId("file-list");
+    const handle = screen.getByRole("separator", { name: "调整类型列宽" });
+    fireEvent(handle, new MouseEvent("pointermove", { bubbles: true, clientX: 500 }));
+    fireEvent(handle, new MouseEvent("pointerup", { bubbles: true }));
+    expect(wrapper.style.getPropertyValue("--file-cols-type")).toBe("84px");
+    expect(document.body.classList.contains("col-resizing")).toBe(false);
+  });
+});

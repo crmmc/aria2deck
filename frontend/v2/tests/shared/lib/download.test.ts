@@ -9,13 +9,20 @@ describe("triggerFileDownload", () => {
     const created: HTMLElement[] = [];
     const click = jest.fn();
     const remove = jest.fn();
+    const assigned: Record<string, string> = {};
     const appendChild = jest.spyOn(document.body, "appendChild").mockImplementation((node) => {
       created.push(node as HTMLElement);
       return node;
     });
     const anchorSpy = jest.spyOn(document, "createElement").mockImplementation((tag) => {
       if (tag === "a") {
-        return { click, remove, set href(_v: string) {}, set rel(_v: string) {}, set download(_v: string) {} } as unknown as HTMLElement;
+        return {
+          click,
+          remove,
+          set href(value: string) { assigned.href = value; },
+          set rel(value: string) { assigned.rel = value; },
+          set download(value: string) { assigned.download = value; },
+        } as unknown as HTMLElement;
       }
       return document.createElement(tag);
     });
@@ -24,6 +31,7 @@ describe("triggerFileDownload", () => {
       expect(created).toHaveLength(1);
       expect(click).toHaveBeenCalledTimes(1);
       expect(remove).toHaveBeenCalledTimes(1);
+      expect(assigned).toEqual({ href: "/api/v2/files/3/download", rel: "noopener", download: "报告.pdf" });
     } finally {
       anchorSpy.mockRestore();
       appendChild.mockRestore();

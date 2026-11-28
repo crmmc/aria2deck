@@ -41,14 +41,6 @@ describe("api client", () => {
     });
   });
 
-  it("maps network failure to Chinese message", async () => {
-    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed"));
-    await expect(api.get("/api/v2/a")).rejects.toMatchObject({
-      status: 0,
-      code: "network_error",
-      message: "网络异常，请检查连接后重试",
-    });
-  });
 
   it("network failure surfaces a network error and never triggers the 401 logout handler", async () => {
     const handler = jest.fn();

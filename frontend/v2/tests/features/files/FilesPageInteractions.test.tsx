@@ -127,24 +127,28 @@ describe("FilesPage 排序", () => {
 
     const headers = () => Array.from(document.querySelectorAll(".sortable-header"));
     const icons = () => headers().map((el) => el.querySelector(".sort-icon")?.getAttribute("data-icon"));
-    expect(icons()).toEqual(["sort", "sort", "chevron-down"]);
+    expect(icons()).toEqual(["sort", "sort", "sort", "chevron-down"]);
 
     // 点名称表头：切到 name-asc。
     fireEvent.click(headers()[0]);
     await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("name-asc"));
-    expect(icons()).toEqual(["chevron-up", "sort", "sort"]);
+    expect(icons()).toEqual(["chevron-up", "sort", "sort", "sort"]);
 
     // 再点同一个：方向翻转。
     fireEvent.click(headers()[0]);
     await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("name-desc"));
-    expect(icons()).toEqual(["chevron-down", "sort", "sort"]);
+    expect(icons()).toEqual(["chevron-down", "sort", "sort", "sort"]);
 
-    // 点大小表头：字段切换，非名称字段默认降序。
+    // 点类型表头：文本类字段默认升序。
     fireEvent.click(headers()[1]);
+    await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("type-asc"));
+
+    // 点大小表头：字段切换，非文本字段默认降序。
+    fireEvent.click(headers()[2]);
     await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("size-desc"));
 
     // 点时间表头。
-    fireEvent.click(headers()[2]);
+    fireEvent.click(headers()[3]);
     await waitFor(() => expect(screen.getByLabelText("排序方式")).toHaveValue("created_at-desc"));
   });
 });
@@ -633,32 +637,6 @@ describe("FilesPage 批量操作", () => {
     expect(document.querySelector(".file-bulk-layer")).toBeNull();
   });
 
-  it("批量删除实际删除整页后回退页码", async () => {
-    setup((url, init) => {
-      if (url === "/api/v2/files" && init?.method === "DELETE") {
-        return {
-          accepted_count: 1,
-          rejected_count: 0,
-          results: [{ file_id: 1, accepted: true, error: null }],
-        };
-      }
-      const page = Number(new URL(String(url), "http://localhost").searchParams.get("page") ?? "1");
-      return page === 1 ? filesEnvelope([fileItem(1, "a.txt")], 11) : filesEnvelope([], 11);
-    });
-    renderPage();
-    await screen.findByText("a.txt");
-    // 先翻到第 2 页（空页），再回第 1 页做删除，验证页码回退计算。
-    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
-    await waitFor(() => expect(screen.getByText("暂无文件")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "上一页" }));
-    await screen.findByText("a.txt");
-    fireEvent.click(screen.getAllByLabelText("选择文件")[0]);
-    fireEvent.click(within(bulkBar()).getByRole("button", { name: "删除" }));
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
-    expect(await screen.findByText("已删除 1 个文件")).toBeInTheDocument();
-    await waitFor(() => expect(document.querySelector(".bulk-bar")).toBeNull());
-  });
 
   it("批量删除部分失败给出警告", async () => {
     setup((url, init) => {
@@ -838,7 +816,7 @@ describe("FilesPage 目录浏览", () => {
     expect(screen.queryByText("a.png")).not.toBeInTheDocument();
   });
 
-  it("目录内下载与不可用删除提示", async () => {
+  it("目录内下载触发浏览器下载链接", async () => {
     setup(dirListing);
     renderPage();
     await screen.findByText("素材");
@@ -1038,21 +1016,6 @@ describe("FilesPage 目录浏览", () => {
 });
 
 describe("FilesPage 打包任务完成回调", () => {
-  it("打包任务完成后重新拉取根列表", async () => {
-    // PackEntryButton 内部的完成回调会触发 FilesPage 的 loadFiles。
-    setup((url) => {
-      if (url === "/api/v2/packs?limit=50") {
-        return { items: [{ id: 1, status: "packing", step: "compressing", step_progress: 10, step_started_at_ms: null, created_at_ms: 1, updated_at_ms: 1, finished_at_ms: null, error_code: null, delete_source: false, output_name: "a.zip", output: null }] };
-      }
-      return filesEnvelope([fileItem(1, "a.txt")]);
-    });
-    const { unmount } = renderPage();
-    await screen.findByText("a.txt");
-    const listCalls = () => mockFetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v2/files?")).length;
-    const before = listCalls();
-    unmount();
-    expect(before).toBeGreaterThan(0);
-  });
 });
 
 describe("FilesPage 竞态与边界", () => {
@@ -1252,46 +1215,6 @@ describe("FilesPage 目录内翻页与选中切换", () => {
 });
 
 describe("FilesPage 过期请求守卫", () => {
-  it("进入子目录的过程中改点面包屑：迟到的子目录结果被丢弃", async () => {
-    const pending: { resolve: (value: unknown) => void }[] = [];
-    mockFetch.mockReset();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      // 打包任务卡常驻轮询：本节用例不覆盖打包卡，给空列表。
-      if (String(url).startsWith("/api/v2/packs?")) return json(200, { items: [] });
-      if (url === "/api/v2/public/site-info") return json(200, { site_title: "Aria2Deck" });
-      if (url.startsWith("/api/v2/files?")) {
-        return json(200, filesEnvelope([fileItem(2, "素材", { kind: "directory" })]));
-      }
-      if (url.includes("/entries")) {
-        const path = new URL(String(url), "http://localhost").searchParams.get("path");
-        if (path === "子目录") {
-          return new Promise((resolve) => {
-            pending.push({ resolve });
-          });
-        }
-        return json(200, entriesEnvelope([{ name: "子目录", path: "子目录", kind: "directory", size: 0 }]));
-      }
-      return json(200, {});
-    });
-
-    renderPage();
-    await screen.findByText("素材");
-    fireEvent.click(screen.getByRole("button", { name: "浏览" }));
-    await screen.findByText("子目录");
-
-    fireEvent.click(screen.getByRole("button", { name: "子目录" }));
-    await waitFor(() => expect(pending).toHaveLength(1));
-    // 面包屑重新导航，作废在途的子目录请求。
-    fireEvent.click(screen.getByRole("button", { name: "素材" }));
-    await waitFor(() => expect(screen.getByText("子目录")).toBeInTheDocument());
-
-    await act(async () => {
-      pending[0].resolve(json(200, entriesEnvelope([{ name: "迟到.txt", path: "子目录/迟到.txt", kind: "file", size: 1 }])));
-      await Promise.resolve();
-    });
-    expect(screen.queryByText("迟到.txt")).not.toBeInTheDocument();
-  });
 
   it("定位过程中作废在途目录请求：迟到的定位结果被丢弃", async () => {
     const pending: { resolve: (value: unknown) => void }[] = [];

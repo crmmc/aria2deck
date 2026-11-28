@@ -379,7 +379,9 @@ dialog.command-dialog {
 .file-table-head,
 .file-row {
   display: grid;
-  grid-template-columns: 34px minmax(250px, 1.5fr) 110px 160px 126px;
+  grid-template-columns:
+    34px minmax(220px, 1fr) var(--file-cols-type, 84px) var(--file-cols-size, 92px)
+    var(--file-cols-date, 146px) var(--file-cols-ops, 122px);
   gap: 12px;
   align-items: center;
   padding: 0 18px;
@@ -412,6 +414,46 @@ dialog.command-dialog {
   min-width: 0;
 }
 
+.file-table-head > .table-cell {
+  position: relative;
+}
+
+/* 列宽拖拽手柄：挂在表头单元格右缘，列宽经 --file-cols-* 自定义属性注入 */
+.col-resizer {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  bottom: 0;
+  width: 10px;
+  cursor: col-resize;
+  z-index: 5;
+  touch-action: none;
+}
+
+.col-resizer::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background 120ms;
+}
+
+.col-resizer:hover::after,
+.col-resizer.dragging::after {
+  background: var(--primary);
+  opacity: 0.55;
+}
+
+body.col-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
 .file-table-head .sortable-header {
   padding: 0;
 }
@@ -420,12 +462,19 @@ dialog.command-dialog {
   min-width: 0;
 }
 
+.file-type,
 .file-size,
 .file-date {
   min-width: 0;
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.file-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .task-main {
@@ -2689,6 +2738,237 @@ dialog.confirm-overlay {
   border-radius: 8px;
   font-size: 11px;
   line-height: 1.5;
+}
+
+/* ===== 文件页条件筛选：入口按钮、状态行、条件浮层与自定义下拉 ===== */
+.filter-btn {
+  gap: 6px;
+}
+
+.filter-btn.is-active {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.filter-btn .filter-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.filter-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -6px 4px 10px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.filter-status .link-btn {
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--primary);
+  font-size: var(--text-xs);
+}
+
+.filter-status .link-btn:hover {
+  text-decoration: underline;
+}
+
+.filter-pop {
+  width: 424px;
+}
+
+.filter-pop .filter-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px 6px;
+}
+
+.filter-pop .filter-head .scope {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.filter-cond-list {
+  display: grid;
+  gap: 2px;
+  padding: 4px 12px 8px;
+}
+
+.filter-cond-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-cond-row .cond-remove {
+  flex: 0 0 auto;
+}
+
+.filter-and {
+  padding: 1px 0 1px 2px;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 2px;
+  user-select: none;
+}
+
+.filter-add-row {
+  margin: 0 12px 8px;
+  padding: 6px;
+  width: calc(100% - 24px);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.filter-add-row:hover:not(:disabled) {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.filter-add-row:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.filter-empty-hint {
+  padding: 6px 12px 10px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+.filter-pop .pack-pop-footer {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.filter-pop .filter-hidden-note {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* 自定义下拉 FilterSelect：触发器 + fixed 定位选项列表，与 pack-pop 同视觉体系 */
+.cselect {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 5px 8px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.65);
+  color: var(--foreground);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color 120ms, box-shadow 120ms;
+}
+
+.cselect:hover {
+  border-color: rgba(0, 113, 227, 0.45);
+}
+
+.cselect.is-open {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.12);
+}
+
+.cselect.is-placeholder {
+  color: var(--muted);
+}
+
+.cselect .cselect-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cselect .cselect-chev {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.cond-field {
+  flex: 0 0 74px;
+}
+
+.cond-rule {
+  flex: 0 0 52px;
+}
+
+.cond-value {
+  flex: 1;
+}
+
+.cselect-list {
+  position: fixed;
+  z-index: 1500;
+  padding: 4px;
+  max-height: 244px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow:
+    0 12px 32px rgba(60, 60, 90, 0.16),
+    0 2px 8px rgba(60, 60, 90, 0.08);
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+}
+
+.cselect-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.cselect-option:hover,
+.cselect-option.is-active {
+  background: rgba(0, 113, 227, 0.08);
+}
+
+.cselect-option.is-selected {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.cselect-option.is-disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.cselect-option.is-disabled:hover {
+  background: none;
+}
+
+.cselect-option .option-check {
+  flex: 0 0 auto;
 }
 
 /* 清单式行：无卡片边框，发丝分割线 + 悬停底色，行首图标承载状态语义。 */

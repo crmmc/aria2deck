@@ -122,8 +122,12 @@ describe("LoginPage", () => {
   });
 
   it("shows network error inline", async () => {
-    routeMocks({
-      "/api/v2/auth/login": Promise.reject(new TypeError("fetch failed")),
+    // 拒绝在 fetch 被调用时才抛出：提前创建 rejected promise 会在慢哈希/原生 crypto 时序下
+    // 出现「拒绝已产生但尚未被 await」的窗口，被 Jest 误判为未处理拒绝。
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/v2/public/site-info") return json(200, siteInfo());
+      if (url === "/api/v2/auth/login") throw new TypeError("fetch failed");
+      return json(401, err());
     });
     renderLogin();
     fillAndSubmit("admin", "x");

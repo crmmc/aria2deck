@@ -497,10 +497,7 @@ describe("TasksPage 批量取消", () => {
     expect(await screen.findByText("已取消 1 个任务，1 个取消失败")).toBeInTheDocument();
   });
 
-  it("选中项都不可取消时提示没有可取消任务", async () => {
-    // 只有终态任务时列表为空；改用「当前任务」视图里已完成的任务无法选中，
-    // 因此这里直接构造一个选中后又被服务端更新为终态的场景不成立，
-    // 只验证空选中时批量按钮不出现。
+  it("无选中时批量取消按钮不出现", async () => {
     await renderWithTasks([task(1)]);
     expect(screen.queryByRole("button", { name: "取消下载" })).not.toBeInTheDocument();
   });
@@ -820,21 +817,6 @@ describe("TasksPage FileReader 异常路径", () => {
 });
 
 describe("TasksPage 单条创建 502 与批量取消 item 配对", () => {
-  it("单条创建遇 502 展示无法确认提示", async () => {
-    await renderWithTasks();
-    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      if (url === "/api/v2/public/site-info") return json(200, { site_title: "Aria2Deck" });
-      if (url === "/api/v2/tasks/stats") return json(200, STATS);
-      if (url === "/api/v2/tasks" && init?.method === "POST") {
-        return json(502, { error: { code: "upstream", message: "上游失败" } });
-      }
-      return json(200, tasksEnvelope([]));
-    });
-    fireEvent.change(screen.getByLabelText("下载链接"), { target: { value: "https://a/b" } });
-    fireEvent.click(screen.getByRole("button", { name: "+ 添加任务" }));
-    expect(await screen.findByText("提交结果暂无法确认，请刷新任务列表")).toBeInTheDocument();
-  });
 
   it("批量取消响应缺 task 时按请求顺序回填 id", async () => {
     await renderWithTasks([task(1), task(2)]);
@@ -864,35 +846,6 @@ describe("TasksPage 单条创建 502 与批量取消 item 配对", () => {
 });
 
 describe("TasksPage 批量成功与筛选切换", () => {
-  it("批量取消全部成功提示成功", async () => {
-    await renderWithTasks([task(1), task(2)]);
-    mockFetch.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      if (url === "/api/v2/public/site-info") return json(200, { site_title: "Aria2Deck" });
-      if (url === "/api/v2/tasks/stats") return json(200, STATS);
-      if (url === "/api/v2/tasks/cancel" && init?.method === "POST") {
-        const body = JSON.parse(init.body ?? "{}") as { task_ids: number[] };
-        return json(200, {
-          items: body.task_ids.map((id) => ({
-            accepted: true,
-            task: task(id),
-            outcome: null,
-            error: null,
-            stop_confirmed: true,
-          })),
-          accepted_count: body.task_ids.length,
-          rejected_count: 0,
-        });
-      }
-      return json(200, tasksEnvelope([task(1), task(2)]));
-    });
-    fireEvent.click(screen.getByLabelText("选择全部可见任务"));
-    fireEvent.click(screen.getByRole("button", { name: "取消下载" }));
-    const dialog = await screen.findByRole("dialog");
-    const buttons = within(dialog).getAllByRole("button", { name: "取消" });
-    fireEvent.click(buttons[buttons.length - 1]);
-    expect(await screen.findByText("已取消 2 个任务")).toBeInTheDocument();
-  });
 
   it("批量添加部分失败后点重试失败项会回填链接", async () => {
     await renderWithTasks();

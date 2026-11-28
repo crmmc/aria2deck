@@ -86,5 +86,5 @@ export function useListSelection<TId>(visibleIds: readonly TId[]) {
     [anchor, clear, selectAll, setSelected, visibleIds],
   );
 
-  return { selected, toggle, toggleAll, clear, handleKeyDown };
+  return { selected, setSelected, toggle, toggleAll, clear, handleKeyDown };
 }

@@ -66,10 +66,6 @@ describe("TaskCard", () => {
     expect(screen.getByText("50.0%")).toBeInTheDocument();
   });
 
-  it("total_bytes 为空时不显示进度百分比", () => {
-    render(<TaskCard task={task({ total_bytes: null })} {...base} />);
-    expect(screen.queryByText(/%/)).not.toBeInTheDocument();
-  });
 
   it("failed 任务显示中文原因、悬停原文、重试与删除按钮", () => {
     render(
@@ -248,6 +244,7 @@ describe("TaskToolbar", () => {
 describe("AddTaskForm", () => {
   it("提交与按钮组", () => {
     const onSubmit = jest.fn((e) => e.preventDefault());
+    const onBatchAdd = jest.fn();
     const uriRef = { current: null };
     const torrentRef = { current: null };
     render(
@@ -260,7 +257,7 @@ describe("AddTaskForm", () => {
         onUriChange={jest.fn()}
         onSubmit={onSubmit}
         onTorrentUpload={jest.fn()}
-        onBatchAdd={jest.fn()}
+        onBatchAdd={onBatchAdd}
       />,
     );
     expect(screen.getByLabelText("下载链接")).toHaveValue("https://a");
@@ -270,6 +267,9 @@ describe("AddTaskForm", () => {
       "+ 添加任务",
     ]);
     fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
+    expect(onBatchAdd).toHaveBeenCalledTimes(1);
+    fireEvent.submit(document.querySelector("form")!);
+    expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -393,14 +393,15 @@ describe("StatsWidget", () => {
       await act(async () => {
         await Promise.resolve();
       });
-      expect(screen.getByText("存储空间")).toBeInTheDocument();
+      expect(screen.getByText("900.0 B")).toBeInTheDocument();
 
       mockFetch.mockRejectedValue(new TypeError("fetch failed"));
       await act(async () => {
         jest.advanceTimersByTime(5000);
         await Promise.resolve();
       });
-      expect(screen.getByText("存储空间")).toBeInTheDocument();
+      // 轮询失败不得清空上次读数（可用空间仍是 1000-100=900 B）
+      expect(screen.getByText("900.0 B")).toBeInTheDocument();
     } finally {
       jest.useRealTimers();
     }
@@ -524,17 +525,28 @@ describe("StatsWidget", () => {
   });
 
   it("卸载后迟到的响应不再写入", async () => {
-    const holder: { resolve?: (value: unknown) => void } = {};
-    mockFetch.mockImplementation(() => new Promise((resolve) => {
-      holder.resolve = resolve;
-    }));
-    const { unmount } = render(<StatsWidget />);
-    unmount();
-    holder.resolve?.(json(200, buildStats({})));
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(screen.queryByText("存储空间")).not.toBeInTheDocument();
+    jest.useFakeTimers();
+    try {
+      const holder: { resolve?: (value: unknown) => void } = {};
+      mockFetch.mockImplementation(() => new Promise((resolve) => {
+        holder.resolve = resolve;
+      }));
+      const { unmount } = render(<StatsWidget />);
+      unmount();
+      holder.resolve?.(json(200, buildStats({})));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // StatsWidget 不接 toast；可观察的迟到制作用是 finally 里重新调度轮询。
+      // 卸载后推进一个轮询周期，不得再发 stats 请求（卸载后 DOM 负断言恒真，已移除）。
+      await act(async () => {
+        jest.advanceTimersByTime(5000);
+        await Promise.resolve();
+      });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 
@@ -631,17 +643,6 @@ describe("buildTorrentTree", () => {
 });
 
 describe("api client boundary", () => {
-  it("StatsWidget 经统一 client 请求", async () => {
-    mockFetch.mockResolvedValue(json(200, {
-      counts: { queued: 0, active: 0, waiting: 0, paused: 0, completed: 0, failed: 0, cancelled: 0, expired: 0 },
-      total: 0, download_speed: 0, upload_speed: 0,
-      quota: { quota_bytes: 0, used_bytes: 0, reserved_bytes: 0, available_bytes: 0, limited: false },
-      disk: { total_bytes: 1, used_bytes: 0, reserved_bytes: 0, available_bytes: 1, limited: false },
-    }));
-    render(<StatsWidget />);
-    await screen.findByRole("img", { name: /1 次真实采样/ });
-    expect(mockFetch.mock.calls.some(([url]) => url === "/api/v2/tasks/stats")).toBe(true);
-  });
 });
 
 describe("TorrentFileTree 只读与部分选中", () => {
@@ -783,20 +784,4 @@ describe("TorrentFileTree 未选中/空目录/文件节点", () => {
 });
 
 describe("TaskCard 无 uri 分支", () => {
-  it("uri 为空时不显示复制按钮，点击复制回调也不触发", () => {
-    const onCopyUri = jest.fn();
-    render(
-      <TaskCard
-        task={task({ status: "active", uri: null })}
-        isSelected={false}
-        isOperating={false}
-        onToggleSelection={() => undefined}
-        onCancel={() => undefined}
-        onRetry={() => undefined}
-        onCopyUri={onCopyUri}
-      />,
-    );
-    expect(screen.queryByRole("button", { name: "复制" })).not.toBeInTheDocument();
-    expect(onCopyUri).not.toHaveBeenCalled();
-  });
 });

@@ -1,9 +1,12 @@
-import { type KeyboardEvent, type MouseEvent } from "react";
+import { type KeyboardEvent, type MouseEvent, useEffect, useRef, useState } from "react";
 import { formatBytes } from "@/shared/lib/format";
 import { isShiftClick } from "@/shared/lib/selection";
 import { Icon, SortIcon, type SortDirection } from "@/shared/components/Icon";
-import type { FileView } from "../model";
+import { fileTypeLabel, type FileView } from "../model";
 import type { SortField } from "./FileToolbar";
+import { useColumnWidths, type ResizableColumn } from "./useColumnWidths";
+
+type ColumnResize = ReturnType<typeof useColumnWidths>;
 
 type RootFileTableProps = {
   isMobile: boolean;
@@ -29,6 +32,9 @@ type RootFileTableProps = {
   onShare: (file: FileView) => void;
   onDelete: (file: FileView) => void;
   formatDate: (ms: number) => string;
+  /** 当前页有条目但全部被筛选隐藏：显示专属空态而非「暂无文件」。 */
+  filteredEmpty?: boolean;
+  onClearFilter?: () => void;
 };
 
 type RootFileListProps = Omit<RootFileTableProps, "isMobile" | "loading" | "error">;
@@ -138,6 +144,7 @@ function RootFileMobileList({
 }
 
 function RootFileDesktopTable({
+  columnResize,
   sortedFiles,
   selectedFiles,
   renaming,
@@ -157,15 +164,68 @@ function RootFileDesktopTable({
   onShare,
   onDelete,
   formatDate,
-}: RootFileListProps) {
+}: RootFileListProps & { columnResize: ColumnResize }) {
+  const { widths, beginDrag, updateDrag, endDrag, resetColumn } = columnResize;
+  const dragRef = useRef<{ column: ResizableColumn; startX: number; startWidth: number } | null>(null);
+  const [draggingColumn, setDraggingColumn] = useState<ResizableColumn | null>(null);
+
+  useEffect(() => () => document.body.classList.remove("col-resizing"), []);
+
+  const startResize = (event: React.PointerEvent<HTMLSpanElement>, column: ResizableColumn) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dragRef.current = { column, startX: event.clientX, startWidth: widths[column] };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setDraggingColumn(column);
+    document.body.classList.add("col-resizing");
+    beginDrag();
+  };
+  const moveResize = (event: React.PointerEvent<HTMLSpanElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    updateDrag(drag.column, drag.startWidth + event.clientX - drag.startX);
+  };
+  const stopResize = () => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    setDraggingColumn(null);
+    document.body.classList.remove("col-resizing");
+    endDrag();
+  };
+
+  const RESIZER_LABELS: Record<ResizableColumn, string> = {
+    type: "调整类型列宽",
+    size: "调整大小列宽",
+    date: "调整时间列宽",
+    ops: "调整操作列宽",
+  };
+  const resizer = (column: ResizableColumn) => (
+    <span
+      className={`col-resizer${draggingColumn === column ? " dragging" : ""}`}
+      role="separator"
+      aria-label={RESIZER_LABELS[column]}
+      title="拖拽调整列宽，双击恢复默认"
+      onPointerDown={(event) => startResize(event, column)}
+      onPointerMove={moveResize}
+      onPointerUp={stopResize}
+      onPointerCancel={stopResize}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        resetColumn(column);
+      }}
+    />
+  );
+
   return (
     <>
       <div className="table-header file-table-head">
         <input type="checkbox" checked={selectedFiles.size === sortedFiles.length && sortedFiles.length > 0} onChange={onToggleSelectAll} className="checkbox-sm cursor-pointer" aria-label="全选" />
         <button type="button" className="table-cell text-left sortable-header" onClick={() => onSort("name")}>名称 <SortIcon direction={getSortIcon("name")} /></button>
-        <button type="button" className="table-cell text-left sortable-header" onClick={() => onSort("size")}>大小 <SortIcon direction={getSortIcon("size")} /></button>
-        <button type="button" className="table-cell text-left sortable-header" onClick={() => onSort("created_at")}>添加时间 <SortIcon direction={getSortIcon("created_at")} /></button>
-        <div className="table-cell text-right">操作</div>
+        <button type="button" className="table-cell text-left sortable-header" onClick={() => onSort("type")}>类型 <SortIcon direction={getSortIcon("type")} />{resizer("type")}</button>
+        <button type="button" className="table-cell text-left sortable-header" onClick={() => onSort("size")}>大小 <SortIcon direction={getSortIcon("size")} />{resizer("size")}</button>
+        <button type="button" className="table-cell text-left sortable-header" onClick={() => onSort("created_at")}>添加时间 <SortIcon direction={getSortIcon("created_at")} />{resizer("date")}</button>
+        <div className="table-cell text-right">操作{resizer("ops")}</div>
       </div>
       <div className="file-rows">
         {sortedFiles.map((file, index) => {
@@ -194,6 +254,7 @@ function RootFileDesktopTable({
                   )}
                 </div>
               </div>
+              <span className="file-type" data-label="类型">{fileTypeLabel(file.name, file.isDirectory)}</span>
               <span className="file-size" data-label="大小">{formatBytes(file.size)}</span>
               <span className="file-date" data-label="添加时间">{formatDate(file.createdAtMs)}</span>
               <div className="row-actions">
@@ -215,9 +276,19 @@ function RootFileDesktopTable({
 }
 
 export function RootFileTable(props: RootFileTableProps) {
+  const columnResize = useColumnWidths();
   if (props.loading) return <div className="card text-center py-8"><p className="muted">加载中...</p></div>;
   if (props.error) return <div className="card text-center py-8"><p className="text-danger">{props.error}</p></div>;
   if (props.sortedFiles.length === 0) {
+    if (props.filteredEmpty) {
+      return (
+        <div className="empty-state">
+          <p className="font-medium mb-1">当前页没有符合筛选条件的文件</p>
+          <p className="muted text-base mb-3">对象没有被删除，只是被筛选条件隐藏了</p>
+          <button type="button" className="button secondary btn-sm" onClick={props.onClearFilter}>清除筛选</button>
+        </div>
+      );
+    }
     return (
       <div className="empty-state">
         <div className="empty-state-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg></div>
@@ -230,9 +301,10 @@ export function RootFileTable(props: RootFileTableProps) {
     <div
       className="card p-0 overflow-hidden file-table-wrapper"
       data-testid="file-list"
+      style={columnResize.styleVars}
       onKeyDown={props.onSelectionKeyDown}
     >
-      {props.isMobile ? <RootFileMobileList {...props} /> : <RootFileDesktopTable {...props} />}
+      {props.isMobile ? <RootFileMobileList {...props} /> : <RootFileDesktopTable {...props} columnResize={columnResize} />}
     </div>
   );
 }

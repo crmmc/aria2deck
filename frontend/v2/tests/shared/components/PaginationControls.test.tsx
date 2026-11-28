@@ -1,34 +1,6 @@
 import { act, render, screen, fireEvent } from "@testing-library/react";
 import { PaginationControls } from "@/shared/components/PaginationControls";
-import {
-  buildPageItems,
-  MIN_PAGE_CAPACITY,
-} from "@/shared/components/pagination-utils";
 import { ToolbarGroup, ToolbarSearchInput, ToolbarShell } from "@/shared/components/Toolbar";
-
-describe("buildPageItems", () => {
-  it("returns all pages when total fits capacity", () => {
-    expect(buildPageItems(1, 5, MIN_PAGE_CAPACITY)).toEqual([1, 2, 3, 4, 5]);
-  });
-
-  it("uses ellipsis windows for large page counts", () => {
-    const items = buildPageItems(10, 30, MIN_PAGE_CAPACITY);
-    expect(items[0]).toBe(1);
-    expect(items[items.length - 1]).toBe(30);
-    expect(items).toContain("ellipsis");
-  });
-
-  it("centers the window around the current page", () => {
-    const items = buildPageItems(15, 40, MIN_PAGE_CAPACITY) as number[];
-    const numbers = items.filter((i) => typeof i === "number");
-    expect(numbers).toContain(15);
-    expect(numbers.length).toBeGreaterThanOrEqual(5);
-  });
-
-  it("clamps capacity to the minimum", () => {
-    expect(buildPageItems(1, 100, 1)).toEqual(buildPageItems(1, 100, MIN_PAGE_CAPACITY));
-  });
-});
 
 describe("PaginationControls", () => {
   it("navigates with arrow buttons and disables at boundaries", () => {

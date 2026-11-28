@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
 import { SharesPage } from "@/features/shares/SharesPage";
 import type { ShareItemResponse, UserResponse } from "@/shared/api/types";
+import * as toastContext from "@/shared/components/toast-context";
 
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
@@ -741,56 +742,75 @@ describe("SharesPage 逐项结果与竞态守卫", () => {
   });
 
   it("卸载后到达的响应不再更新状态也不再提示", async () => {
-    let releaseList: (value: unknown) => void = () => undefined;
-    const pending = new Promise((resolve) => {
-      releaseList = resolve;
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
     });
-    mockFetch.mockReset();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
-      return pending as never;
-    });
-    const view = render(
-      <MemoryRouter initialEntries={["/shares"]}>
-        <AppProviders>
-          <SharesPage />
-        </AppProviders>
-      </MemoryRouter>,
-    );
-    await screen.findByText("加载中...");
-    view.unmount();
-    releaseList(json(200, list([share(1)])));
-    // 卸载后既不能渲染旧数据，也不应出现加载失败提示。
-    await waitFor(() => {
-      expect(screen.queryByText("share-file-1.zip")).not.toBeInTheDocument();
-    });
-    expect(screen.queryByText("加载分享记录失败")).not.toBeInTheDocument();
+    try {
+      let releaseList: (value: unknown) => void = () => undefined;
+      const pending = new Promise((resolve) => {
+        releaseList = resolve;
+      });
+      mockFetch.mockReset();
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url === "/api/v2/auth/me") return json(200, ME);
+        if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
+        return pending as never;
+      });
+      const view = render(
+        <MemoryRouter initialEntries={["/shares"]}>
+          <AppProviders>
+            <SharesPage />
+          </AppProviders>
+        </MemoryRouter>,
+      );
+      await screen.findByText("加载中...");
+      view.unmount();
+      releaseList(json(200, list([share(1)])));
+      // 卸载后整棵树（含 Toast portal）已移除，DOM 负断言恒真；真实目标是迟到响应不得再产生提示副作用。
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(showToast).not.toHaveBeenCalled();
+    } finally {
+      useToastSpy.mockRestore();
+    }
   });
 
   it("卸载后到达的失败响应不再提示", async () => {
-    let rejectList: (reason: unknown) => void = () => undefined;
-    const pending = new Promise((_resolve, reject) => {
-      rejectList = reject;
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
     });
-    mockFetch.mockReset();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(200, ME);
-      if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
-      return pending as never;
-    });
-    const view = render(
-      <MemoryRouter initialEntries={["/shares"]}>
-        <AppProviders>
-          <SharesPage />
-        </AppProviders>
-      </MemoryRouter>,
-    );
-    await screen.findByText("加载中...");
-    view.unmount();
-    rejectList(new Error("网络中断"));
-    await waitFor(() => {
-      expect(screen.queryByText("加载分享记录失败")).not.toBeInTheDocument();
-    });
+    try {
+      let rejectList: (reason: unknown) => void = () => undefined;
+      const pending = new Promise((_resolve, reject) => {
+        rejectList = reject;
+      });
+      mockFetch.mockReset();
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url === "/api/v2/auth/me") return json(200, ME);
+        if (url === "/api/v2/public/site-info") return json(200, SITE_INFO);
+        return pending as never;
+      });
+      const view = render(
+        <MemoryRouter initialEntries={["/shares"]}>
+          <AppProviders>
+            <SharesPage />
+          </AppProviders>
+        </MemoryRouter>,
+      );
+      await screen.findByText("加载中...");
+      view.unmount();
+      rejectList(new Error("网络中断"));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(showToast).not.toHaveBeenCalled();
+    } finally {
+      useToastSpy.mockRestore();
+    }
   });
 });

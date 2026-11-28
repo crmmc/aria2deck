@@ -129,7 +129,7 @@ describe("SearchModal", () => {
     userFileId: 1, name: "a.txt", path: "素材/a.txt", size: 10, isDirectory: false, entryPath: "素材/a.txt",
   };
 
-  it("加载中/错误/空/结果四态", () => {
+  it("加载中/错误/空三态", () => {
     const { rerender } = render(
       <SearchModal keyword="k" results={[]} loading error={null} truncated={false} onLocate={jest.fn()} onClose={jest.fn()} />,
     );
@@ -153,7 +153,7 @@ describe("SearchModal", () => {
     expect(screen.queryByText("📄")).not.toBeInTheDocument();
   });
 
-  it("关闭按钮与遮罩都能关闭弹窗", async () => {
+  it("点击遮罩关闭弹窗", async () => {
     const onClose = jest.fn();
     render(
       <SearchModal keyword="k" results={[]} loading={false} error={null} truncated={false} onLocate={jest.fn()} onClose={onClose} />,

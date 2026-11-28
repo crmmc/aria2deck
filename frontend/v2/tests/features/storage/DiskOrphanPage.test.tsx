@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
+import * as toastContext from "@/shared/components/toast-context";
 import { DiskOrphanPage } from "@/features/storage/DiskOrphanPage";
 import type {
   DiskOrphanItemResponse,
@@ -1250,6 +1251,11 @@ describe("DiskOrphanPage 删除", () => {
 
 describe("DiskOrphanPage 卸载保护", () => {
   it("卸载后的扫描失败不弹 Toast", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
+    });
     let rejectScan: (error: Error) => void = () => undefined;
     const pending = new Promise((_resolve, reject) => { rejectScan = reject; });
     const view = setup((url) => (url === "/api/v2/storage/disk-orphans/queue" ? snapshot() : pending));
@@ -1259,7 +1265,8 @@ describe("DiskOrphanPage 卸载保护", () => {
     view.unmount();
     rejectScan(new Error("扫描炸了"));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    expect(screen.queryByText("扫描炸了")).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    useToastSpy.mockRestore();
   });
 
   it("卸载后的删除成功响应不弹 Toast 也不重扫", async () => {
@@ -1329,6 +1336,11 @@ describe("DiskOrphanPage 卸载保护", () => {
   });
 
   it("卸载后才返回的队列快照与开关响应都不再落地", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
+    });
     let releaseQueue: (value: unknown) => void = () => undefined;
     let releaseStart: (value: unknown) => void = () => undefined;
     const queuePending = new Promise((resolve) => { releaseQueue = resolve; });
@@ -1353,16 +1365,24 @@ describe("DiskOrphanPage 卸载保护", () => {
       expect(callsWith("POST", "/api/v2/storage/disk-orphans/queue/start")).toHaveLength(1),
     );
 
+    const queueReadsBeforeUnmount = queueGetCalls().length;
     view.unmount();
     await act(async () => {
       releaseQueue(json(200, snapshot({ running: true, items: [queueItem({ state: "running" })] })));
       releaseStart(json(200, snapshot({ running: true, items: [queueItem({ state: "running" })] })));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(screen.queryByText("已开始处理入库队列")).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    expect(queueGetCalls()).toHaveLength(queueReadsBeforeUnmount);
+    useToastSpy.mockRestore();
   });
 
   it("卸载后的开关失败与入队成功都不弹 Toast", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
+    });
     let rejectStart: (error: Error) => void = () => undefined;
     let releaseEnqueue: (value: unknown) => void = () => undefined;
     const startPending = new Promise((_resolve, reject) => { rejectStart = reject; });
@@ -1390,6 +1410,7 @@ describe("DiskOrphanPage 卸载保护", () => {
       expect(callsWith("POST", "/api/v2/storage/disk-orphans/queue/start")).toHaveLength(1),
     );
 
+    const queueReadsBeforeUnmount = queueGetCalls().length;
     view.unmount();
     await act(async () => {
       rejectStart(new Error("开关炸了"));
@@ -1398,10 +1419,17 @@ describe("DiskOrphanPage 卸载保护", () => {
       ]));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(screen.queryByText(/已加入队列/)).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    expect(queueGetCalls()).toHaveLength(queueReadsBeforeUnmount);
+    useToastSpy.mockRestore();
   });
 
   it("卸载后的删除失败不弹 Toast", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
+    });
     let rejectDelete: (error: Error) => void = () => undefined;
     const pending = new Promise((_resolve, reject) => { rejectDelete = reject; });
     const view = setup((url, init) => {
@@ -1421,10 +1449,16 @@ describe("DiskOrphanPage 卸载保护", () => {
     view.unmount();
     rejectDelete(new Error("删除炸了"));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    expect(screen.queryByText("删除炸了")).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    useToastSpy.mockRestore();
   });
 
   it("卸载后的入队失败不弹 Toast", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
+    });
     let rejectEnqueue: (error: Error) => void = () => undefined;
     const pending = new Promise((_resolve, reject) => { rejectEnqueue = reject; });
     const view = setup((url, init) => {
@@ -1443,6 +1477,7 @@ describe("DiskOrphanPage 卸载保护", () => {
     view.unmount();
     rejectEnqueue(new Error("入队炸了"));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    expect(screen.queryByText("入队炸了")).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    useToastSpy.mockRestore();
   });
 });

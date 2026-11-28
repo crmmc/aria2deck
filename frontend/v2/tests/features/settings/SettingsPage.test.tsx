@@ -11,6 +11,7 @@ import {
 } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
+import * as toastContext from "@/shared/components/toast-context";
 import { settingsCommands, type SettingsCommand } from "@/shared/lib/commands";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import type {
@@ -770,8 +771,6 @@ describe("SettingsPage 卸载保护", () => {
     openSection("安全与限流");
     await screen.findByRole("button", { name: "作废全部 API Token 与 RPC Secret" });
     fireEvent.click(screen.getByRole("button", { name: "作废全部 API Token 与 RPC Secret" }));
-    const dialog = await screen.findByRole("dialog", { name: "作废全部凭证" });
-    fireEvent.click(within(dialog).getByRole("button", { name: "确认作废" }));
     await waitFor(() => expect(mockFetch.mock.calls.some(([url]) =>
       url === "/api/v2/credentials/invalidate"
     )).toBe(true));
@@ -783,6 +782,11 @@ describe("SettingsPage 卸载保护", () => {
   }
 
   it("ignores successful write responses that land after unmount", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn().mockResolvedValue(true),
+    });
     const patch = deferred<unknown>();
     const test = deferred<unknown>();
     const invalidate = deferred<unknown>();
@@ -801,11 +805,16 @@ describe("SettingsPage 卸载保护", () => {
     invalidate.resolve(json(200, { ok: true, api_token_count: 1, rpc_secret_count: 1 }));
     refresh.resolve(json(200, tracker()));
     await act(async () => new Promise((done) => setTimeout(done, 0)));
-    expect(screen.queryByText("配置已保存")).not.toBeInTheDocument();
-    expect(screen.queryByText("tracker 列表已刷新")).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    useToastSpy.mockRestore();
   });
 
   it("ignores write failures that land after unmount", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn().mockResolvedValue(true),
+    });
     const patch = deferred<unknown>();
     const test = deferred<unknown>();
     const invalidate = deferred<unknown>();
@@ -824,30 +833,50 @@ describe("SettingsPage 卸载保护", () => {
     invalidate.reject(new Error("晚到的作废失败"));
     refresh.reject(new Error("晚到的刷新失败"));
     await act(async () => new Promise((done) => setTimeout(done, 0)));
-    expect(screen.queryByText(/晚到的/)).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    useToastSpy.mockRestore();
   });
 
   it("ignores an initial settings read that resolves after unmount", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn().mockResolvedValue(true),
+    });
     const pending = deferred<unknown>();
     const view = setup((url) => url === "/api/v2/settings" ? pending.promise : null);
     await waitFor(() => expect(mockFetch.mock.calls.some(([url]) => url === "/api/v2/settings")).toBe(true));
+    const callsBeforeResolve = mockFetch.mock.calls.length;
     view.unmount();
     pending.resolve(json(200, settings()));
     await act(async () => new Promise((done) => setTimeout(done, 0)));
-    expect(screen.queryByLabelText("网站标题")).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    expect(mockFetch.mock.calls).toHaveLength(callsBeforeResolve);
+    useToastSpy.mockRestore();
   });
 
   it("ignores an initial settings failure that lands after unmount", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn().mockResolvedValue(true),
+    });
     const pending = deferred<unknown>();
     const view = setup((url) => url === "/api/v2/settings" ? pending.promise : null);
     await waitFor(() => expect(mockFetch.mock.calls.some(([url]) => url === "/api/v2/settings")).toBe(true));
     view.unmount();
     pending.reject(new Error("晚到的读取失败"));
     await act(async () => new Promise((done) => setTimeout(done, 0)));
-    expect(screen.queryByText("加载配置失败")).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    useToastSpy.mockRestore();
   });
 
   it("drops the success path when the post-save re-read lands after unmount", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn().mockResolvedValue(true),
+    });
     const reread = deferred<unknown>();
     let reads = 0;
     const view = setup((url, init) => {
@@ -862,10 +891,13 @@ describe("SettingsPage 卸载保护", () => {
     fireEvent.change(screen.getByLabelText("网站标题"), { target: { value: "新标题" } });
     fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
     await waitFor(() => expect(reads).toBeGreaterThanOrEqual(2));
+    const callsBeforeResolve = mockFetch.mock.calls.length;
     view.unmount();
     reread.resolve(json(200, settings()));
     await act(async () => new Promise((done) => setTimeout(done, 0)));
-    expect(screen.queryByText("配置已保存")).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    expect(mockFetch.mock.calls).toHaveLength(callsBeforeResolve);
+    useToastSpy.mockRestore();
   });
 });
 
