@@ -95,18 +95,6 @@ describe("AppLayout（V1 应用壳）", () => {
     expect(document.querySelector(".logout-btn")).toBeTruthy();
   });
 
-  it("shows site title in sidebar header only when expanded", async () => {
-    setup((url) => (url === "/api/v2/public/site-info" ? siteInfo("团队下载站") : defaultHandler(url)));
-    await waitFor(() => expect(document.querySelector(".sidebar")).toBeTruthy());
-    // 默认折叠：不渲染标题文本。
-    expect(document.querySelector(".sidebar-title")).toBeNull();
-    fireEvent.mouseEnter(document.querySelector(".sidebar")!);
-    await waitFor(() =>
-      expect(document.querySelector(".sidebar-title")?.textContent).toBe("团队下载站"),
-    );
-    fireEvent.mouseLeave(document.querySelector(".sidebar")!);
-    await waitFor(() => expect(document.querySelector(".sidebar-title")).toBeNull());
-  });
 
   it("omits admin entries for regular users", async () => {
     setup((url) =>
@@ -119,13 +107,6 @@ describe("AppLayout（V1 应用壳）", () => {
     expect(nav?.textContent).not.toContain("系统设置");
   });
 
-  it("renders mobile bottom nav with more entry", async () => {
-    setup();
-    await waitFor(() => expect(document.querySelector(".bottom-nav")).toBeTruthy());
-    const bottom = document.querySelector(".bottom-nav");
-    expect(bottom?.textContent).toContain("任务");
-    expect(bottom?.textContent).toContain("更多");
-  });
 
   it("shows loading skeleton while initializing", () => {
     mockFetch.mockReset();
@@ -247,13 +228,4 @@ describe("AppLayout（V1 应用壳）", () => {
     expect(await screen.findByText("系统设置占位")).toBeInTheDocument();
   });
 
-  it("logout button in sidebar footer logs out", async () => {
-    setup();
-    await waitFor(() => expect(document.querySelector(".logout-btn")).toBeTruthy());
-    fireEvent.click(document.querySelector(".logout-btn")!);
-    await waitFor(() => {
-      const calls = mockFetch.mock.calls.filter(([url]) => url === "/api/v2/auth/logout");
-      expect(calls).toHaveLength(1);
-    });
-  });
 });

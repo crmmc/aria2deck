@@ -130,13 +130,17 @@ describe("FilterSelect", () => {
 
   it("打开时按方向键不重复打开，其他键无效果", async () => {
     const user = userEvent.setup();
-    setup();
+    const onChange = jest.fn();
+    setup({ onChange });
     const trigger = screen.getByRole("button", { name: "指标" });
     await user.click(trigger);
     trigger.focus();
     await user.keyboard("{ArrowDown}");
     await user.keyboard("a");
     expect(screen.getAllByRole("listbox")).toHaveLength(1);
+    // 活动项仍是初始选中项（zip），且未触发任何选择
+    expect(screen.getByRole("option", { name: "zip" })).toHaveClass("is-active");
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("全部选项禁用时方向键与 Enter 均不生效", async () => {

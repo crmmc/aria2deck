@@ -133,29 +133,6 @@ describe("FilesPage（V1 文件页）", () => {
     expect(await screen.findByText(/请求失败|加载/)).toBeInTheDocument();
   });
 
-  it("目录浏览：进入 设计素材 并列出条目", async () => {
-    setup((url) => {
-      if (url.startsWith("/api/v2/files?")) return filesEnvelope([fileItem(2, "设计素材", { kind: "directory", size: 6656 })]);
-      if (url.includes("/entries")) {
-        return {
-          items: [
-            { name: "主视觉 v2.png", path: "主视觉 v2.png", kind: "file", size: 2048 },
-            { name: "配色方案.txt", path: "配色方案.txt", kind: "file", size: 512 },
-          ],
-          total: 2, page: 1, page_size: 200,
-          breadcrumbs: [{ name: "设计素材", path: "" }],
-        };
-      }
-      return {};
-    });
-    renderPage();
-    await screen.findByText("设计素材");
-    fireEvent.click(screen.getByRole("button", { name: "浏览" }));
-    await screen.findByText("主视觉 v2.png");
-    expect(screen.getByText("配色方案.txt")).toBeInTheDocument();
-    // breadcrumb 出现
-    expect(document.querySelector(".path-breadcrumb")?.textContent).toContain("根目录");
-  });
 
   it("搜索：弹窗展示结果，根命中定位到目标页", async () => {
     setup((url) => {

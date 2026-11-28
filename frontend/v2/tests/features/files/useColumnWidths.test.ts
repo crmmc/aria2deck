@@ -49,8 +49,10 @@ describe("useColumnWidths 守卫", () => {
     const { result } = renderHook(() => useColumnWidths());
     act(() => result.current.beginDrag());
     act(() => result.current.updateDrag("type", 120));
+    act(() => result.current.updateDrag("size", 150));
     act(() => result.current.endDrag());
     act(() => result.current.resetColumn("type"));
     expect(result.current.widths.type).toBe(84);
+    expect(result.current.widths.size).toBe(150);
   });
 });

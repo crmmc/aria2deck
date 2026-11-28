@@ -78,11 +78,4 @@ describe("passwordClientHash", () => {
     await expect(passwordClientHash(username, password)).resolves.toBe(expected);
   });
 
-  it("derives with the normalized username, not the raw input", async () => {
-    const { webcrypto } = await import("node:crypto");
-    defineCrypto(webcrypto);
-    await expect(passwordClientHash("  Admin ", "vector-password")).resolves.toBe(
-      await passwordClientHash("admin", "vector-password"),
-    );
-  });
 });

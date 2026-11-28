@@ -227,6 +227,7 @@ describe("Sidebar（V1 侧栏与移动底栏）", () => {
     // 点击遮罩关闭。
     fireEvent.click(document.querySelector(".modal-backdrop-button")!);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
   });
 
   it("更多菜单里的退出登录会调用登出接口并收起菜单", async () => {

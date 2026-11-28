@@ -191,13 +191,10 @@ describe("buildPageItems 窗口扩展分支", () => {
   it("就近扩展时优先补距离较近的一侧", () => {
     const nearLeft = buildPageItems(5, 60, 9);
     const nearRight = buildPageItems(56, 60, 9);
-    // 两者都应包含当前页与首末页
-    expect(nearLeft[0]).toBe(1);
-    expect(nearLeft[nearLeft.length - 1]).toBe(60);
-    expect(nearRight[0]).toBe(1);
-    expect(nearRight[nearRight.length - 1]).toBe(60);
-    expect(nearLeft).toContain(5);
-    expect(nearRight).toContain(56);
+    // 靠近首页：左侧补到 2（无左省略号），右侧保留省略号
+    expect(nearLeft).toEqual([1, 2, 3, 4, 5, 6, 7, "ellipsis", 60]);
+    // 靠近末页：右侧补到 59（无右省略号），左侧保留省略号
+    expect(nearRight).toEqual([1, "ellipsis", 54, 55, 56, 57, 58, 59, 60]);
   });
 });
 

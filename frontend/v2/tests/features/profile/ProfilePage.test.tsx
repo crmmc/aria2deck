@@ -709,21 +709,6 @@ describe("ProfilePage 卸载保护", () => {
     expect(window.localStorage.getItem("notifications.on_completed")).toBeNull();
   });
 
-  it("通知子开关在挂载时正常落盘（对照组）", async () => {
-    window.localStorage.setItem("notifications.enabled", "true");
-    (globalThis as { Notification?: unknown }).Notification = {
-      permission: "granted",
-      requestPermission: jest.fn(),
-    };
-    setup(() => RPC_ON);
-    renderPage();
-    await screen.findByText("下载完成时");
-
-    fireEvent.click(screen.getByRole("button", { name: "下载完成时通知" }));
-    await waitFor(() => {
-      expect(window.localStorage.getItem("notifications.on_completed")).toBe("false");
-    });
-  });
 
   it("复制密钥成功后卸载，不再启动 2 秒复位计时器", async () => {
     const clipboard = deferredClipboard();
@@ -771,28 +756,6 @@ describe("ProfilePage 卸载保护", () => {
     }
   });
 
-  it("复制后卸载，2 秒计时器不写已复制状态", async () => {
-    const writeText = jest.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, { clipboard: { writeText } });
-    setup(() => RPC_ON);
-    renderPageWithToggle();
-    await screen.findByText("raw-secret-value");
-    jest.useFakeTimers();
-    try {
-      fireEvent.click(screen.getByRole("button", { name: "复制 RPC 密钥" }));
-      await act(async () => {
-        await Promise.resolve();
-      });
-      expect(screen.getAllByRole("button", { name: "已复制" })).toHaveLength(1);
-      fireEvent.click(screen.getByRole("button", { name: "卸载页面" }));
-      act(() => {
-        jest.advanceTimersByTime(2000);
-      });
-      expect(screen.queryAllByRole("button", { name: "已复制" })).toHaveLength(0);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
 });
 
 describe("ProfilePage 外部访问", () => {

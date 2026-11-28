@@ -47,12 +47,15 @@ describe("useLocalState", () => {
     });
     const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
+      // warned 是模块级标志，前序用例可能已消耗过那次警告；本用例只承诺「多次挂载至多警告一次」。
+      const baseline = warn.mock.calls.length;
       const first = renderHook(() => useLocalState("tasks.filter", "a"));
       const second = renderHook(() => useLocalState("notifications.enabled", false));
       const firstResult = first.result;
       const secondResult = second.result;
       expect(firstResult.current.persistent).toBe(false);
       expect(secondResult.current.persistent).toBe(false); // 第二次挂载命中 warned 早退分支。
+      expect(warn.mock.calls.length - baseline).toBeLessThanOrEqual(1);
       second.unmount();
       first.unmount();
     } finally {

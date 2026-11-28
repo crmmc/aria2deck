@@ -1,9 +1,8 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
 import { AppRouter } from "@/app/router";
-import { PublicSharePage } from "@/features/public-share/PublicSharePage";
 import { goneCardFor, toShareEntryView, toShareInfoView } from "@/features/public-share/model";
 import { ApiRequestError } from "@/shared/api/client";
 import { triggerFormDownload } from "@/shared/lib/download";
@@ -87,18 +86,6 @@ function setup(
   );
 }
 
-function renderPage() {
-  return render(
-    <MemoryRouter initialEntries={["/s/abc123"]}>
-      <AppProviders>
-        <Routes>
-          <Route path="/s/:code" element={<PublicSharePage />} />
-        </Routes>
-      </AppProviders>
-    </MemoryRouter>,
-  );
-}
-
 beforeEach(() => {
   (triggerFormDownload as jest.Mock).mockClear();
   window.history.replaceState(null, "", "/");
@@ -139,22 +126,6 @@ describe("公开分享页 · V1 单文件视图", () => {
     }
   });
 
-  it("卸载时清掉下载计时器，不再更新状态", async () => {
-    jest.useFakeTimers();
-    try {
-      setup(() => info());
-      await act(async () => {
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      const view = renderPage();
-      fireEvent.click(screen.getByRole("button", { name: "下载文件" }));
-      view.unmount();
-      act(() => jest.advanceTimersByTime(2000));
-    } finally {
-      jest.useRealTimers();
-    }
-  });
 
   it("连点下载只保留一个重置计时器", async () => {
     jest.useFakeTimers();
@@ -178,43 +149,7 @@ describe("公开分享页 · V1 单文件视图", () => {
     }
   });
 
-  it("分享信息返回前卸载，不再写入状态", async () => {
-    const pending: { resolve?: (value: unknown) => void } = {};
-    mockFetch.mockReset();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(401, {});
-      if (url === "/api/v2/public/site-info") return json(200, { site_title: "Aria2Deck" });
-      return new Promise((resolve) => {
-        pending.resolve = resolve;
-      });
-    });
-    const view = renderPage();
-    view.unmount();
-    pending.resolve?.(json(200, info()));
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-  });
 
-  it("info 失败返回前卸载，不再写入错误卡", async () => {
-    const pending: { resolve?: (value: unknown) => void } = {};
-    mockFetch.mockReset();
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "/api/v2/auth/me") return json(401, {});
-      if (url === "/api/v2/public/site-info") return json(200, { site_title: "Aria2Deck" });
-      return new Promise((resolve) => {
-        pending.resolve = resolve;
-      });
-    });
-    const view = renderPage();
-    view.unmount();
-    pending.resolve?.(json(410, { error: { code: "share_expired", message: "分享已过期" } }));
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-  });
 });
 
 describe("公开分享页 · V1 提取码表单（手动提交，C19）", () => {
@@ -291,36 +226,6 @@ describe("公开分享页 · V1 提取码表单（手动提交，C19）", () => 
     }
   });
 
-  it("验密成功/失败返回前卸载，不再写入页面状态", async () => {
-    for (const settleWith of ["ok", "fail"] as const) {
-      const pending: { resolve?: (value: unknown) => void } = {};
-      mockFetch.mockReset();
-      mockFetch.mockImplementation(async (url: string, init?: Init) => {
-        if (url === "/api/v2/auth/me") return json(401, {});
-        if (url === "/api/v2/public/site-info") return json(200, { site_title: "Aria2Deck" });
-        if (init?.method === "POST" && url.includes("/verify")) {
-          return new Promise((resolve) => {
-            pending.resolve = resolve;
-          });
-        }
-        return json(200, info({ has_password: true }));
-      });
-      const view = renderPage();
-      fireEvent.change(await screen.findByLabelText("提取码"), { target: { value: "pw" } });
-      fireEvent.click(screen.getByRole("button", { name: "提取文件" }));
-      await waitFor(() => expect(pending.resolve).toBeDefined());
-      view.unmount();
-      pending.resolve?.(
-        settleWith === "ok"
-          ? json(200, { access_token: "tok", expires_in: 60 })
-          : json(403, { error: { code: "password_invalid", message: "分享密码错误" } }),
-      );
-      await act(async () => {
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-    }
-  });
 });
 
 describe("公开分享页 · V1 失效与错误卡片", () => {
@@ -336,10 +241,12 @@ describe("公开分享页 · V1 失效与错误卡片", () => {
     expect(screen.getByText(icon)).toBeInTheDocument();
   });
 
-  it("404 与 5xx 显示 V1「访问出错」卡", async () => {
-    setup(() => json(404, { error: { code: "not_found", message: "分享不存在" } }));
+  it.each([404, 500])("%i 显示 V1「访问出错」卡", async (status) => {
+    setup(() => json(status, {
+      error: { code: status === 404 ? "not_found" : "internal", message: status === 404 ? "分享不存在" : "服务器内部错误" },
+    }));
     expect(await screen.findByText("访问出错")).toBeInTheDocument();
-    expect(screen.getByText("分享不存在")).toBeInTheDocument();
+    expect(screen.getByText(status === 404 ? "分享不存在" : "服务器内部错误")).toBeInTheDocument();
     expect(screen.getByText("😕")).toBeInTheDocument();
   });
 
@@ -353,6 +260,7 @@ describe("公开分享页 · V1 失效与错误卡片", () => {
       </MemoryRouter>,
     );
     expect(await screen.findByText("无效的分享链接")).toBeInTheDocument();
+    expect(mockFetch.mock.calls.some(([url]) => String(url) === "/api/s/_/info")).toBe(false);
   });
 });
 

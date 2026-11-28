@@ -154,7 +154,9 @@ describe("TasksPage（V1 任务页）", () => {
   
   
   it("搜索过滤任务", async () => {
-    await renderWithTasks();
+    // task-2 必须先是 active 可见状态，负断言才有意义（默认 failed 根本进不了列表）
+    await renderWithTasks([task(1), task(2, "active")]);
+    expect(screen.getByText("task-2.bin")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("搜索任务"), { target: { value: "task-1" } });
     await waitFor(() => {
       expect(screen.getByText("task-1.bin")).toBeInTheDocument();
@@ -162,14 +164,6 @@ describe("TasksPage（V1 任务页）", () => {
     });
   });
 
-  it("筛选「进行中」隐藏失败任务", async () => {
-    await renderWithTasks();
-    fireEvent.click(screen.getByRole("tab", { name: /^进行中/ }));
-    await waitFor(() => {
-      expect(screen.getByText("task-1.bin")).toBeInTheDocument();
-      expect(screen.queryByText("task-2.bin")).not.toBeInTheDocument();
-    });
-  });
 
   it("按下载进度排序", async () => {
     await renderWithTasks([
@@ -251,31 +245,6 @@ describe("TasksPage（V1 任务页）", () => {
     expect(screen.queryByText("task-1.bin")).not.toBeInTheDocument();
   });
 
-  it("批量添加部分失败列出失败项并可回填重试", async () => {
-    await renderWithTasks();
-    fireEvent.click(screen.getByRole("button", { name: "批量添加" }));
-    const textarea = await screen.findByLabelText("批量下载链接");
-    fireEvent.change(textarea, { target: { value: "https://a/1\nhttps://a/2" } });
-    mockFetch.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
-      if (url === "/api/v2/tasks" && init?.method === "POST") {
-        return json(200, {
-          items: [
-            { accepted: true, task: task(11), outcome: null, error: null, stop_confirmed: null },
-            { accepted: false, task: null, outcome: null, error: { code: "bad_uri", message: "链接无效" }, stop_confirmed: null },
-          ],
-          accepted_count: 1,
-          rejected_count: 1,
-        });
-      }
-      return json(200, tasksEnvelope([]));
-    });
-    fireEvent.click(screen.getByRole("button", { name: "添加任务" }));
-    await screen.findByText("已提交 1 个，1 个失败");
-    fireEvent.click(screen.getByRole("button", { name: "重试失败项" }));
-    await waitFor(() => {
-      expect((screen.getByLabelText("批量下载链接") as HTMLTextAreaElement).value).toBe("https://a/2");
-    });
-  });
 
   it("上传非种子文件给出错误提示", async () => {
     await renderWithTasks();

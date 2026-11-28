@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AppProviders } from "@/app/providers";
+import * as toastContext from "@/shared/components/toast-context";
 import { StoragePage } from "@/features/storage/StoragePage";
 import {
   digestOf,
@@ -883,6 +884,11 @@ describe("storage model 与卸载保护", () => {
   });
 
   it("卸载后的列表失败不弹 Toast", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
+    });
     let rejectList: (error: Error) => void = () => undefined;
     const pending = new Promise((_resolve, reject) => { rejectList = reject; });
     const view = setup(() => pending);
@@ -890,10 +896,16 @@ describe("storage model 与卸载保护", () => {
     view.unmount();
     rejectList(new Error("后端炸了"));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    expect(screen.queryByText("加载存储文件失败")).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    useToastSpy.mockRestore();
   });
 
   it("卸载后的引用失败不弹 Toast", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
+    });
     let rejectUsers: (error: Error) => void = () => undefined;
     const pending = new Promise((_resolve, reject) => { rejectUsers = reject; });
     const view = setup((url) => url.includes("/users") ? pending : list([content(1, { reference_count: 1 })]));
@@ -903,7 +915,8 @@ describe("storage model 与卸载保护", () => {
     view.unmount();
     rejectUsers(new Error("用户列表失败"));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    expect(screen.queryByText("用户列表失败")).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    useToastSpy.mockRestore();
   });
 
   it("卸载后的删除成功响应不弹 Toast 或刷新", async () => {
@@ -924,6 +937,11 @@ describe("storage model 与卸载保护", () => {
   });
 
   it("卸载后的删除失败不弹 Toast", async () => {
+    const showToast = jest.fn();
+    const useToastSpy = jest.spyOn(toastContext, "useToast").mockReturnValue({
+      showToast,
+      showConfirm: jest.fn(),
+    });
     let rejectDelete: (error: Error) => void = () => undefined;
     const pending = new Promise((_resolve, reject) => { rejectDelete = reject; });
     const view = setup((_url, init) => init?.method === "POST" ? pending : list([content(1)]));
@@ -935,6 +953,7 @@ describe("storage model 与卸载保护", () => {
     view.unmount();
     rejectDelete(new Error("整批失败"));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    expect(screen.queryByText("删除失败")).not.toBeInTheDocument();
+    expect(showToast).not.toHaveBeenCalled();
+    useToastSpy.mockRestore();
   });
 });
